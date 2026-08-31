@@ -1,0 +1,33 @@
+{
+  "name": "@gateforge/pack-validation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Validation discovery pack: TS-only AST-light detector (GPP/2) for zod / joi / yup / class-validator request schemas; boundary + side-effect contracts.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gateforge/core": "*",
+    "@gateforge/plugin-protocol": "*"
+  },
+  "devDependencies": {
+    "typescript": "*",
+    "vitest": "*"
+  }
+}
