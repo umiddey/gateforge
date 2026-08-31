@@ -1,0 +1,30 @@
+{
+  "name": "@gateforge/pack-workflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Workflow / state-machine discovery pack: TS-only AST detector (GPP/2), five workflow contracts (transition-allowed, transition-rejected, terminal-immutable, audit-emitted, persisted-final-state), entity-adapter schema for state-machine witnesses.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gateforge/core": "*",
+    "@gateforge/plugin-protocol": "*",
+    "zod": "^4.1.5"
+  }
+}
