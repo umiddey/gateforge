@@ -1,0 +1,13 @@
+{
+  "name": "@gateforge/example-workflow-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-dep demo workflow server: in-memory contract state machine (draft -> pending -> signed -> terminated) on port 3002 with an append-only audit.json. Driven by @gateforge/pack-workflow.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
