@@ -1,0 +1,33 @@
+{
+  "name": "@gateforge/pack-sqlalchemy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SQLAlchemy CRUD discovery pack: AST-only python detector (GPP/2), in-process TS discover entry, configurable plane mapping, entity-adapter schema.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "python",
+    "examples",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gateforge/core": "*",
+    "@gateforge/plugin-protocol": "*",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.5"
+  }
+}
