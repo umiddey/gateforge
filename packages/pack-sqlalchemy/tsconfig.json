@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@gateforge/core": ["../core/src/index.ts"],
+      "@gateforge/plugin-protocol": ["../plugin-protocol/src/index.ts"]
+    }
+  },
+  "include": ["src", "test", "vitest.config.ts", "examples"]
+}
