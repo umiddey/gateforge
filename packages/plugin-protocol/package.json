@@ -1,0 +1,29 @@
+{
+  "name": "@gateforge/plugin-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GPP/2 subprocess plugin protocol: TS host library, TS plugin SDK, zod payload schemas, Python reference client.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "python"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gateforge/core": "*",
+    "zod": "^4.1.5"
+  }
+}

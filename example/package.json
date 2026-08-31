@@ -1,0 +1,13 @@
+{
+  "name": "@gateforge/example-accounts-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Isolated zero-dependency demo app: in-memory accounts with server-rendered create/edit/archive UI and a read-only JSON API. Driven by the Gateforge Playwright pack and e2e tests.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}

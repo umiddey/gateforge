@@ -1,0 +1,5 @@
+# Demo route table fixture (trivial line format: METHOD path per line).
+GET /users
+GET /users
+POST /users
+DELETE /users/:id

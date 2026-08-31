@@ -1,0 +1,35 @@
+{
+  "name": "@gateforge/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Gateforge CLI: init, discover, obligations, check, test-gates, baseline update.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "gateforge": "./bin/gateforge.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prebuild": "npm run build -w @gateforge/core && npm run build -w @gateforge/plugin-protocol",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gateforge/core": "*",
+    "@gateforge/plugin-protocol": "*",
+    "picomatch": "^4.0.7",
+    "yaml": "^2.8.1"
+  }
+}

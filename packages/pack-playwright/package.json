@@ -1,0 +1,49 @@
+{
+  "name": "@gateforge/pack-playwright",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Gateforge Playwright evidence pack: loopback witness service, engine-side adapter execution, trusted evidence fixture, verdict reporter.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "gateforge-witness": "./bin/gateforge-witness.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./reporter": {
+      "types": "./dist/reporter/reporter.d.ts",
+      "import": "./dist/reporter/reporter.js"
+    },
+    "./fixture": {
+      "types": "./dist/fixture/fixture.d.ts",
+      "import": "./dist/fixture/fixture.js"
+    },
+    "./witness": {
+      "types": "./dist/witness/server.d.ts",
+      "import": "./dist/witness/server.js"
+    },
+    "./attestation": {
+      "types": "./dist/attestation/proxy.d.ts",
+      "import": "./dist/attestation/proxy.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gateforge/core": "*",
+    "playwright": "1.58.2",
+    "yaml": "^2.8.1"
+  }
+}
