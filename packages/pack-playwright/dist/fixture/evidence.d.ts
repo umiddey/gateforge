@@ -1,8 +1,8 @@
 /**
  * Trusted evidence primitives (plan §5.3, invariant 6, GF-22).
  *
- * The fixture exposes EXACTLY six surfaces — `ui`, `visible`,
- * `persistence`, `http`, `checks`, `finalize` — on a frozen object with a
+ * The fixture exposes EXACTLY five surfaces — `ui`, `visible`,
+ * `persistence`, `http`, `finalize` — on a frozen object with a
  * closure-private record list. There is no boolean/escape-hatch primitive (no
  * `prove(kind, true)`), no way to state an entity id for persistence
  * evidence, and no way to substitute an adapter: persistence evidence is
@@ -87,22 +87,6 @@ export interface EvidenceApi {
     /** ADR 0004 D7: consumes one proxy-observed request for an http:* claim. */
     http: Readonly<{
         observe(request: {
-            method: string;
-            path: string;
-        }): Promise<{
-            status: number;
-            recordId: string;
-        }>;
-    }>;
-    /**
-     * ADR 0004 D8: witnessed domain-check channel. Consumes one
-     * proxy-observed request for the scenario and issues the witnessed
-     * `<namespace>.check` record bound to the matching declared claim.
-     */
-    checks: Readonly<{
-        observe(request: {
-            kind: string;
-            scenario: string;
             method: string;
             path: string;
         }): Promise<{

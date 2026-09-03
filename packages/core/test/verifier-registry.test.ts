@@ -4,8 +4,11 @@
  * fail-closed, fake generic evidence cannot satisfy pack contracts, the
  * http verifier honors the claimed/witnessed trust boundary, observed
  * paths match the obligation's canonical endpoint shape positionally
- * (ADR 0004 D2/D3), and domain checks grade the WITNESS-DERIVED outcome
- * of the observed HTTP exchange (never caller-asserted booleans).
+ * (ADR 0004 D2/D3), and the domain namespaces (auth, task, validation,
+ * webhook, workflow) fail closed for EVERY contract of the namespace:
+ * no transport-grade evidence — however perfectly formed or witnessed —
+ * can stand in for the engine-owned state-observing producer their
+ * semantics require.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -42,30 +45,6 @@ function claim(obligationId: string = OBLIGATION.id): Record<string, unknown> {
   return { schemaVersion: 1, obligationId, testId: 'test-1' };
 }
 
-/** A full witness-derived domain-check payload (the witness contract):
- * the witness observed the exchange itself and DERIVED the outcome from
- * the status. Tests pass overrides to vary individual fields. */
-function checkPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    scenario: 'role-denied',
-    outcome: 'rejected',
-    method: 'POST',
-    url: '/api/v1/accounts',
-    status: 403,
-    responseSha256: RESPONSE_SHA256,
-    responseBytes: 42,
-    ...overrides,
-  };
-}
-
-/** Copies a payload without the named keys (absent, not undefined:
- * record ids hash canonical JSON, where undefined members cannot exist). */
-function withoutKeys(payload: Record<string, unknown>, ...keys: string[]): Record<string, unknown> {
-  const copy = { ...payload };
-  for (const key of keys) delete copy[key];
-  return copy;
-}
-
 function record(obligationId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const base: Record<string, unknown> = {
     schemaVersion: 1,
@@ -75,7 +54,7 @@ function record(obligationId: string, overrides: Record<string, unknown> = {}): 
     testId: 'test-1',
     kind: 'auth.check',
     origin: 'engine-observed',
-    payload: checkPayload(),
+    payload: legacyCheckPayload(),
     ...overrides,
   };
   base['recordId'] = recordIdOf({
@@ -87,6 +66,26 @@ function record(obligationId: string, overrides: Record<string, unknown> = {}): 
     payload: base['payload'],
   });
   return base;
+}
+
+/**
+ * The RETIRED transport-grading payload (suite-chosen `scenario`, the
+ * witness-derived status-class `outcome`, observed method/url/status,
+ * response digest): kept here PERFECTLY FORMED on purpose — the domain
+ * tests below prove that even flawless witnessed evidence of this shape
+ * can no longer satisfy a domain contract.
+ */
+function legacyCheckPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    scenario: 'role-denied',
+    outcome: 'rejected',
+    method: 'POST',
+    url: '/api/v1/accounts',
+    status: 403,
+    responseSha256: RESPONSE_SHA256,
+    responseBytes: 42,
+    ...overrides,
+  };
 }
 
 /** The provenanced claimed `ui.action` anchor from the declaring test. */
@@ -166,228 +165,187 @@ describe('pack contract grading (fail-closed by default)', () => {
     expect(outcome.verdict).toBe('missing');
   });
 
-  it('claimed-tier pack checks cannot satisfy — independent evidence is owed', () => {
-    const claimed = record(OBLIGATION.id, { origin: 'suite-submitted', trust: 'claimed' });
-    const anchorOnly = anchorRecord(OBLIGATION.id, 'read');
-    const outcome = grade([claimed, anchorOnly]);
-    expect(outcome.verdict).toBe('missing');
-    expect(outcome.reason).toContain('suite-submitted');
-  });
-
-  it('a witnessed pack check with a contradicting scenario grades invalid', () => {
-    const anchor = anchorRecord(OBLIGATION.id, 'read');
-    const wrong = record(OBLIGATION.id, {
-      payload: checkPayload({
-        scenario: 'role-allowed',
-        outcome: 'accepted',
-        method: 'GET',
-        status: 200,
-      }),
-    });
-    const outcome = grade([anchor, wrong]);
-    expect(outcome.verdict).toBe('invalid');
-    expect(outcome.reason).toContain("'auth:role-denied' requires 'role-denied'");
-  });
-
-  it('a witnessed rejected-class check with a provenanced ui anchor satisfies', () => {
-    const anchor = anchorRecord(OBLIGATION.id, 'read');
-    const check = record(OBLIGATION.id);
-    const outcome = grade([anchor, check]);
-    expect(outcome.verdict).toBe('satisfied');
-    expect(outcome.recordIds).toEqual([String(check['recordId'])]);
-  });
-
-  it('an unknown scenario stays fail-closed missing', () => {
+  it('an unknown namespace stays fail-closed missing', () => {
     const unknown: Obligation = {
       ...OBLIGATION,
-      id: 'tenant.accounts:auth:not-a-scenario',
-      contract: 'auth:not-a-scenario',
+      id: 'tenant.accounts:notapack:thing',
+      contract: 'notapack:thing',
     };
-    const anchor = anchorRecord(unknown.id, 'read');
-    const check = record(unknown.id);
-    const outcome = gradeFor(unknown, [anchor, check]);
+    const outcome = gradeFor(unknown, []);
     expect(outcome.verdict).toBe('missing');
-    expect(outcome.reason).toContain("no semantic verifier is registered for contract 'auth:not-a-scenario'");
+    expect(outcome.reason).toContain(
+      "no semantic verifier is registered for contract 'notapack:thing'",
+    );
   });
 });
 
-describe('witness-derived domain-check grading', () => {
-  it("an 'accepted' outcome can never evidence a rejected-class scenario", () => {
+describe('domain namespaces fail closed (no honest evidence channel)', () => {
+  it('auth: a perfectly-formed witnessed check record grades missing', () => {
     const anchor = anchorRecord(OBLIGATION.id, 'read');
-    const wrong = record(OBLIGATION.id, {
-      payload: checkPayload({ outcome: 'accepted', status: 200 }),
-    });
-    const outcome = grade([anchor, wrong]);
-    expect(outcome.verdict).toBe('invalid');
+    const check = record(OBLIGATION.id);
+    const outcome = grade([anchor, check]);
+    expect(outcome.verdict).toBe('missing');
     expect(outcome.reason).toContain(
-      "witness-derived outcome 'accepted' cannot evidence 'auth:role-denied'",
+      "contract 'auth:role-denied' has no honest evidence channel: proving 'role-denied'",
     );
+    expect(outcome.reason).toContain('identity/role material and tenant-scoped application state');
+    expect(outcome.reason).toContain("'tenant.accounts:auth:role-denied' stays blocking");
+    expect(outcome.reason).toContain('state-observing producer');
   });
 
-  it('a rejected-class scenario whose observed status is 2xx grades invalid', () => {
-    const anchor = anchorRecord(OBLIGATION.id, 'read');
-    const wrong = record(OBLIGATION.id, { payload: checkPayload({ status: 200 }) });
-    const outcome = grade([anchor, wrong]);
-    expect(outcome.verdict).toBe('invalid');
-    expect(outcome.reason).toContain("observed status '200'");
-    expect(outcome.reason).toContain('rejected scenarios require 400-499');
-  });
-
-  it('a rejected-class scenario whose observed status is 5xx grades invalid', () => {
-    const anchor = anchorRecord(OBLIGATION.id, 'read');
-    const wrong = record(OBLIGATION.id, { payload: checkPayload({ status: 500 }) });
-    const outcome = grade([anchor, wrong]);
-    expect(outcome.verdict).toBe('invalid');
-    expect(outcome.reason).toContain("observed status '500'");
-  });
-
-  it('an accepted-class scenario with a 2xx observed status satisfies', () => {
-    const allowed: Obligation = {
+  it('workflow: a perfectly-formed witnessed check record grades missing', () => {
+    const workflow: Obligation = {
       ...OBLIGATION,
-      id: 'tenant.accounts:auth:role-allowed',
-      contract: 'auth:role-allowed',
+      id: 'tenant.accounts:workflow:persisted-final-state',
+      contract: 'workflow:persisted-final-state',
     };
-    const anchor = anchorRecord(allowed.id, 'read');
-    const check = record(allowed.id, {
-      payload: checkPayload({
+    const anchor = anchorRecord(workflow.id, 'create');
+    const check = record(workflow.id, {
+      kind: 'workflow.check',
+      payload: legacyCheckPayload({
+        scenario: 'persisted-final-state',
+        outcome: 'accepted',
+        status: 200,
+      }),
+    });
+    const outcome = gradeFor(workflow, [anchor, check]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain(
+      "contract 'workflow:persisted-final-state' has no honest evidence channel: " +
+        "proving 'persisted-final-state'",
+    );
+    expect(outcome.reason).toContain('the workflow state machine and its audit log');
+    expect(outcome.reason).toContain('state-observing producer');
+  });
+
+  it('webhook: a perfectly-formed dual-observation check record grades missing', () => {
+    const webhook: Obligation = {
+      ...OBLIGATION,
+      id: 'tenant.accounts:webhook:replay-idempotent',
+      contract: 'webhook:replay-idempotent',
+    };
+    const anchor = anchorRecord(webhook.id, 'update');
+    const check = record(webhook.id, {
+      kind: 'webhook.check',
+      payload: legacyCheckPayload({
+        scenario: 'replay-idempotent',
+        outcome: 'accepted',
+        status: 200,
+        observations: 2,
+      }),
+    });
+    const outcome = gradeFor(webhook, [anchor, check]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain(
+      "contract 'webhook:replay-idempotent' has no honest evidence channel: " +
+        "proving 'replay-idempotent'",
+    );
+    expect(outcome.reason).toContain(
+      'signature/replay verification over application-received deliveries',
+    );
+    expect(outcome.reason).toContain('state-observing producer');
+  });
+
+  it('task: a perfectly-formed dual-observation check record grades missing', () => {
+    const task: Obligation = {
+      ...OBLIGATION,
+      id: 'tenant.accounts:task:idempotent',
+      contract: 'task:idempotent',
+    };
+    const anchor = anchorRecord(task.id, 'create');
+    const check = record(task.id, {
+      kind: 'task.check',
+      payload: legacyCheckPayload({
+        scenario: 'idempotent',
+        outcome: 'accepted',
+        status: 201,
+        observations: 2,
+      }),
+    });
+    const outcome = gradeFor(task, [anchor, check]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain(
+      "contract 'task:idempotent' has no honest evidence channel: proving 'idempotent'",
+    );
+    expect(outcome.reason).toContain('queue/job delivery state');
+    expect(outcome.reason).toContain('state-observing producer');
+  });
+
+  it('validation: a perfectly-formed witnessed check record grades missing', () => {
+    const validation: Obligation = {
+      ...OBLIGATION,
+      id: 'tenant.accounts:validation:error-message-explicit',
+      contract: 'validation:error-message-explicit',
+    };
+    const anchor = anchorRecord(validation.id, 'read');
+    const check = record(validation.id, {
+      kind: 'validation.check',
+      payload: legacyCheckPayload({
+        scenario: 'error-message-explicit',
+        outcome: 'accepted',
+        status: 200,
+      }),
+    });
+    const outcome = gradeFor(validation, [anchor, check]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain(
+      "contract 'validation:error-message-explicit' has no honest evidence channel: " +
+        "proving 'error-message-explicit'",
+    );
+    expect(outcome.reason).toContain(
+      'boundary semantics over application state and the response envelope',
+    );
+    expect(outcome.reason).toContain('state-observing producer');
+  });
+
+  it('a forged-looking witnessed check can never satisfy: missing, never satisfied or invalid', () => {
+    // The strongest possible transport evidence — a provenanced witnessed
+    // check record, a provenanced anchor, and the bound endpoint resource
+    // — still yields only the honest-channel missing verdict.
+    const anchor = anchorRecord(OBLIGATION.id, 'read');
+    const check = record(OBLIGATION.id);
+    const outcome = grade([anchor, check], [claim()], {
+      kind: 'http.endpoint',
+      attributes: { method: 'POST', canonicalPath: '/api/v1/accounts' },
+    });
+    expect(outcome.verdict).not.toBe('satisfied');
+    expect(outcome.verdict).not.toBe('invalid');
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain('has no honest evidence channel');
+  });
+
+  it('ui anchors do not change the fail-closed outcome', () => {
+    const withAnchor = grade([anchorRecord(OBLIGATION.id, 'read'), record(OBLIGATION.id)]);
+    const withoutAnchor = grade([record(OBLIGATION.id)]);
+    const anchorOnly = grade([anchorRecord(OBLIGATION.id, 'read')]);
+    expect(withAnchor.verdict).toBe('missing');
+    expect(withoutAnchor.verdict).toBe('missing');
+    expect(anchorOnly.verdict).toBe('missing');
+    expect(withAnchor.reason).toBe(withoutAnchor.reason);
+    expect(withAnchor.reason).toContain('has no honest evidence channel');
+  });
+
+  it('claimed-tier check records get the same honest-channel reason', () => {
+    const claimed = record(OBLIGATION.id, { origin: 'suite-submitted', trust: 'claimed' });
+    const outcome = grade([claimed]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain('has no honest evidence channel');
+    expect(outcome.reason).toContain('state-observing producer');
+  });
+
+  it('a witnessed check with a contradicting scenario still grades missing (never invalid)', () => {
+    const wrong = record(OBLIGATION.id, {
+      payload: legacyCheckPayload({
         scenario: 'role-allowed',
         outcome: 'accepted',
         method: 'GET',
         status: 200,
       }),
     });
-    const outcome = gradeFor(allowed, [anchor, check]);
-    expect(outcome.verdict).toBe('satisfied');
-    expect(outcome.recordIds).toEqual([String(check['recordId'])]);
-  });
-
-  it('a payload without a usable method/url pair grades invalid', () => {
-    const anchor = anchorRecord(OBLIGATION.id, 'read');
-    const wrong = record(OBLIGATION.id, {
-      payload: withoutKeys(checkPayload(), 'url', 'method'),
-    });
-    const outcome = grade([anchor, wrong]);
-    expect(outcome.verdict).toBe('invalid');
-    expect(outcome.reason).toContain('carries no witnessed method/url pair');
-  });
-
-  it('a missing or malformed responseSha256 grades invalid', () => {
-    const anchor = anchorRecord(OBLIGATION.id, 'read');
-    const missing = record(OBLIGATION.id, {
-      payload: withoutKeys(checkPayload(), 'responseSha256'),
-    });
-    const outcome = grade([anchor, missing]);
-    expect(outcome.verdict).toBe('invalid');
-    expect(outcome.reason).toContain('carries no witness-derived response evidence');
-
-    const uppercaseHex = record(OBLIGATION.id, {
-      payload: checkPayload({ responseSha256: RESPONSE_SHA256.toUpperCase() }),
-    });
-    const outcome2 = grade([anchor, uppercaseHex]);
-    expect(outcome2.verdict).toBe('invalid');
-    expect(outcome2.reason).toContain('carries no witness-derived response evidence');
-
-    const fractionalBytes = record(OBLIGATION.id, {
-      payload: checkPayload({ responseBytes: 1.5 }),
-    });
-    const outcome3 = grade([anchor, fractionalBytes]);
-    expect(outcome3.verdict).toBe('invalid');
-    expect(outcome3.reason).toContain('carries no witness-derived response evidence');
-  });
-
-  it('the dual-observation scenario replay-idempotent demands exactly two observations', () => {
-    const webhook: Obligation = {
-      ...OBLIGATION,
-      id: 'tenant.webhooks:webhook:replay-idempotent',
-      resourceId: 'tenant.webhooks',
-      contract: 'webhook:replay-idempotent',
-    };
-    const anchor = anchorRecord(webhook.id, 'update');
-    const payload = checkPayload({
-      scenario: 'replay-idempotent',
-      outcome: 'accepted',
-      method: 'POST',
-      url: '/api/v1/hooks',
-      status: 200,
-    });
-
-    const one = record(webhook.id, {
-      kind: 'webhook.check',
-      payload: { ...payload, observations: 1 },
-    });
-    const oneOutcome = gradeFor(webhook, [anchor, one]);
-    expect(oneOutcome.verdict).toBe('invalid');
-    expect(oneOutcome.reason).toContain('requires two witnessed observations of the exchange');
-
-    const absent = record(webhook.id, { kind: 'webhook.check', payload });
-    const absentOutcome = gradeFor(webhook, [anchor, absent]);
-    expect(absentOutcome.verdict).toBe('invalid');
-    expect(absentOutcome.reason).toContain('requires two witnessed observations of the exchange');
-
-    const dual = record(webhook.id, {
-      kind: 'webhook.check',
-      payload: { ...payload, observations: 2 },
-    });
-    const satisfied = gradeFor(webhook, [anchor, dual]);
-    expect(satisfied.verdict).toBe('satisfied');
-    expect(satisfied.recordIds).toEqual([String(dual['recordId'])]);
-  });
-
-  it('the task-namespace dual scenario idempotent demands two observations too', () => {
-    const task: Obligation = {
-      ...OBLIGATION,
-      id: 'tenant.tasks:task:idempotent',
-      resourceId: 'tenant.tasks',
-      contract: 'task:idempotent',
-    };
-    const anchor = anchorRecord(task.id, 'create');
-    const absent = record(task.id, {
-      kind: 'task.check',
-      payload: checkPayload({
-        scenario: 'idempotent',
-        outcome: 'accepted',
-        method: 'POST',
-        url: '/api/v1/tasks',
-        status: 201,
-      }),
-    });
-    const outcome = gradeFor(task, [anchor, absent]);
-    expect(outcome.verdict).toBe('invalid');
-    expect(outcome.reason).toContain('requires two witnessed observations of the exchange');
-  });
-
-  it('a domain check bound to a resource must match the endpoint shape and method', () => {
-    const ACCOUNT_RESOURCE = {
-      kind: 'http.endpoint',
-      attributes: { method: 'POST', canonicalPath: '/api/v1/accounts' },
-    };
-    const anchor = anchorRecord(OBLIGATION.id, 'read');
-
-    const wrongShape = record(OBLIGATION.id, {
-      payload: checkPayload({ url: '/api/v2/accounts' }),
-    });
-    const wrongOutcome = grade([anchor, wrongShape], [claim()], ACCOUNT_RESOURCE);
-    expect(wrongOutcome.verdict).toBe('invalid');
-    expect(wrongOutcome.reason).toContain('observed POST /api/v2/accounts');
-    expect(wrongOutcome.reason).toContain('does not match endpoint shape POST /api/v1/accounts');
-
-    const wrongMethod = record(OBLIGATION.id, {
-      payload: checkPayload({ method: 'GET' }),
-    });
-    const methodOutcome = grade([anchor, wrongMethod], [claim()], ACCOUNT_RESOURCE);
-    expect(methodOutcome.verdict).toBe('invalid');
-    expect(methodOutcome.reason).toContain('observed GET /api/v1/accounts');
-
-    // Shape satisfaction also holds behind a positional segment.
-    const parameterized = {
-      kind: 'http.endpoint',
-      attributes: { method: 'POST', canonicalPath: '/api/v1/accounts/{}' },
-    };
-    const concrete = record(OBLIGATION.id, {
-      payload: checkPayload({ url: '/api/v1/accounts/acc-42' }),
-    });
-    const satisfied = grade([anchor, concrete], [claim()], parameterized);
-    expect(satisfied.verdict).toBe('satisfied');
+    const outcome = grade([anchorRecord(OBLIGATION.id, 'read'), wrong]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.verdict).not.toBe('invalid');
+    expect(outcome.reason).toContain('has no honest evidence channel');
   });
 });
 

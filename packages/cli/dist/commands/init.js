@@ -48,24 +48,9 @@ policies:
     require:
       - http:frontend-request-observed
       - http:response-status-ok
-  - id: workflow-command-endpoints
-    # Command-shaped endpoints also owe their workflow semantic checks,
-    # graded by the workflow namespace verifier (scenario records).
-    when:
-      capability: workflow-command
-      consumed: true
-    require:
-      - workflow:transition-allowed
-      - workflow:transition-rejected
-      - workflow:terminal-immutable
-  - id: validation-preview-endpoints
-    when:
-      capability: validation-preview
-      consumed: true
-    require:
-      - validation:boundary-accepted
-      - validation:boundary-rejected
-      - validation:no-side-effect-on-reject
+  # Capability-scoped endpoint policies (workflow/validation/...) may be added
+  # ONLY when the owning pack ships an engine-owned state-observing producer;
+  # until then those contracts cannot be honestly evidenced and stay blocking.
   - id: user-facing-persistence
     when:
       exposure: user-facing

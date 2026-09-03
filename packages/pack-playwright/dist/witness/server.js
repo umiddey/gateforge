@@ -17,16 +17,6 @@
  *   the pin-#7 shape extended with `testId` + `claimId` (the pinned
  *   fields stay honored) so persistence records bind to the claim the
  *   engine grades.
- * - `POST /witness/domain-check` — run-token authed; consumes ONE
- *   matching proxy observation (TWO for dual-observation idempotency
- *   scenarios), DERIVES the outcome class from the observed status
- *   (2xx → accepted, 4xx → rejected), and issues a witnessed
- *   `<namespace>.check` record `{scenario, outcome, method, url, status,
- *   responseSha256, responseBytes[, observations]}` bound to the
- *   obligation claim. Contradictory statuses are refused with 409 and
- *   nothing is consumed; without method+path it answers 409: a
- *   non-HTTP scenario has no engine-side producer yet, and this engine
- *   endpoint never mints claimed records.
  * - `GET /records`           — the issued ledger (the ONLY input the
  *   reporter copies into `records.json`; fabricated bundles never enter
  *   it — GF-23).
@@ -49,7 +39,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ledgerMac, recordIdOf } from '@gateforge/core';
 import { canonicalOf } from '../json.js';
-import { DEFAULT_REQUEST_TIMEOUT_MS, DOMAIN_CHECK_KINDS, DOMAIN_DUAL_SCENARIOS, DOMAIN_SCENARIO_CLASSES, KNOWN_RECORD_KINDS, LOOPBACK_HOSTNAME, PERSISTENCE_KIND, RUN_HEADER, VERIFIER_HEADER, } from '../constants.js';
+import { DEFAULT_REQUEST_TIMEOUT_MS, KNOWN_RECORD_KINDS, LOOPBACK_HOSTNAME, PERSISTENCE_KIND, RUN_HEADER, VERIFIER_HEADER, } from '../constants.js';
 import { loadAdapters, makeAdapterContext } from './adapter-registry.js';
 import { AttestationError, assertLoopback, envFingerprintMismatch, probeEnvFingerprint, } from './env-attestation.js';
 import { loadClassifications, toClassificationView } from './classifications.js';
@@ -306,7 +296,10 @@ function normalizeObservedPath(rawPath) {
  * Consumes one engine-observed request matching (method, path) and
  * issues the witnessed `http.request` record bound to the caller's
  * obligation claim (ADR 0004 D7). Single-use: an observation proves one
- * request for one obligation, never a replayable credit.
+ * request for one obligation, never a replayable credit. The payload is
+ * `{method, url, status, bodySha256, bodyBytes}` — the bounded response
+ * snapshot hash and total byte count ride in the record, a tamper-evident
+ * trace of exactly what the engine observed.
  */
 async function handleHttpObservation(state, res, body) {
     const obligationId = body['obligationId'];
@@ -339,147 +332,18 @@ async function handleHttpObservation(state, res, body) {
     }
     const observedRequest = state.observed[index];
     state.observed.splice(index, 1);
-    const record = issueRecord(state, obligationId, 'http.request', testId, { method: observedRequest.method, url: observedRequest.path, status: observedRequest.status }, 'engine-observed');
+    const record = issueRecord(state, obligationId, 'http.request', testId, {
+        method: observedRequest.method,
+        url: observedRequest.path,
+        status: observedRequest.status,
+        bodySha256: observedRequest.bodySha256,
+        bodyBytes: observedRequest.bodyBytes,
+    }, 'engine-observed');
     sendJson(res, 200, {
         recordId: record.recordId,
         runId: record.runId,
         trust: record.trust,
         status: observedRequest.status,
-    });
-}
-/**
- * `POST /witness/domain-check` (ADR 0004 D8 producer channel): issues a
- * witnessed `<namespace>.check` record for a domain scenario. The suite
- * only NAMES the scenario; the witness DERIVES the outcome from the
- * exchange it actually observed and refuses contradictions. Fail-closed
- * on four fronts:
- * - the scenario must belong to the check kind's namespace table
- *   (`DOMAIN_SCENARIO_CLASSES`) — an unknown or foreign scenario is 400;
- * - the record is only WITNESSED when the scenario's HTTP exchange
- *   actually traversed the observation proxy: ONE matching (method,
- *   path) observation is consumed single-use for normal scenarios, TWO
- *   (in arrival order) for the dual-observation idempotency scenarios
- *   (`DOMAIN_DUAL_SCENARIOS`); an observation proves one request for one
- *   obligation, never a replayable credit;
- * - the outcome class is DERIVED, never asserted: `accepted` requires
- *   every consumed status to be 2xx, `rejected` requires every consumed
- *   status to be 4xx — anything else is a 409 refusal that consumes
- *   NOTHING (a 201 POST can never evidence `signature-rejected`, and a
- *   401 can never evidence `signature-accepted`);
- * - without method+path the endpoint answers 409: a non-HTTP scenario
- *   has no engine-side producer yet, and this engine endpoint NEVER
- *   mints claimed records (the suite can submit claimed check kinds via
- *   `POST /records`; they can never satisfy on their own).
- *
- * The payload is exactly the engine observation the verdict engine
- * grades: `{scenario, outcome, method, url, status, responseSha256,
- * responseBytes}` (+ `observations: 2` for dual scenarios), where status
- * is the LAST observed status and the response hash/size come from the
- * proxy's bounded body snapshot.
- */
-async function handleDomainCheck(state, res, body) {
-    const obligationId = body['obligationId'];
-    const testId = body['testId'];
-    const claimId = body['claimId'];
-    const kind = body['kind'];
-    const scenario = body['scenario'];
-    const method = body['method'];
-    const path = body['path'];
-    if (typeof obligationId !== 'string' ||
-        !OBLIGATION_ID_PATTERN.test(obligationId) ||
-        typeof testId !== 'string' ||
-        testId.length === 0 ||
-        typeof claimId !== 'string' ||
-        claimId.length === 0 ||
-        typeof kind !== 'string' ||
-        !DOMAIN_CHECK_KINDS.includes(kind) ||
-        typeof scenario !== 'string' ||
-        scenario.length === 0) {
-        sendJson(res, 400, {
-            error: 'domain check requires obligationId, testId, claimId, scenario, and kind one of ' +
-                `${DOMAIN_CHECK_KINDS.join(', ')}`,
-        });
-        return;
-    }
-    const scenarioTable = DOMAIN_SCENARIO_CLASSES[kind];
-    const outcome = scenarioTable?.[scenario];
-    if (scenarioTable === undefined || outcome === undefined) {
-        sendJson(res, 400, {
-            error: `scenario '${scenario}' is not part of the '${kind}' namespace table; the witness only ` +
-                `derives outcomes for: ${Object.keys(scenarioTable ?? {}).sort(compareStrings).join(', ')}`,
-        });
-        return;
-    }
-    if (typeof method !== 'string' || method.length === 0 || typeof path !== 'string' || path.length === 0) {
-        sendJson(res, 409, {
-            error: 'domain check has no engine-side producer for non-HTTP scenarios yet: this endpoint can ' +
-                'only witness a check whose HTTP exchange traversed the observation proxy, so method ' +
-                'and path are required (a claimed record is never issued from this engine endpoint)',
-        });
-        return;
-    }
-    const wanted = normalizeObservedPath(path);
-    const upperMethod = method.toUpperCase();
-    // Dual-observation scenarios (idempotency proofs) consume TWO matching
-    // exchanges; everything else exactly one. Nothing is consumed unless
-    // the full set is present AND agrees with the scenario's outcome class.
-    const needed = DOMAIN_DUAL_SCENARIOS[scenario] === true ? 2 : 1;
-    const matches = [];
-    for (const entry of state.observed) {
-        if (entry.method === upperMethod && entry.path === wanted) {
-            matches.push(entry);
-            if (matches.length === needed)
-                break;
-        }
-    }
-    if (matches.length < needed) {
-        sendJson(res, 409, {
-            error: needed === 1
-                ? `no engine-observed request matches ${upperMethod} ${wanted}; drive the ` +
-                    'scenario through the observation proxy before claiming the obligation'
-                : `scenario '${scenario}' is evidenced by TWO engine-observed requests matching ` +
-                    `${upperMethod} ${wanted}, but only ${matches.length} was observed; drive the ` +
-                    'exchange the scenario describes through the observation proxy',
-        });
-        return;
-    }
-    const statuses = matches.map((entry) => entry.status);
-    const inClass = outcome === 'accepted'
-        ? statuses.every((status) => status >= 200 && status <= 299)
-        : statuses.every((status) => status >= 400 && status <= 499);
-    if (!inClass) {
-        // Refusal WITHOUT consuming: the observations stay available for a
-        // scenario their statuses CAN evidence.
-        sendJson(res, 409, {
-            error: `engine observed status(s) ${statuses.join(', ')} which cannot evidence scenario ` +
-                `'${scenario}'; drive the exchange the scenario describes`,
-        });
-        return;
-    }
-    // Consume exactly the matched observations (single-use), preserving
-    // arrival order; the LAST observation carries the graded status/body.
-    for (const entry of matches) {
-        const index = state.observed.indexOf(entry);
-        if (index !== -1)
-            state.observed.splice(index, 1);
-    }
-    const last = matches[matches.length - 1];
-    const payload = {
-        scenario,
-        outcome,
-        method: upperMethod,
-        url: wanted,
-        status: last.status,
-        responseSha256: last.bodySha256,
-        responseBytes: last.bodyBytes,
-        ...(needed === 2 ? { observations: 2 } : {}),
-    };
-    const record = issueRecord(state, obligationId, kind, testId, payload, 'engine-observed');
-    sendJson(res, 200, {
-        recordId: record.recordId,
-        runId: record.runId,
-        trust: record.trust,
-        status: last.status,
     });
 }
 /** Formats the bind host into a URL host (bracketing IPv6 literals). */
@@ -539,10 +403,6 @@ async function handleRequest(state, req, res) {
             await handleHttpObservation(state, res, (await readBody(req)));
             return;
         }
-        if (req.method === 'POST' && path === '/witness/domain-check') {
-            await handleDomainCheck(state, res, (await readBody(req)));
-            return;
-        }
         sendJson(res, 404, { error: `no witness endpoint at ${req.method} ${path}` });
     }
     catch (error) {
@@ -577,11 +437,10 @@ function sendJson(res, status, body) {
  * `POST /records`: validates and issues a submitted evidence record.
  * Unknown primitive kinds → 400 (GF-11: an unregistered primitive name
  * has no registration path; GF-14: the audit-event primitive is
- * implementation-gated and does not exist yet). The domain-check kinds
- * are accepted here SUITE-SUBMITTED only — trust follows origin, so they
- * issue at the claimed tier and can never satisfy alone (the engine
- * still owes witnessed evidence via `POST /witness/domain-check`);
- * persistence records are issued ONLY by the witness.
+ * implementation-gated and does not exist yet). Only the two UI
+ * primitives are suite-submittable; `http.request` and persistence
+ * records are witness-issued only (engine-side observation), so no
+ * claimed-side path can mint them.
  */
 async function handleRecords(state, res, body) {
     if (!isPlainObject(body)) {
@@ -593,8 +452,8 @@ async function handleRecords(state, res, body) {
     }
     if (typeof kind !== 'string' || !KNOWN_RECORD_KINDS.includes(kind)) {
         throw new HttpError(400, `unknown evidence primitive '${String(kind)}'; accepted kinds: ${KNOWN_RECORD_KINDS.join(', ')} ` +
-            '(check kinds are accepted suite-submitted as claimed-tier records only; witnessed check ' +
-            'records come from /witness/domain-check and persistence records only from /witness/persistence)');
+            '(http.request and persistence records are witness-issued only: /witness/http-observation ' +
+            'and /witness/persistence)');
     }
     if (typeof testId !== 'string' || testId.length === 0) {
         throw new HttpError(400, 'testId must be a non-empty string');
