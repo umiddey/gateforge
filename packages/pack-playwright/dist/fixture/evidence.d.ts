@@ -84,6 +84,16 @@ export interface EvidenceApi {
     readonly persistence: Readonly<{
         verify(receipt: Receipt): Promise<PersistenceOutcome>;
     }>;
+    /** ADR 0004 D7: consumes one proxy-observed request for an http:* claim. */
+    http: Readonly<{
+        observe(request: {
+            method: string;
+            path: string;
+        }): Promise<{
+            status: number;
+            recordId: string;
+        }>;
+    }>;
     finalize(): Promise<{
         claims: string[];
         records: WitnessRecord[];

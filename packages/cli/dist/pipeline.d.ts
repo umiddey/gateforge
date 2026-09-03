@@ -1,4 +1,5 @@
 import { type ChangedProvider, type ClassificationFile, type ClassificationResult, type DetectorOutput, type GateforgeConfig, type PolicyEvaluationResult, type ResourceGraph, type RunManifest } from '@gateforge/core';
+import { type EndpointInventory } from './endpoint-compiler.js';
 /** Everything one pipeline run needs. */
 export interface PipelineOptions {
     /** Repo root; all repo-relative paths resolve against it. */
@@ -18,6 +19,8 @@ export interface PipelineOptions {
 export interface PipelineResult {
     /** One validated contribution per configured plugin (config order). */
     contributions: DetectorOutput[];
+    /** Compiled endpoint inventory (ADR 0004 D6): facts, endpoints, blocks. */
+    endpointInventory: EndpointInventory;
     /** The built resource graph with effective classifications bound. */
     graph: ResourceGraph;
     /** Policy evaluation: obligations, blocking entries, claim assessments. */

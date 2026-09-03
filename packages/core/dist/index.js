@@ -214,7 +214,7 @@ export { GraphFindingSchema } from './graph/index.js';
  */
 export { DetectorOutputSchema } from './graph/index.js';
 /** Reserved resource `kind` for symbol-table class declarations. */
-export { CLASS_SYMBOL_KIND } from './graph/index.js';
+export { CLASS_SYMBOL_KIND, EVIDENCE_ONLY_RESOURCE_KINDS, HTTP_ENDPOINT_RESOURCE_KIND, isEvidenceOnlyKind } from './graph/index.js';
 /** Attribute payload of a class-symbol resource. */
 export { ClassSymbolAttributesSchema } from './graph/index.js';
 /** Canonical detector attribute carrying a resource's identity name. */
@@ -312,6 +312,7 @@ export { evaluateObligation } from './verdict/index.js';
 export { evaluateObligations } from './verdict/index.js';
 /** The five gate-blocking verdicts (`satisfied`/`waived` are clean). */
 export { BLOCKING_VERDICTS } from './verdict/index.js';
+export { registerContractVerifier, verifierFor, registeredNamespaces, } from './verdict/index.js';
 /** Fail-closed verdict-engine error (malformed obligation / clock). */
 export { GateforgeVerdictError } from './verdict/index.js';
 /** Normalizes the injected clock (`Date | string`) to a `Date`. */

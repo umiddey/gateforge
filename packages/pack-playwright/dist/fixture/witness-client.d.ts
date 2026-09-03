@@ -40,6 +40,23 @@ export declare class WitnessClient {
      */
     preObserve(request: PreObservationRequest): Promise<PreObservationResponse>;
     /** POST /witness/persistence (pin #7 + testId/claimId binding extension). */
+    /**
+     * POST /witness/http-observation (ADR 0004 D7): consumes one
+     * engine-observed request matching (method, path) and issues the
+     * witnessed `http.request` record for the obligation claim.
+     */
+    observeHttp(request: {
+        obligationId: string;
+        testId: string;
+        claimId: string;
+        method: string;
+        path: string;
+    }): Promise<{
+        recordId: string;
+        runId: string;
+        trust: string;
+        status: number;
+    }>;
     verifyPersistence(request: PersistenceRequest & {
         testId: string;
         claimId: string;

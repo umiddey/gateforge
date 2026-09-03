@@ -22,6 +22,7 @@ import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.
 import { clockFromConfig } from './clock.js';
 import { expandIncludePaths } from './glob.js';
 import { runPlugins } from './plugins.js';
+import { compileEndpointContribution } from './endpoint-compiler.js';
 import { readJsonArray } from './state.js';
 import { providerFor } from './providers.js';
 /** Source-file map resourceId → repo-relative source (for diff scoping). */
@@ -138,8 +139,14 @@ export async function runPipeline(options) {
     const claims = claimsRaw.filter((entry) => ClaimSchema.safeParse(entry).success);
     const adapters = loadAdapterNames(cwd, config.adapters);
     const waiverLoad = loadWaivers(resolveRepoPath(cwd, config.waivers), { now: clock.now() });
+    // Endpoint compilation (ADR 0004 D6): deterministic stage over the
+    // detectors' contract facts; its output is a synthetic engine
+    // contribution that participates in the graph like any detector's.
+    // Coverage/successful-detector accounting stays pinned to the PLUGIN
+    // contributions — the compiler examines no files itself.
+    const { contribution: endpointContribution, inventory: endpointInventory } = compileEndpointContribution(contributions);
     const built = buildResourceGraph({
-        detectors: contributions,
+        detectors: [...contributions, endpointContribution],
         claims,
         adapters,
         waivers: waiverLoad.waivers,
@@ -180,7 +187,7 @@ export async function runPipeline(options) {
     // toward MORE obligations; typed blocks stay gate-visible.
     const { graph, classification, blocking } = runClassification({
         graph: built,
-        signals: contributions.flatMap((contribution) => contribution.classificationSignals),
+        signals: [...contributions, endpointContribution].flatMap((contribution) => contribution.classificationSignals),
         authority,
         policy: policyDocParsed.data,
         adapters,
@@ -211,6 +218,7 @@ export async function runPipeline(options) {
     });
     return {
         contributions,
+        endpointInventory,
         graph,
         policy,
         manifest,

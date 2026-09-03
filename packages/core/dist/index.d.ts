@@ -70,6 +70,7 @@ export { GATEFORGE_SCHEMA_VERSION } from './schemas/common.js';
  * unresolved reasons and detector provenance.
  */
 export { LocationSchema } from './schemas/common.js';
+export type { Location } from './schemas/common.js';
 /** Contract-name grammar: interior colons legal (`crud:update`), no leading colon. */
 export { ContractNameSchema } from './schemas/common.js';
 /** Inferred contract-name type. */
@@ -262,7 +263,7 @@ export { DetectorOutputSchema } from './graph/index.js';
 /** Inferred detector-contribution type. */
 export type { DetectorOutput } from './graph/index.js';
 /** Reserved resource `kind` for symbol-table class declarations. */
-export { CLASS_SYMBOL_KIND } from './graph/index.js';
+export { CLASS_SYMBOL_KIND, EVIDENCE_ONLY_RESOURCE_KINDS, HTTP_ENDPOINT_RESOURCE_KIND, isEvidenceOnlyKind } from './graph/index.js';
 /** Attribute payload of a class-symbol resource. */
 export { ClassSymbolAttributesSchema } from './graph/index.js';
 /** Inferred class-symbol attribute type. */
@@ -380,6 +381,7 @@ export { evaluateObligation } from './verdict/index.js';
 export { evaluateObligations } from './verdict/index.js';
 /** The five gate-blocking verdicts (`satisfied`/`waived` are clean). */
 export { BLOCKING_VERDICTS } from './verdict/index.js';
+export { registerContractVerifier, verifierFor, registeredNamespaces, type ClaimEvidenceInput, type ClaimOutcome, type ContractVerifier, } from './verdict/index.js';
 /** Fail-closed verdict-engine error (malformed obligation / clock). */
 export { GateforgeVerdictError } from './verdict/index.js';
 /** Normalizes the injected clock (`Date | string`) to a `Date`. */

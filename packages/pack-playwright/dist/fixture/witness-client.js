@@ -76,6 +76,14 @@ export class WitnessClient {
         return this.request('/witness/pre-observation', request);
     }
     /** POST /witness/persistence (pin #7 + testId/claimId binding extension). */
+    /**
+     * POST /witness/http-observation (ADR 0004 D7): consumes one
+     * engine-observed request matching (method, path) and issues the
+     * witnessed `http.request` record for the obligation claim.
+     */
+    async observeHttp(request) {
+        return this.request('/witness/http-observation', request);
+    }
     async verifyPersistence(request) {
         return this.request('/witness/persistence', request);
     }

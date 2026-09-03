@@ -28,7 +28,7 @@ import { z } from 'zod';
 import { type ContractName } from '../schemas/common.js';
 import { type PolicyFile } from '../schemas/policy.js';
 import { type Claim } from '../schemas/claim.js';
-import type { ResourceGraph } from '../graph/schema.js';
+import { type ResourceGraph } from '../graph/schema.js';
 /** The CRUD contract namespace gated by lifecycle flags. */
 export declare const CRUD_CONTRACT_PREFIX = "crud:";
 /**
