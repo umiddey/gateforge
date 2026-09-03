@@ -16,11 +16,13 @@ no network, no external deps — and emits the classification **signals**
 
 ## Resources
 
-One `http-route` resource per artifact: id
-`http-route:<file>:<line>:<method>.<name>` (`.N` disambiguator for exact
-duplicates on one line), attributes `resourceName` (path identity),
-`method`, `path`, and `origin` (`express | fastify | hono | nestjs | fetch |
-axios`). Sorted by id; output is a pure function of file bytes.
+**None.** Routes are evidence, not business resources: an early design
+emitted one `http-route` resource per artifact, but a path-derived resource
+name collides with the converged SQLAlchemy table at the same
+plane-qualified id, so the resource channel was removed after a red-probe
+(`resources: []` always; see ADR 0004 D1 for the successor design —
+endpoint identities live in the `@gateforge/http-contract` join, never in
+the path-derived table name).
 
 ## Signals
 
