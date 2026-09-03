@@ -4,33 +4,35 @@
  * re-registration, so no pack can override another namespace.
  *
  * Trust model (invariant, ADR 0001): ONLY witnessed records satisfy.
- * Suite-submitted records are claimed-tier at issuance; a claimed record
- * with the right shape leaves the obligation `missing` (honest gap:
- * independent observation still owed), while a record whose payload
- * contradicts the contract grades `invalid`. Fabricated provenance is
- * rejected before verifiers run (the engine re-computes record hashes).
+ * Suite-submitted records are claimed-tier at issuance. Fabricated
+ * provenance is rejected before verifiers run (the engine re-computes
+ * record hashes).
  *
  * HTTP namespace: `http:frontend-request-observed` requires an
  * engine-observed `http.request` record bound to the run (the
  * witness-owned observation channel, phase 6) PLUS a provenanced
  * claimed `ui.action` anchor from the declaring test; a suite-submitted
  * network record can never satisfy (`HTTP_OBSERVATION_UNTRUSTED`).
- * `http:response-status-ok` additionally requires a 2xx status.
+ * `http:response-status-ok` additionally requires a 2xx status. Proxy
+ * observation plus the endpoint shape binding genuinely prove that the
+ * frontend request was observed and the response status was ok — that is
+ * exactly as far as transport evidence reaches, and the verifier claims
+ * nothing beyond it.
  *
- * Domain-check namespaces (`auth.check`, `workflow.check`,
- * `webhook.check`, `task.check`, `validation.check`): the WITNESS derives
- * the outcome from the observed HTTP exchange. The record payload carries
- * the witness-derived `outcome` (`'accepted'` for a 2xx, `'rejected'`
- * for a 4xx), the observed `method`/`url`/`status`, the response digest
- * and byte count, and — for dual-observation scenarios — the observed
- * exchange count. The caller-asserted `allowed`/`observed` booleans the
- * payload once carried are gone: a suite can assert anything, only the
- * witness's derived outcome grades. Identity binding uses the same
- * positional shape match as the http namespace (`pathMatchesShape`),
- * so `/accounts/123` satisfies an `/accounts/{}` endpoint (ADR 0004
- * D2/D3).
+ * Domain namespaces (`auth:*`, `task:*`, `validation:*`, `webhook:*`,
+ * `workflow:*`): FAIL-CLOSED, unconditionally, for EVERY contract of the
+ * namespace. Proving these behaviors requires an engine-owned observer
+ * over application state — audit logs, FSM/state observation,
+ * identity/role material (plan §6) — and no such producer exists yet.
+ * Grading them from a witnessed check record whose witness-derived
+ * outcome is merely the observed HTTP status class (2xx → accepted, 4xx
+ * → rejected) is forged green: any 2xx would "prove" `audit-emitted` or
+ * `persisted-final-state`, any 4xx would "prove" `tenant-isolated` or
+ * `denied-no-side-effect`, and a response hash proves nothing about
+ * `error-message-explicit`. Every contract of these namespaces therefore
+ * grades `missing` with a reason naming the missing channel — never
+ * `satisfied`, never `invalid`, whatever evidence arrives.
  */
-import type { Obligation } from '../schemas/index.js';
 import { isProvenancedRecord } from '../provenance.js';
 
 /**
@@ -49,13 +51,6 @@ import {
 /** Record kinds the witness and suites exchange. */
 const UI_ACTION_KIND = 'ui.action';
 const HTTP_REQUEST_KIND = 'http.request';
-
-function recordIdsOf(
-  evidence: ClaimEvidenceInput['evidence'],
-  predicate: (entry: ClaimEvidenceInput['evidence'][number]) => boolean,
-): string[] {
-  return [...new Set(evidence.filter(predicate).map((entry) => String(entry.record.recordId)))].sort();
-}
 
 function payloadOf(record: ClaimEvidenceInput['evidence'][number]['record']): Record<string, unknown> | null {
   const payload = record.payload;
@@ -224,229 +219,69 @@ function httpVerifier(input: ClaimEvidenceInput): ClaimOutcome {
 }
 
 /**
- * The outcome class of a domain-check scenario, DERIVED by the witness
- * from the last observed HTTP status: `accepted` requires 200-299,
- * `rejected` requires 400-499.
+ * The honest evidence channel each domain namespace would need. Wording
+ * is per-namespace on purpose: the fail-closed reason must name WHAT is
+ * missing, not a generic unsupported hole.
  */
-type ScenarioClass = 'accepted' | 'rejected';
-
-/**
- * One scenario's grading requirements (mirror of the witness payload
- * contract). The witness uses the same table, so the verifier's
- * expectations never come from the tested suite.
- */
-interface ScenarioSpec {
-  /** Outcome class the witness must have derived for the scenario. */
-  outcomeClass: ScenarioClass;
-  /** Set (=== 2) only for dual-observation scenarios: the witness must
-   * have consumed TWO matching proxied requests of the exchange. */
-  observations?: 2;
-}
-
-/**
- * Namespace → scenario table for the domain packs. The scenario string
- * is the contract's verb; the witnessed record's payload must carry the
- * witness-derived outcome class for it.
- */
-interface NamespaceSpec {
-  namespace: string;
-  kind: string;
-  scenarios: Readonly<Record<string, ScenarioSpec>>;
-}
-
-const NAMESPACE_SPECS: readonly NamespaceSpec[] = [
+const DOMAIN_NAMESPACES: readonly { namespace: string; channel: string }[] = [
   {
     namespace: 'auth',
-    kind: 'auth.check',
-    scenarios: {
-      'denied-no-side-effect': { outcomeClass: 'rejected' },
-      'forged-token-rejected': { outcomeClass: 'rejected' },
-      'role-allowed': { outcomeClass: 'accepted' },
-      'role-denied': { outcomeClass: 'rejected' },
-      'tenant-isolated': { outcomeClass: 'rejected' },
-    },
-  },
-  {
-    namespace: 'workflow',
-    kind: 'workflow.check',
-    scenarios: {
-      'audit-emitted': { outcomeClass: 'accepted' },
-      'persisted-final-state': { outcomeClass: 'accepted' },
-      'terminal-immutable': { outcomeClass: 'rejected' },
-      'transition-allowed': { outcomeClass: 'accepted' },
-      'transition-rejected': { outcomeClass: 'rejected' },
-    },
-  },
-  {
-    namespace: 'webhook',
-    kind: 'webhook.check',
-    scenarios: {
-      'malformed-rejected': { outcomeClass: 'rejected' },
-      'replay-idempotent': { outcomeClass: 'accepted', observations: 2 },
-      'retry-bounded': { outcomeClass: 'accepted' },
-      'signature-accepted': { outcomeClass: 'accepted' },
-      'signature-rejected': { outcomeClass: 'rejected' },
-    },
+    channel: 'identity/role material and tenant-scoped application state',
   },
   {
     namespace: 'task',
-    kind: 'task.check',
-    scenarios: {
-      'duplicate-delivery-handled': { outcomeClass: 'accepted', observations: 2 },
-      idempotent: { outcomeClass: 'accepted', observations: 2 },
-      'observability-recorded': { outcomeClass: 'accepted' },
-      'retry-policy-enforced': { outcomeClass: 'accepted' },
-      'terminal-handled': { outcomeClass: 'accepted' },
-    },
+    channel: 'queue/job delivery state',
   },
   {
     namespace: 'validation',
-    kind: 'validation.check',
-    scenarios: {
-      'boundary-accepted': { outcomeClass: 'accepted' },
-      'boundary-rejected': { outcomeClass: 'rejected' },
-      'envelope-shape-stable': { outcomeClass: 'accepted' },
-      'error-message-explicit': { outcomeClass: 'accepted' },
-      'no-side-effect-on-reject': { outcomeClass: 'rejected' },
-    },
+    channel: 'boundary semantics over application state and the response envelope',
+  },
+  {
+    namespace: 'webhook',
+    channel: 'signature/replay verification over application-received deliveries',
+  },
+  {
+    namespace: 'workflow',
+    channel: 'the workflow state machine and its audit log',
   },
 ];
 
-/** Builds one namespace's verifier from its spec (table-driven). */
-function packVerifier(spec: NamespaceSpec): ContractVerifier {
+/**
+ * Builds the honest fail-closed reason for one domain contract: it names
+ * the contract, the behavior to prove, the missing engine-owned channel,
+ * and why transport evidence can never substitute for it.
+ */
+function failClosedReason(namespace: string, channel: string, input: ClaimEvidenceInput): string {
+  const verb = input.obligation.contract.slice(namespace.length + 1);
+  const behavior = verb.length > 0 ? verb : input.obligation.contract;
+  return (
+    `contract '${input.obligation.contract}' has no honest evidence channel: proving '${behavior}' ` +
+    `requires an engine-owned observer over application state (${channel} per plan §6), and no such ` +
+    'producer exists yet; transport exchanges (status codes, response bytes) cannot prove these ' +
+    `semantics, so '${input.obligation.id}' stays blocking. Do not add this contract to policies ` +
+    'until its pack ships a state-observing producer.'
+  );
+}
+
+/**
+ * The domain namespaces' verifier: fail-closed for EVERY contract of the
+ * namespace, whatever evidence arrives — old-shape check records,
+ * claimed or witnessed, perfectly formed. It never returns `satisfied`
+ * and never `invalid`: no existing record can honestly evidence these
+ * semantics, and hostile evidence deserves no sharper verdict than the
+ * honest-channel reason.
+ */
+function failClosedVerifier(namespace: string, channel: string): ContractVerifier {
   return (input: ClaimEvidenceInput): ClaimOutcome => {
-    const verb = input.obligation.contract.slice(spec.namespace.length + 1);
-    const scenarioSpec = spec.scenarios[verb];
-    if (scenarioSpec === undefined) {
+    // A contract string that does not parse into this namespace is
+    // genuinely unknown, not merely unproducible.
+    if (!input.obligation.contract.startsWith(`${namespace}:`)) {
       return unknownContract(input);
     }
-    const anchorFailure = uiAnchorFailure(input);
-    if (anchorFailure !== null) return anchorFailure;
-
-    const checks = input.evidence.filter((entry) => entry.record.kind === spec.kind);
-    if (checks.length === 0) {
-      return {
-        status: 'missing',
-        reason:
-          `'${input.obligation.id}': no '${spec.kind}' record for scenario '${verb}'; ` +
-          'the pack-specific check must be observed by the witness',
-        recordIds: [],
-      };
-    }
-    const untrusted = checks.find((entry) => entry.record.origin !== 'engine-observed');
-    if (untrusted !== undefined) {
-      return {
-        status: 'missing',
-        reason:
-          `'${input.obligation.id}': '${spec.kind}' records exist only as suite-submitted ` +
-          '(claimed) observations; independent witnessed evidence is still owed',
-      };
-    }
-    const proven = checks.find(
-      (entry) => entry.trust === 'witnessed' && isProvenancedRecord(entry.record),
-    );
-    if (proven === undefined) {
-      return {
-        status: 'missing',
-        reason:
-          `'${input.obligation.id}': observed '${spec.kind}' records exist but none carries ` +
-          'witnessed provenance bound to this run',
-      };
-    }
-    const payload = payloadOf(proven.record);
-    if (payload === null || payload['scenario'] !== verb) {
-      const got = payload === null ? '<no payload>' : String(payload['scenario']);
-      return {
-        status: 'invalid',
-        reason:
-          `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
-          `'${String(proven.record.recordId)}' asserts scenario '${got}' but ` +
-          `'${input.obligation.contract}' requires '${verb}'`,
-      };
-    }
-    // The outcome is WITNESS-DERIVED (from the observed HTTP status), not
-    // caller-asserted: a scenario's class demands exactly one outcome.
-    const outcomeClass = scenarioSpec.outcomeClass;
-    if (payload['outcome'] !== outcomeClass) {
-      return {
-        status: 'invalid',
-        reason:
-          `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
-          `'${String(proven.record.recordId)}' witness-derived outcome ` +
-          `'${String(payload['outcome'])}' cannot evidence '${input.obligation.contract}'`,
-      };
-    }
-    const method = payload['method'];
-    const url = payload['url'];
-    if (typeof method !== 'string' || typeof url !== 'string') {
-      return {
-        status: 'invalid',
-        reason:
-          `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
-          `'${String(proven.record.recordId)}' carries no witnessed method/url pair of the exchange`,
-      };
-    }
-    const status = payload['status'];
-    const statusRange = outcomeClass === 'accepted' ? '200-299' : '400-499';
-    const minStatus = outcomeClass === 'accepted' ? 200 : 400;
-    const maxStatus = outcomeClass === 'accepted' ? 299 : 499;
-    if (typeof status !== 'number' || !Number.isInteger(status) || status < minStatus || status > maxStatus) {
-      return {
-        status: 'invalid',
-        reason:
-          `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
-          `'${String(proven.record.recordId)}' observed status '${String(status)}', which cannot ` +
-          `evidence '${input.obligation.contract}' (${outcomeClass} scenarios require ${statusRange})`,
-      };
-    }
-    const responseSha256 = payload['responseSha256'];
-    const responseBytes = payload['responseBytes'];
-    if (
-      typeof responseSha256 !== 'string' ||
-      /^[0-9a-f]{64}$/.test(responseSha256) === false ||
-      typeof responseBytes !== 'number' ||
-      !Number.isInteger(responseBytes) ||
-      responseBytes < 0
-    ) {
-      return {
-        status: 'invalid',
-        reason:
-          `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
-          `'${String(proven.record.recordId)}' carries no witness-derived response evidence ` +
-          '(responseSha256 must be 64 lowercase hex and responseBytes a non-negative integer)',
-      };
-    }
-    if (scenarioSpec.observations === 2 && payload['observations'] !== 2) {
-      return {
-        status: 'invalid',
-        reason:
-          `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
-          `'${String(proven.record.recordId)}' requires two witnessed observations of the exchange ` +
-          `for '${input.obligation.contract}' (payload.observations must be 2)`,
-      };
-    }
-    // Identity match against the obligation's endpoint (same semantics as
-    // the http namespace): the witnessed exchange must have hit THAT
-    // endpoint shape, with THAT method.
-    if (input.resource !== null && input.resource !== undefined && input.resource.kind === 'http.endpoint') {
-      const expectedMethod = String(input.resource.attributes['method']).toUpperCase();
-      const expectedPath = String(input.resource.attributes['canonicalPath']);
-      const observedMethod = method.toUpperCase();
-      const observedPath = normalizeObservedPath(url);
-      if (observedMethod !== expectedMethod || !pathMatchesShape(observedPath, expectedPath)) {
-        return {
-          status: 'invalid',
-          reason:
-            `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
-            `'${String(proven.record.recordId)}' observed ${observedMethod} ${url} does not ` +
-            `match endpoint shape ${expectedMethod} ${expectedPath}; evidence from a different ` +
-            'endpoint can never satisfy it',
-        };
-      }
-    }
     return {
-      status: 'satisfied',
-      recordIds: [String(proven.record.recordId)],
+      status: 'missing',
+      reason: failClosedReason(namespace, channel, input),
+      recordIds: [],
     };
   };
 }
@@ -470,7 +305,7 @@ export function registerPackVerifiers(): void {
   if (registered) return;
   registered = true;
   registerContractVerifier('http', httpVerifier);
-  for (const spec of NAMESPACE_SPECS) {
-    registerContractVerifier(spec.namespace, packVerifier(spec));
+  for (const { namespace, channel } of DOMAIN_NAMESPACES) {
+    registerContractVerifier(namespace, failClosedVerifier(namespace, channel));
   }
 }

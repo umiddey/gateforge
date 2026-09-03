@@ -214,3 +214,38 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
     }
   });
 });
+
+describe('no claimed-side path around the trust model', () => {
+  it('rejects a suite-submitted check-kind record at /records (400, honest gap)', async () => {
+    // The witnessed domain-check channel was RETIRED (its scenario label
+    // plus status-class outcome was forged-green by construction) and it
+    // must not come back as a claimed-side shortcut: check-kind records
+    // are not accepted primitives, so domain contracts return to
+    // fail-closed until real state-observing producers exist.
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      const res = await fetch(`${witness.url}/records`, {
+        method: 'POST',
+        headers: { 'x-gateforge-run': TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: OBLIGATION.id,
+          kind: 'workflow.check',
+          payload: { scenario: 'transition-allowed', outcome: 'accepted' },
+          testId: 'journey-1',
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain(
+        "unknown evidence primitive 'workflow.check'; accepted kinds: ui.action, ui.visible-result",
+      );
+      expect(body.error).toContain(
+        'http.request and persistence records are witness-issued only',
+      );
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+});
