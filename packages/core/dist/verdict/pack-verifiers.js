@@ -51,6 +51,47 @@ function normalizeObservedPath(rawUrl) {
         path = path.replace(/\/+$/, '');
     return path;
 }
+/**
+ * Positional match of a concrete observed path against a compiled
+ * canonical shape (ADR 0004 D2/D3 semantics): literal segments must be
+ * equal, `{}` matches any single non-empty segment, and a TRAILING `{*}`
+ * matches one or more trailing segments. Non-trailing wildcards and any
+ * other shape never match. Case-sensitive.
+ *
+ * Args:
+ *   observedPath: the concrete observed path (query already stripped).
+ *   canonicalPath: the endpoint's compiled canonical shape.
+ *
+ * Returns:
+ *   boolean: true only when the observed path instantiates the shape.
+ */
+export function pathMatchesShape(observedPath, canonicalPath) {
+    const observed = observedPath.split('/').filter((segment) => segment.length > 0);
+    const shape = canonicalPath.split('/').filter((segment) => segment.length > 0);
+    const wildcardIndex = shape.indexOf('{*}');
+    // Fail closed: only a TRAILING `{*}` is a wildcard — a shape that
+    // carries one anywhere else (or more than once) never matches.
+    if (wildcardIndex !== -1 && wildcardIndex !== shape.length - 1)
+        return false;
+    if (wildcardIndex !== -1) {
+        // The wildcard consumes one or more trailing segments, so the
+        // observed path needs at least the shape's leading literals.
+        if (observed.length < shape.length)
+            return false;
+    }
+    else if (observed.length !== shape.length) {
+        return false;
+    }
+    const literalPositions = wildcardIndex === -1 ? shape.length : wildcardIndex;
+    for (let i = 0; i < literalPositions; i++) {
+        const pattern = shape[i];
+        // `{}` matches any single (non-empty — empties were dropped)
+        // segment; anything else must be literally equal. Case-sensitive.
+        if (pattern !== '{}' && pattern !== observed[i])
+            return false;
+    }
+    return true;
+}
 /** Grades the HTTP runtime-observation contracts (phase 5/6 semantics). */
 function httpVerifier(input) {
     const anchorFailure = uiAnchorFailure(input);
@@ -94,19 +135,22 @@ function httpVerifier(input) {
     // Identity match (fail-closed): when the host supplies the obligation's
     // graph resource, the witnessed observation must come from THAT
     // endpoint — a `/health` observation can never satisfy a `/contracts`
-    // obligation. Absent resource (test harnesses) keeps the historical
-    // any-endpoint behavior; the real CLI always supplies it.
+    // obligation. The comparison is positional against the endpoint's
+    // canonical SHAPE (ADR 0004 D2/D3): `/accounts/123` satisfies
+    // `/accounts/{}`; evidence from a different endpoint shape never does.
+    // Absent resource (test harnesses) keeps the historical any-endpoint
+    // behavior; the real CLI always supplies it.
     if (input.resource !== null && input.resource !== undefined && input.resource.kind === 'http.endpoint') {
         const expectedMethod = String(input.resource.attributes['method']).toUpperCase();
         const expectedPath = String(input.resource.attributes['canonicalPath']);
         const observedMethod = payload['method'].toUpperCase();
         const observedPath = normalizeObservedPath(payload['url']);
-        if (observedMethod !== expectedMethod || observedPath !== expectedPath) {
+        if (observedMethod !== expectedMethod || !pathMatchesShape(observedPath, expectedPath)) {
             return {
                 status: 'invalid',
                 reason: `'${input.obligation.id}': witnessed '${HTTP_REQUEST_KIND}' record ` +
-                    `'${String(proven.record.recordId)}' observed ${observedMethod} ${payload['url']} but the ` +
-                    `obligation's endpoint is ${expectedMethod} ${expectedPath}; evidence from a different ` +
+                    `'${String(proven.record.recordId)}' observed ${observedMethod} ${payload['url']} does not ` +
+                    `match endpoint shape ${expectedMethod} ${expectedPath}; evidence from a different ` +
                     'endpoint can never satisfy it',
             };
         }
@@ -131,55 +175,55 @@ const NAMESPACE_SPECS = [
         namespace: 'auth',
         kind: 'auth.check',
         scenarios: {
-            'role-allowed': {},
-            'role-denied': { requiresObservedFalse: true },
-            'tenant-isolated': { requiresObservedFalse: true },
-            'denied-no-side-effect': { requiresObservedFalse: true },
-            'forged-token-rejected': { requiresObservedFalse: true },
+            'denied-no-side-effect': { outcomeClass: 'rejected' },
+            'forged-token-rejected': { outcomeClass: 'rejected' },
+            'role-allowed': { outcomeClass: 'accepted' },
+            'role-denied': { outcomeClass: 'rejected' },
+            'tenant-isolated': { outcomeClass: 'rejected' },
         },
     },
     {
         namespace: 'workflow',
         kind: 'workflow.check',
         scenarios: {
-            'transition-allowed': {},
-            'transition-rejected': { requiresObservedFalse: true },
-            'terminal-immutable': { requiresObservedFalse: true },
-            'audit-emitted': {},
-            'persisted-final-state': {},
+            'audit-emitted': { outcomeClass: 'accepted' },
+            'persisted-final-state': { outcomeClass: 'accepted' },
+            'terminal-immutable': { outcomeClass: 'rejected' },
+            'transition-allowed': { outcomeClass: 'accepted' },
+            'transition-rejected': { outcomeClass: 'rejected' },
         },
     },
     {
         namespace: 'webhook',
         kind: 'webhook.check',
         scenarios: {
-            'signature-accepted': {},
-            'signature-rejected': { requiresObservedFalse: true },
-            'malformed-rejected': { requiresObservedFalse: true },
-            'replay-idempotent': {},
-            'retry-bounded': {},
+            'malformed-rejected': { outcomeClass: 'rejected' },
+            'replay-idempotent': { outcomeClass: 'accepted', observations: 2 },
+            'retry-bounded': { outcomeClass: 'accepted' },
+            'signature-accepted': { outcomeClass: 'accepted' },
+            'signature-rejected': { outcomeClass: 'rejected' },
         },
     },
     {
         namespace: 'task',
         kind: 'task.check',
         scenarios: {
-            'retry-policy-enforced': {},
-            idempotent: {},
-            'terminal-handled': {},
-            'observability-recorded': {},
-            'duplicate-delivery-handled': {},
+            'duplicate-delivery-handled': { outcomeClass: 'accepted', observations: 2 },
+            idempotent: { outcomeClass: 'accepted', observations: 2 },
+            'observability-recorded': { outcomeClass: 'accepted' },
+            'retry-policy-enforced': { outcomeClass: 'accepted' },
+            'terminal-handled': { outcomeClass: 'accepted' },
         },
     },
     {
         namespace: 'validation',
         kind: 'validation.check',
         scenarios: {
-            'boundary-accepted': {},
-            'boundary-rejected': { requiresObservedFalse: true },
-            'no-side-effect-on-reject': { requiresObservedFalse: true },
-            'error-message-explicit': {},
-            'envelope-shape-stable': {},
+            'boundary-accepted': { outcomeClass: 'accepted' },
+            'boundary-rejected': { outcomeClass: 'rejected' },
+            'envelope-shape-stable': { outcomeClass: 'accepted' },
+            'error-message-explicit': { outcomeClass: 'accepted' },
+            'no-side-effect-on-reject': { outcomeClass: 'rejected' },
         },
     },
 ];
@@ -229,13 +273,75 @@ function packVerifier(spec) {
                     `'${input.obligation.contract}' requires '${verb}'`,
             };
         }
-        if (scenarioSpec.requiresObservedFalse) {
-            if (payload['allowed'] !== false && payload['observed'] !== false) {
+        // The outcome is WITNESS-DERIVED (from the observed HTTP status), not
+        // caller-asserted: a scenario's class demands exactly one outcome.
+        const outcomeClass = scenarioSpec.outcomeClass;
+        if (payload['outcome'] !== outcomeClass) {
+            return {
+                status: 'invalid',
+                reason: `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
+                    `'${String(proven.record.recordId)}' witness-derived outcome ` +
+                    `'${String(payload['outcome'])}' cannot evidence '${input.obligation.contract}'`,
+            };
+        }
+        const method = payload['method'];
+        const url = payload['url'];
+        if (typeof method !== 'string' || typeof url !== 'string') {
+            return {
+                status: 'invalid',
+                reason: `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
+                    `'${String(proven.record.recordId)}' carries no witnessed method/url pair of the exchange`,
+            };
+        }
+        const status = payload['status'];
+        const statusRange = outcomeClass === 'accepted' ? '200-299' : '400-499';
+        const minStatus = outcomeClass === 'accepted' ? 200 : 400;
+        const maxStatus = outcomeClass === 'accepted' ? 299 : 499;
+        if (typeof status !== 'number' || !Number.isInteger(status) || status < minStatus || status > maxStatus) {
+            return {
+                status: 'invalid',
+                reason: `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
+                    `'${String(proven.record.recordId)}' observed status '${String(status)}', which cannot ` +
+                    `evidence '${input.obligation.contract}' (${outcomeClass} scenarios require ${statusRange})`,
+            };
+        }
+        const responseSha256 = payload['responseSha256'];
+        const responseBytes = payload['responseBytes'];
+        if (typeof responseSha256 !== 'string' ||
+            /^[0-9a-f]{64}$/.test(responseSha256) === false ||
+            typeof responseBytes !== 'number' ||
+            !Number.isInteger(responseBytes) ||
+            responseBytes < 0) {
+            return {
+                status: 'invalid',
+                reason: `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
+                    `'${String(proven.record.recordId)}' carries no witness-derived response evidence ` +
+                    '(responseSha256 must be 64 lowercase hex and responseBytes a non-negative integer)',
+            };
+        }
+        if (scenarioSpec.observations === 2 && payload['observations'] !== 2) {
+            return {
+                status: 'invalid',
+                reason: `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
+                    `'${String(proven.record.recordId)}' requires two witnessed observations of the exchange ` +
+                    `for '${input.obligation.contract}' (payload.observations must be 2)`,
+            };
+        }
+        // Identity match against the obligation's endpoint (same semantics as
+        // the http namespace): the witnessed exchange must have hit THAT
+        // endpoint shape, with THAT method.
+        if (input.resource !== null && input.resource !== undefined && input.resource.kind === 'http.endpoint') {
+            const expectedMethod = String(input.resource.attributes['method']).toUpperCase();
+            const expectedPath = String(input.resource.attributes['canonicalPath']);
+            const observedMethod = method.toUpperCase();
+            const observedPath = normalizeObservedPath(url);
+            if (observedMethod !== expectedMethod || !pathMatchesShape(observedPath, expectedPath)) {
                 return {
                     status: 'invalid',
-                    reason: `'${input.obligation.id}': witnessed record ` +
-                        `'${String(proven.record.recordId)}' does not assert the negative outcome ` +
-                        `required by '${input.obligation.contract}'`,
+                    reason: `'${input.obligation.id}': witnessed '${spec.kind}' record ` +
+                        `'${String(proven.record.recordId)}' observed ${observedMethod} ${url} does not ` +
+                        `match endpoint shape ${expectedMethod} ${expectedPath}; evidence from a different ` +
+                        'endpoint can never satisfy it',
                 };
             }
         }

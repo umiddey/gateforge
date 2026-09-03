@@ -18,9 +18,13 @@
  *   fields stay honored) so persistence records bind to the claim the
  *   engine grades.
  * - `POST /witness/domain-check` — run-token authed; consumes ONE
- *   matching proxy observation (method+path) and issues a witnessed
- *   `<namespace>.check` record `{scenario, method, url, status}` bound
- *   to the obligation claim. Without method+path it answers 409: a
+ *   matching proxy observation (TWO for dual-observation idempotency
+ *   scenarios), DERIVES the outcome class from the observed status
+ *   (2xx → accepted, 4xx → rejected), and issues a witnessed
+ *   `<namespace>.check` record `{scenario, outcome, method, url, status,
+ *   responseSha256, responseBytes[, observations]}` bound to the
+ *   obligation claim. Contradictory statuses are refused with 409 and
+ *   nothing is consumed; without method+path it answers 409: a
  *   non-HTTP scenario has no engine-side producer yet, and this engine
  *   endpoint never mints claimed records.
  * - `GET /records`           — the issued ledger (the ONLY input the
@@ -40,17 +44,24 @@
  * `manifest.json` in the run-state dir (pin #4/#7).
  */
 import { createServer, request } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ledgerMac, recordIdOf } from '@gateforge/core';
 import { canonicalOf } from '../json.js';
-import { DEFAULT_REQUEST_TIMEOUT_MS, DOMAIN_CHECK_KINDS, KNOWN_RECORD_KINDS, LOOPBACK_HOSTNAME, PERSISTENCE_KIND, RUN_HEADER, VERIFIER_HEADER, } from '../constants.js';
+import { DEFAULT_REQUEST_TIMEOUT_MS, DOMAIN_CHECK_KINDS, DOMAIN_DUAL_SCENARIOS, DOMAIN_SCENARIO_CLASSES, KNOWN_RECORD_KINDS, LOOPBACK_HOSTNAME, PERSISTENCE_KIND, RUN_HEADER, VERIFIER_HEADER, } from '../constants.js';
 import { loadAdapters, makeAdapterContext } from './adapter-registry.js';
 import { AttestationError, assertLoopback, envFingerprintMismatch, probeEnvFingerprint, } from './env-attestation.js';
 import { loadClassifications, toClassificationView } from './classifications.js';
 const MAX_BODY_BYTES = 1024 * 1024;
 const OBLIGATION_ID_PATTERN = /^[^:]+:.+$/;
+/**
+ * Bounded response snapshot the observation proxy keeps per forwarded
+ * exchange: at most this many body bytes are hashed into the snapshot,
+ * while the TOTAL byte count is tracked separately. The response still
+ * streams to the browser unbuffered — the snapshot is a tap, not a gate.
+ */
+const OBSERVED_BODY_SNAPSHOT_BYTES = 16384;
 /** Fail-closed witness configuration/startup error. */
 export class WitnessStartupError extends Error {
     constructor(message) {
@@ -199,11 +210,11 @@ export async function startWitness(options) {
     const url = `http://${formatHost(state.options.host)}:${address.port}`;
     // ADR 0004 D7: the witness-owned loopback reverse proxy. Browser
     // traffic aimed at the proxy is forwarded to the attested target and
-    // (method, path, status) recorded as an ENGINE observation; a
-    // suite-callable endpoint consumes a matching observation to issue a
-    // witnessed `http.request` record. The proxy never needs the run
-    // token: it serves the browser, holds no authority, and can only add
-    // observations the engine itself saw.
+    // (method, path, status, bounded body snapshot, total body bytes)
+    // recorded as an ENGINE observation; a suite-callable endpoint consumes
+    // a matching observation to issue a witnessed record. The proxy never
+    // needs the run token: it serves the browser, holds no authority, and
+    // can only add observations the engine itself saw.
     let proxyUrl = null;
     if (typeof state.options.proxyTarget === 'string' && state.options.proxyTarget.length > 0) {
         assertLoopback(state.options.proxyTarget, 'observation proxy target');
@@ -221,14 +232,36 @@ export async function startWitness(options) {
                     path: req.url,
                     headers: { ...req.headers, host: proxyTargetUrl.host },
                 }, (upstream) => {
+                    const status = upstream.statusCode ?? 0;
                     const observedPath = normalizeObservedPath(req.url ?? '/');
-                    state.observed.push({
-                        method: (req.method ?? 'GET').toUpperCase(),
-                        path: observedPath,
-                        status: upstream.statusCode ?? 0,
-                        seq: (state.observedSeq += 1),
+                    // Bounded response-body snapshot: the tap is attached BEFORE
+                    // piping so both consumers receive the stream; forwarding to
+                    // the browser stays unbuffered (the snapshot never gates the
+                    // response). Total bytes are counted even beyond the snapshot
+                    // limit; only the snapshot is hashed.
+                    const snapshot = [];
+                    let snapshotBytes = 0;
+                    let totalBytes = 0;
+                    upstream.on('data', (chunk) => {
+                        totalBytes += chunk.length;
+                        if (snapshotBytes < OBSERVED_BODY_SNAPSHOT_BYTES) {
+                            const room = OBSERVED_BODY_SNAPSHOT_BYTES - snapshotBytes;
+                            const taken = chunk.length > room ? chunk.subarray(0, room) : chunk;
+                            snapshot.push(Buffer.from(taken)); // copy: detach from the stream pool
+                            snapshotBytes += taken.length;
+                        }
                     });
-                    res.writeHead(upstream.statusCode ?? 502, upstream.headers);
+                    upstream.on('end', () => {
+                        state.observed.push({
+                            method: (req.method ?? 'GET').toUpperCase(),
+                            path: observedPath,
+                            status,
+                            seq: (state.observedSeq += 1),
+                            bodySha256: createHash('sha256').update(Buffer.concat(snapshot)).digest('hex'),
+                            bodyBytes: totalBytes,
+                        });
+                    });
+                    res.writeHead(status, upstream.headers);
                     upstream.pipe(res);
                 });
                 forward.on('error', () => {
@@ -316,17 +349,33 @@ async function handleHttpObservation(state, res, body) {
 }
 /**
  * `POST /witness/domain-check` (ADR 0004 D8 producer channel): issues a
- * witnessed `<namespace>.check` record for a domain scenario. Fail-closed
- * on two fronts:
+ * witnessed `<namespace>.check` record for a domain scenario. The suite
+ * only NAMES the scenario; the witness DERIVES the outcome from the
+ * exchange it actually observed and refuses contradictions. Fail-closed
+ * on four fronts:
+ * - the scenario must belong to the check kind's namespace table
+ *   (`DOMAIN_SCENARIO_CLASSES`) — an unknown or foreign scenario is 400;
  * - the record is only WITNESSED when the scenario's HTTP exchange
- *   actually traversed the observation proxy — one matching (method,
- *   path) observation is consumed single-use (same as http-observation;
- *   an observation proves one request for one obligation, never a
- *   replayable credit);
+ *   actually traversed the observation proxy: ONE matching (method,
+ *   path) observation is consumed single-use for normal scenarios, TWO
+ *   (in arrival order) for the dual-observation idempotency scenarios
+ *   (`DOMAIN_DUAL_SCENARIOS`); an observation proves one request for one
+ *   obligation, never a replayable credit;
+ * - the outcome class is DERIVED, never asserted: `accepted` requires
+ *   every consumed status to be 2xx, `rejected` requires every consumed
+ *   status to be 4xx — anything else is a 409 refusal that consumes
+ *   NOTHING (a 201 POST can never evidence `signature-rejected`, and a
+ *   401 can never evidence `signature-accepted`);
  * - without method+path the endpoint answers 409: a non-HTTP scenario
  *   has no engine-side producer yet, and this engine endpoint NEVER
  *   mints claimed records (the suite can submit claimed check kinds via
  *   `POST /records`; they can never satisfy on their own).
+ *
+ * The payload is exactly the engine observation the verdict engine
+ * grades: `{scenario, outcome, method, url, status, responseSha256,
+ * responseBytes}` (+ `observations: 2` for dual scenarios), where status
+ * is the LAST observed status and the response hash/size come from the
+ * proxy's bounded body snapshot.
  */
 async function handleDomainCheck(state, res, body) {
     const obligationId = body['obligationId'];
@@ -352,6 +401,15 @@ async function handleDomainCheck(state, res, body) {
         });
         return;
     }
+    const scenarioTable = DOMAIN_SCENARIO_CLASSES[kind];
+    const outcome = scenarioTable?.[scenario];
+    if (scenarioTable === undefined || outcome === undefined) {
+        sendJson(res, 400, {
+            error: `scenario '${scenario}' is not part of the '${kind}' namespace table; the witness only ` +
+                `derives outcomes for: ${Object.keys(scenarioTable ?? {}).sort(compareStrings).join(', ')}`,
+        });
+        return;
+    }
     if (typeof method !== 'string' || method.length === 0 || typeof path !== 'string' || path.length === 0) {
         sendJson(res, 409, {
             error: 'domain check has no engine-side producer for non-HTTP scenarios yet: this endpoint can ' +
@@ -361,22 +419,67 @@ async function handleDomainCheck(state, res, body) {
         return;
     }
     const wanted = normalizeObservedPath(path);
-    const index = state.observed.findIndex((entry) => entry.method === method.toUpperCase() && entry.path === wanted);
-    if (index === -1) {
+    const upperMethod = method.toUpperCase();
+    // Dual-observation scenarios (idempotency proofs) consume TWO matching
+    // exchanges; everything else exactly one. Nothing is consumed unless
+    // the full set is present AND agrees with the scenario's outcome class.
+    const needed = DOMAIN_DUAL_SCENARIOS[scenario] === true ? 2 : 1;
+    const matches = [];
+    for (const entry of state.observed) {
+        if (entry.method === upperMethod && entry.path === wanted) {
+            matches.push(entry);
+            if (matches.length === needed)
+                break;
+        }
+    }
+    if (matches.length < needed) {
         sendJson(res, 409, {
-            error: `no engine-observed request matches ${method.toUpperCase()} ${wanted}; drive the ` +
-                'scenario through the observation proxy before claiming the obligation',
+            error: needed === 1
+                ? `no engine-observed request matches ${upperMethod} ${wanted}; drive the ` +
+                    'scenario through the observation proxy before claiming the obligation'
+                : `scenario '${scenario}' is evidenced by TWO engine-observed requests matching ` +
+                    `${upperMethod} ${wanted}, but only ${matches.length} was observed; drive the ` +
+                    'exchange the scenario describes through the observation proxy',
         });
         return;
     }
-    const observedRequest = state.observed[index];
-    state.observed.splice(index, 1);
-    const record = issueRecord(state, obligationId, kind, testId, { scenario, method: observedRequest.method, url: observedRequest.path, status: observedRequest.status }, 'engine-observed');
+    const statuses = matches.map((entry) => entry.status);
+    const inClass = outcome === 'accepted'
+        ? statuses.every((status) => status >= 200 && status <= 299)
+        : statuses.every((status) => status >= 400 && status <= 499);
+    if (!inClass) {
+        // Refusal WITHOUT consuming: the observations stay available for a
+        // scenario their statuses CAN evidence.
+        sendJson(res, 409, {
+            error: `engine observed status(s) ${statuses.join(', ')} which cannot evidence scenario ` +
+                `'${scenario}'; drive the exchange the scenario describes`,
+        });
+        return;
+    }
+    // Consume exactly the matched observations (single-use), preserving
+    // arrival order; the LAST observation carries the graded status/body.
+    for (const entry of matches) {
+        const index = state.observed.indexOf(entry);
+        if (index !== -1)
+            state.observed.splice(index, 1);
+    }
+    const last = matches[matches.length - 1];
+    const payload = {
+        scenario,
+        outcome,
+        method: upperMethod,
+        url: wanted,
+        status: last.status,
+        responseSha256: last.bodySha256,
+        responseBytes: last.bodyBytes,
+        ...(needed === 2 ? { observations: 2 } : {}),
+    };
+    const record = issueRecord(state, obligationId, kind, testId, payload, 'engine-observed');
     sendJson(res, 200, {
         recordId: record.recordId,
         runId: record.runId,
         trust: record.trust,
-        status: observedRequest.status,
+        status: last.status,
     });
 }
 /** Formats the bind host into a URL host (bracketing IPv6 literals). */
