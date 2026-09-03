@@ -7,6 +7,9 @@ export default defineConfig({
   resolve: {
     alias: {
       '@gateforge/core': fileURLToPath(new URL('../core/src/index.ts', import.meta.url)),
+      '@gateforge/http-contract': fileURLToPath(
+        new URL('../http-contract/src/index.ts', import.meta.url),
+      ),
       '@gateforge/plugin-protocol': fileURLToPath(
         new URL('../plugin-protocol/src/index.ts', import.meta.url),
       ),

@@ -65,10 +65,17 @@ describe('detector: route and client-call discovery', () => {
     try {
       const detector = createHttpDetector({ root: dir });
       const outcome = detector.discover(['src']);
-      // Routes are EVIDENCE, not business resources (red-team round 2):
-      // the pack emits NO resources — only signals bound to the entity
-      // name the path converges with.
-      expect(outcome.resources).toEqual([]);
+      // Routes are EVIDENCE, not business resources (red-team round 2,
+      // superseded by ADR 0004 D1): the pack emits `http.contract`
+      // evidence facts only — never a business resource carrying the
+      // path-derived bare name, which is what collided with the converged
+      // table at the same plane-qualified id.
+      for (const resource of outcome.resources) {
+        expect(resource.kind).toBe('http.contract');
+        expect(resource.attributes['resourceName']).toBeUndefined();
+        expect(resource.attributes['role']).toBe('server-route');
+      }
+      expect(outcome.resources.length).toBeGreaterThanOrEqual(6);
       const signalTargets = outcome.classificationSignals.map(
         (s) => `${s.dimension}:${s.target.resourceName ?? ''}`,
       );
