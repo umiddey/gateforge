@@ -1,22 +1,24 @@
 /**
- * @gateforge/plugin-protocol — GPP/2, the hardened subprocess plugin
- * protocol (ADR 0002 D3).
+ * @gateforge/plugin-protocol — GPP/3, the hardened subprocess plugin
+ * protocol (ADR 0002 D3; GPP/3 signal transport per ADR 0003 D6).
  *
  * Surface:
  * - {@link PluginSession}: the engine-side host (one spawn, many lock-step
  *   discovers, watchdog + kill, shutdown handshake).
  * - {@link servePlugin}: the TypeScript plugin SDK.
- * - zod payload schemas for every message (`src/schema.ts`).
+ * - zod payload schemas for every message (`src/schema.ts`); GPP/3 adds
+ *   mandatory `classificationSignals` on `result` payloads.
  * - typed failure classes for every E_* code (`src/codes.ts`).
  * - Python client + reference plugin under `python/`.
  *
  * Lineage: spikes/plugin-protocol/spec.md (GPP/1), hardened with
  * pluginVersion pinning, per-message digests, and schema-generated
- * validation per docs/decisions/0002-plugin-boundary.md.
+ * validation per docs/decisions/0002-plugin-boundary.md; GPP/3 clean
+ * cutover per docs/decisions/0003-automatic-conservative-classification.md.
  */
 export { FAILURE_CODES, ProtocolFailure, ProtocolVersionError, UnknownPluginError, FrameJsonError, UnknownTypeError, SchemaError, EofError, TimeoutError, PluginError, ExitStatusError, isProtocolFailure, formatDiagnostic, } from './codes.js';
 export type { ProtocolFailureCode, FailureContext } from './codes.js';
-export { PROTOCOL_VERSION, MAX_FRAME_BYTES, MESSAGE_TYPES, REQUIRED_CAPABILITY, HelloPayloadSchema, ReadyPayloadSchema, DiscoverPayloadSchema, ResultPayloadSchema, ErrorPayloadSchema, ShutdownPayloadSchema, ByePayloadSchema, PAYLOAD_SCHEMAS, FindingSchema, firstIssueText, } from './schema.js';
+export { PROTOCOL_VERSION, MAX_FRAME_BYTES, MESSAGE_TYPES, REQUIRED_CAPABILITY, SIGNAL_CAPABILITY, HelloPayloadSchema, ReadyPayloadSchema, DiscoverPayloadSchema, ResultPayloadSchema, ErrorPayloadSchema, ShutdownPayloadSchema, ByePayloadSchema, PAYLOAD_SCHEMAS, FindingSchema, firstIssueText, } from './schema.js';
 export type { MessageType, Finding, DiscoveryOutcome } from './schema.js';
 export { extractLines, parseLine, verifyEnvelope, verifyPayload, encodeFrame, } from './framing.js';
 export type { GppEnvelope, EnvelopeContext } from './framing.js';

@@ -1,7 +1,7 @@
 /**
  * Test helpers: fixture roots, the documented subprocess invocation
  * (`python3 -m gateforge_sqlalchemy_detector` with cwd = fixture root),
- * and a one-shot discover driver over a hardened GPP/2 session.
+ * and a one-shot discover driver over a hardened GPP/3 session.
  */
 import { delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,23 +18,26 @@ export const FIXTURE_ROOT = fileURLToPath(new URL('./fixtures', import.meta.url)
 /** Absolute dir of this pack's python detector package. */
 export const PACK_PYTHON = fileURLToPath(new URL('../python', import.meta.url));
 
-/** Absolute dir of the sibling GPP/2 python client. */
+/** Absolute dir of the sibling GPP/3 python client. */
 export const PROTOCOL_PYTHON = fileURLToPath(
   new URL('../../../plugin-protocol/python', import.meta.url),
 );
 
 /** Every fixture scanned as one discovery request. */
 export const ALL_FIXTURES = [
-  'legacy_declarative.py',
-  'modern_declarative.py',
-  'collisions.py',
-  'function_local.py',
-  'computed_names.py',
-  'malformed.py',
-  'cross_module/base.py',
-  'cross_module/child.py',
-  'cross_module/computed.py',
-  'example_models.py',
+	'legacy_declarative.py',
+	'modern_declarative.py',
+	'collisions.py',
+	'function_local.py',
+	'computed_names.py',
+	'malformed.py',
+	'cross_module/base.py',
+	'cross_module/child.py',
+	'cross_module/computed.py',
+	'example_models.py',
+	'composite_pk.py',
+	'signals_archive.py',
+	'signals_computed_pk.py',
 ] as const;
 
 /**
@@ -45,7 +48,7 @@ export const ALL_FIXTURES = [
  *   extra: Additional leading PYTHONPATH entries.
  *
  * Returns:
- *   NodeJS.ProcessEnv: environment for the GPP/2 spawn.
+ *   NodeJS.ProcessEnv: environment for the GPP/3 spawn.
  */
 export function pythonEnv(extra: string[] = []): NodeJS.ProcessEnv {
   return {
@@ -79,7 +82,7 @@ export function pythonSessionOptions(
 }
 
 /**
- * Runs one discover request over a fresh GPP/2 session (spawn →
+ * Runs one discover request over a fresh GPP/3 session (spawn →
  * handshake → discover → shutdown), cleaning the session up always.
  *
  * Args:

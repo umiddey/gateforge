@@ -1,4 +1,4 @@
-import type { PersistenceRequest, PersistenceResponse, RecordsRequest, RecordsResponse } from '../witness/types.js';
+import type { PersistenceRequest, PersistenceResponse, PreObservationRequest, PreObservationResponse, RecordsRequest, RecordsResponse } from '../witness/types.js';
 /** A witness call that failed (status + single-cause diagnostic). */
 export declare class WitnessRequestError extends Error {
     readonly status: number;
@@ -32,6 +32,13 @@ export declare class WitnessClient {
     constructor(url?: string, token?: string | undefined, timeoutMs?: number);
     /** POST /records (pin #7). */
     postRecords(request: RecordsRequest): Promise<RecordsResponse>;
+    /**
+     * POST /witness/pre-observation (audit round 4): engine-side id-set
+     * snapshot BEFORE a claimed create; pass the returned
+     * `observationId` to `verifyPersistence` so the issued record carries
+     * `before: {entityAbsent}`.
+     */
+    preObserve(request: PreObservationRequest): Promise<PreObservationResponse>;
     /** POST /witness/persistence (pin #7 + testId/claimId binding extension). */
     verifyPersistence(request: PersistenceRequest & {
         testId: string;

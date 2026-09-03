@@ -1,5 +1,5 @@
 /**
- * GPP/2 plugin SDK (TypeScript side): the reference client for plugin
+ * GPP/3 plugin SDK (TypeScript side): the reference client for plugin
  * authors. Performs the `hello`/`ready` handshake, validates host frames
  * (protocolVersion, pinned identity, seq order, digest), answers
  * `discover` requests through a user handler, and completes the
@@ -16,7 +16,7 @@ import { PROTOCOL_VERSION, REQUIRED_CAPABILITY } from './schema.js';
 /** Message types a plugin may legally receive from the host. */
 const HOST_TYPES = ['ready', 'discover', 'shutdown'];
 /**
- * Runs the plugin side of a GPP/2 session until the host sends `shutdown`
+ * Runs the plugin side of a GPP/3 session until the host sends `shutdown`
  * (answered with `bye`) or closes stdin. Throws a {@link ProtocolFailure}
  * if the host violates the protocol (after emitting a session-fatal
  * `error` frame so the host can name the cause).
@@ -87,16 +87,24 @@ export async function servePlugin(handler, options) {
                     const { requestId, paths } = payload;
                     try {
                         const result = await handler(paths);
-                        for (const key of ['resources', 'unresolved', 'findings']) {
+                        for (const key of ['resources', 'unresolved', 'findings', 'classificationSignals']) {
                             if (!isJsonValue(result[key])) {
                                 throw new SchemaError(`discover handler returned non-JSON "${key}"`);
                             }
+                        }
+                        // Optional coverage evidence (ADR 0003 D4): pass through the
+                        // handler's reported scanned paths when it provides them.
+                        const scannedPaths = result.scannedPaths;
+                        if (scannedPaths !== undefined && !isJsonValue(scannedPaths)) {
+                            throw new SchemaError('discover handler returned non-JSON "scannedPaths"');
                         }
                         send('result', {
                             requestId,
                             resources: result.resources,
                             unresolved: result.unresolved,
                             findings: result.findings,
+                            classificationSignals: result.classificationSignals,
+                            ...(scannedPaths !== undefined ? { scannedPaths } : {}),
                         });
                     }
                     catch (error) {

@@ -37,7 +37,13 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const AUDIT_PATH = join(HERE, 'audit.json');
+// The audit file defaults to `audit.json` next to the server. Parallel
+// test specs driving this server each pass their own `AUDIT_FILE` so
+// their logs never race on one shared file.
+const AUDIT_PATH =
+  process.env.AUDIT_FILE !== undefined && process.env.AUDIT_FILE !== ''
+    ? process.env.AUDIT_FILE
+    : join(HERE, 'audit.json');
 const MAX_BODY_BYTES = 32 * 1024;
 
 const STATUSES = /** @type {const} */ (['draft', 'pending', 'signed', 'terminated']);

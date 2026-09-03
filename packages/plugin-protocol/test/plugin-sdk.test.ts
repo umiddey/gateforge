@@ -20,7 +20,7 @@ const IDENTITY = { pluginId: 'ts-sdk-plugin', pluginVersion: '2.0.0' } as const;
 function hostFrame(type: string, seq: number, payload: JsonValue): string {
   const digest = sha256Canonical({ type, seq, payload });
   return `${JSON.stringify({
-    protocolVersion: 2,
+    protocolVersion: 3,
     pluginId: IDENTITY.pluginId,
     pluginVersion: IDENTITY.pluginVersion,
     type,
@@ -53,6 +53,18 @@ function discoverResult(): DiscoveryResult {
     ],
     unresolved: [],
     findings: [],
+    classificationSignals: [
+      {
+        schemaVersion: 1,
+        target: { resourceId: 'web.routes:GET /health' },
+        dimension: 'exposure',
+        assertion: 'route',
+        basis: 'code-positive',
+        source: 'sdk-test-detector',
+        location: { file: 'src/app.ts', line: 12, col: 2 },
+        detector: { id: IDENTITY.pluginId, version: IDENTITY.pluginVersion },
+      },
+    ],
   };
 }
 
@@ -82,7 +94,7 @@ describe('servePlugin', () => {
 
     const [hello, first, second, bye] = frames;
     expect(hello).toMatchObject({
-      protocolVersion: 2,
+      protocolVersion: 3,
       pluginId: IDENTITY.pluginId,
       pluginVersion: IDENTITY.pluginVersion,
       type: 'hello',

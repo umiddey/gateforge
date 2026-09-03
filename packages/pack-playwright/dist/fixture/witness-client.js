@@ -66,6 +66,15 @@ export class WitnessClient {
         const body = await this.request('/records', request);
         return body;
     }
+    /**
+     * POST /witness/pre-observation (audit round 4): engine-side id-set
+     * snapshot BEFORE a claimed create; pass the returned
+     * `observationId` to `verifyPersistence` so the issued record carries
+     * `before: {entityAbsent}`.
+     */
+    async preObserve(request) {
+        return this.request('/witness/pre-observation', request);
+    }
     /** POST /witness/persistence (pin #7 + testId/claimId binding extension). */
     async verifyPersistence(request) {
         return this.request('/witness/persistence', request);

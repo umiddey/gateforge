@@ -51,6 +51,13 @@ export declare function readJsonArray(stateDir: string, name: string): unknown[]
 export declare function writeManifest(stateDir: string, manifest: RunManifest): void;
 /** Persists the suite-visible obligations document (sorted by id). */
 export declare function writeObligations(stateDir: string, obligations: readonly StateObligation[]): void;
+/**
+ * Persists the run's effective-classification view (plan phase 5) as a
+ * derived artifact for the verifier side (e.g. the witness service's
+ * `GET /classifications` surface). NEVER authoritative engine input: the
+ * engine recomputes classifications from signals on every run.
+ */
+export declare function writeClassificationsView(stateDir: string, view: Record<string, unknown>): void;
 /** Persists the ambient env record and returns it (fresh token unless adopted). */
 export declare function writeEnv(stateDir: string, manifest: RunManifest, witnessUrl: string | null, runToken?: string): TestGatesEnv;
 /** Persists the canonical json-format run report. */

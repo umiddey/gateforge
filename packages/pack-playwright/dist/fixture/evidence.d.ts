@@ -35,6 +35,12 @@ export interface Receipt {
     readonly entityId: string;
     readonly fields: Record<string, string>;
     readonly mode: 'row' | 'form';
+    /**
+     * Create only: the engine-side pre-observation taken BEFORE the UI
+     * action, bound into the persistence record so the engine can verify
+     * the entity was absent before (create postcondition, audit round 4).
+     */
+    readonly preObservationId?: string;
 }
 /** Outcome of `persistence.verify` (verdict-relevant, witness-issued). */
 export interface PersistenceOutcome {

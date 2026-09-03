@@ -1,6 +1,6 @@
 /**
  * `gateforge init`: generation, idempotence, and the no-overwrite rule
- * (plan Phase 2 verification).
+ * (automatic classification contract).
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,7 +11,7 @@ import { runCli } from './helpers.js';
 const TARGETS = [
   '.gateforge.yml',
   '.gateforge/policies.yml',
-  '.gateforge/classifications.yml',
+  '.gateforge/classification-policy.yml',
   '.gateforge/baselines/obligations.json',
 ];
 

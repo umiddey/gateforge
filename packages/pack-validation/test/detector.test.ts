@@ -42,7 +42,7 @@ describe('validation detector — zod', () => {
   });
 
   it('returns an empty outcome when no path is given', () => {
-    expect(detector().discover([])).toEqual({ resources: [], unresolved: [], findings: [] });
+    expect(detector().discover([])).toEqual({ resources: [], unresolved: [], findings: [], classificationSignals: [] });
   });
 });
 

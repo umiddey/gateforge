@@ -4,12 +4,14 @@
  *
  * Two transports, both fed the SAME expanded include path list:
  *
- * - `subprocess` (GPP/2): spawn the configured `command` argv via
+ * - `subprocess` (GPP/3): spawn the configured `command` argv via
  *   {@link PluginSession}, perform the pinned handshake, one lock-step
  *   `discover`, then the shutdown handshake. The session is disposed on
  *   every path — a protocol violation never leaves a stray plugin
  *   process behind. The host validates the result payload against the
  *   pinned discovery shape (GF-12/18: fail closed with E_* codes).
+ *   GPP/2 peers fail closed at the handshake with an actionable
+ *   expected-versus-received `E_PROTOCOL_VERSION` diagnostic (ADR 0003 D6).
  * - `in-process`: dynamic-import the configured `module` and call its
  *   default export's `discover(paths)`. The module contract is the same
  *   discovery shape the wire protocol carries:
@@ -17,8 +19,8 @@
  *   ```ts
  *   export default {
  *     discover(paths: readonly string[]):
- *       Promise<{resources: unknown[], unresolved: unknown[], findings: unknown[]}>
- *       | {resources: unknown[], unresolved: unknown[], findings: unknown[]},
+ *       Promise<{resources: unknown[], unresolved: unknown[], findings: unknown[], classificationSignals: unknown[]}>
+ *       | {resources: unknown[], unresolved: unknown[], findings: unknown[], classificationSignals: unknown[]},
  *   };
  *   ```
  *
@@ -66,7 +68,7 @@ export async function runPlugins(plugins, paths, cwd) {
     }
     return { contributions, registrations };
 }
-/** Drives one GPP/2 subprocess plugin session over the path list. */
+/** Drives one GPP/3 subprocess plugin session over the path list. */
 async function runSubprocessPlugin(plugin, paths, cwd) {
     const command = plugin.command;
     if (command === undefined) {
@@ -82,7 +84,7 @@ async function runSubprocessPlugin(plugin, paths, cwd) {
         await session.start();
         const outcome = paths.length > 0
             ? await session.discover(paths)
-            : { resources: [], unresolved: [], findings: [] };
+            : { resources: [], unresolved: [], findings: [], classificationSignals: [] };
         await session.shutdown();
         return {
             detectorId: plugin.id,
@@ -90,6 +92,7 @@ async function runSubprocessPlugin(plugin, paths, cwd) {
             resources: outcome.resources,
             unresolved: outcome.unresolved,
             findings: outcome.findings,
+            classificationSignals: outcome.classificationSignals,
         };
     }
     catch (error) {
@@ -133,6 +136,16 @@ async function runInProcessPlugin(plugin, paths, cwd) {
             resources: Array.isArray(outcome.resources) ? outcome.resources : [],
             unresolved: Array.isArray(outcome.unresolved) ? outcome.unresolved : [],
             findings: Array.isArray(outcome.findings) ? outcome.findings : [],
+            // GPP/3 (ADR 0003 D6): mandatory on the discovery contract. A
+            // pre-GPP/3 in-process plugin omitting the field stays undefined
+            // here and the DetectorOutputSchema parse below fails closed with
+            // an actionable migration diagnostic — never a silent default.
+            classificationSignals: outcome.classificationSignals,
+            // Coverage evidence (ADR 0003 D4): optional; omitted ⇒ the
+            // complete-scan attestation fails closed.
+            ...(Array.isArray(outcome['scannedPaths'])
+                ? { scannedPaths: outcome.scannedPaths }
+                : {}),
         };
     }
     catch (error) {
@@ -149,6 +162,20 @@ async function runInProcessPlugin(plugin, paths, cwd) {
         const path = issue?.path.join('.') ?? '<document>';
         throw new UsageError(`in-process plugin '${plugin.id}' returned an invalid discovery result: ` +
             `${path}: ${issue?.message ?? 'unknown issue'}`);
+    }
+    // Authority tie (ADR 0003 D6, subprocess parity): every classification
+    // signal must carry the PINNED plugin identity. A plugin module that
+    // claims another issuer — most critically the engine's own
+    // `gateforge.core@1` suppressive authority — is forging, and forgery
+    // must fail closed at the boundary with an actionable diagnostic, never
+    // flow into the classifier.
+    for (const signal of parsed.data.classificationSignals) {
+        if (signal.detector.id !== plugin.id || signal.detector.version !== plugin.version) {
+            throw new UsageError(`in-process plugin '${plugin.id}'@'${plugin.version}' returned a classification signal ` +
+                `claiming detector ${JSON.stringify(signal.detector.id)}@` +
+                `${JSON.stringify(signal.detector.version)}; signal identity must equal the pinned ` +
+                `plugin identity (suppressive authority is engine-issued, never plugin-issued)`);
+        }
     }
     return parsed.data;
 }

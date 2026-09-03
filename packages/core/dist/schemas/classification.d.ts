@@ -16,6 +16,11 @@ import { z } from 'zod';
  * Lifecycle surface of a resource. `create`/`read`/`update` are plain
  * switches; `delete` additionally declares its semantics because archive
  * and hard delete have different evidence contracts (plan §5.3).
+ *
+ * `archiveFields` is the OWNER-DECLARED archived state (audit round 5):
+ * the expected post-archive field values come from the classification —
+ * never from the tested suite — so a suite cannot bless an unarchived
+ * entity by declaring its current state as the expected result.
  */
 export declare const LifecycleSchema: z.ZodObject<{
     create: z.ZodBoolean;
@@ -26,6 +31,8 @@ export declare const LifecycleSchema: z.ZodObject<{
         hard: "hard";
         archive: "archive";
     }>>;
+    archiveFields: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>>;
+    updateableFields: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strict>;
 /** Inferred lifecycle shape. */
 export type Lifecycle = z.infer<typeof LifecycleSchema>;
@@ -51,6 +58,8 @@ export declare const ClassificationSchema: z.ZodObject<{
             hard: "hard";
             archive: "archive";
         }>>;
+        archiveFields: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>>;
+        updateableFields: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strict>;
     primaryKey: z.ZodArray<z.ZodString>;
     evidenceAdapter: z.ZodOptional<z.ZodString>;
@@ -84,6 +93,8 @@ export declare const ClassificationFileSchema: z.ZodObject<{
                 hard: "hard";
                 archive: "archive";
             }>>;
+            archiveFields: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>>;
+            updateableFields: z.ZodOptional<z.ZodArray<z.ZodString>>;
         }, z.core.$strict>;
         primaryKey: z.ZodArray<z.ZodString>;
         evidenceAdapter: z.ZodOptional<z.ZodString>;

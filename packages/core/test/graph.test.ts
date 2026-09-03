@@ -2,6 +2,12 @@
  * Resource-graph ingestion tests (G2): detector-output normalization,
  * plane-qualified ids, deterministic ordering, duplicate-table-name
  * detection (GF-20 groundwork), and path/name hardening.
+ *
+ * Since the automatic-classification cutover (plan phase 5, ADR 0003 D5)
+ * the graph binds NO business meaning: identity is qualified only by
+ * detector `attributes.plane` evidence, and effective classifications
+ * come exclusively from the deterministic classifier over signals
+ * (covered in classifier.test.ts and the classifier-linkage suites).
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -45,30 +51,10 @@ function detector(resources: Resource[], overrides: Partial<DetectorOutput> = {}
     resources,
     unresolved: [],
     findings: [],
+    classificationSignals: [],
     ...overrides,
   };
 }
-
-const FULL_LIFECYCLE = {
-  create: true,
-  read: true,
-  update: true,
-  delete: true,
-  deleteSemantics: 'archive',
-} as const;
-
-const CLASSIFICATIONS = {
-  schemaVersion: 1,
-  resources: {
-    'tenant.accounts': {
-      exposure: 'user-facing',
-      plane: 'tenant',
-      lifecycle: FULL_LIFECYCLE,
-      primaryKey: ['id'],
-      evidenceAdapter: 'tenant.accounts',
-    },
-  },
-};
 
 describe('graph ingestion (normalization + determinism)', () => {
   it('normalizes detector output to plane-qualified ids and repo-relative sources', () => {
@@ -79,11 +65,10 @@ describe('graph ingestion (normalization + determinism)', () => {
             id: 'sqlalchemy:table:./backend/models/account.py:Account',
             source: './backend/models/account.py',
             location: { file: './backend/models/account.py', line: 17, col: 0 },
-            attributes: { resourceName: 'accounts' },
+            attributes: { resourceName: 'accounts', plane: 'tenant' },
           }),
         ]),
       ],
-      classifications: CLASSIFICATIONS,
     });
 
     expect(graph.resources).toHaveLength(1);
@@ -93,24 +78,20 @@ describe('graph ingestion (normalization + determinism)', () => {
     expect(entry?.plane).toBe('tenant');
     expect(entry?.source).toBe('backend/models/account.py');
     expect(entry?.location.file).toBe('./backend/models/account.py'); // original location preserved
-    expect(entry?.exposure).toBe('user-facing');
-    expect(entry?.classification?.evidenceAdapter).toBe('tenant.accounts');
+    // The graph binds NO business meaning — that is the classifier's job.
+    expect(entry?.exposure).toBeNull();
+    expect(entry?.classification).toBeNull();
+    expect(entry?.classificationTrace).toBeNull();
     expect(entry?.detector).toEqual({ id: 'gateforge.discovery.sqlalchemy', version: '0.1.0' });
     expect(graph.stale).toEqual([]);
   });
 
-  it('falls back to a valid attributes.plane when no classification entry exists (id present, business meaning missing)', () => {
+  it('binds nothing when no plane evidence exists (id-less but visible)', () => {
     const graph = buildResourceGraph({
-      detectors: [
-        detector([
-          tableResource({
-            attributes: { resourceName: 'accounts', plane: 'master' },
-          }),
-        ]),
-      ],
+      detectors: [detector([tableResource({ attributes: { resourceName: 'accounts' } })])],
     });
     const entry = graph.resources[0];
-    expect(entry?.id).toBe('master.accounts');
+    expect(entry?.id).toBeNull();
     expect(entry?.classification).toBeNull();
     expect(entry?.exposure).toBeNull();
   });
@@ -127,45 +108,19 @@ describe('graph ingestion (normalization + determinism)', () => {
     const accounts = tableResource({
       source: 'backend/models/account.py',
       location: { file: 'backend/models/account.py', line: 17, col: 0 },
-      attributes: { resourceName: 'accounts' },
+      attributes: { resourceName: 'accounts', plane: 'tenant' },
     });
     const sessions = tableResource({
       source: 'backend/models/session.py',
       location: { file: 'backend/models/session.py', line: 5, col: 0 },
-      attributes: { resourceName: 'sessions' },
+      attributes: { resourceName: 'sessions', plane: 'tenant' },
     });
-    const sessionsClassification = {
-      schemaVersion: 1,
-      resources: {
-        'tenant.accounts': {
-          exposure: 'user-facing',
-          plane: 'tenant',
-          lifecycle: FULL_LIFECYCLE,
-          primaryKey: ['id'],
-          evidenceAdapter: 'tenant.accounts',
-        },
-        'tenant.sessions': {
-          exposure: 'internal',
-          plane: 'tenant',
-          lifecycle: { create: false, read: false, update: false, delete: false },
-          primaryKey: ['id'],
-        },
-      },
-    };
     const input: ResourceGraphInput = {
       detectors: [detector([accounts, sessions])],
-      classifications: sessionsClassification,
     };
     // Same artifacts, different input orderings — output must not care.
     const shuffled: ResourceGraphInput = {
       detectors: [detector([sessions, accounts])],
-      classifications: {
-        schemaVersion: 1,
-        resources: {
-          'tenant.sessions': sessionsClassification.resources['tenant.sessions'],
-          'tenant.accounts': sessionsClassification.resources['tenant.accounts'],
-        },
-      },
     };
 
     const a = buildResourceGraph(input);
@@ -180,7 +135,7 @@ describe('graph ingestion (normalization + determinism)', () => {
     const graph = buildResourceGraph({
       detectors: [
         detector(
-          [tableResource({ attributes: { resourceName: 'accounts' } })],
+          [tableResource({ attributes: { resourceName: 'accounts', plane: 'tenant' } })],
           {
             unresolved: [
               { code: 'computed_tablename', detail: 'decorated function (1 decorator(s))', location: { file: 'backend/models/x.py', line: 40, col: 4 } },
@@ -191,7 +146,6 @@ describe('graph ingestion (normalization + determinism)', () => {
           },
         ),
       ],
-      classifications: CLASSIFICATIONS,
     });
     const reparsed: unknown = JSON.parse(bytes(graph));
     expect(bytes(reparsed)).toBe(bytes(graph));
@@ -202,19 +156,6 @@ describe('graph ingestion (normalization + determinism)', () => {
 });
 
 describe('duplicate-table-name detection (GF-20 groundwork)', () => {
-  const dupClassifications = {
-    schemaVersion: 1,
-    resources: {
-      'tenant.dupes': {
-        exposure: 'user-facing',
-        plane: 'tenant',
-        lifecycle: FULL_LIFECYCLE,
-        primaryKey: ['id'],
-        evidenceAdapter: 'tenant.dupes',
-      },
-    },
-  };
-
   it('flags the same name declared in two files (one finding, both locations)', () => {
     const graph = buildResourceGraph({
       detectors: [
@@ -223,17 +164,16 @@ describe('duplicate-table-name detection (GF-20 groundwork)', () => {
             id: 'raw:a',
             source: 'backend/models/a.py',
             location: { file: 'backend/models/a.py', line: 3, col: 0 },
-            attributes: { resourceName: 'dupes' },
+            attributes: { resourceName: 'dupes', plane: 'tenant' },
           }),
           tableResource({
             id: 'raw:b',
             source: 'backend/models/b.py',
             location: { file: 'backend/models/b.py', line: 8, col: 0 },
-            attributes: { resourceName: 'dupes' },
+            attributes: { resourceName: 'dupes', plane: 'tenant' },
           }),
         ]),
       ],
-      classifications: dupClassifications,
     });
 
     expect(graph.resources).toHaveLength(2);
@@ -258,16 +198,15 @@ describe('duplicate-table-name detection (GF-20 groundwork)', () => {
           tableResource({
             source: 'backend/models/dupes.py',
             location: { file: 'backend/models/dupes.py', line: 3, col: 0 },
-            attributes: { resourceName: 'dupes' },
+            attributes: { resourceName: 'dupes', plane: 'tenant' },
           }),
           tableResource({
             source: 'backend/models/dupes.py',
             location: { file: 'backend/models/dupes.py', line: 30, col: 4 },
-            attributes: { resourceName: 'dupes' },
+            attributes: { resourceName: 'dupes', plane: 'tenant' },
           }),
         ]),
       ],
-      classifications: dupClassifications,
     });
     expect(graph.findings).toHaveLength(1);
     expect(graph.findings[0]?.code).toBe('DUPLICATE_TABLE_NAME');
@@ -293,56 +232,21 @@ describe('duplicate-table-name detection (GF-20 groundwork)', () => {
           }),
         ]),
       ],
-      classifications: {
-        schemaVersion: 1,
-        resources: {
-          'tenant.items': {
-            exposure: 'user-facing',
-            plane: 'tenant',
-            lifecycle: FULL_LIFECYCLE,
-            primaryKey: ['id'],
-            evidenceAdapter: 'tenant.items',
-          },
-          'master.items': {
-            exposure: 'internal',
-            plane: 'master',
-            lifecycle: { create: false, read: false, update: false, delete: false },
-            primaryKey: ['id'],
-          },
-        },
-      },
     });
     expect(graph.resources.map((r) => r.id)).toEqual(['master.items', 'tenant.items']);
-    expect(graph.resources[1]?.classification?.evidenceAdapter).toBe('tenant.items');
+    // Business meaning is never bound here — even with plane evidence.
+    expect(graph.resources.every((r) => r.classification === null)).toBe(true);
     expect(graph.findings).toEqual([]);
   });
 
-  it('reports an ambiguous multi-plane classification without a plane hint', () => {
+  it('leaves same-name plane-less resources id-less (identity never guessed)', () => {
     const graph = buildResourceGraph({
       detectors: [
         detector([tableResource({ attributes: { resourceName: 'items' } })]),
       ],
-      classifications: {
-        schemaVersion: 1,
-        resources: {
-          'tenant.items': {
-            exposure: 'user-facing',
-            plane: 'tenant',
-            lifecycle: FULL_LIFECYCLE,
-            primaryKey: ['id'],
-            evidenceAdapter: 'tenant.items',
-          },
-          'master.items': {
-            exposure: 'internal',
-            plane: 'master',
-            lifecycle: { create: false, read: false, update: false, delete: false },
-            primaryKey: ['id'],
-          },
-        },
-      },
     });
     expect(graph.resources[0]?.id).toBeNull();
-    expect(graph.findings[0]?.code).toBe('AMBIGUOUS_CLASSIFICATION_KEY');
+    expect(graph.findings).toEqual([]);
   });
 });
 
@@ -355,7 +259,6 @@ describe('graph hardening', () => {
           tableResource({ attributes: { resourceName: 'accounts' } }),
         ]),
       ],
-      classifications: CLASSIFICATIONS,
     });
     expect(graph.resources).toHaveLength(1);
     expect(graph.findings[0]?.code).toBe('INVALID_RESOURCE');
@@ -380,18 +283,15 @@ describe('graph hardening', () => {
           }),
         ]),
       ],
-      classifications: CLASSIFICATIONS,
     });
     expect(graph.resources).toEqual([]);
     expect(graph.findings[0]?.code).toBe('NON_REPO_RELATIVE_PATH');
-    expect(graph.stale).toEqual([]); // name was declared → classification not stale
+    expect(graph.stale).toEqual([]); // name was declared → references not stale
   });
 
   it('rejects names that break the plane.name / id:contract grammars', () => {
     const graph = buildResourceGraph({
-      detectors: [
-        detector([tableResource({ attributes: { resourceName: 'bad.name' } })]),
-      ],
+      detectors: [detector([tableResource({ attributes: { resourceName: 'bad.name' } })])],
     });
     expect(graph.resources).toEqual([]);
     expect(graph.findings[0]?.code).toBe('INVALID_RESOURCE_NAME');

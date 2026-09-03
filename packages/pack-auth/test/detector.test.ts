@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { ResourceSchema } from '@gateforge/core';
+import { ClassificationSignalSchema, ResourceSchema } from '@gateforge/core';
 import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
 import { createAuthDetector, type AuthDetector } from '../src/index.js';
 
@@ -91,7 +91,7 @@ describe('auth detector — fail-closed paths', () => {
 
   it('returns an empty outcome for an empty path list', () => {
     const out = detector().discover([]);
-    expect(out).toEqual({ resources: [], unresolved: [], findings: [] });
+    expect(out).toEqual({ resources: [], unresolved: [], findings: [], classificationSignals: [] });
   });
 
   it('skips node_modules / dist / .git when given a directory', () => {
@@ -123,5 +123,42 @@ describe('auth detector — synthetic adversarial cases', () => {
   it('does NOT emit when a NestJS controller lacks @UseGuards(RolesGuard) and @Roles', () => {
     const out = detector().discover([fixture('dynamic-role.ts')]);
     expect(out.resources.find((r) => r.id === 'auth.post.billing.refund')).toBeUndefined();
+  });
+});
+describe('auth detector — classification signals (plan phase 4)', () => {
+  it('emits exposure, lifecycle-by-method, and plane signals per guarded endpoint', () => {
+    const out = detector().discover([fixture('express-billing.js')]);
+    // POST /billing/refund with requireTenant(): exposure + lifecycle.create
+    // + plane tenant, all targeted at the path-derived name 'refund'.
+    const byDimension = (dimension: string): unknown[] =>
+      out.classificationSignals.filter((s) => s.dimension === dimension);
+    expect(byDimension('exposure')).toHaveLength(1);
+    expect(byDimension('exposure')[0]).toMatchObject({
+      target: { resourceName: 'refund' },
+      assertion: 'route',
+      basis: 'code-positive',
+      detector: { id: 'gateforge.pack-auth' },
+    });
+    expect(byDimension('lifecycle.create')).toHaveLength(1);
+    expect(byDimension('lifecycle.create')[0]).toMatchObject({
+      target: { resourceName: 'refund' },
+      assertion: true,
+    });
+    expect(byDimension('plane')).toHaveLength(1);
+    expect(byDimension('plane')[0]).toMatchObject({
+      target: { resourceName: 'refund' },
+      assertion: 'tenant',
+    });
+    // Every signal validates against the frozen core schema; no negative
+    // proof exists in this pack.
+    for (const signal of out.classificationSignals) {
+      expect(ClassificationSignalSchema.safeParse(signal).success).toBe(true);
+      expect(signal.basis).not.toBe('code-negative-closed-world');
+    }
+  });
+
+  it('emits no signal for an endpoint whose path has no derivable name', () => {
+    const out = detector().discover([fixture('unguarded.ts')]);
+    expect(out.classificationSignals).toEqual([]);
   });
 });

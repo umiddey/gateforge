@@ -3,7 +3,7 @@
  *
  * Detects background-task signatures from `.ts`/`.js`/`.mjs` source
  * (AST-light regex, no Python subprocess, no execution) and exposes
- * the pinned GPP/2 discovery vocabulary of the resource graph: one
+ * the pinned GPP/3 discovery vocabulary of the resource graph: one
  * `task.resource` per detected task (BullMQ `Queue`/`Bee-Queue`/custom
  * queue/message handlers/recurring jobs/`@Task`/`@Queue` decorators),
  * plus typed findings `DUPLICATE_TASK_ID`, `AMBIGUOUS_HANDLER`, and

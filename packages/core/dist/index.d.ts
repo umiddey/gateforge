@@ -36,9 +36,30 @@ export { canonicalJson } from './canonical-json.js';
 export { sha256Hex } from './canonical-json.js';
 /**
  * `sha256(canonicalJson(value))` — the single primitive behind
- * fingerprints, GPP/2 digests, and witness record ids (pin #1).
+ * fingerprints, GPP/3 digests, and witness record ids (pin #1).
  */
 export { sha256Canonical } from './canonical-json.js';
+/**
+ * Derives the service-issued witness record id: sha256 over the
+ * GF-canonical JSON of `{runId, obligationId, kind, testId, origin,
+ * payload}`. The single source of truth shared by the witness
+ * (issuance) and every verifier (checking).
+ */
+export { recordIdOf, type RecordIdentity } from './provenance.js';
+/**
+ * Lenient provenance check (never throws): a record is provenanced only
+ * when its 64-hex recordId recomputes from its own contents. Records
+ * failing it demote to claimed tier (GF-23).
+ */
+export { isProvenancedRecord, isWitnessedRecord } from './provenance.js';
+/**
+ * Witness-ledger attestation (pin #7): HMAC-SHA256 over the canonical
+ * `{runId, recordIds}` set, keyed by the verifier key the tested suite
+ * never receives. Makes the suite-writable manifest append tamper-
+ * evident; `GET /ledger-attestation` serves the same authenticated set
+ * live.
+ */
+export { ledgerMac, verifyLedgerMac } from './provenance.js';
 /**
  * The only accepted `schemaVersion` on any artifact (currently `1`).
  * Unknown versions are rejected everywhere; gateforge never migrates.
@@ -120,7 +141,7 @@ export type { ObligationId } from './schemas/claim.js';
  * record — recordId, runId, trust tier, obligation, kind, optional
  * bulk scope. Only `witnessed` can satisfy (GF-23).
  */
-export { EvidenceRecordSchema, BulkScopeSchema } from './schemas/evidence.js';
+export { EvidenceRecordSchema, BulkScopeSchema, RecordOriginSchema, type RecordOrigin, } from './schemas/evidence.js';
 /** Inferred evidence-record type. */
 export type { EvidenceRecord } from './schemas/evidence.js';
 /** Inferred bulk-scope type (pin #11). */
@@ -172,7 +193,7 @@ export { UnresolvedReasonSchema } from './schemas/verdict.js';
 export type { UnresolvedReason } from './schemas/verdict.js';
 /**
  * PluginRegistration: pinned plugin identity `{id, version, transport}`
- * shared by run manifests (pin #4) and the GPP/2 handshake (pin #5).
+ * shared by run manifests (pin #4) and the GPP/3 handshake (pin #5).
  */
 export { PluginRegistrationSchema } from './schemas/plugin.js';
 /** Inferred plugin-registration type. */
@@ -287,6 +308,34 @@ export type { ClassSymbol } from './graph/index.js';
 export type { InheritanceResolution } from './graph/index.js';
 /** Codepoint-wise deterministic comparison helpers (never localeCompare). */
 export { compareStrings, compareLocations } from './graph/index.js';
+/**
+ * ClassificationSignal (ADR 0003 D1): a source-located, detector-
+ * versioned FACT a detector emits about one classification dimension.
+ * Signals carry a `basis`, never a confidence score; only
+ * `code-negative-closed-world` can ever suppress, and only over a
+ * complete scan.
+ */
+export { ClassificationSignalSchema, signalId, SignalTargetSchema, SignalDimensionSchema, SignalBasisSchema, SignalAssertionSchema, SIGNAL_DIMENSIONS } from './schemas/classification-signal.js';
+/** Inferred classification-signal type. */
+export type { ClassificationSignal, SignalTarget, SignalDimension, SignalBasis, SignalAssertion } from './schemas/classification-signal.js';
+/**
+ * ClassificationPolicy: the `classification-policy.yml` document —
+ * scan roots, trusted internal entry-point categories, organization
+ * internal rules (certificate inputs, never overrides), supported
+ * declaration syntax, and volatile fields.
+ */
+export { ClassificationPolicySchema, InternalEntryPointCategorySchema, InternalRuleSchema, InternalRuleMatchSchema, } from './schemas/classification-policy.js';
+/** Inferred classification-policy type. */
+export type { ClassificationPolicy, InternalEntryPointCategory, InternalRule, InternalRuleMatch } from './schemas/classification-policy.js';
+/**
+ * The deterministic conservative classifier (ADR 0003 D2):
+ * `classifyResources()` resolves signals into effective classifications
+ * or typed machine-actionable blocks; uncertainty adds obligations and
+ * never removes them.
+ */
+export { RULES, classifyResources, ClassifierBlockSchema, ClassifierBlockCodeSchema, CLASSIFIER_BLOCK_CODES, BLOCK_DIMENSIONS, ClassifierContradictionSchema, ClassificationDecisionTraceSchema, EffectiveClassificationSchema, compileGlob, globMatch, pathInScope, classifierBlocking, resourceRef, runClassification, } from './classifier/index.js';
+/** Inferred classifier types. */
+export type { ClassifierResourceRef, ClassificationDecision, ClassificationResult, ClassifierScanInput, ClassifyResourcesInput, ClassifierBlock, ClassifierBlockCode, ClassifierContradiction, ClassificationDecisionTrace, EffectiveClassification, } from './classifier/index.js';
 /** The lifecycle-gated CRUD contract namespace (`crud:create`, …). */
 export { CRUD_CONTRACT_PREFIX } from './policy/index.js';
 /**

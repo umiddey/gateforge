@@ -47,7 +47,7 @@ import { readFileSync, statSync, readdirSync } from 'node:fs';
 import { join, extname, relative, resolve } from 'node:path';
 import { GATEFORGE_SCHEMA_VERSION } from '@gateforge/core';
 import type { DiscoveryOutcome, Finding } from '@gateforge/plugin-protocol';
-import { PACK_VERSION } from './version.js';
+import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
 /** Detected framework of a webhook endpoint. */
 export type WebhookFramework = 'express' | 'fastify' | 'hono' | 'decorator';
@@ -348,6 +348,7 @@ export function discoverWebhooks(paths: readonly string[], options: WebhookDetec
   const detected: DetectedWebhook[] = [];
   const findings: Finding[] = [];
 
+  const scanned: string[] = [];
   for (const abs of files) {
     const file = toRepoRelative(root, abs);
     let text: string;
@@ -357,6 +358,7 @@ export function discoverWebhooks(paths: readonly string[], options: WebhookDetec
       findings.push(finding('PARSE_ERROR', `unable to read ${file}`, file, 1, 0));
       continue;
     }
+    scanned.push(file);
     detected.push(...scanRouteRegistries(text, file, opt), ...scanDecorators(text, file, opt));
   }
 
@@ -387,7 +389,42 @@ export function discoverWebhooks(paths: readonly string[], options: WebhookDetec
     return 0;
   });
 
-  return { resources, unresolved: [], findings };
+  // Phase-4 linkage (plan phase 4, ADR 0003 D1/D2): a webhook endpoint is
+  // externally reachable by definition — one code-positive `exposure`
+  // signal per endpoint, targeted at the path-derived resource name so
+  // the core classifier can converge it with a discovered table. An
+  // underivable name emits no signal (nothing is claimed). No lifecycle
+  // or negative claims exist in this pack: receiving events proves
+  // reachability, nothing more.
+  const classificationSignals = resources.flatMap((resource) => {
+    const attributes = resource.attributes as unknown as WebhookResourceAttributes;
+    const target = lastPathName(attributes.path);
+    if (target === null) return [];
+    return [{
+      schemaVersion: 1 as const,
+      target: { resourceName: target },
+      dimension: 'exposure' as const,
+      assertion: 'webhook',
+      basis: 'code-positive' as const,
+      source: PACK_PLUGIN_ID,
+      location: resource.location,
+      detector: { id: PACK_PLUGIN_ID, version: PACK_VERSION },
+    }];
+  });
+  return { resources, unresolved: [], findings, classificationSignals, scannedPaths: scanned.sort() };
+}
+
+/** Last non-parameter path segment, lower-cased; null when underivable. */
+function lastPathName(rawPath: string): string | null {
+  const segments = rawPath.split('/').filter((segment) => segment.length > 0);
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const segment = segments[i];
+    if (segment === undefined) continue;
+    if (segment.startsWith(':') || segment.startsWith('{') || segment.startsWith('*')) continue;
+    if (/^\d+$/.test(segment)) continue;
+    return segment.toLowerCase();
+  }
+  return null;
 }
 
 /** Build a discover-capable detector module. */

@@ -32,6 +32,18 @@ export const ConfigPluginSchema = z
 })
     .strict()
     .superRefine((plugin, ctx) => {
+    // Issuer reservation (ADR 0003 D2/D6): `gateforge.core` is the
+    // ENGINE's suppressive-signal authority. A plugin configured under
+    // that id would let ordinary plugin output forge engine-issued
+    // declarations, so the id is reserved at config validation — the
+    // engine is not a configurable plugin.
+    if (plugin.id === 'gateforge.core') {
+        ctx.addIssue({
+            code: 'custom',
+            path: ['id'],
+            message: "plugin id 'gateforge.core' is reserved: suppressive classification authority is engine-issued, never plugin-issued",
+        });
+    }
     if (plugin.transport === 'subprocess') {
         if (plugin.command === undefined) {
             ctx.addIssue({
@@ -89,12 +101,17 @@ export const GateforgeConfigSchema = z
             .strict(),
     })
         .strict(),
-    /** Plugin set: subprocess (GPP/2) and in-process detectors. */
+    /** Plugin set: subprocess (GPP/3) and in-process detectors. */
     plugins: z.array(ConfigPluginSchema),
     /** Path to the policies YAML document. */
     policies: z.string().min(1),
-    /** Path to the classifications YAML document. */
-    classifications: z.string().min(1),
+    /**
+     * Path to the classification-policy YAML document (plan phase 5,
+     * ADR 0003 D5): repository-wide deterministic classification rules.
+     * Effective classifications are computed from detector signals on
+     * every run; there is no manual classifications document.
+     */
+    classificationPolicy: z.string().min(1),
     /** Directory of reviewed evidence adapters (.mjs, engine-loaded). */
     adapters: z.string().min(1),
     /** Directory of waiver documents. */
@@ -301,6 +318,23 @@ export function formatDiagnostics(diagnostics) {
  *   schemaVersion (never migrated) and unknown keys (typos fail loud).
  */
 export function parseConfig(input, { file = '<inline>' } = {}) {
+    // Migration diagnostic (plan phase 5): the authoritative manual
+    // classifications document was removed in the automatic-classification
+    // cutover. Fail with the exact migration steps, never a generic
+    // unknown-key error.
+    if (input !== null && typeof input === 'object' && 'classifications' in input) {
+        throw new GateforgeConfigError([
+            {
+                file,
+                jsonPath: '$.classifications',
+                message: "config key 'classifications' was removed: classification is now automatic. " +
+                    "Delete the key and add `classificationPolicy: .gateforge/classification-policy.yml` " +
+                    '(create it with `gateforge init`); its scanRoots gate every closed-world proof. ' +
+                    'Per-resource entries became `gateforge classify --write-snapshot` output ' +
+                    '(a derived artifact — never authoritative input) or source declarations.',
+            },
+        ]);
+    }
     const result = GateforgeConfigSchema.safeParse(input);
     if (result.success) {
         return result.data;

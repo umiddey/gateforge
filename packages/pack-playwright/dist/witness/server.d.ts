@@ -1,22 +1,19 @@
+import { recordIdOf } from '@gateforge/core';
 import type { WitnessHandle, WitnessOptions } from './types.js';
 /** Fail-closed witness configuration/startup error. */
 export declare class WitnessStartupError extends Error {
     constructor(message: string);
 }
 /**
- * Derives the service-issued recordId: sha256 over GF-canonical JSON of
- * the record identity (pin #1). Deterministic and stable across runs;
- * an entry that never passed through the service has no matching hash,
- * so shape-level fabrication (a hex string the service never issued)
- * cannot line up with the ledger the reporter copies.
+ * The service-issued recordId comes from the frozen core primitive
+ * (`recordIdOf`, pin #1/#7): sha256 over GF-canonical JSON of the record
+ * identity. Sharing one implementation with the engine's provenance
+ * verifier guarantees the witness issues exactly what evaluation can
+ * recompute — an entry that never passed through the service has no
+ * matching hash, so shape-level fabrication (a hex string the service
+ * never issued) cannot line up with the ledger the reporter copies.
  */
-export declare function recordIdOf(identity: {
-    runId: string;
-    obligationId: string;
-    kind: string;
-    testId: string;
-    payload: unknown;
-}): string;
+export { recordIdOf };
 /**
  * Starts the witness service.
  *

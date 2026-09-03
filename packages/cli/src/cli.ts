@@ -18,6 +18,8 @@ import { obligationsCommand } from './commands/obligations.js';
 import { checkCommand } from './commands/check.js';
 import { testGatesCommand } from './commands/test-gates.js';
 import { baselineCommand } from './commands/baseline.js';
+import { classifyCommand } from './commands/classify.js';
+import { explainCommand } from './commands/explain.js';
 
 /** The top-level usage text (also printed for `--help`). */
 export const USAGE = `\
@@ -26,6 +28,8 @@ usage: gateforge <command> [options]
 commands:
   init [--languages <comma,list>]        create .gateforge.yml + skeleton (idempotent, never overwrites)
   discover [--json]                      run detectors and dump the resource graph
+  classify [--json] [--write-snapshot P] inspect effective classifications + typed blocks
+  explain <resourceId> [--json]          full signal/rule/obligation trace for one resource
   obligations [--json]                   evaluate policies and dump obligations
   check [--changed] [--format F]         run the full gate and report (F: text|json|sarif)
   test-gates [--suite CMD] [--out DIR]   orchestrate a suite run over the obligations
@@ -69,6 +73,10 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return runWithExitCodes(io, () => Promise.resolve(initCommand(io, rest)));
     case 'discover':
       return runWithExitCodes(io, () => discoverCommand(io, rest));
+    case 'classify':
+      return runWithExitCodes(io, () => classifyCommand(io, rest));
+    case 'explain':
+      return runWithExitCodes(io, () => explainCommand(io, rest));
     case 'obligations':
       return runWithExitCodes(io, () => obligationsCommand(io, rest));
     case 'check':

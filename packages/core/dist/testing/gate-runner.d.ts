@@ -1,7 +1,8 @@
 import type { DetectorOutput, GraphFinding, ResourceGraph } from '../graph/index.js';
 import type { PolicyEvaluationResult } from '../policy/index.js';
 import type { Claim } from '../schemas/claim.js';
-import type { Classification, ClassificationFile } from '../schemas/classification.js';
+import type { Classification } from '../schemas/classification.js';
+import type { ClassificationPolicy } from '../schemas/classification-policy.js';
 import type { PolicyFile } from '../schemas/policy.js';
 import type { EvidenceRecord } from '../schemas/evidence.js';
 import type { Obligation } from '../schemas/obligation.js';
@@ -53,8 +54,13 @@ export interface RunGatesInput {
     repo: TempRepo;
     /** Detector contributions; at least one. */
     detectors: DetectorContribution[];
-    /** Classifications document (`.gateforge/classifications.yml` content). */
-    classifications: ClassificationFile;
+    /**
+     * The classification policy (`.gateforge/classification-policy.yml`
+     * content, plan phase 5). Effective classifications are computed
+     * deterministically from detector signals on every run — there is no
+     * manual classifications document.
+     */
+    classificationPolicy: ClassificationPolicy;
     /** Policies document (`.gateforge/policies.yml` content). */
     policies: PolicyFile;
     /** The obligation evaluator (pin #9). */
@@ -123,8 +129,8 @@ export interface GateRunResult {
  *
  * Args:
  *   input: repository, detector contributions (+ parse audits), the
- *     classification/policy documents, injected clock, evaluator double
- *     or real, and optional claims/records/waivers/provider/runId.
+ *     classification-policy/policy documents, injected clock, evaluator
+ *     double or real, and optional claims/records/waivers/provider/runId.
  *
  * Returns:
  *   GateRunResult: manifest, graph, policy result, per-obligation

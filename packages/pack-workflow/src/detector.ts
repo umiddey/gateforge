@@ -96,10 +96,11 @@ export function createWorkflowDetector(
 
   return {
     async discover(paths) {
-      const out: DiscoveryOutcome = { resources: [], unresolved: [], findings: [] };
+      const out: DiscoveryOutcome = { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       if (paths.length === 0) return out;
       const machines: PendingMachine[] = [];
       const findings: ProtocolFinding[] = [];
+      const scanned: string[] = [];
 
       for (const rawPath of paths) {
         const path = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
@@ -118,6 +119,7 @@ export function createWorkflowDetector(
           });
           continue;
         }
+        scanned.push(relPath(cwd, path));
         const sf = ts.createSourceFile(path, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
         const visit = createVisitor({
           file: path,
@@ -147,7 +149,7 @@ export function createWorkflowDetector(
         return aLoc.line - bLoc.line;
       });
       out.findings.push(...findings);
-      return out;
+      return { ...out, scannedPaths: scanned.sort() };
     },
   };
 }
@@ -217,17 +219,51 @@ function isCreateMachineCall(expr: ts.Expression): boolean {
   return false;
 }
 
+/**
+ * Emits the typed finding for a `createMachine` call that cannot be
+ * parsed as a known FSM style. Fail-closed: no resource is produced, and
+ * the reason surfaces as a gate-visible finding instead of silence.
+ */
+function unknownFsmStyleFinding(
+  ctx: VisitorContext,
+  call: ts.CallExpression,
+  cause: string,
+): ProtocolFinding {
+  const { sourceFile } = ctx;
+  const lc = sourceFile.getLineAndCharacterOfPosition(call.getStart(sourceFile));
+  return {
+    code: 'UNKNOWN_FSM_STYLE',
+    detail: `createMachine call could not be parsed as a known FSM style: ${cause}; no workflow resource is emitted from this call`,
+    locations: [{ file: relPath(ctx.cwd, ctx.file), line: lc.line + 1, col: lc.character }],
+  };
+}
+
 function tryExtractXstateMachine(
   ctx: VisitorContext,
   call: ts.CallExpression,
 ): PendingMachine | null {
   const arg = call.arguments[0];
-  if (arg === undefined || !ts.isObjectLiteralExpression(arg)) return null;
+  if (arg === undefined || !ts.isObjectLiteralExpression(arg)) {
+    ctx.onFinding(
+      unknownFsmStyleFinding(ctx, call, 'the config argument is not an object literal'),
+    );
+    return null;
+  }
   const statesProp = arg.properties.find(
     (p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === 'states',
   );
-  if (statesProp === undefined) return null;
-  if (!ts.isObjectLiteralExpression(statesProp.initializer)) return null;
+  if (statesProp === undefined) {
+    ctx.onFinding(
+      unknownFsmStyleFinding(ctx, call, 'the config declares no `states` object'),
+    );
+    return null;
+  }
+  if (!ts.isObjectLiteralExpression(statesProp.initializer)) {
+    ctx.onFinding(
+      unknownFsmStyleFinding(ctx, call, '`states` is not an object literal'),
+    );
+    return null;
+  }
 
   const machine: PendingMachine = newMachine(ctx, 'xstate');
   const stateNames: string[] = [];
@@ -265,7 +301,10 @@ function tryExtractXstateMachine(
       }
     }
   }
-  if (machine.states.size === 0) return null;
+  if (machine.states.size === 0) {
+    ctx.onFinding(unknownFsmStyleFinding(ctx, call, 'the `states` object declares no states'));
+    return null;
+  }
   machine.claimed = true;
   machine.auditEvent = ctx.sourceFile.text.includes('audit') || ctx.sourceFile.text.includes('appendFile');
   machine.name = deriveXstateName(ctx, call, stateNames);
@@ -473,8 +512,13 @@ function finalizeMachine(
   for (const t of transitions) outgoing.add(t.from);
   const terminal = states.filter((s) => !outgoing.has(s));
 
+  // The graph identity must satisfy the bare-name grammar (`^[^.]+$`):
+  // the dotted `idFragment` (`domain.name`) stays on the resource id, the
+  // dashed bare form is the graph-visible name. A normalized collision
+  // with another machine surfaces downstream as a duplicate-id finding —
+  // never silently merged.
   const attributes: WorkflowContractAttributes = {
-    resourceName: machine.idFragment,
+    resourceName: machine.idFragment.replace(/[^A-Za-z0-9_-]/g, '-'),
     states,
     transitions,
     terminal,

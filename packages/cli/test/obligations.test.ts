@@ -13,8 +13,8 @@ describe('gateforge obligations', () => {
       const { code, stdout } = await runCli(repo, ['obligations']);
       expect(code).toBe(0);
       expect(stdout).toContain('obligations (2):');
-      expect(stdout).toContain(`  tenant.accounts:crud:read  (policy 'user-facing-crud')`);
-      expect(stdout).toContain(`  tenant.orders:crud:read  (policy 'user-facing-crud')`);
+      expect(stdout).toContain(`  tenant.accounts:persistence:read  (policy 'user-facing-crud')`);
+      expect(stdout).toContain(`  tenant.orders:persistence:read  (policy 'user-facing-crud')`);
       expect(stdout).toContain('blocking (0):');
     });
   });
@@ -31,27 +31,27 @@ describe('gateforge obligations', () => {
         blocking: unknown[];
       };
       expect(policy.obligations.map((o) => o.id).sort()).toEqual([
-        'tenant.accounts:crud:read',
-        'tenant.orders:crud:read',
+        'tenant.accounts:persistence:read',
+        'tenant.orders:persistence:read',
       ]);
       expect(policy.obligations.every((o) => o.policyId === 'user-facing-crud')).toBe(true);
       expect(policy.blocking).toEqual([]);
     });
   });
 
-  it('reports unclassified resources as blocking entries', async () => {
+  it('reports automatically classified resources', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
-      // Drop the orders classification: orders becomes unclassified.
       repo.writeFiles({
         '.gateforge/classifications.yml':
-          'schemaVersion: 1\nresources:\n  accounts:\n    exposure: user-facing\n    plane: tenant\n    lifecycle: { create: false, read: true, update: false, delete: false }\n    primaryKey: [id]\n    evidenceAdapter: accounts\n',
+          'schemaVersion: 1\nresources:\n  accounts:\n    exposure: user-facing\n',
       });
       const { code, stdout } = await runCli(repo, ['obligations']);
       expect(code).toBe(0);
-      expect(stdout).toContain('obligations (1):');
-      expect(stdout).toContain('blocking (1):');
-      expect(stdout).toContain('[unclassified] orders');
+      expect(stdout).toContain('obligations (2):');
+      expect(stdout).toContain('blocking (0):');
+      expect(stdout).toContain('tenant.accounts:persistence:read');
+      expect(stdout).toContain('tenant.orders:persistence:read');
     });
   });
 });

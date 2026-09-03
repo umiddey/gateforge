@@ -27,16 +27,23 @@ function matchesAny(path, matchers) {
  * Expands include globs minus exclude globs into concrete repo-root-
  * relative file paths.
  *
+ * FAIL-CLOSED (red-team F3): filesystem failures are never silent. An
+ * unreadable directory or a failed stat means files MAY exist that the
+ * scan could not see — they are collected in `errors` so the pipeline
+ * can block the gate and invalidate closed-world proofs instead of
+ * letting them vanish from both the requested and scanned sets.
+ *
  * Args:
  *   include: include globs (at least one, schema-enforced).
  *   exclude: exclude globs (possibly empty).
  *   root: absolute repo root to walk.
+ *   errors: out-array collecting every unreadable path.
  *
  * Returns:
  *   string[]: deduplicated, codepoint-sorted posix paths. Empty when no
  *   included file exists.
  */
-export function expandIncludePaths(include, exclude, root) {
+export function expandIncludePaths(include, exclude, root, errors) {
     const includeMatchers = include.map((pattern) => picomatch(pattern, { dot: true }));
     const excludeMatchers = exclude.map((pattern) => picomatch(pattern, { dot: true }));
     const files = [];
@@ -45,8 +52,14 @@ export function expandIncludePaths(include, exclude, root) {
         try {
             entries = readdirSync(dir);
         }
-        catch {
-            return; // unreadable directory: not part of the scan
+        catch (cause) {
+            // Unreadable directory: NOT silently skippable — files inside may
+            // exist and must not vanish from the scan's knowledge.
+            errors?.push({
+                path: segments.join('/') || '.',
+                detail: `could not read directory: ${cause instanceof Error ? cause.message : String(cause)}`,
+            });
+            return;
         }
         entries.sort(compareStrings);
         for (const entry of entries) {
@@ -58,7 +71,11 @@ export function expandIncludePaths(include, exclude, root) {
             try {
                 stat = statSync(absolute);
             }
-            catch {
+            catch (cause) {
+                errors?.push({
+                    path: relative,
+                    detail: `could not stat path: ${cause instanceof Error ? cause.message : String(cause)}`,
+                });
                 continue;
             }
             if (stat.isDirectory()) {

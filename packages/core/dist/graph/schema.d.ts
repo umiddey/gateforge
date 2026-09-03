@@ -1,7 +1,7 @@
 /**
  * Resource-graph input/output schemas (Phase 1 "resource graph
  * construction"). The graph consumes detector contributions — the
- * discovery-spike output shape pinned by GPP/2 (`resources`,
+ * discovery-spike output shape pinned by GPP/3 (`resources`,
  * `unresolved`, `findings`) plus detector provenance — and produces the
  * normalized, deterministically ordered graph the policy engine and
  * verdict engine speak.
@@ -80,6 +80,10 @@ export type GraphFinding = z.infer<typeof GraphFindingSchema>;
  * the discovery-spike output shape. `resources` entries are validated
  * individually by the graph — invalid entries become `INVALID_RESOURCE`
  * findings instead of aborting the run (fail visible, never crash).
+ *
+ * Since GPP/3 (ADR 0003 D6) every contribution also carries
+ * `classificationSignals` — the GPP/2 discovery shape is rejected
+ * fail-closed with an actionable diagnostic naming the missing field.
  */
 export declare const DetectorOutputSchema: z.ZodObject<{
     detectorId: z.ZodString;
@@ -115,25 +119,65 @@ export declare const DetectorOutputSchema: z.ZodObject<{
             col: z.ZodNumber;
         }, z.core.$strict>>;
     }, z.core.$strict>>;
+    classificationSignals: z.ZodArray<z.ZodObject<{
+        schemaVersion: z.ZodLiteral<1>;
+        target: z.ZodObject<{
+            resourceName: z.ZodOptional<z.ZodString>;
+            resourceId: z.ZodOptional<z.ZodString>;
+            symbol: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>;
+        dimension: z.ZodEnum<{
+            exposure: "exposure";
+            plane: "plane";
+            identity: "identity";
+            "lifecycle.create": "lifecycle.create";
+            "lifecycle.read": "lifecycle.read";
+            "lifecycle.update": "lifecycle.update";
+            "lifecycle.delete": "lifecycle.delete";
+            "delete-semantics": "delete-semantics";
+            "archive-state": "archive-state";
+            "adapter-binding": "adapter-binding";
+            internality: "internality";
+        }>;
+        assertion: z.ZodUnion<readonly [z.ZodString, z.ZodBoolean, z.ZodArray<z.ZodString>, z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>]>;
+        basis: z.ZodEnum<{
+            "code-positive": "code-positive";
+            "code-negative-closed-world": "code-negative-closed-world";
+            declaration: "declaration";
+            "organization-policy": "organization-policy";
+        }>;
+        source: z.ZodString;
+        location: z.ZodObject<{
+            file: z.ZodString;
+            line: z.ZodNumber;
+            col: z.ZodNumber;
+        }, z.core.$strict>;
+        detector: z.ZodObject<{
+            id: z.ZodString;
+            version: z.ZodString;
+        }, z.core.$strict>;
+    }, z.core.$strict>>;
+    scannedPaths: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strict>;
 /** Inferred detector-contribution shape. */
 export type DetectorOutput = z.infer<typeof DetectorOutputSchema>;
 /**
- * Everything the graph ingests: one or more detector contributions,
- * the declarative classifications file (validated fail-closed at build
- * time via `ClassificationFileSchema`), and the artifact populations
- * stale-reference validation watches (invariant 9 / GF-06).
+ * Everything the graph ingests: one or more detector contributions and
+ * the artifact populations stale-reference validation watches
+ * (invariant 9 / GF-06). Since the automatic-classification cutover
+ * (plan phase 5, ADR 0003 D5) the graph binds NO business meaning —
+ * business meaning comes only from the deterministic classifier
+ * (`runClassification`) over detector signals; the manual
+ * classifications document no longer exists.
  *
- * `classifications`, `claims`, and `waivers` are deliberately typed
- * `unknown`-tolerant: the graph validates each entry individually and
- * converts invalid ones into `INVALID_CLAIM`/`INVALID_WAIVER` findings
- * instead of aborting the run (fail visible, never crash).
+ * `claims` and `waivers` are deliberately typed `unknown`-tolerant: the
+ * graph validates each entry individually and converts invalid ones
+ * into `INVALID_CLAIM`/`INVALID_WAIVER` findings instead of aborting
+ * the run (fail visible, never crash).
  */
 export interface ResourceGraphInput {
     /** Detector contributions; ≥1. */
     detectors: DetectorOutput[];
-    /** `.gateforge` classifications document (keys: names or plane-qualified ids). */
-    classifications?: unknown;
     /** Claims to watch for stale references (obligation ids). */
     claims?: unknown[];
     /** Adapter file names or paths (`.gateforge/adapters/<resourceId>.mjs`). */
@@ -187,10 +231,29 @@ export declare const GraphResourceSchema: z.ZodObject<{
                 hard: "hard";
                 archive: "archive";
             }>>;
+            archiveFields: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>>;
+            updateableFields: z.ZodOptional<z.ZodArray<z.ZodString>>;
         }, z.core.$strict>;
         primaryKey: z.ZodArray<z.ZodString>;
         evidenceAdapter: z.ZodOptional<z.ZodString>;
         notes: z.ZodOptional<z.ZodString>;
+    }, z.core.$strict>>;
+    classificationTrace: z.ZodNullable<z.ZodObject<{
+        rules: z.ZodArray<z.ZodString>;
+        defaultsApplied: z.ZodArray<z.ZodString>;
+        contributingSignalIds: z.ZodArray<z.ZodString>;
+        contributingDetectors: z.ZodArray<z.ZodString>;
+        contradictions: z.ZodArray<z.ZodObject<{
+            dimension: z.ZodString;
+            detail: z.ZodString;
+            locations: z.ZodArray<z.ZodObject<{
+                file: z.ZodString;
+                line: z.ZodNumber;
+                col: z.ZodNumber;
+            }, z.core.$strict>>;
+        }, z.core.$strict>>;
+        unresolvedDimensions: z.ZodArray<z.ZodString>;
+        decisionFingerprint: z.ZodString;
     }, z.core.$strict>>;
     detector: z.ZodObject<{
         id: z.ZodString;
@@ -218,7 +281,6 @@ export declare const GraphUnresolvedSchema: z.ZodObject<{
 export type GraphUnresolved = z.infer<typeof GraphUnresolvedSchema>;
 /** Artifact kinds stale-reference validation watches (invariant 9). */
 export declare const StaleReferenceKindSchema: z.ZodEnum<{
-    classification: "classification";
     claim: "claim";
     adapter: "adapter";
     waiver: "waiver";
@@ -227,12 +289,11 @@ export declare const StaleReferenceKindSchema: z.ZodEnum<{
 export type StaleReferenceKind = z.infer<typeof StaleReferenceKindSchema>;
 /**
  * A reference to a resource that no longer exists. `reference` is the
- * stale pointer itself: a classification key, an obligation id, an
- * adapter name, or a waiver-scoped resource id.
+ * stale pointer itself: an obligation id, an adapter name, or a
+ * waiver-scoped resource id.
  */
 export declare const StaleReferenceSchema: z.ZodObject<{
     kind: z.ZodEnum<{
-        classification: "classification";
         claim: "claim";
         adapter: "adapter";
         waiver: "waiver";
@@ -288,10 +349,29 @@ export declare const ResourceGraphSchema: z.ZodObject<{
                     hard: "hard";
                     archive: "archive";
                 }>>;
+                archiveFields: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>>;
+                updateableFields: z.ZodOptional<z.ZodArray<z.ZodString>>;
             }, z.core.$strict>;
             primaryKey: z.ZodArray<z.ZodString>;
             evidenceAdapter: z.ZodOptional<z.ZodString>;
             notes: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+        classificationTrace: z.ZodNullable<z.ZodObject<{
+            rules: z.ZodArray<z.ZodString>;
+            defaultsApplied: z.ZodArray<z.ZodString>;
+            contributingSignalIds: z.ZodArray<z.ZodString>;
+            contributingDetectors: z.ZodArray<z.ZodString>;
+            contradictions: z.ZodArray<z.ZodObject<{
+                dimension: z.ZodString;
+                detail: z.ZodString;
+                locations: z.ZodArray<z.ZodObject<{
+                    file: z.ZodString;
+                    line: z.ZodNumber;
+                    col: z.ZodNumber;
+                }, z.core.$strict>>;
+            }, z.core.$strict>>;
+            unresolvedDimensions: z.ZodArray<z.ZodString>;
+            decisionFingerprint: z.ZodString;
         }, z.core.$strict>>;
         detector: z.ZodObject<{
             id: z.ZodString;
@@ -324,7 +404,6 @@ export declare const ResourceGraphSchema: z.ZodObject<{
     }, z.core.$strict>>;
     stale: z.ZodArray<z.ZodObject<{
         kind: z.ZodEnum<{
-            classification: "classification";
             claim: "claim";
             adapter: "adapter";
             waiver: "waiver";

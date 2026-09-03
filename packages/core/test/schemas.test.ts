@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ClassificationSchema } from '../src/index.js';
 import {
   BaselineSchema,
   ClassificationFileSchema,
@@ -37,6 +38,7 @@ resources:
       update: true
       delete: true
       deleteSemantics: archive
+      archiveFields: { status: archived }
   master.internal_settings:
     exposure: internal
     plane: master
@@ -91,7 +93,7 @@ policies:
         read: true,
         update: true,
         delete: true,
-        deleteSemantics: 'archive',
+        deleteSemantics: 'archive', archiveFields: { status: 'archived' },
       },
     });
     expect(obligation.id).toBe(`${obligation.resourceId}:${obligation.contract}`);
@@ -134,6 +136,66 @@ policies:
     });
     expect(manifest.provider).toBe('local-staged');
     expect(manifest.gitSha).toBeNull();
+  });
+
+  it('RunManifest stays valid before the witness appends (no recordIds) and after (pin #7)', () => {
+    const base = {
+      schemaVersion: 1,
+      runId: RUN_ID,
+      startedAt: '2026-08-30T12:00:00.000Z',
+      gitSha: null,
+      provider: 'local-staged' as const,
+      plugins: [],
+      attestationScope: null,
+    };
+    // Pre-append manifest written by the CLI: no recordIds field.
+    expect(RunManifestSchema.parse(base).recordIds).toBeUndefined();
+    // Post-append manifest written by the witness shutdown: recordIds present.
+    const appended = RunManifestSchema.parse({ ...base, recordIds: [RECORD_ID] });
+    expect(appended.recordIds).toEqual([RECORD_ID]);
+  });
+
+  it('RunManifest rejects a malformed recordIds entry (fail-closed pin #7)', () => {
+    const result = RunManifestSchema.safeParse({
+      schemaVersion: 1,
+      runId: RUN_ID,
+      startedAt: '2026-08-30T12:00:00.000Z',
+      gitSha: null,
+      provider: 'local-staged',
+      plugins: [],
+      attestationScope: null,
+      recordIds: ['made-up-id-not-issued-by-the-witness'],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('RunManifest accepts an authenticated append (recordIds + recordIdsMac, pin #7)', () => {
+    const manifest = RunManifestSchema.parse({
+      schemaVersion: 1,
+      runId: RUN_ID,
+      startedAt: '2026-08-30T12:00:00.000Z',
+      gitSha: null,
+      provider: 'local-staged',
+      plugins: [],
+      attestationScope: null,
+      recordIds: [RECORD_ID],
+      recordIdsMac: 'c'.repeat(64),
+    });
+    expect(manifest.recordIds).toEqual([RECORD_ID]);
+    expect(manifest.recordIdsMac).toBe('c'.repeat(64));
+    // A malformed MAC is schema-invalid too.
+    const bad = RunManifestSchema.safeParse({
+      schemaVersion: 1,
+      runId: RUN_ID,
+      startedAt: '2026-08-30T12:00:00.000Z',
+      gitSha: null,
+      provider: 'local-staged',
+      plugins: [],
+      attestationScope: null,
+      recordIds: [RECORD_ID],
+      recordIdsMac: 'not-a-mac',
+    });
+    expect(bad.success).toBe(false);
   });
 
   it('all seven verdicts are valid (ADR 0001)', () => {
@@ -276,5 +338,92 @@ describe('baseline ordering (pin #3)', () => {
     expect(
       BaselineSchema.safeParse({ schemaVersion: 1, fingerprints: [fpA, fpA] }).success,
     ).toBe(false);
+  });
+});
+
+describe('archive lifecycle requires a non-empty owner-owned archiveFields map', () => {
+  const base = {
+    exposure: 'user-facing',
+    plane: 'tenant',
+    lifecycle: {
+      create: true,
+      read: true,
+      update: true,
+      delete: true,
+      deleteSemantics: 'archive',
+    },
+    primaryKey: ['id'],
+    evidenceAdapter: 'accounts',
+  };
+
+  it('rejects an archive lifecycle without archiveFields', () => {
+    const result = ClassificationSchema.safeParse(base);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.path.includes('archiveFields'))).toBe(true);
+    }
+  });
+
+  it('rejects an EMPTY archiveFields map (audit round 6: it can never satisfy)', () => {
+    const result = ClassificationSchema.safeParse({
+      ...base,
+      lifecycle: { ...base.lifecycle, archiveFields: {} },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(
+        result.error.issues.some(
+          (issue) =>
+            issue.path.includes('archiveFields') &&
+            /at least one field/.test(issue.message),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('rejects an EMPTY updateableFields array (audit round 6)', () => {
+    const result = ClassificationSchema.safeParse({
+      ...base,
+      lifecycle: {
+        ...base.lifecycle,
+        deleteSemantics: 'hard',
+        archiveFields: undefined,
+        updateableFields: [],
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a populated updateableFields array', () => {
+    const result = ClassificationSchema.safeParse({
+      ...base,
+      lifecycle: {
+        ...base.lifecycle,
+        deleteSemantics: 'hard',
+        updateableFields: ['first_name', 'last_name'],
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a populated archiveFields map and a hard-delete lifecycle without one', () => {
+    expect(
+      ClassificationSchema.safeParse({
+        ...base,
+        lifecycle: { ...base.lifecycle, archiveFields: { status: 'archived' } },
+      }).success,
+    ).toBe(true);
+    expect(
+      ClassificationSchema.safeParse({
+        ...base,
+        lifecycle: {
+          create: true,
+          read: true,
+          update: true,
+          delete: true,
+          deleteSemantics: 'hard',
+        },
+      }).success,
+    ).toBe(true);
   });
 });

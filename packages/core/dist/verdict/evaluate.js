@@ -8,14 +8,28 @@
  * deterministic, no I/O, clock injected via `now`.
  *
  * Rules encoded here:
- * - `satisfied` requires COMPLETE WITNESSED evidence: a service-witnessed
- *   `ui.action` record matching the contract's operation plus a
- *   service-witnessed `persistence.*` record for the SAME entity
- *   (plan §5.3). Claimed-tier records can drive `missing`/`invalid` but
- *   never `satisfied` (D2, GF-23).
- * - Records lacking service-issued provenance markers (sha256-hex
- *   `recordId` + `runId`) are demoted to `claimed` regardless of their
- *   `trust` field (pin #7, GF-23).
+ * - `satisfied` requires a `ui.action` record matching the contract's
+ *   operation PLUS a service-witnessed `persistence.*` record for the
+ *   SAME entity that MEETS THE OPERATION'S POSTCONDITION (plan §5.3).
+ *   Trust asymmetry (2026-08-31 audits): the UI action is suite-asserted
+ *   — submitted through the run token, stamped claimed-tier at issuance
+ *   — and only anchors the entity/operation. The satisfaction weight is
+ *   the persistence record, whose contents the witness observed itself
+ *   via the engine-side adapter read (`origin: 'engine-observed'`), and
+ *   the engine grades that observation against the claimed operation
+ *   with EXPECTATIONS THAT NEVER COME FROM THE SUITE (round 5):
+ *   create ⇒ engine-observed absence before + presence after; update ⇒
+ *   an engine-observed before/after field delta; read ⇒ presence;
+ *   delete ⇒ absent (hard) or matching the classification's
+ *   owner-declared `archiveFields` (archive). UI-semantic `crud:`
+ *   contracts FAIL CLOSED — no witness-controlled UI observation
+ *   channel exists — as do contracts outside the persistence namespace.
+ *   Fabricated persistence records demote to claimed and can never
+ *   satisfy (D2, GF-23).
+ * - Records whose provenance does not verify — a recordId that does not
+ *   recompute from the record's own contents (sha256 over the canonical
+ *   identity) — are demoted to `claimed` regardless of their `trust`
+ *   field (pin #7, GF-23).
  * - Same-entity enforcement (invariant 3): every satisfying record carries
  *   an `entityId` equal to the UI action's entity. Composite identity is a
  *   column-keyed object whose keys are exactly the `primaryKey` columns
@@ -33,11 +47,12 @@ import { z } from 'zod';
 import { canonicalJson } from '../canonical-json.js';
 import { fingerprint } from '../fingerprints.js';
 import { compareStrings } from '../graph/util.js';
+import { isProvenancedRecord } from '../provenance.js';
 import { ClassificationSchema } from '../schemas/classification.js';
 import { ClaimSchema } from '../schemas/claim.js';
 import { ObligationSchema } from '../schemas/obligation.js';
 import { WaiverSchema } from '../schemas/waiver.js';
-import { CRUD_CONTRACT_PREFIX } from '../policy/index.js';
+import { CRUD_CONTRACT_PREFIX, PERSISTENCE_CONTRACT_PREFIX } from '../policy/index.js';
 /** Evidence kinds the built-in CRUD contract speaks (plan §5.3). */
 const UI_ACTION_KIND = 'ui.action';
 const UI_VISIBLE_KIND = 'ui.visible-result';
@@ -103,19 +118,22 @@ function asRecord(value) {
         obligationId: record['obligationId'],
         testId: record['testId'],
         kind: record['kind'],
+        origin: record['origin'],
         payload: record['payload'],
     };
 }
 /**
  * Derives the trust tier of a record (D2 + pin #7): `witnessed` only when
- * the record asserts the witnessed tier AND carries service-issued
- * provenance (64-hex recordId + non-empty runId). Everything else is
- * claimed-tier — GF-23 fabricated bundles demote here.
+ * the record asserts the witnessed tier AND its provenance verifies —
+ * the 64-hex recordId must recompute from the record's own contents
+ * (`sha256` over the canonical identity; pin #1). Everything else is
+ * claimed-tier: GF-23 fabricated bundles and transplanted-but-never-
+ * issued ids demote here. Issuance membership (the recordId appearing
+ * in the witness-issued manifest set) is enforced separately by the
+ * CLI's provenance gate, which owns the run manifest.
  */
 function trustOf(record) {
-    const provenanced = typeof record.recordId === 'string' && /^[0-9a-f]{64}$/.test(record.recordId);
-    const hasRun = typeof record.runId === 'string' && record.runId.length > 0;
-    return record.trust === 'witnessed' && provenanced && hasRun ? 'witnessed' : 'claimed';
+    return record.trust === 'witnessed' && isProvenancedRecord(record) ? 'witnessed' : 'claimed';
 }
 /**
  * Stable label for a record in reasons, provenance-aware: unprovenanced
@@ -149,14 +167,26 @@ function isJsonValue(value) {
     return false;
 }
 /**
- * Extracts the CRUD operation a contract requires (`crud:update` →
- * `update`); null for contracts outside the crud namespace, which the
- * generic two-record completeness rule covers.
+ * Extracts the operation a persistence-level contract requires
+ * (`persistence:update` → `update`); null for anything else.
+ *
+ * Dispatch (audit round 5):
+ * - `persistence:<op>` — UI-independent CRUD, graded on the witness's
+ *   own engine-side observations with owner/classification-owned
+ *   expectations;
+ * - `crud:<op>` — UI-SEMANTIC: satisfaction would require observing the
+ *   UI itself, and no witness-controlled UI observation channel exists
+ *   (the suite owns the browser), so these FAIL CLOSED;
+ * - everything else — no semantic verifier registered, fail closed.
  */
-function crudOperation(contract) {
-    if (!contract.startsWith(CRUD_CONTRACT_PREFIX))
+function persistenceOperation(contract) {
+    if (!contract.startsWith(PERSISTENCE_CONTRACT_PREFIX))
         return null;
-    return contract.slice(CRUD_CONTRACT_PREFIX.length);
+    const operation = contract.slice(PERSISTENCE_CONTRACT_PREFIX.length);
+    if (operation === 'create' || operation === 'read' || operation === 'update' || operation === 'delete') {
+        return operation;
+    }
+    return null;
 }
 /** The payload of a record when it is a plain object, else undefined. */
 function payloadOf(record) {
@@ -258,54 +288,210 @@ function fieldsDisagreement(visible, persisted) {
     return null;
 }
 /**
- * Evaluates one claim's evidence against the obligation's contract:
- * witnessed ui.action (+ operation for crud contracts) → entityId
- * extraction and D3 validation → witnessed persistence.* record for the
- * same entity → optional visible/persisted field agreement.
- *
- * Args:
- *   claim: the validated claim under evaluation.
- *   evidence: records attributed to this claim (obligation + testId).
- *   obligation: the verified obligation (id/contract used in reasons).
- *   primaryKey: the classification's ordered identity columns.
+ * Compares owner-declared expected field values against the
+ * engine-observed persisted fields: every expected key must exist and
+ * agree (canonical-JSON equality). Returns the first mismatch
+ * description, or null. The EXPECTATIONS come from the classification
+ * (owner-owned) — never from the tested suite (audit round 5).
+ */
+function declaredFieldsMatchFailure(expected, observed, what) {
+    if (!isPlainObject(expected) || Object.keys(expected).length === 0) {
+        return `${what} postcondition cannot be evaluated: the classification declares no expected fields`;
+    }
+    if (!isPlainObject(observed)) {
+        return `${what} postcondition violated: the engine observed no persisted fields`;
+    }
+    for (const key of Object.keys(expected).sort()) {
+        const expectedValue = expected[key];
+        if (!isJsonValue(expectedValue))
+            continue;
+        const observedValue = observed[key];
+        if (!isJsonValue(observedValue) || canonicalJson(expectedValue) !== canonicalJson(observedValue)) {
+            return (`${what} postcondition violated: persisted fields do not match the classification-declared ` +
+                `state on '${key}' (expected ${canonicalJson(expectedValue)}, persisted ` +
+                `${isJsonValue(observedValue) ? canonicalJson(observedValue) : '<none>'})`);
+        }
+    }
+    return null;
+}
+/**
+ * The operation-specific postcondition a witnessed persistence record
+ * must meet for the claim to be satisfiable. Every EXPECTATION is
+ * owner-owned (classification) or engine-observed (pre-observation
+ * delta) — never suite-supplied (audit round 5):
+ * - create: the engine observed the entity ABSENT before (a witness
+ *   id-set pre-observation bound to this read) and PRESENT after.
+ * - update: a witness entity pre-observation exists, and the engine
+ *   observed an actual field delta between it and the post-action read.
+ * - read: the entity is present in the engine-observed state.
+ * - delete: hard delete ⇒ entity absent; archive ⇒ entity present and
+ *   matching the classification's `archiveFields`.
  *
  * Returns:
- *   ClaimOutcome: satisfied with used record ids, or the single-cause
- *   invalid/missing explanation (invariant 8).
+ *   string | null: the first postcondition failure, or null when met.
+ */
+function persistencePostconditionFailure(obligation, record, actionEntityKey) {
+    const payload = payloadOf(record);
+    if (payload === undefined) {
+        return `persistence record '${labelOf(record)}' carries no payload to evaluate`;
+    }
+    if (typeof payload['found'] !== 'boolean') {
+        return (`persistence record '${labelOf(record)}' carries no engine-observed presence ` +
+            `observation ('found'), so the '${obligation.contract}' postcondition cannot be evaluated`);
+    }
+    const found = payload['found'];
+    const operation = obligation.contract.slice(PERSISTENCE_CONTRACT_PREFIX.length);
+    const before = payload['before'];
+    if (operation === 'create') {
+        if (!isPlainObject(before) || before['entityAbsent'] !== true) {
+            return 'create postcondition violated: no engine-observed pre-observation shows the entity absent before the action';
+        }
+        if (!found) {
+            return 'create postcondition violated: entity still absent after the action';
+        }
+        return null;
+    }
+    if (operation === 'update') {
+        if (!isPlainObject(before) ||
+            before['found'] !== true ||
+            !isPlainObject(before['fields'])) {
+            return 'update postcondition violated: no engine-observed before-state (a witness pre-observation of the entity is required)';
+        }
+        if (!found) {
+            return 'update postcondition violated: entity absent after the action';
+        }
+        // Owner-owned relevance (audit round 6): the delta must touch at
+        // least one classification-declared updateable field. Bookkeeping
+        // columns (e.g. `updated_at`) drifting on an untouched entity can
+        // never satisfy.
+        const updateable = obligation.lifecycle.updateableFields;
+        if (!Array.isArray(updateable) || updateable.length === 0) {
+            return 'update postcondition cannot be evaluated: the classification declares no updateableFields';
+        }
+        if (!isPlainObject(payload['fields'])) {
+            return 'update postcondition violated: the engine observed no persisted fields';
+        }
+        const delta = [];
+        const after = payload['fields'];
+        const beforeFields = before['fields'];
+        for (const key of new Set([...Object.keys(beforeFields), ...Object.keys(after)])) {
+            const beforeValue = beforeFields[key];
+            const afterValue = after[key];
+            if (!isJsonValue(beforeValue) || !isJsonValue(afterValue))
+                continue;
+            if (canonicalJson(beforeValue) !== canonicalJson(afterValue))
+                delta.push(key);
+        }
+        const qualifying = delta.filter((key) => updateable.includes(key));
+        if (qualifying.length === 0) {
+            return ('update postcondition violated: the engine-observed delta ' +
+                `[${[...delta].sort().join(', ')}] touches no classification-declared ` +
+                `updateable field (updateableFields: [${[...updateable].sort().join(', ')}])`);
+        }
+        return null;
+    }
+    if (operation === 'read') {
+        if (!found) {
+            return 'read postcondition violated: entity absent';
+        }
+        return null;
+    }
+    if (operation === 'delete') {
+        if (obligation.lifecycle.deleteSemantics === 'archive') {
+            if (!found) {
+                return 'archive postcondition violated: entity absent (archived entities stay present)';
+            }
+            return declaredFieldsMatchFailure(obligation.lifecycle.archiveFields, payload['fields'], 'archive');
+        }
+        if (found) {
+            return 'delete postcondition violated: entity still present after a hard delete';
+        }
+        return null;
+    }
+    return null;
+}
+/**
+ * Evaluates one claim's evidence against the obligation's contract:
+ * a ui.action (any tier — suite-asserted) matching the operation →
+ * entityId extraction and D3 validation → a WITNESSED (engine-observed)
+ * persistence.* record for the same entity meeting the operation's
+ * postcondition.
+ *
+ * Dispatch (audit round 5):
+ * - `crud:<op>` — UI-SEMANTIC, FAIL-CLOSED: no witness-controlled UI
+ *   observation channel exists (the suite owns the browser), so a
+ *   claimed UI action can never be verified. These contracts stay
+ *   blocking `missing`; persistence-level `persistence:<op>` contracts
+ *   are the gradable surface.
+ * - `persistence:<op>` — graded on the witness's own observations with
+ *   OWNER-owned expectations (classification `archiveFields`) and
+ *   engine-observed before/after deltas. The tested suite never supplies
+ *   expectations.
+ * - everything else — no semantic verifier registered, fail closed.
  */
 function evaluateClaimEvidence(claim, evidence, obligation, primaryKey) {
-    const requiredOp = crudOperation(obligation.contract);
+    // UI-semantic CRUD: fail closed — the suite owns the browser, so a
+    // claimed UI action can never be independently observed (round 5).
+    if (obligation.contract.startsWith(CRUD_CONTRACT_PREFIX)) {
+        return {
+            status: 'missing',
+            reason: `no witness-controlled UI observation channel exists, so the UI-semantic contract ` +
+                `'${obligation.contract}' cannot be verified; use the persistence-level ` +
+                `'${PERSISTENCE_CONTRACT_PREFIX}<operation>' contract (graded on engine-observed state)`,
+        };
+    }
+    const requiredOp = persistenceOperation(obligation.contract);
+    if (requiredOp === null) {
+        return {
+            status: 'missing',
+            reason: `no semantic verifier is registered for contract '${obligation.contract}'; the generic ` +
+                `CRUD evidence rule does not apply to non-persistence contracts, so '${obligation.id}' stays ` +
+                'blocking until its pack-specific verifier grades the evidence',
+        };
+    }
     if (evidence.length === 0) {
         return {
             status: 'missing',
             reason: `claim '${claim.testId}' declares '${obligation.id}' but produced no evidence records`,
         };
     }
-    // Requirement 1: a witnessed ui.action anchoring the entity.
+    // Requirement 1: a ui.action anchoring the entity. The action itself
+    // is SUITE-ASSERTED (submitted through the run token; the witness
+    // stamps such records claimed-tier at issuance — GF-23 round 3), so
+    // any tier anchors — but ONLY records whose provenance verifies:
+    // witness-stamped claimed records carry a consistent hash, fabricated
+    // ones do not. Satisfaction weight lives in requirement 2, the
+    // engine-observed persistence read.
     const actions = evidence.filter((entry) => entry.record.kind === UI_ACTION_KIND);
-    const matchingAction = actions.find((entry) => entry.trust === 'witnessed' &&
-        (requiredOp === null || payloadOf(entry.record)?.['operation'] === requiredOp));
+    const matchingAction = actions.find((entry) => isProvenancedRecord(entry.record) &&
+        payloadOf(entry.record)?.['operation'] === requiredOp);
     if (matchingAction === undefined) {
-        const claimedAction = actions.find((entry) => entry.trust === 'claimed');
-        if (claimedAction !== undefined) {
+        if (actions.length === 0) {
+            return {
+                status: 'missing',
+                reason: `no '${UI_ACTION_KIND}' evidence for '${obligation.id}'`,
+            };
+        }
+        const fabricated = actions.find((entry) => !isProvenancedRecord(entry.record));
+        if (fabricated !== undefined) {
             return {
                 status: 'invalid',
-                reason: `claimed-tier '${UI_ACTION_KIND}' record '${labelOf(claimedAction.record)}' cannot ` +
+                reason: `claimed-tier '${UI_ACTION_KIND}' record '${labelOf(fabricated.record)}' cannot ` +
                     `satisfy '${obligation.contract}': only service-witnessed evidence satisfies (GF-23)`,
             };
         }
-        const wrongOp = actions.find((entry) => entry.trust === 'witnessed');
-        if (wrongOp !== undefined && requiredOp !== null) {
+        const wrongOp = actions.find((entry) => payloadOf(entry.record)?.['operation'] !== requiredOp);
+        if (wrongOp !== undefined) {
             const got = String(payloadOf(wrongOp.record)?.['operation'] ?? '<none>');
             return {
                 status: 'invalid',
-                reason: `witnessed '${UI_ACTION_KIND}' record '${labelOf(wrongOp.record)}' has operation ` +
+                reason: `'${UI_ACTION_KIND}' record '${labelOf(wrongOp.record)}' has operation ` +
                     `'${got}' but '${obligation.contract}' requires '${requiredOp}'`,
             };
         }
         return {
             status: 'missing',
-            reason: `no witnessed '${UI_ACTION_KIND}' evidence for '${obligation.id}'`,
+            reason: `no admissible '${UI_ACTION_KIND}' evidence for '${obligation.id}'`,
         };
     }
     const actionPayload = payloadOf(matchingAction.record);
@@ -324,15 +510,20 @@ function evaluateClaimEvidence(claim, evidence, obligation, primaryKey) {
                 'same-entity enforcement (invariant 3) is impossible without it',
         };
     }
-    // Requirement 2: a witnessed persistence record for the same entity.
+    // Requirement 2: a WITNESSED persistence record for the same entity
+    // whose contents the witness observed engine-side (origin
+    // 'engine-observed'), AND whose observed state satisfies the
+    // operation's postcondition (2026-08-31 audit round 4): presence
+    // alone proves nothing — a claimed delete of a live entity or a
+    // "read" nobody ever saw must not satisfy.
     const persistence = evidence.filter((entry) => typeof entry.record.kind === 'string' &&
         entry.record.kind.startsWith(PERSISTENCE_KIND_PREFIX));
     const witnessedPersistence = persistence.filter((entry) => entry.trust === 'witnessed');
-    const matchingPersistence = witnessedPersistence.find((entry) => {
+    const sameEntity = witnessedPersistence.filter((entry) => {
         const entity = normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey);
         return entity.ok && entity.key === actionEntity.key;
     });
-    if (matchingPersistence === undefined) {
+    if (sameEntity.length === 0) {
         const claimedPersistence = persistence.find((entry) => entry.trust === 'claimed');
         if (claimedPersistence !== undefined) {
             return {
@@ -361,10 +552,32 @@ function evaluateClaimEvidence(claim, evidence, obligation, primaryKey) {
                 `of '${obligation.id}'`,
         };
     }
+    // At least one same-entity witnessed record must meet the operation's
+    // postcondition; otherwise the first failure explains the block.
+    let firstPostconditionFailure = null;
+    let matchingPersistence;
+    for (const entry of sameEntity) {
+        const failure = persistencePostconditionFailure(obligation, entry.record, actionEntity.key);
+        if (failure === null) {
+            matchingPersistence = entry;
+            break;
+        }
+        if (firstPostconditionFailure === null)
+            firstPostconditionFailure = failure;
+    }
+    if (matchingPersistence === undefined) {
+        return {
+            status: 'invalid',
+            reason: `${firstPostconditionFailure ?? `no witnessed '${PERSISTENCE_KIND_PREFIX}*' record meets ` +
+                `the '${obligation.contract}' postcondition`} (obligation '${obligation.id}')`,
+        };
+    }
     // Consistency hardening: visible vs persisted fields must agree when a
-    // witnessed visible-result record for the same entity exists.
+    // visible-result record for the same entity exists (any tier — the
+    // visible side is suite-asserted, so disagreement with the
+    // engine-observed persisted fields is a fabrication signal).
     const visible = evidence.find((entry) => {
-        if (entry.record.kind !== UI_VISIBLE_KIND || entry.trust !== 'witnessed')
+        if (entry.record.kind !== UI_VISIBLE_KIND)
             return false;
         const entity = normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey);
         return entity.ok && entity.key === actionEntity.key;

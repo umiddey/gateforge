@@ -11,6 +11,8 @@ export interface ClassificationView {
         update: boolean;
         delete: boolean;
         deleteSemantics?: 'hard' | 'archive';
+        archiveFields?: Record<string, string | number | boolean>;
+        updateableFields?: string[];
     };
 }
 /**

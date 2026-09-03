@@ -13,6 +13,15 @@
 export const CLAIM_ANNOTATION_TYPE = 'gateforge';
 /** Per-run auth header on every witness call (pin #7). */
 export const RUN_HEADER = 'x-gateforge-run';
+/**
+ * Verifier auth header on the witness attestation surface
+ * (`GET /ledger-attestation` and the manifest MAC). Carries the
+ * verifier key — a secret the orchestrator shares with the witness and
+ * the evaluating CLI but NEVER with the tested suite (the suite's run
+ * token authorizes evidence submission; it must not authorize
+ * attestation, or a hostile suite could certify its own fabrications).
+ */
+export const VERIFIER_HEADER = 'x-gateforge-verifier';
 /** Marker header the SUT (or its attestation proxy) must present. */
 export const ENV_FINGERPRINT_HEADER = 'x-gateforge-env-fingerprint';
 /** Marker header the SUT (or its attestation proxy) may present. */

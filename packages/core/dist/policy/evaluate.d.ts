@@ -18,6 +18,8 @@
  *   invalid (ADR 0001). Non-CRUD contracts still apply.
  * - Unclassified and unresolved resources produce blocking entries and
  *   no obligations until classified/resolved, but stay gate-visible.
+ *   So do detector/graph `findings` (a partial discovery must never
+ *   yield a green gate) and `stale` references (invariant 9).
  * - Policies are evaluated in file order; the first policy generating
  *   a given `<resourceId>:<contract>` owns it (obligation ids are
  *   unique identities — pin #1's fingerprint keys on them).
@@ -29,6 +31,15 @@ import { type Claim } from '../schemas/claim.js';
 import type { ResourceGraph } from '../graph/schema.js';
 /** The CRUD contract namespace gated by lifecycle flags. */
 export declare const CRUD_CONTRACT_PREFIX = "crud:";
+/**
+ * The persistence-level CRUD contract namespace (audit round 5):
+ * lifecycle-gated exactly like `crud:`, but graded on the witness's own
+ * engine-side observations (absence/presence, before/after deltas,
+ * owner-declared archive state). UI-semantic `crud:` contracts stay
+ * fail-closed in the verdict engine until a witness-controlled UI
+ * observation channel exists.
+ */
+export declare const PERSISTENCE_CONTRACT_PREFIX = "persistence:";
 /**
  * Fail-closed policy-engine error: thrown for policy documents that
  * are structurally invalid (zod) or use the `crud:` namespace with an
@@ -42,6 +53,9 @@ export declare const BlockingEntrySchema: z.ZodObject<{
     kind: z.ZodEnum<{
         unclassified: "unclassified";
         unresolved: "unresolved";
+        classification: "classification";
+        finding: "finding";
+        "stale-reference": "stale-reference";
     }>;
     resourceId: z.ZodNullable<z.ZodString>;
     name: z.ZodNullable<z.ZodString>;
@@ -93,12 +107,17 @@ export declare const PolicyEvaluationResultSchema: z.ZodObject<{
                 hard: "hard";
                 archive: "archive";
             }>>;
+            archiveFields: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>>;
+            updateableFields: z.ZodOptional<z.ZodArray<z.ZodString>>;
         }, z.core.$strict>;
     }, z.core.$strict>>;
     blocking: z.ZodArray<z.ZodObject<{
         kind: z.ZodEnum<{
             unclassified: "unclassified";
             unresolved: "unresolved";
+            classification: "classification";
+            finding: "finding";
+            "stale-reference": "stale-reference";
         }>;
         resourceId: z.ZodNullable<z.ZodString>;
         name: z.ZodNullable<z.ZodString>;
@@ -131,10 +150,11 @@ export declare const PolicyEvaluationResultSchema: z.ZodObject<{
 /** Inferred policy-evaluation-result shape. */
 export type PolicyEvaluationResult = z.infer<typeof PolicyEvaluationResultSchema>;
 /**
- * Whether a contract is allowed by a lifecycle. `crud:` contracts map
- * to their lifecycle flag (`crud:create` ⇔ `lifecycle.create === true`,
- * etc. — unknown `crud:<op>` contracts are a policy-authoring error);
- * every other contract passes through ungated.
+ * Whether a contract is allowed by a lifecycle. `crud:` and
+ * `persistence:` contracts map to their lifecycle flag (`crud:create` ⇔
+ * `lifecycle.create === true`, etc. — unknown operations in either
+ * namespace are a policy-authoring error); every other contract passes
+ * through ungated.
  *
  * Args:
  *   contract: the required contract name, e.g. `crud:update`.
@@ -142,14 +162,15 @@ export type PolicyEvaluationResult = z.infer<typeof PolicyEvaluationResultSchema
  *
  * Returns:
  *   boolean: true when an obligation for this contract must be generated.
- * @throws PolicyEvaluationError for `crud:` contracts outside the four
- *   lifecycle operations.
+ * @throws PolicyEvaluationError for `crud:`/`persistence:` contracts
+ *   outside the four lifecycle operations.
  */
 export declare function lifecycleAllowsContract(contract: ContractName, lifecycle: {
     create: boolean;
     read: boolean;
     update: boolean;
     delete: boolean;
+    archiveFields?: Record<string, string | number | boolean>;
 }): boolean;
 export interface PolicyEvaluationInput {
     /** A graph built by `buildResourceGraph`. */
@@ -158,6 +179,11 @@ export interface PolicyEvaluationInput {
     policies: PolicyFile;
     /** Claims to assess against the generated obligations (ADR 0001). */
     claims?: Claim[];
+    /**
+     * Pre-projected blocking entries from the classifier (plan phase 5),
+     * appended verbatim before the deterministic sort.
+     */
+    extraBlocking?: BlockingEntry[];
 }
 /**
  * Evaluates the policy document against a built resource graph.

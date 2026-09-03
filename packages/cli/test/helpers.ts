@@ -2,7 +2,7 @@
  * Shared CLI-test fixtures: temp repos preloaded with a working
  * `.gateforge` project (in-process fixture plugin + policies +
  * classifications), the run helper, and the python reference detector
- * path for real GPP/2 round-trips.
+ * path for real GPP/3 round-trips.
  */
 import { fileURLToPath } from 'node:url';
 import { fingerprint, withTempRepo, type TempRepo } from '@gateforge/core';
@@ -14,52 +14,89 @@ export const FIXED_AT = '2026-01-01T00:00:00.000Z';
 /** Policy id the fixture policies document declares. */
 export const POLICY_ID = 'user-facing-crud';
 
-/** Lifecycle the fixture classifications declare for both resources. */
-export const LIFECYCLE = { create: false, read: true, update: false, delete: false };
+/** Lifecycle the fixture classification resolves to: every operation
+ * conservatively enabled (plugin signals cannot disable — suppression is
+ * engine-issued), with delete semantics proven `hard` by declaration. */
+export const LIFECYCLE = {
+  create: true,
+  read: true,
+  update: true,
+  delete: true,
+  deleteSemantics: 'hard',
+} as const;
 
 /** Built-in test obligations of the standard fixture. */
-export const OBLIGATION_ACCOUNTS = 'tenant.accounts:crud:read';
-export const OBLIGATION_ORDERS = 'tenant.orders:crud:read';
+export const OBLIGATION_ACCOUNTS = 'tenant.accounts:persistence:read';
+export const OBLIGATION_ORDERS = 'tenant.orders:persistence:read';
 
 /** Pin-#2 fingerprint for one fixture obligation. */
 export function fixtureFingerprint(resourceId: string): string {
   return fingerprint({
     resourceId,
-    contract: 'crud:read',
+    contract: 'persistence:read',
     policyId: POLICY_ID,
     lifecycle: LIFECYCLE,
   });
 }
 
-/** In-process fixture plugin: one resource per non-comment line. */
+/** In-process fixture plugin: one resource per non-comment line.
+ *
+ * Trust note (ADR 0003 D6): every signal carries the plugin's OWN pinned
+ * identity. Suppressive authority (`gateforge.core@1`) is engine-issued
+ * and rejected at the plugin boundary — a fixture, like any plugin, can
+ * only contribute code-derived facts, so lifecycle operations resolve to
+ * the conservative enabled defaults and `delete-semantics: hard` (which
+ * is not suppressive) keeps delete semantics resolved.
+ */
 export const PLUGIN_SOURCE = `import { readFileSync } from 'node:fs';
 export default {
   discover(paths) {
     const resources = [];
+    const classificationSignals = [];
+    const scannedPaths = [];
     for (const rel of paths) {
       const text = readFileSync(rel, 'utf8');
+      scannedPaths.push(rel);
       for (const line of text.split('\\n')) {
         const trimmed = line.trim();
         if (trimmed === '' || trimmed.startsWith('#')) continue;
         const [name, kind] = trimmed.split(/\\s+/);
         if (!name) continue;
+        const location = { file: rel, line: 1, col: 0 };
         resources.push({
           schemaVersion: 1,
           id: 'raw.' + name,
           kind: kind || 'fixture.resource',
           source: rel,
-          location: { file: rel, line: 1, col: 0 },
+          location,
           detectorVersion: '1.0.0',
           attributes: { resourceName: name },
         });
+        const signal = (dimension, assertion, basis = 'code-positive') =>
+          classificationSignals.push({
+            schemaVersion: 1,
+            target: { resourceName: name },
+            dimension,
+            assertion,
+            basis,
+            source: 'fixture.plugin',
+            location,
+            detector: { id: 'fixture.plugin', version: '1.0.0' },
+          });
+        signal('plane', 'tenant');
+        signal('identity', ['id']);
+        signal('lifecycle.read', true);
+        signal('delete-semantics', 'hard');
+        signal('adapter-binding', name);
       }
     }
-    return { resources, unresolved: [], findings: [] };
+    return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };
   },
 };
 `;
 
-/** Policies document: one user-facing crud:read policy. */
+
+/** Policies document: one user-facing persistence:read policy. */
 export const POLICIES_YML = `\
 schemaVersion: 1
 policies:
@@ -67,12 +104,22 @@ policies:
     when:
       exposure: user-facing
     require:
-      - crud:read
+      - persistence:read
+`;
+
+/** Classification policy for the fixture's complete source scan. */
+export const CLASSIFICATION_POLICY_YML = `\
+schemaVersion: 1
+scanRoots: ['src/**/*.txt']
+trustedInternalEntryPoints: []
+internalRules: []
+declarations:
+  internality: gateforge:internal
+volatileFields: []
 `;
 
 /**
- * Classifications document for the named resources (user-facing
- * tenant tables with a single-column primary key).
+ * Legacy helper for tests that exercise stale manual references.
  */
 export function classificationsYml(resources: readonly string[]): string {
   const entries = resources
@@ -124,7 +171,7 @@ project:
 plugins:
 ${plugins}
 policies: .gateforge/policies.yml
-classifications: .gateforge/classifications.yml
+classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
@@ -137,13 +184,15 @@ ${clockBlock}
 `;
 }
 
-/** Installs the standard fixture project into a temp repo. */
+/** Installs the standard automatic-classification fixture project. */
 export function installFixture(repo: TempRepo, options: Parameters<typeof configYml>[0] = {}): void {
   repo.writeFiles({
     '.gateforge.yml': configYml(options),
     '.gateforge/policies.yml': POLICIES_YML,
-    '.gateforge/classifications.yml': classificationsYml(['accounts', 'orders']),
+    '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,
     'plugin.mjs': PLUGIN_SOURCE,
+    '.gateforge/adapters/accounts.mjs': 'export default {};\n',
+    '.gateforge/adapters/orders.mjs': 'export default {};\n',
     ...RESOURCE_FILES,
   });
 }
@@ -175,7 +224,7 @@ export async function runCli(
   }
 }
 
-/** Absolute path of the python reference detector (GPP/2 round-trips). */
+/** Absolute path of the python reference detector (GPP/3 round-trips). */
 export function referenceDetectorPath(): string {
   return fileURLToPath(
     new URL('../../plugin-protocol/python/plugins/reference_detector.py', import.meta.url),

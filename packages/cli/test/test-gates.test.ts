@@ -17,7 +17,7 @@ import { join } from 'node:path';
 const stateDir = process.env.GATEFORGE_STATE_DIR;
 if (!stateDir) throw new Error('missing GATEFORGE_STATE_DIR');
 mkdirSync(stateDir, { recursive: true });
-const obligationId = process.env.GATEFORGE_TARGET || 'tenant.accounts:crud:read';
+const obligationId = process.env.GATEFORGE_TARGET || 'tenant.accounts:persistence:read';
 writeFileSync(join(stateDir, 'claims.json'), JSON.stringify([
   { schemaVersion: 1, obligationId, testId: 'suite-test', testFile: 'tests/accounts.spec.ts' },
 ]));
@@ -63,8 +63,8 @@ describe('gateforge test-gates', () => {
         readFileSync(join(stateDir, 'obligations.json'), 'utf8'),
       ) as { obligations: Array<{ id: string; fingerprint: string; source: string }> };
       expect(obligations.obligations.map((o) => o.id).sort()).toEqual([
-        'tenant.accounts:crud:read',
-        'tenant.orders:crud:read',
+        'tenant.accounts:persistence:read',
+        'tenant.orders:persistence:read',
       ]);
       expect(obligations.obligations[0]?.fingerprint).toBe(
         fixtureFingerprint('tenant.accounts'),
@@ -111,7 +111,7 @@ describe('gateforge test-gates', () => {
         verdicts: Array<{ obligationId: string; verdict: string; recordIds: string[] }>;
       };
       const accounts = report.verdicts.find(
-        (v) => v.obligationId === 'tenant.accounts:crud:read',
+        (v) => v.obligationId === 'tenant.accounts:persistence:read',
       );
       expect(accounts?.verdict).toBe('invalid');
       expect(accounts?.recordIds).toEqual(['b'.repeat(64)]);

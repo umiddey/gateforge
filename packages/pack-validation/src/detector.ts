@@ -25,7 +25,7 @@
  * Math.random), and fails closed: malformed schemas surface as
  * `AMBIGUOUS_SCHEMA` findings, never silently emit.
  */
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { readFileSync } from 'node:fs';
 import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
 import type { Resource } from '@gateforge/core';
@@ -211,8 +211,9 @@ export function createValidationDetector(options: ValidationDetectorOptions = {}
   const root = options.root ?? process.cwd();
   return {
     discover(paths) {
-      const out: DiscoveryOutcome = { resources: [], unresolved: [], findings: [] };
+      const out: DiscoveryOutcome = { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       if (paths.length === 0) return out;
+      const scanned: string[] = [];
       for (const rawPath of paths) {
         const abs = isAbsolute(rawPath) ? rawPath : resolve(root, rawPath);
         const files = collectFiles(abs);
@@ -220,6 +221,7 @@ export function createValidationDetector(options: ValidationDetectorOptions = {}
           let text: string;
           try { text = readFileSync(file, 'utf8'); }
           catch { continue; }
+          scanned.push(relative(root, file).split(sep).join('/'));
           for (const s of [
             ...detectZod(text, file),
             ...detectJoi(text, file),
@@ -231,7 +233,7 @@ export function createValidationDetector(options: ValidationDetectorOptions = {}
         }
       }
       out.resources.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-      return out;
+      return { ...out, scannedPaths: scanned.sort() };
     },
   };
 }

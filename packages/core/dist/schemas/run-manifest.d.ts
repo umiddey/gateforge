@@ -37,6 +37,8 @@ export declare const RunManifestSchema: z.ZodObject<{
         }>;
     }, z.core.$strict>>;
     attestationScope: z.ZodNullable<z.ZodString>;
+    recordIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    recordIdsMac: z.ZodOptional<z.ZodString>;
 }, z.core.$strict>;
 /** Inferred run-manifest shape. */
 export type RunManifest = z.infer<typeof RunManifestSchema>;

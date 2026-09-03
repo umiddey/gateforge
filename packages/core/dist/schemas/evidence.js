@@ -24,6 +24,16 @@ export const BulkScopeSchema = z
 })
     .strict();
 /**
+ * Where a record's contents came from (part of the hashed identity,
+ * pin #7). `suite-submitted` records carry the TESTED SUITE's own
+ * assertion — the witness received it but cannot verify it happened —
+ * and are stamped `trust: 'claimed'` at issuance. `engine-observed`
+ * records carry contents the witness itself produced from an
+ * engine-side observation (the adapter read behind
+ * `persistence.entity`) and are stamped `trust: 'witnessed'`.
+ */
+export const RecordOriginSchema = z.enum(['suite-submitted', 'engine-observed']);
+/**
  * A trusted evidence record issued by the witness service.
  */
 export const EvidenceRecordSchema = z
@@ -43,6 +53,8 @@ export const EvidenceRecordSchema = z
     testId: z.string().min(1).optional(),
     /** Evidence payload (primitive-defined, open JSON). */
     payload: z.unknown().optional(),
+    /** Where the contents came from (drives the trust stamp at issuance). */
+    origin: RecordOriginSchema.optional(),
     /** Bulk attestation scope, when this record covers multiple items. */
     scope: BulkScopeSchema.optional(),
     /** Issue timestamp from the engine-injected clock (ISO-8601). */

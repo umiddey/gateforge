@@ -42,7 +42,7 @@ export declare const GateforgeConfigSchema: z.ZodObject<{
         module: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>;
     policies: z.ZodString;
-    classifications: z.ZodString;
+    classificationPolicy: z.ZodString;
     adapters: z.ZodString;
     waivers: z.ZodString;
     baselines: z.ZodString;

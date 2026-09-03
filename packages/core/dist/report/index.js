@@ -91,12 +91,21 @@ function summarize(entries) {
 /** Builds the canonical json-format report document. */
 function jsonReport(entries, options, blocking) {
     const counts = summarize(entries);
-    const blockingCount = counts.missing + counts.invalid + counts.unclassified + counts.unresolved + counts.stale;
+    // The blocking total covers BOTH sources of red: blocking verdicts and
+    // policy blocking entries (findings/stale references block the gate
+    // too — undercounting them would show "0 blocking" next to exit 1).
+    const blockingCount = counts.missing +
+        counts.invalid +
+        counts.unclassified +
+        counts.unresolved +
+        counts.stale +
+        blocking.length;
     const report = {
         schemaVersion: 1,
         summary: {
             obligations: entries.length,
             blocking: blockingCount,
+            blockingEntries: blocking.length,
             ...counts,
         },
         verdicts: entries.map((entry) => {
@@ -129,6 +138,10 @@ function jsonReport(entries, options, blocking) {
     if (options.waiverCounts !== undefined) {
         report['waiverCounts'] = options.waiverCounts;
     }
+    if (options.classificationTraces !== undefined) {
+        // Canonical JSON sorts keys, so insertion order is irrelevant.
+        report['classifications'] = options.classificationTraces;
+    }
     return report;
 }
 /** Builds the SARIF 2.1.0 projection (pin #10). */
@@ -153,6 +166,12 @@ function sarifReport(entries, options) {
                 contract: entry.obligation.contract,
                 verdict: entry.verdict,
                 trustTier: entry.trustTier,
+                ...(options.classificationTraces?.[entry.obligation.resourceId] !== undefined
+                    ? {
+                        classificationFingerprint: options.classificationTraces[entry.obligation.resourceId]?.decisionFingerprint,
+                        classificationRules: options.classificationTraces[entry.obligation.resourceId]?.rules,
+                    }
+                    : {}),
             },
             partialFingerprints: {
                 gateforgeFingerprint: fingerprint({
@@ -186,6 +205,25 @@ function sarifReport(entries, options) {
                         rules: ruleIds.map((ruleId) => ({ ruleId })),
                     },
                 },
+                // Blocking policy entries (unclassified/unresolved resources,
+                // detector findings, stale references) are not obligation
+                // verdicts, so they surface as tool-execution notifications
+                // (SARIF 2.1.0 §3.20) instead of results — visible, error-level,
+                // never silently omitted from the projection.
+                invocations: [
+                    {
+                        toolExecutionNotifications: (options.blocking ?? []).map((entry) => ({
+                            level: 'error',
+                            message: {
+                                text: `[${entry.kind}] ${entry.resourceId ?? entry.name ?? '<unnamed>'} — ${entry.detail}`,
+                            },
+                            properties: {
+                                kind: entry.kind,
+                                ...(entry.location !== null ? { location: entry.location } : {}),
+                            },
+                        })),
+                    },
+                ],
                 results,
             },
         ],
@@ -195,7 +233,12 @@ function sarifReport(entries, options) {
 function textReport(entries, options, blocking) {
     const lines = [];
     const counts = summarize(entries);
-    const blockingCount = counts.missing + counts.invalid + counts.unclassified + counts.unresolved + counts.stale;
+    const blockingCount = counts.missing +
+        counts.invalid +
+        counts.unclassified +
+        counts.unresolved +
+        counts.stale +
+        blocking.length;
     lines.push(`gateforge run: ${entries.length} obligation(s) — ` +
         `${counts.satisfied} satisfied, ${counts.waived} waived, ${blockingCount} blocking`);
     if (options.waiverCounts !== undefined) {
@@ -224,10 +267,34 @@ function textReport(entries, options, blocking) {
     }
     if (blocking.length > 0) {
         lines.push('');
-        lines.push('blocking entries (unclassified/unresolved):');
+        lines.push('blocking entries (unclassified/unresolved/findings/stale references):');
         for (const entry of blocking) {
             const where = entry.location !== null ? ` at ${entry.location.file}:${entry.location.line}` : '';
             lines.push(`  [${entry.kind}] ${entry.resourceId ?? entry.name ?? '<unnamed>'} — ${entry.detail}${where}`);
+        }
+    }
+    if (options.classificationTraces !== undefined) {
+        const ids = Object.keys(options.classificationTraces).sort(compareStrings);
+        if (ids.length > 0) {
+            lines.push('');
+            lines.push('classification decisions (automatic, conservative — ADR 0003):');
+            for (const id of ids) {
+                const trace = options.classificationTraces[id];
+                if (trace === undefined)
+                    continue;
+                lines.push(`  ${id}`);
+                lines.push(`    decision fingerprint: ${trace.decisionFingerprint}`);
+                lines.push(`    rules: ${trace.rules.join(', ')}`);
+                if (trace.defaultsApplied.length > 0) {
+                    lines.push(`    defaults applied: ${trace.defaultsApplied.join(', ')}`);
+                }
+                lines.push(`    contributing signals: ${trace.contributingSignalIds.length}`);
+                if (trace.contradictions.length > 0) {
+                    for (const contradiction of trace.contradictions) {
+                        lines.push(`    contradiction [${contradiction.dimension}]: ${contradiction.detail}`);
+                    }
+                }
+            }
         }
     }
     lines.push('');

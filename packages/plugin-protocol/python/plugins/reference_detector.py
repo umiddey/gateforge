@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Reference GPP/2 detector: parses trivial `.gfx` route fixtures.
+"""Reference GPP/3 detector: parses trivial `.gfx` route fixtures.
 
 One `METHOD path` per line, `#` comments — the same fixture format and
 algorithm as test/fixtures/plugins/_lib.mjs, so both reference plugins
-must produce identical resources/findings for identical fixture bytes
-(determinism, plan invariant 7). Usage:
+must produce identical resources/findings AND classification-signal
+documents for identical fixture bytes (determinism, plan invariant 7;
+GPP/3 signal transport per ADR 0003 D6). Usage:
 
     python3 reference_detector.py <fixture-root>
 
@@ -24,15 +25,15 @@ from gateforge_plugin import ProtocolError, serve  # noqa: E402
 DETECTOR_VERSION = "1.0.0"
 
 
-def _scan(root: str, rel: str) -> tuple[list[dict], list[dict]]:
-    """Scans one .gfx fixture file into (resources, findings).
+def _scan(root: str, rel: str) -> tuple[list[dict], list[dict], list[dict]]:
+    """Scans one .gfx fixture file into (resources, findings, signals).
 
     Args:
         root: Fixture root directory (plugin argv).
         rel: Repo-root-relative path to scan; rejects absolute/`..` paths.
 
     Returns:
-        tuple[list[dict], list[dict]]: (resources, DUPLICATE_ROUTE findings).
+        tuple: (resources, DUPLICATE_ROUTE findings, exposure signals).
 
     Raises:
         ValueError: On a non-relative path or a malformed fixture line.
@@ -42,6 +43,7 @@ def _scan(root: str, rel: str) -> tuple[list[dict], list[dict]]:
         raise ValueError(f"target must be a relative path under the fixture root, got {rel!r}")
     text = (Path(root) / rel).read_text(encoding="utf-8")
     resources: list[dict] = []
+    signals: list[dict] = []
     seen: dict[str, list[dict]] = {}
     for i, line_text in enumerate(text.split("\n")):
         line = line_text.strip()
@@ -53,15 +55,28 @@ def _scan(root: str, rel: str) -> tuple[list[dict], list[dict]]:
         method = line[:space_at]
         route_path = line[space_at + 1 :].strip()
         location = {"file": rel, "line": i + 1, "col": 0}
+        resource_id = f"web.routes:{method} {route_path}"
         resources.append(
             {
                 "schemaVersion": 1,
-                "id": f"web.routes:{method} {route_path}",
+                "id": resource_id,
                 "kind": "http-route",
                 "source": rel,
                 "location": location,
                 "detectorVersion": DETECTOR_VERSION,
                 "attributes": {"method": method, "path": route_path},
+            }
+        )
+        signals.append(
+            {
+                "schemaVersion": 1,
+                "target": {"resourceId": resource_id},
+                "dimension": "exposure",
+                "assertion": "route",
+                "basis": "code-positive",
+                "source": "python-fixture-detector",
+                "location": location,
+                "detector": {"id": "python-fixture-detector", "version": DETECTOR_VERSION},
             }
         )
         seen.setdefault(f"{method} {route_path}", []).append(location)
@@ -74,25 +89,38 @@ def _scan(root: str, rel: str) -> tuple[list[dict], list[dict]]:
         for key, locations in sorted(seen.items())
         if len(locations) >= 2
     ]
-    return resources, findings
+    return resources, findings, signals
 
 
 def discover(paths: list[str]) -> dict:
-    """GPP/2 discover handler: scans each requested path in order.
+    """GPP/3 discover handler: scans each requested path in order.
 
     Args:
         paths: Repo-root-relative fixture paths from the discover request.
 
     Returns:
-        dict: {"resources": [...], "unresolved": [], "findings": [...]}.
+        dict: {"resources": [...], "unresolved": [], "findings": [...],
+        "classificationSignals": [...]}.
     """
     resources: list[dict] = []
     findings: list[dict] = []
+    signals: list[dict] = []
+    scanned: list[str] = []
     for rel in paths:
-        file_resources, file_findings = _scan(sys.argv[1] if len(sys.argv) > 1 else ".", rel)
+        file_resources, file_findings, file_signals = _scan(
+            sys.argv[1] if len(sys.argv) > 1 else ".", rel
+        )
         resources.extend(file_resources)
         findings.extend(file_findings)
-    return {"resources": resources, "unresolved": [], "findings": findings}
+        signals.extend(file_signals)
+        scanned.append(rel)
+    return {
+        "resources": resources,
+        "unresolved": [],
+        "findings": findings,
+        "classificationSignals": signals,
+        "scannedPaths": scanned,
+    }
 
 
 if __name__ == "__main__":
