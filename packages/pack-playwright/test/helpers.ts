@@ -105,11 +105,9 @@ export function removeTempProject(dir: string): void {
 }
 
 /**
- * Writes the full `.gateforge` fixture project: config, in-process
- * detector, classifications, policies, baseline, and a placeholder
- * source file. The in-process detector declares one resource
- * (`accounts`, kind `fixture.entity`) that the graph normalizes to
- * `tenant.accounts` via the classifications plane.
+ * detector, automatic classification policy, policies, baseline, and a
+ * placeholder source file. The detector emits source-located GPP/3 facts
+ * and core derives the effective classification.
  */
 export function writeFixtureProject(
 	dir: string,
@@ -134,7 +132,7 @@ export function writeFixtureProject(
 			'    transport: in-process',
 			'    module: ./.gateforge/fixture-detector.mjs',
 			'policies: .gateforge/policies.yml',
-			'classifications: .gateforge/classifications.yml',
+			'classificationPolicy: .gateforge/classification-policy.yml',
 			'adapters: .gateforge/adapters',
 			'waivers: .gateforge/waivers',
 			'baselines: .gateforge/baselines/obligations.json',
@@ -147,9 +145,8 @@ export function writeFixtureProject(
 	writeFileSync(
 		join(dir, '.gateforge/fixture-detector.mjs'),
 		[
-			'// In-process fixture detector: declares the accounts resource',
-			'// exactly as a reviewed detector would (the resource graph',
-			'// normalizes `accounts` + plane `tenant` to `tenant.accounts`).',
+			'// In-process fixture detector: declares the accounts resource and',
+			'// emits only normalized GPP/3 classification facts.',
 			'export default {',
 			'  async discover() {',
 			'    return {',
@@ -160,10 +157,25 @@ export function writeFixtureProject(
 			"        source: 'src/accounts.js',",
 			"        location: { file: 'src/accounts.js', line: 1, col: 0 },",
 			"        detectorVersion: '1.0.0',",
-			"        attributes: { resourceName: 'accounts' },",
+			"        attributes: { resourceName: 'accounts', updateableFields: ['first_name', 'last_name', 'status'] },",
 			'      }],',
 			'      unresolved: [],',
 			'      findings: [],',
+			'      classificationSignals: [',
+			'        { schemaVersion: 1, target: { resourceName: "accounts" }, dimension: "plane", assertion: "tenant", basis: "declaration", source: "gateforge.fixture", location: { file: "src/accounts.js", line: 1, col: 0 }, detector: { id: "gateforge.fixture", version: "1.0.0" } },',
+			'        { schemaVersion: 1, target: { resourceName: "accounts" }, dimension: "identity", assertion: ["id"], basis: "declaration", source: "gateforge.fixture", location: { file: "src/accounts.js", line: 1, col: 0 }, detector: { id: "gateforge.fixture", version: "1.0.0" } },',
+			'        { schemaVersion: 1, target: { resourceName: "accounts" }, dimension: "adapter-binding", assertion: "tenant.accounts", basis: "declaration", source: "gateforge.fixture", location: { file: "src/accounts.js", line: 1, col: 0 }, detector: { id: "gateforge.fixture", version: "1.0.0" } },',
+			`        { schemaVersion: 1, target: { resourceName: "accounts" }, dimension: "lifecycle.create", assertion: ${String(lifecycle.create)}, basis: "declaration", source: "gateforge.fixture", location: { file: "src/accounts.js", line: 1, col: 0 }, detector: { id: "gateforge.fixture", version: "1.0.0" } },`,
+			`        { schemaVersion: 1, target: { resourceName: "accounts" }, dimension: "lifecycle.read", assertion: ${String(lifecycle.read)}, basis: "declaration", source: "gateforge.fixture", location: { file: "src/accounts.js", line: 1, col: 0 }, detector: { id: "gateforge.fixture", version: "1.0.0" } },`,
+			`        { schemaVersion: 1, target: { resourceName: "accounts" }, dimension: "lifecycle.update", assertion: ${String(lifecycle.update)}, basis: "declaration", source: "gateforge.fixture", location: { file: "src/accounts.js", line: 1, col: 0 }, detector: { id: "gateforge.fixture", version: "1.0.0" } },`,
+			`        { schemaVersion: 1, target: { resourceName: "accounts" }, dimension: "lifecycle.delete", assertion: ${String(lifecycle.delete)}, basis: "${lifecycle.delete ? 'declaration' : 'code-negative-closed-world'}", source: "gateforge.fixture", location: { file: "src/accounts.js", line: 1, col: 0 }, detector: { id: "gateforge.fixture", version: "1.0.0" } }${lifecycle.delete ? ',' : ''}`,
+			...(lifecycle.delete
+				? [
+						'        { schemaVersion: 1, target: { resourceName: "accounts" }, dimension: "delete-semantics", assertion: "archive", basis: "declaration", source: "gateforge.fixture", location: { file: "src/accounts.js", line: 1, col: 0 }, detector: { id: "gateforge.fixture", version: "1.0.0" } },',
+						'        { schemaVersion: 1, target: { resourceName: "accounts" }, dimension: "archive-state", assertion: { status: "archived" }, basis: "declaration", source: "gateforge.fixture", location: { file: "src/accounts.js", line: 1, col: 0 }, detector: { id: "gateforge.fixture", version: "1.0.0" } },',
+					]
+				: []),
+			'      ],',
 			'    };',
 			'  },',
 			'};',
@@ -177,7 +189,20 @@ export function writeFixtureProject(
 			'policies:',
 			'  - id: crud',
 			'    when: {}',
-			'    require: [crud:create, crud:read, crud:update, crud:delete]',
+			'    require: [persistence:create, persistence:read, persistence:update, persistence:delete]',
+			'',
+		].join('\n'),
+	);
+	writeFileSync(
+		join(dir, '.gateforge/classification-policy.yml'),
+		[
+			'schemaVersion: 1',
+			"scanRoots: ['src/**']",
+			'trustedInternalEntryPoints: []',
+			'internalRules: []',
+			'declarations:',
+			'  internality: gateforge:internal',
+			'volatileFields: []',
 			'',
 		].join('\n'),
 	);
@@ -188,14 +213,17 @@ export function writeFixtureProject(
 		`      delete: ${lifecycle.delete}`,
 	];
 	if (lifecycle.delete) {
-		lifecycleLines.push(`      deleteSemantics: ${lifecycle.deleteSemantics ?? 'archive'}`);
+		lifecycleLines.push(
+			`      deleteSemantics: ${lifecycle.deleteSemantics ?? 'archive'}`,
+			'      archiveFields: { status: archived }',
+		);
 	}
 	writeFileSync(
-		join(dir, '.gateforge/classifications.yml'),
+		join(dir, '.gateforge/effective-classifications.yml'),
 		[
 			'schemaVersion: 1',
 			'resources:',
-			'  accounts:',
+			'  tenant.accounts:',
 			'    exposure: user-facing',
 			'    plane: tenant',
 			'    lifecycle:',
@@ -223,6 +251,12 @@ export function writeHonestAdapter(dir: string, fingerprint = FINGERPRINT): void
 			'    if (res.status === 404) return null;',
 			'    if (res.status !== 200) throw new Error(`adapter read failed: HTTP ${res.status}`);',
 			'    return res.json();',
+			'  },',
+			'  async list(ctx) {',
+			'    const res = await ctx.get(\'/api/accounts\');',
+			'    if (res.status !== 200) throw new Error(`adapter list failed: HTTP ${res.status}`);',
+			'    const body = await res.json();',
+			'    return body.accounts;',
 			'  },',
 			'  normalize(body) {',
 			'    return {',

@@ -9,6 +9,7 @@ import { PluginError, PluginSession, isProtocolFailure } from '../src/index.js';
 import {
   EXPECTED_FINDINGS,
   EXPECTED_RESOURCES,
+  EXPECTED_SIGNALS,
   jsPluginOptions,
   pythonPluginOptions,
 } from './helpers.js';
@@ -22,6 +23,8 @@ describe('TS host x Python plugin', () => {
       expect(first.resources).toEqual(EXPECTED_RESOURCES);
       expect(first.unresolved).toEqual([]);
       expect(first.findings).toEqual(EXPECTED_FINDINGS);
+      // GPP/3: the Python reference detector emits the exposure signals.
+      expect(first.classificationSignals).toEqual(EXPECTED_SIGNALS);
       const second = await session.discover(['app/routes.gfx']);
       expect(second).toEqual(first);
       await session.shutdown();
@@ -31,11 +34,16 @@ describe('TS host x Python plugin', () => {
   }, 20_000);
 
   test('both reference detectors emit byte-identical outcomes for the same fixture', async () => {
+    // The only legitimate difference between the two detectors is their
+    // own identity, which each signal stamps; normalize it before the
+    // byte comparison so the assertion proves document parity.
+    const normalizeIdentity = (text: string): string =>
+      text.replaceAll('js-fixture-detector', 'python-fixture-detector');
     const runJs = async (): Promise<string> => {
       const session = new PluginSession(jsPluginOptions('plugin_ok.mjs'));
       try {
         await session.start();
-        return JSON.stringify(await session.discover(['app/routes.gfx']));
+        return normalizeIdentity(JSON.stringify(await session.discover(['app/routes.gfx'])));
       } finally {
         await session.dispose();
       }

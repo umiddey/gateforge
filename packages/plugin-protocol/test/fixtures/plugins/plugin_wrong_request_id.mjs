@@ -9,6 +9,7 @@ serve({ id: PLUGIN_ID, version: PLUGIN_VERSION }, {
         resources: [],
         unresolved: [],
         findings: [],
+        classificationSignals: [],
       }),
     );
     return true;

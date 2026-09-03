@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GateforgeReporter } from '../src/reporter/reporter.js';
+import { ledgerRowFor } from '../src/reporter/ledger.js';
 import { startWitness } from '../src/witness/server.js';
 import { startMarkerServer } from './marker-server.js';
 import { makeTempProject, writeFixtureProject, writeHonestAdapter, FINGERPRINT } from './helpers.js';
@@ -20,8 +21,8 @@ import { WitnessClient } from '../src/fixture/witness-client.js';
 
 const RUN_ID = '6f1c3f90-2d5e-4b1a-9c6d-0f0e2b8a1c9d';
 const TOKEN = 'reporter-token';
-const CREATE = 'tenant.accounts:crud:create';
-const UPDATE = 'tenant.accounts:crud:update';
+const CREATE = 'tenant.accounts:persistence:create';
+const UPDATE = 'tenant.accounts:persistence:update';
 const TEST_ID = 'spec.js > honest create';
 
 const ORIGINAL_ENV: Record<string, string | undefined> = {};
@@ -55,9 +56,9 @@ async function setupRun(options: { adapterFingerprint?: string } = {}) {
           {
             id: CREATE,
             resourceId: 'tenant.accounts',
-            contract: 'crud:create',
+            contract: 'persistence:create',
             policyId: 'crud',
-            lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' },
+            lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive', archiveFields: { status: 'archived' } },
             fingerprint: 'f-create',
             source: 'src/accounts.js',
             location: { file: 'src/accounts.js', line: 1, col: 0 },
@@ -65,9 +66,9 @@ async function setupRun(options: { adapterFingerprint?: string } = {}) {
           {
             id: UPDATE,
             resourceId: 'tenant.accounts',
-            contract: 'crud:update',
+            contract: 'persistence:update',
             policyId: 'crud',
-            lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' },
+            lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive', archiveFields: { status: 'archived' } },
             fingerprint: 'f-update',
             source: 'src/accounts.js',
             location: { file: 'src/accounts.js', line: 1, col: 0 },
@@ -87,7 +88,7 @@ async function setupRun(options: { adapterFingerprint?: string } = {}) {
     token: TOKEN,
     stateDir,
     adaptersDir: join(project, '.gateforge/adapters'),
-    classificationsPath: join(project, '.gateforge/classifications.yml'),
+    classificationsPath: join(project, '.gateforge/effective-classifications.yml'),
     targetBaseUrl: target.url,
     targetFingerprint: FINGERPRINT,
     adapterBaseUrl: target.url,
@@ -96,30 +97,53 @@ async function setupRun(options: { adapterFingerprint?: string } = {}) {
   return { project, target, witness, stateDir };
 }
 
-/** Posts one honest create flow's records through the real witness. */
-async function postHonestCreate(client: WitnessClient): Promise<void> {
+/**
+ * Posts one honest create flow's records through the real witness:
+ * engine-side pre-observation (entity absent), the app-side create, then
+ * the UI-action/visible assertions and the persistence verify bound to
+ * the pre-observation (create postcondition, audit round 4).
+ */
+async function postHonestCreate(client: WitnessClient, appBase: string): Promise<string> {
+  // 1. Engine-side "before": the marker target's observed id set.
+  const pre = await client.preObserve({
+    resourceId: 'tenant.accounts',
+    testId: TEST_ID,
+    claimId: CREATE,
+  });
+  // 2. The app-side effect of the UI create (mints the entity).
+  const created = (await (
+    await fetch(`${appBase}/api/accounts`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ first_name: 'Ada', last_name: 'Lovelace' }),
+    })
+  ).json()) as { id: string; status: string };
+  const entityId = created.id;
+  // 3. The suite-asserted UI action + visible result (claimed tier).
   await client.postRecords({
     claimId: CREATE,
     kind: 'ui.action',
-    payload: { operation: 'create', entityId: 'acc-1', fields: { first_name: 'Ada', last_name: 'Lovelace' } },
+    payload: { operation: 'create', entityId, fields: { first_name: 'Ada', last_name: 'Lovelace' } },
     testId: TEST_ID,
   });
   await client.postRecords({
     claimId: CREATE,
     kind: 'ui.visible-result',
     payload: {
-      entityId: 'acc-1',
-      fields: { first_name: 'Ada', last_name: 'Lovelace', status: 'active' },
+      entityId,
+      fields: { first_name: 'Ada', last_name: 'Lovelace', status: created.status },
     },
     testId: TEST_ID,
   });
+  // 4. Engine-observed persistence, bound to the pre-observation.
   await client.verifyPersistence({
     resourceId: 'tenant.accounts',
-    entityId: 'acc-1',
-    expectFields: { first_name: 'Ada', last_name: 'Lovelace' },
+    entityId,
     testId: TEST_ID,
     claimId: CREATE,
+    preObservationId: pre.observationId,
   });
+  return entityId;
 }
 
 function runReporter(
@@ -154,7 +178,7 @@ describe('reporter artifacts (claims.json / records.json)', () => {
       process.env.GATEFORGE_STATE_DIR = run.stateDir;
       process.env.GATEFORGE_OBLIGATIONS = join(run.project, '.gateforge/test-gates/obligations.json');
       const client = new WitnessClient(run.witness.url, TOKEN);
-      await postHonestCreate(client);
+      await postHonestCreate(client, run.target.url);
 
       // Adversarial: try to plant a fabricated consistent bundle in the
       // state dir BEFORE the reporter writes (the reporter must
@@ -209,38 +233,73 @@ describe('reporter artifacts (claims.json / records.json)', () => {
 });
 
 describe('GF-23: fabricated bundles never satisfy', () => {
-  it('engine verdict: a consistent bundle LACKING service-issued recordIds is invalid/missing', async () => {
+  const CLASSIFICATION = {
+    exposure: 'user-facing' as const,
+    plane: 'tenant' as const,
+    lifecycle: {
+      create: true,
+      read: true,
+      update: true,
+      delete: true,
+      deleteSemantics: 'archive' as const,
+      archiveFields: { status: 'archived' },
+    },
+    primaryKey: ['id'],
+    evidenceAdapter: 'accounts',
+  };
+  const obligationsDoc = {
+    schemaVersion: 1,
+    obligations: [
+      {
+        id: UPDATE,
+        resourceId: 'tenant.accounts',
+        contract: 'persistence:update',
+        policyId: 'crud',
+        lifecycle: CLASSIFICATION.lifecycle,
+        fingerprint: 'f-update',
+        source: 'src/accounts.js',
+        location: null,
+      },
+    ],
+  };
+
+  /** The internally-consistent bundle a hostile test process fabricates. */
+  function fabricatedBundle(): unknown[] {
+    return [
+      {
+        schemaVersion: 1,
+        recordId: 'made-up-id-not-issued-by-the-witness',
+        runId: RUN_ID,
+        trust: 'witnessed',
+        obligationId: UPDATE,
+        kind: 'ui.action',
+        testId: 'attack-test',
+        payload: { operation: 'update', entityId: 'acc-1', fields: { first_name: 'Mallory' } },
+      },
+      {
+        schemaVersion: 1,
+        trust: 'witnessed',
+        obligationId: UPDATE,
+        kind: 'persistence.entity',
+        testId: 'attack-test',
+        payload: { resourceId: 'tenant.accounts', entityId: 'acc-1', fields: { first_name: 'Mallory', status: 'active' } },
+      },
+    ];
+  }
+
+  it('reporter path: a fabricated records.json is overwritten by the witness ledger, never graded', async () => {
     const run = await setupRun();
     try {
-      // The fabricated bundle has NO service-issued provenance (either
-      // no recordId at all or non-hex ids — demoted to claimed by the
-      // engine's GF-23 rule).
-      const fabricated = [
-        {
-          schemaVersion: 1,
-          recordId: 'made-up-id-not-issued-by-the-witness',
-          runId: RUN_ID,
-          trust: 'witnessed',
-          obligationId: UPDATE,
-          kind: 'ui.action',
-          testId: 'attack-test',
-          payload: { operation: 'update', entityId: 'acc-1', fields: { first_name: 'Mallory' } },
-        },
-        {
-          schemaVersion: 1,
-          trust: 'witnessed',
-          obligationId: UPDATE,
-          kind: 'persistence.entity',
-          testId: 'attack-test',
-          payload: { resourceId: 'tenant.accounts', entityId: 'acc-1', fields: { first_name: 'Mallory', status: 'active' } },
-        },
-      ];
       saveEnv('GATEFORGE_WITNESS_URL', 'GATEFORGE_RUN_TOKEN', 'GATEFORGE_STATE_DIR', 'GATEFORGE_OBLIGATIONS');
       process.env.GATEFORGE_WITNESS_URL = run.witness.url;
       process.env.GATEFORGE_RUN_TOKEN = TOKEN;
       process.env.GATEFORGE_STATE_DIR = run.stateDir;
       process.env.GATEFORGE_OBLIGATIONS = join(run.project, '.gateforge/test-gates/obligations.json');
-      writeFileSync(join(run.stateDir, 'records.json'), `${JSON.stringify(fabricated)}\n`);
+      // The witness ledger is EMPTY: the attacker plants their bundle in
+      // records.json before the reporter runs. The reporter must replace
+      // it with GET /records verbatim (GF-23), so the fabrication never
+      // reaches the engine and the claim grades `missing`.
+      writeFileSync(join(run.stateDir, 'records.json'), `${JSON.stringify(fabricatedBundle())}\n`);
       await runReporter(run.stateDir, [
         {
           id: 'attack-test',
@@ -248,55 +307,61 @@ describe('GF-23: fabricated bundles never satisfy', () => {
           location: { file: 'attack.spec.js', line: 1, column: 0 },
         },
       ]);
+      const records = JSON.parse(readFileSync(join(run.stateDir, 'records.json'), 'utf8')) as Array<{
+        recordId: string;
+      }>;
+      expect(
+        records.some((record) => record.recordId === 'made-up-id-not-issued-by-the-witness'),
+      ).toBe(false);
       const ledger = JSON.parse(readFileSync(join(run.stateDir, 'ledger.json'), 'utf8')) as Array<{
         verdict: string;
         reason: string | null;
       }>;
       expect(ledger).toHaveLength(1);
-      expect(ledger[0]?.verdict).not.toBe('satisfied');
-      expect(['invalid', 'missing']).toContain(ledger[0]?.verdict);
-      expect(ledger[0]?.reason ?? '').toMatch(/claimed|provenance|service-witnessed/i);
+      expect(ledger[0]?.verdict).toBe('missing');
+      expect(ledger[0]?.reason ?? '').toContain('no evidence records');
     } finally {
       await run.witness.stop();
       await run.target.stop();
     }
   });
 
-  it('a bundle with no recordId at all cannot satisfy either (GF-23)', async () => {
-    const run = await setupRun();
-    try {
-      saveEnv('GATEFORGE_WITNESS_URL', 'GATEFORGE_RUN_TOKEN', 'GATEFORGE_STATE_DIR', 'GATEFORGE_OBLIGATIONS');
-      process.env.GATEFORGE_WITNESS_URL = run.witness.url;
-      process.env.GATEFORGE_RUN_TOKEN = TOKEN;
-      process.env.GATEFORGE_STATE_DIR = run.stateDir;
-      process.env.GATEFORGE_OBLIGATIONS = join(run.project, '.gateforge/test-gates/obligations.json');
-      writeFileSync(
-        join(run.stateDir, 'records.json'),
-        `${JSON.stringify([
-          {
-            schemaVersion: 1,
-            trust: 'witnessed',
-            obligationId: UPDATE,
-            kind: 'ui.action',
-            testId: 'attack-2',
-            payload: { operation: 'update', entityId: 'acc-1', fields: {} },
-          },
-        ])}\n`,
-      );
-      await runReporter(run.stateDir, [
+  it('engine verdict: a consistent bundle LACKING service-issued recordIds is claimed-tier → invalid', () => {
+    // Fed DIRECTLY to the engine (bypassing the reporter's ledger copy):
+    // fabricated ids are not service-issued, so the records demote to
+    // claimed-tier, which can never satisfy (GF-23).
+    const row = ledgerRowFor(
+      { obligationId: UPDATE, testId: 'attack-test', testFile: 'attack.spec.js', location: null },
+      obligationsDoc,
+      { 'tenant.accounts': CLASSIFICATION },
+      fabricatedBundle() as never,
+      '2026-08-30T12:00:02.000Z',
+    );
+    expect(row.verdict).toBe('invalid');
+    expect(row.trustTier).toBe('claimed');
+    expect(row.reason ?? '').toMatch(/claimed|provenance|service-witnessed/i);
+  });
+
+  it('engine verdict: a bundle with no recordId at all cannot satisfy either (GF-23)', () => {
+    const row = ledgerRowFor(
+      { obligationId: UPDATE, testId: 'attack-2', testFile: 'attack.spec.js', location: null },
+      obligationsDoc,
+      { 'tenant.accounts': CLASSIFICATION },
+      [
         {
-          id: 'attack-2',
-          annotations: [{ type: 'gateforge', description: UPDATE }],
+          schemaVersion: 1,
+          trust: 'witnessed',
+          obligationId: UPDATE,
+          kind: 'ui.action',
+          testId: 'attack-2',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
         },
-      ]);
-      const ledger = JSON.parse(readFileSync(join(run.stateDir, 'ledger.json'), 'utf8')) as Array<{
-        verdict: string;
-      }>;
-      expect(ledger[0]?.verdict).not.toBe('satisfied');
-    } finally {
-      await run.witness.stop();
-      await run.target.stop();
-    }
+      ] as never,
+      '2026-08-30T12:00:02.000Z',
+    );
+    expect(row.verdict).toBe('invalid');
+    expect(row.trustTier).toBe('claimed');
+    expect(row.verdict).not.toBe('satisfied');
   });
 });
 
@@ -378,7 +443,7 @@ describe('reporter ledger grading', () => {
       process.env.GATEFORGE_STATE_DIR = run.stateDir;
       process.env.GATEFORGE_OBLIGATIONS = join(run.project, '.gateforge/test-gates/obligations.json');
       const client = new WitnessClient(run.witness.url, TOKEN);
-      await postHonestCreate(client);
+      await postHonestCreate(client, run.target.url);
       await runReporter(run.stateDir, [
         {
           id: TEST_ID,
@@ -397,5 +462,5 @@ describe('reporter ledger grading', () => {
       await run.witness.stop();
       await run.target.stop();
     }
+  });
 });
-})

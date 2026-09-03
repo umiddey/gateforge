@@ -1,8 +1,8 @@
-// Shared client implementation for the GPP/2 test fixture plugins. Each
+// Shared client implementation for the GPP/3 test fixture plugins. Each
 // fault plugin is this module plus exactly one deliberate deviation, so
 // every host diagnostic stays attributable to a single protocol violation.
 // Mirrors the spike lineage (spikes/plugin-protocol/plugins/_lib.js) at
-// protocolVersion 2. Determinism: output is a pure function of fixture bytes.
+// protocolVersion 3. Determinism: output is a pure function of fixture bytes.
 import { createHash } from 'node:crypto';
 import { readFileSync, writeSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -36,10 +36,13 @@ export function digestOf(type, seq, payload) {
   return createHash('sha256').update(canonicalJson({ type, seq, payload })).digest('hex');
 }
 
-/** Builds one full GPP/2 envelope, with per-field fault overrides. */
+/** Protocol version the fixture plugins speak (the GPP/2-peer fixture overrides it to 2 to prove the fail-closed handshake). */
+export const PROTOCOL_VERSION = 3;
+
+/** Builds one full GPP/3 envelope, with per-field fault overrides. */
 export function makeEnvelope(plugin, type, seq, payload, overrides = {}) {
   const frame = {
-    protocolVersion: overrides.protocolVersion ?? 2,
+    protocolVersion: overrides.protocolVersion ?? PROTOCOL_VERSION,
     pluginId: overrides.pluginId ?? plugin.id,
     pluginVersion: overrides.pluginVersion ?? plugin.version,
     type: overrides.type ?? type,
@@ -103,6 +106,25 @@ export function scanFixture(root, rel) {
 }
 
 /**
+ * Derives the classification signals for scanned route resources: one
+ * `exposure` code-positive signal per route row. Identical algorithm in
+ * the Python reference detector — the cross-language suite proves the
+ * signal documents are byte-identical.
+ */
+export function scanSignals(resources) {
+  return resources.map((resource) => ({
+    schemaVersion: 1,
+    target: { resourceId: resource.id },
+    dimension: 'exposure',
+    assertion: 'route',
+    basis: 'code-positive',
+    source: PLUGIN_ID,
+    location: resource.location,
+    detector: { id: PLUGIN_ID, version: PLUGIN_VERSION },
+  }));
+}
+
+/**
  * Standard serve loop: hello → (discover → result|error)* → shutdown →
  * bye → exit 0. Fault hooks return true when they handled the event.
  */
@@ -111,7 +133,15 @@ export async function serve(plugin, opts = {}) {
   let seq = 0;
   const nextSeq = () => ++seq;
 
-  send(makeEnvelope(plugin, 'hello', nextSeq(), { capabilities: ['discover'] }, opts.helloOverrides));
+  send(
+    makeEnvelope(
+      plugin,
+      'hello',
+      nextSeq(),
+      { capabilities: opts.capabilities ?? ['discover'] },
+      opts.helloOverrides,
+    ),
+  );
 
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of rl) {
@@ -124,10 +154,12 @@ export async function serve(plugin, opts = {}) {
       try {
         let resources = [];
         let findings = [];
+        let scanned = [];
         for (const rel of paths) {
           const out = scanFixture(root, rel);
           resources = resources.concat(out.resources);
           findings = findings.concat(out.findings);
+          scanned = scanned.concat(rel);
         }
         send(
           makeEnvelope(plugin, 'result', nextSeq(), {
@@ -135,6 +167,8 @@ export async function serve(plugin, opts = {}) {
             resources,
             unresolved: [],
             findings,
+            classificationSignals: scanSignals(resources),
+            scannedPaths: scanned,
           }),
         );
       } catch (e) {

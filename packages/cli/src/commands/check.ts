@@ -23,7 +23,7 @@ import { evaluateRun } from '../evaluate.js';
 import { runPipeline } from '../pipeline.js';
 import { resolveProvider } from '../providers.js';
 import { resolveStateDir } from '../state.js';
-import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERSION } from './common.js';
+import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
 
 export const CHECK_USAGE = 'usage: gateforge check [--changed] [--format text|json|sarif]';
 
@@ -47,6 +47,12 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
   rejectUnknownFlags(options, ['changed', 'format', 'help'], CHECK_USAGE);
   const format = parseRunFormat(stringFlag(options, 'format') ?? 'text');
   const diffScoped = options['changed'] === true;
+  // Witness verifier key (GF-23, audit round 3): read from the
+  // environment — never argv, whose cmdline is world-readable. With the
+  // key, the manifest's `recordIds` + `recordIdsMac` can be
+  // authenticated; without it, no suite-writable artifact can prove
+  // issuance and the provenance gate fails closed.
+  const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
 
   const config = loadConfigAt(io.cwd);
   const providerIdentity = diffScoped ? resolveProvider(config.changed.provider, io.cwd, io.env).provider : 'all-files';
@@ -68,6 +74,7 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
     stateDir,
     now: pipeline.now,
     changedFiles: diffScoped ? pipeline.changedFiles : null,
+    witnessVerifierKey,
   });
 
   const report = renderRun(evaluated.verdicts, {

@@ -1,9 +1,9 @@
-"""AST-only SQLAlchemy table discovery for Gateforge (GPP/2 detector).
+"""AST-only SQLAlchemy table discovery for Gateforge (GPP/3 detector).
 
 Parses Python source with the stdlib ``ast`` module and reports
 SQLAlchemy declarative tables, abstract bases, and raw ``Table()``
 declarations WITHOUT importing or executing any application code
-(plan §4.1). Stdlib only (Python >= 3.11); the GPP/2 serve loop lives in
+(plan §4.1). Stdlib only (Python >= 3.11); the GPP/3 serve loop lives in
 ``__main__.py`` and uses the reference client from
 ``@gateforge/plugin-protocol``.
 
@@ -24,6 +24,20 @@ Detector vocabulary (frozen with the pack):
   the class statement; the graph retires them when it resolves the name
   and synthesizes ``inherited_tablename_unresolved`` when it cannot
   (GF-21: computed identity is typed, never absent).
+- ``classificationSignals`` (plan phase 3, ADR 0003 D1): code-derived
+  FACTS for the core classifier — ordered ``identity`` (primary-key)
+  signals; ``delete-semantics``/``archive-state``/``lifecycle.*``
+  declaration signals from the machine-readable declarations
+  ``__gateforge_delete_semantics__``, ``__gateforge_archive_state__``,
+  ``__gateforge_read_only__``; never an exposure claim (a table
+  declaration proves nothing about external reachability).
+- additional table attributes: ``primaryKeyColumns``,
+  ``foreignKeyReferences`` (literal ``ForeignKey`` targets),
+  ``softDeleteCandidateFields`` (bookkeeping-resembling column names —
+  facts for reviewers, never semantics), ``readOnly``.
+- additional unresolved entries: ``PRIMARY_KEY_UNRESOLVED`` (computed
+  or invisible primary key — the key is never defaulted to ``id``) and
+  ``ARCHIVE_STATE_UNRESOLVED`` (non-literal archive declaration).
 - ``findings``: ``DUPLICATE_TABLE_NAME`` (GF-20: 2-file and 1-file
   variants), ``CLASS_NAME_REPEATED_IN_FILE`` (GF-01 non-collapse), and
   ``PARSE_ERROR`` (GF-19: malformed files never crash the scan and

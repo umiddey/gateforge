@@ -4,7 +4,7 @@
  * Exit-code contract (architecture contract 4 / pin #4): 0 clean or
  * waived, 1 unresolved obligations, 2 config/usage error. Every
  * fail-closed class in the engine (config, waivers, baselines, policy,
- * GPP/2 protocol failures) maps to 2 with its single-cause diagnostic on
+ * GPP/3 protocol failures) maps to 2 with its single-cause diagnostic on
  * stderr; gate outcomes map to 0/1 through `runExitCode`.
  */
 import type { Io } from './io.js';

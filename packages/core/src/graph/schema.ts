@@ -1,7 +1,7 @@
 /**
  * Resource-graph input/output schemas (Phase 1 "resource graph
  * construction"). The graph consumes detector contributions — the
- * discovery-spike output shape pinned by GPP/2 (`resources`,
+ * discovery-spike output shape pinned by GPP/3 (`resources`,
  * `unresolved`, `findings`) plus detector provenance — and produces the
  * normalized, deterministically ordered graph the policy engine and
  * verdict engine speak.
@@ -17,6 +17,8 @@
 import { z } from 'zod';
 import { ExposureSchema, LocationSchema, PlaneSchema, SchemaVersionField } from '../schemas/common.js';
 import { ClassificationSchema } from '../schemas/classification.js';
+import { ClassificationSignalSchema } from '../schemas/classification-signal.js';
+import { ClassificationDecisionTraceSchema } from '../classifier/schema.js';
 import { ResourceSchema } from '../schemas/resource.js';
 import { UnresolvedReasonSchema } from '../schemas/verdict.js';
 
@@ -108,10 +110,14 @@ export type GraphFinding = z.infer<typeof GraphFindingSchema>;
  * the discovery-spike output shape. `resources` entries are validated
  * individually by the graph — invalid entries become `INVALID_RESOURCE`
  * findings instead of aborting the run (fail visible, never crash).
+ *
+ * Since GPP/3 (ADR 0003 D6) every contribution also carries
+ * `classificationSignals` — the GPP/2 discovery shape is rejected
+ * fail-closed with an actionable diagnostic naming the missing field.
  */
 export const DetectorOutputSchema = z
   .strictObject({
-    /** Plugin id pinned at the GPP/2 handshake (or in-process loader). */
+    /** Plugin id pinned at the GPP/3 handshake (or in-process loader). */
     detectorId: z.string().min(1),
     /** Plugin version pinned at the handshake. */
     detectorVersion: z.string().min(1),
@@ -121,27 +127,41 @@ export const DetectorOutputSchema = z
     unresolved: z.array(UnresolvedReasonSchema),
     /** Non-resource observations (duplicates, ambiguities). */
     findings: z.array(FindingSchema),
+    /**
+     * Classification-signal facts (ADR 0003 D1) for the discovered
+     * resources. Detectors that cannot emit signals contribute an empty
+     * array — conservative defaults classify their resources.
+     */
+    classificationSignals: z.array(ClassificationSignalSchema),
+    /**
+     * Repo-root-relative files the detector actually examined
+     * successfully (coverage evidence, ADR 0003 D4). Optional: a
+     * contribution that omits it leaves the complete-scan attestation
+     * unknown, which fails closed.
+     */
+    scannedPaths: z.array(z.string().min(1)).optional(),
   });
 
 /** Inferred detector-contribution shape. */
 export type DetectorOutput = z.infer<typeof DetectorOutputSchema>;
 
 /**
- * Everything the graph ingests: one or more detector contributions,
- * the declarative classifications file (validated fail-closed at build
- * time via `ClassificationFileSchema`), and the artifact populations
- * stale-reference validation watches (invariant 9 / GF-06).
+ * Everything the graph ingests: one or more detector contributions and
+ * the artifact populations stale-reference validation watches
+ * (invariant 9 / GF-06). Since the automatic-classification cutover
+ * (plan phase 5, ADR 0003 D5) the graph binds NO business meaning —
+ * business meaning comes only from the deterministic classifier
+ * (`runClassification`) over detector signals; the manual
+ * classifications document no longer exists.
  *
- * `classifications`, `claims`, and `waivers` are deliberately typed
- * `unknown`-tolerant: the graph validates each entry individually and
- * converts invalid ones into `INVALID_CLAIM`/`INVALID_WAIVER` findings
- * instead of aborting the run (fail visible, never crash).
+ * `claims` and `waivers` are deliberately typed `unknown`-tolerant: the
+ * graph validates each entry individually and converts invalid ones
+ * into `INVALID_CLAIM`/`INVALID_WAIVER` findings instead of aborting
+ * the run (fail visible, never crash).
  */
 export interface ResourceGraphInput {
   /** Detector contributions; ≥1. */
   detectors: DetectorOutput[];
-  /** `.gateforge` classifications document (keys: names or plane-qualified ids). */
-  classifications?: unknown;
   /** Claims to watch for stale references (obligation ids). */
   claims?: unknown[];
   /** Adapter file names or paths (`.gateforge/adapters/<resourceId>.mjs`). */
@@ -176,6 +196,16 @@ export const GraphResourceSchema = z
     exposure: ExposureSchema.nullable(),
     /** Bound classification entry, or `null` while unclassified. */
     classification: ClassificationSchema.nullable(),
+    /**
+     * Explainability provenance of an automatically classified resource
+     * (ADR 0003 D1): decision fingerprint, contributing signal ids,
+     * rules, defaults, contradictions. Sibling metadata — NEVER
+     * smuggled into detector attributes, never authoritative input.
+     * `null` while the resource is unclassified or the classifier has
+     * not produced a decision for it (manual classifications carry no
+     * trace).
+     */
+    classificationTrace: ClassificationDecisionTraceSchema.nullable(),
     /** Detector provenance (handshake-pinned id + version). */
     detector: z.strictObject({ id: z.string().min(1), version: z.string().min(1) }),
     /** Detector-specific attributes, open payload. */
@@ -200,20 +230,15 @@ export const GraphUnresolvedSchema = z
 export type GraphUnresolved = z.infer<typeof GraphUnresolvedSchema>;
 
 /** Artifact kinds stale-reference validation watches (invariant 9). */
-export const StaleReferenceKindSchema = z.enum([
-  'classification',
-  'claim',
-  'adapter',
-  'waiver',
-]);
+export const StaleReferenceKindSchema = z.enum(['claim', 'adapter', 'waiver']);
 
 /** Inferred stale-reference-kind shape. */
 export type StaleReferenceKind = z.infer<typeof StaleReferenceKindSchema>;
 
 /**
  * A reference to a resource that no longer exists. `reference` is the
- * stale pointer itself: a classification key, an obligation id, an
- * adapter name, or a waiver-scoped resource id.
+ * stale pointer itself: an obligation id, an adapter name, or a
+ * waiver-scoped resource id.
  */
 export const StaleReferenceSchema = z
   .strictObject({

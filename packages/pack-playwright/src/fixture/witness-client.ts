@@ -10,6 +10,8 @@ import {
 import type {
   PersistenceRequest,
   PersistenceResponse,
+  PreObservationRequest,
+  PreObservationResponse,
   RecordsRequest,
   RecordsResponse,
 } from '../witness/types.js';
@@ -86,6 +88,16 @@ export class WitnessClient {
   async postRecords(request: RecordsRequest): Promise<RecordsResponse> {
     const body = await this.request<RecordsResponse>('/records', request);
     return body;
+  }
+
+  /**
+   * POST /witness/pre-observation (audit round 4): engine-side id-set
+   * snapshot BEFORE a claimed create; pass the returned
+   * `observationId` to `verifyPersistence` so the issued record carries
+   * `before: {entityAbsent}`.
+   */
+  async preObserve(request: PreObservationRequest): Promise<PreObservationResponse> {
+    return this.request<PreObservationResponse>('/witness/pre-observation', request);
   }
 
   /** POST /witness/persistence (pin #7 + testId/claimId binding extension). */

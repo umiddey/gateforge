@@ -22,7 +22,7 @@ const LIFECYCLE = {
   read: true,
   update: true,
   delete: true,
-  deleteSemantics: 'archive',
+  deleteSemantics: 'archive', archiveFields: { status: 'archived' },
 } as const;
 
 function makeObligation(resourceId: string, contract = 'crud:update'): Obligation {
@@ -106,7 +106,11 @@ describe('renderRun — json format', () => {
       satisfied: 1,
       missing: 1,
       waived: 1,
-      blocking: 1,
+      // The blocking total covers BOTH sources of red: the blocking
+      // verdict AND the blocking entry (audit remediation: a
+      // finding/stale entry must never coexist with "0 blocking").
+      blocking: 2,
+      blockingEntries: 1,
     });
     expect(report.waiverCounts).toEqual(WDIOR_COUNTS);
     expect(report.blocking).toEqual(BLOCKING);
@@ -203,6 +207,45 @@ describe('renderRun — SARIF 2.1.0 projection (pin #10)', () => {
     expect(suppression?.status).toBe('accepted');
     expect(suppression?.justification).toContain('team-audit');
   });
+
+  it('projects blocking entries as error-level tool-execution notifications (audit remediation)', () => {
+    const withBlocking = JSON.parse(
+      renderRun([entry(accounts, 'waived')], {
+        format: 'sarif',
+        blocking: [
+          {
+            kind: 'finding',
+            resourceId: null,
+            name: null,
+            detail: 'PARSE_ERROR: failed to read src/broken.py: EACCES (detector d)',
+            location: { file: 'src/broken.py', line: 1, col: 0 },
+          },
+          {
+            kind: 'stale-reference',
+            resourceId: null,
+            name: null,
+            detail: "stale classification reference 'tenant.ghosts': gone",
+            location: null,
+          },
+        ],
+      }),
+    ) as {
+      runs: Array<{
+        invocations?: Array<{
+          toolExecutionNotifications?: Array<{
+            level: string;
+            message: { text: string };
+            properties: Record<string, unknown>;
+          }>;
+        }>;
+      }>;
+    };
+    const notifications = withBlocking.runs[0]?.invocations?.[0]?.toolExecutionNotifications;
+    expect(notifications).toHaveLength(2);
+    expect(notifications?.every((notification) => notification.level === 'error')).toBe(true);
+    expect(notifications?.[0]?.message.text).toContain('PARSE_ERROR');
+    expect(notifications?.[1]?.properties).toMatchObject({ kind: 'stale-reference' });
+  });
 });
 
 describe('renderRun — text trace (invariant 8)', () => {
@@ -227,7 +270,7 @@ describe('renderRun — text trace (invariant 8)', () => {
   it('lists blocking entries and consulted record ids', () => {
     const verdicts = [entry(accounts, 'invalid', { recordIds: ['b'.repeat(64)] })];
     const text = renderRun(verdicts, { format: 'text', blocking: BLOCKING });
-    expect(text).toContain('blocking entries (unclassified/unresolved):');
+    expect(text).toContain('blocking entries (unclassified/unresolved/findings/stale references):');
     expect(text).toContain('[unclassified] tenant.widgets — no classification entry');
     expect(text).toContain(`records: ${'b'.repeat(64)}`);
     expect(text).toContain('exit code: 1');

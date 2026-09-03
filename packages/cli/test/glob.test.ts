@@ -2,7 +2,7 @@
  * Repo path expansion (project.paths include/exclude): determinism,
  * files-only, always-skip directories, exclude precedence.
  */
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -70,6 +70,26 @@ describe('expandIncludePaths', () => {
     try {
       expect(expandIncludePaths(['missing/**'], [], root)).toEqual([]);
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+describe('expandIncludePaths fail-closed coverage (red-team F3)', () => {
+  it('collects unreadable directories instead of silently dropping them', () => {
+    const root = tree({ 'src/a.txt': '' });
+    const hidden = join(root, 'src', 'guarded');
+    mkdirSync(hidden, { recursive: true });
+    writeFileSync(join(hidden, 'secret.txt'), 'x');
+    chmodSync(hidden, 0o000);
+    try {
+      const errors: Array<{ path: string; detail: string }> = [];
+      const files = expandIncludePaths(['src/**/*.txt'], [], root, errors);
+      expect(files).toEqual(['src/a.txt']);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.path).toBe('src/guarded');
+      expect(errors[0]?.detail).toContain('could not read directory');
+    } finally {
+      chmodSync(hidden, 0o755);
       rmSync(root, { recursive: true, force: true });
     }
   });

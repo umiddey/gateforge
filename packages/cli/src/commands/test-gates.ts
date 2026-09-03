@@ -24,7 +24,7 @@
  * to be clean — a broken run must never report success.
  */
 import { spawnSync } from 'node:child_process';
-import { renderRun, runExitCode, type RunManifest } from '@gateforge/core';
+import { renderRun, runExitCode, verifyLedgerMac, type RunManifest } from '@gateforge/core';
 import { parseArgs, stringFlag } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
@@ -33,16 +33,18 @@ import { runPipeline } from '../pipeline.js';
 import {
   resolveStateDir,
   stateObligations,
+  writeClassificationsView,
   writeEnv,
   writeManifest,
   writeObligations,
   writeReport,
 } from '../state.js';
-import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERSION } from './common.js';
+import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--suite <command>] [--out <dir>] ' +
-  '[--format text|json|sarif] [--witness-url <url>] [--run-token <token>]';
+  '[--format text|json|sarif] [--witness-url <url>] [--run-token <token>] ' +
+  '(verifier key via GATEFORGE_WITNESS_VERIFIER_KEY env)';
 
 /**
  * Runs the test-gates subcommand.
@@ -75,6 +77,12 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
   // already holds its own token; the CLI must adopt it or every
   // fixture call answers 401 (x-gateforge-run mismatch).
   const runToken = stringFlag(options, 'run-token');
+  // Verifier key for the attestation surface (GF-23, audit round 3):
+  // read from the environment — never argv, whose /proc cmdline is
+  // world-readable. Shared by the orchestrator with the witness and
+  // this CLI, never with the suite; without it no suite-writable
+  // artifact can prove issuance and the gate fails closed.
+  const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
 
   const config = loadConfigAt(io.cwd);
   const stateDir = resolveStateDir(io.cwd, out);
@@ -101,6 +109,9 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
 
   writeManifest(stateDir, manifest);
   writeObligations(stateDir, stateObligations(pipeline.policy.obligations, pipeline.graph));
+  // The effective-classification view (plan phase 5): derived from this
+  // run's signals, for verifier-side consumers only — never engine input.
+  writeClassificationsView(stateDir, pipeline.classificationsView);
   const envRecord = writeEnv(stateDir, manifest, witnessUrl ?? null, runToken);
 
   let suiteFailed = false;
@@ -116,7 +127,9 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
     }
     const result = spawnSync('sh', ['-c', suite], {
       cwd: io.cwd,
-      env: { ...io.env, ...suiteEnv },
+      // The verifier key must NEVER reach the suite: strip it from the
+      // ambient env the child inherits (audit round 3).
+      env: { ...io.env, [VERIFIER_KEY_ENV]: undefined, ...suiteEnv },
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     });
@@ -144,6 +157,12 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
     stateDir,
     now: pipeline.now,
     changedFiles: null,
+    witnessVerifierKey,
+    witnessAttestation: await fetchWitnessLedgerAttestation(
+      witnessUrl,
+      runToken,
+      witnessVerifierKey,
+    ),
   });
 
   const report = renderRun(evaluated.verdicts, {
@@ -168,6 +187,70 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
 
   const gateCode = runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
   return suiteFailed && gateCode === 0 ? 1 : gateCode;
+}
+
+/**
+ * Fetches the live ledger attestation from a still-running wired witness
+ * (pin #7, GF-23). A wired witness appends its ids to the run manifest
+ * only at its own shutdown — which typically happens AFTER `test-gates`
+ * evaluates — so while it is up, the verifier-authenticated
+ * `GET /ledger-attestation` response is the issuance attestation of
+ * record. The response is MAC-verified here, and the gate verifies
+ * again at evaluation; a response that fails either check contributes
+ * no trust. Best-effort: any failure (already stopped, unreachable,
+ * wrong key, malformed body) yields null and the MAC-verified manifest
+ * append remains the sole durable channel; with neither, witnessed
+ * records demote to claimed-tier (fail closed — the suite-writable
+ * manifest alone never proves issuance).
+ *
+ * Args:
+ *   witnessUrl: the wired witness base URL, when provided.
+ *   runToken: the witness's run token (outer auth gate), when provided.
+ *   verifierKey: the witness verifier key (attestation auth), when provided.
+ *
+ * Returns:
+ *   {runId, recordIds, mac} | null: the attestation, or null when
+ *   unavailable or unverified.
+ */
+async function fetchWitnessLedgerAttestation(
+  witnessUrl: string | undefined,
+  runToken: string | undefined,
+  verifierKey: string | undefined,
+): Promise<{ runId: string; recordIds: string[]; mac: string } | null> {
+  if (witnessUrl === undefined || runToken === undefined || verifierKey === undefined) {
+    return null;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const response = await fetch(`${witnessUrl}/ledger-attestation`, {
+      headers: { 'x-gateforge-run': runToken, 'x-gateforge-verifier': verifierKey, accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as {
+      runId?: unknown;
+      recordIds?: unknown;
+      mac?: unknown;
+    };
+    if (
+      typeof body.runId !== 'string' ||
+      body.runId.length === 0 ||
+      !Array.isArray(body.recordIds) ||
+      !body.recordIds.every((id) => typeof id === 'string') ||
+      typeof body.mac !== 'string'
+    ) {
+      return null;
+    }
+    const recordIds = body.recordIds as string[];
+    // Verify before handing it to the gate; the gate re-verifies.
+    if (!verifyLedgerMac(verifierKey, body.runId, recordIds, body.mac)) return null;
+    return { runId: body.runId, recordIds, mac: body.mac };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

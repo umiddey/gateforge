@@ -2,7 +2,7 @@
  * @gateforge/pack-sqlalchemy — SQLAlchemy CRUD discovery pack.
  *
  * Detects SQLAlchemy tables from Python source (AST only, stdlib, no
- * imports/execution) and exposes the pinned GPP/2 discovery vocabulary
+ * imports/execution) and exposes the pinned GPP/3 discovery vocabulary
  * of the resource graph: business `sqlalchemy.table` resources,
  * `gateforge.class` symbol resources for cross-module inheritance
  * resolution, typed `unresolved` entries for computed names (GF-21),
@@ -32,8 +32,6 @@ export {
 export {
   NO_PLANE_MAPPING,
   byTableName,
-  fromClassificationsDocument,
-  planeRuleFromProjectConfig,
   type PlaneContext,
   type PlaneRule,
   type SqlalchemyPlane,

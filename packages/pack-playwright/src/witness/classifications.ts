@@ -30,6 +30,8 @@ export interface ClassificationView {
     update: boolean;
     delete: boolean;
     deleteSemantics?: 'hard' | 'archive';
+    archiveFields?: Record<string, string | number | boolean>;
+    updateableFields?: string[];
   };
 }
 
@@ -97,6 +99,12 @@ export function toClassificationView(entry: Classification): ClassificationView 
       ...(entry.lifecycle.deleteSemantics === undefined
         ? {}
         : { deleteSemantics: entry.lifecycle.deleteSemantics }),
+      ...(entry.lifecycle.archiveFields === undefined
+        ? {}
+        : { archiveFields: entry.lifecycle.archiveFields }),
+      ...(entry.lifecycle.updateableFields === undefined
+        ? {}
+        : { updateableFields: [...entry.lifecycle.updateableFields] }),
     },
   };
 }

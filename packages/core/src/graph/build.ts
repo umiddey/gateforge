@@ -12,17 +12,15 @@
  * Normalization rules (ADR 0001):
  * - D5.3: resource id = plane-qualified `plane.name`; `source` paths
  *   are repo-root-relative (posix, no `./`, no escape).
- * - Plane resolution per resource: its classification entry's `plane`
- *   (looked up by exact bare-name key, then by a unique
- *   `<plane>.<name>` key), falling back to a valid `attributes.plane`
- *   from the detector. Resources with neither stay id-less and are
- *   reported unclassified downstream — never dropped.
- * - Invariant 9 / GF-06: classifications, claims, adapter files, and
- *   waivers pointing at removed/renamed resources surface as typed
- *   `stale` entries.
+ * - Plane resolution per resource: a valid `attributes.plane` from the
+ *   detector. Resources with none stay id-less here; the deterministic
+ *   classifier (`runClassification`, plan phase 5) resolves planes from
+ *   classification signals and binds the effective classification —
+ *   the manual classifications document no longer exists (ADR 0003 D5).
+ * - Invariant 9 / GF-06: claims, adapter files, and waivers pointing at
+ *   removed/renamed resources surface as typed `stale` entries.
  */
 import { z } from 'zod';
-import { ClassificationFileSchema, type Classification } from '../schemas/classification.js';
 import { ClaimSchema } from '../schemas/claim.js';
 import { LocationSchema, type Location, type Plane } from '../schemas/common.js';
 import { ResourceSchema, type Resource } from '../schemas/resource.js';
@@ -42,16 +40,13 @@ const RESOURCE_NAME_PATTERN = /^[^.]+$/;
  * rules; see `ResourceGraphSchema` for the output shape.
  *
  * Args:
- *   input: detector contributions, classifications document, and the
- *     claim/adapter/waiver populations to watch for staleness.
+ *   input: detector contributions and the claim/adapter/waiver
+ *     populations to watch for staleness.
  *
  * Returns:
  *   ResourceGraph: normalized, sorted, byte-for-byte deterministic.
- * @throws z.ZodError when the classifications document is invalid —
- *   classification config fails closed (ADR 0001 D5.1).
  */
 export function buildResourceGraph(input: ResourceGraphInput): ResourceGraph {
-  const classifications = parseClassifications(input.classifications);
   const findings: GraphFinding[] = [];
   const symbolTable = buildSymbolTable(input.detectors, findings);
 
@@ -60,12 +55,11 @@ export function buildResourceGraph(input: ResourceGraphInput): ResourceGraph {
   const declaredNames = new Set<string>();
 
   for (const detector of input.detectors) {
-    ingestDetector(detector, symbolTable, classifications, resources, unresolved, declaredNames, findings);
+    ingestDetector(detector, symbolTable, resources, unresolved, declaredNames, findings);
   }
 
   const stale = collectStaleReferences(
     input,
-    classifications,
     resources,
     declaredNames,
     idLessNames(resources, declaredNames),
@@ -99,15 +93,9 @@ function idLessNames(resources: GraphResource[], declaredNames: Set<string>): Se
   return idLess;
 }
 
-function parseClassifications(raw: unknown): Record<string, Classification> {
-  if (raw === undefined) return {};
-  return ClassificationFileSchema.parse(raw).resources;
-}
-
 function ingestDetector(
   detector: DetectorOutput,
   symbolTable: SymbolTable,
-  classifications: Record<string, Classification>,
   resources: GraphResource[],
   unresolved: GraphUnresolved[],
   declaredNames: Set<string>,
@@ -151,7 +139,6 @@ function ingestDetector(
         },
       },
       detector,
-      classifications,
       declaredNames,
       resources,
       unresolved,
@@ -194,7 +181,6 @@ function ingestDetector(
         attributes: resource.attributes,
       },
       detector,
-      classifications,
       declaredNames,
       resources,
       unresolved,
@@ -239,7 +225,6 @@ interface EntrySeed {
 function emitEntry(
   seed: EntrySeed,
   detector: DetectorOutput,
-  classifications: Record<string, Classification>,
   declaredNames: Set<string>,
   resources: GraphResource[],
   unresolved: GraphUnresolved[],
@@ -267,74 +252,31 @@ function emitEntry(
     return;
   }
 
-  const bound = bindClassification(seed.name, seed.location, seed.attributes, classifications, findings);
+  // Business meaning is bound ONLY by the deterministic classifier
+  // (`runClassification`, ADR 0003 D5) over detector signals. Here the
+  // graph binds detector plane evidence alone: a lone valid
+  // `attributes.plane` qualifies the identity; resources without any
+  // plane evidence stay id-less until the classifier resolves one
+  // (never guessed across tenant/master/global).
+  const attributePlane = seed.attributes['plane'];
+  const attributePlaneValid =
+    attributePlane === 'tenant' || attributePlane === 'master' || attributePlane === 'global';
   resources.push({
     schemaVersion: 1,
-    id: bound === null ? null : `${bound.plane}.${seed.name}`,
+    id: attributePlaneValid ? `${String(attributePlane)}.${seed.name}` : null,
     name: seed.name,
-    plane: bound?.plane ?? null,
+    plane: attributePlaneValid ? (attributePlane as Plane) : null,
     kind: seed.kind,
     source: path.path,
     location: seed.location,
-    exposure: bound?.classification?.exposure ?? null,
-    classification: bound?.classification ?? null,
+    exposure: null,
+    classification: null,
+    // The classifier stamps this sibling field when it decides; the
+    // graph itself never asserts business meaning.
+    classificationTrace: null,
     detector: { id: detector.detectorId, version: detector.detectorVersion },
     attributes: seed.attributes,
   });
-}
-
-/**
- * Resolves a resource's plane and classification entry. Lookup order:
- * exact bare-name key; then `<plane>.<name>` suffix keys — unique wins,
- * and when several planes classify the same name (the reason ids are
- * plane-qualified at all) a valid detector-emitted `attributes.plane`
- * disambiguates, otherwise `AMBIGUOUS_CLASSIFICATION_KEY`; finally a
- * lone valid `attributes.plane` binds identity only (classification
- * stays `null` — business meaning still unclassified). Returns `null`
- * when no plane can be derived at all.
- */
-function bindClassification(
-  name: string,
-  location: Location,
-  attributes: Record<string, unknown>,
-  classifications: Record<string, Classification>,
-  findings: GraphFinding[],
-): { plane: Plane; classification: Classification | null } | null {
-  const exact = classifications[name];
-  if (exact !== undefined) return { plane: exact.plane, classification: exact };
-
-  const suffix = `.${name}`;
-  const matchingKeys = Object.keys(classifications)
-    .sort(compareStrings)
-    .filter((key) => key.endsWith(suffix));
-  const attributePlane = attributes['plane'];
-  const attributePlaneValid =
-    attributePlane === 'tenant' || attributePlane === 'master' || attributePlane === 'global';
-
-  if (matchingKeys.length > 1) {
-    if (attributePlaneValid) {
-      const byPlane = classifications[`${String(attributePlane)}.${name}`];
-      if (byPlane !== undefined) return { plane: byPlane.plane, classification: byPlane };
-    }
-    findings.push({
-      code: 'AMBIGUOUS_CLASSIFICATION_KEY',
-      detail: `resource name '${name}' matches ${matchingKeys.length} classification keys (${matchingKeys.join(', ')}); no plane can be derived`,
-      locations: [location],
-      detectorId: GRAPH_DETECTOR_ID,
-    });
-    return null;
-  }
-  if (matchingKeys.length === 1) {
-    const classification = classifications[matchingKeys[0] as string];
-    if (classification !== undefined) {
-      return { plane: classification.plane, classification };
-    }
-  }
-
-  if (attributePlaneValid) {
-    return { plane: attributePlane, classification: null };
-  }
-  return null;
 }
 /** Result of source-path normalization. */
 type NormalizedPath = { ok: true; path: string } | { ok: false; error: string };
@@ -423,9 +365,6 @@ function detectDuplicateIds(resources: GraphResource[]): GraphFinding[] {
  * Stale-reference validation (invariant 9 / GF-06): every watched
  * artifact still pointing at a removed/renamed resource is reported.
  * Matching rules:
- * - classification keys match via the lookup convention (bare name, or
- *   a `<plane>.<name>` key over declared bare names) — a key matching
- *   no declared name is stale;
  * - claims, adapters, and waivers reference FINAL plane-qualified ids
  *   and match strictly — a plane change or rename is exactly the
  *   rename invariant 9 exists to catch. A reference also binds when
@@ -435,7 +374,6 @@ function detectDuplicateIds(resources: GraphResource[]): GraphFinding[] {
  */
 function collectStaleReferences(
   input: ResourceGraphInput,
-  classifications: Record<string, Classification>,
   resources: GraphResource[],
   declaredNames: Set<string>,
   idLessNames: Set<string>,
@@ -453,23 +391,6 @@ function collectStaleReferences(
     }
     return false;
   };
-
-  for (const key of Object.keys(classifications).sort(compareStrings)) {
-    let binds = false;
-    for (const name of declaredNames) {
-      if (key === name || key.endsWith(`.${name}`)) {
-        binds = true;
-        break;
-      }
-    }
-    if (!binds) {
-      stale.push({
-        kind: 'classification',
-        reference: key,
-        detail: `classification '${key}' references no declared resource; the resource was removed or renamed`,
-      });
-    }
-  }
 
   if (input.claims !== undefined) {
     for (const raw of input.claims) {

@@ -7,7 +7,7 @@
  */
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { ResourceSchema } from '@gateforge/core';
+import { ClassificationSignalSchema, ResourceSchema } from '@gateforge/core';
 import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
 import { createWebhookDetector } from '../src/index.js';
 
@@ -97,6 +97,19 @@ describe('pack-webhook detector: determinism + cleanup', () => {
     for (const r of outcome.resources) {
       const result = ResourceSchema.safeParse(r);
       expect(result.success).toBe(true);
+    }
+  });
+});
+describe('webhook detector — classification signals (plan phase 4)', () => {
+  it('emits one code-positive exposure signal per endpoint, path-derived', () => {
+    const outcome = createWebhookDetector({ root: FIXTURE_ROOT }).discover([FIXTURE_ROOT]);
+    expect(outcome.classificationSignals.length).toBeGreaterThan(0);
+    for (const signal of outcome.classificationSignals) {
+      expect(signal.dimension).toBe('exposure');
+      expect(signal.assertion).toBe('webhook');
+      expect(signal.basis).toBe('code-positive');
+      expect(signal.target.resourceName).toBeTruthy();
+      expect(ClassificationSignalSchema.safeParse(signal).success).toBe(true);
     }
   });
 });

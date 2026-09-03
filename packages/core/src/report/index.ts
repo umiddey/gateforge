@@ -21,6 +21,7 @@
 import { canonicalJson, type JsonValue } from '../canonical-json.js';
 import { fingerprint } from '../fingerprints.js';
 import { compareStrings } from '../graph/util.js';
+import type { ClassificationDecisionTrace } from '../classifier/schema.js';
 import type { BlockingEntry } from '../policy/index.js';
 import type { RunManifest } from '../schemas/run-manifest.js';
 import type { Verdict } from '../schemas/verdict.js';
@@ -46,7 +47,7 @@ export interface WaiverCounts {
 export interface RenderRunOptions {
   /** Output format. */
   format: 'json' | 'sarif' | 'text';
-  /** Unclassified/unresolved blocking entries (invariants 1, 8). */
+  /** Blocking entries (unclassified/unresolved/findings/stale references). */
   blocking?: readonly BlockingEntry[];
   /** Waiver-population counts; included in json/text when provided. */
   waiverCounts?: WaiverCounts;
@@ -54,6 +55,13 @@ export interface RenderRunOptions {
   run?: RunManifest;
   /** Tool version stamped into SARIF `tool.driver.version`. */
   toolVersion?: string;
+  /**
+   * Classification decision provenance per resource id (ADR 0003):
+   * decision fingerprint + rule trace, included in json/SARIF/text when
+   * provided. Report-visible so any signal change (and hence any
+   * fingerprint change) is auditable — never authoritative input.
+   */
+  classificationTraces?: Record<string, ClassificationDecisionTrace>;
 }
 
 /** A run's exit code (architecture contract 4). */
@@ -142,13 +150,22 @@ function jsonReport(
   blocking: readonly BlockingEntry[],
 ): Record<string, unknown> {
   const counts = summarize(entries);
+  // The blocking total covers BOTH sources of red: blocking verdicts and
+  // policy blocking entries (findings/stale references block the gate
+  // too — undercounting them would show "0 blocking" next to exit 1).
   const blockingCount =
-    counts.missing + counts.invalid + counts.unclassified + counts.unresolved + counts.stale;
+    counts.missing +
+    counts.invalid +
+    counts.unclassified +
+    counts.unresolved +
+    counts.stale +
+    blocking.length;
   const report: Record<string, unknown> = {
     schemaVersion: 1,
     summary: {
       obligations: entries.length,
       blocking: blockingCount,
+      blockingEntries: blocking.length,
       ...counts,
     },
     verdicts: entries.map((entry) => {
@@ -181,6 +198,10 @@ function jsonReport(
   if (options.waiverCounts !== undefined) {
     report['waiverCounts'] = options.waiverCounts;
   }
+  if (options.classificationTraces !== undefined) {
+    // Canonical JSON sorts keys, so insertion order is irrelevant.
+    report['classifications'] = options.classificationTraces;
+  }
   return report;
 }
 
@@ -210,6 +231,14 @@ function sarifReport(
         contract: entry.obligation.contract,
         verdict: entry.verdict,
         trustTier: entry.trustTier,
+        ...(options.classificationTraces?.[entry.obligation.resourceId] !== undefined
+          ? {
+              classificationFingerprint:
+                options.classificationTraces[entry.obligation.resourceId]?.decisionFingerprint,
+              classificationRules:
+                options.classificationTraces[entry.obligation.resourceId]?.rules,
+            }
+          : {}),
       },
       partialFingerprints: {
         gateforgeFingerprint: fingerprint({
@@ -243,6 +272,25 @@ function sarifReport(
             rules: ruleIds.map((ruleId) => ({ ruleId })),
           },
         },
+        // Blocking policy entries (unclassified/unresolved resources,
+        // detector findings, stale references) are not obligation
+        // verdicts, so they surface as tool-execution notifications
+        // (SARIF 2.1.0 §3.20) instead of results — visible, error-level,
+        // never silently omitted from the projection.
+        invocations: [
+          {
+            toolExecutionNotifications: (options.blocking ?? []).map((entry) => ({
+              level: 'error' as const,
+              message: {
+                text: `[${entry.kind}] ${entry.resourceId ?? entry.name ?? '<unnamed>'} — ${entry.detail}`,
+              },
+              properties: {
+                kind: entry.kind,
+                ...(entry.location !== null ? { location: entry.location } : {}),
+              },
+            })),
+          },
+        ],
         results,
       },
     ],
@@ -258,7 +306,12 @@ function textReport(
   const lines: string[] = [];
   const counts = summarize(entries);
   const blockingCount =
-    counts.missing + counts.invalid + counts.unclassified + counts.unresolved + counts.stale;
+    counts.missing +
+    counts.invalid +
+    counts.unclassified +
+    counts.unresolved +
+    counts.stale +
+    blocking.length;
   lines.push(
     `gateforge run: ${entries.length} obligation(s) — ` +
       `${counts.satisfied} satisfied, ${counts.waived} waived, ${blockingCount} blocking`,
@@ -294,10 +347,33 @@ function textReport(
   }
   if (blocking.length > 0) {
     lines.push('');
-    lines.push('blocking entries (unclassified/unresolved):');
+    lines.push('blocking entries (unclassified/unresolved/findings/stale references):');
     for (const entry of blocking) {
       const where = entry.location !== null ? ` at ${entry.location.file}:${entry.location.line}` : '';
       lines.push(`  [${entry.kind}] ${entry.resourceId ?? entry.name ?? '<unnamed>'} — ${entry.detail}${where}`);
+    }
+  }
+  if (options.classificationTraces !== undefined) {
+    const ids = Object.keys(options.classificationTraces).sort(compareStrings);
+    if (ids.length > 0) {
+      lines.push('');
+      lines.push('classification decisions (automatic, conservative — ADR 0003):');
+      for (const id of ids) {
+        const trace = options.classificationTraces[id];
+        if (trace === undefined) continue;
+        lines.push(`  ${id}`);
+        lines.push(`    decision fingerprint: ${trace.decisionFingerprint}`);
+        lines.push(`    rules: ${trace.rules.join(', ')}`);
+        if (trace.defaultsApplied.length > 0) {
+          lines.push(`    defaults applied: ${trace.defaultsApplied.join(', ')}`);
+        }
+        lines.push(`    contributing signals: ${trace.contributingSignalIds.length}`);
+        if (trace.contradictions.length > 0) {
+          for (const contradiction of trace.contradictions) {
+            lines.push(`    contradiction [${contradiction.dimension}]: ${contradiction.detail}`);
+          }
+        }
+      }
     }
   }
   lines.push('');

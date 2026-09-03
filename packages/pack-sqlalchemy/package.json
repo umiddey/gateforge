@@ -2,7 +2,7 @@
   "name": "@gateforge/pack-sqlalchemy",
   "version": "0.1.0",
   "private": true,
-  "description": "SQLAlchemy CRUD discovery pack: AST-only python detector (GPP/2), in-process TS discover entry, configurable plane mapping, entity-adapter schema.",
+  "description": "SQLAlchemy CRUD discovery pack: AST-only python detector (GPP/3), in-process TS discover entry, configurable plane mapping, entity-adapter schema.",
   "type": "module",
   "engines": {
     "node": ">=20"

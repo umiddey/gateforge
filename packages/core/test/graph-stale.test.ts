@@ -1,9 +1,10 @@
 /**
  * Stale-reference tests (G2, GF-06 + invariant 9): removed/renamed
- * resources must surface as typed `stale` entries across
- * classifications, claims, adapter files, and waivers — never silent
- * disappearance. Sorted output order is by (kind, reference):
- * adapter < claim < classification < waiver.
+ * resources must surface as typed `stale` entries across claims, adapter
+ * files, and waivers — never silent disappearance. (The manual
+ * classifications document no longer exists — plan phase 5 cutover — so
+ * classification keys are no longer a watched artifact.) Sorted output
+ * order is by (kind, reference): adapter < claim < waiver.
  */
 import { describe, expect, it } from 'vitest';
 import { buildResourceGraph, fingerprint, type DetectorOutput, type Resource, type Waiver } from '../src/index.js';
@@ -29,6 +30,7 @@ function detector(resources: Resource[]): DetectorOutput {
     resources,
     unresolved: [],
     findings: [],
+    classificationSignals: [],
   };
 }
 
@@ -37,21 +39,8 @@ const ACCOUNTS_LIFECYCLE = {
   read: true,
   update: true,
   delete: true,
-  deleteSemantics: 'archive',
+  deleteSemantics: 'archive', archiveFields: { status: 'archived' },
 } as const;
-
-const CLASSIFICATIONS = {
-  schemaVersion: 1,
-  resources: {
-    'tenant.accounts': {
-      exposure: 'user-facing',
-      plane: 'tenant',
-      lifecycle: ACCOUNTS_LIFECYCLE,
-      primaryKey: ['id'],
-      evidenceAdapter: 'tenant.accounts',
-    },
-  },
-};
 
 const CLAIM = {
   schemaVersion: 1,
@@ -82,7 +71,6 @@ describe('stale-reference validation (GF-06)', () => {
   it('reports nothing stale while every reference binds', () => {
     const graph = buildResourceGraph({
       detectors: [detector([accountsResource()])],
-      classifications: CLASSIFICATIONS,
       claims: [CLAIM],
       adapters: ['tenant.accounts.mjs'],
       waivers: [WAIVER],
@@ -90,11 +78,10 @@ describe('stale-reference validation (GF-06)', () => {
     expect(graph.stale).toEqual([]);
   });
 
-  it('surfaces all four artifact kinds as stale after the resource is removed', () => {
+  it('surfaces every artifact kind as stale after the resource is removed', () => {
     // The declaration is gone; every artifact that pointed at it stays.
     const graph = buildResourceGraph({
       detectors: [detector([])],
-      classifications: CLASSIFICATIONS,
       claims: [CLAIM],
       adapters: ['.gateforge/adapters/tenant.accounts.mjs'],
       waivers: [WAIVER],
@@ -104,7 +91,6 @@ describe('stale-reference validation (GF-06)', () => {
     expect(graph.stale.map((s) => `${s.kind}:${s.reference}`)).toEqual([
       'adapter:tenant.accounts',
       'claim:tenant.accounts:crud:update',
-      'classification:tenant.accounts',
       'waiver:tenant.accounts',
     ]);
     expect(graph.stale.every((s) => s.detail.length > 0)).toBe(true);
@@ -115,13 +101,11 @@ describe('stale-reference validation (GF-06)', () => {
     renamed.attributes = { ...renamed.attributes, resourceName: 'tenants' };
     const graph = buildResourceGraph({
       detectors: [detector([renamed])],
-      classifications: CLASSIFICATIONS,
       claims: [CLAIM], // still points at tenant.accounts
       waivers: [WAIVER],
     });
     expect(graph.stale.map((s) => `${s.kind}:${s.reference}`)).toEqual([
       'claim:tenant.accounts:crud:update',
-      'classification:tenant.accounts',
       'waiver:tenant.accounts',
     ]);
   });
@@ -131,7 +115,6 @@ describe('stale-reference validation (GF-06)', () => {
     broken.source = '../outside/models.py'; // path-invalid, but declared
     const graph = buildResourceGraph({
       detectors: [detector([broken])],
-      classifications: CLASSIFICATIONS,
       claims: [CLAIM],
       adapters: ['tenant.accounts'],
     });

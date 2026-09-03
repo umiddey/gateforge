@@ -2,16 +2,19 @@
   "name": "@gateforge/pack-task",
   "version": "0.1.0",
   "private": true,
-  "description": "Background-task discovery pack: TS-only AST-light detector (GPP/2) for BullMQ / Bee-Queue / custom queues / message handlers / recurring jobs / @Task @Queue decorators, idempotency + retry-policy + terminal-on + observability contracts, audit-run entity-adapter schema.",
+  "description": "Background-task discovery pack: TS-only AST-light detector (GPP/3) for BullMQ / Bee-Queue / custom queues / message handlers / recurring jobs / @Task @Queue decorators, idempotency + retry-policy + terminal-on + observability contracts, audit-run entity-adapter schema.",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
+  "main": "./dist/index.js",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",

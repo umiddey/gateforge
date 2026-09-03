@@ -16,10 +16,11 @@
  * that silent inversion.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
 
@@ -54,11 +55,13 @@ async function awaitReady(child: ChildProcess): Promise<void> {
 }
 
 async function bootServer(): Promise<ServerHandle> {
-  mkdirSync(join(tmpdir(), `gateforge-workflow-adv-${process.pid}-${Math.random().toString(36).slice(2)}`), { recursive: true });
-  writeFileSync(join(EXAMPLE_DIR, 'audit.json'), '[]\n');
+  // A per-spec audit file: sharing one `audit.json` across specs raced
+  // unrelated specs' boot-time resets into each other's assertions.
+  const auditFile = join(tmpdir(), `gateforge-wf-audit-adv-${randomUUID().slice(0, 8)}.json`);
+  writeFileSync(auditFile, '[]\n');
   const port = 40000 + Math.floor(Math.random() * 5000);
   const child = spawn(process.execPath, [join(EXAMPLE_DIR, 'server.js')], {
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, PORT: String(port), AUDIT_FILE: auditFile },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   await awaitReady(child);
@@ -67,7 +70,7 @@ async function bootServer(): Promise<ServerHandle> {
     child,
     cleanup: () => {
       child.kill('SIGTERM');
-      rmSync(EXAMPLE_DIR + '/audit.json', { force: true });
+      rmSync(auditFile, { force: true });
     },
   };
 }
@@ -126,18 +129,27 @@ describe('fake-green #1: "transition rejected" claim that is actually wrong', ()
 
 describe('fake-green #2: "audit emitted" claim that is actually wrong', () => {
   it('REJECTS the fake-green: an invalid-jump attempt MUST NOT append an audit row', async () => {
-    const created = await httpJson('POST', '/contracts', { actor: 'trent', title: 'Bad-2' });
+    // The audit log is a file shared with every other spec driving this
+    // example server, so under parallel load unrelated rows race in.
+    // Scope the assertion to a UNIQUE actor: only rows minted by THIS
+    // test can legitimately appear for it (flake fix, audit round 5).
+    const actor = `trent-${randomUUID().slice(0, 8)}`;
+    const created = await httpJson('POST', '/contracts', { actor, title: 'Bad-2' });
     const contractId = ContractSchema.parse(created.body).id;
+    const rowsFor = (body: unknown): unknown[] =>
+      AuditBodySchema.parse(body).rows.filter(
+        (row) => (row as { actor?: unknown })['actor'] === actor,
+      );
     const before = await httpJson('GET', '/audit');
-    const beforeCount = AuditBodySchema.parse(before.body).rows.length;
+    const beforeCount = rowsFor(before.body).length;
 
     await httpJson('POST', `/contracts/${contractId}/transitions`, {
-      actor: 'trent',
+      actor,
       event: 'sign', // invalid: draft -> signed
     });
 
     const after = await httpJson('GET', '/audit');
-    const afterCount = AuditBodySchema.parse(after.body).rows.length;
+    const afterCount = rowsFor(after.body).length;
     // CORRECT: the audit log MUST NOT grow. The fake-green claim
     // would assert the log grew by one — that is wrong, and we
     // explicitly reject it.

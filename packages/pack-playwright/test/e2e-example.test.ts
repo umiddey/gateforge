@@ -52,12 +52,23 @@ import {
 import { startAttestationProxy } from '../src/attestation/proxy.js';
 import { startWitness } from '../src/witness/server.js';
 
-const LIFECYCLE = { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' as const };
+const LIFECYCLE = {
+	create: true,
+	read: true,
+	update: true,
+	delete: true,
+	deleteSemantics: 'archive' as const,
+	// Owner-declared archived state (audit round 5): graded by the engine
+	// against the witness's own observation, never suite expectations.
+	archiveFields: { status: 'archived' },
+	// Owner-declared update relevance (audit round 6).
+	updateableFields: ['first_name', 'last_name', 'status'],
+};
 const CLAIMS = {
-	create: 'tenant.accounts:crud:create',
-	read: 'tenant.accounts:crud:read',
-	update: 'tenant.accounts:crud:update',
-	delete: 'tenant.accounts:crud:delete',
+	create: 'tenant.accounts:persistence:create',
+	read: 'tenant.accounts:persistence:read',
+	update: 'tenant.accounts:persistence:update',
+	delete: 'tenant.accounts:persistence:delete',
 };
 
 /** Cleanup safety net (each scenario also disposes itself). */
@@ -90,12 +101,17 @@ async function scaffoldSuite(
 	const stateDir = join(project, '.gateforge/test-gates');
 	const token = randomUUID();
 	const runId = randomUUID();
+	// Attestation secret (GF-23): distinct from the run token. The run
+	// token reaches the SUITE env (it authorizes evidence submission);
+	// the verifier key stays with this scaffold and the CLI only.
+	const verifierKey = randomUUID();
 	const witness = await startWitness({
 		runId,
 		token,
+		verifierKey,
 		stateDir,
 		adaptersDir: join(project, '.gateforge/adapters'),
-		classificationsPath: join(project, '.gateforge/classifications.yml'),
+		classificationsPath: join(project, '.gateforge/effective-classifications.yml'),
 		targetBaseUrl: proxy.url,
 		targetFingerprint: FINGERPRINT,
 		adapterBaseUrl: proxy.url,
@@ -105,10 +121,10 @@ async function scaffoldSuite(
 	// during its own runs; scaffolds without the CLI need it for the
 	// reporter's per-claim ledger, e.g. the standalone scenario).
 	const obligations = [
-		{ id: CLAIMS.create, contract: 'crud:create' },
-		{ id: CLAIMS.read, contract: 'crud:read' },
-		{ id: CLAIMS.update, contract: 'crud:update' },
-		{ id: CLAIMS.delete, contract: 'crud:delete' },
+		{ id: CLAIMS.create, contract: 'persistence:create' },
+		{ id: CLAIMS.read, contract: 'persistence:read' },
+		{ id: CLAIMS.update, contract: 'persistence:update' },
+		{ id: CLAIMS.delete, contract: 'persistence:delete' },
 	].map((entry) => {
 		const [resourceId] = entry.id.split(':');
 		return {
@@ -158,7 +174,7 @@ async function scaffoldSuite(
 		await proxy.stop();
 		app.stop();
 	};
-	return { project, stateDir, proxyUrl: proxy.url, suiteCommand, witnessUrl: witness.url, token, runId, dispose };
+	return { project, stateDir, proxyUrl: proxy.url, suiteCommand, witnessUrl: witness.url, token, verifierKey, runId, dispose };
 }
 
 /**
@@ -169,11 +185,8 @@ async function scaffoldSuite(
  * every fixture call the suite makes.
  */
 async function runTestGates(
-	project: string,
-	stateDir: string,
+	scaffold: Awaited<ReturnType<typeof scaffoldSuite>>,
 	suiteCommand: string,
-	witnessUrl: string,
-	runToken: string,
 	env: NodeJS.ProcessEnv = {},
 ): Promise<{
 	result: { status: number | null; stdout: string; stderr: string };
@@ -182,6 +195,7 @@ async function runTestGates(
 		verdicts?: Array<{ obligationId: string; verdict: string; reason: string | null }>;
 	} | null;
 }> {
+	const { project, stateDir, witnessUrl, token, verifierKey } = scaffold;
 	const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
 		(resolve) => {
 			const child = spawn(
@@ -192,11 +206,19 @@ async function runTestGates(
 					'--out', stateDir,
 					'--suite', suiteCommand,
 					'--witness-url', witnessUrl,
-					'--run-token', runToken,
+					'--run-token', token,
 				],
 				{
 					cwd: project,
-					env: { GATEFORGE_APP_BASE_URL: '', ...env },
+					// Attestation channel (GF-23): the verifier key travels by
+					// ENVIRONMENT — never argv, whose /proc cmdline is
+					// world-readable. Orchestrator-side only; the suite child
+					// gets its env from the CLI, which strips this var.
+					env: {
+						GATEFORGE_APP_BASE_URL: '',
+						GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey,
+						...env,
+					},
 				},
 			);
 			let stdout = '';
@@ -282,11 +304,8 @@ describe('honest end-to-end (real Playwright vs the example app)', () => {
 		const scaffold = await scaffoldSuite(HONEST_LIFECYCLE_SPEC);
 		try {
 			const { result, report } = await runTestGates(
-				scaffold.project,
-				scaffold.stateDir,
+				scaffold,
 				scaffold.suiteCommand,
-				scaffold.witnessUrl,
-				scaffold.token,
 				{ GATEFORGE_APP_BASE_URL: scaffold.proxyUrl },
 			);
 			expect(result.status, `CLI stderr:\n${result.stderr}\nCLI stdout:\n${result.stdout}`).toBe(0);
@@ -299,10 +318,20 @@ describe('honest end-to-end (real Playwright vs the example app)', () => {
 			const records = readJson(join(scaffold.stateDir, 'records.json')) as Array<{
 				recordId: string;
 				trust: string;
+				origin: string;
 				kind: string;
 			}>;
 			expect(records.length).toBeGreaterThanOrEqual(12); // 4 actions + 4 visible + 4 persistence
-			expect(records.every((record) => record.trust === 'witnessed')).toBe(true);
+			// Trust follows origin (GF-23 round 3): suite-submitted UI
+			// assertions are claimed; only engine-observed persistence reads
+			// are witnessed — and the claims still satisfy on that basis.
+			expect(
+				records.every((record) =>
+					record.kind === 'persistence.entity'
+						? record.trust === 'witnessed' && record.origin === 'engine-observed'
+						: record.trust === 'claimed' && record.origin === 'suite-submitted',
+				),
+			).toBe(true);
 			expect(records.every((record) => /^[0-9a-f]{64}$/.test(record.recordId))).toBe(true);
 		} finally {
 			await scaffold.dispose();
@@ -331,11 +360,8 @@ test('claims crud:update but only performs unrelated browsing and reads', {
 		const scaffold = await scaffoldSuite(spec);
 		try {
 			const { result, report } = await runTestGates(
-				scaffold.project,
-				scaffold.stateDir,
+				scaffold,
 				scaffold.suiteCommand,
-				scaffold.witnessUrl,
-				scaffold.token,
 				{ GATEFORGE_APP_BASE_URL: scaffold.proxyUrl },
 			);
 			expect(result.status).toBe(1); // test failed (finalize fail-fast) + blocking verdict
@@ -373,11 +399,8 @@ test('borrows the create operation under a crud:update claim', {
 		const scaffold = await scaffoldSuite(spec);
 		try {
 			const { result, report } = await runTestGates(
-				scaffold.project,
-				scaffold.stateDir,
+				scaffold,
 				scaffold.suiteCommand,
-				scaffold.witnessUrl,
-				scaffold.token,
 				{ GATEFORGE_APP_BASE_URL: scaffold.proxyUrl },
 			);
 			expect(verdictOf(report, CLAIMS.create)).toBe('satisfied');
@@ -418,11 +441,8 @@ test('updates acc-1 but the adapter returns acc-3 evidence', {
 		const scaffold = await scaffoldSuite(spec, { adapter: 'wrong-entity' });
 		try {
 			const { result, report } = await runTestGates(
-				scaffold.project,
-				scaffold.stateDir,
+				scaffold,
 				scaffold.suiteCommand,
-				scaffold.witnessUrl,
-				scaffold.token,
 				{ GATEFORGE_APP_BASE_URL: scaffold.proxyUrl },
 			);
 			expect(result.status).toBe(1); // test failure (fieldsMatch false) + blocking verdict
@@ -449,11 +469,8 @@ test('feeds a hand-rolled receipt to persistence.verify', {
 		const scaffold = await scaffoldSuite(spec);
 		try {
 			const { result, report } = await runTestGates(
-				scaffold.project,
-				scaffold.stateDir,
+				scaffold,
 				scaffold.suiteCommand,
-				scaffold.witnessUrl,
-				scaffold.token,
 				{ GATEFORGE_APP_BASE_URL: scaffold.proxyUrl },
 			);
 			expect(result.status).toBe(1); // test failed (receipt rejected)
@@ -468,11 +485,8 @@ test('feeds a hand-rolled receipt to persistence.verify', {
 		const scaffold = await scaffoldSuite(HONEST_LIFECYCLE_SPEC);
 		try {
 			const honest = await runTestGates(
-				scaffold.project,
-				scaffold.stateDir,
+				scaffold,
 				scaffold.suiteCommand,
-				scaffold.witnessUrl,
-				scaffold.token,
 				{ GATEFORGE_APP_BASE_URL: scaffold.proxyUrl },
 			);
 			expect(honest.result.status, `honest baseline should be green:\n${honest.result.stderr}`).toBe(0);
@@ -566,11 +580,8 @@ test('performs obligation-relevant flows without any gateforge claim', async ({ 
 		const scaffold = await scaffoldSuite(spec);
 		try {
 			const { result, report } = await runTestGates(
-				scaffold.project,
-				scaffold.stateDir,
+				scaffold,
 				scaffold.suiteCommand,
-				scaffold.witnessUrl,
-				scaffold.token,
 				{ GATEFORGE_APP_BASE_URL: scaffold.proxyUrl },
 			);
 			// The bypass test itself is green; the GATE still grades the

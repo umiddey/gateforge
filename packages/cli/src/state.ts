@@ -155,6 +155,20 @@ export function writeObligations(
   } as unknown as JsonValue);
 }
 
+
+/**
+ * Persists the run's effective-classification view (plan phase 5) as a
+ * derived artifact for the verifier side (e.g. the witness service's
+ * `GET /classifications` surface). NEVER authoritative engine input: the
+ * engine recomputes classifications from signals on every run.
+ */
+export function writeClassificationsView(
+  stateDir: string,
+  view: Record<string, unknown>,
+): void {
+  writeStateFile(stateDir, 'classifications.json', view as unknown as JsonValue);
+}
+
 /** Persists the ambient env record and returns it (fresh token unless adopted). */
 export function writeEnv(
   stateDir: string,

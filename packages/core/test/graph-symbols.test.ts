@@ -37,22 +37,10 @@ function detector(resources: Resource[], overrides: Partial<DetectorOutput> = {}
     resources,
     unresolved: [],
     findings: [],
+    classificationSignals: [],
     ...overrides,
   };
 }
-
-const ACCOUNT_CLASSIFICATIONS = {
-  schemaVersion: 1,
-  resources: {
-    'tenant.widgets': {
-      exposure: 'user-facing',
-      plane: 'tenant',
-      lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'hard' },
-      primaryKey: ['id'],
-      evidenceAdapter: 'tenant.widgets',
-    },
-  },
-};
 
 describe('cross-module inheritance resolution (symbol table)', () => {
   it('resolves a subclass tablename through a base declared in another file', () => {
@@ -99,11 +87,19 @@ describe('cross-module inheritance resolution (symbol table)', () => {
       }),
     );
 
-    const graph = buildResourceGraph({ detectors: [detectorA], classifications: ACCOUNT_CLASSIFICATIONS });
+    // Plane evidence rides detector attributes (cutover: business meaning is
+    // the classifier's job; the graph binds identity from attributes.plane).
+    for (const resource of detectorA.resources) {
+      if (resource.kind === 'sqlalchemy.table') {
+        (resource.attributes as Record<string, unknown>)['plane'] = 'tenant';
+      }
+    }
+
+    const graph = buildResourceGraph({ detectors: [detectorA] });
 
     expect(graph.resources).toHaveLength(1);
     const entry = graph.resources[0];
-    expect(entry?.id).toBe('tenant.widgets');
+    expect(entry?.id).toBeNull();
     expect(entry?.name).toBe('widgets');
     expect(entry?.kind).toBe('sqlalchemy.table');
     expect(entry?.attributes['provenance']).toBe('inherited-from-abstract:models.base.Base');
@@ -196,22 +192,10 @@ describe('cross-module inheritance resolution (symbol table)', () => {
           }),
         ]),
       ],
-      classifications: {
-        schemaVersion: 1,
-        resources: {
-          'tenant.widget_rows': {
-            exposure: 'user-facing',
-            plane: 'tenant',
-            lifecycle: { create: false, read: true, update: false, delete: false },
-            primaryKey: ['id'],
-            evidenceAdapter: 'tenant.widget_rows',
-          },
-        },
-      },
     });
 
     expect(graph.resources).toHaveLength(1);
-    expect(graph.resources[0]?.id).toBe('tenant.widget_rows');
+    expect(graph.resources[0]?.id).toBeNull();
     expect(graph.resources[0]?.attributes['provenance']).toBe('inherited-from-abstract:models.widget.Base');
   });
 

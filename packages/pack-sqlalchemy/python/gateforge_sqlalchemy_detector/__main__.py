@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPP/2 serve entry for the Gateforge SQLAlchemy detector.
+"""GPP/3 serve entry for the Gateforge SQLAlchemy detector.
 
 Runnable as a module so the CLI's subprocess transport can invoke it with
 ``python3 -m gateforge_sqlalchemy_detector`` (G4 surface): handshake,
@@ -36,7 +36,7 @@ _scan_root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
 
 
 def _discover(paths: list[str]) -> dict:
-    """GPP/2 discover handler: scans each repo-relative path in order."""
+    """GPP/3 discover handler: scans each repo-relative path in order."""
     from gateforge_sqlalchemy_detector import scan
 
     return scan.scan(paths, _scan_root)

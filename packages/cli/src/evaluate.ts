@@ -17,6 +17,7 @@ import {
   BLOCKING_VERDICTS,
   evaluateObligations,
   loadWaivers,
+  verifyLedgerMac,
   type BlockingEntry,
   type GateforgeConfig,
   type Obligation,
@@ -41,7 +42,10 @@ export interface EvaluateInput {
   graph: ResourceGraph;
   /** Generated obligations (policy result). */
   obligations: readonly Obligation[];
-  /** Blocking entries (unclassified/unresolved) from the policy result. */
+  /**
+   * Blocking entries (unclassified/unresolved resources, detector or
+   * graph findings, stale references) from the policy result.
+   */
   blocking: readonly BlockingEntry[];
   /** Absolute run-state directory holding claims.json / records.json. */
   stateDir: string;
@@ -52,6 +56,25 @@ export interface EvaluateInput {
    * these changed files are evaluated/reported (check --changed).
    */
   changedFiles?: readonly string[] | null;
+  /**
+   * Verifier key for the witness attestation surface — a secret the
+   * orchestrator shares with the witness and this CLI, never with the
+   * tested suite. When absent (or when neither authenticated set
+   * verifies) the provenance gate fails closed and demotes every
+   * witnessed record: suite-writable artifacts alone cannot prove
+   * issuance.
+   */
+  witnessVerifierKey?: string | null;
+  /**
+   * Live `GET /ledger-attestation` response fetched by `test-gates`
+   * while a wired witness was still serving (runId + issued id set +
+   * verifier-key MAC). Verified again here before it contributes trust.
+   */
+  witnessAttestation?: {
+    runId: string;
+    recordIds: readonly string[];
+    mac: string;
+  } | null;
 }
 
 /** The evaluated run. */
@@ -79,12 +102,16 @@ function scopeBlocking(
       if (source !== undefined && changed.has(source)) kept.push(entry);
       continue;
     }
-    if (entry.kind === 'unresolved' && entry.location !== null) {
+    if (
+      (entry.kind === 'unresolved' || entry.kind === 'finding') &&
+      entry.location !== null
+    ) {
       if (changed.has(entry.location.file)) kept.push(entry);
       continue;
     }
     // Unattributable entries stay visible: never hide a block we cannot
-    // prove belongs to an unchanged file.
+    // prove belongs to an unchanged file (stale references carry no
+    // location, so they always surface).
     kept.push(entry);
   }
   return kept;
@@ -115,7 +142,10 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   const waiverLoad = loadWaivers(resolveRepoPath(cwd, config.waivers), { now });
 
   const claims = readJsonArray(stateDir, 'claims.json');
-  const records = demoteUnprovenRecords(readJsonArray(stateDir, 'records.json'), stateDir);
+  const records = demoteUnprovenRecords(readJsonArray(stateDir, 'records.json'), stateDir, {
+    verifierKey: input.witnessVerifierKey,
+    live: input.witnessAttestation,
+  });
 
   const scoped = scopeObligations(input);
   const verdicts: ObligationVerdict[] = [];
@@ -173,23 +203,93 @@ function scopeObligations(input: EvaluateInput): Obligation[] {
 
 /**
  * GF-23 provenance gate (ADR 0001 D2c): only records carrying
- * service-issued provenance — a sha256-hex recordId bound to THIS run
- * manifest — keep their `witnessed` tier. Anything else is demoted to
- * claimed-tier, which the engine grades invalid for evidence
- * contracts (never satisfied). Fail-closed: a missing/unreadable run
- * manifest demotes every witnessed record.
+ * service-issued provenance keep their `witnessed` tier. The checks:
+ * - hash recomputation (recordId = sha256 over the record's canonical
+ *   identity) happens in the engine itself (`isProvenancedRecord`), so
+ *   arbitrary or transplanted hex ids demote everywhere;
+ * - AUTHENTICATED ISSUANCE MEMBERSHIP happens here. The run manifest —
+ *   like records.json — lives in the suite-writable state directory, so
+ *   plain `recordIds` membership proves nothing: a hostile suite can
+ *   fabricate records and the id list alike, and the id hash is public.
+ *   A set is therefore trusted ONLY when its integrity is protected by
+ *   the witness VERIFIER KEY (a secret the orchestrator shares with the
+ *   witness and this CLI, never with the suite):
+ *     1. the manifest's `recordIds` with a `recordIdsMac` that
+ *        verifies (`verifyLedgerMac`), or
+ *     2. the live witness `GET /ledger-attestation` response, which the
+ *        caller fetched verifier-authenticated and MAC-verified.
+ * - Run identity: the record's runId must equal the manifest's (or the
+ *   live attestation's) runId, so sets cannot be transplanted across
+ *   runs.
+ * Fail closed: without a verifier key — or when neither authenticated
+ * set exists or verifies — every witnessed record demotes to
+ * claimed-tier, which the engine grades invalid for evidence contracts
+ * (never satisfied). An unauthenticated manifest append (witness started
+ * without a verifier key, or tampered) demotes the same way.
  */
-function demoteUnprovenRecords(records: readonly unknown[], stateDir: string): unknown[] {
-  let manifestRunId: string | null = null;
-  try {
-    const manifest = JSON.parse(readFileSync(join(stateDir, 'manifest.json'), 'utf8')) as {
-      runId?: unknown;
-    };
-    if (typeof manifest.runId === 'string') manifestRunId = manifest.runId;
-  } catch {
-    manifestRunId = null;
-  }
+function demoteUnprovenRecords(
+  records: readonly unknown[],
+  stateDir: string,
+  attestation: {
+    verifierKey?: string | null;
+    live?: { runId: string; recordIds: readonly string[]; mac: string } | null;
+  } = {},
+): unknown[] {
   const issuedRecordId = /^[0-9a-f]{64}$/;
+  const verifierKey = typeof attestation.verifierKey === 'string' && attestation.verifierKey.length > 0
+    ? attestation.verifierKey
+    : null;
+  const trusted = new Set<string>();
+  let manifestRunId: string | null = null;
+  let liveRunId: string | null = null;
+
+  // 1. Durable channel: manifest recordIds + verifying MAC.
+  if (verifierKey !== null) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(stateDir, 'manifest.json'), 'utf8')) as {
+        runId?: unknown;
+        recordIds?: unknown;
+        recordIdsMac?: unknown;
+      };
+      if (typeof manifest.runId === 'string' && manifest.runId.length > 0) {
+        manifestRunId = manifest.runId;
+      }
+      if (
+        manifestRunId !== null &&
+        Array.isArray(manifest.recordIds) &&
+        typeof manifest.recordIdsMac === 'string' &&
+        verifyLedgerMac(
+          verifierKey,
+          manifestRunId,
+          manifest.recordIds.filter((id): id is string => typeof id === 'string'),
+          manifest.recordIdsMac,
+        )
+      ) {
+        for (const id of manifest.recordIds) {
+          if (typeof id === 'string' && issuedRecordId.test(id)) trusted.add(id);
+        }
+      }
+    } catch {
+      manifestRunId = null; // missing/unreadable manifest: durable channel unavailable
+    }
+
+    // 2. Live channel: verifier-authenticated ledger attestation, MAC-
+    //    verified client-side before it can contribute trust.
+    const live = attestation.live;
+    if (
+      live !== undefined &&
+      live !== null &&
+      typeof live.runId === 'string' &&
+      live.runId.length > 0 &&
+      verifyLedgerMac(verifierKey, live.runId, live.recordIds, live.mac)
+    ) {
+      for (const id of live.recordIds) {
+        if (typeof id === 'string' && issuedRecordId.test(id)) trusted.add(id);
+      }
+      liveRunId = live.runId;
+    }
+  }
+
   return records.map((record) => {
     if (typeof record !== 'object' || record === null) return record;
     const candidate = record as { trust?: unknown; recordId?: unknown; runId?: unknown };
@@ -197,7 +297,9 @@ function demoteUnprovenRecords(records: readonly unknown[], stateDir: string): u
     const proven =
       typeof candidate['recordId'] === 'string' &&
       issuedRecordId.test(candidate['recordId']) &&
-      candidate['runId'] === manifestRunId;
+      trusted.has(candidate['recordId']) &&
+      ((manifestRunId !== null && candidate['runId'] === manifestRunId) ||
+        (liveRunId !== null && candidate['runId'] === liveRunId));
     return proven ? record : { ...record, trust: 'claimed' };
   });
 }

@@ -6,6 +6,7 @@
  */
 export {
   CRUD_CONTRACT_PREFIX,
+  PERSISTENCE_CONTRACT_PREFIX,
   BlockingEntrySchema,
   ClaimAssessmentSchema,
   PolicyEvaluationError,

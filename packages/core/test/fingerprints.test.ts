@@ -7,7 +7,7 @@ const lifecycle = {
   read: true,
   update: true,
   delete: true,
-  deleteSemantics: 'archive',
+  deleteSemantics: 'archive', archiveFields: { status: 'archived' },
 } as const;
 
 describe('fingerprint (pin #2)', () => {
@@ -50,7 +50,7 @@ describe('fingerprint (pin #2)', () => {
     });
     const b = fingerprint({
       lifecycle: {
-        deleteSemantics: 'archive',
+        deleteSemantics: 'archive', archiveFields: { status: 'archived' },
         delete: true,
         update: true,
         read: true,

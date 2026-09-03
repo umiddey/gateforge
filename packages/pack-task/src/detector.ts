@@ -1,12 +1,12 @@
 /**
- * The pack's discover entry: a pure TypeScript GPP/2 in-process
+ * The pack's discover entry: a pure TypeScript GPP/3 in-process
  * detector that scans `.ts`/`.js`/`.mjs` files for background-task
  * signatures and emits one `task.resource` per detected task plus a
  * set of typed findings (`DUPLICATE_TASK_ID`, `AMBIGUOUS_HANDLER`,
  * `PARSE_ERROR`).
  *
  * Mirrors the public shape of `packages/pack-sqlalchemy/src/detector.ts`:
- *   - `discover(paths: string[])` returns the GPP/2 `DiscoveryOutcome`
+ *   - `discover(paths: string[])` returns the GPP/3 `DiscoveryOutcome`
  *     shape (resources, unresolved, findings).
  *   - `createTaskDetector()` is the factory.
  *   - Resource ids are stable, dotted (`task.<name>`, e.g. `task.email.send`).
@@ -30,7 +30,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, relative, sep, posix } from 'node:path';
 import { GATEFORGE_SCHEMA_VERSION, type Resource } from '@gateforge/core';
 import type { DiscoveryOutcome, Finding } from '@gateforge/plugin-protocol';
-import { PACK_VERSION } from './version.js';
+import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
 /** Attributes attached to every detected `task.resource`. */
 export interface TaskResourceAttributes {
@@ -70,28 +70,23 @@ const DEFAULT_RETRY_POLICY: TaskResourceAttributes['retryPolicy'] = {
   backoff: 'fixed',
 };
 
-/** Dirs to skip during recursion (kept small to match pack-auth's gateforge.scan conventions). */
-const SKIP_DIRS: Record<string, true> = {
-  node_modules: true,
-  dist: true,
-  '.git': true,
-  coverage: true,
-  '.turbo': true,
-};
-
-/** File extensions to scan (keys include leading dot). */
+/** Source extensions this pack scans. */
 const SCAN_EXTS: Record<string, true> = {
   '.ts': true,
-  '.tsx': true,
   '.js': true,
   '.mjs': true,
   '.cjs': true,
 };
 
+/** Directories skipped during recursive scans. */
+const SKIP_DIRS: Record<string, true> = {
+  node_modules: true,
+  dist: true,
+  coverage: true,
+  '.git': true,
+};
 /**
- * One internal detection, before resource-construction. The detector
- * collects these, deduplicates by id, and emits one `task.resource`
- * per unique id (duplicates become `DUPLICATE_TASK_ID` findings).
+ * One internal detection, before signal-construction.
  */
 interface RawDetection {
   /** Dotted task name (literal extracted from source; e.g. `email.send`). */
@@ -108,8 +103,9 @@ interface RawDetection {
   observability: boolean;
   /** Source declaration location (file + line + col). */
   location: Location;
+  /** Target business model names (derived from imports, repositories, task name). */
+  targetModels: string[];
 }
-
 /**
  * Creates a discover-capable detector module. The default export of the
  * pack is an instance with no overrides.
@@ -129,6 +125,7 @@ export function createTaskDetector(options: TaskDetectorOptions = {}): TaskDetec
     const findings: Finding[] = [];
     const unresolved: DiscoveryOutcome['unresolved'] = [];
 
+    const scanned: string[] = [];
     for (const absPath of files) {
       const relPath = relative(rootDir, absPath).split(sep).join(posix.sep);
       let text: string;
@@ -142,10 +139,11 @@ export function createTaskDetector(options: TaskDetectorOptions = {}): TaskDetec
         });
         continue;
       }
+      scanned.push(relPath);
       detections.push(...scanFile(relPath, text, findings));
     }
 
-    return finalize(detections, findings, unresolved);
+    return finalize(detections, findings, unresolved, scanned);
   }
 
   return { discover };
@@ -237,6 +235,7 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf(bullmq) },
+        targetModels: extractTargetModels(text, bullmq),
       });
       continue;
     }
@@ -252,6 +251,7 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf(bee) },
+        targetModels: extractTargetModels(text, bee),
       });
       continue;
     }
@@ -267,6 +267,7 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf(regMatch.name) },
+        targetModels: extractTargetModels(text, regMatch.name),
       });
       if (!regMatch.hasHandler) {
         findings.push({
@@ -289,6 +290,7 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf(message) },
+        targetModels: extractTargetModels(text, message),
       });
       continue;
     }
@@ -304,6 +306,7 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf(recurring) },
+        targetModels: extractTargetModels(text, recurring),
       });
       continue;
     }
@@ -319,6 +322,7 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf('@') },
+        targetModels: extractTargetModels(text, 'decorated'),
       });
     }
   }
@@ -347,6 +351,7 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
       terminalOn: extractTerminalOn(block),
       observability: /observability\s*:\s*true/.test(block),
       location: { file: relPath, line: lineNumber, col: 0 },
+      targetModels: extractTargetModels(text, name),
     });
     if (!hasHandler) {
       findings.push({
@@ -499,61 +504,146 @@ function surroundingWindow(source: string, anchorLine: number, radius: number): 
 }
 
 /**
- * Finalizes raw detections into resources: dedupes by id, emits
- * `DUPLICATE_TASK_ID` findings for collisions, builds the typed
- * resource list with stable ordering.
+ * Converts a PascalCase identifier to snake_case.
+ */
+function pascalToSnake(str: string): string {
+  return str.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+}
+
+/**
+ * Traces target models from worker file imports, repository/service calls, and task naming.
+ * e.g. `import { Account } from '../models/account'`, `accountRepository.save()`, `sync_accounts`.
+ */
+function extractTargetModels(text: string, taskName: string): string[] {
+  const targets = new Set<string>();
+
+  // 1. Model / entity file imports: from '../models/account[.ts|.py]'
+  const modelImportMatches = text.matchAll(/from\s+['"][^'"]*\/models(?:\/([^/'"]+))?['"]/g);
+  for (const m of modelImportMatches) {
+    if (m[1]) {
+      const name = m[1].replace(/\.(ts|js|py|mjs)$/, '').toLowerCase();
+      targets.add(name);
+      targets.add(name.endsWith('s') ? name : `${name}s`);
+    }
+  }
+
+  // 2. Repository file imports: from '../repositories/account_repository'
+  const repoImportMatches = text.matchAll(/from\s+['"][^'"]*\/repositories\/([^/'"]+)['"]/g);
+  for (const m of repoImportMatches) {
+    if (m[1]) {
+      const name = m[1].replace(/_repository.*$/, '').replace(/\.(ts|js|py|mjs)$/, '').toLowerCase();
+      targets.add(name);
+      targets.add(name.endsWith('s') ? name : `${name}s`);
+    }
+  }
+
+  // 3. Class/Repository/Service identifiers: e.g. AccountRepository, AuditLog, Account
+  const idMatches = text.matchAll(/\b([A-Z][a-zA-Z0-9]+)(?:Repository|Service|Model|Table)?\b/g);
+  for (const m of idMatches) {
+    const raw = m[1];
+    if (
+      raw &&
+      ![
+        'Task',
+        'Queue',
+        'Job',
+        'Worker',
+        'Bullmq',
+        'Bee',
+        'Promise',
+        'Error',
+        'CustomQueue',
+        'Array',
+        'String',
+        'Object',
+      ].includes(raw)
+    ) {
+      const snake = pascalToSnake(raw);
+      targets.add(snake);
+      targets.add(snake.endsWith('s') ? snake : `${snake}s`);
+    }
+  }
+
+  // 4. Task name: strip action prefixes/suffixes
+  const stripped = taskName
+    .replace(/^(sync|send|process|run|dispatch|flush|index|reindex|resize)[_.-]/i, '')
+    .replace(/[_.-](sync|send|process|run|dispatch|flush|index|reindex|resize)$/i, '')
+    .replace(/[^a-zA-Z0-9_]/g, '_')
+    .toLowerCase();
+  if (stripped.length > 0) {
+    targets.add(stripped);
+    targets.add(stripped.endsWith('s') ? stripped : `${stripped}s`);
+  }
+
+  if (targets.size === 0) {
+    const bare = bareResourceName(taskName);
+    targets.add(bare);
+  }
+  return [...targets].sort();
+}
+
+/**
+ * Normalizes a task's queue/registration name into the graph's bare
+ * resource-name grammar (`^[^.]+$`): dots (as in `email.send`) become
+ * dashes.
+ */
+function bareResourceName(name: string): string {
+  return name.replace(/[^A-Za-z0-9_-]/g, '-');
+}
+
+/**
+ * Finalizes raw detections into internality reachability signals:
+ * routes signals to target models and returns empty resources.
  */
 function finalize(
   detections: RawDetection[],
   findings: Finding[],
   unresolved: DiscoveryOutcome['unresolved'],
+  scanned: string[] = [],
 ): DiscoveryOutcome {
-  const byId = new Map<string, RawDetection[]>();
+  const classificationSignals: Array<{
+    schemaVersion: 1;
+    target: { resourceName: string };
+    dimension: 'internality';
+    assertion: { category: string };
+    basis: 'code-positive';
+    source: string;
+    location: Location;
+    detector: { id: string; version: string };
+  }> = [];
   for (const detection of detections) {
-    const id = `task.${detection.name}`;
-    const list = byId.get(id) ?? [];
-    list.push(detection);
-    byId.set(id, list);
-  }
-
-  const resources: Resource[] = [];
-  for (const [id, group] of byId.entries()) {
-    const first = group[0];
-    if (!first) continue;
-    if (group.length > 1) {
-      findings.push({
-        code: 'DUPLICATE_TASK_ID',
-        detail: `task id "${id}" discovered ${group.length} times; first wins`,
-        locations: group.map((g) => g.location),
+    for (const targetModel of detection.targetModels) {
+      classificationSignals.push({
+        schemaVersion: 1,
+        target: { resourceName: targetModel },
+        dimension: 'internality',
+        assertion: { category: 'worker' },
+        basis: 'code-positive',
+        source: PACK_PLUGIN_ID,
+        location: detection.location,
+        detector: { id: PACK_PLUGIN_ID, version: PACK_VERSION },
       });
     }
-    const attrs: TaskResourceAttributes = {
-      taskName: first.name,
-      framework: first.framework,
-      retryPolicy: first.retryPolicy,
-      idempotencyKey: first.idempotencyKey,
-      terminalOn: first.terminalOn,
-      observability: first.observability,
-      source: first.location,
-    };
-    resources.push({
-      schemaVersion: GATEFORGE_SCHEMA_VERSION,
-      id,
-      kind: 'task.resource',
-      source: first.location.file,
-      location: first.location,
-      detectorVersion: PACK_VERSION,
-      attributes: attrs as unknown as Record<string, unknown>,
-    });
   }
 
-  resources.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  classificationSignals.sort((a, b) => {
+    const aj = JSON.stringify(a);
+    const bj = JSON.stringify(b);
+    return aj < bj ? -1 : aj > bj ? 1 : 0;
+  });
+
   findings.sort((a, b) => {
     if (a.code !== b.code) return a.code < b.code ? -1 : 1;
     return a.detail < b.detail ? -1 : a.detail > b.detail ? 1 : 0;
   });
 
-  return { resources, unresolved, findings };
+  return {
+    resources: [],
+    unresolved,
+    findings,
+    classificationSignals,
+    scannedPaths: scanned.sort(),
+  };
 }
 
 const defaultDetector = createTaskDetector();

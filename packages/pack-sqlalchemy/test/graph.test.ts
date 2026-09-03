@@ -17,7 +17,7 @@ const ACCOUNTS_CLASSIFICATION = {
     accounts: {
       exposure: 'internal',
       plane: 'master',
-      lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' },
+      lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive', archiveFields: { status: 'archived' } },
       primaryKey: ['id'],
     },
     shared_items: {
@@ -30,7 +30,7 @@ const ACCOUNTS_CLASSIFICATION = {
 };
 
 /** Runs discovery + graph build over a fixture subset. */
-async function build(paths: readonly string[], classifications: unknown = undefined): Promise<ResourceGraph> {
+async function build(paths: readonly string[]): Promise<ResourceGraph> {
   const outcome: DiscoveryOutcome = await runDiscover(paths);
   return buildResourceGraph({
     detectors: [
@@ -40,9 +40,9 @@ async function build(paths: readonly string[], classifications: unknown = undefi
         resources: outcome.resources,
         unresolved: outcome.unresolved,
         findings: outcome.findings,
+        classificationSignals: outcome.classificationSignals,
       },
     ],
-    classifications,
   });
 }
 
@@ -127,31 +127,28 @@ describe('graph integration: GF-21 computed identity (nothing absent)', () => {
   }, 60_000);
 });
 
-describe('graph integration: plane mapping + classification binding', () => {
-  it('binds the example accounts table to master.accounts via the classifier', async () => {
-    const graph = await build(['example_models.py'], ACCOUNTS_CLASSIFICATION);
+describe('graph integration: classification cutover', () => {
+  it('leaves business classification to the classification pipeline', async () => {
+    const graph = await build(['example_models.py']);
     const account = byName(graph, 'accounts');
-    expect(account?.id).toBe('master.accounts');
-    expect(account?.plane).toBe('master');
-    expect(account?.classification?.exposure).toBe('internal');
+    expect(account?.id).toBeNull();
+    expect(account?.plane).toBeNull();
+    expect(account?.classification).toBeNull();
     expect(graph.resources).toHaveLength(1);
   }, 60_000);
 });
 
-describe('graph integration: GF-20 duplicates at graph level', () => {
-  it('flags same-plane duplicate ids after classification, keeping detector findings', async () => {
-    const graph = await build(['collisions.py', 'modern_declarative.py'], ACCOUNTS_CLASSIFICATION);
+describe('graph integration: detector findings', () => {
+  it('keeps detector duplicate findings without synthesizing classification duplicates', async () => {
+    const graph = await build(['collisions.py', 'modern_declarative.py']);
     const graphDup = graph.findings.filter(
       (f) => f.code === 'DUPLICATE_TABLE_NAME' && f.detectorId === 'gateforge.graph',
     );
-    expect(graphDup).toHaveLength(1); // shared_items collapses onto master.shared_items (dupes unclassified)
-    expect(graphDup[0]?.detail).toContain("table name 'shared_items' declared 2 time(s)");
-    // Detector findings survive with provenance.
+    expect(graphDup).toHaveLength(0);
     const detectorDup = graph.findings.filter(
       (f) => f.code === 'DUPLICATE_TABLE_NAME' && f.detectorId === 'gateforge.pack-sqlalchemy',
     );
     expect(detectorDup).toHaveLength(2);
-    expect(detectorDup.map((f) => f.detail).join('\n')).toContain("'dupes'");
   }, 60_000);
 });
 

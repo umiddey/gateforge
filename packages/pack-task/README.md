@@ -1,6 +1,6 @@
 # @gateforge/pack-task
 
-Background-task discovery pack: a pure-TypeScript GPP/2 in-process detector that finds background-task signatures in `.ts`/`.js`/`.mjs` source — no Python subprocess, no execution, no external deps — plus an audit-trail entity-adapter schema and an example server that proves the five obligation contracts the pack claims.
+Background-task discovery pack: a pure-TypeScript GPP/3 in-process detector that finds background-task signatures in `.ts`/`.js`/`.mjs` source — no Python subprocess, no execution, no external deps — plus an audit-trail entity-adapter schema and an example server that proves the five obligation contracts the pack claims.
 
 ## How discovery works
 

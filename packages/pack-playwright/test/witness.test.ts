@@ -11,14 +11,16 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { startWitness, WitnessStartupError, recordIdOf } from '../src/witness/server.js';
+import { RunManifestSchema, ledgerMac, verifyLedgerMac } from '@gateforge/core';
 import { writeHonestAdapter, writeFixtureProject, makeTempProject } from './helpers.js';
 import { AttestationError } from '../src/witness/env-attestation.js';
-import { ENV_FINGERPRINT_HEADER, RUN_HEADER } from '../src/constants.js';
+import { ENV_FINGERPRINT_HEADER, RUN_HEADER, VERIFIER_HEADER } from '../src/constants.js';
 import { startAttestationProxy } from '../src/attestation/proxy.js';
 import { startMarkerServer } from './marker-server.js';
 
 const RUN_ID = '6f1c3f90-2d5e-4b1a-9c6d-0f0e2b8a1c9d';
 const TOKEN = 'run-token-abc-123';
+const VERIFIER_KEY = 'verifier-secret-the-suite-never-sees';
 const TEST_ID = 'spec-file.js > test title';
 const OBLIGATION = 'tenant.accounts:crud:update';
 
@@ -30,6 +32,7 @@ async function startFixturedWitness(options: {
   targetBaseUrl?: string;
   stateDir?: string | null;
   classifier?: boolean;
+  verifierKey?: string | null;
 }) {
   const project = makeTempProject('witness');
   writeFixtureProject(project);
@@ -38,17 +41,27 @@ async function startFixturedWitness(options: {
   const stateDir = options.stateDir === undefined ? join(project, '.gateforge/test-gates') : options.stateDir;
   if (stateDir !== null) {
     mkdirSync(stateDir, { recursive: true });
+    // A full RunManifestSchema-valid manifest, as the real CLI writes it.
     writeFileSync(
       join(stateDir, 'manifest.json'),
-      `${JSON.stringify({ schemaVersion: 1, runId: RUN_ID, startedAt: '2026-08-30T12:00:00.000Z' })}\n`,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        runId: RUN_ID,
+        startedAt: '2026-08-30T12:00:00.000Z',
+        gitSha: null,
+        provider: 'local-staged',
+        plugins: [],
+        attestationScope: null,
+      })}\n`,
     );
   }
   const witness = await startWitness({
     runId: RUN_ID,
     token: TOKEN,
+    verifierKey: options.verifierKey === undefined ? VERIFIER_KEY : options.verifierKey,
     stateDir,
     adaptersDir: join(project, '.gateforge/adapters'),
-    classificationsPath: join(project, '.gateforge/classifications.yml'),
+    classificationsPath: join(project, '.gateforge/effective-classifications.yml'),
     targetBaseUrl: options.targetBaseUrl ?? target.url,
     targetFingerprint: options.targetFingerprint === undefined ? 'example-v1' : options.targetFingerprint,
     adapterBaseUrl: target.url,
@@ -79,7 +92,7 @@ describe('witness auth (pin #7)', () => {
 });
 
 describe('record issuance (pin #7)', () => {
-  it('issues a witnessed record with service-computed provenance', async () => {
+  it('stamps a submitted ui.action claimed-tier with suite-submitted origin (GF-23 round 3)', async () => {
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
     try {
       const res = await fetch(`${fixture.witness.url}/records`, {
@@ -98,7 +111,11 @@ describe('record issuance (pin #7)', () => {
         trust: string;
         runId: string;
       };
-      expect(body.trust).toBe('witnessed');
+      // The suite owns the browser and holds the run token, so a
+      // submitted payload proves only that the suite ASSERTED it: the
+      // witness stamps it claimed-tier (attestation proves receipt,
+      // never occurrence).
+      expect(body.trust).toBe('claimed');
       expect(body.runId).toBe(RUN_ID);
       expect(body.recordId).toMatch(/^[0-9a-f]{64}$/);
       expect(body.recordId).toBe(
@@ -107,6 +124,7 @@ describe('record issuance (pin #7)', () => {
           obligationId: OBLIGATION,
           kind: 'ui.action',
           testId: TEST_ID,
+          origin: 'suite-submitted',
           payload: { operation: 'update', entityId: 'acc-1', fields: { first_name: 'Ada' } },
         }),
       );
@@ -114,9 +132,12 @@ describe('record issuance (pin #7)', () => {
         await fetch(`${fixture.witness.url}/records`, {
           headers: { [RUN_HEADER]: TOKEN },
         })
-      ).json()) as { records: Array<{ recordId: string; trust: string; payload: unknown }> };
+      ).json()) as {
+        records: Array<{ recordId: string; trust: string; origin: string; payload: unknown }>;
+      };
       expect(ledger.records).toHaveLength(1);
-      expect(ledger.records[0]?.trust).toBe('witnessed');
+      expect(ledger.records[0]?.trust).toBe('claimed');
+      expect(ledger.records[0]?.origin).toBe('suite-submitted');
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();
@@ -197,9 +218,14 @@ describe('persistence endpoint (pin #7)', () => {
         await fetch(`${fixture.witness.url}/records`, {
           headers: { [RUN_HEADER]: TOKEN },
         })
-      ).json()) as { records: Array<{ kind: string; payload: { entityId: string } }> };
+      ).json()) as {
+        records: Array<{ recordId: string; trust: string; origin: string; kind: string; payload: { entityId: string } }>;
+      };
       const persistence = ledger.records.find((record) => record.kind === 'persistence.entity');
       expect(persistence?.payload.entityId).toBe('acc-1');
+      // Engine-side observation: the only witnessed origin (GF-23 round 3).
+      expect(persistence?.trust).toBe('witnessed');
+      expect(persistence?.origin).toBe('engine-observed');
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();
@@ -381,8 +407,68 @@ describe('classifications surface', () => {
   });
 });
 
+describe('ledger attestation surface (pin #7, GF-23)', () => {
+  it('serves a verifier-key-authenticated, MAC-bound id set', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      const post = await fetch(`${fixture.witness.url}/records`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: OBLIGATION,
+          kind: 'ui.action',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
+          testId: TEST_ID,
+        }),
+      });
+      expect(post.status).toBe(200);
+      const issued = (await post.json()) as { recordId: string };
+
+      // Run token alone is NOT enough: the suite can never read the
+      // attestation.
+      const tokenOnly = await fetch(`${fixture.witness.url}/ledger-attestation`, {
+        headers: { [RUN_HEADER]: TOKEN },
+      });
+      expect(tokenOnly.status).toBe(401);
+      const wrongKey = await fetch(`${fixture.witness.url}/ledger-attestation`, {
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: 'wrong-verifier-key' },
+      });
+      expect(wrongKey.status).toBe(401);
+
+      const ok = await fetch(`${fixture.witness.url}/ledger-attestation`, {
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY },
+      });
+      expect(ok.status).toBe(200);
+      const body = (await ok.json()) as { runId: string; recordIds: string[]; mac: string };
+      expect(body.runId).toBe(RUN_ID);
+      expect(body.recordIds).toEqual([issued.recordId]);
+      expect(verifyLedgerMac(VERIFIER_KEY, body.runId, body.recordIds, body.mac)).toBe(true);
+      // A tampered set never verifies (the hostile-suite attack).
+      expect(
+        verifyLedgerMac(VERIFIER_KEY, body.runId, [...body.recordIds, 'a'.repeat(64)], body.mac),
+      ).toBe(false);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('answers 409 when no verifier key is configured (no unauthenticated attestation)', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1', verifierKey: null });
+    try {
+      const res = await fetch(`${fixture.witness.url}/ledger-attestation`, {
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY },
+      });
+      expect(res.status).toBe(409);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+});
+
 describe('run-manifest append (pin #4/#7)', () => {
-  it('appends the issued recordIds to manifest.json at shutdown', async () => {
+  it('appends the issued recordIds to manifest.json at shutdown, authenticated by the verifier MAC', async () => {
     const stateDir = join(mkdtempSync(join(tmpdir(), 'gateforge-manifest-')), 'state');
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1', stateDir });
     try {
@@ -400,10 +486,79 @@ describe('run-manifest append (pin #4/#7)', () => {
       const manifest = JSON.parse(readFileSync(join(stateDir, 'manifest.json'), 'utf8')) as {
         runId: string;
         recordIds?: string[];
+        recordIdsMac?: string;
       };
       expect(manifest.runId).toBe(RUN_ID);
       expect(manifest.recordIds).toHaveLength(1);
       expect(manifest.recordIds?.[0]).toMatch(/^[0-9a-f]{64}$/);
+      expect(RunManifestSchema.parse(manifest).recordIds).toEqual(manifest.recordIds);
+      // The append is authenticated: the MAC covers the exact set under
+      // the verifier key — a hostile suite editing manifest.json (adding
+      // a forged id, dropping one, transplanting the set) cannot re-mint it.
+      expect(manifest.recordIdsMac).toBeDefined();
+      expect(
+        verifyLedgerMac(VERIFIER_KEY, manifest.runId, manifest.recordIds ?? [], manifest.recordIdsMac),
+      ).toBe(true);
+      expect(
+        verifyLedgerMac(VERIFIER_KEY, manifest.runId, [...(manifest.recordIds ?? []), 'a'.repeat(64)], manifest.recordIdsMac),
+      ).toBe(false);
+      // The MAC binds the manifest's own runId (what the CLI verifies against).
+      expect(manifest.recordIdsMac).toBe(ledgerMac(VERIFIER_KEY, RUN_ID, manifest.recordIds ?? []));
+    } finally {
+      await fixture.target.stop();
+    }
+  });
+
+  it('never signs ids it did not issue: pre-seeded forged ids are discarded (GF-23 round 3)', async () => {
+    const stateDir = join(mkdtempSync(join(tmpdir(), 'gateforge-manifest-')), 'state');
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1', stateDir });
+    try {
+      // The hostile suite plants a hash-consistent forged id in the
+      // suite-writable manifest BEFORE the witness shuts down, hoping the
+      // append will merge — and thereby sign — it into the issued set.
+      const forgedId = recordIdOf({
+        runId: RUN_ID,
+        obligationId: OBLIGATION,
+        kind: 'persistence.entity',
+        testId: 'attack',
+        origin: 'engine-observed',
+        payload: { resourceId: 'tenant.accounts', entityId: 'acc-1', fields: {} },
+      });
+      const manifestPath = join(stateDir, 'manifest.json');
+      const seeded = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+      writeFileSync(
+        manifestPath,
+        `${JSON.stringify({ ...seeded, recordIds: [forgedId] })}\n`,
+      );
+
+      // The witness issues exactly ONE record (never the forged one).
+      await fetch(`${fixture.witness.url}/records`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: OBLIGATION,
+          kind: 'ui.action',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
+          testId: TEST_ID,
+        }),
+      });
+      await fixture.witness.stop(); // shutdown appends
+
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        recordIds?: string[];
+        recordIdsMac?: string;
+      };
+      // The appended set is EXACTLY the ledger: the forged id was
+      // discarded, not merged — and the MAC covers exactly that set, so
+      // the gate can never trust the forgery.
+      expect(manifest.recordIds).toHaveLength(1);
+      expect(manifest.recordIds).not.toContain(forgedId);
+      expect(
+        verifyLedgerMac(VERIFIER_KEY, RUN_ID, manifest.recordIds ?? [], manifest.recordIdsMac),
+      ).toBe(true);
+      expect(
+        verifyLedgerMac(VERIFIER_KEY, RUN_ID, [...(manifest.recordIds ?? []), forgedId], manifest.recordIdsMac),
+      ).toBe(false);
     } finally {
       await fixture.target.stop();
     }

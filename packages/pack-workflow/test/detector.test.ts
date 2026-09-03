@@ -25,7 +25,7 @@ describe('createWorkflowDetector()', () => {
   it('returns an empty outcome for an empty path list (no scan)', async () => {
     const detector = createWorkflowDetector({ cwd: FIXTURE_ROOT });
     const outcome = await detector.discover([]);
-    expect(outcome).toEqual({ resources: [], unresolved: [], findings: [] });
+    expect(outcome).toEqual({ resources: [], unresolved: [], findings: [], classificationSignals: [] });
   });
 
   it('detects XState v5 createMachine() and emits one resource per machine', async () => {
@@ -94,16 +94,17 @@ describe('createWorkflowDetector()', () => {
     for (const r of outcome.resources) expect(r.kind).toBe('workflow.contract');
   });
 
-  it.skip('emits an UNKNOWN_FSM_STYLE finding for a malformed FSM', async () => {
+  it('emits an UNKNOWN_FSM_STYLE finding for a malformed FSM', async () => {
     const detector = createWorkflowDetector({ cwd: FIXTURE_ROOT });
     const outcome = await detector.discover(['malformed.ts']);
-    // Detector's contract for invalid FSMs: emit NO resource (fail-closed),
-    // optionally surface a finding. Current implementation does the former
-    // but not the latter; the finding is a planned enhancement (see pack
-    // README "Limitations"). Until then, this assertion is documented as
-    // expected-fail.
-    void outcome;
-    expect(true).toBe(true);
+    // Detector's contract for invalid FSMs: emit NO resource (fail-closed)
+    // and surface the reason as a typed, gate-visible finding.
+    const broken = outcome.resources.find((r) => r.id.includes('broken'));
+    expect(broken).toBeUndefined();
+    const finding = outcome.findings.find((f) => f.code === 'UNKNOWN_FSM_STYLE');
+    expect(finding).toBeDefined();
+    expect(finding?.detail).toContain('declares no `states`');
+    expect(finding?.locations[0]?.file).toContain('malformed.ts');
   });
 
   it('resource ids are deterministic (no Date.now / Math.random)', async () => {

@@ -214,6 +214,25 @@ export class GateforgeReporter {
             ...(lifecycle['deleteSemantics'] === 'hard' || lifecycle['deleteSemantics'] === 'archive'
               ? { deleteSemantics: lifecycle['deleteSemantics'] }
               : {}),
+            // Owner-owned archived state must reach the engine: it grades
+            // archive postconditions against it (audit round 5).
+            ...(typeof lifecycle['archiveFields'] === 'object' &&
+            lifecycle['archiveFields'] !== null &&
+            !Array.isArray(lifecycle['archiveFields'])
+              ? {
+                  archiveFields: lifecycle['archiveFields'] as Record<
+                    string,
+                    string | number | boolean
+                  >,
+                }
+              : {}),
+            ...(Array.isArray(lifecycle['updateableFields'])
+              ? {
+                  updateableFields: lifecycle['updateableFields'].filter(
+                    (field): field is string => typeof field === 'string',
+                  ),
+                }
+              : {}),
           },
         };
       }

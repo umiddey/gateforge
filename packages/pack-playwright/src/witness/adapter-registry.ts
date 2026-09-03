@@ -127,6 +127,9 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
   ) {
     problems.push('baseUrl must be a non-empty string when present');
   }
+  if (adapter['list'] !== undefined && typeof adapter['list'] !== 'function') {
+    problems.push('list must be a function (ctx) => entity[] when present');
+  }
   if (problems.length > 0) {
     throw new AdapterRegistryError(`adapter '${name}' violates the adapter contract: ${problems.join('; ')}`);
   }
@@ -136,6 +139,9 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
     deletion: adapter['deletion'] as 'hard' | 'archive',
     environmentFingerprint: adapter['environmentFingerprint'] as string,
     baseUrl: adapter['baseUrl'] as string | undefined,
+    ...(adapter['list'] !== undefined
+      ? { list: adapter['list'] as EvidenceAdapter['list'] }
+      : {}),
   };
 }
 

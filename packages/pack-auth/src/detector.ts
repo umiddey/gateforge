@@ -40,7 +40,7 @@ import { resolve, relative, sep } from 'node:path';
 import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
 import type { z } from 'zod';
 import { LocationSchema, type Resource } from '@gateforge/core';
-import { PACK_VERSION } from './version.js';
+import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
 /** Inferred location shape (file, 1-based line, 0-based col). */
 type Location = z.infer<typeof LocationSchema>;
@@ -475,7 +475,7 @@ function scanFile(text: string, file: string): Endpoint[] {
 
 /**
  * Builds one `auth.resource` from one detected endpoint. The output
- * shape is the frozen GPP/2 `Resource` schema (id, kind, source,
+ * shape is the frozen GPP/3 `Resource` schema (id, kind, source,
  * location, detectorVersion, attributes).
  */
 function endpointToResource(root: string, ep: Endpoint): Resource {
@@ -514,17 +514,27 @@ export function createAuthDetector(options: AuthDetectorOptions = {}): AuthDetec
   return {
     discover(paths) {
       if (paths.length === 0) {
-        return { resources: [], unresolved: [], findings: [] };
+        return { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       }
       const files = resolveInputs(paths);
       const endpoints: Endpoint[] = [];
+      const scanned: string[] = [];
+      const findings: DiscoveryOutcome['findings'] = [];
       for (const file of files) {
         let text: string;
         try {
           text = readFileSync(file, 'utf8');
-        } catch {
+        } catch (error) {
+          // Fail-visible coverage (ADR 0003 D4): an unreadable file is a
+          // finding, never a silent hole in the scan.
+          findings.push({
+            code: 'SOURCE_READ_ERROR',
+            detail: `failed to read '${relative(root, file).split(sep).join('/')}': ${error instanceof Error ? error.message : String(error)}`,
+            locations: [{ file: relative(root, file).split(sep).join('/'), line: 1, col: 0 }],
+          });
           continue;
         }
+        scanned.push(relative(root, file).split(sep).join('/'));
         for (const endpoint of scanFile(text, file)) endpoints.push(endpoint);
       }
       endpoints.sort((a, b) => {
@@ -533,7 +543,92 @@ export function createAuthDetector(options: AuthDetectorOptions = {}): AuthDetec
         return idA < idB ? -1 : idA > idB ? 1 : 0;
       });
       const resources = endpoints.map((ep) => endpointToResource(root, ep));
-      return { resources, unresolved: [], findings: [] };
+      // Phase-4 linkage (plan phase 4, ADR 0003 D1/D2): each guarded
+      // endpoint is externally reachable — one code-positive `exposure`
+      // signal per endpoint plus `lifecycle.<op>` from the HTTP method
+      // (POST⇒create, GET/HEAD⇒read, PUT/PATCH⇒update, DELETE⇒delete),
+      // and a `plane` signal asserting `tenant` when a tenant guard is
+      // present. Targets are the PATH-DERIVED resource name (last
+      // non-parameter segment) so the core classifier converges routes
+      // with tables deterministically; an underivable name emits no
+      // signal (nothing is claimed). `app.all`-style methods assert no
+      // operation. No negative proofs exist in this pack.
+      const classificationSignals = endpoints.flatMap((ep) => {
+        const location: Location = {
+          file: relative(root, ep.file).split(sep).join('/'),
+          line: ep.line,
+          col: ep.col,
+        };
+        const target = lastPathName(ep.path);
+        if (target === null) return [];
+        const signals: DiscoveryOutcome['classificationSignals'] = [
+          {
+            schemaVersion: 1,
+            target: { resourceName: target },
+            dimension: 'exposure',
+            assertion: 'route',
+            basis: 'code-positive',
+            source: PACK_PLUGIN_ID,
+            location,
+            detector: { id: PACK_PLUGIN_ID, version: PACK_VERSION },
+          },
+        ];
+        const operation = operationForMethod(ep.method);
+        if (operation !== null) {
+          signals.push({
+            schemaVersion: 1,
+            target: { resourceName: target },
+            dimension: `lifecycle.${operation}`,
+            assertion: true,
+            basis: 'code-positive',
+            source: PACK_PLUGIN_ID,
+            location,
+            detector: { id: PACK_PLUGIN_ID, version: PACK_VERSION },
+          });
+        }
+        if (ep.tenancy === 'tenant-bound') {
+          signals.push({
+            schemaVersion: 1,
+            target: { resourceName: target },
+            dimension: 'plane',
+            assertion: 'tenant',
+            basis: 'code-positive',
+            source: PACK_PLUGIN_ID,
+            location,
+            detector: { id: PACK_PLUGIN_ID, version: PACK_VERSION },
+          });
+        }
+        return signals;
+      });
+      findings.sort((a, b) => (a.detail < b.detail ? -1 : a.detail > b.detail ? 1 : 0));
+      return { resources, unresolved: [], findings, classificationSignals, scannedPaths: scanned.sort() };
     },
   };
+}
+/** The lifecycle operation an HTTP method evidences, if any. */
+function operationForMethod(
+  method: string,
+): 'create' | 'read' | 'update' | 'delete' | null {
+  switch (method) {
+    case 'POST': return 'create';
+    case 'GET':
+    case 'HEAD': return 'read';
+    case 'PUT':
+    case 'PATCH': return 'update';
+    case 'DELETE': return 'delete';
+    default: return null;
+  }
+}
+
+/** Last non-parameter path segment, lower-cased; null when underivable. */
+function lastPathName(rawPath: string): string | null {
+  const segments = rawPath.split('/').filter((segment) => segment.length > 0);
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const segment = segments[i];
+    if (segment === undefined) continue;
+    if (segment.startsWith(':') || segment.startsWith('{') || segment.startsWith('*')) continue;
+    if (/^\d+$/.test(segment)) continue;
+    return segment.toLowerCase();
+  }
+  return null;
 }
