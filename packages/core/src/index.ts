@@ -338,7 +338,7 @@ export { DetectorOutputSchema } from './graph/index.js';
 export type { DetectorOutput } from './graph/index.js';
 
 /** Reserved resource `kind` for symbol-table class declarations. */
-export { CLASS_SYMBOL_KIND } from './graph/index.js';
+export { CLASS_SYMBOL_KIND, EVIDENCE_ONLY_RESOURCE_KINDS, HTTP_ENDPOINT_RESOURCE_KIND, isEvidenceOnlyKind } from './graph/index.js';
 /** Attribute payload of a class-symbol resource. */
 export { ClassSymbolAttributesSchema } from './graph/index.js';
 /** Inferred class-symbol attribute type. */
