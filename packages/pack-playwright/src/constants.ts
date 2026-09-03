@@ -60,6 +60,73 @@ export const KNOWN_RECORD_KINDS: readonly string[] = [
   UI_VISIBLE_RESULT_KIND,
   ...DOMAIN_CHECK_KINDS,
 ];
+
+/**
+ * The scenario table the WITNESS enforces per check kind (ADR 0004 D8
+ * witnessed producer channel). The suite asserts only a scenario NAME;
+ * the witness derives the outcome class from the status it actually
+ * observed through the proxy and refuses contradictions:
+ *
+ * - `rejected` scenarios are evidenced ONLY by an observed 4xx
+ *   (client-error) status;
+ * - `accepted` scenarios are evidenced ONLY by an observed 2xx status.
+ *
+ * A scenario name outside its kind's namespace table is a 400, never a
+ * witnessed record — the suite cannot rename its way into a different
+ * outcome class. Mirrors the engine's per-namespace contract verbs.
+ */
+export type DomainScenarioOutcome = 'accepted' | 'rejected';
+
+export const DOMAIN_SCENARIO_CLASSES: Readonly<
+  Record<string, Readonly<Record<string, DomainScenarioOutcome>>>
+> = {
+  'auth.check': {
+    'role-allowed': 'accepted',
+    'role-denied': 'rejected',
+    'tenant-isolated': 'rejected',
+    'denied-no-side-effect': 'rejected',
+    'forged-token-rejected': 'rejected',
+  },
+  'workflow.check': {
+    'transition-allowed': 'accepted',
+    'transition-rejected': 'rejected',
+    'terminal-immutable': 'rejected',
+    'audit-emitted': 'accepted',
+    'persisted-final-state': 'accepted',
+  },
+  'webhook.check': {
+    'signature-accepted': 'accepted',
+    'signature-rejected': 'rejected',
+    'malformed-rejected': 'rejected',
+    'replay-idempotent': 'accepted',
+    'retry-bounded': 'accepted',
+  },
+  'task.check': {
+    'retry-policy-enforced': 'accepted',
+    idempotent: 'accepted',
+    'terminal-handled': 'accepted',
+    'observability-recorded': 'accepted',
+    'duplicate-delivery-handled': 'accepted',
+  },
+  'validation.check': {
+    'boundary-accepted': 'accepted',
+    'boundary-rejected': 'rejected',
+    'no-side-effect-on-reject': 'rejected',
+    'error-message-explicit': 'accepted',
+    'envelope-shape-stable': 'accepted',
+  },
+};
+
+/**
+ * Dual-observation scenarios (idempotency proofs): the exchange is only
+ * evidence when the proxy observed TWO matching requests, so the witness
+ * consumes TWO matching observations single-use before issuing.
+ */
+export const DOMAIN_DUAL_SCENARIOS: Readonly<Record<string, true>> = {
+  'replay-idempotent': true,
+  'duplicate-delivery-handled': true,
+  idempotent: true,
+};
 /** Persistence kinds are ONLY issued by the witness (engine-side adapter reads). */
 export const KNOWN_PERSISTENCE_KINDS: readonly string[] = [PERSISTENCE_KIND];
 
