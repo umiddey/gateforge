@@ -15,3 +15,12 @@ export type {
   VerdictOutcome,
   WaiverRef,
 } from './evaluate.js';
+export {
+  registerContractVerifier,
+  verifierFor,
+  registeredNamespaces,
+  type ClaimEvidenceInput,
+  type ClaimOutcome,
+  type ContractVerifier,
+} from './registry.js';
+export { registerPackVerifiers } from './pack-verifiers.js';

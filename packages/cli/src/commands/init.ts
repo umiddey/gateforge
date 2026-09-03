@@ -46,6 +46,16 @@ const POLICIES_TEMPLATE = `\
 # deliberately.
 schemaVersion: 1
 policies:
+  - id: frontend-consumed-endpoints
+    # ADR 0004 D8: compiled http.endpoint resources owe their runtime
+    # observation contracts; CRUD state keeps flowing through the linked
+    # business resource's persistence:* obligations above.
+    when:
+      kind: http.endpoint
+      exposure: user-facing
+    require:
+      - http:frontend-request-observed
+      - http:response-status-ok
   - id: user-facing-persistence
     when:
       exposure: user-facing

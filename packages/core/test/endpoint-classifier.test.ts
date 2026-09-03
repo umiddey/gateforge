@@ -152,7 +152,7 @@ describe('endpoint plane inheritance', () => {
     const endpoint = endpointResource();
     const result = runWith(
       [business, endpoint],
-      [endpointSignals(endpoint.name)[0]],
+      [endpointSignals(endpoint.name)[0] as ClassificationSignal],
     );
     const endpointDecision = result.decisions.find((d) => d.name === endpoint.name);
     expect(endpointDecision?.classification).toBeNull();
