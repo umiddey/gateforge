@@ -34,6 +34,33 @@ export function sourceByResourceId(graph) {
     }
     return map;
 }
+/**
+ * Join-aware change sources (plan phase 7.4): an endpoint obligation is
+ * in scope when the backend route source OR any joined frontend-call
+ * source changed — a change on either end of the join pulls the joined
+ * endpoint's obligations into scope.
+ */
+export function sourcesByResourceId(graph) {
+    const map = new Map();
+    for (const resource of graph.resources) {
+        if (resource.id === null)
+            continue;
+        const sources = new Set([resource.source]);
+        const callSources = resource.attributes['callSources'];
+        if (Array.isArray(callSources)) {
+            for (const entry of callSources) {
+                if (typeof entry === 'string') {
+                    // `file:line:col` — the change scope is file-grained.
+                    const file = entry.split(':').slice(0, -2).join(':');
+                    if (file.length > 0)
+                        sources.add(file);
+                }
+            }
+        }
+        map.set(resource.id, [...sources].sort(compareStrings));
+    }
+    return map;
+}
 /** Reads the HEAD sha of the repo in `cwd`, or null when unavailable. */
 export function headSha(cwd) {
     const result = spawnSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' });

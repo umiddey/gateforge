@@ -100,6 +100,25 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
   );
   writeLine(io.stdout, `  source: ${resource.source}:${String(resource.location.line)}`);
   writeLine(io.stdout, `  detector: ${resource.detector.id}@${resource.detector.version}`);
+  if (resource.kind === 'http.endpoint') {
+    // Plan phase 7: the join trace — capabilities with their rules, the
+    // linked business resource, and both ends' sources.
+    const attributes = resource.attributes as Record<string, unknown>;
+    const canonicalPath = String(attributes['canonicalPath'] ?? '<unknown>');
+    writeLine(io.stdout, `  endpoint: ${String(attributes['method'] ?? '?')} ${canonicalPath}`);
+    writeLine(io.stdout, `  capabilities: ${(attributes['capabilities'] as string[] | undefined)?.join(', ') || '<unresolved>'}`);
+    for (const traceEntry of (attributes['capabilityTrace'] as Array<{ capability: string; rule: string }> | undefined) ?? []) {
+      writeLine(io.stdout, `    - ${traceEntry.capability} <- ${traceEntry.rule}`);
+    }
+    writeLine(io.stdout, `  linkedResource: ${String(attributes['linkedResourceName'] ?? '<none>')}`);
+    writeLine(io.stdout, `  frontendConsumed: ${String(attributes['frontendConsumed'] ?? 'false')}`);
+    for (const source of (attributes['serverSources'] as string[] | undefined) ?? []) {
+      writeLine(io.stdout, `  route source: ${source}`);
+    }
+    for (const source of (attributes['callSources'] as string[] | undefined) ?? []) {
+      writeLine(io.stdout, `  call source: ${source}`);
+    }
+  }
   const classification = resource.classification;
   const trace = resource.classificationTrace;
   if (classification === null || trace === null || decision === undefined) {

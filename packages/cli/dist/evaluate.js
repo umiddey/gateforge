@@ -16,7 +16,7 @@
 import { BLOCKING_VERDICTS, evaluateObligations, loadWaivers, verifyLedgerMac, } from '@gateforge/core';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveRepoPath, sourceByResourceId } from './pipeline.js';
+import { resolveRepoPath, sourceByResourceId, sourcesByResourceId } from './pipeline.js';
 import { readJsonArray } from './state.js';
 /** Keeps only blocking entries plausibly tied to a changed file. */
 function scopeBlocking(blocking, changed, sources) {
@@ -110,10 +110,12 @@ function scopeObligations(input) {
         return [...input.obligations];
     }
     const changed = new Set(input.changedFiles);
-    const sources = sourceByResourceId(input.graph);
+    const sources = sourcesByResourceId(input.graph);
     return input.obligations.filter((obligation) => {
-        const source = sources.get(obligation.resourceId);
-        return source !== undefined && changed.has(source);
+        const resourceSources = sources.get(obligation.resourceId);
+        if (resourceSources === undefined)
+            return false;
+        return resourceSources.some((source) => changed.has(source));
     });
 }
 /**
