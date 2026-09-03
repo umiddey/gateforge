@@ -44,6 +44,8 @@
  *   a waiver whose owner is stale yields `stale` (GF-17).
  */
 import { z } from 'zod';
+import { registerContractVerifier, verifierFor } from './registry.js';
+import { registerPackVerifiers } from './pack-verifiers.js';
 import { canonicalJson, type JsonValue } from '../canonical-json.js';
 import { fingerprint } from '../fingerprints.js';
 import { compareStrings } from '../graph/util.js';
@@ -541,7 +543,39 @@ function persistencePostconditionFailure(
  *   expectations.
  * - everything else — no semantic verifier registered, fail closed.
  */
+/**
+ * Per-claim dispatch (ADR 0004 D8, plan phase 5): every contract
+ * namespace is graded by exactly one registered semantic verifier;
+ * unknown namespaces stay fail-closed blocking. The built-in
+ * persistence/crud grader keeps its historical behavior verbatim.
+ */
 function evaluateClaimEvidence(
+  claim: Claim,
+  evidence: Array<{ record: RecordLike; trust: TrustTier }>,
+  obligation: Obligation,
+  primaryKey: readonly string[],
+): ClaimOutcome {
+  const verifier = verifierFor(obligation.contract);
+  if (verifier === null) {
+    return {
+      status: 'missing',
+      reason:
+        `no semantic verifier is registered for contract '${obligation.contract}'; the generic ` +
+        `CRUD evidence rule does not apply to non-persistence contracts, so '${obligation.id}' stays ` +
+        'blocking until its pack-specific verifier grades the evidence',
+    };
+  }
+  return verifier({ claim, obligation, evidence, primaryKey });
+}
+
+// Built-in registrations: persistence/crud semantics stay owned by this
+// module; pack namespaces register through './pack-verifiers.js'.
+registerContractVerifier('crud', (input) => persistenceClaimVerifier(input.claim, input.evidence, input.obligation, input.primaryKey));
+registerContractVerifier('persistence', (input) => persistenceClaimVerifier(input.claim, input.evidence, input.obligation, input.primaryKey));
+registerPackVerifiers();
+
+/** The built-in persistence/crud grader (behavior kept verbatim). */
+function persistenceClaimVerifier(
   claim: Claim,
   evidence: Array<{ record: RecordLike; trust: TrustTier }>,
   obligation: Obligation,
