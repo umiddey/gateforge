@@ -6,6 +6,7 @@
     "baseUrl": ".",
     "paths": {
       "@gateforge/core": ["../core/src/index.ts"],
+      "@gateforge/http-contract": ["../http-contract/src/index.ts"],
       "@gateforge/plugin-protocol": ["../plugin-protocol/src/index.ts"]
     }
   },

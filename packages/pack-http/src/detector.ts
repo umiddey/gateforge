@@ -12,10 +12,21 @@
  *     Fastify and Hono registrations (import-disambiguated, mirroring
  *     pack-auth's convention), and NestJS `@Controller('prefix')` +
  *     `@Get('suffix')` decorators.
- *   - Frontend API-client calls: `fetch('/api/accounts')` /
- *     `axios.get('/api/accounts')` with literal URL paths — the
- *     frontend-only exposure path (checklist: frontend-only linkage
- *     marks a resource user-facing).
+ *   - Frontend API-client calls resolved through the bounded static
+ *     dataflow in `client-calls.ts` (plan phase 3): direct literal
+ *     `fetch`/Axios, `fetch(url, { method })`, Axios instances and
+ *     config objects, configured client symbols, pure URL builders,
+ *     module constants (local and imported within the scanned set),
+ *     and simple single-return wrapper functions. Computed methods,
+ *     arbitrary concatenation, environment-dependent hosts, and wrapper
+ *     flows outside the model emit typed unresolved entries — they never
+ *     disappear and never default to GET.
+ *
+ * Both sides additionally emit `http.contract` evidence facts (ADR 0004
+ * D1) — one per server artifact and one per frontend callsite — which the
+ * engine's endpoint compiler joins by canonical method + positional path.
+ * Facts are engine-owned evidence-only resources: never business
+ * resources, never classified directly.
  *
  * Signals (facts, never classifications):
  *   - `exposure` code-positive per discovered artifact (assertion
@@ -43,6 +54,19 @@ import { resolve, relative, sep } from 'node:path';
 import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
 import type { z } from 'zod';
 import { LocationSchema, type ClassificationSignal } from '@gateforge/core';
+import {
+  HTTP_CONTRACT_KIND,
+  normalizeHttpMethod,
+  normalizeHttpPath,
+  type HttpContractFact,
+  type HttpLocation,
+} from '@gateforge/http-contract';
+import {
+  readClientScanConfigOrNull,
+  scanClientCalls,
+  type ClientCall,
+  type ClientScanConfig,
+} from './client-calls.js';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
 /** Inferred location shape (file, 1-based line, 0-based col). */
@@ -57,6 +81,14 @@ export interface HttpDetector {
 export interface HttpDetectorOptions {
   /** Repo root for repo-relative `source` paths (default: `process.cwd()`). */
   root?: string;
+  /** Client-scan configuration (declarates resolvable APIs, ADR 0004 D6). */
+  clientScan?: ClientScanConfig;
+  /**
+   * Repo-relative path of a client-scan config document (JSON) read from
+   * `root` when `clientScan` is not given (default:
+   * `.gateforge/http-clients.json`; absence is normal).
+   */
+  clientScanConfigPath?: string;
 }
 
 /** Where an externally-reachable artifact was found. */
@@ -212,8 +244,8 @@ function scanNestControllers(text: string, file: string): HttpArtifact[] {
     while ((methodMatch = methodDecorator.exec(body)) !== null) {
       const method = (methodMatch[1] ?? '').toUpperCase();
       const suffix = methodMatch[3] ?? '';
-      const path = `${prefix}/${suffix}`.replace(/\/+$/, '');
-      if (path.length === 0) continue;
+      const path = `/${prefix}/${suffix}`.replace(/\/+$/, '');
+      if (path === '/') continue;
       const absoluteIndex = bodyStart + (methodMatch.index ?? 0);
       const { line, col } = lineColumnFor(text, absoluteIndex);
       out.push({ method, path, origin: 'nestjs', file, line, col });
@@ -222,23 +254,6 @@ function scanNestControllers(text: string, file: string): HttpArtifact[] {
   return out;
 }
 
-/** Scans one file's text for frontend API-client calls (fetch/axios). */
-function scanClientCalls(text: string, file: string): HttpArtifact[] {
-  const out: HttpArtifact[] = [];
-  const fetchCall = /\bfetch\(\s*(['"`])(\/[^'"`]+)\1/g;
-  let match: RegExpExecArray | null;
-  while ((match = fetchCall.exec(text)) !== null) {
-    const { line, col } = lineColumnFor(text, match.index);
-    out.push({ method: 'GET', path: match[2] ?? '', origin: 'fetch', file, line, col });
-  }
-  const axiosCall = /\baxios\s*\.\s*(get|post|put|patch|delete)\(\s*(['"`])(\/[^'"`]+)\2/g;
-  while ((match = axiosCall.exec(text)) !== null) {
-    const method = (match[1] ?? '').toUpperCase();
-    const { line, col } = lineColumnFor(text, match.index);
-    out.push({ method, path: match[3] ?? '', origin: 'axios', file, line, col });
-  }
-  return out;
-}
 
 /** Builds the stable resource id for one artifact. */
 /** One canonical classification signal (facts only). */
@@ -272,6 +287,11 @@ function signal(
  */
 export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetector {
   const root = options.root ?? process.cwd();
+  const clientScan =
+    options.clientScan ??
+    readClientScanConfigOrNull(
+      resolve(root, options.clientScanConfigPath ?? '.gateforge/http-clients.json'),
+    );
   return {
     discover(paths) {
       if (paths.length === 0) {
@@ -281,6 +301,7 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
       const artifacts: HttpArtifact[] = [];
       const findings: Array<{ code: string; detail: string; locations: Location[] }> = [];
       const scanned: string[] = [];
+      const texts = new Map<string, string>();
       for (const file of files) {
         let text: string;
         try {
@@ -294,10 +315,11 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
           });
           continue;
         }
-        scanned.push(relative(root, file).split(sep).join('/'));
+        const sourceRel = relative(root, file).split(sep).join('/');
+        scanned.push(sourceRel);
+        texts.set(sourceRel, text);
         for (const artifact of scanServerRoutes(text, file)) artifacts.push(artifact);
         for (const artifact of scanNestControllers(text, file)) artifacts.push(artifact);
-        for (const artifact of scanClientCalls(text, file)) artifacts.push(artifact);
       }
       artifacts.sort((a, b) => {
         const keyA = `${a.file}:${a.line}:${a.col}:${a.method}:${a.path}:${a.origin}`;
@@ -309,15 +331,26 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
       // emitting a classifiable resource with the path-derived bare name
       // would collide with the converged table at the same plane-
       // qualified id. The signals below bind the exposure/lifecycle facts
-      // onto the entity resource the name converges with.
+      // onto the entity resource the name converges with; contract facts
+      // (ADR 0004 D1) carry both raw and canonical paths to the compiler.
       const signals: ClassificationSignal[] = [];
+      const resources: ContractResource[] = [];
+      const unresolved: Array<{ code: string; detail: string; location: HttpLocation }> = [];
       for (const artifact of artifacts) {
+        const sourceRel = relative(root, artifact.file).split(sep).join('/');
+        const location: Location = { file: sourceRel, line: artifact.line, col: artifact.col };
+        // Catch-all registrations (app.all/*) are exposure-only evidence:
+        // they prove reachability but no concrete method, so they emit no
+        // contract fact and no block.
+        if (!['all', 'any', '*'].includes(artifact.method.toLowerCase())) {
+          const fact = contractFactFromArtifact(artifact, sourceRel, location);
+          if (fact.ok) resources.push(fact.resource);
+          else unresolved.push(fact.unresolved);
+        }
         // Without a derived name the engine claims NOTHING about the
         // artifact's classification targets (no guess, no stale block).
         const derived = resourceNameFromPath(artifact.path);
         if (derived === null) continue;
-        const sourceRel = relative(root, artifact.file).split(sep).join('/');
-        const location: Location = { file: sourceRel, line: artifact.line, col: artifact.col };
         const assertion = artifact.origin === 'fetch' || artifact.origin === 'axios'
           ? 'frontend-call'
           : 'route';
@@ -328,6 +361,36 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
         }
       }
 
+      // Frontend calls: bounded static dataflow (client-calls.ts) — one
+      // fact per source callsite, exposure assertion `frontend-call`.
+      for (const sourceRel of [...texts.keys()].sort(compareStringsHttp)) {
+        const text = texts.get(sourceRel);
+        if (text === undefined) continue;
+        const result = scanClientCalls(sourceRel, text, clientScan, texts);
+        for (const clientCall of result.calls) {
+          const fact = contractFactFromClientCall(clientCall, sourceRel);
+          if (fact.ok) resources.push(fact.resource);
+          else unresolved.push(fact.unresolved);
+          const derived = resourceNameFromPath(clientCall.rawPath);
+          if (derived === null) continue;
+          signals.push(signal('exposure', 'frontend-call', clientCall.location, derived));
+          const operation = operationForMethod(clientCall.method);
+          if (operation !== null) {
+            signals.push(signal(`lifecycle.${operation}`, true, clientCall.location, derived));
+          }
+        }
+        unresolved.push(...result.unresolved);
+      }
+
+      resources.sort((a, b) => compareStringsHttp(String(a['id']), String(b['id'])));
+      unresolved.sort(
+        (a, b) =>
+          compareStringsHttp(a.location.file, b.location.file) ||
+          a.location.line - b.location.line ||
+          a.location.col - b.location.col ||
+          compareStringsHttp(a.code, b.code) ||
+          compareStringsHttp(a.detail, b.detail),
+      );
       signals.sort((a, b) =>
         JSON.stringify(a) < JSON.stringify(b)
           ? -1
@@ -336,7 +399,112 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
             : 0,
       );
       findings.sort((a, b) => a.detail < b.detail ? -1 : a.detail > b.detail ? 1 : 0);
-      return { resources: [], unresolved: [], findings, classificationSignals: signals, scannedPaths: scanned.sort(compareStringsHttp) };
+      return { resources, unresolved, findings, classificationSignals: signals, scannedPaths: scanned.sort(compareStringsHttp) };
+    },
+  };
+}
+
+interface ContractResource {
+  schemaVersion: 1;
+  kind: typeof HTTP_CONTRACT_KIND;
+  source: string;
+  location: HttpLocation;
+  detectorVersion: string;
+  attributes: Record<string, unknown>;
+  id: string;
+}
+
+type FactOutcome =
+  | { ok: true; resource: ContractResource }
+  | { ok: false; unresolved: { code: string; detail: string; location: HttpLocation } };
+
+function contractFactFromArtifact(
+  artifact: HttpArtifact,
+  sourceRel: string,
+  location: Location,
+): FactOutcome {
+  return buildFact({
+    role: 'server-route',
+    method: artifact.method,
+    rawPath: artifact.path,
+    framework: artifact.origin,
+    file: sourceRel,
+    location,
+    idSuffix: `${sourceRel}:${artifact.line}:${artifact.col}:${artifact.method}`,
+  });
+}
+
+function contractFactFromClientCall(
+  clientCall: ClientCall,
+  sourceRel: string,
+): FactOutcome {
+  const location: HttpLocation = {
+    file: clientCall.location.file,
+    line: clientCall.location.line,
+    col: clientCall.location.col,
+  };
+  return buildFact({
+    role: 'frontend-call',
+    method: clientCall.method,
+    rawPath: clientCall.rawPath,
+    framework: clientCall.framework,
+    file: sourceRel,
+    location,
+    idSuffix: `${sourceRel}:${clientCall.location.line}:${clientCall.location.col}`,
+    callsites: [`${clientCall.location.file}:${clientCall.location.line}:${clientCall.location.col}`],
+  });
+}
+
+function buildFact(input: {
+  role: 'server-route' | 'frontend-call';
+  method: string;
+  rawPath: string;
+  framework: string;
+  file: string;
+  location: HttpLocation;
+  idSuffix: string;
+  callsites?: string[];
+}): FactOutcome {
+  const method = normalizeHttpMethod(input.method);
+  if (method === null) {
+    return {
+      ok: false,
+      unresolved: {
+        code: 'HTTP_METHOD_DYNAMIC',
+        detail: `artifact in ${input.file} carries method '${input.method}' that cannot be proven`,
+        location: input.location,
+      },
+    };
+  }
+  const canonical = normalizeHttpPath(input.rawPath);
+  if (!canonical.ok) {
+    return {
+      ok: false,
+      unresolved: {
+        code: 'HTTP_PATH_DYNAMIC',
+        detail: `path '${input.rawPath}' in ${input.file}: ${canonical.detail}`,
+        location: input.location,
+      },
+    };
+  }
+  const attributes: Record<string, unknown> = {
+    role: input.role,
+    method,
+    normalizedPath: canonical.canonical,
+    rawPath: input.rawPath,
+    framework: input.framework,
+  };
+  if (input.callsites !== undefined) attributes['callsites'] = input.callsites;
+  return {
+    ok: true,
+    resource: {
+      schemaVersion: 1,
+      kind: HTTP_CONTRACT_KIND,
+      source: input.file,
+      location: input.location,
+      detectorVersion: PACK_VERSION,
+      attributes,
+      id: `http.contract:${input.idSuffix}`,
     },
   };
 }
