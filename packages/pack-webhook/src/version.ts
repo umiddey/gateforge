@@ -1,5 +1,5 @@
 /**
- * Pack identity constants. The GPP/2 handshake pins these values: the
+ * Pack identity constants. The GPP/3 handshake pins these values: the
  * `.gateforge.yml` plugin entry MUST declare the same `id` and `version`
  * (see the pack README).
  */

@@ -366,6 +366,7 @@ export function stubDetector(repo: TempRepo, options: StubDetectorOptions = {}):
       resources,
       unresolved: [],
       findings,
+      classificationSignals: [],
     },
     audit,
   };

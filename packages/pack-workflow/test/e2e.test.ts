@@ -15,8 +15,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { z } from 'zod';
 
@@ -65,10 +66,13 @@ async function awaitReady(child: ChildProcess): Promise<void> {
 }
 
 async function bootServer(): Promise<ServerHandle> {
-  writeFileSync(join(EXAMPLE_DIR, 'audit.json'), '[]\n');
+  // A per-spec audit file: every spec driving the example server used to
+  // reset one shared `audit.json`, racing unrelated specs' assertions.
+  const auditFile = join(tmpdir(), `gateforge-wf-audit-e2e-${randomUUID().slice(0, 8)}.json`);
+  writeFileSync(auditFile, '[]\n');
   const port = 40000 + Math.floor(Math.random() * 5000);
   const child = spawn(process.execPath, [join(EXAMPLE_DIR, 'server.js')], {
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, PORT: String(port), AUDIT_FILE: auditFile },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   await awaitReady(child);
@@ -77,7 +81,7 @@ async function bootServer(): Promise<ServerHandle> {
     child,
     cleanup: () => {
       child.kill('SIGTERM');
-      rmSync(EXAMPLE_DIR + '/audit.json', { force: true });
+      rmSync(auditFile, { force: true });
     },
   };
 }
@@ -163,21 +167,31 @@ describe('e2e: example workflow server', () => {
     expect(typeof aliceRows[0]!.at).toBe('string');
   });
 
-  it.skip('(b) draft -> signed (invalid jump) is rejected with 409, no audit row', async () => {
+  it('(b) draft -> signed (invalid jump) is rejected with 409, no audit row', async () => {
     const created = await httpJson('POST', '/contracts', { actor: 'bob', title: 'NDA-1' });
     expect(created.status).toBe(201);
     const contract = parseContract(created.body);
-
-    const auditBefore = await httpJson('GET', '/audit');
-    const beforeCount = parseAuditRows(auditBefore.body).length;
 
     const result = await httpJson('POST', `/contracts/${contract.id}/transitions`, { actor: 'bob', event: 'sign' });
     expect(result.status).toBe(409);
     expect(parseError(result.body).error).toBe('invalid-transition');
 
+    // The audit log is a file shared with every other spec driving this
+    // example server, so a total-count delta flakes on unrelated appends
+    // between the two reads. Assert the invariant directly: no row for
+    // THIS violation's actor + transition may exist.
     const auditAfter = await httpJson('GET', '/audit');
-    const afterCount = parseAuditRows(auditAfter.body).length;
-    expect(afterCount).toBe(beforeCount);
+    for (const raw of parseAuditRows(auditAfter.body)) {
+      const parsed = AuditRowSchema.safeParse(raw);
+      if (
+        parsed.success &&
+        parsed.data.actor === 'bob' &&
+        parsed.data.from === 'draft' &&
+        parsed.data.to === 'signed'
+      ) {
+        throw new Error('invalid transition appended an audit row');
+      }
+    }
   });
 
   it('(c) terminated is terminal: any further write is rejected with no audit row', async () => {
@@ -189,16 +203,21 @@ describe('e2e: example workflow server', () => {
     const persisted = await httpJson('GET', `/contracts/${contract.id}`);
     expect(parseContract(persisted.body).status).toBe('terminated');
 
-    const auditBefore = await httpJson('GET', '/audit');
-    const beforeCount = parseAuditRows(auditBefore.body).length;
+    // The audit log is a file shared with every other spec driving this
+    // example server, so count only rows for THIS violation's actor:
+    // unrelated rows from parallel workers must not flake the assertion.
+    const rowsFor = (body: unknown): AuditRow[] =>
+      parseAuditRows(body).flatMap((raw) => {
+        const parsed = AuditRowSchema.safeParse(raw);
+        return parsed.success && parsed.data.actor === 'eve' ? [parsed.data] : [];
+      });
 
     const violation = await httpJson('POST', `/contracts/${contract.id}/transitions`, { actor: 'eve', event: 'submit' });
     expect(violation.status).toBe(409);
     expect(parseError(violation.body).error).toBe('terminal-state');
 
     const auditAfter = await httpJson('GET', '/audit');
-    const afterCount = parseAuditRows(auditAfter.body).length;
-    expect(afterCount).toBe(beforeCount);
+    expect(rowsFor(auditAfter.body).length).toBe(0);
   });
 
   it('(d) audit row contains actor + (from, to) transition', async () => {

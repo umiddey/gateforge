@@ -1,5 +1,5 @@
 /**
- * Shared test helpers for the GPP/2 suites: fixture paths and the expected
+ * Shared test helpers for the GPP/3 suites: fixture paths and the expected
  * discovery outcome for the `app/routes.gfx` fixture (computed by hand, so
  * the tests check plugin output against an independent ground truth).
  */
@@ -54,6 +54,25 @@ export const EXPECTED_FINDINGS = [
     ],
   },
 ];
+
+/**
+ * The classification signals the PYTHON reference detector must emit for
+ * the fixture (GPP/3): one exposure signal per route row, targeted by the
+ * route's resource id. The JS fixture plugin's signals are identical
+ * except `source`/`detector.id` (its own plugin id) — the cross-language
+ * suite asserts both sides produce byte-identical signal documents for
+ * the same fixture after normalizing the detector identity.
+ */
+export const EXPECTED_SIGNALS = ROUTES.map((route) => ({
+  schemaVersion: 1,
+  target: { resourceId: `web.routes:${route.method} ${route.path}` },
+  dimension: 'exposure',
+  assertion: 'route',
+  basis: 'code-positive',
+  source: 'python-fixture-detector',
+  location: { file: 'app/routes.gfx', line: route.line, col: 0 },
+  detector: { id: 'python-fixture-detector', version: '1.0.0' },
+}));
 
 /** Host spawn options for a fixture plugin with fast watchdogs. */
 export function jsPluginOptions(

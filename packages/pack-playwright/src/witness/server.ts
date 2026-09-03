@@ -34,9 +34,10 @@
  * `manifest.json` in the run-state dir (pin #4/#7).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { sha256Hex, type Classification } from '@gateforge/core';
+import { ledgerMac, recordIdOf, type Classification, type RecordOrigin } from '@gateforge/core';
 import { canonicalOf } from '../json.js';
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
@@ -44,6 +45,7 @@ import {
   LOOPBACK_HOSTNAME,
   PERSISTENCE_KIND,
   RUN_HEADER,
+  VERIFIER_HEADER,
 } from '../constants.js';
 import { loadAdapters, makeAdapterContext } from './adapter-registry.js';
 import {
@@ -58,6 +60,8 @@ import type {
   IssuedRecord,
   PersistenceRequest,
   PersistenceResponse,
+  PreObservationRequest,
+  PreObservationResponse,
   RecordsRequest,
   RecordsResponse,
   WitnessHandle,
@@ -96,6 +100,20 @@ interface WitnessState {
   adapters: Map<string, EvidenceAdapter>;
   classifications: Record<string, Classification>;
   ledger: Map<string, IssuedRecord>;
+  /**
+   * Engine-side pre-observations (audit rounds 4-5): snapshots taken
+   * BEFORE a claimed action, consumed by the matching persistence read.
+   * Two kinds — an id-set snapshot (create: was the entity absent?) and
+   * an entity-fields snapshot (update: what changed?). In-memory,
+   * single-use: the suite can reference real observations but can never
+   * fabricate, replay, or mutate their contents, and expectations never
+   * come from the suite.
+   */
+  preObservations: Map<
+    string,
+    | { resourceId: string; kind: 'ids'; ids: string[] }
+    | { resourceId: string; kind: 'entity'; entityId: string; found: boolean; fields?: unknown }
+  >;
   server: Server;
   nowIso: () => string;
   stopped: boolean;
@@ -111,29 +129,15 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Derives the service-issued recordId: sha256 over GF-canonical JSON of
- * the record identity (pin #1). Deterministic and stable across runs;
- * an entry that never passed through the service has no matching hash,
- * so shape-level fabrication (a hex string the service never issued)
- * cannot line up with the ledger the reporter copies.
+ * The service-issued recordId comes from the frozen core primitive
+ * (`recordIdOf`, pin #1/#7): sha256 over GF-canonical JSON of the record
+ * identity. Sharing one implementation with the engine's provenance
+ * verifier guarantees the witness issues exactly what evaluation can
+ * recompute — an entry that never passed through the service has no
+ * matching hash, so shape-level fabrication (a hex string the service
+ * never issued) cannot line up with the ledger the reporter copies.
  */
-export function recordIdOf(identity: {
-  runId: string;
-  obligationId: string;
-  kind: string;
-  testId: string;
-  payload: unknown;
-}): string {
-  return sha256Hex(
-    canonicalOf({
-      runId: identity.runId,
-      obligationId: identity.obligationId,
-      kind: identity.kind,
-      testId: identity.testId,
-      payload: identity.payload,
-    }),
-  );
-}
+export { recordIdOf };
 
 /** Reads the JSON request body (sized; malformed → HttpError). */
 function readBody(req: IncomingMessage): Promise<unknown> {
@@ -232,12 +236,17 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
       ...options,
       runId: options.runId,
       token: options.token,
+      verifierKey:
+        typeof options.verifierKey === 'string' && options.verifierKey.length > 0
+          ? options.verifierKey
+          : null,
       requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
       host: options.host ?? LOOPBACK_HOSTNAME,
     },
     adapters,
     classifications,
     ledger: new Map(),
+    preObservations: new Map(),
     server: undefined as unknown as Server,
     nowIso: options.now ?? (() => new Date().toISOString()),
     stopped: false,
@@ -301,6 +310,10 @@ async function handleRequest(
       sendJson(res, 200, { records });
       return;
     }
+    if (req.method === 'GET' && path === '/ledger-attestation') {
+      handleLedgerAttestation(state, res, req.headers[VERIFIER_HEADER]);
+      return;
+    }
     if (req.method === 'GET' && path === '/classifications') {
       const resources: Record<string, unknown> = {};
       for (const key of Object.keys(state.classifications).sort(compareStrings)) {
@@ -311,6 +324,10 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/records') {
       await handleRecords(state, res, (await readBody(req)) as RecordsRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/witness/pre-observation') {
+      await handlePreObservation(state, res, (await readBody(req)) as PreObservationRequest);
       return;
     }
     if (req.method === 'POST' && path === '/witness/persistence') {
@@ -387,7 +404,7 @@ async function handleRecords(
   if (!isPlainObject(payload)) {
     throw new HttpError(400, 'payload must be a JSON object');
   }
-  const record = issueRecord(state, claimId, kind, testId, payload);
+  const record = issueRecord(state, claimId, kind, testId, payload, 'suite-submitted');
   const response: RecordsResponse = {
     recordId: record.recordId,
     trust: record.trust,
@@ -402,6 +419,12 @@ async function handleRecords(
  * and returns the verdict-relevant comparison. Attestation failures
  * (GF-10 non-loopback base, GF-13 fingerprint mismatch) REJECT the
  * record with 409 — raw adapter responses never leave this process.
+ *
+ * The issued record's payload is the ENGINE OBSERVATION the verdict
+ * engine grades postconditions against (audit rounds 4-5): `{resourceId,
+ * entityId, found, fields?, before?}`. Expectations NEVER come from the
+ * tested suite; `before` links a consumed pre-observation (id-set
+ * absence for create, entity-fields snapshot for update).
  */
 async function handlePersistence(
   state: WitnessState,
@@ -411,7 +434,10 @@ async function handlePersistence(
   if (!isPlainObject(body)) {
     throw new HttpError(400, 'request body must be an object');
   }
-  const { resourceId, entityId, expectFields, testId, claimId } = body as Record<string, unknown>;
+  const { resourceId, entityId, testId, claimId, preObservationId } = body as Record<
+    string,
+    unknown
+  >;
   if (typeof resourceId !== 'string' || resourceId.length === 0) {
     throw new HttpError(400, 'resourceId must be a non-empty string');
   }
@@ -421,10 +447,253 @@ async function handlePersistence(
   if (typeof claimId !== 'string' || !OBLIGATION_ID_PATTERN.test(claimId)) {
     throw new HttpError(400, "claimId must be an obligation id '<resourceId>:<contract>'");
   }
-  if (expectFields !== undefined && expectFields !== null && !isPlainObject(expectFields)) {
-    throw new HttpError(400, 'expectFields must be a JSON object when present');
+  if (
+    preObservationId !== undefined &&
+    (typeof preObservationId !== 'string' || preObservationId.length === 0)
+  ) {
+    throw new HttpError(400, 'preObservationId must be a non-empty string when present');
   }
 
+  const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
+
+  // Consume the referenced pre-observation, if any (single-use). Its
+  // contents — never suite-declared expectations — are what the engine
+  // grades create/update postconditions against.
+  let before: { entityAbsent: boolean } | { found: boolean; fields?: unknown } | undefined;
+  let consumed:
+    | { resourceId: string; kind: 'ids'; ids: string[] }
+    | { resourceId: string; kind: 'entity'; entityId: string; found: boolean; fields?: unknown }
+    | undefined;
+  if (typeof preObservationId === 'string') {
+    const observation = state.preObservations.get(preObservationId);
+    if (observation === undefined || observation.resourceId !== resourceId) {
+      throw new HttpError(
+        400,
+        `pre-observation '${preObservationId}' is unknown, already consumed, or belongs to another resource`,
+      );
+    }
+    state.preObservations.delete(preObservationId);
+    consumed = observation;
+    before = { entityAbsent: true }; // refined below for ids-kind snapshots
+  }
+
+  // Execute the adapter's GET-only read through the mediated transport.
+  const ctx = makeAdapterContext(baseUrl, resourceId, (path: string) =>
+    adapterGet(baseUrl, state.options.requestTimeoutMs, path),
+  );
+  let bodyRaw: unknown;
+  try {
+    bodyRaw = await adapter.read(ctx, entityId);
+  } catch (error) {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' read failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const found = bodyRaw !== null && bodyRaw !== undefined;
+
+  let normalized: { entityId: unknown; fields: unknown } | null = null;
+  if (found) {
+    try {
+      const candidate = adapter.normalize(bodyRaw);
+      if (!isPlainObject(candidate) || !('entityId' in candidate) || !('fields' in candidate)) {
+        throw new Error('normalize must return {entityId, fields}');
+      }
+      normalized = { entityId: candidate['entityId'], fields: candidate['fields'] };
+    } catch (error) {
+      throw new HttpError(
+        409,
+        `adapter '${adapterName}' normalize failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  // Report-only observations; the ENGINE judges identity binding (GF-05).
+  const mismatches: string[] = [];
+  let entityAgrees = true;
+  if (found && entityId !== undefined && normalized !== null) {
+    try {
+      if (canonicalOf(entityId) !== canonicalOf(normalized.entityId)) {
+        entityAgrees = false;
+        mismatches.push(
+          `entityId mismatch: adapter returned ${canonicalOf(normalized.entityId)} for requested ${canonicalOf(entityId)}`,
+        );
+      }
+    } catch {
+      entityAgrees = false;
+    }
+  }
+  // Build `before` from the consumed pre-observation's OWN contents —
+  // never from anything the suite declared.
+  if (consumed !== undefined && before !== undefined) {
+    if (consumed.kind === 'ids') {
+      const observedId =
+        normalized !== null && normalized.entityId !== undefined ? normalized.entityId : entityId;
+      let absent = true;
+      try {
+        absent = !consumed.ids.includes(canonicalOf(observedId));
+      } catch {
+        absent = true; // unrepresentable id: treat as not previously observed
+      }
+      before = { entityAbsent: absent };
+    } else {
+      before = {
+        found: consumed.found,
+        ...(consumed.found ? { fields: consumed.fields } : {}),
+      };
+    }
+  }
+
+  // The payload IS the engine observation (hashed into the record id).
+  const payload: Record<string, unknown> = {
+    resourceId,
+    entityId: found && normalized !== null ? normalized.entityId : entityId ?? null,
+    found,
+    ...(found && normalized !== null ? { fields: normalized.fields } : {}),
+    ...(before !== undefined ? { before } : {}),
+  };
+  const issued = issuePersistenceRecord(state, String(claimId), testId, payload);
+
+  const response: PersistenceResponse = {
+    recordId: issued.recordId,
+    runId: issued.runId,
+    verdictRelevant: {
+      found,
+      fieldsMatch: entityAgrees,
+      ...(mismatches.length > 0 ? { mismatches } : {}),
+    },
+  };
+  sendJson(res, 200, response);
+}
+
+/**
+ * `POST /witness/pre-observation` (audit rounds 4-5): takes an
+ * engine-side snapshot BEFORE a claimed action, stored in witness
+ * memory and consumed single-use by the paired persistence read. Two
+ * modes:
+ * - with `entityId`: snapshots that entity's observed fields (for
+ *   update postconditions — the engine grades the before/after delta);
+ * - without: snapshots the resource's observed id set via the adapter's
+ *   optional `list` (for create postconditions — the engine grades
+ *   absence-before).
+ * A suite can reference a real observation but cannot fabricate,
+ * replay, or mutate its contents.
+ */
+async function handlePreObservation(
+  state: WitnessState,
+  res: ServerResponse,
+  body: PreObservationRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'request body must be an object');
+  }
+  const { resourceId, testId, claimId, entityId } = body as Record<string, unknown>;
+  if (typeof resourceId !== 'string' || resourceId.length === 0) {
+    throw new HttpError(400, 'resourceId must be a non-empty string');
+  }
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'testId must be a non-empty string');
+  }
+  if (typeof claimId !== 'string' || !OBLIGATION_ID_PATTERN.test(claimId)) {
+    throw new HttpError(400, "claimId must be an obligation id '<resourceId>:<contract>'");
+  }
+
+  const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
+  const ctx = makeAdapterContext(baseUrl, resourceId, (path: string) =>
+    adapterGet(baseUrl, state.options.requestTimeoutMs, path),
+  );
+  const observationId = randomUUID();
+
+  if (entityId !== undefined) {
+    // Entity-fields snapshot (update postconditions).
+    let bodyRaw: unknown;
+    try {
+      bodyRaw = await adapter.read(ctx, entityId);
+    } catch (error) {
+      throw new HttpError(
+        409,
+        `adapter '${adapterName}' read failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const found = bodyRaw !== null && bodyRaw !== undefined;
+    let fields: unknown = undefined;
+    if (found) {
+      try {
+        const candidate = adapter.normalize(bodyRaw);
+        if (!isPlainObject(candidate) || !('fields' in candidate)) {
+          throw new Error('normalize must return {entityId, fields}');
+        }
+        fields = candidate['fields'];
+      } catch (error) {
+        throw new HttpError(
+          409,
+          `adapter '${adapterName}' normalize failed during pre-observation: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    state.preObservations.set(observationId, {
+      resourceId,
+      kind: 'entity',
+      entityId: canonicalOf(entityId),
+      found,
+      ...(found ? { fields } : {}),
+    });
+    const response: PreObservationResponse = { observationId, observed: found ? 1 : 0 };
+    sendJson(res, 200, response);
+    return;
+  }
+
+  // Resource id-set snapshot (create postconditions).
+  if (typeof adapter.list !== 'function') {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' does not support resource-level pre-observation ` +
+        '(no list export); create postconditions cannot be observed for this resource',
+    );
+  }
+  let raw: unknown;
+  try {
+    raw = await adapter.list(ctx);
+  } catch (error) {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' list failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!Array.isArray(raw)) {
+    throw new HttpError(409, `adapter '${adapterName}' list must return an array of entities`);
+  }
+  const ids: string[] = [];
+  for (const entity of raw) {
+    try {
+      const candidate = adapter.normalize(entity);
+      if (!isPlainObject(candidate) || !('entityId' in candidate)) {
+        throw new Error('normalize must return {entityId, fields}');
+      }
+      ids.push(canonicalOf(candidate['entityId']));
+    } catch (error) {
+      throw new HttpError(
+        409,
+        `adapter '${adapterName}' normalize failed during pre-observation: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  state.preObservations.set(observationId, { resourceId, kind: 'ids', ids: ids.sort(compareStrings) });
+
+  const response: PreObservationResponse = { observationId, observed: ids.length };
+  sendJson(res, 200, response);
+}
+
+/**
+ * Resolves the reviewed adapter + mediated read base for one resource,
+ * enforcing the full attestation chain (ADR 0001 adapter, GF-10
+ * loopback, GF-13 fingerprint). Shared by persistence reads and
+ * pre-observations.
+ */
+async function adapterReadContext(
+  state: WitnessState,
+  resourceId: string,
+): Promise<{ adapterName: string; adapter: EvidenceAdapter; baseUrl: string }> {
   const classification = state.classifications[resourceId] as Classification | undefined;
   const adapterName = classification?.evidenceAdapter ?? resourceId;
   const adapter = state.adapters.get(adapterName);
@@ -465,71 +734,7 @@ async function handlePersistence(
       mismatch,
     );
   }
-
-  // Execute the adapter's GET-only read through the mediated transport.
-  const ctx = makeAdapterContext(baseUrl, resourceId, (path: string) =>
-    adapterGet(baseUrl, state.options.requestTimeoutMs, path),
-  );
-  let bodyRaw: unknown;
-  try {
-    bodyRaw = await adapter.read(ctx, entityId);
-  } catch (error) {
-    throw new HttpError(
-      409,
-      `adapter '${adapterName}' read failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  const found = bodyRaw !== null && bodyRaw !== undefined;
-
-  let normalized: { entityId: unknown; fields: unknown };
-  try {
-    const candidate = adapter.normalize(bodyRaw);
-    if (!isPlainObject(candidate) || !('entityId' in candidate) || !('fields' in candidate)) {
-      throw new Error('normalize must return {entityId, fields}');
-    }
-    normalized = { entityId: candidate['entityId'], fields: candidate['fields'] };
-  } catch (error) {
-    throw new HttpError(
-      409,
-      `adapter '${adapterName}' normalize failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  // Report-only observations; the ENGINE judges identity binding (GF-05).
-  const mismatches: string[] = [];
-  let entityAgrees = true;
-  if (entityId !== undefined) {
-    try {
-      if (canonicalOf(entityId) !== canonicalOf(normalized.entityId)) {
-        entityAgrees = false;
-        mismatches.push(
-          `entityId mismatch: adapter returned ${canonicalOf(normalized.entityId)} for requested ${canonicalOf(entityId)}`,
-        );
-      }
-    } catch {
-      entityAgrees = false;
-    }
-  }
-  const fieldsAgreeResult = fieldsAgree(expectFields, normalized.fields, mismatches);
-
-  const issued = issuePersistenceRecord(
-    state,
-    String(claimId),
-    testId,
-    resourceId,
-    normalized,
-  );
-
-  const response: PersistenceResponse = {
-    recordId: issued.recordId,
-    runId: issued.runId,
-    verdictRelevant: {
-      found,
-      fieldsMatch: entityAgrees && fieldsAgreeResult,
-      ...(mismatches.length > 0 ? { mismatches } : {}),
-    },
-  };
-  sendJson(res, 200, response);
+  return { adapterName, adapter, baseUrl };
 }
 
 /**
@@ -564,62 +769,44 @@ async function adapterGet(
 }
 
 /**
- * Compares `expectFields` against the persisted field map (shared keys;
- * canonical equality). Mismatching or missing keys append diagnostics.
+ * Issues one witness-stamped record into the ledger.
+ *
+ * Trust follows ORIGIN, not channel (GF-23, audit round 3): the tested
+ * suite owns the browser and holds the run token, so a submitted
+ * `ui.action`/`ui.visible-result` payload proves only that the suite
+ * asserted it — those records are stamped `trust: 'claimed'` with
+ * `origin: 'suite-submitted'`. Records whose contents the witness
+ * itself observed engine-side (the adapter read behind
+ * `persistence.entity`) are stamped `trust: 'witnessed'` with
+ * `origin: 'engine-observed'`. Attestation (the ledger MAC) proves the
+ * witness issued a record; it can never prove a UI event happened.
  */
-function fieldsAgree(
-  expectFields: unknown,
-  actualFields: unknown,
-  mismatches: string[],
-): boolean {
-  if (!isPlainObject(expectFields)) return true; // nothing declared to agree
-  if (!isPlainObject(actualFields)) {
-    mismatches.push('persisted fields are not an object');
-    return false;
-  }
-  let agree = true;
-  for (const [key, expected] of Object.entries(expectFields)) {
-    if (!(key in actualFields)) {
-      mismatches.push(
-        `'${key}': expected ${canonicalOf(expected)} but the persisted entity has no such field`,
-      );
-      agree = false;
-      continue;
-    }
-    let actual: string;
-    try {
-      actual = canonicalOf(actualFields[key]);
-    } catch {
-      mismatches.push(`'${key}': persisted value is not JSON-comparable`);
-      agree = false;
-      continue;
-    }
-    if (actual !== canonicalOf(expected)) {
-      mismatches.push(`'${key}': expected ${canonicalOf(expected)}, persisted ${actual}`);
-      agree = false;
-    }
-  }
-  return agree;
-}
-
-/** Issues one witness-stamped record into the ledger. */
 function issueRecord(
   state: WitnessState,
   obligationId: string,
   kind: string,
   testId: string,
   payload: unknown,
+  origin: RecordOrigin,
 ): IssuedRecord {
   const issuedAt = state.nowIso();
-  const recordId = recordIdOf({ runId: state.options.runId, obligationId, kind, testId, payload });
+  const recordId = recordIdOf({
+    runId: state.options.runId,
+    obligationId,
+    kind,
+    testId,
+    origin,
+    payload,
+  });
   const record: IssuedRecord = {
     schemaVersion: 1,
     recordId,
     runId: state.options.runId,
-    trust: 'witnessed',
+    trust: origin === 'engine-observed' ? 'witnessed' : 'claimed',
     obligationId,
     kind,
     testId,
+    origin,
     payload,
     issuedAt,
   };
@@ -629,20 +816,49 @@ function issueRecord(
 
 /**
  * Issues a persistence record bound to the claim that requested the
- * adapter read (same testId/obligationId as the claim), with entityId +
- * fields stamped from the ADAPTER RESPONSE (never from caller args).
+ * adapter read (same testId/obligationId as the claim). The payload is
+ * the ENGINE OBSERVATION assembled by the caller — entityId + fields
+ * from the ADAPTER RESPONSE (never from caller args), plus the
+ * presence/expectation/before data the engine grades postconditions
+ * against.
  */
 function issuePersistenceRecord(
   state: WitnessState,
   claimId: string,
   testId: string,
-  resourceId: string,
-  normalized: { entityId: unknown; fields: unknown },
+  payload: Record<string, unknown>,
 ): IssuedRecord {
-  return issueRecord(state, claimId, PERSISTENCE_KIND, testId, {
-    resourceId,
-    entityId: normalized.entityId,
-    fields: normalized.fields,
+  return issueRecord(state, claimId, PERSISTENCE_KIND, testId, payload, 'engine-observed');
+}
+
+/**
+ * Serves the authenticated live ledger set (pin #7, GF-23): runId plus
+ * the issued recordIds, bound by a verifier-key MAC. Requires the
+ * verifier key — a secret the tested suite never receives — so only an
+ * orchestrator-grade caller (the evaluating CLI) can certify issuance;
+ * the suite's run token authorizes submissions, never attestation.
+ * Without a configured verifier key the witness answers 409: an
+ * unauthenticated ledger is not an attestation.
+ */
+function handleLedgerAttestation(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+): void {
+  const verifierKey = state.options.verifierKey;
+  if (verifierKey === null || verifierKey === undefined) {
+    sendJson(res, 409, { error: 'witness has no verifier key; attestation is unavailable' });
+    return;
+  }
+  if (typeof verifier !== 'string' || !timingSafeEqual(verifier, verifierKey)) {
+    sendJson(res, 401, { error: 'unauthorized: expected x-gateforge-verifier with the verifier key' });
+    return;
+  }
+  const recordIds = [...state.ledger.keys()].sort(compareStrings);
+  sendJson(res, 200, {
+    runId: state.options.runId,
+    recordIds,
+    mac: ledgerMac(verifierKey, state.options.runId, recordIds),
   });
 }
 
@@ -660,6 +876,13 @@ async function stopWitness(state: WitnessState): Promise<void> {
  * Pin #4/#7: at shutdown, append the issued recordIds to the run
  * manifest in the state dir (sorted, deduplicated; preserves every
  * other field). Absent manifest → no-op (standalone witness).
+ *
+ * With a verifier key configured, the append is AUTHENTICATED: a
+ * `recordIdsMac` (HMAC over the canonical `{runId, recordIds}`) is
+ * stamped alongside the ids, making the suite-writable manifest
+ * tamper-evident for the evaluating CLI (GF-23). Without one the ids
+ * are appended for reporting only — downstream evaluation treats an
+ * unauthenticated set as untrusted and fails closed.
  */
 function appendRecordIdsToManifest(state: WitnessState): void {
   const stateDir = state.options.stateDir;
@@ -677,8 +900,24 @@ function appendRecordIdsToManifest(state: WitnessState): void {
   } catch {
     return; // malformed manifest: never corrupt it; evaluation reads it leniently
   }
-  const existing = Array.isArray(manifest['recordIds']) ? (manifest['recordIds'] as unknown[]) : [];
-  const issued = [...state.ledger.keys()];
-  const merged = [...new Set([...existing.map(String), ...issued])].sort(compareStrings);
-  writeFileSync(manifestPath, `${canonicalOf({ ...manifest, recordIds: merged })}\n`, 'utf8');
+  // The authenticated set is EXACTLY what this witness issued — nothing
+  // more. The pre-existing `recordIds` in the manifest came from the
+  // suite-writable file, so merging them in would let a hostile suite
+  // have its forged computed ids signed as issued (audit round 3).
+  // They are discarded, not merged.
+  const issued = [...state.ledger.keys()].sort(compareStrings);
+  const updated: Record<string, unknown> = { ...manifest, recordIds: issued };
+  const verifierKey = state.options.verifierKey;
+  const manifestRunId = typeof manifest['runId'] === 'string' ? manifest['runId'] : null;
+  if (
+    verifierKey !== null &&
+    verifierKey !== undefined &&
+    manifestRunId !== null &&
+    manifestRunId.length > 0
+  ) {
+    // Bind the set to the MANIFEST's runId: the CLI verifies against the
+    // same value it checks each record's runId against.
+    updated['recordIdsMac'] = ledgerMac(verifierKey, manifestRunId, issued);
+  }
+  writeFileSync(manifestPath, `${canonicalOf(updated)}\n`, 'utf8');
 }

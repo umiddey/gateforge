@@ -20,8 +20,11 @@ import { buildResourceGraph, compareStrings } from '../graph/index.js';
 import { fingerprint } from '../fingerprints.js';
 import type { PolicyEvaluationResult } from '../policy/index.js';
 import { evaluatePolicies } from '../policy/index.js';
+import { runClassification } from '../classifier/bind.js';
+import type { ClassificationSignal } from '../schemas/classification-signal.js';
 import type { Claim } from '../schemas/claim.js';
-import type { Classification, ClassificationFile } from '../schemas/classification.js';
+import type { Classification } from '../schemas/classification.js';
+import type { ClassificationPolicy } from '../schemas/classification-policy.js';
 import type { PolicyFile } from '../schemas/policy.js';
 import type { EvidenceRecord } from '../schemas/evidence.js';
 import type { Obligation } from '../schemas/obligation.js';
@@ -83,8 +86,13 @@ export interface RunGatesInput {
   repo: TempRepo;
   /** Detector contributions; at least one. */
   detectors: DetectorContribution[];
-  /** Classifications document (`.gateforge/classifications.yml` content). */
-  classifications: ClassificationFile;
+  /**
+   * The classification policy (`.gateforge/classification-policy.yml`
+   * content, plan phase 5). Effective classifications are computed
+   * deterministically from detector signals on every run — there is no
+   * manual classifications document.
+   */
+  classificationPolicy: ClassificationPolicy;
   /** Policies document (`.gateforge/policies.yml` content). */
   policies: PolicyFile;
   /** The obligation evaluator (pin #9). */
@@ -156,8 +164,8 @@ export interface GateRunResult {
  *
  * Args:
  *   input: repository, detector contributions (+ parse audits), the
- *     classification/policy documents, injected clock, evaluator double
- *     or real, and optional claims/records/waivers/provider/runId.
+ *     classification-policy/policy documents, injected clock, evaluator
+ *     double or real, and optional claims/records/waivers/provider/runId.
  *
  * Returns:
  *   GateRunResult: manifest, graph, policy result, per-obligation
@@ -191,17 +199,59 @@ export function runGates(input: RunGatesInput): GateRunResult {
       // The rule's guaranteed findings carry provenance; feed them back
       // through the pinned discovery shape so the graph owns them.
       findings: ruled.findings.map(({ code, detail, locations }) => ({ code, detail, locations })),
+      classificationSignals: contribution.classificationSignals,
+      ...(contribution.scannedPaths !== undefined
+        ? { scannedPaths: contribution.scannedPaths }
+        : {}),
     });
   }
 
-  const graph = buildResourceGraph({
+  const built = buildResourceGraph({
     detectors: contributions,
-    classifications: input.classifications,
     claims: input.claims,
     adapters: input.adapters,
     waivers: input.waivers,
   });
-  const policy = evaluatePolicies({ graph, policies: input.policies, claims: input.claims });
+  const signals = contributions.flatMap((contribution) => contribution.classificationSignals);
+  // Channel routing (ADR 0003 D2): the harness stands in the HOST, so
+  // suppressive-shaped signals in the fixture contributions are minted
+  // onto the authority channel exactly as the real pipeline would.
+  const suppressive = (signal: ClassificationSignal): boolean =>
+    (signal.dimension === 'internality' &&
+      (signal.basis === 'declaration' || signal.basis === 'organization-policy')) ||
+    (signal.dimension.startsWith('lifecycle.') && signal.basis === 'code-negative-closed-world');
+  // Per-detector coverage (red-team round 3): synthesize the coverage
+  // reports from contributions that reported scannedPaths, exactly as
+  // the real pipeline does — the attestation judges THESE, never a union.
+  const coverage = contributions
+    .filter((contribution) => contribution.scannedPaths !== undefined)
+    .map((contribution) => ({
+      detector: contribution.detectorId,
+      scannedPaths: contribution.scannedPaths as string[],
+    }));
+  const { graph, blocking } = runClassification({
+    graph: built,
+    signals: signals.filter((signal) => !suppressive(signal)),
+    authority: signals.filter(suppressive),
+    policy: input.classificationPolicy,
+    adapters: input.adapters ?? [],
+    scan: {
+      // The harness's requested scope is the union of reported coverage
+      // (fixture-level self-consistency); the policy's coverage rules
+      // still judge each detector individually below.
+      requestedPaths: [...new Set(coverage.flatMap((entry) => entry.scannedPaths))],
+      scannedPaths: [...new Set(coverage.flatMap((entry) => entry.scannedPaths))],
+      coverage,
+      configuredDetectors: contributions.length,
+      successfulDetectors: contributions.length,
+    },
+  });
+  const policy = evaluatePolicies({
+    graph,
+    policies: input.policies,
+    claims: input.claims,
+    extraBlocking: blocking,
+  });
 
   const now = input.clock.now();
   const verdicts = policy.obligations
@@ -261,6 +311,7 @@ export function runGates(input: RunGatesInput): GateRunResult {
       blockingVerdicts.length === 0 &&
       policy.blocking.length === 0 &&
       graph.findings.length === 0 &&
+      graph.stale.length === 0 &&
       auditViolations.length === 0,
   };
 }

@@ -15,6 +15,7 @@ import {
   toIso,
   withEnv,
   withTempRepo,
+  type ClassificationSignal,
   type EvidenceRecord,
   type ObligationEvaluator,
   type RunGatesInput,
@@ -34,6 +35,7 @@ const ACCOUNTS_LIFECYCLE = {
   update: true,
   delete: true,
   deleteSemantics: 'archive' as const,
+  archiveFields: { status: 'archived' } as const,
 };
 
 /**
@@ -157,13 +159,78 @@ function witnessedRecord(obligationId: string): EvidenceRecord {
   };
 }
 
-/** Base gate-run input over a committed classified repo. */
+/** Builds the automatic classification policy and signal set for fixtures. */
+function automaticClassification(repo: TempRepo, detection: ReturnType<typeof stubDetector>) {
+  const signals = detection.output.resources.flatMap((resource) => {
+    const internal = resource.attributes.resourceName === 'audit_log';
+    const location = resource.location;
+    const detector = { id: detection.output.detectorId, version: detection.output.detectorVersion };
+    const signal = (
+      dimension: ClassificationSignal['dimension'],
+      assertion: ClassificationSignal['assertion'],
+      basis: ClassificationSignal['basis'] = 'declaration',
+    ): ClassificationSignal => ({
+      schemaVersion: 1,
+      target: { resourceName: resource.attributes.resourceName as string },
+      dimension,
+      assertion,
+      basis,
+      source: basis === 'declaration' || basis === 'code-negative-closed-world'
+        ? 'gateforge:internal'
+        : detection.output.detectorId,
+      location: resource.location,
+      detector: basis === 'declaration' || basis === 'code-negative-closed-world'
+        ? { id: 'gateforge.core', version: '1' }
+        : detector,
+    });
+    return [
+      signal('plane', internal ? 'master' : 'tenant'),
+      signal('identity', ['id']),
+      signal('lifecycle.create', !internal),
+      signal('lifecycle.read', !internal),
+      signal('lifecycle.update', !internal),
+      signal('lifecycle.delete', !internal, 'code-negative-closed-world'),
+      ...(internal
+        ? [
+            signal('internality', true, 'organization-policy'),
+            signal('internality', { category: 'worker' }, 'code-positive'),
+          ]
+        : [
+            signal('delete-semantics', 'archive'),
+            signal('archive-state', { status: 'archived' }),
+            signal('adapter-binding', 'accounts'),
+          ]),
+    ];
+  });
+  return {
+    ...detection.output,
+    classificationSignals: signals,
+    // Coverage report (red-team round 3): the stub detector examines every
+    // fixture model file, satisfying the policy's coverage rule.
+    scannedPaths: detection.output.resources.map((resource) => resource.source),
+  };
+}
+
+function classificationPolicy() {
+  return {
+    schemaVersion: 1 as const,
+    scanRoots: ['models/**/*.py'],
+    trustedInternalEntryPoints: [{ category: 'worker', detector: 'gateforge.stub-detector' }],
+    internalRules: [{ match: { resourceName: 'audit_log' }, reason: 'system audit ledger' }],
+    coverage: [{ capability: 'exposure.http', exhaustive: true, detector: 'gateforge.stub-detector', appliesTo: ['models/**'] }],
+    declarations: { internality: 'gateforge:internal' },
+    volatileFields: [],
+  };
+}
+
+/** Base gate-run input over a committed automatically classified repo. */
 function gateInput(repo: TempRepo, overrides: Partial<RunGatesInput> = {}): RunGatesInput {
   const detection = stubDetector(repo, { suffixes: ['.py'] });
   return {
     repo,
-    detectors: [{ ...detection.output, audit: detection.audit }],
-    classifications: classifications(),
+    detectors: [{ ...automaticClassification(repo, detection), audit: detection.audit }],
+    classificationPolicy: classificationPolicy(),
+    adapters: ['accounts'],
     policies: policies(),
     evaluate: evaluatorDouble(),
     clock: makeClock({ fixedAt: NOW }),
@@ -489,9 +556,8 @@ describe('gate runner', () => {
         'models/orphan.py': 'orphan = table(name="orphan")\n',
       }, 'fixture: orphan');
       const result = runGates(gateInput(repo));
-      expect(result.policy.blocking).toEqual([
-        expect.objectContaining({ kind: 'unclassified', name: 'orphan' }),
-      ]);
+      expect(result.graph.resources.some((resource) => resource.name === 'orphan')).toBe(true);
+      expect(result.policy.obligations.some((obligation) => obligation.resourceId === 'tenant.orphan')).toBe(true);
       expect(result.clean).toBe(false);
     });
   });

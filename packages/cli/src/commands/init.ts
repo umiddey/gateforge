@@ -8,11 +8,21 @@
  * self-checked against the pinned schema before anything is written — a
  * template drift from the frozen config must fail here, loudly, never
  * ship broken.
+ *
+ * Automatic classification (plan phase 5, ADR 0003 D5): the skeleton
+ * carries a `classification-policy.yml` with scan roots and trusted
+ * internal entry-point categories — there is NO per-resource
+ * classification file to fill in. Effective classifications are computed
+ * from detector signals on every run.
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { parseConfig, serializeBaseline } from '@gateforge/core';
+import {
+  ClassificationPolicySchema,
+  parseConfig,
+  serializeBaseline,
+} from '@gateforge/core';
 import { parseArgs } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
@@ -20,32 +30,111 @@ import { UsageError } from '../errors.js';
 
 export const INIT_USAGE = 'usage: gateforge init [--languages <comma,list>]';
 
-/** The starter policies document (one user-facing CRUD policy). */
+/**
+ * The starter policies document (plan phase 5): the gradable
+ * `persistence:*` namespace for automatically classified resources.
+ * UI-semantic `crud:*` stays opt-in and visibly fail-closed until a
+ * trusted UI observer exists (ADR 0003 §3).
+ */
 const POLICIES_TEMPLATE = `\
 # Declarative policies: when a resource matches, the required contracts
-# become obligations. Lifecycle-gated crud:* contracts are emitted only
-# for the lifecycle operations the classification enables.
+# become obligations. Lifecycle-gated persistence:* contracts are emitted
+# only for the lifecycle operations the automatic classification enables,
+# and are graded on the witness's own engine-side observation.
+# UI-semantic crud:* contracts intentionally fail closed (no
+# witness-controlled UI observation channel exists yet) — add them only
+# deliberately.
 schemaVersion: 1
 policies:
-  - id: user-facing-crud
+  - id: user-facing-persistence
     when:
       exposure: user-facing
     require:
-      - crud:create
-      - crud:read
-      - crud:update
-      - crud:delete
+      - persistence:create
+      - persistence:read
+      - persistence:update
+      - persistence:delete
 `;
 
-/** The empty classifications document (user fills it in). */
-const CLASSIFICATIONS_TEMPLATE = `\
-# Classify discovered resources here. Keys are resource names (or
-# plane-qualified ids). User-facing entries require exposure, plane,
-# lifecycle, primaryKey, and an evidenceAdapter.
+/**
+ * The classification policy (plan phase 5, ADR 0003 D4/D5): scan roots
+ * scope every closed-world proof, trusted categories name the internal
+ * entry points an internality certificate may rely on. Organization
+ * internal rules and declaration syntax go here too — a name rule alone
+ * NEVER proves internality; the certificate is re-derived every run.
+ */
+/**
+ * Builds the classification policy (plan phase 5, ADR 0003 D4/D5): scan roots
+ * scope every closed-world proof, trusted categories name the internal
+ * entry points an internality certificate may rely on. Organization
+ * internal rules and declaration syntax go here too.
+ */
+function classificationPolicyTemplate(languages: readonly string[]): string {
+  const coverageRules: string[] = [];
+  // Capabilities (red-team round 6): a rule grants a capability over its
+  // files. Model/task discovery NEVER grants exposure, and no generated
+  // rule declares `exhaustive: true` — today's detectors are heuristics,
+  // so generated policies keep the internality certificate UNAVAILABLE
+  // until the organization asserts an exhaustive exposure parser itself.
+  if (languages.includes('typescript') || languages.includes('javascript')) {
+    coverageRules.push(
+      `  - capability: exposure.http\n    detector: gateforge.pack-http\n    appliesTo:\n      - '**/*.ts'\n      - '**/*.js'\n      - '**/*.tsx'\n      - '**/*.jsx'`,
+    );
+    coverageRules.push(
+      `  - capability: linkage.task\n    detector: gateforge.pack-task\n    appliesTo:\n      - '**/*.ts'\n      - '**/*.js'\n      - '**/*.tsx'\n      - '**/*.jsx'`,
+    );
+  }
+  if (languages.includes('python')) {
+    // Model discovery is NOT an exposure capability: python exposure stays
+    // uncovered until an exhaustive python exposure detector exists.
+    coverageRules.push(
+      `  - capability: models.sqlalchemy\n    detector: gateforge.pack-sqlalchemy\n    appliesTo:\n      - '**/*.py'`,
+    );
+  }
+  const coverageBlock =
+    coverageRules.length > 0 ? `coverage:\n${coverageRules.join('\n')}` : 'coverage: []';
+
+  return `\
+# Repository-wide deterministic classification rules (ADR 0003 D5).
+# Effective classifications are computed automatically from detector
+# signals on every run: unknown exposure defaults user-facing, unknown
+# lifecycle operations default enabled, and internal requires a complete
+# closed-world certificate. This file NEVER classifies a resource by hand.
 schemaVersion: 1
-resources: {}
+# Globs a closed-world proof must cover; any parse/unresolved hole inside
+# them invalidates every suppressive decision in scope.
+scanRoots:
+  - '**/*'
+# Entry-point categories trusted as internal reachability (an internality
+# certificate may rely only on these).
+trustedInternalEntryPoints:
+  - category: worker
+    patterns: ['**/workers/**', '**/jobs/**']
+    # Reachability is only honored from this bundled detector (round 5).
+    detector: gateforge.pack-task
+  # Categories WITHOUT a detector binding can never certify: no plugin may
+  # assert their reachability. Bind one when a bundled detector exists.
+  - category: migration
+    patterns: ['**/migrations/**']
+  - category: maintenance-command
+    patterns: ['**/scripts/maintenance/**']
+# Organization internal rules — certificate INPUTS, never overrides.
+internalRules: []
+# Coverage requirements for COMPLETE-scan proofs (closed-world
+# certificates). Each rule: the named detector must report examining
+# every file matching appliesTo. Declaring none means no scan is
+# provably complete and closed-world proofs stay unavailable.
+${coverageBlock}
+# Supported source declaration syntax consumed by the classifier.
+declarations:
+  internality: 'gateforge:internal'
+  archiveState: 'gateforge:archive-state'
+# Bookkeeping columns that never satisfy an update by themselves.
+volatileFields:
+  - updated_at
+  - created_at
 `;
-
+}
 /** Builds the `.gateforge.yml` document for the requested languages. */
 function configTemplate(languages: readonly string[]): string {
   return `\
@@ -61,11 +150,11 @@ ${languages.map((language) => `    - ${language}`).join('\n')}
       - '**/*'
     exclude:
       - '**/node_modules/**'
-# Detector plugins. Subprocess plugins spawn a GPP/2 session; in-process
+# Detector plugins. Subprocess plugins spawn a GPP/3 session; in-process
 # plugins default-export { discover(paths) }.
 plugins: []
 policies: .gateforge/policies.yml
-classifications: .gateforge/classifications.yml
+classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
@@ -126,10 +215,19 @@ export function initCommand(io: Io, argv: readonly string[]): number {
       write: () => writeFileSync(join(gateforgeDir, 'policies.yml'), POLICIES_TEMPLATE, 'utf8'),
     },
     {
-      path: join(gateforgeDir, 'classifications.yml'),
-      label: 'classifications document',
-      write: () =>
-        writeFileSync(join(gateforgeDir, 'classifications.yml'), CLASSIFICATIONS_TEMPLATE, 'utf8'),
+      path: join(gateforgeDir, 'classification-policy.yml'),
+      label: 'classification policy',
+      write: () => {
+        const policyText = classificationPolicyTemplate(languages);
+        // Self-check against the pinned policy schema (same contract as
+        // the config template).
+        ClassificationPolicySchema.parse(parseYaml(policyText));
+        writeFileSync(
+          join(gateforgeDir, 'classification-policy.yml'),
+          policyText,
+          'utf8',
+        );
+      },
     },
     {
       path: join(gateforgeDir, 'baselines', 'obligations.json'),

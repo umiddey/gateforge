@@ -1,8 +1,10 @@
 /**
- * GPP/2 host suite (GF-12 + GF-18 mechanics): every E_* code is exercised
+ * GPP/3 host suite (GF-12 + GF-18 mechanics): every E_* code is exercised
  * by a fixture plugin that commits exactly one fault, and the test asserts
  * the single-cause diagnostic text. Plus the green persistent session
- * (>= 2 sequential discovers over one spawn) and determinism.
+ * (>= 2 sequential discovers over one spawn), determinism, the GPP/2-peer
+ * rejection (ADR 0003 D6: fail closed BEFORE discovery), and the
+ * mandatory-signals schema rule.
  */
 import { describe, expect, test } from 'vitest';
 import {
@@ -24,6 +26,7 @@ import {
 import {
   EXPECTED_FINDINGS,
   EXPECTED_RESOURCES,
+  EXPECTED_SIGNALS,
   FIXTURE_ROOT,
   jsPluginOptions,
 } from './helpers.js';
@@ -73,6 +76,14 @@ describe('green persistent session', () => {
       expect(first.resources).toEqual(EXPECTED_RESOURCES);
       expect(first.unresolved).toEqual([]);
       expect(first.findings).toEqual(EXPECTED_FINDINGS);
+      // GPP/3: the fixture plugin derives one exposure signal per route.
+      expect(first.classificationSignals).toEqual(
+        EXPECTED_SIGNALS.map((signal) => ({
+          ...signal,
+          source: 'js-fixture-detector',
+          detector: { id: 'js-fixture-detector', version: '1.0.0' },
+        })),
+      );
       // Lock-step: a second request on the SAME spawned process.
       const second = await session.discover(['app/routes.gfx']);
       expect(second).toEqual(first);
@@ -119,8 +130,47 @@ describe('E_PROTOCOL_VERSION', () => {
     expect(f.code).toBe('E_PROTOCOL_VERSION');
     expect(f.frameNo).toBe(1);
     expect(f.message).toContain('protocolVersion=1');
-    expect(f.message).toContain('host speaks 2');
+    expect(f.message).toContain('host speaks 3');
     expect(formatDiagnostic(f)).toMatch(/^\[plugin-protocol\] FAIL E_PROTOCOL_VERSION: frame 1: /);
+  });
+});
+
+describe('GPP/3 cutover (ADR 0003 D6)', () => {
+  test('a GPP/2 peer fails closed at the handshake, before any discovery', async () => {
+    const failure = await expectFailure('plugin_gpp2_peer.mjs', (s) => s.start());
+    expect(failure).toBeInstanceOf(ProtocolVersionError);
+    const f = failure as ProtocolVersionError;
+    expect(f.code).toBe('E_PROTOCOL_VERSION');
+    expect(f.frameNo).toBe(1);
+    expect(f.message).toContain('protocolVersion=2');
+    expect(f.message).toContain('host speaks 3');
+  });
+
+  test('a result omitting classificationSignals is a schema violation (no GPP/2 compatibility)', async () => {
+    const failure = await expectFailure('plugin_missing_signals.mjs', async (s) => {
+      await s.start();
+      await s.discover(['app/routes.gfx']);
+    });
+    expect(failure).toBeInstanceOf(SchemaError);
+    const f = failure as SchemaError;
+    expect(f.frameNo).toBe(2);
+    expect(f.message).toContain('type result');
+    expect(f.message).toContain('classificationSignals');
+  });
+
+  test('a malformed signal element is a schema violation naming the offending path', async () => {
+    const failure = await expectFailure('plugin_bad_signal.mjs', async (s) => {
+      await s.start();
+      await s.discover(['app/routes.gfx']);
+    });
+    expect(failure).toBeInstanceOf(SchemaError);
+    const f = failure as SchemaError;
+    expect(f.frameNo).toBe(2);
+    expect(f.message).toContain('type result');
+    // Single-cause diagnostic points INSIDE the signals array at the
+    // first violated rule (strict schema rejects the smuggled field or
+    // the missing location — either way the payload fails closed).
+    expect(f.message).toMatch(/classificationSignals\.0\./);
   });
 });
 
@@ -162,7 +212,10 @@ describe('E_FRAME_JSON', () => {
     expect((failure as FrameJsonError).message).toContain('not an object (got number)');
   });
 
-  test('a stdout line over the 8 MiB cap violates framing before parsing', async () => {
+  test('a stdout line over the 8 MiB cap violates framing before parsing', { timeout: 30_000 }, async () => {
+    // Spawning a child that materializes an 8 MiB line can exceed the
+    // default timeout under full-suite load (CI flake) — the assertion
+    // is about framing, not speed, so give it headroom.
     const failure = await expectFailure('plugin_oversize_line.mjs', (s) => s.start());
     expect(failure).toBeInstanceOf(FrameJsonError);
     const f = failure as FrameJsonError;

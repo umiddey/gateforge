@@ -1,10 +1,16 @@
-"""GPP/2 client library for Gateforge plugins (Python, stdlib only).
+"""GPP/3 client library for Gateforge plugins (Python, stdlib only).
 
 Lineage: spikes/plugin-protocol host/_lib lineage, hardened per ADR 0002
-D3 at protocolVersion 2. A plugin calls :func:`serve` with its identity
-and a ``discover(paths)`` handler; this module performs the hello/ready
-handshake, validates host frames (protocolVersion, seq order, digest),
-answers discover requests, and completes the shutdown/bye handshake.
+D3 at protocolVersion 3 (GPP/3 signal transport per ADR 0003 D6). A
+plugin calls :func:`serve` with its identity and a ``discover(paths)``
+handler; this module performs the hello/ready handshake, validates host
+frames (protocolVersion, seq order, digest), answers discover requests,
+and completes the shutdown/bye handshake.
+
+GPP/3 cutover: ``result`` payloads carry a mandatory
+``classificationSignals`` array (taken from the handler's return value,
+defaulting to an empty list for detectors without signal support).
+GPP/2 peers fail closed at the handshake with ``E_PROTOCOL_VERSION``.
 
 Digest rule (pin #5): ``digest = sha256(canonical({type, seq, payload}))``
 over GF-canonical-JSON (UTF-8, recursively key-sorted, no whitespace,
@@ -17,7 +23,7 @@ import hashlib
 import json
 import sys
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 REQUIRED_CAPABILITY = "discover"
 
 _KNOWN_TYPES = ("hello", "ready", "discover", "result", "error", "shutdown", "bye")
@@ -167,13 +173,15 @@ def serve(
     discover,
     capabilities: tuple[str, ...] = (REQUIRED_CAPABILITY,),
 ) -> int:
-    """Runs the GPP/2 serve loop over stdin/stdout until shutdown or EOF.
+    """Runs the GPP/3 serve loop over stdin/stdout until shutdown or EOF.
 
     Args:
         plugin_id: This plugin's identity, pinned by the host handshake.
         plugin_version: This plugin's version, pinned by the host handshake.
         discover: Callable ``discover(paths: list[str]) -> dict`` returning
-            ``{"resources": [...], "unresolved": [...], "findings": [...]}``.
+            ``{"resources": [...], "unresolved": [...], "findings": [...],
+            "classificationSignals": [...]}`` (GPP/3; the signals array
+            defaults to ``[]`` for detectors without signal support).
             Raise and the request is answered with an ``error`` frame.
         capabilities: Declared capabilities (default: ``("discover",)``).
 
@@ -217,18 +225,21 @@ def serve(
                 )
             try:
                 result = discover(list(paths))
-                _send(
-                    "result",
-                    next_seq(),
-                    {
-                        "requestId": request_id,
-                        "resources": result.get("resources", []),
-                        "unresolved": result.get("unresolved", []),
-                        "findings": result.get("findings", []),
-                    },
-                    plugin_id,
-                    plugin_version,
-                )
+                payload = {
+                    "requestId": request_id,
+                    "resources": result.get("resources", []),
+                    "unresolved": result.get("unresolved", []),
+                    "findings": result.get("findings", []),
+                    # GPP/3 (ADR 0003 D6): mandatory on every result;
+                    # detectors without signal support send [].
+                    "classificationSignals": result.get("classificationSignals", []),
+                }
+                # Optional coverage evidence (ADR 0003 D4): pass through
+                # the handler's reported scanned paths when provided.
+                scanned = result.get("scannedPaths")
+                if scanned is not None:
+                    payload["scannedPaths"] = scanned
+                _send("result", next_seq(), payload, plugin_id, plugin_version)
             except ProtocolError:
                 raise
             except Exception as error:  # request-scoped: session stays alive

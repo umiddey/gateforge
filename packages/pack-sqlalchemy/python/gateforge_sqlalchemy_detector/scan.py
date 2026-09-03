@@ -12,18 +12,67 @@ canonical detector vocabulary of the frozen resource graph:
   the class statement -- never absent, never guessed (ADR 0001 D1);
 - duplicate table names (GF-20) and repeated class names (GF-01) are
   findings; malformed files (GF-19) are ``PARSE_ERROR`` findings.
+
+Classification signals (plan phase 3, ADR 0003 D1): the detector emits
+code-derived FACTS, never classifications and never exposure claims:
+
+- ``identity`` signals carry the ORDERED primary-key columns (simple
+  and composite; declaration order preserved) derived from
+  ``Column(primary_key=True)``/``mapped_column(primary_key=True)`` or a
+  literal ``PrimaryKeyConstraint``. A table whose key is computed or
+  not visible in the class gets a typed ``PRIMARY_KEY_UNRESOLVED``
+  unresolved entry instead — the key is never defaulted to ``id``;
+- ``delete-semantics``/``archive-state`` declaration signals are
+  emitted only from the machine-readable class declarations
+  ``__gateforge_delete_semantics__ = "hard"|"archive"`` and
+  ``__gateforge_archive_state__ = {<field>: <literal value>}``;
+  a non-literal archive declaration becomes ``ARCHIVE_STATE_UNRESOLVED``.
+  Column NAMES resembling soft-delete bookkeeping are reported as the
+  ``softDeleteCandidateFields`` attribute (a fact for reviewers), never
+  as semantics;
+- ``__gateforge_read_only__ = True`` emits ``lifecycle.*`` declaration
+  signals asserting the operation unsupported (an assertion the core
+  classifier consumes conservatively — never a suppression on its own);
+- ``foreignKeyReferences`` facts (column → ``<table>.<column>``) ride
+  the resource attributes for cross-artifact linkage.
+
+No exposure signal is ever emitted from a table declaration alone
+(plan phase 3 guard): exposure needs externally reachable evidence,
+which only linkage detectors may provide.
 """
 
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
-from . import VERSION
+from . import PLUGIN_ID, VERSION
 
 TABULAR_ATTR = "__tablename__"
 ABSTRACT_ATTR = "__abstract__"
 TABLE_ARGS_ATTR = "__table_args__"
+
+# Machine-readable source declarations this detector recognizes (plan
+# phase 3). Declarations are assertions consumed by the core classifier —
+# contradictory code signals still block (ADR 0003 D5).
+DELETE_SEMANTICS_ATTR = "__gateforge_delete_semantics__"
+ARCHIVE_STATE_ATTR = "__gateforge_archive_state__"
+READ_ONLY_ATTR = "__gateforge_read_only__"
+
+# Column-call constructors carrying column facts.
+COLUMN_CALL_NAMES = ("Column", "mapped_column")
+
+# Column names that RESEMBLE soft-delete bookkeeping. Facts for
+# reviewers (attribute only) — never delete semantics, which must be
+# proven by a declaration or by the core classifier's lattice.
+SOFT_DELETE_CANDIDATE_FIELDS = (
+    "archived",
+    "archived_at",
+    "deleted",
+    "deleted_at",
+    "is_deleted",
+)
 
 
 def expr_label(node: ast.expr) -> str:
@@ -85,6 +134,148 @@ def base_name(node: ast.expr) -> str | None:
     return None
 
 
+class ColumnFacts:
+    """Column-level facts extracted from one model's AST, in written order.
+
+    Attributes of a table the detector can SEE statically. Anything not
+    provable here is reported unresolved (never defaulted, never guessed).
+    """
+
+    def __init__(self) -> None:
+        #: Ordered literal primary-key column names (simple + composite).
+        self.primary_key_columns: list[str] = []
+        #: True when a primary_key argument exists but is not the literal True.
+        self.has_computed_pk_arg: bool = False
+        #: True when PrimaryKeyConstraint literal columns were found.
+        self.has_pk_constraint: bool = False
+        #: {column: "<table>.<column>"} literal ForeignKey references.
+        self.foreign_keys: dict[str, str] = {}
+        #: Sorted column names resembling soft-delete bookkeeping.
+        self.soft_delete_candidates: list[str] = []
+
+    @property
+    def has_pk_evidence(self) -> bool:
+        """Whether any literal primary-key evidence was found."""
+        return bool(self.primary_key_columns)
+
+
+def _literal_kwarg_true(call: ast.Call, name: str) -> bool | None:
+    """Reads a keyword flag of a call as True/False/None (non-literal).
+
+    Args:
+        call: The call node.
+        name: Keyword name.
+
+    Returns:
+        bool | None: The literal truth value, or None when absent or
+            non-literal (the caller must treat None as unproven).
+    """
+    for kw in call.keywords:
+        if kw.arg == name:
+            if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool):
+                return kw.value.value
+            return None
+    return None
+
+
+def _column_call_name(call: ast.expr) -> str | None:
+    """Simple name of a call, when it is a column constructor."""
+    name = call_name(call.func) if isinstance(call, ast.Call) else None
+    return name if name in COLUMN_CALL_NAMES else None
+
+
+def _column_name(call: ast.Call, target: str | None) -> str | None:
+    """Derives a column's name: literal first arg wins, else the target.
+
+    Args:
+        call: The column constructor call.
+        target: Assignment target name (or None).
+
+    Returns:
+        str | None: The column name, or None when neither source is literal.
+    """
+    if call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str):
+        return call.args[0].value
+    return target
+
+
+def _foreign_key_reference(call: ast.Call) -> str | None:
+    """Finds a literal ``ForeignKey("<table>.<column>")`` argument."""
+    for arg in call.args:
+        if (
+            isinstance(arg, ast.Call)
+            and call_name(arg.func) == "ForeignKey"
+            and arg.args
+            and isinstance(arg.args[0], ast.Constant)
+            and isinstance(arg.args[0].value, str)
+        ):
+            return arg.args[0].value
+    for kw in call.keywords:
+        if (
+            isinstance(kw.value, ast.Call)
+            and call_name(kw.value.func) == "ForeignKey"
+            and kw.value.args
+            and isinstance(kw.value.args[0], ast.Constant)
+            and isinstance(kw.value.args[0].value, str)
+        ):
+            return kw.value.args[0].value
+    return None
+
+
+def _record_column(facts: ColumnFacts, call: ast.Call, target: str | None) -> None:
+    """Records one column-constructor call's facts into `facts`.
+
+    Args:
+        facts: Accumulating facts.
+        call: The column constructor call.
+        target: Assignment target name (or None for positional columns).
+    """
+    column_name = _column_name(call, target)
+    primary_key = _literal_kwarg_true(call, "primary_key")
+    if primary_key is None and any(kw.arg == "primary_key" for kw in call.keywords):
+        # A primary_key argument exists but is computed (GF-21 mechanic
+        # for keys): remember the hole — never guess the key.
+        facts.has_computed_pk_arg = True
+    if primary_key is True and column_name is not None:
+        facts.primary_key_columns.append(column_name)
+    if column_name is not None:
+        reference = _foreign_key_reference(call)
+        if reference is not None:
+            facts.foreign_keys[column_name] = reference
+        if column_name in SOFT_DELETE_CANDIDATE_FIELDS:
+            facts.soft_delete_candidates.append(column_name)
+
+
+def _facts_from_column_calls(calls: list[tuple[ast.Call, str | None]]) -> ColumnFacts:
+    """Builds ColumnFacts from (call, target) pairs in written order."""
+    facts = ColumnFacts()
+    for call, target in calls:
+        _record_column(facts, call, target)
+    return facts
+
+
+def _pk_constraint_columns(node: ast.expr) -> list[str] | None:
+    """Literal ordered columns of a ``PrimaryKeyConstraint("a", "b")``.
+
+    Args:
+        node: An ``__table_args__`` tuple element.
+
+    Returns:
+        list[str] | None: The ordered literal columns, or None when the
+            node is not a PrimaryKeyConstraint with literal args.
+    """
+    if (
+        isinstance(node, ast.Call)
+        and call_name(node.func) == "PrimaryKeyConstraint"
+        and node.args
+        and all(
+            isinstance(a, ast.Constant) and isinstance(a.value, str) for a in node.args
+        )
+    ):
+        return [a.value for a in node.args if isinstance(a.value, str)]
+    return None
+
+
 class ClassRecord:
     """AST facts about one class definition, at any lexical scope."""
 
@@ -100,9 +291,19 @@ class ClassRecord:
         self.abstract: bool = False
         self.has_table_args: bool = False
         self.table_args_schema: str | None = None
+        # Machine-readable source declarations (phase 3), None when absent.
+        self.delete_semantics_literal: str | None = None
+        self.delete_semantics_expr: ast.expr | None = None
+        self.archive_state_literal: dict[str, str | int | float | bool] | None = None
+        self.archive_state_expr: ast.expr | None = None
+        self.read_only: bool = False
+        # Column-level facts, in written order (body first, then table args).
+        self.column_facts: ColumnFacts = ColumnFacts()
         self._scan_body()
 
     def _scan_body(self) -> None:
+        column_calls: list[tuple[ast.Call, str | None]] = []
+        table_args_node: ast.expr | None = None
         for stmt in self.node.body:
             if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
                 targets = (
@@ -110,10 +311,13 @@ class ClassRecord:
                 )
                 names = [t.id for t in targets if isinstance(t, ast.Name)]
                 value = stmt.value
+                if value is not None and isinstance(value, ast.Call) and _column_call_name(value) is not None:
+                    for name in names:
+                        column_calls.append((value, name))
                 if TABULAR_ATTR in names and self.tablename_expr is None:
                     if isinstance(value, ast.Constant) and isinstance(value.value, str):
                         self.tablename_literal = value.value
-                    else:
+                    elif value is not None:
                         self.tablename_expr = value
                 if ABSTRACT_ATTR in names and isinstance(value, ast.Constant) and value.value is True:
                     self.abstract = True
@@ -128,8 +332,32 @@ class ClassRecord:
                                 and isinstance(v.value, str)
                             ):
                                 self.table_args_schema = v.value
+                    elif value is not None:
+                        table_args_node = value
+                if DELETE_SEMANTICS_ATTR in names and value is not None:
+                    if isinstance(value, ast.Constant) and value.value in ("hard", "archive"):
+                        self.delete_semantics_literal = value.value
+                    else:
+                        self.delete_semantics_expr = value
+                if ARCHIVE_STATE_ATTR in names and value is not None:
+                    self.archive_state_literal = _literal_record(value)
+                    if self.archive_state_literal is None:
+                        self.archive_state_expr = value
+                if READ_ONLY_ATTR in names and isinstance(value, ast.Constant) and value.value is True:
+                    self.read_only = True
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == TABULAR_ATTR:
                 self.tablename_func = stmt
+        # Table-args columns/constraints after body columns, written order.
+        if table_args_node is not None:
+            column_calls.extend(_table_args_column_calls(table_args_node))
+        self.column_facts = _facts_from_column_calls(column_calls)
+        # Explicit constraint columns are the authoritative ordered key.
+        if table_args_node is not None:
+            for element in _table_args_elements(table_args_node):
+                constraint = _pk_constraint_columns(element)
+                if constraint is not None:
+                    self.column_facts.primary_key_columns = constraint
+                    self.column_facts.has_pk_constraint = True
 
     # -- Classification ----------------------------------------------------
 
@@ -153,6 +381,47 @@ class ClassRecord:
             or "table" in self.keywords
         )
         return has_facts or bool(self.bases)
+
+
+def _literal_record(node: ast.expr) -> dict[str, str | int | float | bool] | None:
+    """Reads a dict literal of string keys and scalar values, else None.
+
+    Args:
+        node: The AST expression (e.g. the value of ``__gateforge_archive_state__``).
+
+    Returns:
+        dict | None: {field: literal scalar} preserving written order, or
+            None when any key/value is non-literal (the caller reports it
+            unresolved — the archived state is never guessed).
+    """
+    if not isinstance(node, ast.Dict):
+        return None
+    record: dict[str, str | int | float | bool] = {}
+    for k, v in zip(node.keys, node.values):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            return None
+        if not (isinstance(v, ast.Constant) and isinstance(v.value, (str, int, float, bool))):
+            return None
+        record[k.value] = v.value
+    return record
+
+
+def _table_args_elements(node: ast.expr | None) -> list[ast.expr]:
+    """The elements of a tuple ``__table_args__`` (or the node itself)."""
+    if isinstance(node, ast.Tuple):
+        return list(node.elts)
+    if node is not None:
+        return [node]
+    return []
+
+
+def _table_args_column_calls(node: ast.expr | None) -> list[tuple[ast.Call, str | None]]:
+    """Column-constructor calls inside ``__table_args__``, written order."""
+    calls: list[tuple[ast.Call, str | None]] = []
+    for element in _table_args_elements(node):
+        if isinstance(element, ast.Call) and _column_call_name(element) is not None:
+            calls.append((element, None))
+    return calls
 
 
 class FileIndex:
@@ -295,6 +564,7 @@ def _table_resource(relpath: str, rec: ClassRecord, provenance: str) -> dict:
             "tableKeywordTrue": "table" in rec.keywords,
             "abstract": False,
             "baseNames": list(rec.bases),
+            **_attribute_facts(rec.column_facts, rec),
         },
     }
 
@@ -327,6 +597,219 @@ def _call_table_resource(relpath: str, call: dict) -> dict:
             "baseNames": [],
         },
     }
+
+
+# -- Classification signals (plan phase 3, ADR 0003 D1) --------------------
+
+def _signal(
+    dimension: str,
+    assertion: "str | bool | list[str] | dict[str, str | int | float | bool]",
+    basis: str,
+    source: str,
+    location: dict,
+    target_name: str,
+) -> dict:
+    """One canonical classification signal targeting a bare resource name.
+
+    Args:
+        dimension: The classification dimension.
+        assertion: The dimension-typed assertion payload.
+        basis: The evidence basis (never a confidence score).
+        source: The issuing source (`PLUGIN_ID` or `gateforge.declaration:<key>`).
+        location: Where the evidence lives.
+        target_name: The bare resource name the signal speaks about.
+
+    Returns:
+        dict: A @gateforge/core `ClassificationSignal` document.
+    """
+    return {
+        "schemaVersion": 1,
+        "target": {"resourceName": target_name},
+        "dimension": dimension,
+        "assertion": assertion,
+        "basis": basis,
+        "source": source,
+        "location": location,
+        "detector": {"id": PLUGIN_ID, "version": VERSION},
+    }
+
+
+def _identity_signal(rec_or_facts: "ClassRecord | ColumnFacts", relpath: str, target_name: str, node: ast.AST) -> dict | None:
+    """The ordered primary-key signal for a table, or None when unprovable.
+
+    Args:
+        rec_or_facts: The class record (or bare column facts of a Table call).
+        relpath: Repo-root-relative source path.
+        target_name: The bare table name.
+        node: The declaration node the evidence lives at.
+
+    Returns:
+        dict | None: The `identity` signal with ordered columns (composite
+            order preserved), or None when no literal key was derivable.
+    """
+    facts = rec_or_facts.column_facts if isinstance(rec_or_facts, ClassRecord) else rec_or_facts
+    if not facts.has_pk_evidence:
+        return None
+    return _signal(
+        "identity",
+        list(facts.primary_key_columns),
+        "code-positive",
+        PLUGIN_ID,
+        loc(relpath, node),
+        target_name,
+    )
+
+
+def _declaration_signals(rec: ClassRecord, relpath: str, target_name: str) -> list[dict]:
+    """Declaration signals from machine-readable class declarations.
+
+    Args:
+        rec: The class record.
+        relpath: Repo-root-relative source path.
+        target_name: The bare table name.
+
+    Returns:
+        list[dict]: `delete-semantics`, `archive-state`, and read-only
+            `lifecycle.*` declaration signals. Declarations are ASSERTIONS
+            for the core classifier — never suppressions on their own.
+    """
+    signals: list[dict] = []
+    if rec.delete_semantics_literal is not None:
+        signals.append(
+            _signal(
+                "delete-semantics",
+                rec.delete_semantics_literal,
+                "declaration",
+                "gateforge.declaration:delete-semantics",
+                loc(relpath, rec.node),
+                target_name,
+            )
+        )
+    if rec.archive_state_literal is not None:
+        signals.append(
+            _signal(
+                "archive-state",
+                rec.archive_state_literal,
+                "declaration",
+                "gateforge.declaration:archive-state",
+                loc(relpath, rec.node),
+                target_name,
+            )
+        )
+    if rec.read_only:
+        for operation in ("create", "update", "delete"):
+            signals.append(
+                _signal(
+                    f"lifecycle.{operation}",
+                    False,
+                    "declaration",
+                    "gateforge.declaration:read-only",
+                    loc(relpath, rec.node),
+                    target_name,
+                )
+            )
+    return signals
+
+
+def _attribute_facts(facts: ColumnFacts, rec: ClassRecord | None) -> dict:
+    """Non-authoritative attribute facts for cross-artifact linkage.
+
+    Args:
+        facts: The extracted column facts.
+        rec: The class record (None for Table() calls).
+
+    Returns:
+        dict: Attribute entries (only when non-empty): ordered
+            `primaryKeyColumns`, `foreignKeyReferences` (sorted by
+            column), `softDeleteCandidateFields`, and `readOnly`.
+    """
+    entries: dict = {}
+    if facts.has_pk_evidence:
+        entries["primaryKeyColumns"] = list(facts.primary_key_columns)
+    if facts.foreign_keys:
+        entries["foreignKeyReferences"] = [
+            {"column": column, "references": facts.foreign_keys[column]}
+            for column in sorted(facts.foreign_keys)
+        ]
+    if facts.soft_delete_candidates:
+        entries["softDeleteCandidateFields"] = sorted(set(facts.soft_delete_candidates))
+    if rec is not None and rec.read_only:
+        entries["readOnly"] = True
+    return entries
+
+
+def _signal_unresolved_entries(rec: ClassRecord, relpath: str, has_identity: bool) -> list[dict]:
+    """Typed unresolved entries for unprovable identity/archive facts.
+
+    Args:
+        rec: The class record.
+        relpath: Repo-root-relative source path.
+        has_identity: Whether an `identity` signal was emitted (skips the
+            primary-key entry — the key is proven).
+
+    Returns:
+        list[dict]: ``PRIMARY_KEY_UNRESOLVED`` when the table's key is
+            computed or not visible in the class (inherited keys count as
+            not visible), and ``ARCHIVE_STATE_UNRESOLVED`` when the
+            archive declaration's value is non-literal. Never guesses.
+    """
+    entries: list[dict] = []
+    facts = rec.column_facts
+    if not has_identity and not facts.has_pk_evidence:
+        if facts.has_computed_pk_arg:
+            detail = (
+                "primary_key_unresolved: a primary_key argument is computed "
+                "(not the literal True); the ordered key is never guessed"
+            )
+        elif facts.has_pk_constraint:
+            detail = (
+                "primary_key_unresolved: PrimaryKeyConstraint columns are "
+                "not all string literals; the ordered key is never guessed"
+            )
+        else:
+            detail = (
+                "primary_key_unresolved: no literal primary-key column is "
+                "declared on this class (an inherited mixin/base key is not "
+                "visible to the AST scan); the key is never defaulted to 'id'"
+            )
+        entries.append(
+            {
+                "code": "PRIMARY_KEY_UNRESOLVED",
+                "detail": detail,
+                "location": loc(relpath, rec.node),
+            }
+        )
+    if rec.archive_state_expr is not None:
+        entries.append(
+            {
+                "code": "ARCHIVE_STATE_UNRESOLVED",
+                "detail": (
+                    "archive_state_unresolved: "
+                    f"{ARCHIVE_STATE_ATTR} is assigned from "
+                    f"{expr_label(rec.archive_state_expr)}; the owner-owned "
+                    "archived field values are never guessed"
+                ),
+                "location": loc(relpath, rec.node),
+            }
+        )
+    return entries
+
+
+def _table_call_facts(call: dict) -> ColumnFacts:
+    """Column facts of a direct ``Table(...)`` call (positional columns).
+
+    Args:
+        call: The recorded Table-call facts.
+
+    Returns:
+        ColumnFacts: Facts from the call's column arguments, written order.
+    """
+    node = call["node"]
+    calls: list[tuple[ast.Call, str | None]] = []
+    for arg in node.args[2:]:
+        if isinstance(arg, ast.Call) and _column_call_name(arg) is not None:
+            calls.append((arg, None))
+    return _facts_from_column_calls(calls)
 
 
 def _computed_reason(rec: ClassRecord) -> str:
@@ -535,8 +1018,9 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
             CLI sets to the repo root).
 
     Returns:
-        dict: {"resources": [...], "unresolved": [...], "findings": [...]}
-            with every array deterministically sorted.
+        dict: {"resources": [...], "unresolved": [...], "findings": [...],
+            "classificationSignals": [...]} with every array
+            deterministically sorted.
 
     Raises:
         OSError: A scanned file is missing/unreadable — surfaced as a
@@ -547,17 +1031,21 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
 
     indexes: dict[str, FileIndex] = {}
     findings: list[dict] = []
+    scanned: list[str] = []
     for relpath in relpaths:
+        if not relpath.endswith(".py"):
+            continue
         index, finding = _scan_file(relpath, base)
         if finding is not None:
             findings.append(finding)
             continue
+        scanned.append(relpath)
         indexes[relpath] = index
-
     resources: list[dict] = []
     unresolved: list[dict] = []
+    signals: list[dict] = []
 
-    # Pass 1: class symbols + business tables + typed unresolved.
+    # Pass 1: class symbols + business tables + typed unresolved + signals.
     for relpath in sorted(indexes):
         idx = indexes[relpath]
         for rec in idx.classes:
@@ -570,6 +1058,12 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
                 continue  # bases never materialize; the symbol table owns them
             if rec.tablename_literal is not None:
                 resources.append(_table_resource(relpath, rec, "literal"))
+                table_name = rec.tablename_literal
+                identity = _identity_signal(rec, relpath, table_name, rec.node)
+                if identity is not None:
+                    signals.append(identity)
+                signals.extend(_declaration_signals(rec, relpath, table_name))
+                unresolved.extend(_signal_unresolved_entries(rec, relpath, identity is not None))
             elif rec.is_table_candidate():
                 unresolved.append(_unresolved_entry(relpath, rec))
 
@@ -577,6 +1071,10 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
     for relpath in sorted(indexes):
         for call in indexes[relpath].table_calls:
             resources.append(_call_table_resource(relpath, call))
+            facts = _table_call_facts(call)
+            identity = _identity_signal(facts, relpath, call["table_name"], call["node"])
+            if identity is not None:
+                signals.append(identity)
 
     resources.sort(key=lambda r: r["id"])
     unresolved.sort(
@@ -594,5 +1092,15 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
             f["locations"][0]["line"] if f["locations"] else 0,
         )
     )
+    # Canonical wire order: by GF-canonical-JSON text — deterministic and
+    # identical to what the core classifier's signalId sorting expects.
+    signals.sort(key=lambda s: json.dumps(s, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
 
-    return {"resources": resources, "unresolved": unresolved, "findings": findings}
+    return {
+        "resources": resources,
+        "unresolved": unresolved,
+        "findings": findings,
+        "classificationSignals": signals,
+        # Coverage evidence (ADR 0003 D4): files parsed successfully.
+        "scannedPaths": sorted(scanned),
+    }

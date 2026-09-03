@@ -35,7 +35,7 @@ function oneResourceClassifications(name: string): ClassificationFile {
           read: true,
           update: false,
           delete: false,
-          deleteSemantics: 'archive',
+          deleteSemantics: 'archive', archiveFields: { status: 'archived' },
         },
         primaryKey: ['id'],
         evidenceAdapter: `${name}-adapter`,
@@ -144,6 +144,7 @@ describe('GF-19 rule', () => {
       ],
       unresolved: [],
       findings: [],
+      classificationSignals: [],
     };
     const audit = [
       { file: 'src/good.py', ok: true },
@@ -176,7 +177,14 @@ describe('GF-19 rule', () => {
       detectorId: 'd',
       detectorVersion: '1',
       audit: [{ file: 'f.py', ok: false }],
-      output: { detectorId: 'd', detectorVersion: '1', resources: [], unresolved: [], findings: [] },
+      output: {
+        detectorId: 'd',
+        detectorVersion: '1',
+        resources: [],
+        unresolved: [],
+        findings: [],
+        classificationSignals: [],
+      },
     });
     expect(result.violations.some((violation) => violation.includes('failing closed at line 1'))).toBe(true);
     expect(result.parseErrors[0]?.locations[0]).toEqual({ file: 'f.py', line: 1, col: 0 });
@@ -205,7 +213,14 @@ describe('GF-19 gate-runner integration', () => {
       const result = runGates({
         repo,
         detectors: [{ ...detection.output, audit: detection.audit }],
-        classifications: oneResourceClassifications('alpha'),
+        classificationPolicy: {
+          schemaVersion: 1,
+          scanRoots: ['src/**/*.py'],
+          trustedInternalEntryPoints: [],
+          internalRules: [],
+          declarations: { internality: 'gateforge:internal' },
+          volatileFields: [],
+        },
         policies: createPolicy(),
         evaluate: () => ({ verdict: 'missing', reason: 'no evidence records', recordIds: [] }),
         clock: { now: () => '2026-06-01T00:00:00.000Z' },
@@ -223,7 +238,7 @@ describe('GF-19 gate-runner integration', () => {
       const graphNames = result.graph.resources.map((resource) => resource.name);
       expect(graphNames).toContain('alpha');
       expect(graphNames).not.toContain('gamma');
-      expect(result.policy.blocking.filter((entry) => entry.kind === 'unclassified')).toHaveLength(2);
+      expect(result.policy.blocking.filter((entry) => entry.kind === 'unclassified')).toHaveLength(3);
       // The stub detector was honest — the rule had nothing to correct.
       expect(result.auditViolations).toEqual([]);
     } finally {

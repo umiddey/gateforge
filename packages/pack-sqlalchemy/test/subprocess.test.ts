@@ -1,5 +1,5 @@
 /**
- * GPP/2 subprocess transport suite: the documented
+ * GPP/3 subprocess transport suite: the documented
  * `python3 -m gateforge_sqlalchemy_detector` invocation driven through
  * the hardened host, against fixtures replicating the spike's
  * adversarial cases (GF-01/02/19/20/21) plus cross-module inputs.
@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CLASS_SYMBOL_KIND,
   ClassSymbolAttributesSchema,
+  ClassificationSignalSchema,
   ResourceSchema,
   type Resource,
 } from '@gateforge/core';
@@ -34,7 +35,7 @@ const tableResources = (doc: { resources: Resource[] }): Resource[] =>
 const symbolResources = (doc: { resources: Resource[] }): Resource[] =>
   doc.resources.filter((resource) => resource.kind === CLASS_SYMBOL_KIND);
 
-describe('GPP/2 subprocess transport x python detector', () => {
+describe('GPP/3 subprocess transport x python detector', () => {
   it('handshakes, discovers every fixture, and shuts down cleanly', async () => {
     const outcome = await runDiscover(ALL_FIXTURES);
     // Every emitted resource matches the frozen core schema.
@@ -47,10 +48,10 @@ describe('GPP/2 subprocess transport x python detector', () => {
       const parsed = ClassSymbolAttributesSchema.safeParse(resource.attributes);
       expect(parsed.success, `class symbol ${resource.id} must validate`).toBe(true);
     }
-    expect(tableResources(outcome)).toHaveLength(12);
-    // 29 class symbols: one per declarative/base class across the 10 fixtures.
-    expect(symbolResources(outcome)).toHaveLength(29);
-    expect(outcome.unresolved).toHaveLength(9);
+    expect(tableResources(outcome)).toHaveLength(25);
+    // 44 class symbols: one per declarative/base class across the 13 fixtures.
+    expect(symbolResources(outcome)).toHaveLength(44);
+    expect(outcome.unresolved).toHaveLength(12);
     expect(outcome.findings).toHaveLength(5);
   }, 60_000);
 
@@ -192,5 +193,120 @@ describe('GPP/2 subprocess transport x python detector', () => {
     };
     await runWith('/etc/passwd'); // absolute path
     await runWith('../outside.py'); // `..` escape
+  }, 60_000);
+});
+
+describe('classification signals (plan phase 3, ADR 0003 D1)', () => {
+  /** Signal lookup by dimension + target name. */
+  const signalsOf = (
+    outcome: { classificationSignals: Array<{ dimension: string; target: { resourceName?: string } }> },
+    dimension: string,
+    name?: string,
+  ): unknown[] =>
+    outcome.classificationSignals.filter(
+      (s) => s.dimension === dimension && (name === undefined || s.target.resourceName === name),
+    );
+
+  it('every emitted signal validates against the frozen core schema', async () => {
+    const outcome = await runDiscover(ALL_FIXTURES);
+    for (const signal of outcome.classificationSignals) {
+      const parsed = ClassificationSignalSchema.safeParse(signal);
+      expect(parsed.success, `signal ${JSON.stringify(signal)} must validate`).toBe(true);
+    }
+    // Phase-3 guard: a table declaration NEVER claims exposure.
+    expect(outcome.classificationSignals.every((s) => s.dimension !== 'exposure')).toBe(true);
+  }, 60_000);
+
+  it('simple and composite PK fixtures emit ORDERED identity signals', async () => {
+    const outcome = await runDiscover(['composite_pk.py']);
+    const assertionOf = (name: string): unknown => {
+      const signals = signalsOf(outcome, 'identity', name);
+      expect(signals).toHaveLength(1);
+      return (signals[0] as { assertion: unknown }).assertion;
+    };
+    // Simple key.
+    expect(assertionOf('simple_pks')).toEqual(['id']);
+    // Composite key in column written order.
+    expect(assertionOf('composite_pks')).toEqual(['tenant_id', 'member_no']);
+    // Composite via PrimaryKeyConstraint: the constraint's literal order wins.
+    expect(assertionOf('constraint_pks')).toEqual(['region', 'banner']);
+    // mapped_column style.
+    expect(assertionOf('mapped_pks')).toEqual(['id']);
+    // Composite on a raw Table() call.
+    expect(assertionOf('orders')).toEqual(['shop_id', 'order_no']);
+  }, 60_000);
+
+  it('soft-delete fixture emits archive semantics and owner-state evidence', async () => {
+    const outcome = await runDiscover(['signals_archive.py']);
+    const semantics = signalsOf(outcome, 'delete-semantics', 'archived_docs');
+    expect(semantics).toHaveLength(1);
+    expect(semantics[0]).toMatchObject({
+      assertion: 'archive',
+      basis: 'declaration',
+      source: 'gateforge.declaration:delete-semantics',
+    });
+    const archiveState = signalsOf(outcome, 'archive-state', 'archived_docs');
+    expect(archiveState).toHaveLength(1);
+    expect(archiveState[0]).toMatchObject({
+      assertion: { status: 'archived' },
+      basis: 'declaration',
+      source: 'gateforge.declaration:archive-state',
+    });
+    // Proven hard delete is asserted directly.
+    expect(signalsOf(outcome, 'delete-semantics', 'hard_sessions')[0]).toMatchObject({
+      assertion: 'hard',
+      basis: 'declaration',
+    });
+    // Read-only declarations assert lifecycle unsupported — assertions the
+    // core classifier consumes conservatively, never suppressions.
+    for (const operation of ['create', 'update', 'delete']) {
+      expect(signalsOf(outcome, `lifecycle.${operation}`, 'read_only_ledger')[0]).toMatchObject({
+        assertion: false,
+        basis: 'declaration',
+        source: 'gateforge.declaration:read-only',
+      });
+    }
+  }, 60_000);
+
+  it('computed or invisible identity and archive state become unresolved, never guessed', async () => {
+    const outcome = await runDiscover(['signals_computed_pk.py', 'signals_archive.py']);
+    // No identity signal exists for either broken-key table.
+    expect(signalsOf(outcome, 'identity', 'computed_pks')).toHaveLength(0);
+    expect(signalsOf(outcome, 'identity', 'inherited_pks')).toHaveLength(0);
+    const codes = outcome.unresolved.map((u) => u.code);
+    expect(codes).toContain('PRIMARY_KEY_UNRESOLVED');
+    expect(codes).toContain('ARCHIVE_STATE_UNRESOLVED');
+    const computedPk = outcome.unresolved.find(
+      (u) => u.code === 'PRIMARY_KEY_UNRESOLVED' && u.location.line === 22,
+    );
+    expect(computedPk?.detail).toContain('computed');
+    const inheritedPk = outcome.unresolved.find(
+      (u) => u.code === 'PRIMARY_KEY_UNRESOLVED' && u.location.line === 29,
+    );
+    expect(inheritedPk?.detail).toContain("never defaulted to 'id'");
+    // No archive-state signal for the non-literal declaration.
+    expect(signalsOf(outcome, 'archive-state', 'computed_archive')).toHaveLength(0);
+  }, 60_000);
+
+  it('foreign-key and soft-delete-candidate facts ride attributes, never semantics', async () => {
+    const outcome = await runDiscover(['composite_pk.py']);
+    const fkTable = tableResources(outcome).find(
+      (r) => r.attributes['resourceName'] === 'fk_tables',
+    );
+    expect(fkTable?.attributes['foreignKeyReferences']).toEqual([
+      { column: 'parent_id', references: 'simple_pks.id' },
+    ]);
+    expect(fkTable?.attributes['softDeleteCandidateFields']).toEqual(['deleted_at']);
+    expect(fkTable?.attributes['primaryKeyColumns']).toEqual(['id']);
+    // A candidate column without a declaration emits NO delete-semantics.
+    expect(signalsOf(outcome, 'delete-semantics', 'fk_tables')).toHaveLength(0);
+  }, 60_000);
+
+  it('signal documents are deterministic across sessions (byte-identical)', async () => {
+    const first = await runDiscover(['composite_pk.py', 'signals_archive.py']);
+    const second = await runDiscover(['composite_pk.py', 'signals_archive.py']);
+    expect(JSON.stringify(first.classificationSignals)).toBe(
+      JSON.stringify(second.classificationSignals),
+    );
   }, 60_000);
 });

@@ -3,7 +3,7 @@
  *
  * Detects state machines from TypeScript / JavaScript source via the
  * TypeScript compiler API (AST only — no execution, no module
- * resolution) and exposes the pinned GPP/2 discovery vocabulary of
+ * resolution) and exposes the pinned GPP/3 discovery vocabulary of
  * the resource graph: one `workflow.contract.<domain>.<name>` resource
  * per detected FSM carrying `states[]`, `transitions[]`,
  * `terminal[]`, `auditEvent: boolean`, and `style`.

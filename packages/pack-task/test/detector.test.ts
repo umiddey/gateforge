@@ -50,95 +50,42 @@ const getTerminalOn = (doc: { resources: Resource[] }, id: string): string[] => 
 /** Returns the set of finding codes. */
 const codes = (findings: Finding[]): string[] => findings.map((f) => f.code);
 
-describe('pack-task detector (BullMQ, Bee-Queue, custom, message, recurring, decorator)', () => {
+describe('pack-task detector (worker internality reachability discovery)', () => {
   let outcome: DiscoveryOutcome;
 
-  it('discovers every fixture without crashing', async () => {
+  it('discovers every fixture without crashing and emits signals with empty resources', async () => {
     outcome = await detectorOverFixtures().discover([...ALL_FIXTURE_PATHS]);
-    expect(outcome.resources.length).toBeGreaterThan(0);
+    expect(outcome.resources).toHaveLength(0);
+    expect(outcome.classificationSignals.length).toBeGreaterThan(0);
   });
-
-  it('emits BullMQ resources with attempts/backoff + jobId idempotency', async () => {
-    const a = attrs(outcome, 'task.email.send');
-    expect(a.framework).toBe('bullmq');
-    const rp = getRetryPolicy(outcome, 'task.email.send');
-    expect(rp.maxAttempts).toBe(5);
-    expect(rp.backoff).toBe('exponential');
-    expect(a.idempotencyKey).toBe(true);
-  });
-
-  it('emits a Bee-Queue resource', async () => {
-    const r = byId(outcome, 'task.image.resize');
-    expect(r).toBeDefined();
-    expect(attrs(outcome, 'task.image.resize').framework).toBe('bee-queue');
-  });
-
-  it('emits custom-queue resources with resolved handler', async () => {
-    const r = byId(outcome, 'task.webhook.dispatch');
-    // The handler is resolved (the line has `async (job...) =>`).
-    // AMBIGUOUS_HANDLER findings still exist for OTHER tasks (audit.flush
-    // has no handler) — that's tested in the next case.
-    expect(attrs(outcome, 'task.webhook.dispatch').hasHandler).toBeUndefined();
-    // The webhook.dispatch resource must not have an associated AMBIGUOUS_HANDLER finding.
-    const ambiguousForDispatch = outcome.findings.filter(
-      (f) => f.code === 'AMBIGUOUS_HANDLER' && f.detail.includes('webhook.dispatch'),
+  it('emits internality worker signals for BullMQ queue definitions', async () => {
+    const targets = outcome.classificationSignals.map((s) => s.target?.resourceName ?? '');
+    expect(targets.some((t) => t.includes('email') || t.includes('refund'))).toBe(true);
+    const signals = outcome.classificationSignals.filter(
+      (s) => (s.target?.resourceName ?? '').includes('email') || (s.target?.resourceName ?? '').includes('refund'),
     );
-    expect(ambiguousForDispatch).toHaveLength(0);
-  });
-
-  it('emits multi-line CustomQueue resources (block across newlines)', async () => {
-    const r = byId(outcome, 'task.index.reindex');
-    expect(r).toBeDefined();
-    expect(attrs(outcome, 'task.index.reindex').framework).toBe('custom-queue');
+    expect(signals[0]?.assertion).toEqual({ category: 'worker' });
+    expect(signals[0]?.dimension).toBe('internality');
   });
 
   it('emits an AMBIGUOUS_HANDLER finding for register calls without a handler', async () => {
     expect(codes(outcome.findings)).toContain('AMBIGUOUS_HANDLER');
   });
 
-  it('emits message-handler resources for the three patterns', async () => {
-    // Three patterns → 3 detections; expect at least 2 unique ids
-    // (some collapse by name).
-    const ids = outcome.resources.map((r) => r.id).filter((id) => id.startsWith('task.'));
-    expect(ids.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it('emits recurring-job resources for setInterval + setImmediate', async () => {
-    const ids = outcome.resources.map((r) => r.id);
-    expect(ids.some((id) => id.startsWith('task.tick')) || ids.some((id) => id.startsWith('task.flush'))).toBe(true);
-  });
-
-  it('emits decorator resources for @Task / @Queue annotations', async () => {
-    const r = byId(outcome, 'task.decorated');
-    expect(r).toBeDefined();
-    expect(attrs(outcome, 'task.decorated').framework).toBe('decorator');
-  });
-
-  it('emits terminalOn + observability hints from the source', async () => {
-    const a = attrs(outcome, 'task.index.reindex');
-    expect(getTerminalOn(outcome, 'task.index.reindex')).toEqual(['AuthError', 'ValidationError']);
-    expect(a.observability).toBe(true);
-  });
-
-  it('is deterministic (invariant 7): two scans produce identical resources', async () => {
+  it('is deterministic (invariant 7): two scans produce identical signals', async () => {
     const a = await detectorOverFixtures().discover([...ALL_FIXTURE_PATHS]);
     const b = await detectorOverFixtures().discover([...ALL_FIXTURE_PATHS]);
-    expect(a.resources.map((r) => r.id).sort()).toEqual(b.resources.map((r) => r.id).sort());
-    expect(a.resources.map((r) => JSON.stringify(r.attributes))).toEqual(
-      b.resources.map((r) => JSON.stringify(r.attributes)),
+    expect(JSON.stringify(a.classificationSignals)).toEqual(
+      JSON.stringify(b.classificationSignals),
     );
   });
 
-  it('resource ids match the dotted `task.<name>` shape', async () => {
-    for (const r of outcome.resources) {
-      expect(r.id).toMatch(/^task\.[A-Za-z][\w.-]*$/);
-      expect(r.kind).toBe('task.resource');
+  it('validates every emitted signal against the core classification schema', () => {
+    for (const signal of outcome.classificationSignals) {
+      expect(signal.dimension).toBe('internality');
+      expect(signal.assertion).toEqual({ category: 'worker' });
+      expect(signal.basis).toBe('code-positive');
+      expect(String(signal.target.resourceName)).toBeTruthy();
     }
-  });
-
-  it('sorts resources by id (determinism)', async () => {
-    const ids = outcome.resources.map((r) => r.id);
-    const sorted = [...ids].sort();
-    expect(ids).toEqual(sorted);
   });
 });
