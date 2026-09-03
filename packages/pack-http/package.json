@@ -2,7 +2,7 @@
   "name": "@gateforge/pack-http",
   "version": "0.1.0",
   "private": true,
-  "description": "Generic HTTP exposure pack: TS-only detector for route/controller registrations (Express, Fastify, Hono, NestJS) and frontend API-client calls (fetch, axios) emitting http-route resources plus exposure and lifecycle classification signals (plan phase 4, ADR 0003 D1/D2) targeted at the path-derived resource name.",
+  "description": "Generic HTTP exposure pack: TS detector for route registrations (Express, Fastify, Hono, NestJS), bounded static dataflow for frontend API-client calls (fetch, Axios, instances, wrappers, constants, URL builders), http.contract evidence facts plus exposure/lifecycle signals (ADR 0004, plan phases 3-4).",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -28,6 +28,8 @@
   "dependencies": {
     "@gateforge/core": "*",
     "@gateforge/plugin-protocol": "*",
-    "zod": "^4.1.5"
+    "zod": "^4.1.5",
+    "@gateforge/http-contract": "*",
+    "typescript": "^5.9.2"
   }
 }
