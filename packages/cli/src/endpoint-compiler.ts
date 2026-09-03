@@ -101,6 +101,86 @@ const COMMAND_SUFFIXES =
   '(approve|finalize|submit|sign|reject|cancel|retry|clone|activate|deactivate|terminate|transition|publish|expire|suspend|resume|revoke|restore)';
 
 /**
+ * Suffixes stripped when normalizing a schema/model symbol for linkage
+ * corroboration (ADR 0004 D5). One suffix, case-insensitive, at most.
+ */
+const SCHEMA_SYMBOL_SUFFIXES = [
+  'out',
+  'in',
+  'dto',
+  'schema',
+  'model',
+  'payload',
+  'response',
+  'request',
+  'create',
+  'update',
+  'read',
+] as const;
+
+/**
+ * Exact, non-fuzzy schema-symbol corroboration rule:
+ * - take the symbol's LAST dotted segment, lowercased;
+ * - candidate forms are the bare segment plus the segment with ONE of
+ *   `SCHEMA_SYMBOL_SUFFIXES` stripped (case-insensitive, non-empty rest);
+ * - the symbol corroborates the candidate when a form equals the
+ *   candidate OR the candidate with ONE trailing 's' removed (plural
+ *   tolerance, e.g. `AccountOut` corroborates `accounts`).
+ * Total and deterministic: no substring or edit-distance matching.
+ */
+export function symbolCorroborates(symbol: string, candidate: string): boolean {
+  const lastSegment = symbol.includes('.') ? symbol.slice(symbol.lastIndexOf('.') + 1) : symbol;
+  const lower = lastSegment.toLowerCase();
+  const forms = [lower];
+  for (const suffix of SCHEMA_SYMBOL_SUFFIXES) {
+    if (lower.length > suffix.length && lower.endsWith(suffix)) {
+      forms.push(lower.slice(0, lower.length - suffix.length));
+    }
+  }
+  const singularCandidate = candidate.endsWith('s') ? candidate.slice(0, -1) : candidate;
+  return forms.includes(candidate) || forms.includes(singularCandidate);
+}
+
+/**
+ * Exact, non-fuzzy handler-name corroboration rule:
+ * - take the handler symbol's LAST segment after the final ':' or '.',
+ *   lowercased;
+ * - normalize the candidate to singular by removing ONE trailing 's' if
+ *   present;
+ * - the handler corroborates the candidate when the candidate OR its
+ *   singular form appears as a whole snake_case word, i.e. delimited by
+ *   '_' or string start/end (equality, `_x`, `x_`, or `_x_`).
+ * Total and deterministic: no substring or edit-distance matching.
+ */
+export function handlerCorroborates(handlerSymbol: string, candidate: string): boolean {
+  const afterColon = handlerSymbol.includes(':')
+    ? handlerSymbol.slice(handlerSymbol.lastIndexOf(':') + 1)
+    : handlerSymbol;
+  const lastSegment = afterColon.includes('.')
+    ? afterColon.slice(afterColon.lastIndexOf('.') + 1)
+    : afterColon;
+  // camelCase boundaries count as snake_case word boundaries: the
+  // lowercase fold alone would glue `listAccounts` into one word and
+  // miss the `accounts` candidate.
+  const handler = lastSegment
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase();
+  const singular = candidate.endsWith('s') ? candidate.slice(0, -1) : candidate;
+  const forms = candidate === singular ? [candidate] : [candidate, singular];
+  for (const form of forms) {
+    if (
+      handler === form ||
+      handler.startsWith(`${form}_`) ||
+      handler.endsWith(`_${form}`) ||
+      handler.includes(`_${form}_`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Capability rules (ADR 0004 D5). All matching rules apply (an endpoint
  * may carry several capabilities); ordering matters only for the
  * `crud-*` fallbacks, which defer to command semantics.
@@ -331,14 +411,39 @@ export function compileEndpointContribution(
     const consumed = endpointCalls.length > 0;
 
     // Linkage: explicit evidence only. The path-derived name is a
-    // candidate; it becomes a link solely when it names EXACTLY ONE
-    // discovered business resource.
+    // NON-authoritative candidate; it becomes a link solely when it names
+    // EXACTLY ONE discovered business resource AND a deterministic
+    // corroboration fact holds (schema symbol or handler-name word). Name
+    // coincidence alone never links.
     const candidate = derivePathResourceName(canonicalPath);
     let linkedResourceName: string | null = null;
     if (candidate !== null) {
       const matches = [...businessNames.values()].filter((entry) => entry.name === candidate);
       if (matches.length === 1) {
-        linkedResourceName = candidate;
+        const corroboratedBySchema = endpointRoutes.some((route) =>
+          [...(route.responseSchemaSymbols ?? []), ...(route.requestSchemaSymbols ?? [])].some(
+            (symbol) => symbolCorroborates(symbol, candidate),
+          ),
+        );
+        const corroboratedByHandler = endpointRoutes.some(
+          (route) => route.handlerSymbol !== undefined && handlerCorroborates(route.handlerSymbol, candidate),
+        );
+        if (corroboratedBySchema || corroboratedByHandler) {
+          linkedResourceName = candidate;
+        } else {
+          const key = `link:${identity}`;
+          if (!seenEndpointUnresolved.has(key)) {
+            seenEndpointUnresolved.add(key);
+            unresolved.push({
+              code: ENDPOINT_RESOURCE_LINK_UNRESOLVED,
+              detail:
+                `endpoint '${identity}' derives resource name '${candidate}' but no schema symbol ` +
+                'or handler-name fact corroborates the link; add schema/model evidence ' +
+                "(response/request schema named after the resource) or rely on the model pack's own linkage",
+              location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+            });
+          }
+        }
       } else if (matches.length > 1) {
         const key = `link:${identity}`;
         if (!seenEndpointUnresolved.has(key)) {

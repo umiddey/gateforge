@@ -151,12 +151,17 @@ describe('http contract grading', () => {
     contract: 'http:response-status-ok',
   };
 
-  function httpOutcome(obligation: Obligation, records: unknown[]) {
+  function httpOutcome(
+    obligation: Obligation,
+    records: unknown[],
+    resource?: { kind: string; attributes: Record<string, unknown> } | null,
+  ) {
     return evaluateObligation(obligation, {
       claims: [{ schemaVersion: 1, obligationId: obligation.id, testId: 'test-1' }],
       records,
       waivers: [],
       classification: CLASSIFICATION,
+      ...(resource !== undefined ? { resource } : {}),
       now: '2026-01-01T00:00:00.000Z',
     });
   }
@@ -167,6 +172,12 @@ describe('http contract grading', () => {
     trust: 'claimed',
     payload: { operation: 'create', entityId: 'acc-1' },
   });
+
+  /** The obligation's graph resource, as the real CLI supplies it. */
+  const ENDPOINT_RESOURCE = {
+    kind: 'http.endpoint',
+    attributes: { method: 'POST', canonicalPath: '/api/v1/contracts' },
+  };
 
   it('a suite-forged network record can never become satisfaction', () => {
     const forged = record(httpObligation.id, {
@@ -209,5 +220,53 @@ describe('http contract grading', () => {
   it('no observation channel record leaves the obligation missing', () => {
     const outcome = httpOutcome(httpObligation, [anchor]);
     expect(outcome.verdict).toBe('missing');
+  });
+
+  it('a witnessed observation from a different endpoint can never satisfy a bound obligation', () => {
+    const observed = record(httpObligation.id, {
+      kind: 'http.request',
+      payload: { method: 'POST', url: '/health' },
+    });
+    const outcome = httpOutcome(httpObligation, [anchor, observed], ENDPOINT_RESOURCE);
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('/health');
+    expect(outcome.reason).toContain('/api/v1/contracts');
+    expect(outcome.reason).toContain('different endpoint');
+  });
+
+  it('a witnessed observation with the wrong method grades invalid', () => {
+    const observed = record(httpObligation.id, {
+      kind: 'http.request',
+      payload: { method: 'GET', url: '/api/v1/contracts' },
+    });
+    const outcome = httpOutcome(httpObligation, [anchor, observed], ENDPOINT_RESOURCE);
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('GET /api/v1/contracts');
+    expect(outcome.reason).toContain('POST /api/v1/contracts');
+  });
+
+  it('query strings and trailing slashes normalize before the identity match', () => {
+    const withQuery = record(httpObligation.id, {
+      kind: 'http.request',
+      payload: { method: 'POST', url: '/api/v1/contracts?x=1' },
+    });
+    expect(httpOutcome(httpObligation, [anchor, withQuery], ENDPOINT_RESOURCE).verdict).toBe(
+      'satisfied',
+    );
+    const trailingSlash = record(httpObligation.id, {
+      kind: 'http.request',
+      payload: { method: 'POST', url: '/api/v1/contracts/' },
+    });
+    expect(httpOutcome(httpObligation, [anchor, trailingSlash], ENDPOINT_RESOURCE).verdict).toBe(
+      'satisfied',
+    );
+  });
+
+  it('without a bound resource the verifier keeps its historical any-endpoint behavior', () => {
+    const observed = record(httpObligation.id, {
+      kind: 'http.request',
+      payload: { method: 'GET', url: '/health' },
+    });
+    expect(httpOutcome(httpObligation, [anchor, observed]).verdict).toBe('satisfied');
   });
 });

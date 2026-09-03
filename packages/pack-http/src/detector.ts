@@ -104,6 +104,12 @@ interface HttpArtifact {
   file: string;
   line: number;
   col: number;
+  /**
+   * Named handler reference (`app.get('/x', listAccounts)`) when the
+   * registration passes a bare identifier — linkage evidence (ADR 0004
+   * D5). Inline arrows/functions carry no name and stay absent.
+   */
+  handler?: string;
 }
 
 /** Directories the detector never descends into. */
@@ -216,14 +222,15 @@ function scanServerRoutes(text: string, file: string): HttpArtifact[] {
   } else if (/\bfrom\s+['"]fastify['"]/.test(text) || /\brequire\(\s*['"]fastify['"]/.test(text)) {
     origin = 'fastify';
   }
-  const registration = /\b(?:app|server|router|api)\.(get|post|put|patch|delete|all)\(\s*(['"`])([^'"`]+)\2/g;
+  const registration = /\b(?:app|server|router|api)\.(get|post|put|patch|delete|all)\(\s*(['"`])([^'"`]+)\2(?:\s*,\s*([A-Za-z_$][\w$]*)\s*[),])?/g;
   let match: RegExpExecArray | null;
   while ((match = registration.exec(text)) !== null) {
     const method = (match[1] ?? '').toUpperCase();
     const path = match[3] ?? '';
     if (path.length === 0) continue;
+    const handler = match[4];
     const { line, col } = lineColumnFor(text, match.index);
-    out.push({ method, path, origin, file, line, col });
+    out.push({ method, path, origin, file, line, col, ...(handler !== undefined ? { handler } : {}) });
   }
   return out;
 }
@@ -343,7 +350,7 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
         // they prove reachability but no concrete method, so they emit no
         // contract fact and no block.
         if (!['all', 'any', '*'].includes(artifact.method.toLowerCase())) {
-          const fact = contractFactFromArtifact(artifact, sourceRel, location);
+          const fact = contractFactFromArtifact(artifact, sourceRel, location, artifact.handler);
           if (fact.ok) resources.push(fact.resource);
           else unresolved.push(fact.unresolved);
         }
@@ -422,12 +429,14 @@ function contractFactFromArtifact(
   artifact: HttpArtifact,
   sourceRel: string,
   location: Location,
+  handler?: string,
 ): FactOutcome {
   return buildFact({
     role: 'server-route',
     method: artifact.method,
     rawPath: artifact.path,
     framework: artifact.origin,
+    handler,
     file: sourceRel,
     location,
     idSuffix: `${sourceRel}:${artifact.line}:${artifact.col}:${artifact.method}`,
@@ -460,6 +469,7 @@ function buildFact(input: {
   method: string;
   rawPath: string;
   framework: string;
+  handler?: string;
   file: string;
   location: HttpLocation;
   idSuffix: string;
@@ -495,6 +505,7 @@ function buildFact(input: {
     framework: input.framework,
   };
   if (input.callsites !== undefined) attributes['callsites'] = input.callsites;
+  if (input.handler !== undefined && input.handler.length > 0) attributes['handlerSymbol'] = input.handler;
   return {
     ok: true,
     resource: {

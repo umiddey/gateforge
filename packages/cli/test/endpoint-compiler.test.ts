@@ -132,6 +132,10 @@ describe('endpoint capabilities (facts decide, methods are candidates)', () => {
   it('accepts the linked model pack delete-semantics signal as positive evidence', () => {
     const route = routeFact('DELETE', '/api/v1/accounts/{account_id}', {
       handlerSymbol: 'app.archive_account',
+      // Corroborates the path-derived 'accounts' candidate (plural
+      // tolerance: 'accounts' -> 'account' is not needed here; bare
+      // 'Accounts' equals the candidate).
+      responseSchemaSymbols: ['Accounts'],
     });
     const base = contribution([route]);
     const withSemantics = {
@@ -228,6 +232,148 @@ describe('linkage and blocks', () => {
     ]);
     expect(inventory.ambiguous).toHaveLength(1);
     expect(inventory.ambiguous[0]?.candidates).toHaveLength(2);
+  });
+});
+
+describe('linkage corroboration (path-name coincidence never links)', () => {
+  /** Business-resource-only contribution, as model packs emit it. */
+  function businessContribution(
+    names: readonly string[],
+  ): Record<string, unknown> {
+    return {
+      detectorId: 'test.models',
+      detectorVersion: '1',
+      resources: names.map((name, index) => ({
+        schemaVersion: 1 as const,
+        id: `sqlalchemy.table:${name}`,
+        kind: 'sqlalchemy.table',
+        source: `backend/models/${name}.py`,
+        location: { file: `backend/models/${name}.py`, line: index + 4, col: 0 },
+        detectorVersion: '0.1.0',
+        attributes: { resourceName: name },
+      })),
+      unresolved: [],
+      findings: [],
+      classificationSignals: [],
+    };
+  }
+
+  it('does NOT link on unique name coincidence alone and emits one typed unresolved entry', () => {
+    // Default handler is `app.handler_<n>` (no resource word); no schema
+    // symbols. The derived 'accounts' matches exactly one business
+    // resource — pure path-name coincidence, so no link forms.
+    const route = routeFact('GET', '/api/v1/accounts');
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessContribution(['accounts']) as never,
+    ]);
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBeNull();
+    const linkBlocks = compiled.contribution.unresolved.filter(
+      (entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED',
+    );
+    expect(linkBlocks).toHaveLength(1);
+    expect(linkBlocks[0]?.detail).toBe(
+      "endpoint 'GET /api/v1/accounts' derives resource name 'accounts' but no schema symbol " +
+        'or handler-name fact corroborates the link; add schema/model evidence ' +
+        "(response/request schema named after the resource) or rely on the model pack's own linkage",
+    );
+    expect(linkBlocks[0]?.location).toEqual({ file: 'backend/routes.py', line: route.source.line, col: 0 });
+    // No adapter-binding signal without an explicit link.
+    expect(
+      compiled.contribution.classificationSignals.some(
+        (signal) => (signal as { dimension: string }).dimension === 'adapter-binding',
+      ),
+    ).toBe(false);
+  });
+
+  it('deduplicates the unresolved link entry per endpoint identity', () => {
+    const routeA = routeFact('GET', '/api/v1/accounts');
+    const routeB = routeFact('GET', '/api/v1/accounts');
+    const compiled = compileEndpointContribution([
+      contribution([routeA, routeB]),
+      businessContribution(['accounts']) as never,
+    ]);
+    const identity = 'GET /api/v1/accounts';
+    expect(compiled.inventory.endpoints.filter((e) => e.identity === identity)).toHaveLength(1);
+    expect(
+      compiled.contribution.unresolved.filter((entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED'),
+    ).toHaveLength(1);
+  });
+
+  it('corroborates via handler name with singular plural tolerance', () => {
+    // `create_account` carries 'account' as a whole snake word; candidate
+    // 'accounts' normalizes to singular 'account' — corroboration holds
+    // with zero schema symbols.
+    const route = routeFact('GET', '/api/v1/accounts', { handlerSymbol: 'app.create_account' });
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessContribution(['accounts']) as never,
+    ]);
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBe('accounts');
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED'),
+    ).toBe(false);
+  });
+
+  it('does NOT corroborate when the word only appears inside a larger word', () => {
+    // 'myaccount_manager' contains the loose substring 'account_' but
+    // 'account' is never delimited by '_' or string bounds — whole-word
+    // (snake-segment) matching rejects it; coincidence stays unlinked.
+    const route = routeFact('GET', '/api/v1/accounts', { handlerSymbol: 'app.myaccount_manager' });
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessContribution(['accounts']) as never,
+    ]);
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBeNull();
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED'),
+    ).toBe(true);
+  });
+
+  it('corroborates via request schema symbol with suffix strip and plural tolerance', () => {
+    // 'AccountIn' -> last segment 'accountin' -> strip 'in' -> 'account'
+    // == singular('accounts') — request-side schema evidence suffices.
+    const route = routeFact('POST', '/api/accounts', {
+      requestSchemaSymbols: ['AccountIn'],
+      handlerSymbol: 'app.handle', // no resource word; schema does the work
+    });
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessContribution(['accounts']) as never,
+    ]);
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBe('accounts');
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED'),
+    ).toBe(false);
+    const signals = compiled.contribution.classificationSignals;
+    expect(
+      signals.some((signal) => (signal as { dimension: string }).dimension === 'adapter-binding'),
+    ).toBe(true);
+  });
+
+  it('stays byte-identical under input permutation with corroborated and coincidence-only endpoints', () => {
+    const business = businessContribution(['accounts', 'invoices']);
+    const facts = [
+      routeFact('GET', '/api/v1/accounts', { handlerSymbol: 'app.list_accounts' }), // handler-corroborated
+      routeFact('GET', '/api/v1/invoices', { responseSchemaSymbols: ['InvoiceDto'] }), // schema-corroborated
+      routeFact('DELETE', '/api/v1/invoices/{invoice_id}'), // coincidence-only
+      callFact('GET', '/api/v1/accounts'),
+    ];
+    const forward = compileEndpointContribution([contribution(facts), business as never]);
+    const reversed = compileEndpointContribution([
+      contribution([...facts].reverse()),
+      business as never,
+    ]);
+    expect(JSON.stringify(forward.contribution)).toBe(JSON.stringify(reversed.contribution));
+    expect(JSON.stringify(forward.inventory)).toBe(JSON.stringify(reversed.inventory));
+    // And the coincident DELETE stays unlinked while the others link.
+    expect(forward.inventory.endpoints.find((e) => e.method === 'DELETE')?.linkedResourceName).toBeNull();
+    expect(forward.inventory.endpoints.find((e) => e.canonicalPath === '/api/v1/accounts')?.linkedResourceName).toBe(
+      'accounts',
+    );
+    expect(forward.inventory.endpoints.find((e) => e.canonicalPath === '/api/v1/invoices')?.linkedResourceName).toBe(
+      'invoices',
+    );
   });
 });
 

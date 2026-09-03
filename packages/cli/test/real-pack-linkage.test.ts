@@ -345,7 +345,8 @@ class Account(Base):
 `,
         'routes.ts': `import express from 'express';
 const app = express();
-app.get('/api/accounts', (req, res) => res.json({}));
+function listAccounts(req, res) { res.json({}); }
+app.get('/api/accounts', listAccounts);
 `,
         '.gateforge/adapters/accounts.mjs': 'export default {};\n',
         'suite.mjs': `import { writeFileSync, mkdirSync } from 'node:fs';
