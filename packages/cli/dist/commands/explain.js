@@ -77,6 +77,25 @@ export async function explainCommand(io, argv) {
     writeLine(io.stdout, `resource ${resource.id ?? `<unresolved:${resource.name}>`} [${resource.kind}]`);
     writeLine(io.stdout, `  source: ${resource.source}:${String(resource.location.line)}`);
     writeLine(io.stdout, `  detector: ${resource.detector.id}@${resource.detector.version}`);
+    if (resource.kind === 'http.endpoint') {
+        // Plan phase 7: the join trace — capabilities with their rules, the
+        // linked business resource, and both ends' sources.
+        const attributes = resource.attributes;
+        const canonicalPath = String(attributes['canonicalPath'] ?? '<unknown>');
+        writeLine(io.stdout, `  endpoint: ${String(attributes['method'] ?? '?')} ${canonicalPath}`);
+        writeLine(io.stdout, `  capabilities: ${attributes['capabilities']?.join(', ') || '<unresolved>'}`);
+        for (const traceEntry of attributes['capabilityTrace'] ?? []) {
+            writeLine(io.stdout, `    - ${traceEntry.capability} <- ${traceEntry.rule}`);
+        }
+        writeLine(io.stdout, `  linkedResource: ${String(attributes['linkedResourceName'] ?? '<none>')}`);
+        writeLine(io.stdout, `  frontendConsumed: ${String(attributes['frontendConsumed'] ?? 'false')}`);
+        for (const source of attributes['serverSources'] ?? []) {
+            writeLine(io.stdout, `  route source: ${source}`);
+        }
+        for (const source of attributes['callSources'] ?? []) {
+            writeLine(io.stdout, `  call source: ${source}`);
+        }
+    }
     const classification = resource.classification;
     const trace = resource.classificationTrace;
     if (classification === null || trace === null || decision === undefined) {

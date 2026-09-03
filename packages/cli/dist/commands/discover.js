@@ -13,6 +13,7 @@ import { writeLine } from '../io.js';
 import { runPipeline } from '../pipeline.js';
 import { resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
+import { renderEndpointInventory } from '../endpoint-report.js';
 export const DISCOVER_USAGE = 'usage: gateforge discover [--json]';
 /**
  * Runs the discover subcommand.
@@ -42,7 +43,10 @@ export async function discoverCommand(io, argv) {
         stateDir: resolveStateDir(io.cwd),
     });
     if (asJson) {
-        writeLine(io.stdout, canonicalJson(pipeline.graph));
+        writeLine(io.stdout, canonicalJson({
+            graph: pipeline.graph,
+            endpointInventory: pipeline.endpointInventory,
+        }));
         return 0;
     }
     const graph = pipeline.graph;
@@ -68,6 +72,8 @@ export async function discoverCommand(io, argv) {
     for (const stale of graph.stale) {
         writeLine(io.stdout, `  <${stale.kind}> ${stale.reference} — ${stale.detail}`);
     }
+    writeLine(io.stdout, '');
+    writeLine(io.stdout, renderEndpointInventory(pipeline.endpointInventory));
     return 0;
 }
 //# sourceMappingURL=discover.js.map

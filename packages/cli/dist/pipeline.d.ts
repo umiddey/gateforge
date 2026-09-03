@@ -43,6 +43,13 @@ export interface PipelineResult {
 }
 /** Source-file map resourceId → repo-relative source (for diff scoping). */
 export declare function sourceByResourceId(graph: ResourceGraph): Map<string, string>;
+/**
+ * Join-aware change sources (plan phase 7.4): an endpoint obligation is
+ * in scope when the backend route source OR any joined frontend-call
+ * source changed — a change on either end of the join pulls the joined
+ * endpoint's obligations into scope.
+ */
+export declare function sourcesByResourceId(graph: ResourceGraph): Map<string, string[]>;
 /** Reads the HEAD sha of the repo in `cwd`, or null when unavailable. */
 export declare function headSha(cwd: string): string | null;
 /** Reads a YAML document fail-closed (missing/unparsable → UsageError). */
