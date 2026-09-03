@@ -26,6 +26,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { UsageError } from './errors.js';
 /** Bundled detector id → the package that MUST provide it. Frozen trust base. */
 export const TRUSTED_DETECTOR_PACKAGES = Object.freeze({
+    'gateforge.pack-fastapi': '@gateforge/pack-fastapi',
     'gateforge.pack-http': '@gateforge/pack-http',
     'gateforge.pack-sqlalchemy': '@gateforge/pack-sqlalchemy',
     'gateforge.pack-task': '@gateforge/pack-task',
@@ -35,6 +36,7 @@ export const TRUSTED_DETECTOR_PACKAGES = Object.freeze({
     'gateforge.pack-validation': '@gateforge/pack-validation',
 });
 const SHORT_NAMES = Object.freeze({
+    'gateforge.pack-fastapi': 'pack-fastapi',
     'gateforge.pack-http': 'pack-http',
     'gateforge.pack-sqlalchemy': 'pack-sqlalchemy',
     'gateforge.pack-task': 'pack-task',
