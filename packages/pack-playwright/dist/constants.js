@@ -54,6 +54,53 @@ export const KNOWN_RECORD_KINDS = [
     UI_VISIBLE_RESULT_KIND,
     ...DOMAIN_CHECK_KINDS,
 ];
+export const DOMAIN_SCENARIO_CLASSES = {
+    'auth.check': {
+        'role-allowed': 'accepted',
+        'role-denied': 'rejected',
+        'tenant-isolated': 'rejected',
+        'denied-no-side-effect': 'rejected',
+        'forged-token-rejected': 'rejected',
+    },
+    'workflow.check': {
+        'transition-allowed': 'accepted',
+        'transition-rejected': 'rejected',
+        'terminal-immutable': 'rejected',
+        'audit-emitted': 'accepted',
+        'persisted-final-state': 'accepted',
+    },
+    'webhook.check': {
+        'signature-accepted': 'accepted',
+        'signature-rejected': 'rejected',
+        'malformed-rejected': 'rejected',
+        'replay-idempotent': 'accepted',
+        'retry-bounded': 'accepted',
+    },
+    'task.check': {
+        'retry-policy-enforced': 'accepted',
+        idempotent: 'accepted',
+        'terminal-handled': 'accepted',
+        'observability-recorded': 'accepted',
+        'duplicate-delivery-handled': 'accepted',
+    },
+    'validation.check': {
+        'boundary-accepted': 'accepted',
+        'boundary-rejected': 'rejected',
+        'no-side-effect-on-reject': 'rejected',
+        'error-message-explicit': 'accepted',
+        'envelope-shape-stable': 'accepted',
+    },
+};
+/**
+ * Dual-observation scenarios (idempotency proofs): the exchange is only
+ * evidence when the proxy observed TWO matching requests, so the witness
+ * consumes TWO matching observations single-use before issuing.
+ */
+export const DOMAIN_DUAL_SCENARIOS = {
+    'replay-idempotent': true,
+    'duplicate-delivery-handled': true,
+    idempotent: true,
+};
 /** Persistence kinds are ONLY issued by the witness (engine-side adapter reads). */
 export const KNOWN_PERSISTENCE_KINDS = [PERSISTENCE_KIND];
 /** Env the CLI test-gates suite already receives (documented contract). */
