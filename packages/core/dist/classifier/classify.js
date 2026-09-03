@@ -22,6 +22,7 @@ import { ClassificationSchema } from '../schemas/classification.js';
 import { signalId } from '../schemas/classification-signal.js';
 import { BLOCK_DIMENSIONS, } from './schema.js';
 import { globMatch } from './glob.js';
+import { HTTP_ENDPOINT_RESOURCE_KIND } from '../graph/schema.js';
 /** Stable rule ids rendered in decision traces (ADR 0003 D2). */
 export const RULES = {
     exposurePositive: 'EXPOSURE_POSITIVE_SIGNAL',
@@ -34,6 +35,7 @@ export const RULES = {
     deleteProvenHard: 'DELETE_SEMANTICS_PROVEN_HARD',
     deleteProvenArchive: 'DELETE_SEMANTICS_PROVEN_ARCHIVE',
     planeEvidence: 'PLANE_DETECTOR_EVIDENCE',
+    lifecycleEndpointHttp: 'LIFECYCLE_ENDPOINT_HTTP',
     identityEvidence: 'IDENTITY_DETECTOR_EVIDENCE',
     adapterNameMatch: 'ADAPTER_NAME_MATCH',
     orgInternalRule: 'ORGANIZATION_INTERNAL_RULE',
@@ -407,17 +409,20 @@ export function classifyResources(input) {
     const scanComplete = completeScanHolds(input.policy, input.scan);
     const exposureComplete = exposureCoverageHolds(input.policy, input.scan);
     const trustedCategories = new Set(input.policy.trustedInternalEntryPoints.map((entry) => entry.category));
-    const decisions = input.resources.map((resource, index) => classifyOne(resource, {
-        plugin: byResource[index] ?? [],
-        authority: authorityByResource[index] ?? [],
-    }, {
+    const ctx = {
         policy: input.policy,
         adapters: input.adapters,
         scanComplete,
         exposureComplete,
         trustedCategories,
         trustedEntries,
+    };
+    const pools = input.resources.map((_, index) => ({
+        plugin: byResource[index] ?? [],
+        authority: authorityByResource[index] ?? [],
     }));
+    const decisions = input.resources.map((resource, index) => classifyOne(resource, pools[index] ?? { plugin: [], authority: [] }, ctx));
+    resolveEndpointPlanes(input.resources, decisions, pools, ctx);
     return {
         schemaVersion: 1,
         decisions: sortDecisions(decisions),
@@ -425,6 +430,85 @@ export function classifyResources(input) {
         invalidSignals: sortBlocks(invalidSignals),
         unauthorizedSuppressive: sortBlocks(unauthorizedSuppressive),
     };
+}
+/**
+ * Endpoint plane inheritance (ADR 0004 D5): an `http.endpoint` resource
+ * whose plane stayed unresolved inherits the plane of exactly one linked
+ * business resource with a resolved plane; operational endpoints
+ * (capability `health-operations`, no business link) resolve to
+ * `global`. Derivation is engine-issued (authority channel) and runs as
+ * ONE deterministic pass — never chained endpoint-to-endpoint, never
+ * guessed when the link is ambiguous.
+ */
+function resolveEndpointPlanes(resources, decisions, pools, ctx) {
+    const decisionsByName = new Map();
+    for (const decision of decisions) {
+        const list = decisionsByName.get(decision.name);
+        if (list !== undefined)
+            list.push(decision);
+        else
+            decisionsByName.set(decision.name, [decision]);
+    }
+    for (let index = 0; index < decisions.length; index += 1) {
+        const resource = resources[index];
+        const decision = decisions[index];
+        if (resource === undefined || decision === undefined)
+            continue;
+        if (resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND)
+            continue;
+        if (decision.classification !== null)
+            continue;
+        if (!decision.blocks.some((block) => block.code === 'PLANE_UNRESOLVED'))
+            continue;
+        let plane = null;
+        let derivedFrom = null;
+        const linkedName = resource.attributes['linkedResourceName'];
+        if (typeof linkedName === 'string' && linkedName.length > 0) {
+            const linkedDecisions = decisionsByName.get(linkedName) ?? [];
+            const resolvedPlanes = new Set();
+            for (const linked of linkedDecisions) {
+                // Never chain through another endpoint; only business decisions count.
+                if (linked.kind === HTTP_ENDPOINT_RESOURCE_KIND)
+                    continue;
+                if (linked.classification !== null)
+                    resolvedPlanes.add(linked.classification.plane);
+            }
+            if (resolvedPlanes.size === 1) {
+                const only = [...resolvedPlanes][0];
+                if (only !== undefined) {
+                    plane = only;
+                    derivedFrom = 'linked-resource';
+                }
+            }
+        }
+        if (plane === null) {
+            const capabilities = resource.attributes['capabilities'];
+            const healthOperational = Array.isArray(capabilities) &&
+                capabilities.includes('health-operations') &&
+                typeof linkedName !== 'string';
+            if (healthOperational) {
+                plane = 'global';
+                derivedFrom = 'operational';
+            }
+        }
+        if (plane === null || derivedFrom === null)
+            continue;
+        const derived = {
+            schemaVersion: 1,
+            target: { resourceName: resource.name },
+            dimension: 'plane',
+            assertion: plane,
+            basis: 'declaration',
+            source: `gateforge.endpoint-compiler:${derivedFrom}`,
+            location: resource.location,
+            detector: { id: 'gateforge.endpoint-compiler', version: '1' },
+        };
+        const pool = pools[index];
+        decisions[index] = classifyOne(resource, {
+            plugin: pool?.plugin ?? [],
+            authority: [...(pool?.authority ?? []), derived],
+        }, ctx);
+    }
 }
 /** Renders a signal target for diagnostics. */
 function describeTarget(signal) {
@@ -730,76 +814,96 @@ function classifyOne(resource, pool, ctx) {
         defaultsApplied.push(RULES.exposureDefault);
     }
     // -- Lifecycle (per operation, independently) ------------------------------
+    // ADR 0004 D5/D8: HTTP endpoints carry no lifecycle lattice. Their
+    // route semantics live in the compiled capabilities attribute, and the
+    // policy engine never generates crud:*/persistence:* contracts against
+    // the endpoint kind — so lifecycle defaults (which exist to gate those
+    // contracts) have no honest meaning here and would only demand
+    // delete-semantics evidence no route can carry.
     const lifecycle = { create: true, read: true, update: true, delete: true };
-    for (const operation of OPERATIONS) {
-        const dimension = `lifecycle.${operation}`;
-        const positives = signals.filter((s) => s.dimension === dimension &&
-            s.basis === 'code-positive' &&
-            assertionBoolean(s.assertion) === true);
-        const closedWorld = pool.authority.filter((s) => s.dimension === dimension &&
-            s.basis === 'code-negative-closed-world' &&
-            assertionBoolean(s.assertion) === false);
-        const declaredSupported = signals.filter((s) => s.dimension === dimension &&
-            (s.basis === 'declaration' || s.basis === 'organization-policy') &&
-            assertionBoolean(s.assertion) === true);
-        const declaredUnsupported = signals.filter((s) => s.dimension === dimension &&
-            (s.basis === 'declaration' || s.basis === 'organization-policy') &&
-            assertionBoolean(s.assertion) === false);
-        if (positives.length > 0) {
-            contribute(...positives);
-            lifecycle[operation] = true;
-            rules.push(`${RULES.lifecyclePositive}(${operation})`);
-            if (declaredUnsupported.length > 0) {
-                const detail = `lifecycle.${operation} has both positive evidence and unsupported declarations; ` +
-                    'the operation stays enabled (conservative) and the conflict blocks';
-                const locations = sortLocations([...positives, ...declaredUnsupported].map((s) => s.location));
+    if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND) {
+        // ADR 0004 D5/D8: HTTP endpoints carry no lifecycle lattice. Their
+        // route semantics live in the compiled capabilities attribute, and
+        // the policy engine never generates crud:*/persistence:* contracts
+        // against the endpoint kind — so lifecycle defaults (which exist to
+        // gate those contracts) have no honest meaning here and would only
+        // demand delete-semantics evidence no route can carry.
+        lifecycle.create = false;
+        lifecycle.read = false;
+        lifecycle.update = false;
+        lifecycle.delete = false;
+        rules.push(RULES.lifecycleEndpointHttp);
+    }
+    else
+        for (const operation of OPERATIONS) {
+            const dimension = `lifecycle.${operation}`;
+            const positives = signals.filter((s) => s.dimension === dimension &&
+                s.basis === 'code-positive' &&
+                assertionBoolean(s.assertion) === true);
+            const closedWorld = pool.authority.filter((s) => s.dimension === dimension &&
+                s.basis === 'code-negative-closed-world' &&
+                assertionBoolean(s.assertion) === false);
+            const declaredSupported = signals.filter((s) => s.dimension === dimension &&
+                (s.basis === 'declaration' || s.basis === 'organization-policy') &&
+                assertionBoolean(s.assertion) === true);
+            const declaredUnsupported = signals.filter((s) => s.dimension === dimension &&
+                (s.basis === 'declaration' || s.basis === 'organization-policy') &&
+                assertionBoolean(s.assertion) === false);
+            if (positives.length > 0) {
+                contribute(...positives);
+                lifecycle[operation] = true;
+                rules.push(`${RULES.lifecyclePositive}(${operation})`);
+                if (declaredUnsupported.length > 0) {
+                    const detail = `lifecycle.${operation} has both positive evidence and unsupported declarations; ` +
+                        'the operation stays enabled (conservative) and the conflict blocks';
+                    const locations = sortLocations([...positives, ...declaredUnsupported].map((s) => s.location));
+                    blocks.push({
+                        code: 'LIFECYCLE_CONTRADICTION',
+                        resourceId: `${plane}.${resource.name}`,
+                        name: resource.name,
+                        detail,
+                        locations,
+                    });
+                    contradictions.push({ dimension, detail, locations });
+                }
+            }
+            else if (closedWorld.length > 0 && ctx.scanComplete && declaredSupported.length === 0) {
+                contribute(...closedWorld);
+                lifecycle[operation] = false;
+                rules.push(`${RULES.lifecycleClosedWorldDisabled}(${operation})`);
+            }
+            else if (closedWorld.length > 0) {
+                // A closed-world assertion whose proof does not hold: the intent to
+                // suppress is unproven, so the conservative default applies AND the
+                // unproven claim blocks (fail closed on suppressive evidence).
+                lifecycle[operation] = true;
+                defaultsApplied.push(`${RULES.lifecycleDefault}(${operation})`);
+                const reason = !ctx.scanComplete
+                    ? 'the complete-scan attestation fails'
+                    : 'contradicting supported declarations exist';
                 blocks.push({
-                    code: 'LIFECYCLE_CONTRADICTION',
+                    code: 'INCOMPLETE_PROOF_SCOPE',
                     resourceId: `${plane}.${resource.name}`,
                     name: resource.name,
-                    detail,
-                    locations,
+                    detail: `closed-world proof that lifecycle.${operation} is structurally unavailable fails: ` +
+                        `${reason}; the operation stays enabled (conservative)`,
+                    locations: sortLocations(closedWorld.map((s) => s.location)),
                 });
-                contradictions.push({ dimension, detail, locations });
+            }
+            else if (declaredSupported.length > 0) {
+                contribute(...declaredSupported);
+                lifecycle[operation] = true;
+                rules.push(`${RULES.lifecycleDeclaredSupported}(${operation})`);
+            }
+            else if (declaredUnsupported.length > 0) {
+                lifecycle[operation] = true;
+                defaultsApplied.push(`${RULES.lifecycleDefault}(${operation})`);
+            }
+            else {
+                lifecycle[operation] = true;
+                defaultsApplied.push(`${RULES.lifecycleDefault}(${operation})`);
             }
         }
-        else if (closedWorld.length > 0 && ctx.scanComplete && declaredSupported.length === 0) {
-            contribute(...closedWorld);
-            lifecycle[operation] = false;
-            rules.push(`${RULES.lifecycleClosedWorldDisabled}(${operation})`);
-        }
-        else if (closedWorld.length > 0) {
-            // A closed-world assertion whose proof does not hold: the intent to
-            // suppress is unproven, so the conservative default applies AND the
-            // unproven claim blocks (fail closed on suppressive evidence).
-            lifecycle[operation] = true;
-            defaultsApplied.push(`${RULES.lifecycleDefault}(${operation})`);
-            const reason = !ctx.scanComplete
-                ? 'the complete-scan attestation fails'
-                : 'contradicting supported declarations exist';
-            blocks.push({
-                code: 'INCOMPLETE_PROOF_SCOPE',
-                resourceId: `${plane}.${resource.name}`,
-                name: resource.name,
-                detail: `closed-world proof that lifecycle.${operation} is structurally unavailable fails: ` +
-                    `${reason}; the operation stays enabled (conservative)`,
-                locations: sortLocations(closedWorld.map((s) => s.location)),
-            });
-        }
-        else if (declaredSupported.length > 0) {
-            contribute(...declaredSupported);
-            lifecycle[operation] = true;
-            rules.push(`${RULES.lifecycleDeclaredSupported}(${operation})`);
-        }
-        else if (declaredUnsupported.length > 0) {
-            lifecycle[operation] = true;
-            defaultsApplied.push(`${RULES.lifecycleDefault}(${operation})`);
-        }
-        else {
-            lifecycle[operation] = true;
-            defaultsApplied.push(`${RULES.lifecycleDefault}(${operation})`);
-        }
-    }
     // Preserve normalized owner-declared update fields while excluding
     // bookkeeping fields configured as volatile.
     const updateableFields = resource.attributes['updateableFields'];

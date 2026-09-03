@@ -12,4 +12,5 @@ export { HTTP_CONTRACT_SCHEMA_VERSION, HTTP_CONTRACT_KIND, HTTP_ENDPOINT_KIND, H
 export { HTTP_CONTRACT_VERSION, } from './version.js';
 export { HTTP_PARAM_SLOT, HTTP_WILDCARD_SLOT, normalizeHttpMethod, normalizeHttpPath, pathSegments, } from './normalize.js';
 export { canonicalEndpointIdentity, endpointResourceName, joinFrontendCalls, routeMatchesCall, } from './join.js';
+export { derivePathResourceName } from './linkage.js';
 //# sourceMappingURL=index.js.map

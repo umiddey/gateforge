@@ -30,4 +30,5 @@ export { recordIdOf };
  *     HERE, before any adapter request can be constructed).
  */
 export declare function startWitness(options: WitnessOptions): Promise<WitnessHandle>;
+export type { WitnessHandle } from './types.js';
 //# sourceMappingURL=server.d.ts.map

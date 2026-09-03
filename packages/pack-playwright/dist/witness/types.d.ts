@@ -66,6 +66,13 @@ export interface PersistenceResponse {
 }
 /** Witness runtime configuration (env-derived by the bin, explicit in tests). */
 export interface WitnessOptions {
+    /**
+     * ADR 0004 D7: when set, the witness also starts a loopback reverse
+     * proxy forwarding to this base URL and records every forwarded
+     * request as an engine observation (the runtime HTTP evidence
+     * channel). Must be loopback.
+     */
+    proxyTarget?: string;
     /** Run manifest identity (pin #4). */
     runId: string;
     /** Per-run token; every call must carry `x-gateforge-run: <token>`. */
@@ -148,6 +155,7 @@ export interface WitnessHandle {
     /** Base URL (loopback, OS-assigned port). */
     url: string;
     /** Stop the server; appends issued recordIds to the run manifest (pin #4/#7). */
+    proxyUrl: string | null;
     stop: () => Promise<void>;
 }
 //# sourceMappingURL=types.d.ts.map

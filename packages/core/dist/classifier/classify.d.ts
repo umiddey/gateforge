@@ -132,6 +132,7 @@ export declare const RULES: {
     readonly deleteProvenHard: "DELETE_SEMANTICS_PROVEN_HARD";
     readonly deleteProvenArchive: "DELETE_SEMANTICS_PROVEN_ARCHIVE";
     readonly planeEvidence: "PLANE_DETECTOR_EVIDENCE";
+    readonly lifecycleEndpointHttp: "LIFECYCLE_ENDPOINT_HTTP";
     readonly identityEvidence: "IDENTITY_DETECTOR_EVIDENCE";
     readonly adapterNameMatch: "ADAPTER_NAME_MATCH";
     readonly orgInternalRule: "ORGANIZATION_INTERNAL_RULE";

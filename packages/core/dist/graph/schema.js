@@ -49,6 +49,16 @@ export const CLASS_SYMBOL_KIND = 'gateforge.class';
  * detector-controlled suppressive-authority leak.
  */
 export const EVIDENCE_ONLY_RESOURCE_KINDS = ['http.contract'];
+/**
+ * Resource `kind` the engine's endpoint compiler emits for joined
+ * endpoints (ADR 0004 D1/D5). Endpoints ARE classified and carry their
+ * own HTTP obligations, but `crud:*`/`persistence:*` contracts never
+ * generate against them: CRUD state flows through the LINKED business
+ * resource's own obligations — routes are never conflated with tables.
+ * Mirrors `HTTP_ENDPOINT_KIND` in `@gateforge/http-contract` (core cannot
+ * depend on it); keep the two in lockstep.
+ */
+export const HTTP_ENDPOINT_RESOURCE_KIND = 'http.endpoint';
 /** True when a raw resource kind is engine-owned evidence-only. */
 export function isEvidenceOnlyKind(kind) {
     return kind === CLASS_SYMBOL_KIND || EVIDENCE_ONLY_RESOURCE_KINDS.includes(kind);
