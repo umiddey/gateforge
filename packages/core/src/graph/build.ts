@@ -25,7 +25,7 @@ import { ClaimSchema } from '../schemas/claim.js';
 import { LocationSchema, type Location, type Plane } from '../schemas/common.js';
 import { ResourceSchema, type Resource } from '../schemas/resource.js';
 import { WaiverSchema } from '../schemas/waiver.js';
-import { CLASS_SYMBOL_KIND, RESOURCE_NAME_ATTRIBUTE, type DetectorOutput, type GraphFinding, type GraphResource, type GraphUnresolved, type ResourceGraph, type ResourceGraphInput, type StaleReference } from './schema.js';
+import { isEvidenceOnlyKind, RESOURCE_NAME_ATTRIBUTE, type DetectorOutput, type GraphFinding, type GraphResource, type GraphUnresolved, type ResourceGraph, type ResourceGraphInput, type StaleReference } from './schema.js';
 import { buildSymbolTable, locationIndex, resolveInheritedName, sortUnresolved, type ClassSymbol, type SymbolTable } from './symbols.js';
 import { compareStrings, compareLocations } from './util.js';
 
@@ -147,7 +147,7 @@ function ingestDetector(
   }
 
   for (const rawResource of detector.resources) {
-    if (rawResource.kind === CLASS_SYMBOL_KIND) continue; // symbol-table input, not a business resource
+    if (isEvidenceOnlyKind(rawResource.kind)) continue; // symbol-table / endpoint-compiler input, not a business resource
     const parsed = ResourceSchema.safeParse(rawResource);
     if (!parsed.success) {
       findings.push({
