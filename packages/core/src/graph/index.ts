@@ -5,6 +5,9 @@
  */
 export {
   CLASS_SYMBOL_KIND,
+  EVIDENCE_ONLY_RESOURCE_KINDS,
+  HTTP_ENDPOINT_RESOURCE_KIND,
+  isEvidenceOnlyKind,
   RESOURCE_NAME_ATTRIBUTE,
   ClassSymbolAttributesSchema,
   DetectorOutputSchema,

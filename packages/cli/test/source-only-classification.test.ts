@@ -41,9 +41,13 @@ clock:
       });
       const discover = await runCli(repo, ['discover', '--json']);
       expect(discover.code).toBe(0);
-      // Routes are EVIDENCE (red-team round 3): the pack emits no
-      // business resources — the graph has nothing to bind.
-      expect(JSON.parse(discover.stdout).resources).toEqual([]);
+      // Routes are EVIDENCE (red-team round 3, ADR 0004 D1): the pack
+      // emits no business resources — the only resource is the compiled
+      // endpoint, which stays classification-blocked without any
+      // business resource to converge with.
+      const resources = JSON.parse(discover.stdout).resources as Array<{ kind: string; name: string }>;
+      expect(resources.filter((r) => r.kind !== 'http.endpoint')).toEqual([]);
+      expect(resources.map((r) => r.kind)).toEqual(['http.endpoint']);
       const classify = await runCli(repo, ['classify', '--json']);
       expect(classify.code).toBe(1);
       expect(classify.stdout).toContain('"decisions"');

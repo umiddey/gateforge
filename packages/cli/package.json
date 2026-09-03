@@ -30,6 +30,7 @@
     "@gateforge/core": "*",
     "@gateforge/plugin-protocol": "*",
     "picomatch": "^4.0.7",
-    "yaml": "^2.8.1"
+    "yaml": "^2.8.1",
+    "@gateforge/http-contract": "*"
   }
 }

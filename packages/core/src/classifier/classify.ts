@@ -29,6 +29,7 @@ import {
   type ClassificationDecisionTrace,
 } from './schema.js';
 import { globMatch } from './glob.js';
+import { HTTP_ENDPOINT_RESOURCE_KIND } from '../graph/schema.js';
 
 /** The resources the classifier classifies (graph resources, pre-binding). */
 export interface ClassifierResourceRef {
@@ -156,6 +157,7 @@ export const RULES = {
   deleteProvenHard: 'DELETE_SEMANTICS_PROVEN_HARD',
   deleteProvenArchive: 'DELETE_SEMANTICS_PROVEN_ARCHIVE',
   planeEvidence: 'PLANE_DETECTOR_EVIDENCE',
+  lifecycleEndpointHttp: 'LIFECYCLE_ENDPOINT_HTTP',
   identityEvidence: 'IDENTITY_DETECTOR_EVIDENCE',
   adapterNameMatch: 'ADAPTER_NAME_MATCH',
   orgInternalRule: 'ORGANIZATION_INTERNAL_RULE',
@@ -585,23 +587,22 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
   const trustedCategories = new Set(
     input.policy.trustedInternalEntryPoints.map((entry) => entry.category),
   );
+  const ctx: ClassifyContext = {
+    policy: input.policy,
+    adapters: input.adapters,
+    scanComplete,
+    exposureComplete,
+    trustedCategories,
+    trustedEntries,
+  };
+  const pools = input.resources.map((_, index) => ({
+    plugin: byResource[index] ?? [],
+    authority: authorityByResource[index] ?? [],
+  }));
   const decisions: ClassificationDecision[] = input.resources.map((resource, index) =>
-    classifyOne(
-      resource,
-      {
-        plugin: byResource[index] ?? [],
-        authority: authorityByResource[index] ?? [],
-      },
-      {
-        policy: input.policy,
-        adapters: input.adapters,
-        scanComplete,
-        exposureComplete,
-        trustedCategories,
-        trustedEntries,
-      },
-    ),
+    classifyOne(resource, pools[index] ?? { plugin: [], authority: [] }, ctx),
   );
+  resolveEndpointPlanes(input.resources, decisions, pools, ctx);
 
   return {
     schemaVersion: 1,
@@ -610,6 +611,89 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     invalidSignals: sortBlocks(invalidSignals),
     unauthorizedSuppressive: sortBlocks(unauthorizedSuppressive),
   };
+}
+
+/**
+ * Endpoint plane inheritance (ADR 0004 D5): an `http.endpoint` resource
+ * whose plane stayed unresolved inherits the plane of exactly one linked
+ * business resource with a resolved plane; operational endpoints
+ * (capability `health-operations`, no business link) resolve to
+ * `global`. Derivation is engine-issued (authority channel) and runs as
+ * ONE deterministic pass — never chained endpoint-to-endpoint, never
+ * guessed when the link is ambiguous.
+ */
+function resolveEndpointPlanes(
+  resources: readonly ClassifierResourceRef[],
+  decisions: ClassificationDecision[],
+  pools: ReadonlyArray<{ plugin: ClassificationSignal[]; authority: ClassificationSignal[] }>,
+  ctx: ClassifyContext,
+): void {
+  const decisionsByName = new Map<string, ClassificationDecision[]>();
+  for (const decision of decisions) {
+    const list = decisionsByName.get(decision.name);
+    if (list !== undefined) list.push(decision);
+    else decisionsByName.set(decision.name, [decision]);
+  }
+  for (let index = 0; index < decisions.length; index += 1) {
+    const resource = resources[index];
+    const decision = decisions[index];
+    if (resource === undefined || decision === undefined) continue;
+    if (resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) continue;
+    if (decision.classification !== null) continue;
+    if (!decision.blocks.some((block) => block.code === 'PLANE_UNRESOLVED')) continue;
+
+    let plane: 'tenant' | 'master' | 'global' | null = null;
+    let derivedFrom: string | null = null;
+    const linkedName = resource.attributes['linkedResourceName'];
+    if (typeof linkedName === 'string' && linkedName.length > 0) {
+      const linkedDecisions = decisionsByName.get(linkedName) ?? [];
+      const resolvedPlanes = new Set<string>();
+      for (const linked of linkedDecisions) {
+        // Never chain through another endpoint; only business decisions count.
+        if (linked.kind === HTTP_ENDPOINT_RESOURCE_KIND) continue;
+        if (linked.classification !== null) resolvedPlanes.add(linked.classification.plane);
+      }
+      if (resolvedPlanes.size === 1) {
+        const only = [...resolvedPlanes][0] as 'tenant' | 'master' | 'global' | undefined;
+        if (only !== undefined) {
+          plane = only;
+          derivedFrom = 'linked-resource';
+        }
+      }
+    }
+    if (plane === null) {
+      const capabilities = resource.attributes['capabilities'];
+      const healthOperational =
+        Array.isArray(capabilities) &&
+        capabilities.includes('health-operations') &&
+        typeof linkedName !== 'string';
+      if (healthOperational) {
+        plane = 'global';
+        derivedFrom = 'operational';
+      }
+    }
+    if (plane === null || derivedFrom === null) continue;
+
+    const derived: ClassificationSignal = {
+      schemaVersion: 1,
+      target: { resourceName: resource.name },
+      dimension: 'plane',
+      assertion: plane,
+      basis: 'declaration',
+      source: `gateforge.endpoint-compiler:${derivedFrom}`,
+      location: resource.location,
+      detector: { id: 'gateforge.endpoint-compiler', version: '1' },
+    };
+    const pool = pools[index];
+    decisions[index] = classifyOne(
+      resource,
+      {
+        plugin: pool?.plugin ?? [],
+        authority: [...(pool?.authority ?? []), derived],
+      },
+      ctx,
+    );
+  }
 }
 
 /** Renders a signal target for diagnostics. */
@@ -952,8 +1036,26 @@ function classifyOne(
   }
 
   // -- Lifecycle (per operation, independently) ------------------------------
+  // ADR 0004 D5/D8: HTTP endpoints carry no lifecycle lattice. Their
+  // route semantics live in the compiled capabilities attribute, and the
+  // policy engine never generates crud:*/persistence:* contracts against
+  // the endpoint kind — so lifecycle defaults (which exist to gate those
+  // contracts) have no honest meaning here and would only demand
+  // delete-semantics evidence no route can carry.
   const lifecycle: Lifecycle = { create: true, read: true, update: true, delete: true };
-  for (const operation of OPERATIONS) {
+  if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND) {
+    // ADR 0004 D5/D8: HTTP endpoints carry no lifecycle lattice. Their
+    // route semantics live in the compiled capabilities attribute, and
+    // the policy engine never generates crud:*/persistence:* contracts
+    // against the endpoint kind — so lifecycle defaults (which exist to
+    // gate those contracts) have no honest meaning here and would only
+    // demand delete-semantics evidence no route can carry.
+    lifecycle.create = false;
+    lifecycle.read = false;
+    lifecycle.update = false;
+    lifecycle.delete = false;
+    rules.push(RULES.lifecycleEndpointHttp);
+  } else for (const operation of OPERATIONS) {
     const dimension = `lifecycle.${operation}` as const;
     const positives = signals.filter(
       (s) =>

@@ -59,3 +59,4 @@ export {
   type JoinedEndpoint,
   type JoinResult,
 } from './join.js';
+export { derivePathResourceName } from './linkage.js';

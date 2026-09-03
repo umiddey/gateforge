@@ -46,6 +46,7 @@ import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.
 import { clockFromConfig } from './clock.js';
 import { expandIncludePaths, type ExpandError } from './glob.js';
 import { runPlugins } from './plugins.js';
+import { compileEndpointContribution, type EndpointInventory } from './endpoint-compiler.js';
 import { readJsonArray } from './state.js';
 import { providerFor } from './providers.js';
 
@@ -69,6 +70,8 @@ export interface PipelineOptions {
 export interface PipelineResult {
   /** One validated contribution per configured plugin (config order). */
   contributions: DetectorOutput[];
+  /** Compiled endpoint inventory (ADR 0004 D6): facts, endpoints, blocks. */
+  endpointInventory: EndpointInventory;
   /** The built resource graph with effective classifications bound. */
   graph: ResourceGraph;
   /** Policy evaluation: obligations, blocking entries, claim assessments. */
@@ -227,8 +230,16 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const adapters = loadAdapterNames(cwd, config.adapters);
   const waiverLoad = loadWaivers(resolveRepoPath(cwd, config.waivers), { now: clock.now() });
 
+  // Endpoint compilation (ADR 0004 D6): deterministic stage over the
+  // detectors' contract facts; its output is a synthetic engine
+  // contribution that participates in the graph like any detector's.
+  // Coverage/successful-detector accounting stays pinned to the PLUGIN
+  // contributions — the compiler examines no files itself.
+  const { contribution: endpointContribution, inventory: endpointInventory } =
+    compileEndpointContribution(contributions);
+
   const built = buildResourceGraph({
-    detectors: contributions,
+    detectors: [...contributions, endpointContribution],
     claims,
     adapters,
     waivers: waiverLoad.waivers,
@@ -272,7 +283,9 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   // toward MORE obligations; typed blocks stay gate-visible.
   const { graph, classification, blocking } = runClassification({
     graph: built,
-    signals: contributions.flatMap((contribution) => contribution.classificationSignals),
+    signals: [...contributions, endpointContribution].flatMap((contribution) =>
+      contribution.classificationSignals,
+    ),
     authority,
     policy: policyDocParsed.data,
     adapters,
@@ -305,6 +318,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
 
   return {
     contributions,
+    endpointInventory,
     graph,
     policy,
     manifest,

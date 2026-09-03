@@ -29,7 +29,7 @@ import { LocationSchema, SchemaVersionField, type ContractName, type Location } 
 import { ObligationSchema, type Obligation } from '../schemas/obligation.js';
 import { PolicyFileSchema, type Policy, type PolicyFile } from '../schemas/policy.js';
 import { ClaimSchema, type Claim } from '../schemas/claim.js';
-import type { GraphResource, ResourceGraph } from '../graph/schema.js';
+import { HTTP_ENDPOINT_RESOURCE_KIND, type GraphResource, type ResourceGraph } from '../graph/schema.js';
 import { compareStrings } from '../graph/util.js';
 
 /** The CRUD contract namespace gated by lifecycle flags. */
@@ -287,6 +287,11 @@ function generateObligations(
         contract.startsWith(PERSISTENCE_CONTRACT_PREFIX)
       ) {
         if (exposure === 'internal') continue; // ADR 0001: internal ⇒ no CRUD obligations
+        // ADR 0004 D8: endpoints are routes, not tables. CRUD state
+        // obligations flow through the LINKED business resource's own
+        // identity; generating persistence contracts against a route
+        // would conflate the two planes of meaning.
+        if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND) continue;
         if (!lifecycleAllowsContract(contract, classification.lifecycle)) continue;
       }
       const id = `${resource.id}:${contract}`;
