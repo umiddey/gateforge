@@ -522,6 +522,14 @@ export { evaluateObligations } from './verdict/index.js';
 
 /** The five gate-blocking verdicts (`satisfied`/`waived` are clean). */
 export { BLOCKING_VERDICTS } from './verdict/index.js';
+export {
+  registerContractVerifier,
+  verifierFor,
+  registeredNamespaces,
+  type ClaimEvidenceInput,
+  type ClaimOutcome,
+  type ContractVerifier,
+} from './verdict/index.js';
 
 /** Fail-closed verdict-engine error (malformed obligation / clock). */
 export { GateforgeVerdictError } from './verdict/index.js';
