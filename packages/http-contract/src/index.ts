@@ -49,3 +49,13 @@ export {
   type NormalizePathOptions,
   type NormalizePathResult,
 } from './normalize.js';
+export {
+  canonicalEndpointIdentity,
+  endpointResourceName,
+  joinFrontendCalls,
+  routeMatchesCall,
+  type EndpointIdentity,
+  type JoinBlock,
+  type JoinedEndpoint,
+  type JoinResult,
+} from './join.js';
