@@ -112,6 +112,14 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
                 throw new Error('ui.create requires { fields: { first_name, last_name } }');
             }
             const resourceId = resourceIdOfClaim(claims[0]);
+            // Engine-side pre-observation BEFORE the action (audit rounds 4-5):
+            // the witness snapshots the observed id set so the persistence
+            // record can prove the entity was absent before the create.
+            const preObservation = await witness.preObserve({
+                resourceId,
+                testId,
+                claimId: claims[0],
+            });
             await gotoList();
             const before = await collectIds();
             await page.goto(`${appBase}/accounts/new`);
@@ -134,7 +142,14 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
             }
             const fields = { first_name: visible['first_name'] ?? '', last_name: visible['last_name'] ?? '' };
             await submit(UI_ACTION_KIND, { operation: 'create', entityId, fields });
-            return receiptBrand.stamp({ operation: 'create', resourceId, entityId, fields, mode: 'row' });
+            return receiptBrand.stamp({
+                operation: 'create',
+                resourceId,
+                entityId,
+                fields,
+                mode: 'row',
+                preObservationId: preObservation.observationId,
+            });
         },
         async read(input) {
             const { entityId } = input;
@@ -162,6 +177,15 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
                 throw new Error('ui.update requires { entityId, fields }');
             }
             const resourceId = resourceIdOfClaim(claims[0]);
+            // Engine-side entity pre-observation BEFORE the change (audit
+            // rounds 4-5): the witness snapshots the observed fields so the
+            // persistence record can prove an actual before/after delta.
+            const preObservation = await witness.preObserve({
+                resourceId,
+                testId,
+                claimId: claims[0],
+                entityId,
+            });
             await gotoList();
             const row = await findRow(entityId);
             if (row === null) {
@@ -184,7 +208,14 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
             const declared = Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
             await submit(UI_ACTION_KIND, { operation: 'update', entityId, fields: declared });
             void (await readRowFields(updatedRow)); // observed; the engine judges agreement
-            return receiptBrand.stamp({ operation: 'update', resourceId, entityId, fields: declared, mode: 'row' });
+            return receiptBrand.stamp({
+                operation: 'update',
+                resourceId,
+                entityId,
+                fields: declared,
+                mode: 'row',
+                preObservationId: preObservation.observationId,
+            });
         },
         async archive(input) {
             const { entityId } = input;
@@ -250,9 +281,11 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
             const response = await witness.verifyPersistence({
                 resourceId: receipt.resourceId,
                 entityId: receipt.entityId,
-                expectFields: receipt.fields,
                 testId,
                 claimId: claims[0],
+                ...(receipt.preObservationId !== undefined
+                    ? { preObservationId: receipt.preObservationId }
+                    : {}),
             });
             return {
                 recordId: response.recordId,

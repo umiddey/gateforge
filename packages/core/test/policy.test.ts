@@ -13,7 +13,10 @@ import {
   lifecycleAllowsContract,
   PolicyEvaluationError,
   PolicyEvaluationResultSchema,
+  runClassification,
   type Claim,
+  type Classification,
+  type ClassificationSignal,
   type DetectorOutput,
   type JsonValue,
   type PolicyFile,
@@ -35,13 +38,18 @@ function table(overrides: Partial<Resource> & { attributes: Record<string, unkno
 }
 
 /** A detector contribution with defaults. */
-function detector(resources: Resource[], unresolved: DetectorOutput['unresolved'] = []): DetectorOutput {
+function detector(
+  resources: Resource[],
+  unresolved: DetectorOutput['unresolved'] = [],
+  findings: DetectorOutput['findings'] = [],
+): DetectorOutput {
   return {
     detectorId: 'gateforge.discovery.sqlalchemy',
     detectorVersion: '0.1.0',
     resources,
     unresolved,
-    findings: [],
+    findings,
+    classificationSignals: [],
   };
 }
 
@@ -56,6 +64,7 @@ function userFacing(lifecycle: Record<string, unknown>, adapter = 'adapter') {
       update: boolean;
       delete: boolean;
       deleteSemantics?: 'hard' | 'archive';
+      archiveFields?: Record<string, string | number | boolean>;
     },
     primaryKey: ['id'],
     evidenceAdapter: adapter,
@@ -73,12 +82,77 @@ const CRUD_POLICY: PolicyFile = {
   ],
 };
 
-/** Graph over one classified `tenant.accounts` table. */
+/** Graph over one automatically classified `tenant.accounts` table. */
 function graphFor(classification: Record<string, unknown>) {
-  return buildResourceGraph({
-    detectors: [detector([table({ attributes: { resourceName: 'accounts' } })])],
-    classifications: { schemaVersion: 1, resources: { 'tenant.accounts': classification } },
-  });
+  const resource = table({ attributes: { resourceName: 'accounts' } });
+  const graph = buildResourceGraph({ detectors: [detector([resource])] });
+  const value = classification as Classification;
+  const signals = ([
+    { dimension: 'plane', assertion: value.plane },
+    { dimension: 'identity', assertion: value.primaryKey },
+    ...Object.entries(value.lifecycle)
+      .filter(([key]) => ['create', 'read', 'update', 'delete'].includes(key))
+      .map(([key, assertion]) => ({
+        dimension: `lifecycle.${key}`,
+        assertion,
+        basis: assertion === false ? 'code-negative-closed-world' : 'declaration',
+      })),
+    ...(value.lifecycle.deleteSemantics !== undefined
+      ? [{ dimension: 'delete-semantics', assertion: value.lifecycle.deleteSemantics }]
+      : []),
+    ...(value.lifecycle.archiveFields !== undefined
+      ? [{ dimension: 'archive-state', assertion: value.lifecycle.archiveFields }]
+      : []),
+    { dimension: 'adapter-binding', assertion: value.evidenceAdapter ?? 'adapter' },
+    ...(value.exposure === 'internal'
+      ? [
+          { dimension: 'internality', assertion: true, basis: 'organization-policy' },
+          { dimension: 'internality', assertion: { category: 'worker' }, basis: 'code-positive' },
+        ]
+      : []),
+  ].map((signal) => ({
+    schemaVersion: 1 as const,
+    target: { resourceName: 'accounts' },
+    source: 'gateforge:internal',
+    location: resource.location,
+    detector: { id: 'gateforge.core', version: '1' },
+    basis: 'declaration' as const,
+    ...signal,
+  }))) as ClassificationSignal[];
+  // Channel split (ADR 0003 D2): suppressive shapes ride the host-issued
+  // authority channel; everything else stays on the detector channel.
+  const suppressive = (signal: ClassificationSignal): boolean =>
+    (signal.dimension === 'internality' &&
+      (signal.basis === 'declaration' || signal.basis === 'organization-policy')) ||
+    (signal.dimension.startsWith('lifecycle.') && signal.basis === 'code-negative-closed-world');
+  return runClassification({
+    graph,
+    signals: signals.filter((signal) => !suppressive(signal)),
+    authority: signals.filter(suppressive),
+    policy: {
+      schemaVersion: 1,
+      scanRoots: ['backend/**/*.py'],
+      trustedInternalEntryPoints: [{ category: 'worker', detector: 'gateforge.core' }],
+      internalRules: [],
+      coverage: [
+        { capability: 'exposure.http', exhaustive: true, detector: 'gateforge.core', appliesTo: ['backend/**'] },
+      ],
+      declarations: { internality: 'gateforge:internal' },
+      volatileFields: [],
+    },
+    adapters: [value.evidenceAdapter ?? 'adapter'],
+    scan: {
+      requestedPaths: ['backend/models/x.py'],
+      scannedPaths: ['backend/models/x.py'],
+      coverage: [
+        { detector: 'gateforge.pack-sqlalchemy', scannedPaths: ['backend/models/x.py'] },
+        // The fixture's worker-reachability issuer reports the same file.
+        { detector: 'gateforge.core', scannedPaths: ['backend/models/x.py'] },
+      ],
+      configuredDetectors: 1,
+      successfulDetectors: 1,
+    },
+  }).graph;
 }
 
 /** Canonical-JSON bytes with a cast past the open attributes payload. */
@@ -89,7 +163,7 @@ function bytes(value: unknown): string {
 describe('policy → obligation generation', () => {
   it('generates the four CRUD obligations for a full user-facing lifecycle', () => {
     const result = evaluatePolicies({
-      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' })),
+      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'archive', archiveFields: { status: 'archived' } })),
       policies: CRUD_POLICY,
     });
 
@@ -104,7 +178,7 @@ describe('policy → obligation generation', () => {
     expect(update?.policyId).toBe('user-facing-sqlalchemy-lifecycle');
     expect(update?.resourceId).toBe('tenant.accounts');
     // fingerprint (pin #2) derives from exactly the obligation identity
-    const lifecycle = { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' } as const;
+    const lifecycle = { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive', archiveFields: { status: 'archived' } } as const;
     expect(update?.lifecycle).toEqual(lifecycle);
     expect(fingerprint({
       resourceId: 'tenant.accounts',
@@ -132,7 +206,7 @@ describe('policy → obligation generation', () => {
 
   it('keeps archive-vs-hard delete semantics inside the fingerprint identity', () => {
     const archive = evaluatePolicies({
-      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' })),
+      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'archive', archiveFields: { status: 'archived' } })),
       policies: CRUD_POLICY,
     });
     const hard = evaluatePolicies({
@@ -237,7 +311,7 @@ describe('internal resources (ADR 0001)', () => {
 
   it('assesses valid claims on user-facing obligations', () => {
     const result = evaluatePolicies({
-      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' })),
+      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'archive', archiveFields: { status: 'archived' } })),
       policies: CRUD_POLICY,
       claims: [
         { schemaVersion: 1, obligationId: 'tenant.accounts:crud:update', testId: 'happy path' },
@@ -271,12 +345,6 @@ describe('internal resources (ADR 0001)', () => {
           ],
         ),
       ],
-      classifications: {
-        schemaVersion: 1,
-        resources: {
-          'tenant.accounts': userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' }),
-        },
-      },
     });
 
     const result = evaluatePolicies({ graph, policies: CRUD_POLICY });
@@ -295,6 +363,41 @@ describe('internal resources (ADR 0001)', () => {
     expect(result.obligations).toEqual([]);
   });
 
+  it('blocks the gate on detector findings and stale references (fail closed)', () => {
+    // Automatic classification has no manual classification reference to
+    // preserve as stale; the detector finding remains gate-visible.
+    // classification key points at a resource that no longer exists
+    // (invariant 9: nothing silently disappears).
+    const graph = buildResourceGraph({
+      detectors: [
+        detector(
+          [table({ attributes: { resourceName: 'accounts' } })],
+          [],
+          [
+            {
+              code: 'PARSE_ERROR',
+              detail: 'failed to read backend/models/broken.py: EACCES',
+              locations: [{ file: 'backend/models/broken.py', line: 1, col: 0 }],
+            },
+          ],
+        ),
+      ],
+    });
+    expect(graph.findings.map((f) => f.code)).toContain('PARSE_ERROR');
+    expect(graph.stale).toEqual([]);
+
+    const result = evaluatePolicies({ graph, policies: CRUD_POLICY });
+
+    const finding = result.blocking.find((b) => b.kind === 'finding');
+    expect(finding?.detail).toContain('PARSE_ERROR');
+    expect(finding?.detail).toContain('failed to read backend/models/broken.py');
+    // Fail closed: the detector finding still blocks the run.
+    expect(result.blocking.length).toBeGreaterThanOrEqual(1);
+    // Fail closed: the obligations still generate, but the run blocks.
+    expect(result.obligations).toHaveLength(0);
+    expect(result.blocking.length).toBeGreaterThanOrEqual(1);
+  });
+
   it('is byte-for-byte deterministic across runs (canonical JSON)', () => {
     const graph = buildResourceGraph({
       detectors: [
@@ -303,10 +406,6 @@ describe('internal resources (ADR 0001)', () => {
           [{ code: 'computed_tablename', detail: 'f-string', location: { file: 'backend/models/ghost.py', line: 3, col: 0 } }],
         ),
       ],
-      classifications: {
-        schemaVersion: 1,
-        resources: { 'tenant.accounts': userFacing({ create: true, read: true, update: false, delete: true, deleteSemantics: 'archive' }) },
-      },
     });
     const claims: Claim[] = [
       { schemaVersion: 1, obligationId: 'tenant.accounts:crud:read', testId: 'b' },
@@ -338,7 +437,7 @@ describe('lifecycleAllowsContract', () => {
 // the obligation identity they waive — verified against pin #2 here.
 describe('waiver fingerprint compatibility (pin #2)', () => {
   it('produces the same fingerprint the graph tests waive against', () => {
-    const lifecycle = { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive' } as const;
+    const lifecycle = { create: true, read: true, update: true, delete: true, deleteSemantics: 'archive', archiveFields: { status: 'archived' } } as const;
     const fp = fingerprint({ resourceId: 'tenant.accounts', contract: 'crud:delete', policyId: 'crud', lifecycle });
     const waived: Waiver = {
       schemaVersion: 1,

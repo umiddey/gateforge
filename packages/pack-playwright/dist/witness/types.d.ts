@@ -24,13 +24,35 @@ export interface RecordsResponse {
 /**
  * `POST /witness/persistence` body (pin #7): the fixture asks the
  * engine-side witness to run the resource's reviewed adapter (GET-only)
- * for one entity and compare the persisted state against the fields the
- * UI action declared. `expectFields` is a JSON object or undefined.
+ * for one entity. The issued record carries the ENGINE OBSERVATION
+ * (`found`, adapter-normalized `fields`, and a `before` link when a
+ * pre-observation was consumed) — expectations NEVER come from the
+ * suite (audit round 5).
+ *
+ * `preObservationId` references a witness-issued pre-observation (`POST
+ * /witness/pre-observation`): an id-set snapshot for create
+ * postconditions (`before: {entityAbsent}`), or an entity-fields
+ * snapshot for update postconditions (`before: {found, fields}`).
  */
 export interface PersistenceRequest {
     resourceId: string;
     entityId: unknown;
-    expectFields?: unknown;
+    preObservationId?: string;
+}
+/** `POST /witness/pre-observation` body: an engine-side snapshot taken
+ * BEFORE a claimed action. With `entityId` the witness snapshots that
+ * entity's observed fields (update postconditions); without it, the
+ * resource's observed id set (create postconditions). */
+export interface PreObservationRequest {
+    resourceId: string;
+    testId: string;
+    claimId: string;
+    entityId?: unknown;
+}
+/** `POST /witness/pre-observation` response. */
+export interface PreObservationResponse {
+    observationId: string;
+    observed: number;
 }
 /** `POST /witness/persistence` response (pin #7). */
 export interface PersistenceResponse {
@@ -48,6 +70,15 @@ export interface WitnessOptions {
     runId: string;
     /** Per-run token; every call must carry `x-gateforge-run: <token>`. */
     token: string;
+    /**
+     * Verifier key for the attestation surface (`GET /ledger-attestation`
+     * and the manifest `recordIdsMac`): shared by the orchestrator with
+     * the witness and the evaluating CLI, NEVER with the tested suite.
+     * When absent the witness serves no attestation and its manifest
+     * append stays unauthenticated (downstream evaluation fails closed
+     * for witnessed records).
+     */
+    verifierKey?: string | null;
     /** Run-state dir; the witness appends its issued recordIds to manifest.json at shutdown. */
     stateDir?: string | null;
     /** Directory of reviewed `.mjs` adapters (default `.gateforge/adapters`). */
@@ -75,6 +106,12 @@ export interface WitnessOptions {
 export interface EvidenceAdapter {
     /** GET-only transport. Returns the raw entity body, or null when absent. */
     read: (ctx: AdapterContext, id: unknown) => Promise<unknown> | unknown;
+    /**
+     * Optional GET-only listing of the resource's entities (raw bodies).
+     * Powers engine-side pre-observations for create postconditions; when
+     * absent the witness refuses pre-observations for the resource.
+     */
+    list?: (ctx: AdapterContext) => Promise<unknown[]> | unknown[];
     /** Projects the raw body onto {entityId, fields} — stamped from the RESPONSE. */
     normalize: (body: unknown) => {
         entityId: unknown;

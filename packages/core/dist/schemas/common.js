@@ -40,7 +40,7 @@ export const ExposureSchema = z.enum(['user-facing', 'internal']);
 export const PlaneSchema = z.enum(['tenant', 'master', 'global']);
 /**
  * Transport a plugin speaks over the plugin boundary (ADR 0002):
- * `subprocess` = GPP/2 JSON-lines child process, `in-process` = TS
+ * `subprocess` = GPP/3 JSON-lines child process, `in-process` = TS
  * detector loaded into the engine.
  */
 export const TransportSchema = z.enum(['subprocess', 'in-process']);

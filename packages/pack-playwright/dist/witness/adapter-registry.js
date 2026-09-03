@@ -112,6 +112,9 @@ export function validateAdapter(module, name) {
         (typeof adapter['baseUrl'] !== 'string' || adapter['baseUrl'].length === 0)) {
         problems.push('baseUrl must be a non-empty string when present');
     }
+    if (adapter['list'] !== undefined && typeof adapter['list'] !== 'function') {
+        problems.push('list must be a function (ctx) => entity[] when present');
+    }
     if (problems.length > 0) {
         throw new AdapterRegistryError(`adapter '${name}' violates the adapter contract: ${problems.join('; ')}`);
     }
@@ -121,6 +124,9 @@ export function validateAdapter(module, name) {
         deletion: adapter['deletion'],
         environmentFingerprint: adapter['environmentFingerprint'],
         baseUrl: adapter['baseUrl'],
+        ...(adapter['list'] !== undefined
+            ? { list: adapter['list'] }
+            : {}),
     };
 }
 /** Fail-closed adapter-loading error (witness startup aborts). */

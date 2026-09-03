@@ -2,7 +2,7 @@
   "name": "@gateforge/pack-workflow",
   "version": "0.1.0",
   "private": true,
-  "description": "Workflow / state-machine discovery pack: TS-only AST detector (GPP/2), five workflow contracts (transition-allowed, transition-rejected, terminal-immutable, audit-emitted, persisted-final-state), entity-adapter schema for state-machine witnesses.",
+  "description": "Workflow / state-machine discovery pack: TS-only AST detector (GPP/3), five workflow contracts (transition-allowed, transition-rejected, terminal-immutable, audit-emitted, persisted-final-state), entity-adapter schema for state-machine witnesses.",
   "type": "module",
   "engines": {
     "node": ">=20"

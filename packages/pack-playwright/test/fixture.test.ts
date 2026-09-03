@@ -22,7 +22,7 @@ import { join } from 'node:path';
 
 const RUN_ID = '6f1c3f90-2d5e-4b1a-9c6d-0f0e2b8a1c9d';
 const TOKEN = 'fixture-token';
-const OBLIGATION = 'tenant.accounts:crud:update';
+const OBLIGATION = 'tenant.accounts:persistence:update';
 
 /** A Page stand-in: panics on any real browser call (not reached by the
  *  paths under test, which fail at the receipt/claim checks first). */
@@ -54,7 +54,7 @@ async function startFixtureWitness() {
     runId: RUN_ID,
     token: TOKEN,
     adaptersDir: join(project, '.gateforge/adapters'),
-    classificationsPath: join(project, '.gateforge/classifications.yml'),
+    classificationsPath: join(project, '.gateforge/effective-classifications.yml'),
     targetBaseUrl: target.url,
     targetFingerprint: FINGERPRINT,
     adapterBaseUrl: target.url,

@@ -10,10 +10,12 @@ export interface InProcessPluginModule {
         resources: unknown[];
         unresolved: unknown[];
         findings: unknown[];
+        classificationSignals: unknown[];
     }> | {
         resources: unknown[];
         unresolved: unknown[];
         findings: unknown[];
+        classificationSignals: unknown[];
     };
 }
 /**

@@ -4,7 +4,7 @@
  * and the configurable tenant/master plane mapping.
  *
  * The in-process entry spawns the SAME python detector over a hardened
- * GPP/2 session, so its output must be byte-identical to the subprocess
+ * GPP/3 session, so its output must be byte-identical to the subprocess
  * transport for the same paths (one detector implementation, both
  * transports). Plane attribution is unit-tested against a temp project
  * carrying `.gateforge.yml` + a classifications file (the "mapping from
@@ -18,7 +18,6 @@ import { DetectorOutputSchema, type Resource } from '@gateforge/core';
 import defaultPack, {
   byTableName,
   createSqlalchemyDetector,
-  fromClassificationsDocument,
 } from '../src/index.js';
 import { ALL_FIXTURES, FIXTURE_ROOT, runDiscover } from './helpers.js';
 
@@ -55,7 +54,7 @@ resources:
   accounts:
     exposure: user-facing
     plane: master
-    lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: archive }
+    lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: archive, archiveFields: { status: archived } }
     primaryKey: [id]
     evidenceAdapter: example.accounts
 `;
@@ -86,22 +85,22 @@ describe('in-process transport (default export)', () => {
 
   it('returns an empty outcome for an empty path list (no spawn)', async () => {
     const outcome = await defaultPack.discover([]);
-    expect(outcome).toEqual({ resources: [], unresolved: [], findings: [] });
+    expect(outcome).toEqual({ resources: [], unresolved: [], findings: [], classificationSignals: [] });
   });
 
-  it('attaches plane attributes from the project config classifications', async () => {
+  it('ignores obsolete project classification files', async () => {
     const project = mkdtempSync(join(tmpdir(), 'gateforge-pack-'));
     try {
       writeFileSync(join(project, '.gateforge.yml'), GATEFORGE_YML);
       writeFileSync(join(project, 'classifications.yml'), CLASSIFICATIONS_YML);
       copyFileSync(join(FIXTURE_ROOT, 'example_models.py'), join(project, 'example_models.py'));
       process.chdir(project);
-      const detector = createSqlalchemyDetector(); // reads .gateforge.yml from cwd
+      const detector = createSqlalchemyDetector();
       const outcome = await detector.discover(['example_models.py']);
       const account = (outcome.resources as Resource[]).find(
         (r) => r.kind === 'sqlalchemy.table' && r.attributes['resourceName'] === 'accounts',
       );
-      expect(account?.attributes['plane']).toBe('master');
+      expect(account?.attributes['plane']).toBeUndefined();
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(project, { recursive: true, force: true });
@@ -143,33 +142,4 @@ describe('plane mapping (programmatic rules)', () => {
     expect(account.attributes['plane']).toBeUndefined();
   }, 60_000);
 
-  it('fromClassificationsDocument honors bare keys and unique plane-qualified keys', () => {
-    const rule = fromClassificationsDocument({
-      schemaVersion: 1,
-      resources: {
-        accounts: {
-          exposure: 'internal',
-          plane: 'master',
-          lifecycle: { create: false, read: true, update: false, delete: false },
-          primaryKey: ['id'],
-        },
-        'tenant.widgets': {
-          exposure: 'internal',
-          plane: 'tenant',
-          lifecycle: { create: false, read: true, update: false, delete: false },
-          primaryKey: ['id'],
-        },
-        'master.widgets': {
-          exposure: 'internal',
-          plane: 'master',
-          lifecycle: { create: false, read: true, update: false, delete: false },
-          primaryKey: ['id'],
-        },
-      },
-    });
-    expect(rule).not.toBeNull();
-    expect(rule?.({ tableName: 'accounts', classQname: 'Account', provenance: 'literal' })).toBe('master');
-    // Ambiguous across planes: no attribution (the graph flags it).
-    expect(rule?.({ tableName: 'widgets', classQname: 'Widget', provenance: 'literal' })).toBeNull();
-  });
 });

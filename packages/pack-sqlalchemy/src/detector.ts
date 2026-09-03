@@ -1,27 +1,26 @@
 /**
- * The pack's discover entry: a thin TypeScript GPP/2 client over the
+ * The pack's discover entry: a thin TypeScript GPP/3 client over the
  * Python AST detector, usable from BOTH CLI transports.
  *
  * - **in-process**: `.gateforge.yml` declares
  *   `transport: in-process, module: "@gateforge/pack-sqlalchemy"`; the
  *   CLI imports this package's default export and calls
  *   `discover(paths)`. The implementation spawns the SAME python
- *   detector (GPP/2, hardened host) with a computed `PYTHONPATH`, so
+ *   detector (GPP/3, hardened host) with a computed `PYTHONPATH`, so
  *   one detector implementation serves both transports.
  * - **subprocess**: `.gateforge.yml` declares
  *   `transport: subprocess, command: ["python3","-m","gateforge_sqlalchemy_detector"]`
  *   (with the pack's `python/` dir on `PYTHONPATH`); the CLI drives the
  *   plugin directly — see the README.
  *
- * Determinism: the python scan is pure over (paths, file bytes); the
- * default plane attribution reads the project config at discover time,
- * so identical repo state yields byte-identical discovery output.
+ * Determinism: the python scan is pure over (paths, file bytes). Plane
+ * attribution is opt-in through detector options; core owns business meaning.
  */
 import { fileURLToPath } from 'node:url';
 import { delimiter } from 'node:path';
 import { PluginSession, type DiscoveryOutcome } from '@gateforge/plugin-protocol';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
-import { fromClassificationsDocument, NO_PLANE_MAPPING, planeRuleFromProjectConfig, type PlaneRule } from './planes.js';
+import { NO_PLANE_MAPPING, type PlaneRule } from './planes.js';
 
 /** Absolute dir of this pack's `python/` tree (the detector package). */
 const PACK_PYTHON_DIR = fileURLToPath(new URL('../python', import.meta.url));
@@ -37,7 +36,7 @@ export const DEFAULT_COMMAND = ['python3', '-m', 'gateforge_sqlalchemy_detector'
 /**
  * Builds the environment the python detector runs under: the host env
  * plus a `PYTHONPATH` that makes both this pack's detector and the
- * GPP/2 client importable.
+ * GPP/3 client importable.
  *
  * Args:
  *   extra: Additional leading `PYTHONPATH` entries (for tests).
@@ -53,10 +52,7 @@ export function pythonEnvironment(extra: readonly string[] = []): NodeJS.Process
 /** Options for {@link createSqlalchemyDetector}. */
 export interface SqlalchemyDetectorOptions {
   /**
-   * Plane mapping applied to discovered tables. Defaults to
-   * `planeRuleFromProjectConfig(process.cwd())` — the mapping
-   * configured in the project's `.gateforge.yml` classifications.
-   * Pass `NO_PLANE_MAPPING` to disable attribution entirely.
+   * Optional programmatic plane mapping. The default is `NO_PLANE_MAPPING`.
    */
   plane?: PlaneRule;
   /** Subprocess argv (default: `python3 -m gateforge_sqlalchemy_detector`). */
@@ -73,7 +69,13 @@ export interface SqlalchemyDetectorOptions {
 export interface SqlalchemyDetector {
   discover(
     paths: readonly string[],
-  ): Promise<{ resources: unknown[]; unresolved: unknown[]; findings: unknown[] }>;
+  ): Promise<{
+    resources: unknown[];
+    unresolved: unknown[];
+    findings: unknown[];
+    classificationSignals: unknown[];
+    scannedPaths?: string[];
+  }>;
 }
 
 /** One discovery outcome with a typed resource list. */
@@ -110,7 +112,13 @@ export function applyPlaneMapping(outcome: RawOutcome, plane: PlaneRule): RawOut
     if (mapped === null) return resource;
     return { ...resource, attributes: { ...resource.attributes, plane: mapped } };
   });
-  return { resources, unresolved: outcome.unresolved, findings: outcome.findings };
+  return {
+    resources,
+    unresolved: outcome.unresolved,
+    findings: outcome.findings,
+    classificationSignals: outcome.classificationSignals,
+    ...(outcome.scannedPaths !== undefined ? { scannedPaths: outcome.scannedPaths } : {}),
+  };
 }
 
 /**
@@ -124,7 +132,7 @@ export function applyPlaneMapping(outcome: RawOutcome, plane: PlaneRule): RawOut
  *   SqlalchemyDetector: the pinned `{ discover(paths) }` module.
  */
 export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}): SqlalchemyDetector {
-  const plane = options.plane ?? planeRuleFromProjectConfig(process.cwd());
+  const plane = options.plane ?? NO_PLANE_MAPPING;
   const command = options.command ?? DEFAULT_COMMAND;
   const env = options.env ?? pythonEnvironment();
   const pluginId = options.pluginId ?? PACK_PLUGIN_ID;
@@ -133,7 +141,7 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
   return {
     async discover(paths) {
       if (paths.length === 0) {
-        return { resources: [], unresolved: [], findings: [] };
+        return { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       }
       const session = new PluginSession({
         command: [...command],
@@ -146,10 +154,17 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
       try {
         await session.start();
         const outcome = await session.discover([...paths]);
+        const withSignals: DiscoveryOutcome = {
+          resources: outcome.resources,
+          unresolved: outcome.unresolved,
+          findings: outcome.findings,
+          classificationSignals: outcome.classificationSignals,
+          ...(outcome.scannedPaths !== undefined ? { scannedPaths: outcome.scannedPaths } : {}),
+        };
         if (!planeIsNoop(plane)) {
-          return applyPlaneMapping(outcome, plane);
+          return applyPlaneMapping(withSignals, plane);
         }
-        return outcome;
+        return withSignals;
       } finally {
         await session.dispose();
       }
@@ -161,5 +176,3 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
 function planeIsNoop(plane: PlaneRule): boolean {
   return plane === NO_PLANE_MAPPING;
 }
-
-export { fromClassificationsDocument };

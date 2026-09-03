@@ -1,11 +1,11 @@
 import { type DiscoveryOutcome } from '@gateforge/plugin-protocol';
-import { fromClassificationsDocument, type PlaneRule } from './planes.js';
+import { type PlaneRule } from './planes.js';
 /** The subprocess command the in-process transport spawns (G4 surface). */
 export declare const DEFAULT_COMMAND: string[];
 /**
  * Builds the environment the python detector runs under: the host env
  * plus a `PYTHONPATH` that makes both this pack's detector and the
- * GPP/2 client importable.
+ * GPP/3 client importable.
  *
  * Args:
  *   extra: Additional leading `PYTHONPATH` entries (for tests).
@@ -17,10 +17,7 @@ export declare function pythonEnvironment(extra?: readonly string[]): NodeJS.Pro
 /** Options for {@link createSqlalchemyDetector}. */
 export interface SqlalchemyDetectorOptions {
     /**
-     * Plane mapping applied to discovered tables. Defaults to
-     * `planeRuleFromProjectConfig(process.cwd())` — the mapping
-     * configured in the project's `.gateforge.yml` classifications.
-     * Pass `NO_PLANE_MAPPING` to disable attribution entirely.
+     * Optional programmatic plane mapping. The default is `NO_PLANE_MAPPING`.
      */
     plane?: PlaneRule;
     /** Subprocess argv (default: `python3 -m gateforge_sqlalchemy_detector`). */
@@ -38,6 +35,8 @@ export interface SqlalchemyDetector {
         resources: unknown[];
         unresolved: unknown[];
         findings: unknown[];
+        classificationSignals: unknown[];
+        scannedPaths?: string[];
     }>;
 }
 /** One discovery outcome with a typed resource list. */
@@ -66,5 +65,5 @@ export declare function applyPlaneMapping(outcome: RawOutcome, plane: PlaneRule)
  *   SqlalchemyDetector: the pinned `{ discover(paths) }` module.
  */
 export declare function createSqlalchemyDetector(options?: SqlalchemyDetectorOptions): SqlalchemyDetector;
-export { fromClassificationsDocument };
+export {};
 //# sourceMappingURL=detector.d.ts.map

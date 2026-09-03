@@ -52,13 +52,13 @@ with `ast.parse` and reports:
 
 ## Setup
 
-Requires Python ≥ 3.11 (the detector and the GPP/2 client are
+Requires Python ≥ 3.11 (the detector and the GPP/3 client are
 stdlib-only; no pip install is required in the monorepo — the client
 bootstraps itself from `packages/plugin-protocol/python`).
 
 Both transports run the **same** detector; pick one per project:
 
-### Subprocess transport (GPP/2)
+### Subprocess transport (GPP/3)
 
 ```yaml
 # .gateforge.yml
@@ -81,7 +81,7 @@ export PYTHONPATH="$PWD/packages/pack-sqlalchemy/python:$PWD/packages/plugin-pro
 bootstraps the sibling client from the monorepo layout automatically.)
 The CLI spawns the plugin with the repo root as its working directory
 and passes repo-root-relative paths; the `version` must match the pack
-(`0.1.0`) — it is pinned at the GPP/2 handshake.
+(`0.1.0`) — it is pinned at the GPP/3 handshake.
 
 ### In-process transport
 
@@ -96,7 +96,7 @@ plugins:
 
 The pack's default export is the pinned `{ discover(paths) }` contract.
 Internally it spawns the exact same python detector through the hardened
-`PluginSession` host (GPP/2), with the `PYTHONPATH` computed from the
+`PluginSession` host (GPP/3), with the `PYTHONPATH` computed from the
 package's own location — zero environment setup. Requires a build of the
 workspace first (`npm run build`) so the package exports resolve to
 `dist/`.
@@ -104,58 +104,44 @@ workspace first (`npm run build`) so the package exports resolve to
 Both entries emit byte-identical discovery output for the same repo
 state — `test/in-process.test.ts` asserts this.
 
-## Plane mapping (tenant / master / global)
+## Plane and resource classification
 
-A table's plane is **configured in the project config** — the
-declarative classifications file referenced by `.gateforge.yml`
-(ADR 0002): classify each resource name with a plane, exactly as
-`tenant.accounts`, `master.shared`, etc. would be keyed:
+The detector emits normalized facts and classification signals. It does not
+read a per-resource classification file or attach project-configured business
+meaning. The core classifier combines plane, identity, lifecycle, delete
+semantics, exposure, and adapter signals with `.gateforge/classification-policy.yml`.
 
 ```yaml
-# classifications.yml (the authoritative mapping)
+# .gateforge/classification-policy.yml
 schemaVersion: 1
-resources:
-  accounts:
-    exposure: user-facing
-    plane: master
-    lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: archive }
-    primaryKey: [id]
-    evidenceAdapter: accounts
+scanRoots: ['backend/**/*.py']
+trustedInternalEntryPoints: []
+internalRules: []
+declarations:
+  internality: gateforge:internal
+volatileFields: []
 ```
 
-The graph binds every resource to `plane.name` from this file. The pack
-additionally makes the detector output **self-describing**:
-
-- the **default in-process entry** reads `.gateforge.yml` + the
-  classifications file from the working directory at discover time and
-  attaches `attributes.plane` to each mapped table (a mirror that also
-  deterministically disambiguates a name classified on several planes,
-  which would otherwise raise `AMBIGUOUS_CLASSIFICATION_KEY`);
-- `createSqlalchemyDetector({ plane: byTableName({ accounts: 'tenant' }) })`
-  maps programmatically (unmapped tables stay unlabeled; the graph
-  classifies alone);
-- `NO_PLANE_MAPPING` disables attribution entirely.
-
-The subprocess transport carries no `attributes.plane` (the python
-process reads no YAML); plane resolution there is purely the graph's
-classification binding. Either way, an **unclassified** table surfaces as
-an `unclassified` blocking entry — a new table fails the gate until
-someone classifies it (Phase 3 verification).
+Use `gateforge discover`, then `gateforge classify` and
+`gateforge explain tenant.accounts` to inspect the effective decision and its
+fingerprint. Unknown plane or identity is a typed blocking result; uncertainty
+never silently suppresses obligations. `NO_PLANE_MAPPING` remains available for
+tests that intentionally disable programmatic plane attribution.
 
 ## Classification workflow (example app)
 
-1. **Discover** — the detector finds `accounts` in the example app's
-   model file as `sqlalchemy.table`.
-2. **Classify** — add the `accounts` entry above (plane `master`,
-   `deleteSemantics: archive` because the app soft-deletes).
-3. **Gate** — `user-facing` classification + a policy matching
-   `kind: sqlalchemy.table` yields obligations
-   `master.accounts:crud:create|read|update|delete`; the adapter below
-   lets the witness prove them. `internal` classification removes CRUD
-   obligations; no classification blocks the run.
-4. **Observe** — `gateforge discover --json` / `gateforge obligations
-   --json` / `gateforge check` trace detector → classification →
-   obligation → report.
+1. **Discover** — the detector finds `accounts` and emits normalized
+   resource facts plus classification signals.
+2. **Classify** — the core classifier applies the repository-wide policy,
+   conservative defaults, and closed-world proofs. No resource entry is
+   hand-authored.
+3. **Gate** — matching `user-facing` resources receive lifecycle-gated
+   `persistence:*` obligations. Missing identity, plane, delete semantics, or
+   adapter evidence produces a typed blocking result.
+4. **Observe** — `gateforge discover --json`, `gateforge classify`,
+   `gateforge obligations --json`, and `gateforge check` trace detector →
+   classification → obligation → report. UI-semantic `crud:*` contracts
+   remain fail-closed until trusted UI observation exists.
 
 ## Entity adapter schema + sample
 
@@ -210,7 +196,7 @@ Same input paths + same file bytes → byte-identical discovery output
 (plan invariant 7): stdlib-only, no clock/network/randomness, every
 array sorted, every name a literal from the AST, fixed key order on the
 wire. `test/subprocess.test.ts` asserts byte-identity across fresh
-GPP/2 sessions. The default in-process entry reads the project config at
+GPP/3 sessions. The default in-process entry reads the project config at
 discover time, so identical repo state yields identical output.
 
 ## Development

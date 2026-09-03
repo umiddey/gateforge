@@ -21,6 +21,8 @@ export declare const FingerprintInputSchema: z.ZodObject<{
             hard: "hard";
             archive: "archive";
         }>>;
+        archiveFields: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean]>>>;
+        updateableFields: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strict>;
 }, z.core.$strict>;
 /** Inferred fingerprint-input shape. */

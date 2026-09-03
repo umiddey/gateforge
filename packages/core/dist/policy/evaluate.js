@@ -18,6 +18,8 @@
  *   invalid (ADR 0001). Non-CRUD contracts still apply.
  * - Unclassified and unresolved resources produce blocking entries and
  *   no obligations until classified/resolved, but stay gate-visible.
+ *   So do detector/graph `findings` (a partial discovery must never
+ *   yield a green gate) and `stale` references (invariant 9).
  * - Policies are evaluated in file order; the first policy generating
  *   a given `<resourceId>:<contract>` owns it (obligation ids are
  *   unique identities — pin #1's fingerprint keys on them).
@@ -30,6 +32,15 @@ import { ClaimSchema } from '../schemas/claim.js';
 import { compareStrings } from '../graph/util.js';
 /** The CRUD contract namespace gated by lifecycle flags. */
 export const CRUD_CONTRACT_PREFIX = 'crud:';
+/**
+ * The persistence-level CRUD contract namespace (audit round 5):
+ * lifecycle-gated exactly like `crud:`, but graded on the witness's own
+ * engine-side observations (absence/presence, before/after deltas,
+ * owner-declared archive state). UI-semantic `crud:` contracts stay
+ * fail-closed in the verdict engine until a witness-controlled UI
+ * observation channel exists.
+ */
+export const PERSISTENCE_CONTRACT_PREFIX = 'persistence:';
 /** The four lifecycle-gated operations, in canonical order. */
 const CRUD_OPERATIONS = ['create', 'read', 'update', 'delete'];
 /**
@@ -46,8 +57,25 @@ export class PolicyEvaluationError extends Error {
 /** Why a resource currently generates no obligations. */
 export const BlockingEntrySchema = z
     .strictObject({
-    /** `unclassified` = resolved but lacking business meaning; `unresolved` = identity not statically resolvable. */
-    kind: z.enum(['unclassified', 'unresolved']),
+    /**
+     * `unclassified` = resolved but lacking any effective classification
+     * (the classifier blocked it definitionally); `classification` = a
+     * typed classifier block (contradiction, incomplete proof scope,
+     * stale/invalid signal, missing adapter) — machine-actionable, the
+     * conservative decision stands where one exists; `unresolved`
+     * = identity not statically resolvable; `finding` = a detector/graph
+     * finding (e.g. PARSE_ERROR) — discovery only partly succeeded, so
+     * the gate cannot claim full knowledge; `stale-reference` = an
+     * artifact still pointing at a removed resource (invariant 9:
+     * nothing silently disappears).
+     */
+    kind: z.enum([
+        'unclassified',
+        'classification',
+        'unresolved',
+        'finding',
+        'stale-reference',
+    ]),
     /** Plane-qualified id when one could be derived, else `null`. */
     resourceId: z.string().min(1).nullable(),
     /** Bare resource name when known, else `null`. */
@@ -71,16 +99,22 @@ export const PolicyEvaluationResultSchema = z
     schemaVersion: SchemaVersionField,
     /** Generated obligations, sorted by id (unique — first policy wins). */
     obligations: z.array(ObligationSchema),
-    /** Unclassified + unresolved entries, sorted deterministically. */
+    /**
+     * Entries the gate must stay visible for, sorted deterministically:
+     * unclassified + unresolved resources, detector/graph findings, and
+     * stale references (fail closed — a discovery pass that partly
+     * failed or left orphans can never yield a green run).
+     */
     blocking: z.array(BlockingEntrySchema),
     /** Claim assessments, sorted by obligation id then test id. */
     claims: z.array(ClaimAssessmentSchema),
 });
 /**
- * Whether a contract is allowed by a lifecycle. `crud:` contracts map
- * to their lifecycle flag (`crud:create` ⇔ `lifecycle.create === true`,
- * etc. — unknown `crud:<op>` contracts are a policy-authoring error);
- * every other contract passes through ungated.
+ * Whether a contract is allowed by a lifecycle. `crud:` and
+ * `persistence:` contracts map to their lifecycle flag (`crud:create` ⇔
+ * `lifecycle.create === true`, etc. — unknown operations in either
+ * namespace are a policy-authoring error); every other contract passes
+ * through ungated.
  *
  * Args:
  *   contract: the required contract name, e.g. `crud:update`.
@@ -88,17 +122,21 @@ export const PolicyEvaluationResultSchema = z
  *
  * Returns:
  *   boolean: true when an obligation for this contract must be generated.
- * @throws PolicyEvaluationError for `crud:` contracts outside the four
- *   lifecycle operations.
+ * @throws PolicyEvaluationError for `crud:`/`persistence:` contracts
+ *   outside the four lifecycle operations.
  */
 export function lifecycleAllowsContract(contract, lifecycle) {
-    if (!contract.startsWith(CRUD_CONTRACT_PREFIX))
-        return true;
-    const operation = contract.slice(CRUD_CONTRACT_PREFIX.length);
-    if (!CRUD_OPERATIONS.includes(operation)) {
-        throw new PolicyEvaluationError(`policy requires '${contract}' but the crud namespace is limited to: ${CRUD_OPERATIONS.map((op) => `crud:${op}`).join(', ')}`);
+    for (const prefix of [CRUD_CONTRACT_PREFIX, PERSISTENCE_CONTRACT_PREFIX]) {
+        if (!contract.startsWith(prefix))
+            continue;
+        const operation = contract.slice(prefix.length);
+        if (!CRUD_OPERATIONS.includes(operation)) {
+            throw new PolicyEvaluationError(`policy requires '${contract}' but the namespace is limited to: ` +
+                `${CRUD_OPERATIONS.map((op) => `${prefix}${op}`).join(', ')}`);
+        }
+        return lifecycle[operation] === true;
     }
-    return lifecycle[operation] === true;
+    return true;
 }
 /**
  * Evaluates the policy document against a built resource graph.
@@ -126,7 +164,10 @@ export function evaluatePolicies(input) {
                 kind: 'unclassified',
                 resourceId: resource.id,
                 name: resource.name,
-                detail: `resource '${resource.id ?? resource.name}' is not classified; add it to the classifications document (exposure, plane, lifecycle)`,
+                detail: `resource '${resource.id ?? resource.name}' has no effective classification ` +
+                    '(the classifier blocked it definitionally); run ' +
+                    `'gateforge explain ${resource.id ?? resource.name}' for the typed ` +
+                    'reason and its in-code resolution',
                 location: resource.location,
             });
             continue;
@@ -142,6 +183,30 @@ export function evaluatePolicies(input) {
             location: entry.reason.location,
         });
     }
+    // Fail closed on partial discovery: findings (PARSE_ERROR and friends)
+    // mean the graph was built from incomplete knowledge — a parse failure
+    // can erase resources and obligations — and stale references mean an
+    // artifact still points at something removed (invariant 9). Both block
+    // the gate; `discover` remains the non-gating introspection surface.
+    for (const finding of input.graph.findings) {
+        blocking.push({
+            kind: 'finding',
+            resourceId: null,
+            name: null,
+            detail: `${finding.code}: ${finding.detail} (detector ${finding.detectorId})`,
+            location: finding.locations[0] ?? null,
+        });
+    }
+    for (const stale of input.graph.stale) {
+        blocking.push({
+            kind: 'stale-reference',
+            resourceId: null,
+            name: null,
+            detail: `stale ${stale.kind} reference '${stale.reference}': ${stale.detail}`,
+            location: null,
+        });
+    }
+    blocking.push(...(input.extraBlocking ?? []));
     const claims = assessClaims(input.claims ?? [], obligationIds, input.graph.resources);
     return {
         schemaVersion: 1,
@@ -164,7 +229,8 @@ function generateObligations(resource, policies, obligations, obligationIds) {
         if (!policyMatches(policy, resource, exposure))
             continue;
         for (const contract of policy.require) {
-            if (contract.startsWith(CRUD_CONTRACT_PREFIX)) {
+            if (contract.startsWith(CRUD_CONTRACT_PREFIX) ||
+                contract.startsWith(PERSISTENCE_CONTRACT_PREFIX)) {
                 if (exposure === 'internal')
                     continue; // ADR 0001: internal ⇒ no CRUD obligations
                 if (!lifecycleAllowsContract(contract, classification.lifecycle))

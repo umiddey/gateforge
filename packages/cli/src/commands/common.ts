@@ -9,6 +9,19 @@ import { UsageError } from '../errors.js';
 /** Tool version stamped into SARIF `tool.driver.version` (pin #10). */
 export const VERSION = '0.1.0';
 
+/**
+ * Env var carrying the witness verifier key (pin #7, GF-23). The key is
+ * read from the environment, NEVER from argv: `/proc/<pid>/cmdline` is
+ * world-readable, so a command-line flag would publish the orchestrator
+ * secret to every local process — including the tested suite. (Env is
+ * readable only by the same uid and, under the default yama
+ * ptrace_scope ≥ 1, a child cannot read its parent's environ; for
+ * stronger isolation run the suite as a distinct user or container.)
+ * `test-gates` strips this var from the suite child's environment so a
+ * suite can never inherit it.
+ */
+export const VERIFIER_KEY_ENV = 'GATEFORGE_WITNESS_VERIFIER_KEY';
+
 /** Report formats renderRun accepts (pin #10). */
 export const REPORT_FORMATS = ['text', 'json', 'sarif'] as const;
 

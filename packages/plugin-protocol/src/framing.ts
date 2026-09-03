@@ -17,9 +17,9 @@ import {
 } from './codes.js';
 import { MESSAGE_TYPES, PAYLOAD_SCHEMAS, PROTOCOL_VERSION, firstIssueText, type MessageType } from './schema.js';
 
-/** A fully decoded and verified GPP/2 frame. */
+/** A fully decoded and verified GPP/3 frame. */
 export interface GppEnvelope {
-  protocolVersion: 2;
+  protocolVersion: 3;
   pluginId: string;
   pluginVersion: string;
   type: MessageType;

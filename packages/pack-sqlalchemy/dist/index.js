@@ -2,7 +2,7 @@
  * @gateforge/pack-sqlalchemy — SQLAlchemy CRUD discovery pack.
  *
  * Detects SQLAlchemy tables from Python source (AST only, stdlib, no
- * imports/execution) and exposes the pinned GPP/2 discovery vocabulary
+ * imports/execution) and exposes the pinned GPP/3 discovery vocabulary
  * of the resource graph: business `sqlalchemy.table` resources,
  * `gateforge.class` symbol resources for cross-module inheritance
  * resolution, typed `unresolved` entries for computed names (GF-21),
@@ -21,7 +21,7 @@
 import { createSqlalchemyDetector } from './detector.js';
 export { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 export { createSqlalchemyDetector, DEFAULT_COMMAND, pythonEnvironment, applyPlaneMapping, } from './detector.js';
-export { NO_PLANE_MAPPING, byTableName, fromClassificationsDocument, planeRuleFromProjectConfig, } from './planes.js';
+export { NO_PLANE_MAPPING, byTableName, } from './planes.js';
 export { EntityAdapterSchema, validateEntityAdapter, } from './adapter-schema.js';
 /** The default CLI in-process plugin module: `{ discover(paths) }`. */
 export default createSqlalchemyDetector();

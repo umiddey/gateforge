@@ -74,6 +74,12 @@ export function toClassificationView(entry) {
             ...(entry.lifecycle.deleteSemantics === undefined
                 ? {}
                 : { deleteSemantics: entry.lifecycle.deleteSemantics }),
+            ...(entry.lifecycle.archiveFields === undefined
+                ? {}
+                : { archiveFields: entry.lifecycle.archiveFields }),
+            ...(entry.lifecycle.updateableFields === undefined
+                ? {}
+                : { updateableFields: [...entry.lifecycle.updateableFields] }),
         },
     };
 }

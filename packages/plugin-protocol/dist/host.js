@@ -1,5 +1,5 @@
 /**
- * GPP/2 host (engine side): spawns a plugin subprocess, performs the
+ * GPP/3 host (engine side): spawns a plugin subprocess, performs the
  * pinned handshake, drives lock-step discover requests over a persistent
  * session, and tears the plugin down via the shutdown handshake.
  *
@@ -115,10 +115,20 @@ export class PluginSession {
                 throw new SchemaError(`frame ${received.frameNo} (type result): requestId ${JSON.stringify(payload.requestId)} ` +
                     `does not match outstanding request ${JSON.stringify(requestId)}`, { frameNo: received.frameNo });
             }
+            for (const signal of payload.classificationSignals ?? []) {
+                if (signal.detector.id !== this.#pinnedId ||
+                    signal.detector.version !== this.#pinnedVersion) {
+                    throw new SchemaError(`frame ${received.frameNo} (type result): classification signal detector ` +
+                        `${JSON.stringify(signal.detector.id)}@${JSON.stringify(signal.detector.version)} ` +
+                        `is not authorized for plugin ${JSON.stringify(this.#pinnedId)}@${JSON.stringify(this.#pinnedVersion)}`, { frameNo: received.frameNo });
+                }
+            }
             return {
                 resources: payload.resources ?? [],
                 unresolved: payload.unresolved ?? [],
                 findings: payload.findings ?? [],
+                classificationSignals: payload.classificationSignals ?? [],
+                ...(payload.scannedPaths !== undefined ? { scannedPaths: payload.scannedPaths } : {}),
             };
         }
         catch (error) {

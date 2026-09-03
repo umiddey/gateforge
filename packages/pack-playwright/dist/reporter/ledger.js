@@ -13,7 +13,7 @@
  * (`GET /classifications`). When either is unavailable the row carries
  * `verdict: null` and the reason says exactly what is missing.
  */
-import { evaluateObligation, } from '@gateforge/core';
+import { evaluateObligation, isWitnessedRecord, } from '@gateforge/core';
 /** Load a valid claim-shaped object from the annotation source. */
 export function claimOf(obligationId, test) {
     const location = test.location === undefined || test.location === null
@@ -25,6 +25,10 @@ export function claimOf(obligationId, test) {
         testFile: location === null ? '' : location.file,
         location,
     };
+}
+/** Plain-object guard for lenient state parsing. */
+function isPlainObject(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 /** Reads a lifecycle object leniently (absent booleans → false). */
 function lifecycleOf(value) {
@@ -39,6 +43,12 @@ function lifecycleOf(value) {
         delete: entry['delete'] === true,
         ...(entry['deleteSemantics'] === 'hard' || entry['deleteSemantics'] === 'archive'
             ? { deleteSemantics: entry['deleteSemantics'] }
+            : {}),
+        ...(isPlainObject(entry['archiveFields'])
+            ? { archiveFields: entry['archiveFields'] }
+            : {}),
+        ...(Array.isArray(entry['updateableFields'])
+            ? { updateableFields: entry['updateableFields'].filter((f) => typeof f === 'string') }
             : {}),
     };
 }
@@ -132,7 +142,11 @@ export function ledgerRowFor(claim, obligations, classifications, records, now) 
                 schemaVersion: 1,
                 obligationId: claim.obligationId,
                 testId: claim.testId,
-                testFile: claim.testFile,
+                // ClaimSchema requires a non-empty optional testFile: an absent
+                // location must omit the field entirely (an emitted '' made the
+                // strict schema drop the whole claim — honest evidence then
+                // graded `missing`).
+                ...(claim.testFile === '' ? {} : { testFile: claim.testFile }),
                 ...(claim.location === null ? {} : { location: claim.location }),
             },
         ],
@@ -142,7 +156,10 @@ export function ledgerRowFor(claim, obligations, classifications, records, now) 
         now,
     });
     const mine = records.filter((record) => record.testId === claim.testId);
-    const trustTier = mine.some((record) => record.trust === 'witnessed')
+    // Provenance-aware (GF-23): a record counts as witnessed only when its
+    // recordId recomputes from its contents — the same predicate the
+    // engine applies, so the display can never disagree with the verdict.
+    const trustTier = mine.some((record) => isWitnessedRecord(record))
         ? 'witnessed'
         : mine.length > 0
             ? 'claimed'

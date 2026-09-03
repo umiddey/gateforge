@@ -1,5 +1,5 @@
 /**
- * GPP/2 failure codes and their error classes (ADR 0002 D3).
+ * GPP/3 failure codes and their error classes (ADR 0002 D3).
  *
  * Every failure is a distinct class extending {@link ProtocolFailure} and
  * carries a single-cause, actionable detail naming (where applicable) the
@@ -8,9 +8,9 @@
  * `error.stack` is a JS-runtime artifact and must never be printed by the
  * host.
  */
-/** Every fail-closed GPP/2 diagnostic code. */
+/** Every fail-closed GPP/3 diagnostic code. */
 export declare const FAILURE_CODES: readonly ["E_PROTOCOL_VERSION", "E_UNKNOWN_PLUGIN", "E_FRAME_JSON", "E_UNKNOWN_TYPE", "E_SCHEMA", "E_EOF", "E_TIMEOUT", "E_PLUGIN_ERROR", "E_EXIT_STATUS"];
-/** Union of all GPP/2 failure codes. */
+/** Union of all GPP/3 failure codes. */
 export type ProtocolFailureCode = (typeof FAILURE_CODES)[number];
 /** Rendering context attached to a failure for the offending-frame line. */
 export interface FailureContext {
@@ -29,7 +29,7 @@ export declare class ProtocolFailure extends Error {
     readonly rawLine: string | undefined;
     constructor(code: ProtocolFailureCode, detail: string, context?: FailureContext);
 }
-/** Handshake or envelope declared a protocol version other than 2. */
+/** Handshake or envelope declared a protocol version other than 3. */
 export declare class ProtocolVersionError extends ProtocolFailure {
     constructor(detail: string, context?: FailureContext);
 }

@@ -24,7 +24,10 @@ export interface EvaluateInput {
     graph: ResourceGraph;
     /** Generated obligations (policy result). */
     obligations: readonly Obligation[];
-    /** Blocking entries (unclassified/unresolved) from the policy result. */
+    /**
+     * Blocking entries (unclassified/unresolved resources, detector or
+     * graph findings, stale references) from the policy result.
+     */
     blocking: readonly BlockingEntry[];
     /** Absolute run-state directory holding claims.json / records.json. */
     stateDir: string;
@@ -35,6 +38,25 @@ export interface EvaluateInput {
      * these changed files are evaluated/reported (check --changed).
      */
     changedFiles?: readonly string[] | null;
+    /**
+     * Verifier key for the witness attestation surface — a secret the
+     * orchestrator shares with the witness and this CLI, never with the
+     * tested suite. When absent (or when neither authenticated set
+     * verifies) the provenance gate fails closed and demotes every
+     * witnessed record: suite-writable artifacts alone cannot prove
+     * issuance.
+     */
+    witnessVerifierKey?: string | null;
+    /**
+     * Live `GET /ledger-attestation` response fetched by `test-gates`
+     * while a wired witness was still serving (runId + issued id set +
+     * verifier-key MAC). Verified again here before it contributes trust.
+     */
+    witnessAttestation?: {
+        runId: string;
+        recordIds: readonly string[];
+        mac: string;
+    } | null;
 }
 /** The evaluated run. */
 export interface EvaluateResult {

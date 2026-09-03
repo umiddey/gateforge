@@ -15,6 +15,7 @@
  */
 import {
   evaluateObligation,
+  isWitnessedRecord,
   type Classification,
   type Obligation,
   type Verdict,
@@ -33,6 +34,8 @@ export interface StateObligationEntry {
     update: boolean;
     delete: boolean;
     deleteSemantics?: 'hard' | 'archive';
+    archiveFields?: Record<string, string | number | boolean>;
+    updateableFields?: string[];
   };
   fingerprint: string;
   source: string;
@@ -81,6 +84,11 @@ export function claimOf(
   };
 }
 
+/** Plain-object guard for lenient state parsing. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /** Reads a lifecycle object leniently (absent booleans → false). */
 function lifecycleOf(value: unknown): {
   create: boolean;
@@ -88,6 +96,8 @@ function lifecycleOf(value: unknown): {
   update: boolean;
   delete: boolean;
   deleteSemantics?: 'hard' | 'archive';
+  archiveFields?: Record<string, string | number | boolean>;
+  updateableFields?: string[];
 } {
   if (typeof value !== 'object' || value === null) {
     return { create: false, read: false, update: false, delete: false };
@@ -100,6 +110,12 @@ function lifecycleOf(value: unknown): {
     delete: entry['delete'] === true,
     ...(entry['deleteSemantics'] === 'hard' || entry['deleteSemantics'] === 'archive'
       ? { deleteSemantics: entry['deleteSemantics'] }
+      : {}),
+    ...(isPlainObject(entry['archiveFields'])
+      ? { archiveFields: entry['archiveFields'] as Record<string, string | number | boolean> }
+      : {}),
+    ...(Array.isArray(entry['updateableFields'])
+      ? { updateableFields: entry['updateableFields'].filter((f): f is string => typeof f === 'string') }
       : {}),
   };
 }
@@ -198,7 +214,11 @@ export function ledgerRowFor(
         schemaVersion: 1,
         obligationId: claim.obligationId,
         testId: claim.testId,
-        testFile: claim.testFile,
+        // ClaimSchema requires a non-empty optional testFile: an absent
+        // location must omit the field entirely (an emitted '' made the
+        // strict schema drop the whole claim — honest evidence then
+        // graded `missing`).
+        ...(claim.testFile === '' ? {} : { testFile: claim.testFile }),
         ...(claim.location === null ? {} : { location: claim.location }),
       },
     ],
@@ -208,7 +228,10 @@ export function ledgerRowFor(
     now,
   });
   const mine = records.filter((record) => record.testId === claim.testId);
-  const trustTier: LedgerRow['trustTier'] = mine.some((record) => record.trust === 'witnessed')
+  // Provenance-aware (GF-23): a record counts as witnessed only when its
+  // recordId recomputes from its contents — the same predicate the
+  // engine applies, so the display can never disagree with the verdict.
+  const trustTier: LedgerRow['trustTier'] = mine.some((record) => isWitnessedRecord(record))
     ? 'witnessed'
     : mine.length > 0
       ? 'claimed'

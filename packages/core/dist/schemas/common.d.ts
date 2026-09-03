@@ -44,7 +44,7 @@ export declare const PlaneSchema: z.ZodEnum<{
 export type Plane = z.infer<typeof PlaneSchema>;
 /**
  * Transport a plugin speaks over the plugin boundary (ADR 0002):
- * `subprocess` = GPP/2 JSON-lines child process, `in-process` = TS
+ * `subprocess` = GPP/3 JSON-lines child process, `in-process` = TS
  * detector loaded into the engine.
  */
 export declare const TransportSchema: z.ZodEnum<{

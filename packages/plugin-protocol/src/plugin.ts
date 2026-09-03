@@ -1,5 +1,5 @@
 /**
- * GPP/2 plugin SDK (TypeScript side): the reference client for plugin
+ * GPP/3 plugin SDK (TypeScript side): the reference client for plugin
  * authors. Performs the `hello`/`ready` handshake, validates host frames
  * (protocolVersion, pinned identity, seq order, digest), answers
  * `discover` requests through a user handler, and completes the
@@ -14,11 +14,19 @@ import { FrameJsonError, ProtocolFailure, SchemaError } from './codes.js';
 import { encodeFrame, extractLines, parseLine, verifyEnvelope, verifyPayload } from './framing.js';
 import { PROTOCOL_VERSION, REQUIRED_CAPABILITY, type MessageType } from './schema.js';
 
-/** What a plugin's discover handler must return. */
+/** What a plugin's discover handler must return (GPP/3 contract). */
 export interface DiscoveryResult {
   resources: JsonValue[];
   unresolved: JsonValue[];
   findings: JsonValue[];
+  /** Classification-signal facts (ADR 0003 D6); `[]` when unsupported. */
+  classificationSignals: JsonValue[];
+  /**
+   * Optional coverage evidence: repo-root-relative files the handler
+   * actually examined successfully. Omitted ⇒ coverage unknown ⇒ the
+   * host's complete-scan attestation fails closed.
+   */
+  scannedPaths?: JsonValue[];
 }
 
 /** User-implemented discovery callback. Throw to answer with an `error` frame. */
@@ -44,7 +52,7 @@ export interface ServePluginOptions {
 const HOST_TYPES: readonly MessageType[] = ['ready', 'discover', 'shutdown'];
 
 /**
- * Runs the plugin side of a GPP/2 session until the host sends `shutdown`
+ * Runs the plugin side of a GPP/3 session until the host sends `shutdown`
  * (answered with `bye`) or closes stdin. Throws a {@link ProtocolFailure}
  * if the host violates the protocol (after emitting a session-fatal
  * `error` frame so the host can name the cause).
@@ -129,16 +137,24 @@ export async function servePlugin(handler: DiscoverHandler, options: ServePlugin
           const { requestId, paths } = payload as { requestId: string; paths: string[] };
           try {
             const result = await handler(paths);
-            for (const key of ['resources', 'unresolved', 'findings'] as const) {
+            for (const key of ['resources', 'unresolved', 'findings', 'classificationSignals'] as const) {
               if (!isJsonValue(result[key])) {
                 throw new SchemaError(`discover handler returned non-JSON "${key}"`);
               }
+            }
+            // Optional coverage evidence (ADR 0003 D4): pass through the
+            // handler's reported scanned paths when it provides them.
+            const scannedPaths = (result as { scannedPaths?: unknown }).scannedPaths;
+            if (scannedPaths !== undefined && !isJsonValue(scannedPaths)) {
+              throw new SchemaError('discover handler returned non-JSON "scannedPaths"');
             }
             send('result', {
               requestId,
               resources: result.resources,
               unresolved: result.unresolved,
               findings: result.findings,
+              classificationSignals: result.classificationSignals,
+              ...(scannedPaths !== undefined ? { scannedPaths } : {}),
             });
           } catch (error) {
             // Request-scoped failure: the session stays alive; the host

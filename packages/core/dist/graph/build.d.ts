@@ -6,13 +6,11 @@ export declare const GRAPH_DETECTOR_ID = "gateforge.graph";
  * rules; see `ResourceGraphSchema` for the output shape.
  *
  * Args:
- *   input: detector contributions, classifications document, and the
- *     claim/adapter/waiver populations to watch for staleness.
+ *   input: detector contributions and the claim/adapter/waiver
+ *     populations to watch for staleness.
  *
  * Returns:
  *   ResourceGraph: normalized, sorted, byte-for-byte deterministic.
- * @throws z.ZodError when the classifications document is invalid —
- *   classification config fails closed (ADR 0001 D5.1).
  */
 export declare function buildResourceGraph(input: ResourceGraphInput): ResourceGraph;
 //# sourceMappingURL=build.d.ts.map

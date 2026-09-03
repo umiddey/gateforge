@@ -17,6 +17,11 @@ import { ExposureSchema, PlaneSchema, SchemaVersionField } from './common.js';
  * Lifecycle surface of a resource. `create`/`read`/`update` are plain
  * switches; `delete` additionally declares its semantics because archive
  * and hard delete have different evidence contracts (plan §5.3).
+ *
+ * `archiveFields` is the OWNER-DECLARED archived state (audit round 5):
+ * the expected post-archive field values come from the classification —
+ * never from the tested suite — so a suite cannot bless an unarchived
+ * entity by declaring its current state as the expected result.
  */
 export const LifecycleSchema = z
     .object({
@@ -30,6 +35,24 @@ export const LifecycleSchema = z
     delete: z.boolean(),
     /** Required when `delete` is true: how removal manifests. */
     deleteSemantics: z.enum(['hard', 'archive']).optional(),
+    /**
+     * Required when `deleteSemantics` is 'archive': the owner-declared
+     * field values that identify the archived state (e.g. `{status:
+     * 'archived'}`). Graded by the engine against the witness's own
+     * engine-side observation.
+     */
+    archiveFields: z
+        .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+        .optional(),
+    /**
+     * Owner-declared fields whose change constitutes a real update
+     * (audit round 6). `persistence:update` is satisfied only when the
+     * engine-observed before/after delta touches at least one of these —
+     * bookkeeping columns (e.g. `updated_at`) alone never satisfy.
+     * Optional in the schema; the engine fails closed on update
+     * obligations for resources that omit it.
+     */
+    updateableFields: z.array(z.string().min(1)).min(1).optional(),
 })
     .strict()
     .superRefine((lifecycle, ctx) => {
@@ -38,6 +61,25 @@ export const LifecycleSchema = z
             code: 'custom',
             path: ['deleteSemantics'],
             message: "lifecycle.delete is true: 'deleteSemantics' must be 'hard' or 'archive'",
+        });
+    }
+    if (lifecycle.deleteSemantics === 'archive' && lifecycle.archiveFields === undefined) {
+        ctx.addIssue({
+            code: 'custom',
+            path: ['archiveFields'],
+            message: "lifecycle.deleteSemantics is 'archive': 'archiveFields' must declare the " +
+                'owner-owned archived state (e.g. {status: archived})',
+        });
+    }
+    // An empty archiveFields map passes no postcondition check, so it is
+    // a config error, not a dormant one (fail closed at authoring time).
+    if (lifecycle.archiveFields !== undefined &&
+        Object.keys(lifecycle.archiveFields).length === 0) {
+        ctx.addIssue({
+            code: 'custom',
+            path: ['archiveFields'],
+            message: 'archiveFields must declare at least one field (an empty map can never ' +
+                'satisfy the archive postcondition)',
         });
     }
 });

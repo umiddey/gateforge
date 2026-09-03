@@ -1,6 +1,6 @@
 /**
  * PluginRegistration schema: the pinned identity of a plugin as it
- * appears in run manifests (pin #4) and the GPP/2 handshake (pin #5).
+ * appears in run manifests (pin #4) and the GPP/3 handshake (pin #5).
  * Mismatch between the registered and the answering plugin identity is
  * a fail-closed protocol error (GF-12/18, enforced by plugin-protocol).
  */

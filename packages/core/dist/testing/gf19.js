@@ -274,6 +274,7 @@ export function stubDetector(repo, options = {}) {
             resources,
             unresolved: [],
             findings,
+            classificationSignals: [],
         },
         audit,
     };

@@ -21,6 +21,21 @@ export declare const BulkScopeSchema: z.ZodObject<{
 /** Inferred bulk-scope shape. */
 export type BulkScope = z.infer<typeof BulkScopeSchema>;
 /**
+ * Where a record's contents came from (part of the hashed identity,
+ * pin #7). `suite-submitted` records carry the TESTED SUITE's own
+ * assertion — the witness received it but cannot verify it happened —
+ * and are stamped `trust: 'claimed'` at issuance. `engine-observed`
+ * records carry contents the witness itself produced from an
+ * engine-side observation (the adapter read behind
+ * `persistence.entity`) and are stamped `trust: 'witnessed'`.
+ */
+export declare const RecordOriginSchema: z.ZodEnum<{
+    "suite-submitted": "suite-submitted";
+    "engine-observed": "engine-observed";
+}>;
+/** Inferred record-origin shape. */
+export type RecordOrigin = z.infer<typeof RecordOriginSchema>;
+/**
  * A trusted evidence record issued by the witness service.
  */
 export declare const EvidenceRecordSchema: z.ZodObject<{
@@ -35,6 +50,10 @@ export declare const EvidenceRecordSchema: z.ZodObject<{
     kind: z.ZodString;
     testId: z.ZodOptional<z.ZodString>;
     payload: z.ZodOptional<z.ZodUnknown>;
+    origin: z.ZodOptional<z.ZodEnum<{
+        "suite-submitted": "suite-submitted";
+        "engine-observed": "engine-observed";
+    }>>;
     scope: z.ZodOptional<z.ZodObject<{
         kind: z.ZodLiteral<"bulk">;
         count: z.ZodNumber;

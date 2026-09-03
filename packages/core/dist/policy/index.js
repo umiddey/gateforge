@@ -4,5 +4,5 @@
  * and gate-visible blocking entries for unclassified/unresolved
  * resources (invariants 1, 8).
  */
-export { CRUD_CONTRACT_PREFIX, BlockingEntrySchema, ClaimAssessmentSchema, PolicyEvaluationError, PolicyEvaluationResultSchema, evaluatePolicies, lifecycleAllowsContract, } from './evaluate.js';
+export { CRUD_CONTRACT_PREFIX, PERSISTENCE_CONTRACT_PREFIX, BlockingEntrySchema, ClaimAssessmentSchema, PolicyEvaluationError, PolicyEvaluationResultSchema, evaluatePolicies, lifecycleAllowsContract, } from './evaluate.js';
 //# sourceMappingURL=index.js.map

@@ -1,19 +1,33 @@
 /**
- * GPP/2 message catalog and payload schemas (Interface pin #5).
+ * GPP/3 message catalog and payload schemas (Interface pin #5).
  *
- * Every frame is `{protocolVersion: 2, pluginId, pluginVersion, type, seq,
+ * Every frame is `{protocolVersion: 3, pluginId, pluginVersion, type, seq,
  * payload, digest}` with `digest = sha256(canonical({type, seq, payload}))`
  * over the GF-canonical-JSON of @gateforge/core (pin #1).
+ *
+ * GPP/3 (ADR 0003 D6) adds `classificationSignals` to the `result`
+ * payload — INSIDE the digest-checked envelope, never beside it. There
+ * is no unversioned optional-field compatibility: a GPP/2 peer fails
+ * closed at the handshake with `E_PROTOCOL_VERSION` naming both
+ * versions, and a GPP/3 peer omitting the field fails `E_SCHEMA`.
  *
  * Payload validation is schema-generated: every payload type below has a
  * zod schema and is validated on receive; any failure is `E_SCHEMA` with a
  * single-cause path/message diagnostic. The result payload matches the
- * frozen @gateforge/core `Resource` and `UnresolvedReason` shapes.
+ * frozen @gateforge/core `Resource`, `UnresolvedReason`, and
+ * `ClassificationSignal` shapes.
  */
 import { z } from 'zod';
-import { LocationSchema, ResourceSchema, UnresolvedReasonSchema } from '@gateforge/core';
+import { ClassificationSignalSchema, LocationSchema, ResourceSchema, UnresolvedReasonSchema, } from '@gateforge/core';
 /** The GPP version this package speaks. Handshakes pin this value. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
+/**
+ * Capability a GPP/3 plugin declares when its discovery handler emits
+ * classification signals. The host does NOT require it — a detector
+ * that discovers resources but cannot emit signals stays valid and its
+ * resources fall back to conservative classification defaults.
+ */
+export const SIGNAL_CAPABILITY = 'classification-signals';
 /** Maximum bytes per stdout line, enforced while framing (GPP/1 lineage). */
 export const MAX_FRAME_BYTES = 8 * 1024 * 1024; // 8 MiB
 /** Message catalog: every legal envelope `type`. */
@@ -69,6 +83,18 @@ export const ResultPayloadSchema = z
     unresolved: z.array(UnresolvedReasonSchema),
     /** Non-resource observations (duplicates, ambiguities). */
     findings: z.array(FindingSchema),
+    /**
+     * Classification-signal facts (GPP/3, ADR 0003 D6). Mandatory since
+     * the version bump — detectors without signal support send `[]`.
+     */
+    classificationSignals: z.array(ClassificationSignalSchema),
+    /**
+     * Repo-root-relative files the plugin actually examined successfully
+     * (coverage evidence for the complete-scan attestation). Optional on
+     * the wire; a plugin that omits it leaves coverage unknown, which
+     * fails closed in the host's attestation.
+     */
+    scannedPaths: z.array(z.string().min(1)).optional(),
 })
     .strict();
 /**

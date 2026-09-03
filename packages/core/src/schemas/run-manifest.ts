@@ -37,6 +37,29 @@ export const RunManifestSchema = z
     plugins: z.array(PluginRegistrationSchema),
     /** Disposable-environment attestation scope, or null when unset. */
     attestationScope: z.string().nullable(),
+    /**
+     * Record ids the witness issued this run (pin #7), appended at
+     * witness shutdown. Optional: the CLI writes the manifest without it
+     * before the suite runs; an unappended manifest (witness never
+     * finished) is still schema-valid but proves no issuance.
+     *
+     * TRUST: this list lives in the suite-writable state directory, so
+     * on its own it proves nothing — a hostile suite can write ids here
+     * as easily as it can fabricate records. It is trusted only when
+     * `recordIdsMac` verifies under the witness verifier key (a secret
+     * the suite never receives).
+     */
+    recordIds: z.array(z.string().regex(/^[0-9a-f]{64}$/, 'recordId must be 64-char lowercase hex')).optional(),
+    /**
+     * HMAC-SHA256 (verifier-key keyed) over the canonical
+     * `{runId, recordIds}` — the witness's authentication of the
+     * appended set. Verified by the CLI provenance gate; presence of
+     * `recordIds` without a verifying MAC is untrusted (fail closed).
+     */
+    recordIdsMac: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/, 'recordIdsMac must be a 64-char lowercase hex HMAC')
+      .optional(),
   })
   .strict();
 

@@ -1,3 +1,4 @@
+import type { ClassificationDecisionTrace } from '../classifier/schema.js';
 import type { BlockingEntry } from '../policy/index.js';
 import type { RunManifest } from '../schemas/run-manifest.js';
 import { type ObligationVerdict } from '../verdict/index.js';
@@ -16,7 +17,7 @@ export interface WaiverCounts {
 export interface RenderRunOptions {
     /** Output format. */
     format: 'json' | 'sarif' | 'text';
-    /** Unclassified/unresolved blocking entries (invariants 1, 8). */
+    /** Blocking entries (unclassified/unresolved/findings/stale references). */
     blocking?: readonly BlockingEntry[];
     /** Waiver-population counts; included in json/text when provided. */
     waiverCounts?: WaiverCounts;
@@ -24,6 +25,13 @@ export interface RenderRunOptions {
     run?: RunManifest;
     /** Tool version stamped into SARIF `tool.driver.version`. */
     toolVersion?: string;
+    /**
+     * Classification decision provenance per resource id (ADR 0003):
+     * decision fingerprint + rule trace, included in json/SARIF/text when
+     * provided. Report-visible so any signal change (and hence any
+     * fingerprint change) is auditable — never authoritative input.
+     */
+    classificationTraces?: Record<string, ClassificationDecisionTrace>;
 }
 /** A run's exit code (architecture contract 4). */
 export type RunExitCode = 0 | 1 | 2;

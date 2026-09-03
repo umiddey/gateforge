@@ -38,7 +38,7 @@ export declare function canonicalJson(value: JsonValue): string;
 export declare function sha256Hex(input: string | Uint8Array): string;
 /**
  * Hashes a value as GF-canonical-JSON: `sha256(canonicalJson(value))` (pin #1).
- * This is the single primitive behind fingerprints, GPP/2 digests, and
+ * This is the single primitive behind fingerprints, GPP/3 digests, and
  * witness record ids.
  *
  * Args:

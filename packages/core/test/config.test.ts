@@ -31,7 +31,7 @@ const validConfig = {
     },
   ],
   policies: '.gateforge/policies.yml',
-  classifications: '.gateforge/classifications.yml',
+  classificationPolicy: '.gateforge/classification-policy.yml',
   adapters: '.gateforge/adapters',
   waivers: '.gateforge/waivers',
   baselines: '.gateforge/baselines/obligations.json',
@@ -48,6 +48,21 @@ describe('parseConfig (pin #6)', () => {
     expect(config.clock.mode).toBe('system');
   });
 
+  it("rejects the reserved engine issuer id 'gateforge.core' (red-team V1)", () => {
+    const forged = {
+      ...validConfig,
+      plugins: [
+        {
+          id: 'gateforge.core',
+          version: '1',
+          transport: 'in-process',
+          module: './forged-plugin.mjs',
+        },
+      ],
+    };
+    expect(() => parseConfig(forged)).toThrow(/reserved/);
+  });
+
   it('round-trips through YAML text', () => {
     const yamlText = `
 schemaVersion: 1
@@ -58,7 +73,7 @@ project:
     exclude: []
 plugins: []
 policies: .gateforge/policies.yml
-classifications: .gateforge/classifications.yml
+classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
@@ -161,7 +176,7 @@ project:
     exclude: []
 plugins: []
 policies: .gateforge/policies.yml
-classifications: .gateforge/classifications.yml
+classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json

@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { buildResourceGraph, compareStrings } from '../graph/index.js';
 import { fingerprint } from '../fingerprints.js';
 import { evaluatePolicies } from '../policy/index.js';
+import { runClassification } from '../classifier/bind.js';
 import { RunManifestSchema } from '../schemas/run-manifest.js';
 import { applyParseErrorRule } from './gf19.js';
 /**
@@ -27,8 +28,8 @@ import { applyParseErrorRule } from './gf19.js';
  *
  * Args:
  *   input: repository, detector contributions (+ parse audits), the
- *     classification/policy documents, injected clock, evaluator double
- *     or real, and optional claims/records/waivers/provider/runId.
+ *     classification-policy/policy documents, injected clock, evaluator
+ *     double or real, and optional claims/records/waivers/provider/runId.
  *
  * Returns:
  *   GateRunResult: manifest, graph, policy result, per-obligation
@@ -61,16 +62,57 @@ export function runGates(input) {
             // The rule's guaranteed findings carry provenance; feed them back
             // through the pinned discovery shape so the graph owns them.
             findings: ruled.findings.map(({ code, detail, locations }) => ({ code, detail, locations })),
+            classificationSignals: contribution.classificationSignals,
+            ...(contribution.scannedPaths !== undefined
+                ? { scannedPaths: contribution.scannedPaths }
+                : {}),
         });
     }
-    const graph = buildResourceGraph({
+    const built = buildResourceGraph({
         detectors: contributions,
-        classifications: input.classifications,
         claims: input.claims,
         adapters: input.adapters,
         waivers: input.waivers,
     });
-    const policy = evaluatePolicies({ graph, policies: input.policies, claims: input.claims });
+    const signals = contributions.flatMap((contribution) => contribution.classificationSignals);
+    // Channel routing (ADR 0003 D2): the harness stands in the HOST, so
+    // suppressive-shaped signals in the fixture contributions are minted
+    // onto the authority channel exactly as the real pipeline would.
+    const suppressive = (signal) => (signal.dimension === 'internality' &&
+        (signal.basis === 'declaration' || signal.basis === 'organization-policy')) ||
+        (signal.dimension.startsWith('lifecycle.') && signal.basis === 'code-negative-closed-world');
+    // Per-detector coverage (red-team round 3): synthesize the coverage
+    // reports from contributions that reported scannedPaths, exactly as
+    // the real pipeline does — the attestation judges THESE, never a union.
+    const coverage = contributions
+        .filter((contribution) => contribution.scannedPaths !== undefined)
+        .map((contribution) => ({
+        detector: contribution.detectorId,
+        scannedPaths: contribution.scannedPaths,
+    }));
+    const { graph, blocking } = runClassification({
+        graph: built,
+        signals: signals.filter((signal) => !suppressive(signal)),
+        authority: signals.filter(suppressive),
+        policy: input.classificationPolicy,
+        adapters: input.adapters ?? [],
+        scan: {
+            // The harness's requested scope is the union of reported coverage
+            // (fixture-level self-consistency); the policy's coverage rules
+            // still judge each detector individually below.
+            requestedPaths: [...new Set(coverage.flatMap((entry) => entry.scannedPaths))],
+            scannedPaths: [...new Set(coverage.flatMap((entry) => entry.scannedPaths))],
+            coverage,
+            configuredDetectors: contributions.length,
+            successfulDetectors: contributions.length,
+        },
+    });
+    const policy = evaluatePolicies({
+        graph,
+        policies: input.policies,
+        claims: input.claims,
+        extraBlocking: blocking,
+    });
     const now = input.clock.now();
     const verdicts = policy.obligations
         .map((obligation) => {
@@ -124,6 +166,7 @@ export function runGates(input) {
         clean: blockingVerdicts.length === 0 &&
             policy.blocking.length === 0 &&
             graph.findings.length === 0 &&
+            graph.stale.length === 0 &&
             auditViolations.length === 0,
     };
 }

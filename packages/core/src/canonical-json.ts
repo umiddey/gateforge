@@ -82,9 +82,16 @@ export function canonicalJson(value: JsonValue): string {
     return `[${value.map(canonicalJson).join(',')}]`;
   }
   const keys = Object.keys(value).sort();
-  const members = keys.map(
-    (key) => `${JSON.stringify(key)}:${canonicalJson(value[key] as JsonValue)}`,
-  );
+  const members: string[] = [];
+  for (const key of keys) {
+    const member = value[key];
+    // An explicitly-undefined member is ABSENT for hashing purposes —
+    // identical to the key not being present (JSON.stringify semantics).
+    // Without this, zod-parsed artifacts carrying optional keys as
+    // explicit undefined values would crash fingerprinting.
+    if (member === undefined) continue;
+    members.push(`${JSON.stringify(key)}:${canonicalJson(member as JsonValue)}`);
+  }
   return `{${members.join(',')}}`;
 }
 
@@ -103,7 +110,7 @@ export function sha256Hex(input: string | Uint8Array): string {
 
 /**
  * Hashes a value as GF-canonical-JSON: `sha256(canonicalJson(value))` (pin #1).
- * This is the single primitive behind fingerprints, GPP/2 digests, and
+ * This is the single primitive behind fingerprints, GPP/3 digests, and
  * witness record ids.
  *
  * Args:
