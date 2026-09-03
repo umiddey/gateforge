@@ -30,42 +30,7 @@ export declare const ATTESTATION_SCOPE_HEADER = "x-gateforge-attestation-scope";
 export declare const UI_ACTION_KIND = "ui.action";
 export declare const UI_VISIBLE_RESULT_KIND = "ui.visible-result";
 export declare const PERSISTENCE_KIND = "persistence.entity";
-/**
- * Domain-check kinds (ADR 0004 D8 pack namespaces). Suite-submitted
- * records of these kinds are accepted at the CLAIMED tier (trust follows
- * origin: the suite only asserts the scenario); witnessed check records
- * are issued ONLY by the engine-side `POST /witness/domain-check`
- * endpoint from proxy observations.
- */
-export declare const AUTH_CHECK_KIND = "auth.check";
-export declare const WORKFLOW_CHECK_KIND = "workflow.check";
-export declare const WEBHOOK_CHECK_KIND = "webhook.check";
-export declare const TASK_CHECK_KIND = "task.check";
-export declare const VALIDATION_CHECK_KIND = "validation.check";
-export declare const DOMAIN_CHECK_KINDS: readonly string[];
 export declare const KNOWN_RECORD_KINDS: readonly string[];
-/**
- * The scenario table the WITNESS enforces per check kind (ADR 0004 D8
- * witnessed producer channel). The suite asserts only a scenario NAME;
- * the witness derives the outcome class from the status it actually
- * observed through the proxy and refuses contradictions:
- *
- * - `rejected` scenarios are evidenced ONLY by an observed 4xx
- *   (client-error) status;
- * - `accepted` scenarios are evidenced ONLY by an observed 2xx status.
- *
- * A scenario name outside its kind's namespace table is a 400, never a
- * witnessed record — the suite cannot rename its way into a different
- * outcome class. Mirrors the engine's per-namespace contract verbs.
- */
-export type DomainScenarioOutcome = 'accepted' | 'rejected';
-export declare const DOMAIN_SCENARIO_CLASSES: Readonly<Record<string, Readonly<Record<string, DomainScenarioOutcome>>>>;
-/**
- * Dual-observation scenarios (idempotency proofs): the exchange is only
- * evidence when the proxy observed TWO matching requests, so the witness
- * consumes TWO matching observations single-use before issuing.
- */
-export declare const DOMAIN_DUAL_SCENARIOS: Readonly<Record<string, true>>;
 /** Persistence kinds are ONLY issued by the witness (engine-side adapter reads). */
 export declare const KNOWN_PERSISTENCE_KINDS: readonly string[];
 /** Env the CLI test-gates suite already receives (documented contract). */

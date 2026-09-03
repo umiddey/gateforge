@@ -2,7 +2,7 @@
  * Fixture-surface tests (invariant 6, GF-22, GF-24 left side):
  *
  * - the evidence object is FROZEN and exposes EXACTLY
- *   ui/visible/persistence/finalize (no `prove` escape hatch);
+ *   ui/visible/persistence/http/finalize (no `prove` escape hatch);
  * - forged receipts (hand-rolled or Object.create-branded) are
  *   rejected by `visible.confirm`/`persistence.verify` BEFORE any page
  *   or witness interaction (GF-22);
@@ -74,12 +74,12 @@ describe('frozen surface, no escape hatch (invariant 6, GF-11)', () => {
         page: dummyPage(),
         testInfo: testInfoOf([{ type: 'gateforge', description: OBLIGATION }]),
       });
-      // ADR 0004 D7 (phase 6) adds the fifth frozen surface: the
-      // http observation primitive bound to http:* claims. ADR 0004 D8
-      // adds the sixth: the witnessed domain-check primitive bound to
-      // the declared claim carrying the check kind's namespace.
+      // ADR 0004 D7 (phase 6) adds the fourth frozen surface: the
+      // http observation primitive bound to http:* claims. The witnessed
+      // domain-check channel was RETIRED: scenario labels derived from a
+      // status class cannot prove domain semantics, so check contracts
+      // stay fail-closed until real state-observing producers exist.
       expect(Object.keys(evidence).sort()).toEqual([
-        'checks',
         'finalize',
         'http',
         'persistence',
@@ -89,7 +89,6 @@ describe('frozen surface, no escape hatch (invariant 6, GF-11)', () => {
       expect(Object.isFrozen(evidence)).toBe(true);
       expect(Object.isFrozen(evidence.ui)).toBe(true);
       expect(Object.isFrozen(evidence.http)).toBe(true);
-      expect(Object.isFrozen(evidence.checks)).toBe(true);
       expect(Object.isFrozen(evidence.visible)).toBe(true);
       expect(Object.isFrozen(evidence.persistence)).toBe(true);
       // No boolean escape hatch exists (GF-11: registration path absent).
