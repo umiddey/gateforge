@@ -33,7 +33,7 @@
  * At shutdown the witness appends the record ids it issued to
  * `manifest.json` in the run-state dir (pin #4/#7).
  */
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -115,6 +115,15 @@ interface WitnessState {
     | { resourceId: string; kind: 'entity'; entityId: string; found: boolean; fields?: unknown }
   >;
   server: Server;
+  /**
+   * ADR 0004 D7: requests the witness-owned loopback observation proxy
+   * actually forwarded during this run, in arrival order. Suite-callable
+   * endpoints may CONSUME a matching observation to issue a witnessed
+   * `http.request` record — they can never fabricate or mutate one.
+   */
+  observed: Array<{ method: string; path: string; status: number; seq: number }>;
+  observedSeq: number;
+  proxyServer: Server | null;
   nowIso: () => string;
   stopped: boolean;
 }
@@ -247,6 +256,9 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     classifications,
     ledger: new Map(),
     preObservations: new Map(),
+    observed: [],
+    observedSeq: 0,
+    proxyServer: null,
     server: undefined as unknown as Server,
     nowIso: options.now ?? (() => new Date().toISOString()),
     stopped: false,
@@ -268,11 +280,140 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   }
   const url = `http://${formatHost(state.options.host)}:${address.port}`;
 
+  // ADR 0004 D7: the witness-owned loopback reverse proxy. Browser
+  // traffic aimed at the proxy is forwarded to the attested target and
+  // (method, path, status) recorded as an ENGINE observation; a
+  // suite-callable endpoint consumes a matching observation to issue a
+  // witnessed `http.request` record. The proxy never needs the run
+  // token: it serves the browser, holds no authority, and can only add
+  // observations the engine itself saw.
+  let proxyUrl: string | null = null;
+  if (typeof state.options.proxyTarget === 'string' && state.options.proxyTarget.length > 0) {
+    assertLoopback(state.options.proxyTarget, 'observation proxy target');
+    const proxyTargetUrl = new URL(state.options.proxyTarget);
+    state.proxyServer = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks);
+        const forward = request(
+          {
+            protocol: proxyTargetUrl.protocol,
+            hostname: proxyTargetUrl.hostname,
+            port: proxyTargetUrl.port,
+            method: req.method,
+            path: req.url,
+            headers: { ...req.headers, host: proxyTargetUrl.host },
+          },
+          (upstream) => {
+            const observedPath = normalizeObservedPath(req.url ?? '/');
+            state.observed.push({
+              method: (req.method ?? 'GET').toUpperCase(),
+              path: observedPath,
+              status: upstream.statusCode ?? 0,
+              seq: (state.observedSeq += 1),
+            });
+            res.writeHead(upstream.statusCode ?? 502, upstream.headers);
+            upstream.pipe(res);
+          },
+        );
+        forward.on('error', () => {
+          if (!res.headersSent) sendJson(res, 502, { error: 'observation proxy upstream failed' });
+          else res.end();
+        });
+        if (body.length > 0) forward.write(body);
+        forward.end();
+      });
+    });
+    await new Promise<void>((resolveListen, rejectListen) => {
+      state.proxyServer?.once('error', rejectListen);
+      state.proxyServer?.listen(0, state.options.host, () => resolveListen());
+    });
+    const proxyAddress = state.proxyServer.address();
+    if (proxyAddress === null || typeof proxyAddress === 'string') {
+      await stopWitness(state);
+      throw new WitnessStartupError('observation proxy failed to bind an OS-assigned port');
+    }
+    proxyUrl = `http://${formatHost(state.options.host)}:${proxyAddress.port}`;
+  }
+
   const handle = Object.freeze({
     url,
+    proxyUrl,
     stop: (): Promise<void> => stopWitness(state),
   });
   return handle;
+}
+
+/** Canonicalizes an observed request path (query stripped, one slash). */
+function normalizeObservedPath(rawPath: string): string {
+  let path = rawPath.split('?')[0]?.split('#')[0] ?? '/';
+  if (!path.startsWith('/')) path = `/${path}`;
+  if (path.length > 1) path = path.replace(/\/+$/, '');
+  return path;
+}
+
+/**
+ * Consumes one engine-observed request matching (method, path) and
+ * issues the witnessed `http.request` record bound to the caller's
+ * obligation claim (ADR 0004 D7). Single-use: an observation proves one
+ * request for one obligation, never a replayable credit.
+ */
+async function handleHttpObservation(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const obligationId = body['obligationId'];
+  const testId = body['testId'];
+  const claimId = body['claimId'];
+  const method = body['method'];
+  const path = body['path'];
+  if (
+    typeof obligationId !== 'string' ||
+    !OBLIGATION_ID_PATTERN.test(obligationId) ||
+    typeof testId !== 'string' ||
+    testId.length === 0 ||
+    typeof claimId !== 'string' ||
+    claimId.length === 0 ||
+    typeof method !== 'string' ||
+    typeof path !== 'string' ||
+    path.length === 0
+  ) {
+    sendJson(res, 400, {
+      error:
+        'http observation requires obligationId, testId, claimId, method, and path strings',
+    });
+    return;
+  }
+  const wanted = normalizeObservedPath(path);
+  const index = state.observed.findIndex(
+    (entry) => entry.method === method.toUpperCase() && entry.path === wanted,
+  );
+  if (index === -1) {
+    sendJson(res, 409, {
+      error:
+        `no engine-observed request matches ${method.toUpperCase()} ${wanted}; drive the ` +
+        'browser through the observation proxy before claiming the obligation',
+    });
+    return;
+  }
+  const observedRequest = state.observed[index] as { method: string; path: string; status: number };
+  state.observed.splice(index, 1);
+  const record = issueRecord(
+    state,
+    obligationId,
+    'http.request',
+    testId,
+    { method: observedRequest.method, url: observedRequest.path, status: observedRequest.status },
+    'engine-observed',
+  );
+  sendJson(res, 200, {
+    recordId: record.recordId,
+    runId: record.runId,
+    trust: record.trust,
+    status: observedRequest.status,
+  });
 }
 
 /** Formats the bind host into a URL host (bracketing IPv6 literals). */
@@ -332,6 +473,10 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/witness/persistence') {
       await handlePersistence(state, res, (await readBody(req)) as PersistenceRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/witness/http-observation') {
+      await handleHttpObservation(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
     sendJson(res, 404, { error: `no witness endpoint at ${req.method} ${path}` });
@@ -866,6 +1011,13 @@ function handleLedgerAttestation(
 async function stopWitness(state: WitnessState): Promise<void> {
   if (state.stopped) return;
   state.stopped = true;
+  if (state.proxyServer !== null) {
+    const proxy = state.proxyServer;
+    state.proxyServer = null;
+    await new Promise<void>((resolveClose) => {
+      proxy.close(() => resolveClose());
+    });
+  }
   await new Promise<void>((resolveClose) => {
     state.server.close(() => resolveClose());
   });
@@ -921,3 +1073,5 @@ function appendRecordIdsToManifest(state: WitnessState): void {
   }
   writeFileSync(manifestPath, `${canonicalOf(updated)}\n`, 'utf8');
 }
+
+export type { WitnessHandle } from './types.js';
