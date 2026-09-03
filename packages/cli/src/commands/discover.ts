@@ -14,6 +14,7 @@ import { writeLine } from '../io.js';
 import { runPipeline } from '../pipeline.js';
 import { resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
+import { renderEndpointInventory } from '../endpoint-report.js';
 
 export const DISCOVER_USAGE = 'usage: gateforge discover [--json]';
 
@@ -47,7 +48,15 @@ export async function discoverCommand(io: Io, argv: readonly string[]): Promise<
   });
 
   if (asJson) {
-    writeLine(io.stdout, canonicalJson(pipeline.graph as unknown as JsonValue));
+    // The graph document keeps its shape; the endpoint inventory rides
+    // alongside it as a sibling key (plan phase 7.1).
+    writeLine(
+      io.stdout,
+      canonicalJson({
+        ...(pipeline.graph as unknown as JsonValue),
+        endpointInventory: pipeline.endpointInventory as unknown as JsonValue,
+      }),
+    );
     return 0;
   }
   const graph = pipeline.graph;
@@ -76,5 +85,7 @@ export async function discoverCommand(io: Io, argv: readonly string[]): Promise<
   for (const stale of graph.stale) {
     writeLine(io.stdout, `  <${stale.kind}> ${stale.reference} — ${stale.detail}`);
   }
+  writeLine(io.stdout, '');
+  writeLine(io.stdout, renderEndpointInventory(pipeline.endpointInventory));
   return 0;
 }

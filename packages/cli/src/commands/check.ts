@@ -24,6 +24,7 @@ import { runPipeline } from '../pipeline.js';
 import { resolveProvider } from '../providers.js';
 import { resolveStateDir } from '../state.js';
 import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
+import { renderEndpointInventory } from '../endpoint-report.js';
 
 export const CHECK_USAGE = 'usage: gateforge check [--changed] [--format text|json|sarif]';
 
@@ -84,6 +85,20 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
     run: pipeline.manifest,
     toolVersion: VERSION,
   });
+  if (format === 'text') {
+    // Plan phase 7: the endpoint inventory rides the text report —
+    // totals, unmatched calls, unconsumed routes, and ambiguous joins
+    // are visible on every check, never hidden behind a flag.
+    writeLine(io.stdout, '');
+    writeLine(io.stdout, renderEndpointInventory(pipeline.endpointInventory));
+    writeLine(io.stdout, '');
+    writeLine(
+      io.stdout,
+      'remediation: each blocking entry names its code, cause, and source location; ' +
+        'for endpoint obligations the accepted evidence is a witnessed proxy observation ' +
+        'plus a provenanced claimed ui anchor (see ADR 0004 D7/D8).',
+    );
+  }
   writeLine(io.stdout, report);
   return runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
 }
