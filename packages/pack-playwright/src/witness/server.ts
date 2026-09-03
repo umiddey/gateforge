@@ -17,6 +17,12 @@
  *   the pin-#7 shape extended with `testId` + `claimId` (the pinned
  *   fields stay honored) so persistence records bind to the claim the
  *   engine grades.
+ * - `POST /witness/domain-check` — run-token authed; consumes ONE
+ *   matching proxy observation (method+path) and issues a witnessed
+ *   `<namespace>.check` record `{scenario, method, url, status}` bound
+ *   to the obligation claim. Without method+path it answers 409: a
+ *   non-HTTP scenario has no engine-side producer yet, and this engine
+ *   endpoint never mints claimed records.
  * - `GET /records`           — the issued ledger (the ONLY input the
  *   reporter copies into `records.json`; fabricated bundles never enter
  *   it — GF-23).
@@ -41,6 +47,7 @@ import { ledgerMac, recordIdOf, type Classification, type RecordOrigin } from '@
 import { canonicalOf } from '../json.js';
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
+  DOMAIN_CHECK_KINDS,
   KNOWN_RECORD_KINDS,
   LOOPBACK_HOSTNAME,
   PERSISTENCE_KIND,
@@ -416,6 +423,90 @@ async function handleHttpObservation(
   });
 }
 
+/**
+ * `POST /witness/domain-check` (ADR 0004 D8 producer channel): issues a
+ * witnessed `<namespace>.check` record for a domain scenario. Fail-closed
+ * on two fronts:
+ * - the record is only WITNESSED when the scenario's HTTP exchange
+ *   actually traversed the observation proxy — one matching (method,
+ *   path) observation is consumed single-use (same as http-observation;
+ *   an observation proves one request for one obligation, never a
+ *   replayable credit);
+ * - without method+path the endpoint answers 409: a non-HTTP scenario
+ *   has no engine-side producer yet, and this engine endpoint NEVER
+ *   mints claimed records (the suite can submit claimed check kinds via
+ *   `POST /records`; they can never satisfy on their own).
+ */
+async function handleDomainCheck(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const obligationId = body['obligationId'];
+  const testId = body['testId'];
+  const claimId = body['claimId'];
+  const kind = body['kind'];
+  const scenario = body['scenario'];
+  const method = body['method'];
+  const path = body['path'];
+  if (
+    typeof obligationId !== 'string' ||
+    !OBLIGATION_ID_PATTERN.test(obligationId) ||
+    typeof testId !== 'string' ||
+    testId.length === 0 ||
+    typeof claimId !== 'string' ||
+    claimId.length === 0 ||
+    typeof kind !== 'string' ||
+    !DOMAIN_CHECK_KINDS.includes(kind) ||
+    typeof scenario !== 'string' ||
+    scenario.length === 0
+  ) {
+    sendJson(res, 400, {
+      error:
+        'domain check requires obligationId, testId, claimId, scenario, and kind one of ' +
+        `${DOMAIN_CHECK_KINDS.join(', ')}`,
+    });
+    return;
+  }
+  if (typeof method !== 'string' || method.length === 0 || typeof path !== 'string' || path.length === 0) {
+    sendJson(res, 409, {
+      error:
+        'domain check has no engine-side producer for non-HTTP scenarios yet: this endpoint can ' +
+        'only witness a check whose HTTP exchange traversed the observation proxy, so method ' +
+        'and path are required (a claimed record is never issued from this engine endpoint)',
+    });
+    return;
+  }
+  const wanted = normalizeObservedPath(path);
+  const index = state.observed.findIndex(
+    (entry) => entry.method === method.toUpperCase() && entry.path === wanted,
+  );
+  if (index === -1) {
+    sendJson(res, 409, {
+      error:
+        `no engine-observed request matches ${method.toUpperCase()} ${wanted}; drive the ` +
+        'scenario through the observation proxy before claiming the obligation',
+    });
+    return;
+  }
+  const observedRequest = state.observed[index] as { method: string; path: string; status: number };
+  state.observed.splice(index, 1);
+  const record = issueRecord(
+    state,
+    obligationId,
+    kind,
+    testId,
+    { scenario, method: observedRequest.method, url: observedRequest.path, status: observedRequest.status },
+    'engine-observed',
+  );
+  sendJson(res, 200, {
+    recordId: record.recordId,
+    runId: record.runId,
+    trust: record.trust,
+    status: observedRequest.status,
+  });
+}
+
 /** Formats the bind host into a URL host (bracketing IPv6 literals). */
 function formatHost(host: string): string {
   return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
@@ -479,6 +570,10 @@ async function handleRequest(
       await handleHttpObservation(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
+    if (req.method === 'POST' && path === '/witness/domain-check') {
+      await handleDomainCheck(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
     sendJson(res, 404, { error: `no witness endpoint at ${req.method} ${path}` });
   } catch (error) {
     if (error instanceof HttpError) {
@@ -519,10 +614,14 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /**
- * `POST /records`: validates and issues a UI-evidence record. Unknown
- * primitive kinds → 400 (GF-11: an unregistered primitive name has no
- * registration path; GF-14: the audit-event primitive is
- * implementation-gated and does not exist yet).
+ * `POST /records`: validates and issues a submitted evidence record.
+ * Unknown primitive kinds → 400 (GF-11: an unregistered primitive name
+ * has no registration path; GF-14: the audit-event primitive is
+ * implementation-gated and does not exist yet). The domain-check kinds
+ * are accepted here SUITE-SUBMITTED only — trust follows origin, so they
+ * issue at the claimed tier and can never satisfy alone (the engine
+ * still owes witnessed evidence via `POST /witness/domain-check`);
+ * persistence records are issued ONLY by the witness.
  */
 async function handleRecords(
   state: WitnessState,
@@ -540,7 +639,8 @@ async function handleRecords(
     throw new HttpError(
       400,
       `unknown evidence primitive '${String(kind)}'; accepted kinds: ${KNOWN_RECORD_KINDS.join(', ')} ` +
-        '(persistence records are issued only by the witness via /witness/persistence)',
+        '(check kinds are accepted suite-submitted as claimed-tier records only; witnessed check ' +
+        'records come from /witness/domain-check and persistence records only from /witness/persistence)',
     );
   }
   if (typeof testId !== 'string' || testId.length === 0) {

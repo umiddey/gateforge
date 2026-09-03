@@ -437,7 +437,7 @@ function persistencePostconditionFailure(obligation, record, actionEntityKey) {
  * unknown namespaces stay fail-closed blocking. The built-in
  * persistence/crud grader keeps its historical behavior verbatim.
  */
-function evaluateClaimEvidence(claim, evidence, obligation, primaryKey) {
+function evaluateClaimEvidence(claim, evidence, obligation, primaryKey, resource) {
     const verifier = verifierFor(obligation.contract);
     if (verifier === null) {
         return {
@@ -447,7 +447,7 @@ function evaluateClaimEvidence(claim, evidence, obligation, primaryKey) {
                 'blocking until its pack-specific verifier grades the evidence',
         };
     }
-    return verifier({ claim, obligation, evidence, primaryKey });
+    return verifier({ claim, obligation, evidence, primaryKey, resource });
 }
 // Built-in registrations: persistence/crud semantics stay owned by this
 // module; pack namespaces register through './pack-verifiers.js'.
@@ -767,7 +767,7 @@ export function evaluateObligation(obligation, context) {
         const evidence = considered
             .filter((record) => record.testId === claim.testId)
             .map((record) => ({ record, trust: trustOf(record) }));
-        const outcome = evaluateClaimEvidence(claim, evidence, verified, classification.primaryKey);
+        const outcome = evaluateClaimEvidence(claim, evidence, verified, classification.primaryKey, context.resource);
         if (outcome.status === 'satisfied') {
             return { verdict: 'satisfied', reason: null, recordIds: outcome.recordIds };
         }

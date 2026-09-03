@@ -84,6 +84,15 @@ export class WitnessClient {
     async observeHttp(request) {
         return this.request('/witness/http-observation', request);
     }
+    /**
+     * POST /witness/domain-check: consumes one engine-observed request
+     * matching (method, path) and issues the witnessed `<ns>.check` record
+     * for the obligation claim. Without method/path the witness answers
+     * 409 (honest gap: no engine-side producer for non-HTTP scenarios).
+     */
+    async observeDomainCheck(request) {
+        return this.request('/witness/domain-check', request);
+    }
     async verifyPersistence(request) {
         return this.request('/witness/persistence', request);
     }

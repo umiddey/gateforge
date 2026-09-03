@@ -43,8 +43,10 @@ export async function discoverCommand(io, argv) {
         stateDir: resolveStateDir(io.cwd),
     });
     if (asJson) {
+        // The graph document keeps its shape; the endpoint inventory rides
+        // alongside it as a sibling key (plan phase 7.1).
         writeLine(io.stdout, canonicalJson({
-            graph: pipeline.graph,
+            ...pipeline.graph,
             endpointInventory: pipeline.endpointInventory,
         }));
         return 0;

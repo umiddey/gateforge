@@ -62,6 +62,11 @@ export interface VerdictContext {
     waivers: readonly WaiverRef[];
     /** Classification of `obligation.resourceId`; null ⇒ `unclassified`. */
     classification: unknown;
+    /** The obligation's graph resource (kind + attributes), when the host can supply it. Verifiers use it to bind evidence to identity. */
+    resource?: {
+        kind: string;
+        attributes: Record<string, unknown>;
+    } | null;
     /** Injected clock instant (invariant 7) — the only time source. */
     now: Date | string;
 }

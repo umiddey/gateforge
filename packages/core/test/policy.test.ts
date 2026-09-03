@@ -21,6 +21,7 @@ import {
   type JsonValue,
   type PolicyFile,
   type Resource,
+  type ResourceGraph,
   type Waiver,
 } from '../src/index.js';
 
@@ -160,6 +161,48 @@ function bytes(value: unknown): string {
   return canonicalJson(value as JsonValue);
 }
 
+/**
+ * Graph over one already-classified `http.endpoint` resource with the
+ * given detector attributes (the endpoint compiler stamps `capabilities`
+ * and `frontendConsumed` there, ADR 0004 D5/D8).
+ */
+function endpointGraph(attributes: Record<string, unknown>): ResourceGraph {
+  return {
+    schemaVersion: 1,
+    resources: [
+      {
+        schemaVersion: 1,
+        id: 'tenant.http-post-api-accounts-a1b2c3d4',
+        name: 'http-post-api-accounts-a1b2c3d4',
+        plane: 'tenant',
+        kind: 'http.endpoint',
+        source: 'backend/api/accounts.py',
+        location: { file: 'backend/api/accounts.py', line: 30, col: 0 },
+        exposure: 'user-facing',
+        classification: {
+          exposure: 'user-facing',
+          plane: 'tenant',
+          lifecycle: {
+            create: true,
+            read: true,
+            update: true,
+            delete: true,
+            deleteSemantics: 'hard',
+          },
+          primaryKey: ['method', 'path'],
+          evidenceAdapter: 'accounts',
+        },
+        classificationTrace: null,
+        detector: { id: 'gateforge.endpoint-compiler', version: '1' },
+        attributes,
+      },
+    ],
+    unresolved: [],
+    findings: [],
+    stale: [],
+  };
+}
+
 describe('policy → obligation generation', () => {
   it('generates the four CRUD obligations for a full user-facing lifecycle', () => {
     const result = evaluatePolicies({
@@ -262,6 +305,129 @@ describe('policy → obligation generation', () => {
         },
       }),
     ).toThrow(PolicyEvaluationError);
+  });
+});
+
+describe('endpoint capability and consumption matchers (ADR 0004 D8)', () => {
+  const WORKFLOW_POLICY: PolicyFile = {
+    schemaVersion: 1,
+    policies: [
+      {
+        id: 'workflow-command-endpoints',
+        when: { capability: 'workflow-command', consumed: true },
+        require: [
+          'workflow:transition-allowed',
+          'workflow:transition-rejected',
+          'workflow:terminal-immutable',
+        ],
+      },
+    ],
+  };
+
+  it('matches capability only when attributes.capabilities contains the exact string', () => {
+    const consumed = {
+      capabilities: ['crud-create', 'workflow-command'],
+      frontendConsumed: true,
+      linkedResourceName: 'accounts',
+    };
+    const matched = evaluatePolicies({
+      graph: endpointGraph(consumed),
+      policies: WORKFLOW_POLICY,
+    });
+    expect(matched.obligations).toHaveLength(3);
+    // The near-miss capability never matches (fail closed).
+    const nearMiss = evaluatePolicies({
+      graph: endpointGraph({ ...consumed, capabilities: ['workflow-command-ish'] }),
+      policies: WORKFLOW_POLICY,
+    });
+    expect(nearMiss.obligations).toEqual([]);
+    // A non-array capabilities attribute never matches either.
+    const nonArray = evaluatePolicies({
+      graph: endpointGraph({ ...consumed, capabilities: 'workflow-command' }),
+      policies: WORKFLOW_POLICY,
+    });
+    expect(nonArray.obligations).toEqual([]);
+    // Resources without a capabilities attribute (tables) never match a
+    // capability-scoped policy.
+    const tableless = evaluatePolicies({
+      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'hard' })),
+      policies: WORKFLOW_POLICY,
+    });
+    expect(tableless.obligations).toEqual([]);
+  });
+
+  it('consumed:true excludes unconsumed endpoints and resources without the attribute', () => {
+    const attributes = { capabilities: ['workflow-command'] };
+    expect(
+      evaluatePolicies({ graph: endpointGraph({ ...attributes, frontendConsumed: false }), policies: WORKFLOW_POLICY })
+        .obligations,
+    ).toEqual([]);
+    expect(
+      evaluatePolicies({ graph: endpointGraph(attributes), policies: WORKFLOW_POLICY }).obligations,
+    ).toEqual([]);
+  });
+
+  it('consumed:false matches non-consumed and non-endpoint resources, never consumed ones', () => {
+    const policy: PolicyFile = {
+      schemaVersion: 1,
+      policies: [
+        { id: 'not-consumed', when: { consumed: false }, require: ['audit:retention'] },
+      ],
+    };
+    // A table carries no frontendConsumed attribute: it is "not consumed".
+    const tableOnly = evaluatePolicies({
+      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'hard' })),
+      policies: policy,
+    });
+    expect(tableOnly.obligations.map((o) => o.id)).toEqual(['tenant.accounts:audit:retention']);
+    // An unconsumed endpoint matches too...
+    const unconsumed = evaluatePolicies({
+      graph: endpointGraph({ capabilities: ['workflow-command'], frontendConsumed: false }),
+      policies: policy,
+    });
+    expect(unconsumed.obligations.map((o) => o.resourceId)).toEqual([
+      'tenant.http-post-api-accounts-a1b2c3d4',
+    ]);
+    // ...but a consumed endpoint does not.
+    const consumed = evaluatePolicies({
+      graph: endpointGraph({ capabilities: ['workflow-command'], frontendConsumed: true }),
+      policies: policy,
+    });
+    expect(consumed.obligations).toEqual([]);
+  });
+
+  it('still suppresses crud:/persistence: contracts on endpoint resources', () => {
+    const result = evaluatePolicies({
+      graph: endpointGraph({ capabilities: ['crud-create'], frontendConsumed: true }),
+      policies: {
+        schemaVersion: 1,
+        policies: [
+          {
+            id: 'sneaky',
+            when: { kind: 'http.endpoint' },
+            require: ['crud:create', 'persistence:read', 'http:frontend-request-observed'],
+          },
+        ],
+      },
+    });
+    // Routes are never conflated with tables: only the non-CRUD http
+    // contract generates (ADR 0004 D8 guard, unchanged).
+    expect(result.obligations.map((o) => o.id)).toEqual([
+      'tenant.http-post-api-accounts-a1b2c3d4:http:frontend-request-observed',
+    ]);
+  });
+
+  it('generates <id>:workflow:<check> obligations from a capability-scoped policy', () => {
+    const result = evaluatePolicies({
+      graph: endpointGraph({ capabilities: ['workflow-command'], frontendConsumed: true }),
+      policies: WORKFLOW_POLICY,
+    });
+    expect(result.obligations.map((o) => o.id)).toEqual([
+      'tenant.http-post-api-accounts-a1b2c3d4:workflow:terminal-immutable',
+      'tenant.http-post-api-accounts-a1b2c3d4:workflow:transition-allowed',
+      'tenant.http-post-api-accounts-a1b2c3d4:workflow:transition-rejected',
+    ]);
+    expect(result.obligations.every((o) => o.policyId === 'workflow-command-endpoints')).toBe(true);
   });
 });
 

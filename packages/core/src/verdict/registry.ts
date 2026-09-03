@@ -31,6 +31,13 @@ export interface ClaimEvidenceInput {
   evidence: Array<{ record: RegistryRecordLike; trust: TrustTier }>;
   /** Ordered primary-key columns from the resource classification. */
   primaryKey: readonly string[];
+  /**
+   * The obligation's graph resource (kind + attributes), when the host
+   * can supply it. Verifiers use it to bind evidence to identity — e.g.
+   * an `http.request` observation must come from the obligation's own
+   * endpoint. Absent/null (fixture harnesses) keeps historical behavior.
+   */
+  resource?: { kind: string; attributes: Record<string, unknown> } | null;
 }
 
 /** Per-claim grading outcome (same shape the aggregation consumes). */

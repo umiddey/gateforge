@@ -36,7 +36,30 @@ export const ATTESTATION_SCOPE_HEADER = 'x-gateforge-attestation-scope';
 export const UI_ACTION_KIND = 'ui.action';
 export const UI_VISIBLE_RESULT_KIND = 'ui.visible-result';
 export const PERSISTENCE_KIND = 'persistence.entity';
-export const KNOWN_RECORD_KINDS: readonly string[] = [UI_ACTION_KIND, UI_VISIBLE_RESULT_KIND];
+/**
+ * Domain-check kinds (ADR 0004 D8 pack namespaces). Suite-submitted
+ * records of these kinds are accepted at the CLAIMED tier (trust follows
+ * origin: the suite only asserts the scenario); witnessed check records
+ * are issued ONLY by the engine-side `POST /witness/domain-check`
+ * endpoint from proxy observations.
+ */
+export const AUTH_CHECK_KIND = 'auth.check';
+export const WORKFLOW_CHECK_KIND = 'workflow.check';
+export const WEBHOOK_CHECK_KIND = 'webhook.check';
+export const TASK_CHECK_KIND = 'task.check';
+export const VALIDATION_CHECK_KIND = 'validation.check';
+export const DOMAIN_CHECK_KINDS: readonly string[] = [
+  AUTH_CHECK_KIND,
+  WORKFLOW_CHECK_KIND,
+  WEBHOOK_CHECK_KIND,
+  TASK_CHECK_KIND,
+  VALIDATION_CHECK_KIND,
+];
+export const KNOWN_RECORD_KINDS: readonly string[] = [
+  UI_ACTION_KIND,
+  UI_VISIBLE_RESULT_KIND,
+  ...DOMAIN_CHECK_KINDS,
+];
 /** Persistence kinds are ONLY issued by the witness (engine-side adapter reads). */
 export const KNOWN_PERSISTENCE_KINDS: readonly string[] = [PERSISTENCE_KIND];
 

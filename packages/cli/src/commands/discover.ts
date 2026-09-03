@@ -53,7 +53,7 @@ export async function discoverCommand(io: Io, argv: readonly string[]): Promise<
     writeLine(
       io.stdout,
       canonicalJson({
-        ...(pipeline.graph as unknown as JsonValue),
+        ...(pipeline.graph as unknown as Record<string, JsonValue>),
         endpointInventory: pipeline.endpointInventory as unknown as JsonValue,
       }),
     );

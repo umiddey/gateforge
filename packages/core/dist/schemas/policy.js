@@ -18,6 +18,10 @@ export const PolicyWhenSchema = z
     exposure: ExposureSchema.optional(),
     /** Resource plane. */
     plane: PlaneSchema.optional(),
+    /** Endpoint capability match: true when the resource's `capabilities` attribute contains this value. Non-endpoint resources never match. */
+    capability: z.string().min(1).optional(),
+    /** Endpoint consumption match: `true` matches resources whose `frontendConsumed` attribute is exactly `true`; `false` matches everything else (including non-endpoints). Omitted = wildcard. */
+    consumed: z.boolean().optional(),
 })
     .strict();
 /** One policy: when matched, require the listed contracts as obligations. */
