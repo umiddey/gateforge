@@ -133,10 +133,12 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
 
   const classifications = new Map<string, unknown>();
   const detectors = new Map<string, { id: string; version: string }>();
+  const resourceById = new Map<string, { kind: string; attributes: Record<string, unknown> }>();
   for (const resource of graph.resources) {
     if (resource.id === null) continue;
     classifications.set(resource.id, resource.classification);
     detectors.set(resource.id, resource.detector);
+    resourceById.set(resource.id, { kind: resource.kind, attributes: resource.attributes });
   }
 
   const waiverLoad = loadWaivers(resolveRepoPath(cwd, config.waivers), { now });
@@ -155,6 +157,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
       records,
       waivers: waiverLoad.waivers,
       classification: classifications.get(obligation.resourceId) ?? null,
+      resource: resourceById.get(obligation.resourceId) ?? null,
       now,
     });
     const entry = entries[0];

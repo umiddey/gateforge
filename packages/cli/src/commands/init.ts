@@ -36,7 +36,7 @@ export const INIT_USAGE = 'usage: gateforge init [--languages <comma,list>]';
  * UI-semantic `crud:*` stays opt-in and visibly fail-closed until a
  * trusted UI observer exists (ADR 0003 §3).
  */
-const POLICIES_TEMPLATE = `\
+export const POLICIES_TEMPLATE = `\
 # Declarative policies: when a resource matches, the required contracts
 # become obligations. Lifecycle-gated persistence:* contracts are emitted
 # only for the lifecycle operations the automatic classification enables,
@@ -47,15 +47,32 @@ const POLICIES_TEMPLATE = `\
 schemaVersion: 1
 policies:
   - id: frontend-consumed-endpoints
-    # ADR 0004 D8: compiled http.endpoint resources owe their runtime
-    # observation contracts; CRUD state keeps flowing through the linked
-    # business resource's persistence:* obligations above.
+    # ADR 0004 D8: only endpoints the frontend actually consumes (static
+    # join) owe browser-exercise obligations; server-only routes never do.
     when:
       kind: http.endpoint
-      exposure: user-facing
+      consumed: true
     require:
       - http:frontend-request-observed
       - http:response-status-ok
+  - id: workflow-command-endpoints
+    # Command-shaped endpoints also owe their workflow semantic checks,
+    # graded by the workflow namespace verifier (scenario records).
+    when:
+      capability: workflow-command
+      consumed: true
+    require:
+      - workflow:transition-allowed
+      - workflow:transition-rejected
+      - workflow:terminal-immutable
+  - id: validation-preview-endpoints
+    when:
+      capability: validation-preview
+      consumed: true
+    require:
+      - validation:boundary-accepted
+      - validation:boundary-rejected
+      - validation:no-side-effect-on-reject
   - id: user-facing-persistence
     when:
       exposure: user-facing

@@ -1,9 +1,9 @@
 /**
  * Trusted evidence primitives (plan §5.3, invariant 6, GF-22).
  *
- * The fixture exposes EXACTLY four surfaces — `ui`, `visible`,
- * `persistence`, `finalize` — on a frozen object with a closure-private
- * record list. There is no boolean/escape-hatch primitive (no
+ * The fixture exposes EXACTLY six surfaces — `ui`, `visible`,
+ * `persistence`, `http`, `checks`, `finalize` — on a frozen object with a
+ * closure-private record list. There is no boolean/escape-hatch primitive (no
  * `prove(kind, true)`), no way to state an entity id for persistence
  * evidence, and no way to substitute an adapter: persistence evidence is
  * minted ONLY by the engine-side witness running the reviewed adapter
@@ -28,6 +28,7 @@
 import type { Locator, Page, TestInfo } from 'playwright/test';
 import {
   CLAIM_ANNOTATION_TYPE,
+  DOMAIN_CHECK_KINDS,
   ENV_APP_BASE_URL,
   ENV_TARGET_BASE_URL,
   UI_ACTION_KIND,
@@ -79,6 +80,19 @@ export interface EvidenceApi {
   /** ADR 0004 D7: consumes one proxy-observed request for an http:* claim. */
   http: Readonly<{
     observe(request: { method: string; path: string }): Promise<{ status: number; recordId: string }>;
+  }>;
+  /**
+   * ADR 0004 D8: witnessed domain-check channel. Consumes one
+   * proxy-observed request for the scenario and issues the witnessed
+   * `<namespace>.check` record bound to the matching declared claim.
+   */
+  checks: Readonly<{
+    observe(request: {
+      kind: string;
+      scenario: string;
+      method: string;
+      path: string;
+    }): Promise<{ status: number; recordId: string }>;
   }>;
   finalize(): Promise<{ claims: string[]; records: WitnessRecord[] }>;
 }
@@ -456,6 +470,43 @@ export function createEvidence({
     return { status: result.status, recordId: result.recordId };
   }
 
+  // ---------- domain checks (ADR 0004 D8) ----------
+  // Witnessed producer channel for the pack check kinds: consumes one
+  // witness-proxy observation for the scenario's HTTP exchange and binds
+  // the witnessed `<namespace>.check` record to the declared claim whose
+  // contract carries the kind's namespace. Without real proxied traffic
+  // the witness answers 409 — the suite cannot mint network evidence.
+
+  async function observeDomainCheck(request: {
+    kind: string;
+    scenario: string;
+    method: string;
+    path: string;
+  }): Promise<{ status: number; recordId: string }> {
+    if (!DOMAIN_CHECK_KINDS.includes(request.kind)) {
+      throw new Error(
+        `checks.observe requires kind one of ${DOMAIN_CHECK_KINDS.join(', ')} ` +
+          `(got '${request.kind}')`,
+      );
+    }
+    const namespace = request.kind.split('.')[0] ?? '';
+    const checkClaim =
+      claims.find((claim) => new RegExp(`:[a-z-]*${namespace}:`).test(`:${claim}`)) ?? claims[0];
+    if (checkClaim === undefined) {
+      throw new Error('no gateforge claim to bind the domain check to');
+    }
+    const result = await witness.observeDomainCheck({
+      obligationId: checkClaim,
+      testId,
+      claimId: checkClaim,
+      kind: request.kind,
+      scenario: request.scenario,
+      method: request.method.toUpperCase(),
+      path: request.path,
+    });
+    return { status: result.status, recordId: result.recordId };
+  }
+
   // ---------- finalize (fail-fast + ledger cross-check) ----------
 
   async function finalize(): Promise<{ claims: string[]; records: WitnessRecord[] }> {
@@ -493,6 +544,7 @@ export function createEvidence({
     visible: Object.freeze(visible),
     persistence: Object.freeze(persistence),
     http: Object.freeze({ observe: observeHttp }),
+    checks: Object.freeze({ observe: observeDomainCheck }),
     finalize,
   });
 }
