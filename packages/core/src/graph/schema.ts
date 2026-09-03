@@ -41,6 +41,23 @@ export const RESOURCE_NAME_ATTRIBUTE = 'resourceName';
  */
 export const CLASS_SYMBOL_KIND = 'gateforge.class';
 
+/**
+ * Evidence-only resource kinds beyond the class-symbol channel (ADR 0004
+ * D1). Resources of these kinds are consumed by the engine's endpoint
+ * compiler, never emitted as business resources, and never classified —
+ * keeping route facts out of the business-identity namespace (the
+ * route/table collision red probe). This set is ENGINE-OWNED and closed:
+ * a detector cannot invent a new evidence-only kind or flag arbitrary
+ * resources out of classification, because that would be a
+ * detector-controlled suppressive-authority leak.
+ */
+export const EVIDENCE_ONLY_RESOURCE_KINDS: readonly string[] = ['http.contract'];
+
+/** True when a raw resource kind is engine-owned evidence-only. */
+export function isEvidenceOnlyKind(kind: string): boolean {
+  return kind === CLASS_SYMBOL_KIND || EVIDENCE_ONLY_RESOURCE_KINDS.includes(kind);
+}
+
 /** Attribute payload of a {@link CLASS_SYMBOL_KIND} resource. */
 export const ClassSymbolAttributesSchema = z
   .strictObject({

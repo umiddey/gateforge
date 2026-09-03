@@ -27,6 +27,7 @@ import type { GateforgeConfig } from '@gateforge/core';
 import { UsageError } from './errors.js';
 /** Bundled detector id → the package that MUST provide it. Frozen trust base. */
 export const TRUSTED_DETECTOR_PACKAGES: Readonly<Record<string, string>> = Object.freeze({
+  'gateforge.pack-fastapi': '@gateforge/pack-fastapi',
   'gateforge.pack-http': '@gateforge/pack-http',
   'gateforge.pack-sqlalchemy': '@gateforge/pack-sqlalchemy',
   'gateforge.pack-task': '@gateforge/pack-task',
@@ -37,6 +38,7 @@ export const TRUSTED_DETECTOR_PACKAGES: Readonly<Record<string, string>> = Objec
 });
 
 const SHORT_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  'gateforge.pack-fastapi': 'pack-fastapi',
   'gateforge.pack-http': 'pack-http',
   'gateforge.pack-sqlalchemy': 'pack-sqlalchemy',
   'gateforge.pack-task': 'pack-task',

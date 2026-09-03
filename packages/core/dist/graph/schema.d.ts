@@ -32,6 +32,19 @@ export declare const RESOURCE_NAME_ATTRIBUTE = "resourceName";
  * NOT emitted as business resources.
  */
 export declare const CLASS_SYMBOL_KIND = "gateforge.class";
+/**
+ * Evidence-only resource kinds beyond the class-symbol channel (ADR 0004
+ * D1). Resources of these kinds are consumed by the engine's endpoint
+ * compiler, never emitted as business resources, and never classified —
+ * keeping route facts out of the business-identity namespace (the
+ * route/table collision red probe). This set is ENGINE-OWNED and closed:
+ * a detector cannot invent a new evidence-only kind or flag arbitrary
+ * resources out of classification, because that would be a
+ * detector-controlled suppressive-authority leak.
+ */
+export declare const EVIDENCE_ONLY_RESOURCE_KINDS: readonly string[];
+/** True when a raw resource kind is engine-owned evidence-only. */
+export declare function isEvidenceOnlyKind(kind: string): boolean;
 /** Attribute payload of a {@link CLASS_SYMBOL_KIND} resource. */
 export declare const ClassSymbolAttributesSchema: z.ZodObject<{
     qname: z.ZodString;
