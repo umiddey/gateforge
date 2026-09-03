@@ -10,9 +10,35 @@ no network, no external deps — and emits the classification **signals**
   Fastify and Hono registrations (import-disambiguated, the pack-auth
   convention), and NestJS `@Controller('accounts')` + `@Get/@Post/@Put/
   @Patch/@Delete/@All('…')` decorators.
-- **Frontend API-client calls**: `fetch('/api/accounts')` and
-  `axios.get('/api/accounts')` with literal paths — the frontend-only
-  exposure path.
+- **Frontend API-client calls** (bounded static dataflow, plan phase 3):
+  direct literal `fetch`/Axios, `fetch(url, { method })`, Axios config
+  objects and instances, configured client symbols (`apiClient.get`),
+  pure URL builders (`buildApiPath` with a declared base), module
+  constants (local and imported within the scanned set), template
+  literals with positional `${}` slots, and simple single-return wrapper
+  functions. Computed methods, arbitrary concatenation,
+  environment-dependent hosts, undeclared wrappers, and wrapper flows
+  outside the model emit **typed unresolved entries** — they never
+  disappear and never default to GET.
+
+## Client-scan configuration
+
+Configuration declares resolvable APIs, never coverage exemptions
+(`.gateforge/http-clients.json`, or pass `clientScan` to the factory):
+
+```json
+{
+  "clientSymbols": ["apiClient"],
+  "wrapperFunctions": [{ "name": "apiGet", "method": "GET" }],
+  "urlBuilders": [{ "name": "buildApiPath", "base": "/api" }],
+  "sameOriginHosts": ["app.example.com"]
+}
+```
+
+A module-scope function whose body issues client calls IS a client
+wrapper: calling it without declaring it blocks with
+`FRONTEND_CALL_TARGET_UNRESOLVED` — removing wrapper support can never
+make a call silently disappear (red probe).
 
 ## Resources
 
@@ -58,5 +84,9 @@ plugins:
     transport: in-process
     module: '@gateforge/pack-http'
 ```
+
+The pack also emits `http.contract` evidence facts (one per server
+artifact and one per frontend callsite) for the endpoint compiler's join
+(ADR 0004 D1) — evidence-only, never business resources.
 
 Requires Node >= 20; no network at any point.

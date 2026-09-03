@@ -96,6 +96,7 @@ export { GATEFORGE_SCHEMA_VERSION } from './schemas/common.js';
  * unresolved reasons and detector provenance.
  */
 export { LocationSchema } from './schemas/common.js';
+export type { Location } from './schemas/common.js';
 /** Contract-name grammar: interior colons legal (`crud:update`), no leading colon. */
 export { ContractNameSchema } from './schemas/common.js';
 /** Inferred contract-name type. */
