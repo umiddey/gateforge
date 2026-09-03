@@ -1,4 +1,4 @@
-import { CLAIM_ANNOTATION_TYPE, ENV_APP_BASE_URL, ENV_TARGET_BASE_URL, UI_ACTION_KIND, UI_VISIBLE_RESULT_KIND, } from '../constants.js';
+import { CLAIM_ANNOTATION_TYPE, DOMAIN_CHECK_KINDS, ENV_APP_BASE_URL, ENV_TARGET_BASE_URL, UI_ACTION_KIND, UI_VISIBLE_RESULT_KIND, } from '../constants.js';
 import { WitnessClient } from './witness-client.js';
 /** Receipt branding: per-instance symbol, own-property checked (GF-22). */
 function makeReceiptBrand() {
@@ -314,6 +314,33 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
         });
         return { status: result.status, recordId: result.recordId };
     }
+    // ---------- domain checks (ADR 0004 D8) ----------
+    // Witnessed producer channel for the pack check kinds: consumes one
+    // witness-proxy observation for the scenario's HTTP exchange and binds
+    // the witnessed `<namespace>.check` record to the declared claim whose
+    // contract carries the kind's namespace. Without real proxied traffic
+    // the witness answers 409 — the suite cannot mint network evidence.
+    async function observeDomainCheck(request) {
+        if (!DOMAIN_CHECK_KINDS.includes(request.kind)) {
+            throw new Error(`checks.observe requires kind one of ${DOMAIN_CHECK_KINDS.join(', ')} ` +
+                `(got '${request.kind}')`);
+        }
+        const namespace = request.kind.split('.')[0] ?? '';
+        const checkClaim = claims.find((claim) => new RegExp(`:[a-z-]*${namespace}:`).test(`:${claim}`)) ?? claims[0];
+        if (checkClaim === undefined) {
+            throw new Error('no gateforge claim to bind the domain check to');
+        }
+        const result = await witness.observeDomainCheck({
+            obligationId: checkClaim,
+            testId,
+            claimId: checkClaim,
+            kind: request.kind,
+            scenario: request.scenario,
+            method: request.method.toUpperCase(),
+            path: request.path,
+        });
+        return { status: result.status, recordId: result.recordId };
+    }
     // ---------- finalize (fail-fast + ledger cross-check) ----------
     async function finalize() {
         const ledger = await witness.listRecords();
@@ -343,6 +370,7 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
         visible: Object.freeze(visible),
         persistence: Object.freeze(persistence),
         http: Object.freeze({ observe: observeHttp }),
+        checks: Object.freeze({ observe: observeDomainCheck }),
         finalize,
     });
 }

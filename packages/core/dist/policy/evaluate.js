@@ -266,6 +266,28 @@ function policyMatches(policy, resource, exposure) {
         return false;
     if (when.plane !== undefined && when.plane !== resource.plane)
         return false;
+    if (when.capability !== undefined) {
+        // Endpoint capability match: the resource must carry a `capabilities`
+        // ARRAY containing the exact string. Anything else — absent
+        // attribute, non-array value, near-miss strings — never matches
+        // (fail closed).
+        const capabilities = resource.attributes['capabilities'];
+        if (!Array.isArray(capabilities) ||
+            !capabilities.some((capability) => capability === when.capability)) {
+            return false;
+        }
+    }
+    if (when.consumed !== undefined) {
+        // Endpoint consumption match: `true` requires the attribute to be
+        // EXACTLY true; `false` matches everything else (including absent —
+        // non-endpoint resources are "not consumed", never match-excluded).
+        if (when.consumed === true && resource.attributes['frontendConsumed'] !== true) {
+            return false;
+        }
+        if (when.consumed === false && resource.attributes['frontendConsumed'] === true) {
+            return false;
+        }
+    }
     return true;
 }
 /**

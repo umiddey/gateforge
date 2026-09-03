@@ -57,6 +57,26 @@ export declare class WitnessClient {
         trust: string;
         status: number;
     }>;
+    /**
+     * POST /witness/domain-check: consumes one engine-observed request
+     * matching (method, path) and issues the witnessed `<ns>.check` record
+     * for the obligation claim. Without method/path the witness answers
+     * 409 (honest gap: no engine-side producer for non-HTTP scenarios).
+     */
+    observeDomainCheck(request: {
+        obligationId: string;
+        testId: string;
+        claimId: string;
+        kind: string;
+        scenario: string;
+        method: string;
+        path: string;
+    }): Promise<{
+        recordId: string;
+        runId: string;
+        trust: string;
+        status: number;
+    }>;
     verifyPersistence(request: PersistenceRequest & {
         testId: string;
         claimId: string;

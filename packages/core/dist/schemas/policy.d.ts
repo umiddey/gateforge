@@ -20,6 +20,8 @@ export declare const PolicyWhenSchema: z.ZodObject<{
         master: "master";
         global: "global";
     }>>;
+    capability: z.ZodOptional<z.ZodString>;
+    consumed: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strict>;
 /** Inferred policy matcher shape. */
 export type PolicyWhen = z.infer<typeof PolicyWhenSchema>;
@@ -37,6 +39,8 @@ export declare const PolicySchema: z.ZodObject<{
             master: "master";
             global: "global";
         }>>;
+        capability: z.ZodOptional<z.ZodString>;
+        consumed: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strict>;
     require: z.ZodArray<z.ZodString>;
 }, z.core.$strict>;
@@ -58,6 +62,8 @@ export declare const PolicyFileSchema: z.ZodObject<{
                 master: "master";
                 global: "global";
             }>>;
+            capability: z.ZodOptional<z.ZodString>;
+            consumed: z.ZodOptional<z.ZodBoolean>;
         }, z.core.$strict>;
         require: z.ZodArray<z.ZodString>;
     }, z.core.$strict>>;

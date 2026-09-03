@@ -168,15 +168,16 @@ function scanServerRoutes(text, file) {
     else if (/\bfrom\s+['"]fastify['"]/.test(text) || /\brequire\(\s*['"]fastify['"]/.test(text)) {
         origin = 'fastify';
     }
-    const registration = /\b(?:app|server|router|api)\.(get|post|put|patch|delete|all)\(\s*(['"`])([^'"`]+)\2/g;
+    const registration = /\b(?:app|server|router|api)\.(get|post|put|patch|delete|all)\(\s*(['"`])([^'"`]+)\2(?:\s*,\s*([A-Za-z_$][\w$]*)\s*[),])?/g;
     let match;
     while ((match = registration.exec(text)) !== null) {
         const method = (match[1] ?? '').toUpperCase();
         const path = match[3] ?? '';
         if (path.length === 0)
             continue;
+        const handler = match[4];
         const { line, col } = lineColumnFor(text, match.index);
-        out.push({ method, path, origin, file, line, col });
+        out.push({ method, path, origin, file, line, col, ...(handler !== undefined ? { handler } : {}) });
     }
     return out;
 }
@@ -287,7 +288,7 @@ export function createHttpDetector(options = {}) {
                 // they prove reachability but no concrete method, so they emit no
                 // contract fact and no block.
                 if (!['all', 'any', '*'].includes(artifact.method.toLowerCase())) {
-                    const fact = contractFactFromArtifact(artifact, sourceRel, location);
+                    const fact = contractFactFromArtifact(artifact, sourceRel, location, artifact.handler);
                     if (fact.ok)
                         resources.push(fact.resource);
                     else
@@ -347,12 +348,13 @@ export function createHttpDetector(options = {}) {
         },
     };
 }
-function contractFactFromArtifact(artifact, sourceRel, location) {
+function contractFactFromArtifact(artifact, sourceRel, location, handler) {
     return buildFact({
         role: 'server-route',
         method: artifact.method,
         rawPath: artifact.path,
         framework: artifact.origin,
+        handler,
         file: sourceRel,
         location,
         idSuffix: `${sourceRel}:${artifact.line}:${artifact.col}:${artifact.method}`,
@@ -407,6 +409,8 @@ function buildFact(input) {
     };
     if (input.callsites !== undefined)
         attributes['callsites'] = input.callsites;
+    if (input.handler !== undefined && input.handler.length > 0)
+        attributes['handlerSymbol'] = input.handler;
     return {
         ok: true,
         resource: {

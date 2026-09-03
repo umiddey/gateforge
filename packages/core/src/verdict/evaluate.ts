@@ -132,6 +132,8 @@ export interface VerdictContext {
   waivers: readonly WaiverRef[];
   /** Classification of `obligation.resourceId`; null ⇒ `unclassified`. */
   classification: unknown;
+  /** The obligation's graph resource (kind + attributes), when the host can supply it. Verifiers use it to bind evidence to identity. */
+  resource?: { kind: string; attributes: Record<string, unknown> } | null;
   /** Injected clock instant (invariant 7) — the only time source. */
   now: Date | string;
 }
@@ -554,6 +556,7 @@ function evaluateClaimEvidence(
   evidence: Array<{ record: RecordLike; trust: TrustTier }>,
   obligation: Obligation,
   primaryKey: readonly string[],
+  resource: { kind: string; attributes: Record<string, unknown> } | null | undefined,
 ): ClaimOutcome {
   const verifier = verifierFor(obligation.contract);
   if (verifier === null) {
@@ -565,7 +568,7 @@ function evaluateClaimEvidence(
         'blocking until its pack-specific verifier grades the evidence',
     };
   }
-  return verifier({ claim, obligation, evidence, primaryKey });
+  return verifier({ claim, obligation, evidence, primaryKey, resource });
 }
 
 // Built-in registrations: persistence/crud semantics stay owned by this
@@ -951,7 +954,13 @@ export function evaluateObligation(
     const evidence = considered
       .filter((record) => record.testId === claim.testId)
       .map((record) => ({ record, trust: trustOf(record) }));
-    const outcome = evaluateClaimEvidence(claim, evidence, verified, classification.primaryKey);
+    const outcome = evaluateClaimEvidence(
+      claim,
+      evidence,
+      verified,
+      classification.primaryKey,
+      context.resource,
+    );
     if (outcome.status === 'satisfied') {
       return { verdict: 'satisfied', reason: null, recordIds: outcome.recordIds };
     }

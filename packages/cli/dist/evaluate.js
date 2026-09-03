@@ -56,11 +56,13 @@ export function evaluateRun(input) {
     const { cwd, config, graph, obligations, stateDir, now } = input;
     const classifications = new Map();
     const detectors = new Map();
+    const resourceById = new Map();
     for (const resource of graph.resources) {
         if (resource.id === null)
             continue;
         classifications.set(resource.id, resource.classification);
         detectors.set(resource.id, resource.detector);
+        resourceById.set(resource.id, { kind: resource.kind, attributes: resource.attributes });
     }
     const waiverLoad = loadWaivers(resolveRepoPath(cwd, config.waivers), { now });
     const claims = readJsonArray(stateDir, 'claims.json');
@@ -76,6 +78,7 @@ export function evaluateRun(input) {
             records,
             waivers: waiverLoad.waivers,
             classification: classifications.get(obligation.resourceId) ?? null,
+            resource: resourceById.get(obligation.resourceId) ?? null,
             now,
         });
         const entry = entries[0];

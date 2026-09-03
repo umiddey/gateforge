@@ -75,11 +75,21 @@ describe('frozen surface, no escape hatch (invariant 6, GF-11)', () => {
         testInfo: testInfoOf([{ type: 'gateforge', description: OBLIGATION }]),
       });
       // ADR 0004 D7 (phase 6) adds the fifth frozen surface: the
-      // http observation primitive bound to http:* claims.
-      expect(Object.keys(evidence).sort()).toEqual(['finalize', 'http', 'persistence', 'ui', 'visible']);
+      // http observation primitive bound to http:* claims. ADR 0004 D8
+      // adds the sixth: the witnessed domain-check primitive bound to
+      // the declared claim carrying the check kind's namespace.
+      expect(Object.keys(evidence).sort()).toEqual([
+        'checks',
+        'finalize',
+        'http',
+        'persistence',
+        'ui',
+        'visible',
+      ]);
       expect(Object.isFrozen(evidence)).toBe(true);
       expect(Object.isFrozen(evidence.ui)).toBe(true);
       expect(Object.isFrozen(evidence.http)).toBe(true);
+      expect(Object.isFrozen(evidence.checks)).toBe(true);
       expect(Object.isFrozen(evidence.visible)).toBe(true);
       expect(Object.isFrozen(evidence.persistence)).toBe(true);
       // No boolean escape hatch exists (GF-11: registration path absent).

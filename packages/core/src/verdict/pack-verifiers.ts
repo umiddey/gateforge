@@ -70,6 +70,21 @@ function uiAnchorFailure(input: ClaimEvidenceInput): ClaimOutcome | null {
   return null;
 }
 
+/**
+ * Canonicalizes an observed request path the same way the witness does
+ * (query/hash stripped, one leading slash, trailing slashes dropped,
+ * root '/' stays '/'); duplicate slashes collapse so a path can never
+ * masquerade across segment boundaries. Local on purpose: core must not
+ * depend on `@gateforge/http-contract`.
+ */
+function normalizeObservedPath(rawUrl: string): string {
+  let path = rawUrl.split('?')[0]?.split('#')[0] ?? '/';
+  if (!path.startsWith('/')) path = `/${path}`;
+  path = path.replace(/\/{2,}/g, '/');
+  if (path.length > 1) path = path.replace(/\/+$/, '');
+  return path;
+}
+
 /** Grades the HTTP runtime-observation contracts (phase 5/6 semantics). */
 function httpVerifier(input: ClaimEvidenceInput): ClaimOutcome {
   const anchorFailure = uiAnchorFailure(input);
@@ -115,6 +130,27 @@ function httpVerifier(input: ClaimEvidenceInput): ClaimOutcome {
         `'${input.obligation.id}': witnessed '${HTTP_REQUEST_KIND}' record ` +
         `'${String(proven.record.recordId)}' carries no method/url pair`,
     };
+  }
+  // Identity match (fail-closed): when the host supplies the obligation's
+  // graph resource, the witnessed observation must come from THAT
+  // endpoint — a `/health` observation can never satisfy a `/contracts`
+  // obligation. Absent resource (test harnesses) keeps the historical
+  // any-endpoint behavior; the real CLI always supplies it.
+  if (input.resource !== null && input.resource !== undefined && input.resource.kind === 'http.endpoint') {
+    const expectedMethod = String(input.resource.attributes['method']).toUpperCase();
+    const expectedPath = String(input.resource.attributes['canonicalPath']);
+    const observedMethod = payload['method'].toUpperCase();
+    const observedPath = normalizeObservedPath(payload['url']);
+    if (observedMethod !== expectedMethod || observedPath !== expectedPath) {
+      return {
+        status: 'invalid',
+        reason:
+          `'${input.obligation.id}': witnessed '${HTTP_REQUEST_KIND}' record ` +
+          `'${String(proven.record.recordId)}' observed ${observedMethod} ${payload['url']} but the ` +
+          `obligation's endpoint is ${expectedMethod} ${expectedPath}; evidence from a different ` +
+          'endpoint can never satisfy it',
+      };
+    }
   }
   if (input.obligation.contract === 'http:response-status-ok') {
     const status = payload['status'];
