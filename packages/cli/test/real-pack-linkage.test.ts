@@ -99,9 +99,14 @@ app.delete('/api/accounts/:id', (req, res) => res.json({}));
         resources: Array<{ id: string | null; name: string; kind: string }>;
         findings: Array<{ code: string }>;
       };
-      // Exactly ONE business resource: the table. Routes are evidence.
-      expect(graph.resources.map((r) => r.name)).toEqual(['accounts']);
-      expect(graph.resources[0]?.kind).toBe('sqlalchemy.table');
+      // Exactly ONE business resource: the table. Routes are evidence,
+      // now joined into compiled `http.endpoint` resources (ADR 0004 D1)
+      // — a separate namespace that never carries the path-derived name.
+      const business = graph.resources.filter((r) => r.kind === 'sqlalchemy.table');
+      expect(business.map((r) => r.name)).toEqual(['accounts']);
+      expect(
+        graph.resources.filter((r) => r.kind === 'http.endpoint').map((r) => r.name),
+      ).toEqual(['http-delete-api-accounts-id-f8a5c702', 'http-get-api-accounts-4187c96f', 'http-post-api-accounts-e6912669']);
       // No duplicate-id collision from the route artifacts.
       expect(graph.findings.map((f) => f.code)).not.toContain('DUPLICATE_BOUND_RESOURCE_ID');
 
