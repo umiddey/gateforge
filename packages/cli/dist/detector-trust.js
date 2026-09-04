@@ -149,11 +149,15 @@ export function assertBundledDetectors(detectorIds, plugins, cwd, purpose) {
             if (plugin.module === undefined) {
                 throw new UsageError(`${purpose} requires detector '${detectorId}' to declare its bundled module`);
             }
-            const configured = isAbsolute(plugin.module)
-                ? plugin.module
-                : resolve(cwd, plugin.module);
             let configuredReal;
             try {
+                const configured = isAbsolute(plugin.module) || plugin.module.startsWith('./') || plugin.module.startsWith('../')
+                    ? resolve(cwd, plugin.module)
+                    : plugin.module === packageName
+                        ? join(packageDir(detectorId), 'dist', 'index.js')
+                        : (() => {
+                            throw new Error(`expected bundled package '${packageName}'`);
+                        })();
                 configuredReal = realpathSync(configured);
             }
             catch {

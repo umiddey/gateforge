@@ -29,8 +29,12 @@
   "dependencies": {
     "@gateforge/core": "*",
     "@gateforge/plugin-protocol": "*",
+    "@gateforge/http-contract": "*",
+    "@gateforge/pack-fastapi": "*",
+    "@gateforge/pack-http": "*",
+    "@gateforge/pack-sqlalchemy": "*",
+    "@gateforge/pack-task": "*",
     "picomatch": "^4.0.7",
-    "yaml": "^2.8.1",
-    "@gateforge/http-contract": "*"
+    "yaml": "^2.8.1"
   }
 }
