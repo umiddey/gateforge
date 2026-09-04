@@ -18,7 +18,7 @@ import {
   type HttpContractFact,
   type HttpMethod,
 } from '@gateforge/http-contract';
-import { compileEndpointContribution } from '../src/endpoint-compiler.js';
+import { compileEndpointContribution, extractContractFacts } from '../src/endpoint-compiler.js';
 
 let seq = 100;
 function routeFact(
@@ -85,6 +85,56 @@ function contribution(facts: readonly HttpContractFact[]): {
     classificationSignals: [],
   };
 }
+
+describe('detector-specific HTTP fact projection', () => {
+  it('accepts FastAPI metadata and projects the shared contract fields', () => {
+    const result = extractContractFacts([
+      {
+        detectorId: 'gateforge.pack-fastapi',
+        detectorVersion: '0.1.0',
+        resources: [
+          {
+            schemaVersion: 1,
+            id: 'http.contract:backend/routes.py:list_accounts:GET:/api/v1/accounts',
+            kind: 'http.contract',
+            source: 'backend/routes.py',
+            location: { file: 'backend/routes.py', line: 12, col: 0 },
+            detectorVersion: '0.1.0',
+            attributes: {
+              role: 'server-route',
+              method: 'GET',
+              rawPath: '/accounts',
+              normalizedPath: '/api/v1/accounts',
+              effectivePath: '/api/v1/accounts',
+              framework: 'fastapi',
+              handlerSymbol: 'backend.routes:list_accounts',
+              requestSchemaSymbols: ['AccountQuery'],
+              responseModel: 'AccountOut',
+              isAsync: true,
+              tags: ['accounts'],
+              operationId: 'list_accounts',
+              mountProvenance: 'include-chain',
+            },
+          },
+        ],
+        unresolved: [],
+        findings: [],
+        classificationSignals: [],
+      },
+    ]);
+    expect(result.findings).toEqual([]);
+    expect(result.facts).toHaveLength(1);
+    expect(result.facts[0]).toMatchObject({
+      role: 'server-route',
+      method: 'GET',
+      normalizedPath: '/api/v1/accounts',
+      rawPath: '/api/v1/accounts',
+      framework: 'fastapi',
+      requestSchemaSymbols: ['AccountQuery'],
+      responseSchemaSymbols: ['AccountOut'],
+    });
+  });
+});
 
 describe('endpoint capabilities (facts decide, methods are candidates)', () => {
   it('classifies a corroborated POST as crud-create', () => {

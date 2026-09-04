@@ -379,8 +379,17 @@ def _module_of(relpath: str) -> str:
 
 
 def _resolve_import(file_relpath: str, ref: tuple[str | None, int, str], module_map: dict[str, str]) -> str | None:
-    """Absolute dotted module for a raw import ref, or None when textually
-    unresolvable. The scanned-set check happens at the caller."""
+    """Resolve an import to one scanned module, including source-root aliases.
+
+    Args:
+        file_relpath: Repo-relative importing file.
+        ref: Parsed import tuple ``(module, relative-level, imported-name)``.
+        module_map: Dotted module names available in the scanned set.
+
+    Returns:
+        str | None: The unique matching scanned module, or None when the
+        import is ambiguous or outside the scanned set.
+    """
     raw_module, level, name = ref
     parts = _module_of(file_relpath).split(".")
     if level > 0:
@@ -391,14 +400,24 @@ def _resolve_import(file_relpath: str, ref: tuple[str | None, int, str], module_
         candidate = ".".join(parts)
     else:
         candidate = raw_module or ""
-    if not candidate:
-        return None
+
     if candidate in module_map:
         return candidate
-    with_name = f"{candidate}.{name}"
-    if name and with_name in module_map:
+    with_name = f"{candidate}.{name}" if name else candidate
+    if with_name in module_map:
         return with_name
-    return candidate
+
+    # Applications often run with a package directory on PYTHONPATH, so
+    # imports such as ``from api.v1.routes`` resolve to ``backend.api.v1.routes``
+    # when the repository is scanned from its parent directory. Accept only a
+    # unique suffix match; ambiguity remains fail-closed.
+    suffix = f".{candidate}" if candidate else ""
+    matches = sorted(module for module in module_map if suffix and module.endswith(suffix))
+    if len(matches) == 1:
+        return matches[0]
+    with_name_suffix = f".{with_name}" if with_name else ""
+    matches = sorted(module for module in module_map if with_name_suffix and module.endswith(with_name_suffix))
+    return matches[0] if len(matches) == 1 else None
 
 
 class _Resolver:

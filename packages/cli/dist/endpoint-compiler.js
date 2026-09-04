@@ -206,6 +206,48 @@ function classifyDelete(routes, deleteSemantics) {
     }
     return { capability: null, trace };
 }
+/**
+ * Converts the open attributes emitted by HTTP detector packs into the
+ * strict, framework-neutral contract fact consumed by the endpoint compiler.
+ *
+ * FastAPI retains detector-specific route metadata such as `effectivePath`
+ * and `responseModel` for explainability; those fields are deliberately not
+ * part of the shared fact schema and must be projected before validation.
+ */
+function contractFactCandidate(resource) {
+    const attributes = resource.attributes;
+    const effectivePath = typeof attributes['effectivePath'] === 'string' ? attributes['effectivePath'] : undefined;
+    const rawPath = effectivePath ??
+        (typeof attributes['rawPath'] === 'string' ? attributes['rawPath'] : undefined);
+    const normalizedPath = typeof attributes['normalizedPath'] === 'string' && attributes['normalizedPath'].length > 0
+        ? attributes['normalizedPath']
+        : rawPath;
+    const candidate = {
+        schemaVersion: 1,
+        role: attributes['role'],
+        method: attributes['method'],
+        normalizedPath,
+        rawPath,
+        framework: attributes['framework'],
+        source: resource.location,
+    };
+    for (const key of ['handlerSymbol', 'requestSchemaSymbols', 'responseSchemaSymbols', 'callsites']) {
+        const value = attributes[key];
+        if (Array.isArray(value)) {
+            if (value.length > 0)
+                candidate[key] = value;
+        }
+        else if (value !== undefined) {
+            candidate[key] = value;
+        }
+    }
+    if (candidate['responseSchemaSymbols'] === undefined &&
+        typeof attributes['responseModel'] === 'string' &&
+        attributes['responseModel'].length > 0) {
+        candidate['responseSchemaSymbols'] = [attributes['responseModel']];
+    }
+    return candidate;
+}
 /** Extracts and validates contract facts from every contribution. */
 export function extractContractFacts(contributions) {
     const facts = [];
@@ -214,12 +256,7 @@ export function extractContractFacts(contributions) {
         for (const resource of contribution.resources) {
             if (resource.kind !== HTTP_CONTRACT_KIND)
                 continue;
-            const candidate = {
-                ...resource.attributes,
-                schemaVersion: 1,
-                source: resource.location,
-            };
-            const parsed = HttpContractFactSchema.safeParse(candidate);
+            const parsed = HttpContractFactSchema.safeParse(contractFactCandidate(resource));
             if (!parsed.success) {
                 findings.push({
                     code: 'INVALID_HTTP_CONTRACT_FACT',
