@@ -1,8 +1,9 @@
 /**
  * Repo path expansion (project.paths include/exclude): determinism,
- * files-only, always-skip directories, exclude precedence.
+ * files-only, always-skip directories, exclude precedence, symlink
+ * skipping (scan-scope integrity), fail-closed unreadable paths.
  */
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -90,6 +91,33 @@ describe('expandIncludePaths fail-closed coverage (red-team F3)', () => {
       expect(errors[0]?.detail).toContain('could not read directory');
     } finally {
       chmodSync(hidden, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('expandIncludePaths symlink scope integrity (phase 1)', () => {
+  it('silently skips dangling symlinks and symlinked directories (never follows)', () => {
+    const root = tree({
+      'src/real.py': 'x = 1',
+      'outside/ghost.py': 'y = 2',
+    });
+    // A dangling link (target does not exist): lstat succeeds, stat would
+    // fail — the OLD behavior pushed an ExpandError and blocked the gate.
+    symlinkSync(join(root, 'does-not-exist'), join(root, 'src', 'dangling.py'));
+    // A symlinked DIRECTORY whose target matches the globs: the OLD
+    // behavior recursed into it and scanned content outside the tree.
+    symlinkSync(join(root, 'outside'), join(root, 'src', 'linked'));
+    // A symlinked FILE matching the globs: never collected.
+    symlinkSync(join(root, 'outside', 'ghost.py'), join(root, 'top-link.py'));
+    try {
+      const errors: Array<{ path: string; detail: string }> = [];
+      // 'outside/ghost.py' is excluded from the scan directly, so the
+      // ONLY way it could appear is by wrongly following 'src/linked'.
+      const files = expandIncludePaths(['**/*.py'], ['outside/**'], root, errors);
+      expect(files).toEqual(['src/real.py']);
+      expect(errors).toEqual([]);
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });

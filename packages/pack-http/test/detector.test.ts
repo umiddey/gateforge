@@ -4,7 +4,7 @@
  * signal emission, and fail-closed signal hygiene.
  */
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClassificationSignalSchema } from '@gateforge/core';
@@ -168,6 +168,29 @@ describe('detector: route and client-call discovery', () => {
         classificationSignals: [],
         scannedPaths: [],
       });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips symlinks when resolving directory inputs (never scans outside the tree)', async () => {
+    const dir = project({
+      'src/real.ts': `import express from 'express';\nconst app = express();\napp.get('/api/real', () => {});\n`,
+      'vendor/ghost.ts': `import express from 'express';\nconst app = express();\napp.get('/api/ghost', () => {});\n`,
+    });
+    symlinkSync(join(dir, 'missing-target'), join(dir, 'src', 'dangling.ts'));
+    symlinkSync(join(dir, 'vendor'), join(dir, 'src', 'linked'));
+    symlinkSync(join(dir, 'vendor', 'ghost.ts'), join(dir, 'src', 'top-link.ts'));
+    try {
+      const detector = createHttpDetector({ root: dir });
+      const outcome = detector.discover(['src']);
+      // Only the repo's real file is scanned: symlinked dirs are not
+      // recursed, symlinked files are not collected, dangling links are
+      // not errors (mirrors the CLI walker's scope-integrity rule).
+      expect(outcome.scannedPaths).toEqual(['src/real.ts']);
+      const targets = outcome.classificationSignals.map((s) => s.target.resourceName);
+      expect(targets).toContain('real');
+      expect(targets).not.toContain('ghost');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

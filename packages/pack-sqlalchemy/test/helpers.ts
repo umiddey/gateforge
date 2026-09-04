@@ -38,6 +38,12 @@ export const ALL_FIXTURES = [
 	'composite_pk.py',
 	'signals_archive.py',
 	'signals_computed_pk.py',
+	'candidates.py',
+	'candidate_closure.py',
+ 	'non_models.py',
+	'denylisted_base.py',
+	'shadow_schemas.py',
+	'shadow_models.py',
 ] as const;
 
 /**

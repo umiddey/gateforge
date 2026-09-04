@@ -19,6 +19,18 @@ Detector vocabulary (frozen with the pack):
   ``tableName``, ``abstract``, ``tablenameUnresolved`` (GF-01/02 ID
   rules; cross-module inheritance is resolved by the graph's symbol
   table, never by this detector).
+- Table-candidate recognition (phase 2, detector precision): ONLY
+  classes with explicit table facts or a base that conservatively
+  resolves to a declarative base are candidates — the exact
+  conventional name ``Base``, literal ``DeclarativeBase``, a locally
+  registered declarative alias (``declarative_base()``,
+  ``registry().generate_base()``, ``class X(DeclarativeBase)``), or the
+  simple name of an already-detected model class (inheritance closure
+  to a fixpoint). Base names bound (possibly via import aliasing) from
+  known non-ORM families — ``pydantic``, ``abc``, ``enum``,
+  ``argparse``, ``dataclasses``, ``marshmallow``, ``fastapi`` — can
+  never qualify. A non-candidate class is emitted NOWHERE: no symbol,
+  no table, no unresolved entry.
 - ``unresolved`` entries: typed reasons (``computed_tablename``,
   ``table_name_derived_runtime``, ``no_tablename_source``) located at
   the class statement; the graph retires them when it resolves the name

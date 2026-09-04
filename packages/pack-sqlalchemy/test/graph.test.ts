@@ -7,7 +7,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
-import { buildResourceGraph, type GraphResource, type ResourceGraph } from '@gateforge/core';
+import {
+  buildResourceGraph,
+  runClassification,
+  type ClassificationSignal,
+  type GraphResource,
+  type ResourceGraph,
+} from '@gateforge/core';
 import { runDiscover } from './helpers.js';
 
 /** The classifier used by plane-binding tests. */
@@ -165,5 +171,85 @@ describe('graph integration: GF-01 non-collapse', () => {
     expect(new Set(worker.map((r) => r.attributes['classQname']))).toEqual(
       new Set(['build_worker_rows.Row', 'build_tenant_rows.Row']),
     );
+  }, 60_000);
+});
+
+describe('graph integration: GF-20 bound-id non-collapse', () => {
+  it('binds BOTH same-name tables and flags DUPLICATE_BOUND_RESOURCE_ID', async () => {
+    // The two `dupes` tables in collisions.py survive discovery and graph
+    // build as DISTINCT resources; once classification binds each to the
+    // same plane-qualified id, the graph must report the collision as a
+    // finding — never silently collapse or pick a winner.
+    const outcome: DiscoveryOutcome = await runDiscover(['collisions.py']);
+    const graph = buildResourceGraph({
+      detectors: [
+        {
+          detectorId: 'gateforge.pack-sqlalchemy',
+          detectorVersion: '0.1.0',
+          resources: outcome.resources,
+          unresolved: outcome.unresolved,
+          findings: outcome.findings,
+          classificationSignals: outcome.classificationSignals,
+        },
+      ],
+    });
+    const dupes = graph.resources.filter((r) => r.name === 'dupes');
+    expect(dupes).toHaveLength(2);
+    const location = dupes[0]!.location;
+    // The exact signal set policy.test.ts uses to produce a bound
+    // decision (plane + identity + full lifecycle + adapter binding),
+    // targeting the shared bare name — so BOTH resources bind.
+    const signals = ([
+      { dimension: 'plane', assertion: 'tenant' },
+      { dimension: 'identity', assertion: ['id'] },
+      { dimension: 'lifecycle.create', assertion: true },
+      { dimension: 'lifecycle.read', assertion: true },
+      { dimension: 'lifecycle.update', assertion: true },
+      { dimension: 'lifecycle.delete', assertion: true },
+      { dimension: 'delete-semantics', assertion: 'hard' },
+      { dimension: 'adapter-binding', assertion: 'adapter' },
+    ].map((part) => ({
+      schemaVersion: 1 as const,
+      target: { resourceName: 'dupes' },
+      source: 'gateforge:internal',
+      location,
+      detector: { id: 'gateforge.core', version: '1' },
+      basis: 'declaration' as const,
+      ...part,
+    }))) as ClassificationSignal[];
+    const classified = runClassification({
+      graph,
+      signals,
+      policy: {
+        schemaVersion: 1,
+        scanRoots: ['**/*.py'],
+        trustedInternalEntryPoints: [],
+        internalRules: [],
+        coverage: [],
+        declarations: { internality: 'gateforge:internal' },
+        volatileFields: [],
+      },
+      adapters: ['adapter'],
+      scan: {
+        requestedPaths: ['collisions.py'],
+        scannedPaths: ['collisions.py'],
+        configuredDetectors: 1,
+        successfulDetectors: 1,
+      },
+    });
+    const bound = classified.graph.resources.filter((r) => r.id !== null);
+    expect(bound).toHaveLength(2);
+    expect(new Set(bound.map((r) => r.id))).toEqual(new Set(['tenant.dupes']));
+    const boundDuplicates = classified.graph.findings.filter(
+      (f) => f.code === 'DUPLICATE_BOUND_RESOURCE_ID',
+    );
+    expect(boundDuplicates).toHaveLength(1);
+    expect(boundDuplicates[0]?.locations).toHaveLength(2);
+    // Detector-level GF-20 evidence stays alongside (never replaced).
+    expect(
+      classified.graph.findings.filter(
+        (f) => f.code === 'DUPLICATE_TABLE_NAME' && f.detectorId === 'gateforge.pack-sqlalchemy',
+      ),
+    ).toHaveLength(1);
   }, 60_000);
 });

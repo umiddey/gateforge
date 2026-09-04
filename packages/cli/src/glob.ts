@@ -7,13 +7,15 @@
  * include patterns (any match wins) minus the exclude patterns (any
  * match drops it) with picomatch, and returns files only. `.git` and
  * `node_modules` directories are always skipped (never scanned, never
- * reported). No symlink following, no network, no wall clock.
+ * reported). Symbolic links are SKIPPED silently (never followed, never
+ * collected, never reported — see the walk loop for why that closes no
+ * scan-scope hole). No network, no wall clock.
  *
  * The result is the exact path list handed to every plugin's `discover`
  * request, so include/exclude edits change what detectors see — and
  * nothing else.
  */
-import { readdirSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { compareStrings } from '@gateforge/core';
 import picomatch from 'picomatch';
@@ -44,6 +46,14 @@ export interface ExpandError {
  * scan could not see — they are collected in `errors` so the pipeline
  * can block the gate and invalidate closed-world proofs instead of
  * letting them vanish from both the requested and scanned sets.
+ *
+ * SYMBOLIC LINKS are the one deliberate silent skip: they are never
+ * followed and never collected (files or directories). A link's target
+ * is outside the repository's real source tree, so scanning it would
+ * attribute foreign content to the repo and invalidate closed-world
+ * proofs; a dangling link hides nothing (no target content exists).
+ * Unlike unreadable directories, a skipped symlink can never conceal a
+ * repository file — so no error is reported and none is needed.
  *
  * Args:
  *   include: include globs (at least one, schema-enforced).
@@ -84,12 +94,25 @@ export function expandIncludePaths(
       const relative = [...segments, entry].join('/');
       let stat;
       try {
-        stat = statSync(absolute);
+        // lstat (NOT stat): the entry itself is inspected without
+        // following a final symlink, so a link is recognizable as a link.
+        stat = lstatSync(absolute);
       } catch (cause) {
         errors?.push({
           path: relative,
           detail: `could not stat path: ${cause instanceof Error ? cause.message : String(cause)}`,
         });
+        continue;
+      }
+      if (stat.isSymbolicLink()) {
+        // SKIP silently — this is not a scan-scope hole. A symlink is by
+        // definition outside the repository's real source tree: following
+        // one would scan content the repository does not own (files the
+        // repo's VCS never tracked), invalidating closed-world proofs.
+        // A dangling link cannot hide repository files either — there is
+        // no target content behind it. Skipping therefore shrinks the
+        // scan to exactly the real tree, unlike an unreadable directory,
+        // which MAY hide files and must keep failing closed above.
         continue;
       }
       if (stat.isDirectory()) {
