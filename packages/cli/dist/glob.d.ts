@@ -15,6 +15,14 @@ export interface ExpandError {
  * can block the gate and invalidate closed-world proofs instead of
  * letting them vanish from both the requested and scanned sets.
  *
+ * SYMBOLIC LINKS are the one deliberate silent skip: they are never
+ * followed and never collected (files or directories). A link's target
+ * is outside the repository's real source tree, so scanning it would
+ * attribute foreign content to the repo and invalidate closed-world
+ * proofs; a dangling link hides nothing (no target content exists).
+ * Unlike unreadable directories, a skipped symlink can never conceal a
+ * repository file — so no error is reported and none is needed.
+ *
  * Args:
  *   include: include globs (at least one, schema-enforced).
  *   exclude: exclude globs (possibly empty).

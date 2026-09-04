@@ -49,7 +49,7 @@
  * Determinism: pure over (paths, file bytes); no clock, no network;
  * output sorted by resource id; signals sorted by canonical JSON.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
 import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
 import type { z } from 'zod';
@@ -137,8 +137,17 @@ function resolveInputs(paths: readonly string[], root: string): string[] {
     const absolute = resolve(root, rel);
     let stat;
     try {
-      stat = statSync(absolute);
+      // lstat (NOT stat): recognize a final symlink without following it.
+      stat = lstatSync(absolute);
     } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) {
+      // SKIP silently — mirrors the CLI walker's symlink rule. A symlink
+      // target lies outside the repository's real source tree, so
+      // following it would scan content the repo does not own, and a
+      // dangling link hides nothing (no target content exists): skipping
+      // closes no scan-scope hole.
       continue;
     }
     if (stat.isDirectory()) {
@@ -146,6 +155,10 @@ function resolveInputs(paths: readonly string[], root: string): string[] {
       try {
         entries = readdirSync(absolute);
       } catch {
+        // Silent on purpose: the CLI's expandIncludePaths walk already
+        // fail-closes (ExpandError → SCAN_PATH_UNREADABLE) on unreadable
+        // directories and stat failures, so this pass can never be the
+        // last line of defense — it only narrows an already-proven scope.
         continue;
       }
       const nested = entries
