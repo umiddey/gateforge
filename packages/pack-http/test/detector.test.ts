@@ -131,6 +131,27 @@ describe('detector: route and client-call discovery', () => {
     }
   });
 
+  it('does not classify configured client symbols as server routers', () => {
+    const dir = project({
+      'web/api.ts': [
+        `import api from './authFetch';`,
+        `export const loadAccounts = () => api.get('/api/accounts');`,
+      ].join('\n'),
+    });
+    try {
+      const detector = createHttpDetector({
+        root: dir,
+        clientScan: { clientSymbols: ['api'] },
+      });
+      const outcome = detector.discover(['web/api.ts']);
+      expect(outcome.resources).toHaveLength(1);
+      expect(outcome.resources[0]?.attributes['role']).toBe('frontend-call');
+      expect(outcome.resources[0]?.attributes['method']).toBe('GET');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('is deterministic across runs and over an empty path list', async () => {
     const dir = project({
       'src/a.ts': `import express from 'express';\nconst app = express();\napp.get('/x/y', () => {});\n`,
