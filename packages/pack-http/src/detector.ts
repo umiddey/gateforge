@@ -214,7 +214,11 @@ function operationForMethod(method: string): string | null {
  * convention — without import disambiguation the first scanner wins and
  * wrong attribution leaks across frameworks).
  */
-function scanServerRoutes(text: string, file: string): HttpArtifact[] {
+function scanServerRoutes(
+  text: string,
+  file: string,
+  clientSymbols: readonly string[] = [],
+): HttpArtifact[] {
   const out: HttpArtifact[] = [];
   let origin: HttpOrigin = 'express';
   if (/\bfrom\s+['"]hono['"]/.test(text) || /\brequire\(\s*['"]hono['"]/.test(text)) {
@@ -222,13 +226,16 @@ function scanServerRoutes(text: string, file: string): HttpArtifact[] {
   } else if (/\bfrom\s+['"]fastify['"]/.test(text) || /\brequire\(\s*['"]fastify['"]/.test(text)) {
     origin = 'fastify';
   }
-  const registration = /\b(?:app|server|router|api)\.(get|post|put|patch|delete|all)\(\s*(['"`])([^'"`]+)\2(?:\s*,\s*([A-Za-z_$][\w$]*)\s*[),])?/g;
+  const registration =
+    /\b(app|server|router|api)\.(get|post|put|patch|delete|all)\(\s*(['"`])([^'"`]+)\3(?:\s*,\s*([A-Za-z_$][\w$]*)\s*[),])?/g;
   let match: RegExpExecArray | null;
   while ((match = registration.exec(text)) !== null) {
-    const method = (match[1] ?? '').toUpperCase();
-    const path = match[3] ?? '';
+    const receiver = match[1] ?? '';
+    if (clientSymbols.includes(receiver)) continue;
+    const method = (match[2] ?? '').toUpperCase();
+    const path = match[4] ?? '';
     if (path.length === 0) continue;
-    const handler = match[4];
+    const handler = match[5];
     const { line, col } = lineColumnFor(text, match.index);
     out.push({ method, path, origin, file, line, col, ...(handler !== undefined ? { handler } : {}) });
   }
@@ -325,7 +332,7 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
         const sourceRel = relative(root, file).split(sep).join('/');
         scanned.push(sourceRel);
         texts.set(sourceRel, text);
-        for (const artifact of scanServerRoutes(text, file)) artifacts.push(artifact);
+        for (const artifact of scanServerRoutes(text, file, clientScan?.clientSymbols)) artifacts.push(artifact);
         for (const artifact of scanNestControllers(text, file)) artifacts.push(artifact);
       }
       artifacts.sort((a, b) => {

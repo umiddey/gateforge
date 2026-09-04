@@ -72,6 +72,12 @@ describe('fastapi detector (subprocess, real python)', () => {
     expect(outcome.unresolved).toEqual([]);
   });
 
+  it('resolves imports from a source-root package alias', async () => {
+    const outcome = await runDetector(['source-root/main.py', 'source-root/api/routers.py']);
+    expect(effectivePaths(outcome)).toContain('GET /api/v1/accounts');
+    expect(outcome.unresolved).toEqual([]);
+  });
+
   it('carries canonical paths, raw paths, schemas, and provenance on facts', async () => {
     const outcome = await runDetector(['simple/main.py']);
     const create = facts(outcome.resources).find(
