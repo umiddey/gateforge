@@ -48,10 +48,13 @@ describe('GPP/3 subprocess transport x python detector', () => {
       const parsed = ClassSymbolAttributesSchema.safeParse(resource.attributes);
       expect(parsed.success, `class symbol ${resource.id} must validate`).toBe(true);
     }
-    expect(tableResources(outcome)).toHaveLength(25);
-    // 44 class symbols: one per declarative/base class across the 13 fixtures.
-    expect(symbolResources(outcome)).toHaveLength(44);
-    expect(outcome.unresolved).toHaveLength(12);
+    expect(tableResources(outcome)).toHaveLength(30);
+    // 55 class symbols: one per declarative/base class across the 19
+    // fixtures — non-model fixtures (non_models.py, denylisted_base.py,
+    // shadow_schemas.py) contribute ZERO symbols under the phase-2
+    // candidate predicate.
+    expect(symbolResources(outcome)).toHaveLength(55);
+    expect(outcome.unresolved).toHaveLength(17);
     expect(outcome.findings).toHaveLength(5);
   }, 60_000);
 
