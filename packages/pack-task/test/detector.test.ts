@@ -72,6 +72,12 @@ describe('pack-task detector (worker internality reachability discovery)', () =>
     expect(codes(outcome.findings)).toContain('AMBIGUOUS_HANDLER');
   });
 
+  it('keeps message-handler signal locations schema-valid for synthetic names', () => {
+    for (const signal of outcome.classificationSignals) {
+      expect(signal.location.col).toBeGreaterThanOrEqual(0);
+    }
+  });
+
   it('is deterministic (invariant 7): two scans produce identical signals', async () => {
     const a = await detectorOverFixtures().discover([...ALL_FIXTURE_PATHS]);
     const b = await detectorOverFixtures().discover([...ALL_FIXTURE_PATHS]);

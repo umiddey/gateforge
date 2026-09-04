@@ -31,6 +31,35 @@ describe('gateforge init', () => {
     });
   });
 
+  it('preconfigures trusted detectors and makes discovery runnable', async () => {
+    await withTempRepo({}, async (repo) => {
+      const initialized = await runCli(repo, ['init', '--languages', 'python,javascript,typescript']);
+      expect(initialized.code).toBe(0);
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.plugins.map((plugin) => plugin.id)).toEqual([
+        'gateforge.pack-fastapi',
+        'gateforge.pack-sqlalchemy',
+        'gateforge.pack-http',
+        'gateforge.pack-task',
+      ]);
+      expect(config.plugins.every((plugin) => plugin.transport === 'in-process')).toBe(true);
+      expect(config.project.paths.include).toEqual([
+        '**/*.py',
+        '**/*.js',
+        '**/*.jsx',
+        '**/*.mjs',
+        '**/*.cjs',
+        '**/*.ts',
+        '**/*.tsx',
+      ]);
+      expect(config.project.paths.exclude).toContain('**/.venv/**');
+
+      const discovered = await runCli(repo, ['discover']);
+      expect(discovered.code).toBe(0);
+      expect(discovered.stderr).toBe('');
+    });
+  });
+
   it('is idempotent and never overwrites user files', async () => {
     await withTempRepo({}, async (repo) => {
       const first = await runCli(repo, ['init']);

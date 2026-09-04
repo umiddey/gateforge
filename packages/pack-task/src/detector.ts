@@ -289,7 +289,11 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         idempotencyKey: text.includes('messageId') || text.includes('dedupKey'),
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
-        location: { file: relPath, line: lineNumber, col: line.indexOf(message) },
+        location: {
+          file: relPath,
+          line: lineNumber,
+          col: Math.max(0, line.indexOf(message)),
+        },
         targetModels: extractTargetModels(text, message),
       });
       continue;
