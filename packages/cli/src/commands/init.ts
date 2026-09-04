@@ -30,6 +30,66 @@ import { UsageError } from '../errors.js';
 
 export const INIT_USAGE = 'usage: gateforge init [--languages <comma,list>]';
 
+const BUNDLED_PLUGIN_MODULES: Readonly<Record<string, string>> = Object.freeze({
+  'gateforge.pack-fastapi': '@gateforge/pack-fastapi',
+  'gateforge.pack-http': '@gateforge/pack-http',
+  'gateforge.pack-sqlalchemy': '@gateforge/pack-sqlalchemy',
+  'gateforge.pack-task': '@gateforge/pack-task',
+});
+
+/**
+ * Selects the bundled detectors required by the generated coverage and
+ * trusted-entry-point rules for the requested source languages.
+ *
+ * Args:
+ *   languages (readonly string[]): Languages selected by `gateforge init`.
+ *
+ * Returns:
+ *   string[]: Deterministically ordered bundled detector ids.
+ */
+function bundledPluginIds(languages: readonly string[]): string[] {
+  const normalized = new Set(languages.map((language) => language.toLowerCase()));
+  const ids: string[] = ['gateforge.pack-task'];
+  if (normalized.has('python')) {
+    ids.unshift('gateforge.pack-sqlalchemy');
+    ids.unshift('gateforge.pack-fastapi');
+  }
+  if (normalized.has('javascript') || normalized.has('typescript')) {
+    ids.splice(ids.length - 1, 0, 'gateforge.pack-http');
+  }
+  return ids;
+}
+
+/** Renders the trusted bundled plugin entries for `.gateforge.yml`. */
+function pluginsTemplate(languages: readonly string[]): string {
+  return bundledPluginIds(languages)
+    .map(
+      (id) =>
+        `  - id: ${id}\n    version: '0.1.0'\n    transport: in-process\n    module: '${BUNDLED_PLUGIN_MODULES[id]}'`,
+    )
+    .join('\n');
+}
+
+/**
+ * Selects source-only include globs so AST detectors do not parse
+ * dependencies, caches, lockfiles, or arbitrary repository assets.
+ *
+ * Args:
+ *   languages (readonly string[]): Languages selected by `gateforge init`.
+ *
+ * Returns:
+ *   string[]: Deterministically ordered source globs.
+ */
+function sourceIncludePatterns(languages: readonly string[]): string[] {
+  const normalized = new Set(languages.map((language) => language.toLowerCase()));
+  const patterns: string[] = [];
+  if (normalized.has('python')) patterns.push('**/*.py');
+  if (normalized.has('javascript') || normalized.has('typescript') || normalized.has('node')) {
+    patterns.push('**/*.js', '**/*.jsx', '**/*.mjs', '**/*.cjs');
+  }
+  if (normalized.has('typescript')) patterns.push('**/*.ts', '**/*.tsx');
+  return patterns.length > 0 ? patterns : ['**/*'];
+}
 /**
  * The starter policies document (plan phase 5): the gradable
  * `persistence:*` namespace for automatically classified resources.
@@ -88,12 +148,12 @@ function classificationPolicyTemplate(languages: readonly string[]): string {
   // rule declares `exhaustive: true` — today's detectors are heuristics,
   // so generated policies keep the internality certificate UNAVAILABLE
   // until the organization asserts an exhaustive exposure parser itself.
-  if (languages.includes('typescript') || languages.includes('javascript')) {
+  if (languages.includes('typescript') || languages.includes('javascript') || languages.includes('node')) {
     coverageRules.push(
-      `  - capability: exposure.http\n    detector: gateforge.pack-http\n    appliesTo:\n      - '**/*.ts'\n      - '**/*.js'\n      - '**/*.tsx'\n      - '**/*.jsx'`,
+      `  - capability: exposure.http\n    detector: gateforge.pack-http\n    appliesTo:\n      - '**/*.ts'\n      - '**/*.js'\n      - '**/*.tsx'\n      - '**/*.jsx'\n      - '**/*.mjs'\n      - '**/*.cjs'`,
     );
     coverageRules.push(
-      `  - capability: linkage.task\n    detector: gateforge.pack-task\n    appliesTo:\n      - '**/*.ts'\n      - '**/*.js'\n      - '**/*.tsx'\n      - '**/*.jsx'`,
+      `  - capability: linkage.task\n    detector: gateforge.pack-task\n    appliesTo:\n      - '**/*.ts'\n      - '**/*.js'\n      - '**/*.tsx'\n      - '**/*.jsx'\n      - '**/*.mjs'\n      - '**/*.cjs'`,
     );
   }
   if (languages.includes('python')) {
@@ -159,12 +219,20 @@ ${languages.map((language) => `    - ${language}`).join('\n')}
   paths:
     # Globs scanned by every detector; results drive obligations.
     include:
-      - '**/*'
+${sourceIncludePatterns(languages).map((pattern) => `      - '${pattern}'`).join('\n')}
     exclude:
       - '**/node_modules/**'
-# Detector plugins. Subprocess plugins spawn a GPP/3 session; in-process
-# plugins default-export { discover(paths) }.
-plugins: []
+      - '**/.venv/**'
+      - '**/venv/**'
+      - '**/__pycache__/**'
+      - '**/.pytest_cache/**'
+      - '**/.mypy_cache/**'
+      - '**/dist/**'
+      - '**/build/**'
+# Detector plugins. Bundled detectors are preconfigured for the selected
+# languages and are loaded from their trusted package entry points.
+plugins:
+${pluginsTemplate(languages)}
 policies: .gateforge/policies.yml
 classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
@@ -201,7 +269,7 @@ export function initCommand(io: Io, argv: readonly string[]): number {
   }
   const languages = (languagesValue ?? 'python')
     .split(',')
-    .map((language) => language.trim())
+    .map((language) => language.trim().toLowerCase())
     .filter((language) => language.length > 0);
   if (languages.length === 0) {
     throw new UsageError(`flag '--languages' requires at least one language`);
