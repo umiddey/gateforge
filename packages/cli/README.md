@@ -9,7 +9,7 @@ baselines.
 
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
-| `gateforge init [--languages <comma,list>]` | Create `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, and the `adapters/` + `waivers/` skeleton dirs. Idempotent — never overwrites existing files. Default languages: `python`. | 0 |
+| `gateforge init [--languages <comma,list>]` | Create `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, and the `adapters/` + `waivers/` skeleton dirs. Idempotent — never overwrites existing files. Default language: `python`. Bundled detectors are preconfigured automatically for the selected Python, JavaScript, and TypeScript languages. | 0 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. Snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
 | `gateforge explain <resourceId> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. | 0/1/2 |
