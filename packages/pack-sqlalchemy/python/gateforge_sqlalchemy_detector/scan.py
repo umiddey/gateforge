@@ -5,7 +5,7 @@ canonical detector vocabulary of the frozen resource graph:
 - resources carry ``schemaVersion``/``id``/``kind``/``source``/
   ``location``/``detectorVersion``/``attributes`` and use
   ``attributes["resourceName"]`` as the graph identity attribute;
-- table-candidate classes are ALSO emitted as ``gateforge.class``
+- TABLE-CANDIDATE classes are ALSO emitted as ``gateforge.class``
   symbols so the graph's repo-wide symbol table can resolve inherited
   tablenames across files (spike limitation 1 fixed by the graph);
 - computed names (GF-21) are typed ``unresolved`` entries located at
@@ -39,12 +39,41 @@ code-derived FACTS, never classifications and never exposure claims:
 No exposure signal is ever emitted from a table declaration alone
 (plan phase 3 guard): exposure needs externally reachable evidence,
 which only linkage detectors may provide.
+
+Table-candidate recognition (phase 2, detector precision): a class is a
+table candidate iff it carries explicit table facts (literal/computed
+``__tablename__`` or ``table=True``) OR one of its bases statically
+resolves to a SQLAlchemy declarative base. "Resolves" is deliberately
+CONSERVATIVE — a flat file scan cannot import anything, so a base name
+is declarative only when it is the conventional name ``Base`` (exact;
+``BaseModel``/``BaseSettings``/``BaseException`` never match), the
+literal ``DeclarativeBase``, a locally registered declarative alias
+(``X = declarative_base()``, ``X = <alias>.declarative_base()``,
+``X = registry().generate_base()``, ``class X(DeclarativeBase)``), or
+the simple name of an already-detected model class (inheritance closure
+applied to a fixpoint, so multi-level chains resolve across files).
+The closure is bounded by LOCAL DEFINITION EVIDENCE: when the same file
+defines a class with that simple name whose own base is denylisted (a
+Pydantic ``class WebhookEvent(BaseModel)`` shadowing a genuine
+``class WebhookEvent(Base)`` in a models module), the closure must not
+claim it — or any local subclass beneath it.
+Base names whose import provenance is a known NON-ORM module family
+(``pydantic``, ``abc``, ``enum``, ``argparse``, ``dataclasses``,
+``marshmallow``, ``fastapi``) can never make a class a candidate — this
+kills pathological aliasing like ``from pydantic import BaseModel as
+Base``, which in a real dogfood produced ~1,100 false-positive blocking
+entries from Pydantic schema directories alone. A class that is not a
+candidate is emitted NOWHERE — no symbol, no table, no unresolved
+entry: silence for non-models is the point of the predicate, while
+genuine candidates keep every typed escape hatch (``__abstract__``,
+computed names, pure bases).
 """
 
 from __future__ import annotations
 
 import ast
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import PLUGIN_ID, VERSION
@@ -62,6 +91,25 @@ READ_ONLY_ATTR = "__gateforge_read_only__"
 
 # Column-call constructors carrying column facts.
 COLUMN_CALL_NAMES = ("Column", "mapped_column")
+
+# Import provenance that can NEVER make a base name a declarative root
+# (phase 2 denylist). The conventional-name rule ("Base") is a flat-file
+# heuristic: most projects do ``from app.db import Base`` (cross-file,
+# statically unresolvable here), but the SAME spelling is reachable
+# through aliasing — ``from pydantic import BaseModel as Base`` — and a
+# false positive is a BLOCKING finding in a closed-world gate. Root
+# module matching (``pydantic`` covers ``pydantic.*``) is fail-closed in
+# the anti-false-positive direction: an ORM base legitimately imported
+# from one of these families does not exist in practice.
+DENYLISTED_BASE_MODULES = (
+    "pydantic",
+    "abc",
+    "enum",
+    "argparse",
+    "dataclasses",
+    "marshmallow",
+    "fastapi",
+)
 
 # Column names that RESEMBLE soft-delete bookkeeping. Facts for
 # reviewers (attribute only) — never delete semantics, which must be
@@ -132,6 +180,40 @@ def base_name(node: ast.expr) -> str | None:
     if isinstance(node, ast.Attribute):
         return node.attr
     return None
+
+
+@dataclass
+class ImportRef:
+    """One import binding usable for base-name provenance (phase 2).
+
+    Attributes:
+        module: The dotted source module (absolute portion; ``""`` for a
+            bare relative ``from . import x``). ``None``-free on purpose:
+            provenance decisions must see "no module" as an empty string.
+        name: The imported top-level name (``None`` when the binding is a
+            module alias from a plain ``import a.b``).
+        level: Relative-import depth (0: absolute).
+    """
+
+    module: str
+    name: str | None
+    level: int
+
+
+def module_denied(module: str | None) -> bool:
+    """Whether an import source module is on the base-provenance denylist.
+
+    Args:
+        module: The dotted module of the import (``None``/``""`` = not
+            knowable, e.g. a relative import — never denied).
+
+    Returns:
+        bool: True when the module's ROOT is a known non-ORM family, so a
+            base bound from it can never make its class a table candidate.
+    """
+    if not module:
+        return False
+    return module.split(".")[0] in DENYLISTED_BASE_MODULES
 
 
 class ColumnFacts:
@@ -372,15 +454,36 @@ class ClassRecord:
         )
         return no_table_facts and any(b == "DeclarativeBase" for b in self.bases)
 
-    def is_table_candidate(self) -> bool:
-        """Has table facts, or is declarative-style (bases) with none."""
+    def is_table_candidate(self, idx: "FileIndex", model_names: frozenset[str] = frozenset()) -> bool:
+        """Whether this class claims a SQL table under the phase-2 predicate.
+
+        A class is a candidate iff it has explicit table facts OR one of
+        its bases statically resolves to a declarative base (see the
+        module docstring for the full conservative-resolution contract).
+        The old predicate — ``has_facts or bool(self.bases)`` — made every
+        based class (Pydantic models, Enums, ABCs, Exceptions, plain
+        project bases) a table candidate and emitted ~1,100 false-positive
+        blocking entries in a real dogfood; a base list alone is evidence
+        of NOTHING.
+
+        Args:
+            idx: The owning file index (import map + declarative aliases).
+            model_names: Simple names of already-detected model classes
+                across ALL scanned files (inheritance closure, computed to
+                a fixpoint by `scan` before emission).
+
+        Returns:
+            bool: True only for genuine SQLAlchemy table candidates.
+        """
         has_facts = (
             self.tablename_literal is not None
             or self.tablename_expr is not None
             or self.tablename_func is not None
             or "table" in self.keywords
         )
-        return has_facts or bool(self.bases)
+        if has_facts:
+            return True
+        return any(idx.base_is_declarative(base, model_names) for base in self.bases)
 
 
 def _literal_record(node: ast.expr) -> dict[str, str | int | float | bool] | None:
@@ -431,12 +534,28 @@ class FileIndex:
         self.relpath = relpath
         self.classes: list[ClassRecord] = []
         self.table_calls: list[dict] = []  # {table_name, target, node}
+        # Module-level bindings of the form ``X = declarative_base()`` /
+        # ``X = <alias>.declarative_base()`` / ``X =
+        # registry().generate_base()``, plus ``class X(DeclarativeBase)``
+        # style declarations: names that act as declarative bases IN THIS
+        # FILE (phase 2 resolution rule 2a).
         self.declarative_base_aliases: set[str] = set()
+        # Names assigned from a ``registry()`` call; their
+        # ``.generate_base()`` results register declarative aliases.
+        self.registry_aliases: set[str] = set()
+        # Local-name -> ImportRef map for base-name provenance (phase 2
+        # denylist and import-alias resolution of declarative calls).
+        self.imports: dict[str, ImportRef] = {}
+        # Simple names defined in THIS file with a denylisted base (set
+        # properly at the end of `_collect`; empty until then).
+        self.locally_denied_base_names: set[str] = set()
         self._collect(tree)
 
     def _collect(self, tree: ast.Module) -> None:
         assigned_call_nodes: set[int] = set()
         for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                self._record_import(node)
             if isinstance(node, ast.Assign):
                 target = (
                     node.targets[0].id
@@ -445,8 +564,23 @@ class FileIndex:
                 )
                 if isinstance(node.value, ast.Call):
                     fname = call_name(node.value.func)
-                    if fname == "declarative_base" and target:
-                        self.declarative_base_aliases.add(target)
+                    if not self._call_provenance_denied(fname) and target:
+                        # Import-alias aware: ``from sqlalchemy.orm import
+                        # declarative_base as dbase`` makes ``dbase()``
+                        # register too; a denylisted provenance (e.g.
+                        # ``from pydantic import x as declarative_base``)
+                        # registers NOTHING (fail closed vs false models).
+                        effective = self._effective_call_name(fname)
+                        if effective == "declarative_base":
+                            self.declarative_base_aliases.add(target)
+                        elif effective == "registry":
+                            self.registry_aliases.add(target)
+                        elif (
+                            isinstance(node.value.func, ast.Attribute)
+                            and node.value.func.attr == "generate_base"
+                            and self._receiver_is_registry(node.value.func.value)
+                        ):
+                            self.declarative_base_aliases.add(target)
                     if fname == "Table" and self._literal_name_arg(node.value):
                         self.table_calls.append(
                             {
@@ -466,6 +600,133 @@ class FileIndex:
                         }
                     )
         self._collect_classes(tree)
+        self._register_declarative_class_aliases()
+        self._register_locally_denied_base_names()
+
+    def _record_import(self, node: ast.Import | ast.ImportFrom) -> None:
+        """Records one import statement's bindings into the import map."""
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                local = alias.asname or alias.name
+                self.imports[local] = ImportRef(module=module, name=alias.name, level=node.level)
+        else:
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".")[0]
+                self.imports[local] = ImportRef(module=alias.name, name=None, level=0)
+
+    def _effective_call_name(self, fname: str | None) -> str | None:
+        """A call's simple name with import aliases resolved.
+
+        ``from sqlalchemy.orm import declarative_base as dbase`` binds
+        ``dbase`` to imported name ``declarative_base``, so a ``dbase()``
+        call is seen as the declarative factory it is.
+        """
+        if fname is None:
+            return None
+        ref = self.imports.get(fname)
+        if ref is not None and ref.name:
+            return ref.name
+        return fname
+
+    def _call_provenance_denied(self, fname: str | None) -> bool:
+        """Whether a call's simple name is imported from a denylisted module."""
+        if fname is None:
+            return False
+        ref = self.imports.get(fname)
+        return ref is not None and module_denied(ref.module)
+
+    def _receiver_is_registry(self, expr: ast.expr) -> bool:
+        """Whether ``expr`` (the receiver of ``.generate_base()``) is a registry."""
+        if isinstance(expr, ast.Call):
+            fname = call_name(expr.func)
+            return self._effective_call_name(fname) == "registry" and not self._call_provenance_denied(fname)
+        if isinstance(expr, ast.Name):
+            return expr.id in self.registry_aliases
+        return False
+
+    def _register_declarative_class_aliases(self) -> None:
+        """Registers ``class X(DeclarativeBase)``-style names as base aliases.
+
+        Applied iteratively to a fixpoint so an alias chain inside one
+        file (``class Base(DeclarativeBase)``, then ``class NewBase(Base)``
+        acting as a project-wide base) registers every member. Only the
+        per-FILE alias registry is extended here; cross-file chains are
+        the global model-name closure in `scan`.
+        """
+        changed = True
+        while changed:
+            changed = False
+            for rec in self.classes:
+                simple = rec.qname.rsplit(".", 1)[-1]
+                if simple in self.declarative_base_aliases:
+                    continue
+                if any(
+                    (b == "DeclarativeBase" and not self._import_denied(b))
+                    or b in self.declarative_base_aliases
+                    for b in rec.bases
+                ):
+                    self.declarative_base_aliases.add(simple)
+                    changed = True
+
+    def _register_locally_denied_base_names(self) -> None:
+        """Records simple names DEFINED IN THIS FILE with a denylisted base.
+
+        ``class WebhookEvent(BaseModel)`` (Pydantic schema file) sharing a
+        simple name with a genuine ``class WebhookEvent(Base)`` (models
+        file) is the motivating collision: the global model-name closure
+        matches by simple name only, so without this registry the local
+        non-model — and every local subclass of it — silently inherits
+        candidacy from the remote namesake. A denylisted base is positive
+        non-model evidence; the closure must never override it.
+        """
+        self.locally_denied_base_names: set[str] = set()
+        for rec in self.classes:
+            if any(self._import_denied(b) for b in rec.bases):
+                self.locally_denied_base_names.add(rec.qname.rsplit(".", 1)[-1])
+
+    def _import_denied(self, name: str) -> bool:
+        """Whether a base simple name is bound from a denylisted module."""
+        ref = self.imports.get(name)
+        return ref is not None and module_denied(ref.module)
+
+    def base_is_declarative(self, name: str, model_names: frozenset[str]) -> bool:
+        """Whether one base simple name makes its class a declarative model.
+
+        The phase-2 resolution rules, in order: a denylisted provenance
+        vetoes EVERYTHING (even the exact name ``Base`` — this kills
+        ``from pydantic import BaseModel as Base``); then the exact
+        conventional names (``Base``, ``DeclarativeBase`` — exact only,
+        so ``BaseModel``/``BaseSettings``/``BaseException`` never match),
+        a locally registered declarative alias, or membership in the
+        global model-name closure (inheritance across files).
+
+        Args:
+            name: The base's simple name.
+            model_names: Simple names of detected model classes so far.
+
+        Returns:
+            bool: True only when the base is a declarative root.
+        """
+        if self._import_denied(name):
+            return False
+        if name in self.locally_denied_base_names:
+            # A class with this simple name is DEFINED IN THIS FILE with a
+            # denylisted base (e.g. ``class WebhookEvent(BaseModel)`` next
+            # to a genuine ``class WebhookEvent(Base)`` in a models module).
+            # Local definition evidence beats the cross-file closure: the
+            # closure matches by simple name only, so without this veto the
+            # local non-model and every local subclass of it silently
+            # inherit candidacy from the remote namesake (a real dogfood
+            # produced exactly this collision).
+            return False
+        if name == "Base":
+            return True
+        if name == "DeclarativeBase":
+            return True
+        if name in self.declarative_base_aliases:
+            return True
+        return name in model_names
 
     @staticmethod
     def _literal_name_arg(call: ast.Call) -> bool:
@@ -910,11 +1171,22 @@ def _duplicate_findings(resources: list[dict]) -> list[dict]:
     return findings
 
 
-def _class_name_findings(indexes: dict[str, FileIndex]) -> list[dict]:
+def _class_name_findings(
+    indexes: dict[str, FileIndex], model_names: frozenset[str] = frozenset()
+) -> list[dict]:
     """Repeated class names in one file (GF-01): non-collapse proof.
+
+    Only classes that EMIT SOMETHING (table candidates, pure bases) take
+    part: a repeated simple name can only create linkage ambiguity when
+    the repeated class becomes a resource the classifier can address by
+    name. Non-emitting classes (Pydantic's nested ``Config`` idiom, for
+    example) have no resource identity to confuse, so repeating them is
+    not a detector fact — flagging them blocked a real dogfood on noise.
 
     Args:
         indexes: Parsed-file indexes of one discovery request.
+        model_names: The pass-0 inheritance closure, so candidate-hood is
+            judged under the SAME resolution the emission passes use.
 
     Returns:
         list[dict]: One finding per repeated simple class name per file.
@@ -923,6 +1195,11 @@ def _class_name_findings(indexes: dict[str, FileIndex]) -> list[dict]:
     for relpath in sorted(indexes):
         by_simple: dict[str, list[ClassRecord]] = {}
         for rec in indexes[relpath].classes:
+            if not (
+                rec.is_table_candidate(indexes[relpath], model_names)
+                or rec.is_pure_base(indexes[relpath])
+            ):
+                continue
             by_simple.setdefault(rec.qname.split(".")[-1], []).append(rec)
         for simple in sorted(by_simple):
             group = by_simple[simple]
@@ -1045,11 +1322,33 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
     unresolved: list[dict] = []
     signals: list[dict] = []
 
+    # Pass 0: the model-name inheritance closure (phase 2). Starting from
+    # every class with table facts or a declarative root, a base whose
+    # SIMPLE name equals a detected model's simple name makes its class a
+    # model too — iterated to a fixpoint over ALL scanned files, because
+    # a flat file scan sees ``class SalariedEmployee(Employee)`` and
+    # ``class Employee(Base)`` in arbitrary order (or in different files)
+    # and multi-level chains must still resolve. Only the closure is
+    # global: a name enters it exclusively through the conservative
+    # per-file predicate, never through bare base lists.
+    model_names: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for idx in indexes.values():
+            for rec in idx.classes:
+                simple = rec.qname.rsplit(".", 1)[-1]
+                if simple in model_names:
+                    continue
+                if rec.is_table_candidate(idx, model_names):
+                    model_names.add(simple)
+                    changed = True
+
     # Pass 1: class symbols + business tables + typed unresolved + signals.
     for relpath in sorted(indexes):
         idx = indexes[relpath]
         for rec in idx.classes:
-            if rec.is_table_candidate() or rec.is_pure_base(idx):
+            if rec.is_table_candidate(idx, model_names) or rec.is_pure_base(idx):
                 last_segment_unresolved = (
                     rec.tablename_literal is None and not rec.is_pure_base(idx)
                 )
@@ -1064,7 +1363,7 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
                     signals.append(identity)
                 signals.extend(_declaration_signals(rec, relpath, table_name))
                 unresolved.extend(_signal_unresolved_entries(rec, relpath, identity is not None))
-            elif rec.is_table_candidate():
+            elif rec.is_table_candidate(idx, model_names):
                 unresolved.append(_unresolved_entry(relpath, rec))
 
     # Pass 2: direct Table("name", ...) declarations.
@@ -1084,7 +1383,7 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
         )
     )
     findings.extend(_duplicate_findings(resources))
-    findings.extend(_class_name_findings(indexes))
+    findings.extend(_class_name_findings(indexes, frozenset(model_names)))
     findings.sort(
         key=lambda f: (
             f["code"], f["detail"],
