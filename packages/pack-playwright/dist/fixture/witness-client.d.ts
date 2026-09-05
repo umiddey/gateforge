@@ -41,13 +41,16 @@ export declare class WitnessClient {
     preObserve(request: PreObservationRequest): Promise<PreObservationResponse>;
     /**
      * POST /witness/http-observation (ADR 0004 D7): consumes one
-     * engine-observed request matching (method, path) and issues the
-     * witnessed `http.request` record for the obligation claim.
+     * engine-observed request matching (method, path) and issues witnessed
+     * `http.request` records for the declaring test's claimed obligations.
+     * The claim set may be given as `claimIds`, or as the singular legacy
+     * `claimId`/`obligationId` pair (folded in by the server).
      */
     observeHttp(request: {
-        obligationId: string;
+        claimIds?: string[];
+        claimId?: string;
+        obligationId?: string;
         testId: string;
-        claimId: string;
         method: string;
         path: string;
     }): Promise<{
@@ -55,6 +58,10 @@ export declare class WitnessClient {
         runId: string;
         trust: string;
         status: number;
+        records: Array<{
+            recordId: string;
+            obligationId: string;
+        }>;
     }>;
     verifyPersistence(request: PersistenceRequest & {
         testId: string;

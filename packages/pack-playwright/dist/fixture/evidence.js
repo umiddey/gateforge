@@ -297,22 +297,22 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
     // ---------- http observation (ADR 0004 D7) ----------
     // Consumes one witness-proxy observation for the browser request the
     // journey caused and binds the witnessed `http.request` record to the
-    // declared http:* obligation claim. Without real proxied traffic the
+    // declared http:* obligation claims. Without real proxied traffic the
     // witness answers 409 — the suite cannot mint network evidence.
     async function observeHttp(request) {
-        const httpClaim = claims.find((claim) => /:[a-z-]*http:/.test(`:${claim}`) || claim.includes(':http:')) ??
-            claims[0];
-        if (httpClaim === undefined) {
-            throw new Error('no gateforge claim to bind the http observation to');
-        }
+        const httpClaims = claims.filter((claim) => claim.includes(':http:'));
+        const targets = httpClaims.length > 0 ? httpClaims : claims;
         const result = await witness.observeHttp({
-            obligationId: httpClaim,
+            claimIds: [...targets],
             testId,
-            claimId: httpClaim,
             method: request.method.toUpperCase(),
             path: request.path,
         });
-        return { status: result.status, recordId: result.recordId };
+        return {
+            status: result.status,
+            recordId: result.records[0]?.recordId ?? '',
+            recordIds: result.records.map((record) => record.recordId),
+        };
     }
     // ---------- finalize (fail-fast + ledger cross-check) ----------
     async function finalize() {
