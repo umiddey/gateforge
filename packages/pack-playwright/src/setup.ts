@@ -28,10 +28,10 @@ import {
 } from './constants.js';
 
 /** The child witness process started by globalSetup (teardown kills it). */
-let spawned: { child: ChildProcess; url: string } | null = null;
+let spawned: { child: ChildProcess; url: string; proxyUrl: string | null } | null = null;
 
 /** In-progress spawn (avoids double-start in watch mode). */
-let pending: Promise<{ child: ChildProcess; url: string }> | null = null;
+let pending: Promise<{ child: ChildProcess; url: string; proxyUrl: string | null }> | null = null;
 
 /**
  * Starts the witness service as a child process and waits for it to
@@ -40,11 +40,13 @@ let pending: Promise<{ child: ChildProcess; url: string }> | null = null;
  * Args:
  *   env: environment for the child (must carry GATEFORGE_RUN_ID /
  *     GATEFORGE_RUN_TOKEN; the witness derivations are documented in the
- *     pack README).
+ *     pack README). GATEFORGE_PROXY_TARGET / GATEFORGE_MOUNT_PATH start
+ *     the observation proxy (see the `gateforge-witness --help` surface).
  *   timeoutMs: startup timeout.
  *
  * Returns:
- *   {child, url}: running child + its loopback URL.
+ *   {child, url, proxyUrl}: running child, its loopback URL, and the
+ *   observation-proxy URL when one is active (null otherwise).
  *
  * Throws:
  *   Error: when the child exits early or never becomes ready.
@@ -52,24 +54,27 @@ let pending: Promise<{ child: ChildProcess; url: string }> | null = null;
 export async function startWitnessProcess(
   env: NodeJS.ProcessEnv,
   timeoutMs = 15000,
-): Promise<{ child: ChildProcess; url: string }> {
+): Promise<{ child: ChildProcess; url: string; proxyUrl: string | null }> {
   const bin = fileURLToPath(new URL('../../bin/gateforge-witness.js', import.meta.url));
   const child = spawn(process.execPath, [bin], {
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const urlPromise = new Promise<string>((resolveUrl, rejectUrl) => {
+  const urlPromise = new Promise<{ url: string; proxyUrl: string | null }>((resolveUrl, rejectUrl) => {
     let stdout = '';
+    let proxyUrl: string | null = null;
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       rejectUrl(new Error('witness child did not report its URL in time'));
     }, timeoutMs);
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout += chunk.toString('utf8');
+      const proxyMatch = /^GATEFORGE_WITNESS_PROXY_URL=(.+)$/m.exec(stdout);
+      if (proxyMatch !== null) proxyUrl = proxyMatch[1] ?? null;
       const match = /^GATEFORGE_WITNESS_URL=(.+)$/m.exec(stdout);
       if (match !== null) {
         clearTimeout(timer);
-        resolveUrl(match[1] as string);
+        resolveUrl({ url: match[1] as string, proxyUrl });
       }
     });
     child.once('error', (error) => {
@@ -86,9 +91,9 @@ export async function startWitnessProcess(
     });
   });
 
-  const url = await urlPromise;
+  const { url, proxyUrl } = await urlPromise;
   await waitForHealth(url, env[ENV_RUN_TOKEN] ?? '', timeoutMs);
-  return { child, url };
+  return { child, url, proxyUrl };
 }
 
 /** Polls the witness health endpoint until ready (or timeout). */
@@ -143,7 +148,9 @@ export async function gateforgeGlobalSetup(): Promise<void> {
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(
     join(stateDir, WITNESS_URL_FILE),
-    `${JSON.stringify({ url: handle.url })}\n`,
+    // proxyUrl lets harnesses point the browser at the observation proxy
+    // when GATEFORGE_PROXY_TARGET was wired for this run.
+    `${JSON.stringify({ url: handle.url, proxyUrl: handle.proxyUrl })}\n`,
     'utf8',
   );
 }

@@ -10,6 +10,7 @@
  * - obligations without any claim are flagged (GF-24).
  */
 import { afterEach, describe, expect, it } from 'vitest';
+import { createServer } from 'node:http';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GateforgeReporter } from '../src/reporter/reporter.js';
@@ -461,6 +462,131 @@ describe('reporter ledger grading', () => {
     } finally {
       await run.witness.stop();
       await run.target.stop();
+    }
+  });
+
+  it('a claims-lane (evidenceLane: claims) resource grades satisfied, never unclassified', async () => {
+    // The phase-7 witnessed-run blocker: an http.endpoint resource is
+    // user-facing WITHOUT an adapter. The witness classification view
+    // used to drop `evidenceLane`, so the reporter-side engine
+    // re-validation failed ("user-facing resources require an
+    // 'evidenceAdapter'") and the claim graded unclassified. The full
+    // real path must now round-trip: witness view → reporter fetch →
+    // engine classification → witnessed http observation satisfies.
+    const HTTP_CLAIM = 'tenant.http-frontend-errors:http:frontend-request-observed';
+    const project = makeTempProject('reporter-lane');
+    const stateDir = join(project, 'state');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(project, '.gateforge/test-gates/obligations.json'),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        obligations: [
+          {
+            id: HTTP_CLAIM,
+            resourceId: 'tenant.http-frontend-errors',
+            contract: 'http:frontend-request-observed',
+            policyId: 'crud',
+            lifecycle: { create: false, read: false, update: false, delete: false },
+            fingerprint: 'f-http',
+            source: 'src/http.ts',
+            location: { file: 'src/http.ts', line: 1, col: 0 },
+          },
+        ],
+      })}\n`,
+    );
+    writeFileSync(
+      join(stateDir, 'manifest.json'),
+      `${JSON.stringify({ schemaVersion: 1, runId: RUN_ID, startedAt: '2026-08-30T12:00:00.000Z' })}\n`,
+    );
+    // Claims-lane classification: user-facing, NO evidenceAdapter.
+    writeFileSync(
+      join(project, '.gateforge/claims-classifications.yml'),
+      [
+        'schemaVersion: 1',
+        'resources:',
+        '  tenant.http-frontend-errors:',
+        '    exposure: user-facing',
+        '    plane: tenant',
+        '    lifecycle: { create: false, read: false, update: false, delete: false }',
+        '    primaryKey: [method, path]',
+        '    evidenceLane: claims',
+        '',
+      ].join('\n'),
+    );
+    /** Minimal loopback target: every POST answers 201 (observed path echoed). */
+    const target = await new Promise<{ url: string; stop: () => Promise<void> }>((resolve) => {
+      const server = createServer((req, res) => {
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, path: req.url }));
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        if (address === null || typeof address === 'string') throw new Error('no target port');
+        resolve({
+          url: `http://127.0.0.1:${address.port}`,
+          stop: async () => {
+            await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+          },
+        });
+      });
+    });
+    const witness = await startWitness({
+      runId: RUN_ID,
+      token: TOKEN,
+      stateDir,
+      classificationsPath: join(project, '.gateforge/claims-classifications.yml'),
+      proxyTarget: target.url,
+      now: () => '2026-08-30T12:00:01.000Z',
+    });
+    try {
+      saveEnv('GATEFORGE_WITNESS_URL', 'GATEFORGE_RUN_TOKEN', 'GATEFORGE_STATE_DIR', 'GATEFORGE_OBLIGATIONS');
+      process.env.GATEFORGE_WITNESS_URL = witness.url;
+      process.env.GATEFORGE_RUN_TOKEN = TOKEN;
+      process.env.GATEFORGE_STATE_DIR = stateDir;
+      process.env.GATEFORGE_OBLIGATIONS = join(project, '.gateforge/test-gates/obligations.json');
+
+      // Real proxied traffic (the browser request, engine-observed)…
+      const forward = await fetch(`${witness.proxyUrl as string}/ops/frontend-errors`, {
+        method: 'POST',
+      });
+      expect(forward.status).toBe(201);
+      // …consumed once as a witnessed http.request record…
+      const client = new WitnessClient(witness.url, TOKEN);
+      await client.observeHttp({
+        obligationId: HTTP_CLAIM,
+        testId: TEST_ID,
+        claimId: HTTP_CLAIM,
+        method: 'POST',
+        path: '/ops/frontend-errors',
+      });
+      // …plus the provenanced claimed ui.action anchor.
+      await client.postRecords({
+        claimId: HTTP_CLAIM,
+        kind: 'ui.action',
+        payload: { operation: 'create', entityId: 'frontend-error-1', fields: {} },
+        testId: TEST_ID,
+      });
+
+      await runReporter(stateDir, [
+        {
+          id: TEST_ID,
+          annotations: [{ type: 'gateforge', description: HTTP_CLAIM }],
+        },
+      ]);
+      const ledger = JSON.parse(readFileSync(join(stateDir, 'ledger.json'), 'utf8')) as Array<{
+        verdict: string;
+        reason: string | null;
+        trustTier: string;
+      }>;
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0]?.verdict).not.toBe('unclassified');
+      expect(ledger[0]?.reason ?? '').not.toContain('evidenceAdapter');
+      expect(ledger[0]?.verdict).toBe('satisfied');
+      expect(ledger[0]?.trustTier).toBe('witnessed');
+    } finally {
+      await witness.stop();
+      await target.stop();
     }
   });
 });

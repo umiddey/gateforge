@@ -114,8 +114,9 @@ class HttpError extends Error {
 interface WitnessState {
   options: Required<
     Pick<WitnessOptions, 'runId' | 'token' | 'requestTimeoutMs' | 'host'>
-  > &
-    WitnessOptions;
+  > & {
+    mountPath: string | null;
+  } & WitnessOptions;
   adapters: Map<string, EvidenceAdapter>;
   classifications: Record<string, Classification>;
   ledger: Map<string, IssuedRecord>;
@@ -150,6 +151,45 @@ interface WitnessState {
 /** Codepoint-wise comparison for deterministic ordering. */
 function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Normalizes the declared observation-proxy mount prefix (null when
+ * unset/empty). Fail-closed on values that can never be a plain path
+ * prefix — a malformed declaration would otherwise silently mismatch
+ * obligation identities, the exact failure the option exists to prevent.
+ */
+function normalizeMountPath(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  let path = raw.trim();
+  if (!path.startsWith('/')) path = `/${path}`;
+  if (path.length > 1) path = path.replace(/\/+$/, '');
+  if (path === '/' || /[\s?#]/.test(path)) {
+    throw new WitnessStartupError(
+      `invalid mountPath '${raw}': declare the browser-facing mount prefix as a non-empty ` +
+        "absolute path like '/api'",
+    );
+  }
+  return path;
+}
+
+/**
+ * Strips the declared mount prefix from a proxied request URL (path
+ * plus possible query/fragment), returning the backend-facing URL the
+ * proxy forwards AND records. A request outside the prefix passes
+ * through untouched, and with no declared prefix the URL is returned
+ * byte-identical (the unmounted proxy's behavior).
+ */
+function stripMountPath(rawUrl: string, mountPath: string | null): string {
+  if (mountPath === null) return rawUrl;
+  const queryStart = rawUrl.search(/[?#]/);
+  const pathPart = queryStart === -1 ? rawUrl : rawUrl.slice(0, queryStart);
+  const suffix = queryStart === -1 ? '' : rawUrl.slice(queryStart);
+  if (pathPart === mountPath) return `/${suffix}`;
+  if (pathPart.startsWith(`${mountPath}/`)) {
+    return `${pathPart.slice(mountPath.length)}${suffix}`;
+  }
+  return rawUrl;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -231,6 +271,15 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   const classifications = loadClassifications(classificationsPath);
 
   const targetBaseUrl = options.targetBaseUrl ?? null;
+  // The mount prefix declares how the browser-facing deployment mounts
+  // the backend for the OBSERVATION PROXY; it is meaningless without one.
+  const mountPath = normalizeMountPath(options.mountPath);
+  if (mountPath !== null && (options.proxyTarget === undefined || options.proxyTarget === '')) {
+    throw new WitnessStartupError(
+      'witness option mountPath requires proxyTarget: the mount prefix declares how the ' +
+        'observation proxy bridges the browser-facing deployment and the backend',
+    );
+  }
   // GF-10: the attestation subject must be loopback — block at startup,
   // before any mutation-capable request surface exists.
   if (targetBaseUrl !== null) {
@@ -264,6 +313,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
       ...options,
       runId: options.runId,
       token: options.token,
+      mountPath,
       verifierKey:
         typeof options.verifierKey === 'string' && options.verifierKey.length > 0
           ? options.verifierKey
@@ -315,18 +365,24 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         const body = Buffer.concat(chunks);
+        // Mount-prefix handling: forward the backend-facing (STRIPPED)
+        // URL, and record the same STRIPPED path below, so observations
+        // match the backend-derived obligation identities the suite
+        // claims. With no declared mount path the URL is forwarded and
+        // recorded byte-identical to today.
+        const forwardUrl = stripMountPath(req.url ?? '/', state.options.mountPath);
         const forward = request(
           {
             protocol: proxyTargetUrl.protocol,
             hostname: proxyTargetUrl.hostname,
             port: proxyTargetUrl.port,
             method: req.method,
-            path: req.url,
+            path: forwardUrl,
             headers: { ...req.headers, host: proxyTargetUrl.host },
           },
           (upstream) => {
             const status = upstream.statusCode ?? 0;
-            const observedPath = normalizeObservedPath(req.url ?? '/');
+            const observedPath = normalizeObservedPath(forwardUrl);
             // Bounded response-body snapshot: the tap is attached BEFORE
             // piping so both consumers receive the stream; forwarding to
             // the browser stays unbuffered (the snapshot never gates the

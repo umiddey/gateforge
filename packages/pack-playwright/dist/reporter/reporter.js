@@ -137,6 +137,12 @@ export class GateforgeReporter {
                     ...(typeof entry['evidenceAdapter'] === 'string'
                         ? { evidenceAdapter: entry['evidenceAdapter'] }
                         : {}),
+                    // The claims lane (http.endpoint resources) MUST reach the
+                    // engine: without it a user-facing adapter-free entry fails the
+                    // engine's classification validation and grades unclassified.
+                    ...(entry['evidenceLane'] === 'adapter' || entry['evidenceLane'] === 'claims'
+                        ? { evidenceLane: entry['evidenceLane'] }
+                        : {}),
                     lifecycle: {
                         create: lifecycle['create'] === true,
                         read: lifecycle['read'] === true,
@@ -176,6 +182,7 @@ export class GateforgeReporter {
                 exposure: view.exposure === 'internal' ? 'internal' : 'user-facing',
                 plane: view.plane === 'master' ? 'master' : view.plane === 'global' ? 'global' : 'tenant',
                 ...(view.evidenceAdapter === undefined ? {} : { evidenceAdapter: view.evidenceAdapter }),
+                ...(view.evidenceLane === undefined ? {} : { evidenceLane: view.evidenceLane }),
                 lifecycle: view.lifecycle,
                 primaryKey,
             };

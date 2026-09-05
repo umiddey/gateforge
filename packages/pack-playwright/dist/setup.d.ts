@@ -23,11 +23,13 @@ import { type ChildProcess } from 'node:child_process';
  * Args:
  *   env: environment for the child (must carry GATEFORGE_RUN_ID /
  *     GATEFORGE_RUN_TOKEN; the witness derivations are documented in the
- *     pack README).
+ *     pack README). GATEFORGE_PROXY_TARGET / GATEFORGE_MOUNT_PATH start
+ *     the observation proxy (see the `gateforge-witness --help` surface).
  *   timeoutMs: startup timeout.
  *
  * Returns:
- *   {child, url}: running child + its loopback URL.
+ *   {child, url, proxyUrl}: running child, its loopback URL, and the
+ *   observation-proxy URL when one is active (null otherwise).
  *
  * Throws:
  *   Error: when the child exits early or never becomes ready.
@@ -35,6 +37,7 @@ import { type ChildProcess } from 'node:child_process';
 export declare function startWitnessProcess(env: NodeJS.ProcessEnv, timeoutMs?: number): Promise<{
     child: ChildProcess;
     url: string;
+    proxyUrl: string | null;
 }>;
 /**
  * Playwright `globalSetup`: spawn the witness when the run has a state

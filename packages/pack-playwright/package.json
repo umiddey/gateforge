@@ -17,6 +17,7 @@
     },
     "./reporter": {
       "types": "./dist/reporter/reporter.d.ts",
+      "require": "./dist/reporter/reporter.cjs",
       "import": "./dist/reporter/reporter.js"
     },
     "./fixture": {

@@ -604,7 +604,7 @@ export function compileEndpointContribution(contributions, options = {}) {
                 }
             }
             else if (resolved.length > 0) {
-                configPlane = resolved[0].plane;
+                configPlane = resolved[0]?.plane ?? null;
             }
         }
         const handlerLower = endpointRoutes
