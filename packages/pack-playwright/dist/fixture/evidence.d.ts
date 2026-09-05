@@ -89,6 +89,7 @@ export interface EvidenceApi {
         observe(request: {
             method: string;
             path: string;
+            expectedStatus?: number;
         }): Promise<{
             status: number;
             recordId: string;

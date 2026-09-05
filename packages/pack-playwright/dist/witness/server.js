@@ -363,11 +363,21 @@ function normalizeObservedPath(rawPath) {
  * `{method, url, status, bodySha256, bodyBytes}` — the bounded response
  * snapshot hash and total byte count ride in the record, a tamper-evident
  * trace of exactly what the engine observed.
+ *
+ * An optional `expectedStatus` narrows the consume match to exchanges
+ * the target answered with that exact status. This stays honest: the
+ * suite still cannot fabricate or mutate observations — it only selects
+ * WHICH real exchange it is accounting for. It exists because one
+ * (method, path) shape can legitimately fire several times per run with
+ * different statuses (e.g. the SPA's unauthenticated `/me` probe ahead of
+ * the authenticated one); FIFO-without-status would bind a `:response-
+ * status-ok` claim to an observed 401 the journey never intended.
  */
 async function handleHttpObservation(state, res, body) {
     const testId = body['testId'];
     const method = body['method'];
     const path = body['path'];
+    const expectedStatus = body['expectedStatus'];
     // Claim binding: `claimIds` (the declaring test's claimed obligation
     // ids for this endpoint) — with the singular legacy `claimId` /
     // `obligationId` pair still accepted and folded in.
@@ -393,18 +403,24 @@ async function handleHttpObservation(state, res, body) {
         testId.length === 0 ||
         typeof method !== 'string' ||
         typeof path !== 'string' ||
-        path.length === 0) {
+        path.length === 0 ||
+        (expectedStatus !== undefined &&
+            (typeof expectedStatus !== 'number' || !Number.isInteger(expectedStatus)))) {
         sendJson(res, 400, {
             error: 'http observation requires testId, method, and path strings plus at least one ' +
-                "claimed obligation id ('<resourceId>:<contract>')",
+                "claimed obligation id ('<resourceId>:<contract>'); expectedStatus, when present, " +
+                'must be an integer status code',
         });
         return;
     }
     const wanted = normalizeObservedPath(path);
-    const index = state.observed.findIndex((entry) => entry.method === method.toUpperCase() && entry.path === wanted);
+    const index = state.observed.findIndex((entry) => entry.method === method.toUpperCase() &&
+        entry.path === wanted &&
+        (expectedStatus === undefined || entry.status === expectedStatus));
     if (index === -1) {
         sendJson(res, 409, {
-            error: `no engine-observed request matches ${method.toUpperCase()} ${wanted}; drive the ` +
+            error: `no engine-observed request matches ${method.toUpperCase()} ${wanted}` +
+                `${expectedStatus === undefined ? '' : ` with status ${String(expectedStatus)}`}; drive the ` +
                 'browser through the observation proxy before claiming the obligation',
         });
         return;

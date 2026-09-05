@@ -307,6 +307,7 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
             testId,
             method: request.method.toUpperCase(),
             path: request.path,
+            ...(request.expectedStatus !== undefined ? { expectedStatus: request.expectedStatus } : {}),
         });
         return {
             status: result.status,

@@ -37,6 +37,7 @@ export const ALL_FIXTURES = [
 	'example_models.py',
 	'composite_pk.py',
 	'signals_archive.py',
+	'signals_updateable.py',
 	'signals_computed_pk.py',
 	'candidates.py',
 	'candidate_closure.py',
