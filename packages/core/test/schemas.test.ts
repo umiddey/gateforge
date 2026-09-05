@@ -427,3 +427,40 @@ describe('archive lifecycle requires a non-empty owner-owned archiveFields map',
     ).toBe(true);
   });
 });
+
+describe('evidenceLane: the claims lane exempts a user-facing entry from the adapter', () => {
+  const businessBase = {
+    exposure: 'user-facing',
+    plane: 'tenant',
+    lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'hard' },
+    primaryKey: ['id'],
+  };
+
+  it('user-facing WITHOUT evidenceAdapter still fails (the business red side)', () => {
+    const result = ClassificationSchema.safeParse(businessBase);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.path.includes('evidenceAdapter'))).toBe(true);
+    }
+  });
+
+  it('user-facing with evidenceAdapter present passes unchanged', () => {
+    expect(ClassificationSchema.safeParse({ ...businessBase, evidenceAdapter: 'accounts' }).success).toBe(
+      true,
+    );
+  });
+
+  it("user-facing with evidenceLane 'claims' and no adapter passes (http.endpoint lane)", () => {
+    // The classifier mints this for http.endpoint resources only; the
+    // schema-level contract is that the lane REPLACES the adapter demand.
+    expect(ClassificationSchema.safeParse({ ...businessBase, evidenceLane: 'claims' }).success).toBe(
+      true,
+    );
+  });
+
+  it('rejects unknown evidenceLane values', () => {
+    expect(
+      ClassificationSchema.safeParse({ ...businessBase, evidenceLane: 'vibes' }).success,
+    ).toBe(false);
+  });
+});

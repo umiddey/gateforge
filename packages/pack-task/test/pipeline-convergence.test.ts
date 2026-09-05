@@ -1,14 +1,19 @@
 /**
- * Task/model convergence regression (plan open item, ADR 0003 D5): the
- * pack's resources and internality signals must CONVERGE through the real
- * graph + classifier path — the resource's bare `resourceName` is the
- * graph identity, the internality signal targets exactly that name, and
- * a worker-only task can be certified internal ONLY inside a complete
- * certificate (declaration + complete scan + trusted category).
- *
- * Guards the whole chain against identity drift between the detector's
- * resource ids (`task.<name>`), its signal targets (`<name>`), and the
- * graph's bare-name normalization (`^[^.]+$`).
+ * Task/model convergence regression (plan open item, ADR 0003 D5 +
+ * dogfood remediation phase 4): the pack's discovery output must
+ * CONVERGE through the real graph + classifier path, and — since
+ * phase 4 — the pack must supply NO guessed reachability. It once
+ * minted `internality`/`worker` signals targeted at model names
+ * guessed from the worker file; those guesses are path-derived, so
+ * every miss became a `STALE_SIGNAL_TARGET` blocker and every hit was
+ * uncertified luck. Now `classificationSignals` is always empty: the
+ * graph identity (`accounts`, from the model pack) still converges,
+ * and a worker-only internal intent is honestly UNCERTIFIED —
+ * `INCOMPLETE_PROOF_SCOPE` with the conservative user-facing default —
+ * even with the declaration + complete scan + trusted worker binding
+ * all in place. Core's `STALE_SIGNAL_TARGET` detection remains for
+ * genuinely stale authority signals; the trusted worker binding simply
+ * stays unexercised instead of guessing.
  */
 import { afterAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -27,9 +32,11 @@ function policy(_dir: string): ClassificationPolicy {
     // Scan roots are repo-root-relative globs (the detector's location
     // space): everything the temp project contains is in scope.
     scanRoots: ['**'],
-    // Reachability for the worker category is bound to the REAL pack-task
-    // detector (red-team round 5): its own signals are the only ones the
-    // certificate may use for this category.
+    // Reachability for the worker category stays bound to the pack-task
+    // detector (red-team round 5). Since phase 4 the pack asserts no
+    // reachability, so the binding is legitimately unexercised: the
+    // certificate must fall back to the conservative default instead of
+    // being fed guessed targets.
     trustedInternalEntryPoints: [
       { category: 'worker', patterns: ['**/workers/**'], detector: 'gateforge.pack-task' },
     ],
@@ -177,30 +184,52 @@ describe('task/model convergence through the real pipeline path', () => {
     ].join('\n'),
   );
 
-  it('worker traces to target model and emits internality signals targeting accounts', async () => {
+  it('model converges through the graph while the pack emits NO classification signals', async () => {
     const { graph, outcome } = await classifyProject(dir);
     expect(graph.resources).toHaveLength(1);
     expect(graph.resources[0]?.name).toBe('accounts');
     expect(outcome.resources).toHaveLength(0);
-    const targetNames = outcome.classificationSignals.map((s) => s.target.resourceName);
-    expect(targetNames).toContain('accounts');
+    // Phase 4: no guessed-target signals at all. (Red on the
+    // pre-Phase-4 detector, which minted `internality`/`worker` signals
+    // targeting `account`/`accounts` from the file's `Account` import —
+    // a guess that merely happened to match the discovered table.)
+    expect(outcome.classificationSignals).toEqual([]);
   });
 
-  it('worker-only model certifies internal inside a complete certificate', async () => {
+  it('worker-only internal intent stays honestly UNCERTIFIED without guessed reachability', async () => {
+    // Declaration + complete scan + exhaustive coverage + trusted worker
+    // binding all hold — but the pack supplies no reachability signal,
+    // so the certificate cannot be built. The decision stays
+    // conservative and TYPED: no user-facing classification object (the
+    // posture also demands a reviewed evidence adapter), with
+    // single-cause blocks naming exactly what is missing — never a
+    // guess-based `internal`.
     const evidence = [internalDeclaration(dir)];
     const ok = await classifyProject(dir, evidence);
     const accounts = ok.result.classification.decisions.find((d) => d.name === 'accounts');
-    expect(accounts?.classification?.exposure).toBe('internal');
-    expect(accounts?.classification?.rules).toContain('EXPOSURE_INTERNAL_CERTIFICATE');
+    expect(accounts).toBeDefined();
+    expect(accounts?.classification?.exposure ?? null).not.toBe('internal');
+    const blockCodes = accounts?.blocks.map((b) => b.code) ?? [];
+    expect(blockCodes).toContain('ADAPTER_MISSING');
+    expect(blockCodes).toContain('INCOMPLETE_PROOF_SCOPE');
+    const proof = accounts?.blocks.find((b) => b.code === 'INCOMPLETE_PROOF_SCOPE');
+    expect(proof?.detail).toContain('no trusted-internal reachability signal binds this resource');
   });
 
   it('in-scope finding invalidates the closed-world attestation', async () => {
+    // A hole in the complete-scan attestation produces its own typed
+    // INCOMPLETE_PROOF_SCOPE cause; the decision stays conservative —
+    // never `internal` — whether or not any other proof ingredient
+    // happens to hold.
     const evidence = [internalDeclaration(dir)];
     const holed = await classifyProject(dir, evidence, [
       { code: 'parse_error', file: 'workers/sync.ts' },
     ]);
     const accounts = holed.result.classification.decisions.find((d) => d.name === 'accounts');
-    expect(accounts?.classification?.exposure).not.toBe('internal');
+    expect(accounts).toBeDefined();
+    expect(accounts?.classification?.exposure ?? null).not.toBe('internal');
+    const proof = accounts?.blocks.find((b) => b.code === 'INCOMPLETE_PROOF_SCOPE');
+    expect(proof?.detail).toContain('the complete-scan attestation fails');
   });
 
   afterAll(() => {

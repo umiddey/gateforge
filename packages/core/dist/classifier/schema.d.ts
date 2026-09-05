@@ -124,6 +124,10 @@ export declare const EffectiveClassificationSchema: z.ZodObject<{
     }, z.core.$strict>;
     primaryKey: z.ZodArray<z.ZodString>;
     evidenceAdapter: z.ZodOptional<z.ZodString>;
+    evidenceLane: z.ZodOptional<z.ZodEnum<{
+        adapter: "adapter";
+        claims: "claims";
+    }>>;
     notes: z.ZodOptional<z.ZodString>;
     rules: z.ZodArray<z.ZodString>;
     defaultsApplied: z.ZodArray<z.ZodString>;

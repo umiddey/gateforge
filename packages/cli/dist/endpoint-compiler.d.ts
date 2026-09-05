@@ -1,25 +1,3 @@
-/**
- * The endpoint compiler (ADR 0004 D5/D6, plan phase 4): a deterministic
- * CLI-pipeline stage that consumes every detector contribution's
- * `http.contract` facts, joins frontend calls to backend routes
- * (`@gateforge/http-contract`), classifies endpoint capabilities with
- * rules over detector FACTS (never framework syntax), links endpoints to
- * business resources only through unambiguous evidence, and emits a
- * synthetic `gateforge.endpoint-compiler` contribution whose endpoint
- * resources are classified like any other resource.
- *
- * Guarantees:
- * - pure function of the contributions; input permutation yields
- *   byte-identical output;
- * - unwired calls, ambiguous joins, unresolved semantics, and ambiguous
- *   linkage become typed blocking entries — never guesses, never
- *   first-match-wins, never absence-as-internal;
- * - HTTP method is one candidate among many: command suffixes beat
- *   methods, and every `crud-*` rule demands corroboration (schema
- *   symbols, response model, or a linked business resource);
- * - entity linkage is an explicit attribute, never the path-derived name
- *   itself (the route/table collision red probe stays green).
- */
 import { type HttpContractFact, type HttpMethod, type JoinBlock } from '@gateforge/http-contract';
 import { type DetectorOutput, type Finding } from '@gateforge/core';
 /** Detector id of the synthetic compiler contribution (engine-issued). */
@@ -82,14 +60,34 @@ export declare function symbolCorroborates(symbol: string, candidate: string): b
  * Total and deterministic: no substring or edit-distance matching.
  */
 export declare function handlerCorroborates(handlerSymbol: string, candidate: string): boolean;
+/**
+ * Whether the canonical path IS an infrastructure-probe route: the bare
+ * root `/`, or a route of depth <= 2 where some segment IS exactly
+ * (case-insensitively) one of `OPERATIONAL_PROBE_SEGMENTS`. Deep business
+ * routes never qualify, whatever their segments spell.
+ */
+export declare function isOperationalProbePath(canonicalPath: string): boolean;
 /** Extracts and validates contract facts from every contribution. */
 export declare function extractContractFacts(contributions: readonly DetectorOutput[]): {
     facts: HttpContractFact[];
     findings: Finding[];
 };
 /**
+ * Optional compiler inputs. Omitted (default) — e.g. by direct callers
+ * and existing tests — no config document is read and the compiled
+ * output is byte-identical to the pre-config-channel compiler.
+ */
+export interface EndpointCompilerOptions {
+    /**
+     * Repo root. When provided, `.gateforge/planes.json` is read from it
+     * (the same path convention the packs use) and its `match` rules
+     * become endpoint-plane evidence keyed on router source paths.
+     */
+    readonly cwd?: string;
+}
+/**
  * Compiles the endpoint inventory and the synthetic contribution.
  * Pure over its inputs.
  */
-export declare function compileEndpointContribution(contributions: readonly DetectorOutput[]): CompileResult;
+export declare function compileEndpointContribution(contributions: readonly DetectorOutput[], options?: EndpointCompilerOptions): CompileResult;
 //# sourceMappingURL=endpoint-compiler.d.ts.map

@@ -5,11 +5,14 @@
 export {
   createFastapiDetector,
   DEFAULT_COMMAND,
+  DEFAULT_FASTAPI_SCAN_CONFIG,
+  FASTAPI_SCAN_CONFIG_PATH,
   pythonEnvironment,
+  readFastapiScanConfigOrNull,
   type FastapiDetector,
   type FastapiDetectorOptions,
+  type FastapiScanConfig,
 } from './detector.js';
-export { pathDerivedResourceName, operationForMethod } from './facts.js';
 export { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 import { createFastapiDetector } from './detector.js';
 

@@ -1,6 +1,6 @@
 /**
  * Phase 2 subprocess tests: the real python AST detector over GPP/3,
- * wrapped by the pack's canonicalization and signal minting.
+ * wrapped by the pack's canonicalization (phase 4: no signal minting).
  * Engine-class tests: deterministic, offline (spawn + files only).
  */
 import { readFileSync } from 'node:fs';
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ClassificationSignalSchema, ResourceSchema } from '@gateforge/core';
 import { createFastapiDetector } from '../src/detector.js';
-import { PACK_PLUGIN_ID, PACK_VERSION } from '../src/version.js';
+import { PACK_VERSION } from '../src/version.js';
 import { ALL_FIXTURES, FIXTURE_ROOT, pythonEnv, runDetector, runDiscover } from './helpers.js';
 
 interface FactView {
@@ -127,31 +127,31 @@ describe('fastapi detector (subprocess, real python)', () => {
     expect(outcome.scannedPaths).toEqual(['simple/main.py']);
   });
 
-  it('mints exposure/lifecycle signals for name-derivable routes only', async () => {
+  it('emits NO classification signals for path-derived targets (phase 4)', async () => {
     const outcome = await runDetector(['simple/main.py']);
-    const signals = outcome.classificationSignals.map(
-      (signal: unknown) => {
-        const typed = signal as { dimension: string; target: { resourceName?: string } };
-        return `${typed.dimension}:${typed.target?.['resourceName']}`;
-      },
-    );
-    expect(signals).toContain('exposure:accounts');
-    expect(signals).toContain('lifecycle.create:accounts');
-    expect(signals).toContain('lifecycle.read:accounts');
-    expect(signals).toContain('exposure:ready');
-    // No signals carry a foreign detector identity (host authority tie).
-    for (const signal of outcome.classificationSignals) {
-      const detector = (signal as { detector: { id: string; version: string } })['detector'];
-      expect(detector).toEqual({ id: PACK_PLUGIN_ID, version: PACK_VERSION });
-    }
+    // The facts (and their schema-symbol/handler linkage evidence) still
+    // flow to the endpoint compiler...
+    expect(
+      facts(outcome.resources).some(
+        (fact) => fact.attributes['handlerSymbol'] === 'simple.main:create_account',
+      ),
+    ).toBe(true);
+    // ...but the wrapper mints no signals: the pre-phase-4 wrapper
+    // targeted 'accounts'/'ready' (path-derived guesses that mostly name
+    // no discovered resource — the dogfood STALE_SIGNAL_TARGET flood).
+    // Route→resource linkage is the CLI endpoint compiler's exclusive job.
+    expect(outcome.classificationSignals).toEqual([]);
   });
 
-  it('validates every fact against the core ResourceSchema and every signal', async () => {
+  it('validates every fact against the core ResourceSchema and keeps signals empty', async () => {
     const outcome = await runDetector([...ALL_FIXTURES]);
     for (const resource of outcome.resources) {
       const parsed = ResourceSchema.safeParse(resource);
       expect(parsed.success).toBe(true);
     }
+    // Phase 4: zero signals over the whole fixture tree, whatever the
+    // route shapes (derivable names included).
+    expect(outcome.classificationSignals).toEqual([]);
     for (const signal of outcome.classificationSignals) {
       const parsed = ClassificationSignalSchema.safeParse(signal);
       expect(parsed.success).toBe(true);
