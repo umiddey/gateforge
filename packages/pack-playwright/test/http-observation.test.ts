@@ -528,3 +528,45 @@ describe('observation-proxy mount path (deployment-topology declaration)', () =>
     }
   });
 });
+
+describe('status-narrowed consume (phase 7: multi-status shapes)', () => {
+  it('expectedStatus narrows the FIFO match and does not consume on mismatch', async () => {
+    const target = await startTarget(); // answers 201 for everything
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      await callProxy(witness.proxyUrl as string, '/api/contracts');
+
+      // A wrong expected status matches nothing and consumes NOTHING.
+      const miss = await observe(witness, { expectedStatus: 404 });
+      expect(miss.statusCode).toBe(409);
+
+      // The right status consumes the OLDEST matching exchange.
+      const hit = await observe(witness, { expectedStatus: 201 });
+      expect(hit.statusCode).toBe(200);
+
+      // The second exchange is still available; a status-less consume finds it.
+      const second = await observe(witness);
+      expect(second.statusCode).toBe(200);
+
+      // And then the shape is exhausted.
+      const exhausted = await observe(witness);
+      expect(exhausted.statusCode).toBe(409);
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('rejects a non-integer expectedStatus (400)', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      const bad = await observe(witness, { expectedStatus: '2xx' });
+      expect(bad.statusCode).toBe(400);
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+});

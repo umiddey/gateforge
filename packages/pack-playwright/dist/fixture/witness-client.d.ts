@@ -53,6 +53,7 @@ export declare class WitnessClient {
         testId: string;
         method: string;
         path: string;
+        expectedStatus?: number;
     }): Promise<{
         recordId: string;
         runId: string;
