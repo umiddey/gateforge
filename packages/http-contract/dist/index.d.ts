@@ -11,6 +11,6 @@ export { FASTAPI_PREFIX_UNRESOLVED, FRONTEND_CALL_TARGET_UNRESOLVED, FRONTEND_RO
 export { HTTP_CONTRACT_SCHEMA_VERSION, HTTP_CONTRACT_KIND, HTTP_ENDPOINT_KIND, HTTP_METHODS, HttpContractFactSchema, HttpContractRoleSchema, HttpContractSchemaVersionField, HttpLocationSchema, HttpMethodSchema, type HttpContractFact, type HttpContractRole, type HttpLocation, type HttpMethod, } from './schema.js';
 export { HTTP_CONTRACT_VERSION, } from './version.js';
 export { HTTP_PARAM_SLOT, HTTP_WILDCARD_SLOT, normalizeHttpMethod, normalizeHttpPath, pathSegments, type NormalizePathDynamic, type NormalizePathOk, type NormalizePathOptions, type NormalizePathResult, } from './normalize.js';
-export { canonicalEndpointIdentity, endpointResourceName, joinFrontendCalls, routeMatchesCall, type EndpointIdentity, type JoinBlock, type JoinedEndpoint, type JoinResult, } from './join.js';
+export { canonicalEndpointIdentity, endpointResourceName, joinFrontendCalls, routeMatchKind, routeMatchesCall, type EndpointIdentity, type JoinBlock, type JoinedEndpoint, type JoinResult, type RouteMatchKind, } from './join.js';
 export { derivePathResourceName } from './linkage.js';
 //# sourceMappingURL=index.d.ts.map

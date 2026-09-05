@@ -12,16 +12,19 @@
  * The default export is the CLI in-process plugin contract
  * (`discover(paths)`); the same python detector runs under the CLI's
  * subprocess transport via `python3 -m gateforge_sqlalchemy_detector`.
- * Plane mapping is configurable from the project config's
- * classifications file (or programmatically via the factory).
+ * Plane evidence is configured declaratively via `.gateforge/planes.json`
+ * (or programmatically via the factory); declarative rules resolve with
+ * explicit-beats-general precedence — a table claimed by a `tables`
+ * rule ignores `match` globs, and conflicts fail closed within a tier.
  *
- * See README.md for setup, both transports, the classification
- * workflow, and the entity-adapter schema + example adapter.
+ * See README.md for setup, both transports, the plane-config schema and
+ * evaluation semantics, the classification workflow, and the
+ * entity-adapter schema + example adapter.
  */
 import { createSqlalchemyDetector } from './detector.js';
 export { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
-export { createSqlalchemyDetector, DEFAULT_COMMAND, pythonEnvironment, applyPlaneMapping, } from './detector.js';
-export { NO_PLANE_MAPPING, byTableName, } from './planes.js';
+export { createSqlalchemyDetector, DEFAULT_COMMAND, pythonEnvironment, applyPlaneMapping, applyPlanesConfig, PLANE_RULE_CONTRADICTION, } from './detector.js';
+export { DEFAULT_PLANES_CONFIG, NO_PLANE_MAPPING, PLANES_CONFIG_PATH, byTableName, planeRuleMatches, readPlanesConfigOrNull, resolvePlaneByRules, } from './planes.js';
 export { EntityAdapterSchema, validateEntityAdapter, } from './adapter-schema.js';
 /** The default CLI in-process plugin module: `{ discover(paths) }`. */
 export default createSqlalchemyDetector();

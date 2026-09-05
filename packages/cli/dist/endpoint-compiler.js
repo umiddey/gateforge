@@ -9,8 +9,9 @@
  * resources are classified like any other resource.
  *
  * Guarantees:
- * - pure function of the contributions; input permutation yields
- *   byte-identical output;
+ * - pure function of the contributions plus the optional declarative
+ *   endpoint-plane config; input permutation yields byte-identical
+ *   output;
  * - unwired calls, ambiguous joins, unresolved semantics, and ambiguous
  *   linkage become typed blocking entries — never guesses, never
  *   first-match-wins, never absence-as-internal;
@@ -19,9 +20,28 @@
  *   symbols, response model, or a linked business resource);
  * - entity linkage is an explicit attribute, never the path-derived name
  *   itself (the route/table collision red probe stays green).
+ *
+ * Endpoint-plane config channel (plan phase 5): the SAME
+ * `.gateforge/planes.json` document that classifies business tables can
+ * declare endpoint planes — an explicit, human-reviewed declaration
+ * keyed on the ROUTER SOURCE FILE path (`match` globs; `tables` rules
+ * never apply to endpoints). ALL matching rules must agree: agreement
+ * emits a plane-dimension signal exactly like the classifier's
+ * inheritance channel; disagreement emits a typed
+ * `PLANE_RULE_CONTRADICTION` blocking entry and no plane evidence; no
+ * matching rule leaves the endpoint on the inheritance/operational/
+ * unresolved channels as before. Absence of the config file is normal
+ * and byte-identical to not having this channel; a malformed document
+ * throws (fail closed). The config plane participates as EVIDENCE, never
+ * as a blanket override: when the linked-resource/operational plane
+ * derivable from the contributions contradicts it, both assertions are
+ * emitted so the classifier blocks with `PLANE_CONTRADICTION`.
  */
+import { join as joinPath } from 'node:path';
 import { ENDPOINT_RESOURCE_LINK_UNRESOLVED, ENDPOINT_SEMANTICS_UNRESOLVED, HTTP_CONTRACT_KIND, HTTP_ENDPOINT_KIND, HttpContractFactSchema, canonicalEndpointIdentity, derivePathResourceName, endpointResourceName, joinFrontendCalls, } from '@gateforge/http-contract';
 import { HTTP_ENDPOINT_RESOURCE_KIND } from '@gateforge/core';
+import { PLANE_RULE_CONTRADICTION, PLANES_CONFIG_PATH, readPlanesConfigOrNull, resolvePlaneByRules, } from '@gateforge/pack-sqlalchemy';
+import { UsageError } from './errors.js';
 /** Detector id of the synthetic compiler contribution (engine-issued). */
 export const ENDPOINT_COMPILER_DETECTOR_ID = 'gateforge.endpoint-compiler';
 /** Schema version of the compiler's output payloads. */
@@ -103,6 +123,53 @@ export function handlerCorroborates(handlerSymbol, candidate) {
     return false;
 }
 /**
+ * The genuine operational-probe path shape (plan §6 "Health/operations").
+ *
+ * WHY segment-exact + depth-capped: the previous rule matched the probe
+ * words at ANY depth, so business sub-resources whose paths happen to
+ * contain a probe-sounding SEGMENT were misclassified operational-global
+ * (health-operations) — silently exempting them from adapters and
+ * obligations (a dogfood enforcement hole). Concrete false positives:
+ * `…/operating-costs/settlements/{}/readiness` and
+ * `…/meter-readings/readiness` (business readiness states, via the then-
+ * listed `readiness`), `/admin/imports/task/{}/status` (business job
+ * status, via `status`), `/admin/clients/{}/health` (per-client health
+ * sub-resource, via `health`). An infrastructure probe is a TOP-LEVEL
+ * route, not a sub-resource: the words below must BE a path segment on a
+ * route of depth <= 2 hanging directly off the root. `readiness`,
+ * `liveness`, `status`, and `ops` are deliberately NOT on the list —
+ * they are business-vocabulary words (`status` alone is half of every
+ * job API); the unambiguous probe spellings (`healthz`, `readyz`,
+ * `livez`) and the bare root `/` cover the infrastructure side.
+ */
+const OPERATIONAL_PROBE_SEGMENTS = new Set([
+    'health',
+    'healthz',
+    'ready',
+    'readyz',
+    'live',
+    'livez',
+    'drain',
+    'metrics',
+    'ping',
+    'version',
+    'info',
+]);
+/**
+ * Whether the canonical path IS an infrastructure-probe route: the bare
+ * root `/`, or a route of depth <= 2 where some segment IS exactly
+ * (case-insensitively) one of `OPERATIONAL_PROBE_SEGMENTS`. Deep business
+ * routes never qualify, whatever their segments spell.
+ */
+export function isOperationalProbePath(canonicalPath) {
+    if (canonicalPath === '/')
+        return true;
+    const segments = canonicalPath.split('/').filter((segment) => segment !== '');
+    if (segments.length > 2)
+        return false;
+    return segments.some((segment) => OPERATIONAL_PROBE_SEGMENTS.has(segment.toLowerCase()));
+}
+/**
  * Capability rules (ADR 0004 D5). All matching rules apply (an endpoint
  * may carry several capabilities); ordering matters only for the
  * `crud-*` fallbacks, which defer to command semantics.
@@ -111,10 +178,17 @@ const CAPABILITY_RULES = [
     {
         capability: 'health-operations',
         rule: 'HEALTH_PATH_NO_SCHEMA',
+        // GET/HEAD, no request schema, no business link, and a path that IS a
+        // probe shape (segment-exact probe word, depth <= 2, or bare root —
+        // see isOperationalProbePath for why the shape is this narrow). The
+        // `!linked` guard keeps a business-linked route (a /health path bound
+        // to a health-record table, say) out of the operational class: a
+        // linked endpoint is a business UI flow, never a probe.
         test: (c) => c.method !== 'ANY' &&
             (c.method === 'GET' || c.method === 'HEAD') &&
             !c.hasRequestSchemas &&
-            /(^|\/)(health|healthz|ready|readiness|live|liveness|ping|metrics|status|ops)(\/|$)/.test(c.pathLower),
+            !c.linked &&
+            isOperationalProbePath(c.pathLower),
     },
     {
         capability: 'auth-session',
@@ -183,7 +257,16 @@ const CRUD_FALLBACK_RULES = [
     {
         capability: 'crud-update',
         rule: 'PUT_PATCH_WITH_SCHEMA_OR_LINK',
-        test: (c) => (c.method === 'PUT' || c.method === 'PATCH') && (c.hasRequestSchemas || c.hasResponseModel || c.linked),
+        // Same exclusion as crud-create/crud-read: capability rules COMPOSE
+        // (all matching CAPABILITY_RULES attach), so a command-shaped
+        // PUT — `PUT /invoices/{id}/approve`, or a `_approve`-suffixed
+        // handler on an item route — would otherwise carry BOTH
+        // workflow-command and crud-update. Commands beat methods (plan
+        // §5.4): the command capability wins exclusively and the method
+        // fallback never attaches beside it.
+        test: (c) => (c.method === 'PUT' || c.method === 'PATCH') &&
+            (c.hasRequestSchemas || c.hasResponseModel || c.linked) &&
+            !COMMAND_SHAPED(c),
     },
 ];
 const COMMAND_SHAPED = (c) => CAPABILITY_RULES.find((rule) => rule.capability === 'workflow-command')?.test(c) ?? false;
@@ -277,17 +360,57 @@ export function extractContractFacts(contributions) {
  * Compiles the endpoint inventory and the synthetic contribution.
  * Pure over its inputs.
  */
-export function compileEndpointContribution(contributions) {
+export function compileEndpointContribution(contributions, options = {}) {
     const { facts, findings } = extractContractFacts(contributions);
+    // Declarative endpoint-plane config (plan phase 5): read once per
+    // compile. Absence is normal (the default config has no rules and no
+    // observable effect); a malformed document throws (fail closed) — the
+    // CLI surfaces it as a config error instead of scanning with partial
+    // trust, mirroring the pack config readers exactly (same reader).
+    let planesConfig = null;
+    if (options.cwd !== undefined) {
+        try {
+            planesConfig = readPlanesConfigOrNull(joinPath(options.cwd, PLANES_CONFIG_PATH));
+        }
+        catch (error) {
+            throw new UsageError(error.message);
+        }
+    }
     const businessNames = new Map();
     for (const contribution of contributions) {
         for (const resource of contribution.resources) {
             if (resource.kind === HTTP_CONTRACT_KIND)
                 continue;
             const name = resource.attributes['resourceName'];
-            if (typeof name === 'string' && name.length > 0 && !businessNames.has(name)) {
-                businessNames.set(name, { name, kind: resource.kind });
+            if (typeof name !== 'string' || name.length === 0)
+                continue;
+            let entry = businessNames.get(name);
+            if (entry === undefined) {
+                entry = {
+                    name,
+                    kind: resource.kind,
+                    location: resource.location,
+                    planes: new Set(),
+                };
+                businessNames.set(name, entry);
             }
+            if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND)
+                continue; // never chain through endpoints
+            const plane = resource.attributes['plane'];
+            if (plane === 'tenant' || plane === 'master' || plane === 'global')
+                entry.planes.add(plane);
+        }
+    }
+    // Plane-dimension signals are the other evidence half the classifier
+    // sees on the linked resource; collect them so the contradiction
+    // mirror below stays faithful to `resolveEndpointPlanes`.
+    for (const contribution of contributions) {
+        for (const signal of contribution.classificationSignals) {
+            if (signal.dimension !== 'plane')
+                continue;
+            if (signal.assertion !== 'tenant' && signal.assertion !== 'master' && signal.assertion !== 'global')
+                continue;
+            businessNames.get(signal.target.resourceName ?? '')?.planes.add(signal.assertion);
         }
     }
     // Positive delete-semantics evidence from the linked model's own pack.
@@ -393,6 +516,45 @@ export function compileEndpointContribution(contributions) {
                         location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
                     });
                 }
+            }
+        }
+        // -- Declarative endpoint-plane config channel (plan phase 5) ----------
+        // The router SOURCE FILE path is the only thing an endpoint rule can
+        // key on (`match` glob; `tables` rules never apply — endpoints carry
+        // no table identity). ALL matching rules must agree: agreement yields
+        // the config plane; disagreement emits a typed blocking entry and NO
+        // plane evidence (never first-match-wins); no matching rule leaves
+        // the endpoint on the inheritance/operational/unresolved channels.
+        // The configured `reason` (a required human review artifact) rides
+        // the conflict diagnostic.
+        let configPlane = null;
+        const routerFile = endpointRoutes[0]?.source.file ?? null;
+        if (planesConfig !== null && routerFile !== null) {
+            const resolution = resolvePlaneByRules(planesConfig, {
+                sourcePath: routerFile,
+                tableName: '', // an endpoint has no table identity: `tables` rules can never match
+                classSimpleName: null,
+            });
+            if (resolution.conflict) {
+                const key = `plane-config:${identity}`;
+                if (!seenEndpointUnresolved.has(key)) {
+                    seenEndpointUnresolved.add(key);
+                    const asserted = [...new Set(resolution.hits.map((hit) => hit.plane))].sort(compareText);
+                    unresolved.push({
+                        code: PLANE_RULE_CONTRADICTION,
+                        detail: `endpoint '${identity}' (router '${routerFile}') matches ${resolution.hits.length} ` +
+                            `endpoint-plane rules asserting ${asserted.join(' vs ')}: ` +
+                            resolution.hits
+                                .map((hit) => `rules[${String(hit.index)}] -> '${hit.plane}' (${hit.reason})`)
+                                .join('; ') +
+                            '; endpoint-plane rules are explicit declarations for the router source path — ' +
+                            'make the matching rules agree or remove the losing rule',
+                        location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+                    });
+                }
+            }
+            else if (resolution.plane !== null) {
+                configPlane = resolution.plane;
             }
         }
         const handlerLower = endpointRoutes
@@ -514,6 +676,35 @@ export function compileEndpointContribution(contributions) {
         if (linkedResourceName !== null) {
             signals.push(endpointSignal('adapter-binding', linkedResourceName, record));
         }
+        if (configPlane !== null) {
+            // The config plane is EVIDENCE, not a blanket override: it enters
+            // the classifier as one plane assertion beside the others (source
+            // `gateforge.endpoint-compiler:config`, basis `declaration` — the
+            // same channel shape the classifier's own inheritance pass mints).
+            signals.push(planeSignal(configPlane, record, 'config'));
+            // Core's `resolveEndpointPlanes` only consults the linked-resource
+            // or operational rule when the endpoint stayed PLANE_UNRESOLVED —
+            // with config evidence present it would silently skip inheritance.
+            // When the contradicting plane is already derivable from the
+            // contributions, mirror it here so the classifier sees BOTH
+            // assertions and blocks with PLANE_CONTRADICTION (agreement adds
+            // nothing — the set of candidates dedupes).
+            if (linkedResourceName !== null) {
+                const linked = businessNames.get(linkedResourceName);
+                const inherited = linked !== undefined && linked.planes.size === 1
+                    ? [...linked.planes][0]
+                    : undefined;
+                if (linked !== undefined && inherited !== undefined && inherited !== configPlane) {
+                    signals.push(planeSignal(inherited, record, 'linked-resource', linked.location));
+                }
+            }
+            else if (capabilities.includes('health-operations') && configPlane !== 'global') {
+                // Exactly the class the operational rule resolves to `global`
+                // (health-operations capability, no business link): a config rule
+                // asserting any other plane must meet that assertion, not mute it.
+                signals.push(planeSignal('global', record, 'operational'));
+            }
+        }
     }
     endpoints.sort((a, b) => compareText(a.identity, b.identity));
     resources.sort((a, b) => compareText(String(a['id']), String(b['id'])));
@@ -545,6 +736,28 @@ function endpointSignal(dimension, assertion, record) {
         basis: 'code-positive',
         source: `${ENDPOINT_COMPILER_DETECTOR_ID}`,
         location: record.routes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+        detector: { id: ENDPOINT_COMPILER_DETECTOR_ID, version: ENDPOINT_COMPILER_VERSION },
+    };
+}
+/**
+ * A plane-dimension declaration signal for one endpoint, shaped exactly
+ * like the classifier's inheritance pass mints them (`basis:
+ * 'declaration'`, channel-qualified source). `channel` explains WHERE the
+ * assertion came from: `config` (the reviewed `.gateforge/planes.json`
+ * rule) or the mirrored `linked-resource` / `operational` derivation the
+ * classifier would otherwise apply only when no config evidence exists.
+ * `location` overrides the router source when the evidence lives on the
+ * linked resource instead.
+ */
+function planeSignal(assertion, record, channel, location) {
+    return {
+        schemaVersion: 1,
+        target: { resourceName: record.resourceName },
+        dimension: 'plane',
+        assertion,
+        basis: 'declaration',
+        source: `${ENDPOINT_COMPILER_DETECTOR_ID}:${channel}`,
+        location: location ?? record.routes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
         detector: { id: ENDPOINT_COMPILER_DETECTOR_ID, version: ENDPOINT_COMPILER_VERSION },
     };
 }

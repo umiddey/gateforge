@@ -3,9 +3,9 @@
 SQLAlchemy CRUD discovery pack: a Python detector that finds SQLAlchemy
 tables from Python source **using only the stdlib `ast` module** — no
 imports, no execution of application code, no SQLAlchemy dependency —
-plus a TypeScript discover entry, configurable tenant/master plane
-mapping, and the entity-adapter schema with a sample adapter for the
-`example/` accounts app.
+plus a TypeScript discover entry, the declarative `.gateforge/planes.json`
+plane-evidence config (tenant/master/global), and the entity-adapter
+schema with a sample adapter for the `example/` accounts app.
 
 The detector speaks the resource graph's frozen vocabulary: business
 `sqlalchemy.table` resources, `gateforge.class` symbol resources for
@@ -104,9 +104,146 @@ workspace first (`npm run build`) so the package exports resolve to
 Both entries emit byte-identical discovery output for the same repo
 state — `test/in-process.test.ts` asserts this.
 
+## Plane evidence config (`.gateforge/planes.json`)
+
+Every business resource must carry plane evidence — `tenant`, `master`,
+or `global` — before the classifier will decide anything about it; a
+table with no plane is a typed `PLANE_UNRESOLVED` blocker. This pack is
+where that evidence comes from: a declarative, **human-reviewed** JSON
+config at the repo root. It feeds the same `attributes.plane` mechanism
+as the programmatic factory option, so graph ids qualify as
+`plane.name` (e.g. `master.accounts`) exactly as before.
+
+```json
+{
+  "rules": [
+    {
+      "match": "backend/admin_platform/models/**",
+      "plane": "master",
+      "reason": "AdminBase control-plane models (master database)"
+    },
+    {
+      "tables": ["master_users", "erp_client_configs"],
+      "plane": "master",
+      "reason": "platform control-plane tables"
+    },
+    {
+      "match": "backend/models/**",
+      "plane": "tenant",
+      "reason": "per-tenant database models"
+    },
+    {
+      "match": "backend/api/v1/**",
+      "exclude": ["backend/api/v1/public_payment.py", "backend/api/v1/master_admin.py"],
+      "plane": "tenant",
+      "reason": "contractor-scoped routers except the global-ingress files"
+    },
+    {
+      "match": "backend/api/v1/public_payment.py",
+      "plane": "global",
+      "reason": "public payment ingress is plane-global"
+    }
+  ]
+}
+```
+
+This example is deliberate: `master_users` and `erp_client_configs`
+also live under `backend/models/`, so the catch-all glob matches them
+too — the explicit `tables` rule wins for them (see evaluation
+semantics below), and the glob covers only the tables it alone claims.
+Likewise `backend/api/v1/` mixes contractor-scoped routers with
+global-ingress files; without `exclude` the per-file `global` rule
+would collide with the directory `tenant` glob inside the glob tier
+and block as `PLANE_RULE_CONTRADICTION` — the exclusion documents the
+exception on the directory rule instead.
+
+### Schema
+
+One document: `{ "rules": [rule, ...] }`. Every rule carries:
+
+| Field | Meaning |
+| --- | --- |
+| `match` | Repo-root-relative glob over the resource's **source file path** — the same glob semantics as core's classifier (`*` within one segment, `**` across segments, `?` one character; whole-path, case-sensitive). |
+| `exclude` | Optional, **only together with `match`**: a non-empty list of repo-root-relative globs (same semantics) pruning whole **source files** from the rule's surface — if the resource's source path matches ANY of them, the rule does not apply at all. Each entry is validated like `match` (absolute / backslash / `..` patterns throw). |
+| `tables` | Explicit list matched against the table `resourceName` **or** the class simple name (`ErpClient` matches table `erp_clients`). Matching either is deliberate: table names and class names are both identity evidence for the same resource. |
+| `plane` | Strictly `tenant`, `master`, or `global` (validated). |
+| `reason` | Required non-empty string — the human review artifact. It rides conflict diagnostics verbatim. |
+
+A rule carries **exactly one** of `match`/`tables` (both or neither is a
+read-time error); `exclude` is rejected on a `tables` rule — it prunes
+the surface of a source-path glob, so on an enumeration it would be
+dead config, and dead config in a review artifact reads as a review
+that never happened. Rules apply to business `sqlalchemy.table`
+resources only — `gateforge.class` symbols never carry a plane.
+
+### Evaluation semantics (deterministic, fail closed)
+
+Rules resolve in **two tiers with explicit-beats-general precedence**:
+
+- **Explicit tier first** — a table claimed by ANY `tables` rule
+  (explicit enumeration) resolves ONLY against `tables` rules;
+  `match` (glob) rules are ignored for it. The WHY: an enumerated name
+  list is a more specific, human-reviewed claim than a directory glob,
+  and a glob's `exclude` prunes source **files**, not table names —
+  a glob rule cannot enumerate name-level claims. Cross-tier overlap
+  therefore never reads as a contradiction: the explicit names win,
+  the glob keeps covering only the tables it alone claims.
+- **Glob tier second** — `match` rules apply only to tables no explicit
+  rule claims. A `match` rule may carry `exclude`: source files matching
+  any exclusion glob are removed from the rule's surface BEFORE tier
+  collection, so an excluded file cannot collide with a narrower
+  per-file rule. WHY: real directory surfaces mix planes —
+  `backend/api/v1/**` holds contractor-scoped routers beside
+  global-ingress files (`public_payment.py`, `master_admin.py`) — and
+  without documented exceptions the narrow per-file rules collide with
+  the directory glob inside this tier and block as
+  `PLANE_RULE_CONTRADICTION`. The exclusions live in the reviewed
+  config (explicit, `reason`-backed, diff-visible) rather than being
+  resolved by silent rule precedence.
+
+Within the deciding tier:
+
+- **ALL matching rules of that tier are collected**, in config order.
+- **Agreement** — every matching rule of the tier asserts the same
+  plane → it is applied; the graph then qualifies the id as
+  `plane.name`.
+- **Conflict within the tier** — its rules disagree → a blocking
+  `PLANE_RULE_CONTRADICTION` finding names the table, every conflicting
+  plane, every reason, and every rule index, and NO plane is applied:
+  the table stays plane-unresolved and blocks. Fix the config; never
+  guess between planes.
+- **No match** — nothing is applied and the resource stays
+  plane-unresolved → the classifier blocks it. This is deliberate
+  closed-world completeness: the config must cover **every** business
+  table, or the gate stays red.
+
+In the example above, `master_users` and `erp_client_configs` are
+claimed by the `tables` rule and get `master` even though the
+`backend/models/**` glob also matches their files; tables under
+`backend/models/` that are not enumerated get `tenant` from the glob;
+`public_payment.py` is excluded from the `backend/api/v1/**` tenant
+glob and gets `global` from its per-file rule, while the other routers
+under `backend/api/v1/` keep `tenant`; a contradiction is reported only
+when two rules of the SAME tier disagree for one resource (e.g. two
+`tables` rules asserting different planes for one table, or two
+`match` rules whose surfaces — after exclusions — still overlap).
+
+### Reading behavior
+
+The document is read once per `discover()` from the working directory
+(absence is **normal** → byte-identical `NO_PLANE_MAPPING` behavior; a
+malformed document, unknown key, bad plane, missing reason,
+non-repo-relative glob (in `match` or `exclude`), or `exclude` on a
+`tables` rule **throws**, and the CLI surfaces the error
+instead of scanning with partial trust). Precedence: the programmatic
+`plane` factory option wins and the config file is not read at all; an
+explicit `planesConfig` option overrides the document; the default
+document path can be moved with `planesConfigPath`.
+
 ## Plane and resource classification
 
-The detector emits normalized facts and classification signals. It does not
+The detector emits normalized facts, plane evidence (from
+`.gateforge/planes.json`, above), and classification signals. It does not
 read a per-resource classification file or attach project-configured business
 meaning. The core classifier combines plane, identity, lifecycle, delete
 semantics, exposure, and adapter signals with `.gateforge/classification-policy.yml`.
@@ -126,7 +263,8 @@ Use `gateforge discover`, then `gateforge classify` and
 `gateforge explain tenant.accounts` to inspect the effective decision and its
 fingerprint. Unknown plane or identity is a typed blocking result; uncertainty
 never silently suppresses obligations. `NO_PLANE_MAPPING` remains available for
-tests that intentionally disable programmatic plane attribution.
+tests that intentionally disable plane attribution (programmatic or
+config-driven).
 
 ## Classification workflow (example app)
 
@@ -188,6 +326,7 @@ convention.)
 | GF-19 | Malformed file → `PARSE_ERROR` finding with line 6, no resources, no crash |
 | GF-20 | `dupes` × 2 in one file + `shared_items` across two files → both `DUPLICATE_TABLE_NAME` variants, 3 distinct resources |
 | GF-21 | declared_attr / f-string / call / name / `table=True` → typed unresolved entries, never absent |
+| — | Declarative `.gateforge/planes.json` (phase 5): path/tables rules apply with explicit-beats-general precedence (`tables` enumeration beats an overlapping glob; conflicts fail closed WITHIN a tier), `exclude` carves mixed-plane directory surfaces (excluded files never collide with per-file rules), no-match stays plane-unresolved, config absence is byte-identical (`test/planes.test.ts`) |
 | — | Cross-module inheritance resolved through the graph symbol table; genuinely computed chains stay typed-unresolved |
 
 ## Determinism

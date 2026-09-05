@@ -1,7 +1,10 @@
 /**
  * Production-pack linkage E2E (red-team round 3 & 4):
  * 1. REAL pack-http (route evidence) + REAL pack-sqlalchemy (AST model discovery)
- *    converge on one identity with route lifecycle operations enabled.
+ *    converge on one identity. Phase 4: packs mint NO classificationSignals —
+ *    exposure falls back to the user-facing default, unknown lifecycle
+ *    operations default enabled, and endpoint-to-resource linkage comes only
+ *    from the endpoint compiler's corroborated linkage.
  * 2. REAL pack-task (worker reachability) + REAL pack-sqlalchemy (model)
  *    converge into an internality certificate (closed-world proof).
  * 3. Complete green pipeline: init -> discover -> classify -> obligations -> test-gates
@@ -83,10 +86,13 @@ class Account(Base):
 `,
         // Organization plane declaration marker on the model (host-minted).
         // A comment keeps the model importable.
-        // REAL route evidence (pack-http scans this):
+        // REAL route evidence (pack-http scans this). The named handler
+        // gives the endpoint compiler its corroborated linkage evidence
+        // (handler word `accounts`) — packs mint no linkage signals.
         'routes.ts': `import express from 'express';
 const app = express();
-app.get('/api/accounts', (req, res) => res.json({}));
+function listAccounts(req, res) { res.json({}); }
+app.get('/api/accounts', listAccounts);
 app.post('/api/accounts', (req, res) => res.json({}));
 app.delete('/api/accounts/:id', (req, res) => res.json({}));
 `,
@@ -96,7 +102,12 @@ app.delete('/api/accounts/:id', (req, res) => res.json({}));
       if (discover.code !== 0) throw new Error(`DISCOVER STDERR: ${discover.stderr}`);
       expect(discover.code).toBe(0);
       const graph = JSON.parse(discover.stdout) as {
-        resources: Array<{ id: string | null; name: string; kind: string }>;
+        resources: Array<{
+          id: string | null;
+          name: string;
+          kind: string;
+          attributes: { linkedResourceName?: string };
+        }>;
         findings: Array<{ code: string }>;
       };
       // Exactly ONE business resource: the table. Routes are evidence,
@@ -104,9 +115,22 @@ app.delete('/api/accounts/:id', (req, res) => res.json({}));
       // — a separate namespace that never carries the path-derived name.
       const business = graph.resources.filter((r) => r.kind === 'sqlalchemy.table');
       expect(business.map((r) => r.name)).toEqual(['accounts']);
+      // Endpoint-to-resource linkage flows ONLY through the endpoint
+      // compiler's corroborated linkage now (handler word `accounts` on
+      // the GET route): the packs mint no signals that could link
+      // anything, and the path-derived name alone never links. The linked
+      // endpoint inherits the tenant plane, so its plane-qualified id
+      // sorts it before the still-unlinked endpoints.
       expect(
         graph.resources.filter((r) => r.kind === 'http.endpoint').map((r) => r.name),
-      ).toEqual(['http-delete-api-accounts-id-f8a5c702', 'http-get-api-accounts-4187c96f', 'http-post-api-accounts-e6912669']);
+      ).toEqual(['http-get-api-accounts-4187c96f', 'http-delete-api-accounts-id-f8a5c702', 'http-post-api-accounts-e6912669']);
+      const linkedEndpoint = graph.resources.find((r) => r.name === 'http-get-api-accounts-4187c96f');
+      expect(linkedEndpoint?.attributes.linkedResourceName).toBe('accounts');
+      expect(linkedEndpoint?.id).toBe('tenant.http-get-api-accounts-4187c96f');
+      expect(
+        graph.resources.find((r) => r.name === 'http-post-api-accounts-e6912669')?.attributes
+          .linkedResourceName,
+      ).toBeUndefined();
       // No duplicate-id collision from the route artifacts.
       expect(graph.findings.map((f) => f.code)).not.toContain('DUPLICATE_BOUND_RESOURCE_ID');
 
@@ -122,6 +146,7 @@ app.delete('/api/accounts/:id', (req, res) => res.json({}));
               primaryKey: string[];
               lifecycle: { create: boolean; read: boolean; update: boolean; delete: boolean };
               rules: string[];
+              defaultsApplied: string[];
             } | null;
           }>;
         };
@@ -133,7 +158,24 @@ app.delete('/api/accounts/:id', (req, res) => res.json({}));
       expect(accounts?.classification?.lifecycle.create).toBe(true);
       expect(accounts?.classification?.lifecycle.read).toBe(true);
       expect(accounts?.classification?.lifecycle.delete).toBe(true);
-      expect(accounts?.classification?.rules).toContain('EXPOSURE_POSITIVE_SIGNAL');
+      // Phase 4: packs mint NO classificationSignals (the path-derived
+      // EXPOSURE_POSITIVE_SIGNAL is gone), so exposure falls back to the
+      // documented user-facing default and every lifecycle operation the
+      // packs no longer vouches for stays enabled through its default.
+      expect(accounts?.classification?.rules).not.toContain('EXPOSURE_POSITIVE_SIGNAL');
+      expect(accounts?.classification?.rules).toContain('EXPOSURE_DEFAULT_USER_FACING');
+      expect(accounts?.classification?.defaultsApplied).toEqual(
+        expect.arrayContaining([
+          'EXPOSURE_DEFAULT_USER_FACING',
+          'LIFECYCLE_DEFAULT_ENABLED(create)',
+          'LIFECYCLE_DEFAULT_ENABLED(read)',
+          'LIFECYCLE_DEFAULT_ENABLED(update)',
+          'LIFECYCLE_DEFAULT_ENABLED(delete)',
+        ]),
+      );
+      // The table's own model evidence is untouched: plane/identity from
+      // the detector + declarations, hard delete from the model marker.
+      expect(accounts?.classification?.rules).toContain('DELETE_SEMANTICS_PROVEN_HARD');
       expect(accounts?.blocks).toEqual([]);
 
       const obligations = await runCli(repo, ['obligations', '--json']);

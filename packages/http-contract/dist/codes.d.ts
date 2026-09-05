@@ -19,7 +19,12 @@ export declare const FASTAPI_PREFIX_UNRESOLVED = "FASTAPI_PREFIX_UNRESOLVED";
 export declare const FRONTEND_CALL_TARGET_UNRESOLVED = "FRONTEND_CALL_TARGET_UNRESOLVED";
 /** A frontend call with no matching backend route. */
 export declare const FRONTEND_ROUTE_UNWIRED = "FRONTEND_ROUTE_UNWIRED";
-/** A frontend call matching more than one distinct backend route. */
+/**
+ * A frontend call matching more than one distinct backend route within the
+ * surviving literal-precedence tier (see `join.ts`): literal matches shadow
+ * parameter matches, and even after that partition the join refuses to
+ * guess between distinct survivors.
+ */
 export declare const FRONTEND_ROUTE_AMBIGUOUS = "FRONTEND_ROUTE_AMBIGUOUS";
 /** An endpoint whose business semantics no positive rule could decide. */
 export declare const ENDPOINT_SEMANTICS_UNRESOLVED = "ENDPOINT_SEMANTICS_UNRESOLVED";

@@ -259,6 +259,10 @@ export declare const GraphResourceSchema: z.ZodObject<{
         }, z.core.$strict>;
         primaryKey: z.ZodArray<z.ZodString>;
         evidenceAdapter: z.ZodOptional<z.ZodString>;
+        evidenceLane: z.ZodOptional<z.ZodEnum<{
+            adapter: "adapter";
+            claims: "claims";
+        }>>;
         notes: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>;
     classificationTrace: z.ZodNullable<z.ZodObject<{
@@ -304,8 +308,8 @@ export declare const GraphUnresolvedSchema: z.ZodObject<{
 export type GraphUnresolved = z.infer<typeof GraphUnresolvedSchema>;
 /** Artifact kinds stale-reference validation watches (invariant 9). */
 export declare const StaleReferenceKindSchema: z.ZodEnum<{
-    claim: "claim";
     adapter: "adapter";
+    claim: "claim";
     waiver: "waiver";
 }>;
 /** Inferred stale-reference-kind shape. */
@@ -317,8 +321,8 @@ export type StaleReferenceKind = z.infer<typeof StaleReferenceKindSchema>;
  */
 export declare const StaleReferenceSchema: z.ZodObject<{
     kind: z.ZodEnum<{
-        claim: "claim";
         adapter: "adapter";
+        claim: "claim";
         waiver: "waiver";
     }>;
     reference: z.ZodString;
@@ -377,6 +381,10 @@ export declare const ResourceGraphSchema: z.ZodObject<{
             }, z.core.$strict>;
             primaryKey: z.ZodArray<z.ZodString>;
             evidenceAdapter: z.ZodOptional<z.ZodString>;
+            evidenceLane: z.ZodOptional<z.ZodEnum<{
+                adapter: "adapter";
+                claims: "claims";
+            }>>;
             notes: z.ZodOptional<z.ZodString>;
         }, z.core.$strict>>;
         classificationTrace: z.ZodNullable<z.ZodObject<{
@@ -427,8 +435,8 @@ export declare const ResourceGraphSchema: z.ZodObject<{
     }, z.core.$strict>>;
     stale: z.ZodArray<z.ZodObject<{
         kind: z.ZodEnum<{
-            claim: "claim";
             adapter: "adapter";
+            claim: "claim";
             waiver: "waiver";
         }>;
         reference: z.ZodString;

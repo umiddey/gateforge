@@ -9,7 +9,13 @@
  * - internal resources default to NO CRUD obligations and their claims
  *   are invalid (enforced downstream by the verdict engine, not here);
  * - a user-facing resource cannot be proven without a trusted evidence
- *   adapter, so `evidenceAdapter` is mandatory for user-facing entries.
+ *   adapter, so `evidenceAdapter` is mandatory for user-facing entries —
+ *   on the BUSINESS-resource lane. `http.endpoint` resources are witnessed
+ *   through the claims/witness-proxy lane (`http:frontend-request-observed`
+ *   etc.), not through entity persistence adapters (whose contract — read
+ *   by id, normalize body, deletion kind — is about business entities), so
+ *   a user-facing classification may instead declare
+ *   `evidenceLane: 'claims'` and omit the adapter.
  */
 import { z } from 'zod';
 /**
@@ -63,6 +69,10 @@ export declare const ClassificationSchema: z.ZodObject<{
     }, z.core.$strict>;
     primaryKey: z.ZodArray<z.ZodString>;
     evidenceAdapter: z.ZodOptional<z.ZodString>;
+    evidenceLane: z.ZodOptional<z.ZodEnum<{
+        adapter: "adapter";
+        claims: "claims";
+    }>>;
     notes: z.ZodOptional<z.ZodString>;
 }, z.core.$strict>;
 /** Inferred per-resource classification shape. */
@@ -98,6 +108,10 @@ export declare const ClassificationFileSchema: z.ZodObject<{
         }, z.core.$strict>;
         primaryKey: z.ZodArray<z.ZodString>;
         evidenceAdapter: z.ZodOptional<z.ZodString>;
+        evidenceLane: z.ZodOptional<z.ZodEnum<{
+            adapter: "adapter";
+            claims: "claims";
+        }>>;
         notes: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>;
 }, z.core.$strict>;

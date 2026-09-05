@@ -5,9 +5,33 @@
  * exactly one distinct backend route identity: equal uppercase method,
  * position-wise segment match where a frontend `{}` matches any single
  * route segment (param or literal) and a trailing route `{*}` matches one
- * or more trailing call segments. Zero matches and multiple distinct
- * matches are typed blocks — there is no scoring, no fuzzy distance, and
- * no first-match-wins.
+ * or more trailing call segments.
+ *
+ * LITERAL PRECEDENCE (phase 3 refinement). Positional candidates are
+ * partitioned by match quality before the exactly-one check:
+ *
+ *  - A match is *literal* when it consumed no slot generality: every
+ *    matched position is exact segment equality — literal==literal, or the
+ *    call's own `{}` mirrored by the route's `{}` (the route then declares
+ *    exactly the shape the call already has; nothing is absorbed beyond
+ *    what the call itself carries).
+ *  - A match is *parameter* otherwise: a route `{}` absorbed a call
+ *    literal, a call `{}` was relaxed onto a route literal, or any `{*}`
+ *    absorption happened. A wildcard match is never a literal match.
+ *
+ * If any literal matches exist they are THE candidates; parameter-only
+ * matches are considered only when zero literal matches exist. This
+ * mirrors runtime routing truth: FastAPI — like every major router —
+ * resolves literal path segments before parameterized ones, so a request
+ * to `/messages/search` always hits the literal route and never reaches
+ * `/messages/{}` with id="search". The static join must agree: a
+ * template call `/messages/${id}` joins `/messages/{}` despite literal
+ * siblings, and a literal call `/messages/unread-count` joins only the
+ * literal route.
+ *
+ * Never guess: zero selected candidates and multiple distinct selected
+ * candidates (in either tier) are typed blocks — there is no scoring, no
+ * fuzzy distance, and no first-match-wins beyond the documented partition.
  *
  * The result is a pure function of the input facts: identical inputs in
  * any permutation produce byte-identical output (total order everywhere).
@@ -76,7 +100,8 @@ export interface JoinBlock {
   code: typeof FRONTEND_ROUTE_UNWIRED | typeof FRONTEND_ROUTE_AMBIGUOUS | typeof HTTP_METHOD_DYNAMIC;
   detail: string;
   location: HttpLocation;
-  /** Identity candidates for ambiguity blocks, sorted; empty otherwise. */
+  /** Identity candidates for ambiguity blocks — the surviving
+   * literal-precedence tier, sorted; empty otherwise. */
   candidates: EndpointIdentity[];
 }
 
@@ -120,19 +145,53 @@ function segmentsMatchWildcard(routeSegments: readonly string[], callSegments: r
   return true;
 }
 
-/** Whether one call fact can join one route fact. */
-export function routeMatchesCall(route: HttpContractFact, call: HttpContractFact): boolean {
-  if (route.method === 'ANY' || call.method === 'ANY') return false;
-  if (route.method !== call.method) return false;
+/**
+ * Match-quality tier of one route/call pair (LITERAL PRECEDENCE).
+ *
+ * - `'literal'` — matched with zero slot generality: every matched position
+ *   is exact segment equality (literal==literal, or the call's own `{}`
+ *   mirrored by the route's `{}`; the route consumed nothing beyond what
+ *   the call itself declares).
+ * - `'parameter'` — matched, but at least one position exercised slot
+ *   generality: a route `{}` absorbed a call literal, a call `{}` was
+ *   relaxed onto a route literal, or the trailing route `{*}` absorbed one
+ *   or more call segments. A wildcard match is never a literal match.
+ * - `null` — no positional match at all.
+ */
+export type RouteMatchKind = 'literal' | 'parameter';
+
+/**
+ * Classifies one call/route pair by match quality, or returns `null` when
+ * the pair does not match under the documented positional rules. Pure and
+ * order-independent; `routeMatchesCall` is exactly `kind !== null`.
+ */
+export function routeMatchKind(route: HttpContractFact, call: HttpContractFact): RouteMatchKind | null {
+  if (route.method === 'ANY' || call.method === 'ANY') return null;
+  if (route.method !== call.method) return null;
   const routeSegments = pathSegments(route.normalizedPath);
   const callSegments = pathSegments(call.normalizedPath);
   if (routeSegments.length === 0 || callSegments.length === 0) {
-    return routeSegments.length === 0 && callSegments.length === 0;
+    // Root matches root, and only root: a vacuous all-literal match.
+    return routeSegments.length === 0 && callSegments.length === 0 ? 'literal' : null;
   }
   const wildcard = routeSegments[routeSegments.length - 1] === HTTP_WILDCARD_SLOT;
-  return wildcard
-    ? segmentsMatchWildcard(routeSegments, callSegments)
-    : segmentsMatchExact(routeSegments, callSegments);
+  if (wildcard) {
+    // Absorption is generality, not equality — see the wildcard rule and
+    // the LITERAL PRECEDENCE note in the module docstring.
+    return segmentsMatchWildcard(routeSegments, callSegments) ? 'parameter' : null;
+  }
+  if (!segmentsMatchExact(routeSegments, callSegments)) return null;
+  for (let index = 0; index < routeSegments.length; index += 1) {
+    // Any position where the strings differ (route `{}` vs call literal,
+    // or call `{}` vs route literal) consumed slot generality.
+    if (routeSegments[index] !== callSegments[index]) return 'parameter';
+  }
+  return 'literal';
+}
+
+/** Whether one call fact can join one route fact at all. */
+export function routeMatchesCall(route: HttpContractFact, call: HttpContractFact): boolean {
+  return routeMatchKind(route, call) !== null;
 }
 
 interface FactKey {
@@ -143,6 +202,10 @@ interface FactKey {
 
 /**
  * Joins frontend-call facts against server-route facts.
+ *
+ * Candidate selection applies LITERAL PRECEDENCE (see the module
+ * docstring): literal matches shadow parameter matches, mirroring how
+ * routers resolve literal segments before parameterized ones at runtime.
  *
  * `ANY` routes participate in the inventory (they carry exposure evidence)
  * but never join: a catch-all registration cannot prove which concrete
@@ -178,10 +241,13 @@ export function joinFrontendCalls(
       });
       continue;
     }
-    const candidates: FactKey[] = [];
+    // Step 1 — all positional candidates, computed exactly as before.
+    const candidates: Array<{ entry: FactKey; kind: RouteMatchKind }> = [];
     for (const entry of byIdentity.values()) {
       const route = entry.routes[0];
-      if (route && routeMatchesCall(route, call)) candidates.push(entry);
+      if (!route) continue;
+      const kind = routeMatchKind(route, call);
+      if (kind !== null) candidates.push({ entry, kind });
     }
     if (candidates.length === 0) {
       pushBlock(blocks, seenBlockKeys, {
@@ -192,10 +258,18 @@ export function joinFrontendCalls(
       });
       continue;
     }
+    // Steps 2/3 — LITERAL PRECEDENCE partition. Literal matches shadow
+    // parameter matches because routers (FastAPI included) resolve literal
+    // segments before parameterized ones at runtime; a wildcard match is a
+    // parameter match and never shadows. Parameter-only candidates keep
+    // today's behavior. No scoring: the partition is all-or-nothing.
+    const selected = candidates.some((candidate) => candidate.kind === 'literal')
+      ? candidates.filter((candidate) => candidate.kind === 'literal')
+      : candidates;
     const distinct = new Map<EndpointIdentity, FactKey>();
-    for (const candidate of candidates) {
-      const route = candidate.routes[0];
-      if (route) distinct.set(candidate.identity, candidate);
+    for (const { entry } of selected) {
+      const route = entry.routes[0];
+      if (route) distinct.set(entry.identity, entry);
     }
     if (distinct.size > 1) {
       pushBlock(blocks, seenBlockKeys, {
@@ -207,7 +281,7 @@ export function joinFrontendCalls(
       });
       continue;
     }
-    const matched = candidates[0];
+    const matched = selected[0]?.entry;
     if (matched) {
       pushUniqueFact(matched.calls, call);
     }

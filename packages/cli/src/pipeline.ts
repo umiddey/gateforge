@@ -260,9 +260,12 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   // detectors' contract facts; its output is a synthetic engine
   // contribution that participates in the graph like any detector's.
   // Coverage/successful-detector accounting stays pinned to the PLUGIN
-  // contributions — the compiler examines no files itself.
+  // contributions — the compiler examines no files itself. The repo root
+  // is passed so the declarative endpoint-plane rules in
+  // `.gateforge/planes.json` (absence is normal) participate as endpoint
+  // plane evidence; a malformed document fails the run closed.
   const { contribution: endpointContribution, inventory: endpointInventory } =
-    compileEndpointContribution(contributions);
+    compileEndpointContribution(contributions, { cwd });
 
   const built = buildResourceGraph({
     detectors: [...contributions, endpointContribution],
@@ -386,6 +389,9 @@ export function effectiveClassifications(
       plane: bound.plane,
       lifecycle: bound.lifecycle,
       primaryKey: [...bound.primaryKey],
+      // Keep the evidence lane with the entry: a user-facing endpoint is
+      // claims-witnessed (no adapter) and must stay schema-valid here too.
+      ...(bound.evidenceLane !== undefined ? { evidenceLane: bound.evidenceLane } : {}),
       ...(bound.evidenceAdapter !== undefined ? { evidenceAdapter: bound.evidenceAdapter } : {}),
       notes: `automatic (${decision.classification.decisionFingerprint.slice(0, 12)})`,
     };

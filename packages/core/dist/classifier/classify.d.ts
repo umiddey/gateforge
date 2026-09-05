@@ -125,6 +125,7 @@ export declare const RULES: {
     readonly exposurePositive: "EXPOSURE_POSITIVE_SIGNAL";
     readonly exposureInternalCertificate: "EXPOSURE_INTERNAL_CERTIFICATE";
     readonly exposureDefault: "EXPOSURE_DEFAULT_USER_FACING";
+    readonly exposureOperationalProbe: "EXPOSURE_OPERATIONAL_PROBE";
     readonly lifecyclePositive: "LIFECYCLE_POSITIVE_SIGNAL";
     readonly lifecycleDeclaredSupported: "LIFECYCLE_DECLARED_SUPPORTED";
     readonly lifecycleClosedWorldDisabled: "LIFECYCLE_CLOSED_WORLD_DISABLED";
