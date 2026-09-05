@@ -48,12 +48,12 @@ describe('GPP/3 subprocess transport x python detector', () => {
       const parsed = ClassSymbolAttributesSchema.safeParse(resource.attributes);
       expect(parsed.success, `class symbol ${resource.id} must validate`).toBe(true);
     }
-    expect(tableResources(outcome)).toHaveLength(30);
-    // 55 class symbols: one per declarative/base class across the 19
+    expect(tableResources(outcome)).toHaveLength(34);
+    // 60 class symbols: one per declarative/base class across the 20
     // fixtures — non-model fixtures (non_models.py, denylisted_base.py,
     // shadow_schemas.py) contribute ZERO symbols under the phase-2
     // candidate predicate.
-    expect(symbolResources(outcome)).toHaveLength(55);
+    expect(symbolResources(outcome)).toHaveLength(60);
     expect(outcome.unresolved).toHaveLength(17);
     expect(outcome.findings).toHaveLength(5);
   }, 60_000);
@@ -303,6 +303,23 @@ describe('classification signals (plan phase 3, ADR 0003 D1)', () => {
     expect(fkTable?.attributes['primaryKeyColumns']).toEqual(['id']);
     // A candidate column without a declaration emits NO delete-semantics.
     expect(signalsOf(outcome, 'delete-semantics', 'fk_tables')).toHaveLength(0);
+  }, 60_000);
+
+  it('updateable-field declarations ride attributes, literal ones only', async () => {
+    const outcome = await runDiscover(['signals_updateable.py']);
+    const attrOf = (name: string): unknown => {
+      const table = tableResources(outcome).find(
+        (r) => r.attributes['resourceName'] === name,
+      );
+      expect(table, `table resource ${name}`).toBeDefined();
+      return table?.attributes['updateableFields'];
+    };
+    // Tuple and list literals are copied in written order.
+    expect(attrOf('departments')).toEqual(['name', 'description']);
+    expect(attrOf('settings')).toEqual(['theme']);
+    // Non-literal and empty declarations contribute NOTHING — never a guess.
+    expect(attrOf('computed_fields')).toBeUndefined();
+    expect(attrOf('empty_fields')).toBeUndefined();
   }, 60_000);
 
   it('signal documents are deterministic across sessions (byte-identical)', async () => {

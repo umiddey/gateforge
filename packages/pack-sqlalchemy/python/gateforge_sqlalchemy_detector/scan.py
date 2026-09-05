@@ -88,6 +88,7 @@ TABLE_ARGS_ATTR = "__table_args__"
 DELETE_SEMANTICS_ATTR = "__gateforge_delete_semantics__"
 ARCHIVE_STATE_ATTR = "__gateforge_archive_state__"
 READ_ONLY_ATTR = "__gateforge_read_only__"
+UPDATEABLE_FIELDS_ATTR = "__gateforge_updateable_fields__"
 
 # Column-call constructors carrying column facts.
 COLUMN_CALL_NAMES = ("Column", "mapped_column")
@@ -379,6 +380,7 @@ class ClassRecord:
         self.archive_state_literal: dict[str, str | int | float | bool] | None = None
         self.archive_state_expr: ast.expr | None = None
         self.read_only: bool = False
+        self.updateable_fields_literal: list[str] | None = None
         # Column-level facts, in written order (body first, then table args).
         self.column_facts: ColumnFacts = ColumnFacts()
         self._scan_body()
@@ -427,6 +429,8 @@ class ClassRecord:
                         self.archive_state_expr = value
                 if READ_ONLY_ATTR in names and isinstance(value, ast.Constant) and value.value is True:
                     self.read_only = True
+                if UPDATEABLE_FIELDS_ATTR in names and value is not None:
+                    self.updateable_fields_literal = _string_sequence_literal(value)
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == TABULAR_ATTR:
                 self.tablename_func = stmt
         # Table-args columns/constraints after body columns, written order.
@@ -507,6 +511,28 @@ def _literal_record(node: ast.expr) -> dict[str, str | int | float | bool] | Non
             return None
         record[k.value] = v.value
     return record
+
+
+def _string_sequence_literal(node: ast.expr) -> list[str] | None:
+    """Reads a list/tuple literal of distinct non-empty string literals.
+
+    Args:
+        node: The AST expression (e.g. the value of
+            ``__gateforge_updateable_fields__``).
+
+    Returns:
+        list[str] | None: the strings in written order, or None when the
+            node is not a list/tuple of string literals (the classifier
+            then simply sees no attribute — never a guessed one).
+    """
+    if not isinstance(node, (ast.List, ast.Tuple)):
+        return None
+    values: list[str] = []
+    for elt in node.elts:
+        if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str) and elt.value):
+            return None
+        values.append(elt.value)
+    return values or None
 
 
 def _table_args_elements(node: ast.expr | None) -> list[ast.expr]:
@@ -996,6 +1022,8 @@ def _attribute_facts(facts: ColumnFacts, rec: ClassRecord | None) -> dict:
         entries["softDeleteCandidateFields"] = sorted(set(facts.soft_delete_candidates))
     if rec is not None and rec.read_only:
         entries["readOnly"] = True
+    if rec is not None and rec.updateable_fields_literal:
+        entries["updateableFields"] = list(rec.updateable_fields_literal)
     return entries
 
 

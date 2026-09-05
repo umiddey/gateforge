@@ -78,7 +78,7 @@ export interface EvidenceApi {
   }>;
   /** ADR 0004 D7: consumes one proxy-observed request for an http:* claim. */
   http: Readonly<{
-    observe(request: { method: string; path: string }): Promise<{
+    observe(request: { method: string; path: string; expectedStatus?: number }): Promise<{
       status: number;
       recordId: string;
       recordIds: string[];
@@ -443,6 +443,7 @@ export function createEvidence({
   async function observeHttp(request: {
     method: string;
     path: string;
+    expectedStatus?: number;
   }): Promise<{ status: number; recordId: string; recordIds: string[] }> {
     const httpClaims = claims.filter((claim) => claim.includes(':http:'));
     const targets = httpClaims.length > 0 ? httpClaims : claims;
@@ -451,6 +452,7 @@ export function createEvidence({
       testId,
       method: request.method.toUpperCase(),
       path: request.path,
+      ...(request.expectedStatus !== undefined ? { expectedStatus: request.expectedStatus } : {}),
     });
     return {
       status: result.status,
