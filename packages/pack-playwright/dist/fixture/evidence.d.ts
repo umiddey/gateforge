@@ -92,6 +92,7 @@ export interface EvidenceApi {
         }): Promise<{
             status: number;
             recordId: string;
+            recordIds: string[];
         }>;
     }>;
     finalize(): Promise<{
