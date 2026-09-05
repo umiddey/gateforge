@@ -1087,6 +1087,84 @@ describe('endpoint plane config channel (.gateforge/planes.json, plan phase 5)',
     });
   });
 
+  it('a merged identity contributed by multiple router files is plane-qualified only when EVERY contributor is covered', () => {
+    // External-review regression (duplicate-source plane bug): the same
+    // method+path served from two router files must never silently
+    // inherit the one covered file's plane.
+    const routeIn = (file: string) =>
+      routeFact('GET', '/api/accounts', { source: { file, line: 10, col: 0 } });
+
+    withTempRepo({}, (repo) => {
+      // PARTIAL coverage: only backend/a.py matches a rule.
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [{ match: 'backend/a.py', plane: 'tenant', reason: 'covered router' }],
+        }),
+      });
+      const compiled = compileEndpointContribution(
+        [contribution([routeIn('backend/a.py'), routeIn('backend/b.py')])],
+        { cwd: repo.root },
+      );
+      expect(
+        planeSignalsOf(compiled).filter((signal) => signal['source'] === 'gateforge.endpoint-compiler:config'),
+      ).toEqual([]);
+      const partial = compiled.contribution.unresolved.filter((u) => u.code === 'PLANE_RULE_CONTRADICTION');
+      expect(partial).toHaveLength(1);
+      expect(partial[0].detail).toContain('cover only 1');
+      expect(partial[0].detail).toContain("'backend/b.py'");
+    });
+
+    withTempRepo({}, (repo) => {
+      // FULL agreeing coverage → the config plane applies.
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [{ match: 'backend/**', plane: 'tenant', reason: 'covered routers' }],
+        }),
+      });
+      const compiled = compileEndpointContribution(
+        [contribution([routeIn('backend/a.py'), routeIn('backend/b.py')])],
+        { cwd: repo.root },
+      );
+      const configSignals = planeSignalsOf(compiled).filter(
+        (signal) => signal['source'] === 'gateforge.endpoint-compiler:config',
+      );
+      expect(configSignals).toHaveLength(1);
+      expect(configSignals[0]['assertion']).toBe('tenant');
+      // The plane channel is clean; any remaining unresolved entry is the
+      // unrelated semantics debt of a bare GET (no schema/link), not a
+      // plane contradiction.
+      expect(
+        compiled.contribution.unresolved.filter((u) => u.code === 'PLANE_RULE_CONTRADICTION'),
+      ).toEqual([]);
+    });
+
+    withTempRepo({}, (repo) => {
+      // Contributors covered but DISAGREEING → cross-file contradiction.
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [
+            { match: 'backend/a.py', plane: 'tenant', reason: 'a surface' },
+            { match: 'backend/b.py', plane: 'master', reason: 'b surface' },
+          ],
+        }),
+      });
+      const compiled = compileEndpointContribution(
+        [contribution([routeIn('backend/a.py'), routeIn('backend/b.py')])],
+        { cwd: repo.root },
+      );
+      expect(
+        planeSignalsOf(compiled).filter((signal) => signal['source'] === 'gateforge.endpoint-compiler:config'),
+      ).toEqual([]);
+      const contradictions = compiled.contribution.unresolved.filter(
+        (u) => u.code === 'PLANE_RULE_CONTRADICTION',
+      );
+      expect(contradictions).toHaveLength(1);
+      expect(contradictions[0].detail).toContain('disagree');
+      expect(contradictions[0].detail).toContain("'tenant'");
+      expect(contradictions[0].detail).toContain("'master'");
+    });
+  });
+
   it('a malformed planes document throws (fail closed)', () => {
     withTempRepo({}, (repo) => {
       // Missing required `reason` — the human review artifact.
