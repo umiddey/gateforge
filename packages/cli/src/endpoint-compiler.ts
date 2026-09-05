@@ -736,7 +736,7 @@ export function compileEndpointContribution(
           });
         }
       } else if (resolved.length > 0) {
-        configPlane = resolved[0].plane;
+        configPlane = resolved[0]?.plane ?? null;
       }
     }
 

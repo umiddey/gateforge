@@ -1110,8 +1110,8 @@ describe('endpoint plane config channel (.gateforge/planes.json, plan phase 5)',
       ).toEqual([]);
       const partial = compiled.contribution.unresolved.filter((u) => u.code === 'PLANE_RULE_CONTRADICTION');
       expect(partial).toHaveLength(1);
-      expect(partial[0].detail).toContain('cover only 1');
-      expect(partial[0].detail).toContain("'backend/b.py'");
+      expect(partial[0]?.detail).toContain('cover only 1');
+      expect(partial[0]?.detail).toContain("'backend/b.py'");
     });
 
     withTempRepo({}, (repo) => {
@@ -1129,7 +1129,7 @@ describe('endpoint plane config channel (.gateforge/planes.json, plan phase 5)',
         (signal) => signal['source'] === 'gateforge.endpoint-compiler:config',
       );
       expect(configSignals).toHaveLength(1);
-      expect(configSignals[0]['assertion']).toBe('tenant');
+      expect(configSignals[0]?.['assertion']).toBe('tenant');
       // The plane channel is clean; any remaining unresolved entry is the
       // unrelated semantics debt of a bare GET (no schema/link), not a
       // plane contradiction.
@@ -1159,9 +1159,9 @@ describe('endpoint plane config channel (.gateforge/planes.json, plan phase 5)',
         (u) => u.code === 'PLANE_RULE_CONTRADICTION',
       );
       expect(contradictions).toHaveLength(1);
-      expect(contradictions[0].detail).toContain('disagree');
-      expect(contradictions[0].detail).toContain("'tenant'");
-      expect(contradictions[0].detail).toContain("'master'");
+      expect(contradictions[0]?.detail).toContain('disagree');
+      expect(contradictions[0]?.detail).toContain("'tenant'");
+      expect(contradictions[0]?.detail).toContain("'master'");
     });
   });
 

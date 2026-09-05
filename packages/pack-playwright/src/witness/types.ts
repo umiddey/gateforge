@@ -80,6 +80,25 @@ export interface WitnessOptions {
    * channel). Must be loopback.
    */
   proxyTarget?: string;
+  /**
+   * Observation-proxy mount prefix (with `proxyTarget`; e.g. `/api`).
+   *
+   * WHY this is an explicit deployment-topology declaration (same
+   * philosophy as `urlBuilders[].base`): in a real deployment the
+   * browser reaches the backend THROUGH the frontend — a dev proxy or
+   * edge serves `/api/ops/...` while the backend route is `/ops/...`.
+   * Whether such a prefix exists is a property of the deployment the
+   * engine cannot derive from source, and guessing wrong would silently
+   * mismatch obligation identities. When set, the observation proxy
+   * forwards the STRIPPED path to the proxy target AND records the
+   * STRIPPED path in observation records, so observations match the
+   * backend-derived obligation identities the suite claims
+   * (`evidence.http.observe({path: '/ops/x'})`). Requests outside the
+   * prefix pass through and are recorded unstripped. Absent/null strips
+   * nothing — forwarding and recording stay byte-identical to an
+   * unmounted proxy.
+   */
+  mountPath?: string | null;
   /** Run manifest identity (pin #4). */
   runId: string;
   /** Per-run token; every call must carry `x-gateforge-run: <token>`. */

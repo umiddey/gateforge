@@ -24,6 +24,14 @@ export interface ClassificationView {
   exposure: string;
   plane: string;
   evidenceAdapter?: string;
+  /**
+   * Which evidence lane proves user-facing reachability (`'claims'` =
+   * the http.endpoint lane; adapter-free). MUST ride along: without it a
+   * claims-lane entry (user-facing, no adapter) re-validates downstream
+   * as "user-facing resources require an 'evidenceAdapter'" and the
+   * reporter grades the claim unclassified.
+   */
+  evidenceLane?: 'adapter' | 'claims';
   lifecycle: {
     create: boolean;
     read: boolean;
@@ -91,6 +99,7 @@ export function toClassificationView(entry: Classification): ClassificationView 
     exposure: entry.exposure,
     plane: entry.plane,
     ...(entry.evidenceAdapter === undefined ? {} : { evidenceAdapter: entry.evidenceAdapter }),
+    ...(entry.evidenceLane === undefined ? {} : { evidenceLane: entry.evidenceLane }),
     lifecycle: {
       create: entry.lifecycle.create,
       read: entry.lifecycle.read,

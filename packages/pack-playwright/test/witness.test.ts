@@ -11,7 +11,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { startWitness, WitnessStartupError, recordIdOf } from '../src/witness/server.js';
-import { RunManifestSchema, ledgerMac, verifyLedgerMac } from '@gateforge/core';
+import { RunManifestSchema, ledgerMac, verifyLedgerMac, ClassificationSchema, type Classification } from '@gateforge/core';
+import { toClassificationView } from '../src/witness/classifications.js';
 import { writeHonestAdapter, writeFixtureProject, makeTempProject } from './helpers.js';
 import { AttestationError } from '../src/witness/env-attestation.js';
 import { ENV_FINGERPRINT_HEADER, RUN_HEADER, VERIFIER_HEADER } from '../src/constants.js';
@@ -400,6 +401,84 @@ describe('classifications surface', () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as { resources: Record<string, { primaryKey: string[] }> };
       expect(body.resources['tenant.accounts']?.primaryKey).toEqual(['id']);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('carries evidenceLane through the view: a claims-lane entry round-trips intact', async () => {
+    // The claims lane (http.endpoint resources): user-facing WITHOUT an
+    // adapter — exactly the entry the reporter's engine-side validation
+    // used to reject when the view dropped `evidenceLane` ("user-facing
+    // resources require an 'evidenceAdapter'").
+    const project = makeTempProject('witness-lane');
+    writeFileSync(
+      join(project, '.gateforge/claims-classifications.yml'),
+      [
+        'schemaVersion: 1',
+        'resources:',
+        '  tenant.http-frontend-errors:',
+        '    exposure: user-facing',
+        '    plane: tenant',
+        '    lifecycle: { create: false, read: false, update: false, delete: false }',
+        '    primaryKey: [method, path]',
+        '    evidenceLane: claims',
+        '',
+      ].join('\n'),
+    );
+    const witness = await startWitness({
+      runId: RUN_ID,
+      token: TOKEN,
+      classificationsPath: join(project, '.gateforge/claims-classifications.yml'),
+    });
+    try {
+      const res = await fetch(`${witness.url}/classifications`, {
+        headers: { [RUN_HEADER]: TOKEN },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        resources: Record<string, Record<string, unknown>>;
+      };
+      const entry = body.resources['tenant.http-frontend-errors'];
+      expect(entry).toBeDefined();
+      // The lane survived the serialization round-trip…
+      expect(entry?.['evidenceLane']).toBe('claims');
+      expect(entry?.['exposure']).toBe('user-facing');
+      // …and the projected view re-validates against the frozen core
+      // schema (the exact check `evaluateObligation` applies), so the
+      // reporter cannot grade the claim unclassified.
+      const view = toClassificationView(
+        ClassificationSchema.parse({
+          exposure: entry?.['exposure'],
+          plane: entry?.['plane'],
+          lifecycle: entry?.['lifecycle'],
+          primaryKey: entry?.['primaryKey'],
+          ...(entry?.['evidenceAdapter'] !== undefined
+            ? { evidenceAdapter: entry?.['evidenceAdapter'] }
+            : {}),
+          ...(entry?.['evidenceLane'] !== undefined
+            ? { evidenceLane: entry?.['evidenceLane'] }
+            : {}),
+        }) as Classification,
+      );
+      expect(view.evidenceLane).toBe('claims');
+    } finally {
+      await witness.stop();
+    }
+  });
+
+  it('an adapter-lane entry stays adapter-lane (no evidenceLane in the view)', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      const res = await fetch(`${fixture.witness.url}/classifications`, {
+        headers: { [RUN_HEADER]: TOKEN },
+      });
+      const body = (await res.json()) as {
+        resources: Record<string, Record<string, unknown>>;
+      };
+      expect(body.resources['tenant.accounts']?.['evidenceAdapter']).toBe('tenant.accounts');
+      expect(body.resources['tenant.accounts']?.['evidenceLane']).toBeUndefined();
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();
