@@ -5,6 +5,10 @@
  * yields a witnessed `http.request` record that — together with a
  * provenanced claimed ui anchor — satisfies `http:frontend-request-observed`
  * in the real verdict engine. Suite-forged network records stay invalid.
+ *
+ * Mount-path coverage (phase 7): with an explicit `mountPath` the proxy
+ * forwards AND records the STRIPPED backend path; without one the
+ * behavior stays byte-identical.
  */
 import { describe, expect, it } from 'vitest';
 import { createServer, request as httpRequest, type Server } from 'node:http';
@@ -64,11 +68,15 @@ function record(overrides: Record<string, unknown>): Record<string, unknown> {
   return base;
 }
 
-function callProxy(proxyUrl: string, path: string): Promise<number> {
+function callProxy(
+  proxyUrl: string,
+  path: string,
+): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const forward = httpRequest(`${proxyUrl}${path}`, { method: 'POST' }, (res) => {
-      res.resume();
-      res.on('end', () => resolve(res.statusCode ?? 0));
+      let data = '';
+      res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }));
     });
     forward.on('error', reject);
     forward.end();
@@ -120,8 +128,8 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
     const target = await startTarget();
     const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
     try {
-      const emittedStatus = await callProxy(witness.proxyUrl as string, '/api/contracts');
-      expect(emittedStatus).toBe(201);
+      const emitted = await callProxy(witness.proxyUrl as string, '/api/contracts');
+      expect(emitted.status).toBe(201);
 
       const consumed = await observe(witness);
       expect(consumed.statusCode).toBe(200);
@@ -245,6 +253,105 @@ describe('no claimed-side path around the trust model', () => {
       );
     } finally {
       await witness.stop();
+      await target.stop();
+    }
+  });
+});
+
+describe('observation-proxy mount path (deployment-topology declaration)', () => {
+  it('strips the mount prefix: /api/ops/x is forwarded AND recorded as /ops/x', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({
+      runId: RUN_ID,
+      token: TOKEN,
+      proxyTarget: target.url,
+      mountPath: '/api',
+    });
+    try {
+      // The browser calls the frontend-mounted path; the target must see
+      // the STRIPPED backend path (query preserved).
+      const forwarded = await callProxy(witness.proxyUrl as string, '/api/ops/x?y=1');
+      expect(forwarded.status).toBe(201);
+      expect(JSON.parse(forwarded.body)).toMatchObject({ path: '/ops/x?y=1' });
+
+      // The claim references the backend-derived obligation identity.
+      const consumed = await observe(witness, { path: '/ops/x' });
+      expect(consumed.statusCode).toBe(200);
+      expect(consumed.status).toBe(201);
+
+      const recordsResponse = await fetch(`${witness.url}/records`, {
+        headers: { 'x-gateforge-run': TOKEN },
+      });
+      const body = (await recordsResponse.json()) as {
+        records: Array<{ kind: string; payload: Record<string, unknown> }>;
+      };
+      const httpRecords = body.records.filter((entry) => entry.kind === 'http.request');
+      expect(httpRecords).toHaveLength(1);
+      // The RECORD carries the stripped path too.
+      expect(httpRecords[0]?.payload).toMatchObject({ method: 'POST', url: '/ops/x', status: 201 });
+
+      // Single-use is intact.
+      const replay = await observe(witness, { path: '/ops/x' });
+      expect(replay.statusCode).toBe(409);
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('requests outside the mount prefix pass through and record unstripped', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({
+      runId: RUN_ID,
+      token: TOKEN,
+      proxyTarget: target.url,
+      mountPath: '/api',
+    });
+    try {
+      const forwarded = await callProxy(witness.proxyUrl as string, '/other');
+      expect(forwarded.status).toBe(201);
+      expect(JSON.parse(forwarded.body)).toMatchObject({ path: '/other' });
+      const consumed = await observe(witness, { path: '/other' });
+      expect(consumed.statusCode).toBe(200);
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('without a mount path the proxy forwards and records byte-identical to today', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({
+      runId: RUN_ID,
+      token: TOKEN,
+      proxyTarget: target.url,
+      mountPath: null,
+    });
+    try {
+      const forwarded = await callProxy(witness.proxyUrl as string, '/api/ops/x');
+      expect(forwarded.status).toBe(201);
+      expect(JSON.parse(forwarded.body)).toMatchObject({ path: '/api/ops/x' });
+      const consumed = await observe(witness, { path: '/api/ops/x' });
+      expect(consumed.statusCode).toBe(200);
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('fails closed on a mount path without a proxy target and on malformed prefixes', async () => {
+    await expect(
+      startWitness({ runId: RUN_ID, token: TOKEN, mountPath: '/api' }),
+    ).rejects.toThrow(/mountPath requires proxyTarget/);
+    const target = await startTarget();
+    try {
+      await expect(
+        startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url, mountPath: '/' }),
+      ).rejects.toThrow(/invalid mountPath/);
+      await expect(
+        startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url, mountPath: 'a b' }),
+      ).rejects.toThrow(/invalid mountPath/);
+    } finally {
       await target.stop();
     }
   });

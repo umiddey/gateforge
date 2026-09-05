@@ -31,11 +31,13 @@ let pending = null;
  * Args:
  *   env: environment for the child (must carry GATEFORGE_RUN_ID /
  *     GATEFORGE_RUN_TOKEN; the witness derivations are documented in the
- *     pack README).
+ *     pack README). GATEFORGE_PROXY_TARGET / GATEFORGE_MOUNT_PATH start
+ *     the observation proxy (see the `gateforge-witness --help` surface).
  *   timeoutMs: startup timeout.
  *
  * Returns:
- *   {child, url}: running child + its loopback URL.
+ *   {child, url, proxyUrl}: running child, its loopback URL, and the
+ *   observation-proxy URL when one is active (null otherwise).
  *
  * Throws:
  *   Error: when the child exits early or never becomes ready.
@@ -48,16 +50,20 @@ export async function startWitnessProcess(env, timeoutMs = 15000) {
     });
     const urlPromise = new Promise((resolveUrl, rejectUrl) => {
         let stdout = '';
+        let proxyUrl = null;
         const timer = setTimeout(() => {
             child.kill('SIGKILL');
             rejectUrl(new Error('witness child did not report its URL in time'));
         }, timeoutMs);
         child.stdout?.on('data', (chunk) => {
             stdout += chunk.toString('utf8');
+            const proxyMatch = /^GATEFORGE_WITNESS_PROXY_URL=(.+)$/m.exec(stdout);
+            if (proxyMatch !== null)
+                proxyUrl = proxyMatch[1] ?? null;
             const match = /^GATEFORGE_WITNESS_URL=(.+)$/m.exec(stdout);
             if (match !== null) {
                 clearTimeout(timer);
-                resolveUrl(match[1]);
+                resolveUrl({ url: match[1], proxyUrl });
             }
         });
         child.once('error', (error) => {
@@ -71,9 +77,9 @@ export async function startWitnessProcess(env, timeoutMs = 15000) {
             }
         });
     });
-    const url = await urlPromise;
+    const { url, proxyUrl } = await urlPromise;
     await waitForHealth(url, env[ENV_RUN_TOKEN] ?? '', timeoutMs);
-    return { child, url };
+    return { child, url, proxyUrl };
 }
 /** Polls the witness health endpoint until ready (or timeout). */
 async function waitForHealth(url, token, timeoutMs) {
@@ -124,7 +130,10 @@ export async function gateforgeGlobalSetup() {
     const handle = await pending;
     process.env[ENV_WITNESS_URL] = handle.url;
     mkdirSync(stateDir, { recursive: true });
-    writeFileSync(join(stateDir, WITNESS_URL_FILE), `${JSON.stringify({ url: handle.url })}\n`, 'utf8');
+    writeFileSync(join(stateDir, WITNESS_URL_FILE), 
+    // proxyUrl lets harnesses point the browser at the observation proxy
+    // when GATEFORGE_PROXY_TARGET was wired for this run.
+    `${JSON.stringify({ url: handle.url, proxyUrl: handle.proxyUrl })}\n`, 'utf8');
 }
 /** Playwright `globalTeardown`: stop the spawned witness. */
 export async function gateforgeGlobalTeardown() {

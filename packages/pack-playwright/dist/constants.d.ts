@@ -46,6 +46,22 @@ export declare const ENV_TARGET_FINGERPRINT = "GATEFORGE_TARGET_FINGERPRINT";
 export declare const ENV_ADAPTERS_DIR = "GATEFORGE_ADAPTERS_DIR";
 export declare const ENV_CLASSIFICATIONS = "GATEFORGE_CLASSIFICATIONS";
 export declare const ENV_ADAPTER_BASE_URL = "GATEFORGE_ADAPTER_BASE_URL";
+/** Observation proxy target (loopback base URL the proxy forwards to). */
+export declare const ENV_PROXY_TARGET = "GATEFORGE_PROXY_TARGET";
+/**
+ * Observation-proxy mount prefix (e.g. `/api`): the browser-facing path
+ * prefix a frontend dev proxy adds before backend routes. The proxy
+ * strips it before forwarding and before recording observations, so
+ * records match backend-derived obligation identities.
+ */
+export declare const ENV_MOUNT_PATH = "GATEFORGE_MOUNT_PATH";
+/**
+ * Verifier key for the witness attestation surface. Environment ONLY —
+ * never argv (a process's cmdline is world-readable via /proc), and
+ * never exported to the tested suite. Same variable the orchestrating
+ * CLI reads (`gateforge test-gates`).
+ */
+export declare const ENV_WITNESS_VERIFIER_KEY = "GATEFORGE_WITNESS_VERIFIER_KEY";
 /** Opt-in reporter exit-code semantics (standalone runs only). */
 export declare const ENV_REPORTER_FAIL_RUN = "GATEFORGE_REPORTER_FAIL_RUN";
 /** Witness file inside the state dir carrying the spawned URL. */

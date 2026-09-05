@@ -66,6 +66,7 @@ export function toClassificationView(entry) {
         exposure: entry.exposure,
         plane: entry.plane,
         ...(entry.evidenceAdapter === undefined ? {} : { evidenceAdapter: entry.evidenceAdapter }),
+        ...(entry.evidenceLane === undefined ? {} : { evidenceLane: entry.evidenceLane }),
         lifecycle: {
             create: entry.lifecycle.create,
             read: entry.lifecycle.read,
