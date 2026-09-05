@@ -150,6 +150,7 @@ export const RULES = {
   exposurePositive: 'EXPOSURE_POSITIVE_SIGNAL',
   exposureInternalCertificate: 'EXPOSURE_INTERNAL_CERTIFICATE',
   exposureDefault: 'EXPOSURE_DEFAULT_USER_FACING',
+  exposureOperationalProbe: 'EXPOSURE_OPERATIONAL_PROBE',
   lifecyclePositive: 'LIFECYCLE_POSITIVE_SIGNAL',
   lifecycleDeclaredSupported: 'LIFECYCLE_DECLARED_SUPPORTED',
   lifecycleClosedWorldDisabled: 'LIFECYCLE_CLOSED_WORLD_DISABLED',
@@ -263,6 +264,32 @@ function internalityCategory(signal: ClassificationSignal): string | null {
 /** Whether the signal positively asserts external reachability. */
 function isPositiveExposure(signal: ClassificationSignal): boolean {
   return signal.basis === 'code-positive' && signal.assertion !== false;
+}
+
+/**
+ * The precise operational-endpoint class (plan §6 "Health/operations",
+ * ADR 0004 D5): an `http.endpoint` whose compiled capabilities are
+ * EXACTLY `health-operations` and that has NO linked business resource —
+ * the same class the operational plane rule resolves to `global`
+ * (`resolveEndpointPlanes`). The capability set comes from the
+ * deterministic compiler rule `HEALTH_PATH_NO_SCHEMA` (GET/HEAD, no
+ * request schema, no business link, and a root-hung infrastructure-probe
+ * path shape — segment-exact probe words at depth <= 2 or the bare root).
+ * Positive detector facts, never absence-as-internal. Any additional
+ * capability (a health-path route whose response model also corroborated
+ * crud-read, a command suffix, …) or any business link keeps the endpoint
+ * in the full user-facing lattice: fail closed.
+ */
+function isOperationalEndpoint(resource: ClassifierResourceRef): boolean {
+  if (resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) return false;
+  const linked = resource.attributes['linkedResourceName'];
+  if (typeof linked === 'string' && linked.length > 0) return false;
+  const capabilities = resource.attributes['capabilities'];
+  return (
+    Array.isArray(capabilities) &&
+    capabilities.length === 1 &&
+    capabilities[0] === 'health-operations'
+  );
 }
 
 /**
@@ -907,7 +934,25 @@ function classifyOne(
   const hasInternalIntent = internalDeclarations.length > 0 || matchedInternalRules.length > 0;
 
   let exposure: 'user-facing' | 'internal';
-  if (positiveExposure.length > 0) {
+  if (isOperationalEndpoint(resource)) {
+    // Operational probes (plan §6 "Health/operations") resolve through an
+    // engine-issued exposure lane, NOT the user-facing default and NOT an
+    // internality certificate: the class itself is positive compiler
+    // evidence (HEALTH_PATH_NO_SCHEMA, no business resource link). The
+    // architecture assigns these endpoints dependency-ready/degraded
+    // behavior evidence and explicitly "no artificial browser UI
+    // obligation" — so they must never demand a reviewed UI evidence
+    // adapter (ADAPTER_MISSING) they can never honestly carry.
+    // `internal` is the obligation posture that encodes exactly that (no
+    // CRUD/UI evidence lane, adapter optional), and the rule id below
+    // records WHY in the decision trace so the resolution is explainable
+    // rather than a silent internality claim. The global "unknown
+    // exposure defaults user-facing" default is untouched: every other
+    // resource without exposure facts still defaults user-facing.
+    exposure = 'internal';
+    rules.push(RULES.exposureOperationalProbe);
+    contribute(...positiveExposure);
+  } else if (positiveExposure.length > 0) {
     contribute(...positiveExposure);
     exposure = 'user-facing';
     rules.push(RULES.exposurePositive);
@@ -1235,8 +1280,22 @@ function classifyOne(
   }
 
   // -- Adapter binding -------------------------------------------------------
+  // The reviewed EntityAdapter demand is a BUSINESS-resource requirement,
+  // not a universal one (dogfood: 473/746 ADAPTER_MISSING blocks on pure
+  // endpoints). An `http.endpoint` resource is witnessed through the
+  // claims/witness-proxy lane (`http:frontend-request-observed` etc.);
+  // EntityAdapter's contract — read by id, normalize a body, deletion
+  // kind — is about business-entity persistence and has no honest meaning
+  // for a route, so demanding one for every user-facing endpoint was a
+  // category error that red the gate on evidence no route can carry.
+  // Endpoints therefore classify user-facing WITHOUT an adapter (the
+  // claims lane, recorded as `evidenceLane: 'claims'` so the schema and
+  // every downstream consumer see WHY no adapter is present). The demand
+  // is unchanged for business kinds: a user-facing table without a
+  // reviewed adapter still blocks (ADAPTER_MISSING).
+  const businessResource = resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND;
   let evidenceAdapter: string | undefined;
-  if (exposure === 'user-facing') {
+  if (exposure === 'user-facing' && businessResource) {
     const bound = bindAdapter(ctx.adapters, resource, signals);
     if (bound !== null) {
       evidenceAdapter = bound;
@@ -1261,6 +1320,7 @@ function classifyOne(
     plane,
     lifecycle,
     primaryKey,
+    ...(exposure === 'user-facing' && !businessResource ? { evidenceLane: 'claims' as const } : {}),
     ...(evidenceAdapter !== undefined ? { evidenceAdapter } : {}),
   };
   const signalIds = [...new Set(contributing.map((s) => signalId(s)))].sort(compareStrings);

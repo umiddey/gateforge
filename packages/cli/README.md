@@ -51,6 +51,50 @@ The plugin's `discover` receives repo-relative file paths; in-process
 plugins resolve them against the process working directory, which for a
 CLI run is the repo root.
 
+## Endpoint plane rules (`.gateforge/planes.json`)
+
+The same declarative plane document the packs apply to business tables
+also carries endpoint-plane evidence. It is consumed by the endpoint
+compiler (the pipeline stage that builds `http.endpoint` resources) with
+the same strict reader, the same schema
+(`{ rules: [{ match?, tables?, plane, reason }] }`), and the same
+fail-closed posture.
+
+**Endpoint plane rules are explicit human declarations keyed on the
+router SOURCE FILE path — not automatic filename inference.** The config
+IS the documented evidence (mirroring the classification policy's
+declaration channels): a rule whose `match` glob (repo-root-relative,
+posix, core classifier glob semantics) matches an endpoint's router file
+asserts that endpoint's `plane` (`tenant` | `master` | `global`) with a
+required non-empty `reason` as the review artifact. `tables` rules never
+apply to endpoints — endpoints carry no table identity.
+
+Evaluation per endpoint, deterministic and fail closed:
+
+- **All matching rules agree** → the plane is applied as a plane-dimension
+  declaration signal (`gateforge.endpoint-compiler:config`), the same
+  evidence channel the classifier's inheritance pass uses, so the graph
+  qualifies the endpoint id as `plane.<name>`.
+- **Matching rules disagree** → a blocking `PLANE_RULE_CONTRADICTION`
+  entry is emitted (the required `reason` of each matching rule rides the
+  diagnostic) and NO plane is applied — never first-match-wins.
+- **No rule matches** → no evidence; the endpoint stays on the existing
+  channels (linked-resource inheritance, operational `global`, else
+  `PLANE_UNRESOLVED`).
+
+Interaction with the other plane channels: the config plane participates
+as EVIDENCE, never as a blanket override. When the plane the classifier
+would derive for the endpoint (exactly one linked business resource, or
+the operational `global` rule) is already derivable from the detector
+contributions and CONTRADICTS the config plane, the compiler emits both
+assertions so the classifier blocks with `PLANE_CONTRADICTION`; when they
+agree, one plane remains and the endpoint resolves.
+
+Absence of `.gateforge/planes.json` is normal and byte-identical to not
+having this channel; a malformed document (bad JSON, unknown keys, a rule
+without `plane`/`reason`, an absolute or `..`-escaping `match`) fails the
+run closed at startup (exit 2).
+
 ## test-gates protocol (G6 surface)
 
 `gateforge test-gates` writes a run state directory (default

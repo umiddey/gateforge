@@ -53,10 +53,12 @@ export {
   canonicalEndpointIdentity,
   endpointResourceName,
   joinFrontendCalls,
+  routeMatchKind,
   routeMatchesCall,
   type EndpointIdentity,
   type JoinBlock,
   type JoinedEndpoint,
   type JoinResult,
+  type RouteMatchKind,
 } from './join.js';
 export { derivePathResourceName } from './linkage.js';

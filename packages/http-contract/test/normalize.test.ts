@@ -87,6 +87,23 @@ describe('canonical path normalization', () => {
     expect(normalizeHttpPath('/')).toMatchObject({ ok: true, canonical: '/' });
   });
 
+  it('treats a single trailing slash as insignificant on BOTH routes and calls (dogfood regression)', () => {
+    // Runtime frameworks treat `/api/v2/accounts` and `/api/v2/accounts/`
+    // as the same resource; the canonical form must mirror that so the
+    // static join never misses on the spelling. The root `/` is the bare
+    // resource and stays.
+    expect(normalizeHttpPath('/v2/accounts/')).toMatchObject({
+      ok: true,
+      canonical: '/v2/accounts',
+    });
+    expect(normalizeHttpPath('/api/v2/accounts/')).toMatchObject({
+      ok: true,
+      canonical: '/api/v2/accounts',
+    });
+    expect(normalizeHttpPath('/health/')).toMatchObject({ ok: true, canonical: '/health' });
+    expect(normalizeHttpPath('/')).toMatchObject({ ok: true, canonical: '/' });
+  });
+
   it('converts template expressions to positional slots', () => {
     expect(normalizeHttpPath('/accounts/${account.id}')).toMatchObject({
       ok: true,

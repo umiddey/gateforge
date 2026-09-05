@@ -1,12 +1,27 @@
 /**
- * Post-canonicalization and signal minting for the FastAPI detector.
+ * Post-canonicalization for the FastAPI detector.
  *
  * The Python scanner emits raw effective paths; this module is the single
  * place where contract facts get their canonical `normalizedPath` (via
  * `@gateforge/http-contract`, so canonicalization has exactly one
- * implementation across languages) and where the pack's classification
- * signals (exposure/lifecycle facts about business resources, ADR 0003
- * D1) are minted with the pack's pinned detector identity.
+ * implementation across languages).
+ *
+ * Classification signals (dogfood remediation phase 4): NONE. The wrapper
+ * once minted `exposure: route` / `lifecycle.<op>` signals targeted at the
+ * PATH-DERIVED resource name (`pathDerivedResourceName`) — a guess that
+ * mostly names no discovered resource (route `/admin-bypasses` vs the real
+ * table), so the signals surfaced as STALE_SIGNAL_TARGET blockers while
+ * adding nothing: unknown exposure already defaults user-facing and unknown
+ * lifecycle operations already default enabled (ADR 0003 D5). Route→resource
+ * linkage belongs to the CLI endpoint compiler (schema-symbol/handler
+ * corroboration over these very facts' `requestSchemaSymbols`/
+ * `responseSchemaSymbols`/`handlerSymbol`, with typed
+ * ENDPOINT_RESOURCE_LINK_UNRESOLVED blocks for ambiguity). Core's
+ * STALE_SIGNAL_TARGET detection remains for genuinely stale authority
+ * signals (declaration markers, adapter bindings, read-only declarations)
+ * — this pack simply no longer produces false targets. The
+ * `classificationSignals` outcome field stays in the wire shape (protocol
+ * contract) and is always empty.
  */
 import {
   HTTP_PATH_DYNAMIC,
@@ -15,7 +30,6 @@ import {
   type HttpLocation,
 } from '@gateforge/http-contract';
 import type { ClassificationSignal } from '@gateforge/core';
-import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
 /** Source location shape shared by facts, resources, and signals. */
 type Location = HttpLocation;
@@ -31,62 +45,6 @@ export interface ContractResource {
   id: string;
 }
 
-/**
- * Mirrors pack-http's `resourceNameFromPath`: the last non-parameter,
- * non-numeric, non-empty path segment, lower-cased, extension-stripped.
- * Returns `null` when no name can be derived — the caller must emit
- * nothing rather than guess.
- */
-export function pathDerivedResourceName(rawPath: string): string | null {
-  const withoutTail = rawPath.split('?')[0]?.split('#')[0] ?? rawPath;
-  const segments = withoutTail.split('/').filter((segment) => segment !== '');
-  for (let index = segments.length - 1; index >= 0; index -= 1) {
-    const segment = segments[index] ?? '';
-    if (segment.startsWith(':') || segment.startsWith('{') || segment.startsWith('*')) continue;
-    if (/^\d+$/.test(segment)) continue;
-    const cleaned = segment.replace(/\.(json|xml|txt|html)$/i, '');
-    if (cleaned.length === 0) continue;
-    return cleaned.toLowerCase();
-  }
-  return null;
-}
-
-/** HTTP verb → lifecycle operation, mirroring pack-http (`null` = none). */
-export function operationForMethod(method: string): 'create' | 'read' | 'update' | 'delete' | null {
-  switch (method) {
-    case 'POST':
-      return 'create';
-    case 'GET':
-    case 'HEAD':
-      return 'read';
-    case 'PUT':
-    case 'PATCH':
-      return 'update';
-    case 'DELETE':
-      return 'delete';
-    default:
-      return null;
-  }
-}
-
-function signal(
-  dimension: string,
-  assertion: string | boolean,
-  location: Location,
-  targetName: string,
-): ClassificationSignal {
-  return {
-    schemaVersion: 1,
-    target: { resourceName: targetName },
-    dimension: dimension as ClassificationSignal['dimension'],
-    assertion,
-    basis: 'code-positive',
-    source: PACK_PLUGIN_ID,
-    location,
-    detector: { id: PACK_PLUGIN_ID, version: PACK_VERSION },
-  };
-}
-
 export interface CanonicalizationOutcome {
   /** Facts whose effective path canonicalized; `normalizedPath` filled in. */
   facts: HttpContractFact[];
@@ -99,12 +57,12 @@ export interface CanonicalizationOutcome {
 }
 
 /**
- * Canonicalizes python-emitted contract resources into typed facts and
- * mints the pack's classification signals.
+ * Canonicalizes python-emitted contract resources into typed facts.
  *
  * A fact whose effective path canonicalizes to a dynamic outcome becomes a
  * blocking `HTTP_PATH_DYNAMIC` unresolved entry — never a dropped claim
- * and never a guess. Facts and signals are returned in deterministic
+ * and never a guess. No classification signals are minted (phase 4; see
+ * the module doc). Facts and resources are returned in deterministic
  * canonical order.
  */
 export function canonicalizeFacts(
@@ -113,6 +71,8 @@ export function canonicalizeFacts(
   const facts: HttpContractFact[] = [];
   const keptResources: ContractResource[] = [];
   const unresolved: CanonicalizationOutcome['unresolved'] = [];
+  // Phase 4: no classification signals are minted — the field stays in
+  // the wire shape (protocol contract) and is always empty.
   const signals: ClassificationSignal[] = [];
 
   for (const resource of resources) {
@@ -169,20 +129,10 @@ export function canonicalizeFacts(
       ...resource,
       attributes: { ...attributes, normalizedPath: canonical.canonical },
     });
-
-    const targetName = pathDerivedResourceName(effectivePath);
-    if (targetName !== null) {
-      signals.push(signal('exposure', 'route', resource.location, targetName));
-      const operation = operationForMethod(method);
-      if (operation !== null) {
-        signals.push(signal(`lifecycle.${operation}`, true, resource.location, targetName));
-      }
-    }
   }
 
   facts.sort((a, b) => compareText(JSON.stringify(a), JSON.stringify(b)));
   keptResources.sort((a, b) => compareText(a.id, b.id));
-  signals.sort((a, b) => compareText(JSON.stringify(a), JSON.stringify(b)));
   unresolved.sort(
     (a, b) =>
       compareText(a.location.file, b.location.file) ||

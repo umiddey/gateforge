@@ -22,9 +22,53 @@ Detector vocabulary (frozen with the pack):
 - Standalone routers (never the target of a resolvable ``include_router``)
   emit their routes at their own prefix with ``mountProvenance``
   ``standalone`` — matching the legacy wiring scanner's default mount.
+- Registry functions (the ``def register_all_routers(app): ...
+  app.include_router(r, prefix=...)`` pattern): a function whose body
+  calls ``include_router`` on one of ITS OWN parameters collects those
+  include edges keyed by the parameter. A call site whose argument
+  resolves to a known ``FastAPI()``/``APIRouter()`` instance variable
+  (same-file assignment — module-level or factory-local — or an import
+  binding to another scanned file's instance) has the edges REWIRED onto
+  that instance: the includes behave exactly as if written on the
+  instance (mount provenance ``include-chain``, the include call's own
+  source location, repeated mounts duplicate). Chaining is bounded:
+  a registry function may pass its parameter to another helper
+  (``def create_app(app): register_all_routers(app)``) up to
+  ``MAX_RESOLUTION_DEPTH`` helper hops; beyond the bound the outcome is
+  one typed unresolved entry naming the function where the chain still
+  grows — never a silent drop, never a guess. A call site whose argument
+  cannot be resolved to a known instance is a typed unresolved entry
+  naming the exact call site, and emits NOTHING: the routers are
+  provably included (their source carries prefixes), so prefix-less
+  standalone paths would fabricate routes — the honest closed-world
+  outcome is the blocking entry. The same applies to computed (non-Name)
+  argument expressions. Parameter names that shadow a same-file instance
+  variable keep the module-level reading only (no double emission).
+- Package-attribute imports: ``from pkg import attr`` where
+  ``pkg/attr.py`` does not exist resolves ``attr`` through the package's
+  ``__init__.py`` module-level bindings — a router assignment
+  (``router = APIRouter()``) or an import re-export
+  (``from .endpoints import router``), followed up to
+  ``MAX_RESOLUTION_DEPTH`` hops. Ambiguity flows into the existing typed
+  unresolved entries (never a guess).
+- Import roots: when the caller configures them (``scan(...,
+  import_roots=[...])``, repo-root-relative directories that act as
+  Python import roots, e.g. ``["backend"]``), ABSOLUTE imports resolve
+  through them: ``from api.v1.endpoints import activities`` binds
+  ``<importRoot>/api/v1/endpoints/activities.py`` (or its package
+  ``__init__.py``), so centrally-registered routers join the mount graph
+  with their real prefixes. Uniqueness is mandatory: a dotted module
+  matching MORE THAN ONE scanned file across the roots is a typed
+  unresolved entry (``FASTAPI_PREFIX_UNRESOLVED`` with an ambiguous-match
+  detail) — never a guess. With import roots configured the absolute-
+  import suffix heuristic is disabled (explicit roots govern); relative
+  imports are unaffected. Without import roots every behavior is exactly
+  as before (closed-world: back-compat).
 - ``unresolved`` entries: ``FASTAPI_PREFIX_UNRESOLVED`` for computed
-  router/include prefixes, unresolvable include targets/imports/aliases,
-  and include cycles; ``HTTP_PATH_DYNAMIC`` for non-literal route paths;
+  router/include prefixes, unresolvable or ambiguous include
+  targets/imports/aliases, unresolvable registry-function call-site
+  arguments, include cycles, and registry chains beyond the helper-depth
+  bound; ``HTTP_PATH_DYNAMIC`` for non-literal route paths;
   ``HTTP_METHOD_DYNAMIC`` for decorator verbs outside the supported set.
   All are source-located and blocking — nothing disappears silently.
 - No app import, no route execution, no environment or network access
@@ -42,6 +86,9 @@ VERSION = "0.1.0"
 
 CONTRACT_KIND = "http.contract"
 FRAMEWORK = "fastapi"
+
+# Typed outcome codes (mirrored in @gateforge/http-contract codes.ts).
+FASTAPI_PREFIX_UNRESOLVED = "FASTAPI_PREFIX_UNRESOLVED"
 
 _DECORATOR_METHODS = {
     "get": "GET",
@@ -62,6 +109,13 @@ _PRIMITIVE_ANNOTATIONS = {
     "str", "int", "float", "bool", "bytes", "dict", "list", "set", "tuple",
     "Annotated", "Optional", "Union", "Any", "None",
 }
+
+# Bounded interprocedural expansion (documented, deterministic): how many
+# helper hops a registry-function parameter may travel before the walk
+# stops, and how many ``__init__.py`` import bindings one name may pass
+# through. Beyond the bound the outcome is a typed unresolved entry —
+# never a silent drop, never a guess.
+MAX_RESOLUTION_DEPTH = 8
 
 
 @dataclass
@@ -95,14 +149,68 @@ class RouterDef:
 
 @dataclass
 class IncludeEdge:
-    """One ``<owner>.include_router(<target>, prefix=...)`` call."""
+    """One ``<owner>.include_router(<target>, prefix=...)`` call.
+
+    ``owner_var`` is the owner expression's root name: an instance var, an
+    import alias — or a registry function's PARAMETER (function-mediated
+    includes; materialized onto a real instance by the resolver). ``file``
+    is the file the call is written in; resolution and locations for the
+    edge always use it (materialized edges keep their source file, not the
+    mounted instance's file).
+    """
 
     owner_var: str                       # owning router/app var (same file)
     target_var: str | None               # same-file Name target (var or alias)
     target_alias: tuple[str | None, int, str] | None  # Alias.attr target import ref
-    target_attr: str | None              # attribute name for alias targets
+    target_attrs: list[str]              # attribute chain for alias targets (e.g. ['activities', 'router'])
     prefix: str | None                   # literal include prefix ('' absent; None computed)
     node: ast.AST
+    file: str = ""                       # file the include call lives in
+
+
+@dataclass
+class FunctionIncludes:
+    """One top-level function's registry-function record.
+
+    ``param_edges`` maps a parameter name to the ``include_router`` edges
+    whose owner expression is that parameter (the same edge objects that
+    live in ``FileIndex.include_edges``, so identity-based dedup works
+    across the bounded chaining passes). Empty for plain functions.
+    """
+
+    name: str
+    node: ast.AST
+    params: tuple[str, ...]              # positional parameters (call sites bind positionally)
+    param_edges: dict[str, list[IncludeEdge]] = field(default_factory=dict)
+
+
+@dataclass
+class HelperCall:
+    """One plain-name call carrying at least one positional Name argument.
+
+    Recorded for every such call (module level or inside a top-level
+    function); only calls whose callee resolves to a scanned function with
+    include-bearing parameters ever participate in propagation.
+    """
+
+    callee: str                          # called function's name as written
+    args: list[ast.AST]                  # positional argument expressions
+    node: ast.AST                        # the call (typed-unresolved anchor)
+    enclosing: str | None                # enclosing top-level function (None: module level)
+
+
+@dataclass
+class ImportResolution:
+    """Outcome of resolving one import against the scanned set.
+
+    ``module`` is the dotted scanned module (a ``module_map`` key) when
+    uniquely resolved. ``ambiguous`` carries the matching scanned files
+    when the import matches more than one — failure with proof, never a
+    guess.
+    """
+
+    module: str | None = None
+    ambiguous: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -123,6 +231,8 @@ class FileIndex:
     apps: set[str] = field(default_factory=set)
     imports: dict[str, ImportRef] = field(default_factory=dict)
     include_edges: list[IncludeEdge] = field(default_factory=list)
+    functions: dict[str, FunctionIncludes] = field(default_factory=dict)
+    helper_calls: list[HelperCall] = field(default_factory=list)
     unsupported: list[tuple[ast.AST, list[str]]] = field(default_factory=list)
 
 
@@ -162,10 +272,18 @@ def _elements(node: ast.AST | None) -> list[ast.AST] | None:
 
 
 class _ModuleVisitor(ast.NodeVisitor):
-    """Collects routers, apps, imports, include edges, and route decorators."""
+    """Collects routers, apps, imports, include edges, and route decorators.
+
+    Registry-function collection is top-level only (module or class-body
+    ``def``); a nested ``def`` stays in the enclosing function's context so
+    its ``include_router`` calls still count for the outer parameter.
+    """
 
     def __init__(self, relpath: str) -> None:
         self.index = FileIndex(relpath=relpath)
+        # Current top-level function (registry-function context), or None
+        # at module level.
+        self._function: FunctionIncludes | None = None
 
     # -- imports ------------------------------------------------------------
 
@@ -214,13 +332,48 @@ class _ModuleVisitor(ast.NodeVisitor):
     def _visit_callable(self, node, is_async: bool = False) -> None:
         for decorator in node.decorator_list:
             self._visit_route_decorator(decorator, node, is_async)
-        self.generic_visit(node)  # visit_Call records include_router everywhere
+        if self._function is None:
+            # Top-level callable: becomes the registry-function context.
+            # Positional parameters only — call sites bind the app argument
+            # positionally; the LAST def of a name wins (Python semantics).
+            params = tuple(
+                argument.arg for argument in (*node.args.posonlyargs, *node.args.args)
+            )
+            record = FunctionIncludes(name=node.name, node=node, params=params)
+            self.index.functions[node.name] = record
+            self._function = record
+            self.generic_visit(node)  # visit_Call records includes everywhere
+            self._function = None
+        else:
+            self.generic_visit(node)  # nested def: keep the enclosing context
 
     def visit_Call(self, node: ast.Call) -> None:
         self._visit_include_call(node)
+        self._visit_helper_call(node)
         self.generic_visit(node)
 
     # -- detail walkers -------------------------------------------------------
+
+    def _visit_helper_call(self, node: ast.Call) -> None:
+        """Records plain-name calls with positional Name arguments.
+
+        Bounded noise by construction: resolution only ever matches calls
+        whose callee resolves to a scanned function carrying include-bearing
+        parameters, so utility calls (``Depends(get_db)``, ``print(x)``)
+        are recorded but never participate.
+        """
+        if not isinstance(node.func, ast.Name) or not node.args:
+            return
+        if not any(isinstance(argument, ast.Name) for argument in node.args):
+            return
+        self.index.helper_calls.append(
+            HelperCall(
+                callee=node.func.id,
+                args=list(node.args),
+                node=node,
+                enclosing=self._function.name if self._function is not None else None,
+            )
+        )
 
     def _visit_route_decorator(self, node: ast.AST, fn, is_async: bool) -> None:
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
@@ -291,25 +444,43 @@ class _ModuleVisitor(ast.NodeVisitor):
         target = node.args[0]
         target_var: str | None = None
         target_alias: tuple[str | None, int, str] | None = None
-        target_attr: str | None = None
+        target_attrs: list[str] = []
         if isinstance(target, ast.Name):
             target_var = target.id  # same-file var or import alias
-        elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-            ref = self.index.imports.get(target.value.id)
-            if ref is not None and ref.name is not None:
-                target_alias = (ref.module, ref.level, ref.name)
-                target_attr = target.attr
+        elif isinstance(target, ast.Attribute):
+            # Attribute chains over an import binding: ``items.router``,
+            # or the deeper registry shape ``endpoints.health.router``.
+            attrs: list[str] = []
+            base: ast.AST = target
+            while isinstance(base, ast.Attribute):
+                attrs.append(base.attr)
+                base = base.value
+            if isinstance(base, ast.Name):
+                attrs.reverse()
+                ref = self.index.imports.get(base.id)
+                if ref is not None and ref.name is not None:
+                    target_alias = (ref.module, ref.level, ref.name)
+                    target_attrs = attrs
         prefix_node = _keyword(node, "prefix")
-        self.index.include_edges.append(
-            IncludeEdge(
-                owner_var=owner,
-                target_var=target_var,
-                target_alias=target_alias,
-                target_attr=target_attr,
-                prefix="" if prefix_node is None else _static_string(prefix_node),
-                node=node,
-            )
+        edge = IncludeEdge(
+            owner_var=owner,
+            target_var=target_var,
+            target_alias=target_alias,
+            target_attrs=target_attrs,
+            prefix="" if prefix_node is None else _static_string(prefix_node),
+            node=node,
+            file=self.index.relpath,
         )
+        self.index.include_edges.append(edge)
+        if (
+            self._function is not None
+            and owner in self._function.params
+        ):
+            # Function-mediated include (the registry-function pattern).
+            # The same edge object also lives in include_edges, so the
+            # target stays provably-included (suppressed from standalone
+            # emission) whether or not the parameter ever resolves.
+            self._function.param_edges.setdefault(owner, []).append(edge)
 
 
 def _request_schema_names(fn, path: str | None) -> list[str]:
@@ -378,58 +549,126 @@ def _module_of(relpath: str) -> str:
     return without_ext.replace("/", ".")
 
 
-def _resolve_import(file_relpath: str, ref: tuple[str | None, int, str], module_map: dict[str, str]) -> str | None:
-    """Resolve an import to one scanned module, including source-root aliases.
+def _root_candidates(dotted: str, import_roots: tuple[str, ...], scanned: frozenset[str]) -> list[str]:
+    """Scanned files a dotted module name maps to under the import roots.
+
+    ``api.v1.activities`` under root ``backend`` matches the scanned files
+    ``backend/api/v1/activities.py`` and ``backend/api/v1/activities/
+    __init__.py`` when present. Deterministic: root order, then module
+    file before package; duplicates removed.
+    """
+    relative = dotted.replace(".", "/")
+    matches: list[str] = []
+    for root in import_roots:
+        base = f"{root}/{relative}" if root else relative
+        for candidate in (f"{base}.py", f"{base}/__init__.py"):
+            if candidate in scanned and candidate not in matches:
+                matches.append(candidate)
+    return matches
+
+
+def _resolve_import(
+    file_relpath: str,
+    ref: tuple[str | None, int, str],
+    module_map: dict[str, str],
+    import_roots: tuple[str, ...] = (),
+    scanned: frozenset[str] = frozenset(),
+    prefer_name: bool = False,
+) -> ImportResolution:
+    """Resolve an import to one scanned module, or prove why not.
 
     Args:
         file_relpath: Repo-relative importing file.
         ref: Parsed import tuple ``(module, relative-level, imported-name)``.
         module_map: Dotted module names available in the scanned set.
+        import_roots: Configured repo-root-relative import roots. When
+            non-empty, ABSOLUTE imports resolve through them and the
+            suffix heuristic is skipped; relative imports are unchanged.
+        scanned: Repo-relative scanned file set (required for roots).
+        prefer_name: Check ``module.name`` before ``module`` (used by the
+            module-import attribute chain, where the imported name is a
+            submodule: ``from api.v1 import activities``).
 
     Returns:
-        str | None: The unique matching scanned module, or None when the
-        import is ambiguous or outside the scanned set.
+        ImportResolution: the unique module, an ambiguity proof, or an
+        unresolved outcome — never a guess.
     """
     raw_module, level, name = ref
     parts = _module_of(file_relpath).split(".")
     if level > 0:
+        # Relative imports resolve inside the scanned tree itself; import
+        # roots do not participate.
         up = level - 1
         parts = parts[: len(parts) - up] if up > 0 else parts
         if raw_module:
             parts.extend(raw_module.split("."))
         candidate = ".".join(parts)
-    else:
-        candidate = raw_module or ""
+        if candidate in module_map:
+            return ImportResolution(module=candidate)
+        with_name = f"{candidate}.{name}" if name else candidate
+        if with_name in module_map:
+            return ImportResolution(module=with_name)
 
-    if candidate in module_map:
-        return candidate
+        # Applications often run with a package directory on PYTHONPATH, so
+        # imports such as ``from api.v1.routes`` resolve to ``backend.api.v1.routes``
+        # when the repository is scanned from its parent directory. Accept only a
+        # unique suffix match; ambiguity remains fail-closed.
+        suffix = f".{candidate}" if candidate else ""
+        matches = sorted(module for module in module_map if suffix and module.endswith(suffix))
+        if len(matches) == 1:
+            return ImportResolution(module=matches[0])
+        with_name_suffix = f".{with_name}" if with_name else ""
+        matches = sorted(module for module in module_map if with_name_suffix and module.endswith(with_name_suffix))
+        return ImportResolution(module=matches[0] if len(matches) == 1 else None)
+
+    candidate = raw_module or ""
     with_name = f"{candidate}.{name}" if name else candidate
-    if with_name in module_map:
-        return with_name
 
-    # Applications often run with a package directory on PYTHONPATH, so
-    # imports such as ``from api.v1.routes`` resolve to ``backend.api.v1.routes``
-    # when the repository is scanned from its parent directory. Accept only a
-    # unique suffix match; ambiguity remains fail-closed.
-    suffix = f".{candidate}" if candidate else ""
-    matches = sorted(module for module in module_map if suffix and module.endswith(suffix))
-    if len(matches) == 1:
-        return matches[0]
-    with_name_suffix = f".{with_name}" if with_name else ""
-    matches = sorted(module for module in module_map if with_name_suffix and module.endswith(with_name_suffix))
-    return matches[0] if len(matches) == 1 else None
+    if not import_roots:
+        # Legacy behavior (import roots not configured): exact match, then
+        # the unique-suffix heuristic — byte-identical to pre-roots releases.
+        if candidate in module_map:
+            return ImportResolution(module=candidate)
+        if with_name in module_map:
+            return ImportResolution(module=with_name)
+        suffix = f".{candidate}" if candidate else ""
+        matches = sorted(module for module in module_map if suffix and module.endswith(suffix))
+        if len(matches) == 1:
+            return ImportResolution(module=matches[0])
+        with_name_suffix = f".{with_name}" if with_name else ""
+        matches = sorted(module for module in module_map if with_name_suffix and module.endswith(with_name_suffix))
+        return ImportResolution(module=matches[0] if len(matches) == 1 else None)
+
+    # Explicit import roots: the two readings of the import, tried in order
+    # (the imported name first when it is itself the target module).
+    interpretations = (with_name, candidate) if prefer_name else (candidate, with_name)
+    for dotted in interpretations:
+        if dotted and dotted in module_map:
+            return ImportResolution(module=dotted)
+    for dotted in interpretations:
+        if not dotted:
+            continue
+        matches = _root_candidates(dotted, import_roots, scanned)
+        if len(matches) == 1:
+            return ImportResolution(module=_module_of(matches[0]))
+        if len(matches) > 1:
+            return ImportResolution(ambiguous=tuple(sorted(matches)))
+    return ImportResolution(module=None)
 
 
 class _Resolver:
     """Composes effective mounted paths over the cross-file mount graph."""
 
-    def __init__(self, indexes: dict[str, FileIndex]) -> None:
+    def __init__(self, indexes: dict[str, FileIndex], import_roots: tuple[str, ...] = ()) -> None:
         self.indexes = indexes
+        self.import_roots = import_roots
+        self.scanned: frozenset[str] = frozenset(indexes)
         self.module_map = {_module_of(rel): rel for rel in indexes}
         self.facts: list[dict] = []
         self.unresolved: list[dict] = []
 
     def resolve(self) -> None:
+        self._materialize_function_includes()
         self._merge_aliases()
         included = self._collect_included()
         for relpath in sorted(self.indexes):
@@ -445,6 +684,249 @@ class _Resolver:
                 if (relpath, name) in included:
                     continue
                 self._walk(relpath, name, "", (), "standalone", included)
+
+    def _materialize_function_includes(self) -> None:
+        """Rewires registry-function includes onto real instances.
+
+        Interprocedural, bounded, deterministic:
+
+        1. Every top-level function of every scanned file joins the global
+           registry keyed ``(file, name)``; its ``param_edges`` (includes
+           written on its own parameters) seed the effective edge sets.
+        2. Bounded chaining (snapshot fixed point, at most
+           ``MAX_RESOLUTION_DEPTH`` applied passes — after pass k a
+           parameter k helper hops from the include is complete; one extra
+           probe pass detects growth beyond the bound): when a function's
+           body calls another scanned function with one of ITS OWN
+           parameters as a positional argument, the callee's effective
+           edges re-key onto that parameter (identity-deduped, so cycles
+           and re-visits add nothing). Growth the probe pass still finds
+           is a chain deeper than the bound: one typed unresolved entry
+           naming the function where the chain still grows.
+        3. Every recorded call site of an include-bearing function is
+           materialized: each positional argument that resolves to a known
+           instance (``_instance_owner``) receives the corresponding edges
+           as ordinary include edges on that instance — same provenance
+           discipline as written includes (mount ``include-chain`` at the
+           include call's own source location; repeated mounts duplicate).
+           Arguments bound to the enclosing function's own parameter were
+           already handled by chaining and materialize at the outer call
+           site instead.
+
+        Unresolvable arguments (a Name bound to no known instance, or a
+        computed expression) yield a typed unresolved entry naming the
+        exact call site and materialize NOTHING: the routers are provably
+        included somewhere (they stay suppressed from standalone emission)
+        and their source carries prefixes, so emitting prefix-less paths
+        would fabricate routes. A parameter name shadowing a same-file
+        instance variable keeps the module-level reading only (the edge is
+        already walked from the instance; materializing would double-emit).
+        """
+        registry: dict[tuple[str, str], FunctionIncludes] = {
+            (relpath, name): function
+            for relpath, index in sorted(self.indexes.items())
+            for name, function in index.functions.items()
+        }
+        if not registry:
+            return
+
+        def resolve_fn(relpath: str, callee: str) -> tuple[str, str] | None:
+            """(file, function) a plain callee name denotes, or None.
+
+            Same-file top-level def first, then an import binding resolved
+            against the scanned set (deterministic import resolution;
+            ambiguity or absence returns None — a plain unknown call makes
+            no claim).
+            """
+            if callee in self.indexes[relpath].functions:
+                return (relpath, callee)
+            ref = self.indexes[relpath].imports.get(callee)
+            if ref is None or ref.name is None:
+                return None
+            resolution = _resolve_import(
+                relpath, (ref.module, ref.level, ref.name),
+                self.module_map, self.import_roots, self.scanned,
+            )
+            if resolution.module is None:
+                return None
+            target = self.module_map.get(resolution.module)
+            if target is not None and ref.name in self.indexes[target].functions:
+                return (target, ref.name)
+            return None
+
+        # Effective per-parameter edges, snapshot-propagated (each pass
+        # reads only the previous pass's state, so a parameter k helper
+        # hops from its include is complete after pass k).
+        effective: dict[tuple[str, str], dict[str, list[IncludeEdge]]] = {
+            key: {param: list(edges) for param, edges in function.param_edges.items()}
+            for key, function in registry.items()
+        }
+        unconverged: set[tuple[str, str]] = set()
+        converged = False
+        for _pass in range(MAX_RESOLUTION_DEPTH + 1):
+            additions: list[tuple[tuple[str, str], str, IncludeEdge]] = []
+            for relpath in sorted(self.indexes):
+                index = self.indexes[relpath]
+                for call in index.helper_calls:
+                    if call.enclosing is None:
+                        continue  # chaining concerns parameter-carrying functions only
+                    fn_key = (relpath, call.enclosing)
+                    function = registry.get(fn_key)
+                    if function is None:
+                        continue
+                    helper_key = resolve_fn(relpath, call.callee)
+                    if helper_key is None or helper_key == fn_key:
+                        continue
+                    helper_params = registry[helper_key].params
+                    for position, param in enumerate(helper_params):
+                        if position >= len(call.args):
+                            break
+                        argument = call.args[position]
+                        if not isinstance(argument, ast.Name):
+                            continue
+                        if argument.id not in function.params:
+                            continue
+                        if argument.id in index.apps or argument.id in index.routers:
+                            continue  # shadowed param: the module-level instance governs
+                        bucket = effective[fn_key].setdefault(argument.id, [])
+                        for edge in effective.get(helper_key, {}).get(param, []):
+                            if not any(existing is edge for existing in bucket):
+                                additions.append((fn_key, argument.id, edge))
+            if not additions:
+                converged = True
+                break
+            if _pass >= MAX_RESOLUTION_DEPTH:
+                # Probe pass (never applied): growth here needs more than
+                # MAX_RESOLUTION_DEPTH helper hops — beyond the bound.
+                unconverged = {fn_key for fn_key, _param, _edge in additions}
+                break
+            grew: set[tuple[str, str]] = set()
+            for fn_key, param, edge in additions:
+                bucket = effective[fn_key].setdefault(param, [])
+                if not any(existing is edge for existing in bucket):
+                    bucket.append(edge)
+                    grew.add(fn_key)
+            unconverged = grew
+        if not converged:
+            # Still growing after the last pass: chains deeper than the bound.
+            for relpath, name in sorted(unconverged):
+                function = self.indexes[relpath].functions.get(name)
+                if function is None:
+                    continue
+                self.unresolved.append({
+                    "code": FASTAPI_PREFIX_UNRESOLVED,
+                    "detail": (
+                        f"registry-function include chain through '{name}' in {relpath} "
+                        f"exceeds the supported helper depth ({MAX_RESOLUTION_DEPTH}); "
+                        "the effective mount graph cannot be proven statically"
+                    ),
+                    "location": loc(relpath, function.node),
+                })
+
+        # Materialize every call site whose argument resolves to a known
+        # instance (module level or inside a function — the factory shape).
+        for relpath in sorted(self.indexes):
+            for call in self.indexes[relpath].helper_calls:
+                helper_key = resolve_fn(relpath, call.callee)
+                if helper_key is None:
+                    continue
+                for position, param in enumerate(registry[helper_key].params):
+                    if position >= len(call.args):
+                        break
+                    edges = effective.get(helper_key, {}).get(param)
+                    if edges:
+                        self._materialize_call(
+                            relpath, call, call.args[position], edges, helper_key,
+                        )
+
+    def _materialize_call(
+        self,
+        relpath: str,
+        call: HelperCall,
+        argument: ast.AST,
+        edges: list[IncludeEdge],
+        helper_key: tuple[str, str],
+    ) -> None:
+        """Mounts one call site's edges onto the instance the argument names.
+
+        See ``_materialize_function_includes`` for the semantics; this is
+        the per-argument decision point (chaining passthrough, instance
+        rewiring, or the typed unresolvable outcome).
+        """
+        enclosing = (
+            self.indexes[relpath].functions.get(call.enclosing)
+            if call.enclosing is not None
+            else None
+        )
+        if isinstance(argument, ast.Name):
+            if enclosing is not None and argument.id in enclosing.params:
+                return  # chaining passthrough; materialized at the outer call site
+            owner = self._instance_owner(relpath, argument.id)
+            if owner is not None:
+                target_file, owner_var = owner
+                self.indexes[target_file].include_edges.extend(
+                    IncludeEdge(
+                        owner_var=owner_var,
+                        target_var=edge.target_var,
+                        target_alias=edge.target_alias,
+                        target_attrs=list(edge.target_attrs),
+                        prefix=edge.prefix,
+                        node=edge.node,
+                        file=edge.file,
+                    )
+                    for edge in edges
+                )
+                return
+            self.unresolved.append({
+                "code": FASTAPI_PREFIX_UNRESOLVED,
+                "detail": (
+                    f"call to registry function '{helper_key[1]}' in {relpath} passes "
+                    f"'{argument.id}', which cannot be resolved to a known "
+                    "FastAPI/APIRouter instance; its include_router calls cannot be "
+                    "mounted and emit nothing (no prefix-less standalone paths are "
+                    "fabricated)"
+                ),
+                "location": loc(relpath, call.node),
+            })
+            return
+        self.unresolved.append({
+            "code": FASTAPI_PREFIX_UNRESOLVED,
+            "detail": (
+                f"call to registry function '{helper_key[1]}' in {relpath} passes a "
+                "computed argument expression, which cannot be resolved to a known "
+                "FastAPI/APIRouter instance; its include_router calls cannot be "
+                "mounted and emit nothing"
+            ),
+            "location": loc(relpath, call.node),
+        })
+
+    def _instance_owner(self, relpath: str, name: str) -> tuple[str, str] | None:
+        """(file, var) when ``name`` denotes a known FastAPI/APIRouter instance.
+
+        Same-file assignments first (module-level or factory-local — both
+        are walked as instances), then an import binding whose target
+        module declares the name as an instance (both readings of the
+        import, like include-target resolution; ambiguity returns None).
+        """
+        index = self.indexes[relpath]
+        if name in index.apps or name in index.routers:
+            return (relpath, name)
+        ref = index.imports.get(name)
+        if ref is None or ref.name is None:
+            return None
+        parsed = (ref.module, ref.level, ref.name)
+        for prefer_name in (False, True):
+            resolution = _resolve_import(
+                relpath, parsed, self.module_map, self.import_roots, self.scanned,
+                prefer_name=prefer_name,
+            )
+            target = self.module_map.get(resolution.module) if resolution.module else None
+            if target is not None and (
+                ref.name in self.indexes[target].apps
+                or ref.name in self.indexes[target].routers
+            ):
+                return (target, ref.name)
+        return None
 
     def _merge_aliases(self) -> None:
         """Routes declared through import-aliased names join the defining
@@ -478,47 +960,152 @@ class _Resolver:
         targets: set[tuple[str, str]] = set()
         for relpath in sorted(self.indexes):
             for edge in self.indexes[relpath].include_edges:
-                found = self._resolve_target(relpath, edge)
+                found, _ = self._resolve_target(edge.file or relpath, edge)
                 if found is not None:
                     targets.add(found)
         return targets
 
-    def _resolve_target(self, relpath: str, edge: IncludeEdge) -> tuple[str, str] | None:
-        """(file, router var) an include edge points at, or None."""
+    def _resolve_target(
+        self, relpath: str, edge: IncludeEdge,
+    ) -> tuple[tuple[str, str] | None, ImportResolution | None]:
+        """(file, router var) an include edge points at, or None.
+
+        The second element carries the import resolution when AMBIGUITY
+        (not mere absence) caused the failure, so the walk can report the
+        matching files instead of a bare "cannot be resolved".
+        """
         if edge.target_var is not None:
             if edge.target_var in self.indexes[relpath].routers:
-                return (relpath, edge.target_var)
+                return (relpath, edge.target_var), None
             ref = self.indexes[relpath].imports.get(edge.target_var)
             if ref is None:
+                return None, None
+            return self._module_router_ex(relpath, (ref.module, ref.level, ref.name), ref.name)
+        if edge.target_alias is not None and edge.target_attrs:
+            return self._resolve_alias_target(relpath, edge)
+        return None, None
+
+    def _resolve_alias_target(
+        self, relpath: str, edge: IncludeEdge,
+    ) -> tuple[tuple[str, str] | None, ImportResolution | None]:
+        """Resolve ``<binding>.<attr chain>`` include targets.
+
+        ``from a import items`` + ``items.router`` is the one-attribute
+        shape; ``from api.v1 import endpoints`` + ``endpoints.health.router``
+        walks intermediate submodules. With import roots configured, the
+        imported NAME may itself be the target module (``from api.v1 import
+        activities`` + ``activities.router``): a second resolution with the
+        name-qualified module covers that reading. Ambiguity is returned as
+        proof — never guessed.
+        """
+        ref = edge.target_alias
+        assert ref is not None
+        attrs = edge.target_attrs
+        if not self.import_roots and len(attrs) != 1:
+            return None, None  # pre-roots behavior: deep chains stay unresolved
+        resolution = _resolve_import(relpath, ref, self.module_map, self.import_roots, self.scanned)
+        if resolution.module is not None:
+            found = self._alias_target_from(resolution.module, attrs)
+            if found is not None:
+                return found, None
+        if not self.import_roots:
+            return None, None  # pre-roots behavior: single reading, no retry
+        retry = _resolve_import(
+            relpath, ref, self.module_map, self.import_roots, self.scanned, prefer_name=True,
+        )
+        if retry.module is not None and retry.module != resolution.module:
+            found = self._alias_target_from(retry.module, attrs)
+            if found is not None:
+                return found, None
+        ambiguous = resolution.ambiguous if resolution.ambiguous is not None else retry.ambiguous
+        return None, (ImportResolution(ambiguous=ambiguous) if ambiguous is not None else None)
+
+    def _alias_target_from(self, module: str, attrs: list[str]) -> tuple[str, str] | None:
+        """(file, var) for ``<module>.<attr chain>``, or None.
+
+        Intermediate attributes must be scanned submodules; the final
+        attribute is either a submodule whose ``router`` variable is a
+        router (``pkg.router`` shape) or a router variable of the current
+        module (``items`` of ``from a import items`` + ``items`` as a
+        plain router object is handled by the Name branch).
+        """
+        for attr in attrs[:-1]:
+            sub = self.module_map.get(f"{module}.{attr}")
+            if sub is None:
                 return None
-            return self._module_router(relpath, (ref.module, ref.level, ref.name), ref.name)
-        if edge.target_alias is not None and edge.target_attr is not None:
-            module = _resolve_import(relpath, edge.target_alias, self.module_map)
-            if module is None:
-                return None
-            # ``from a import items`` + ``items.router``: try a.items first.
-            target_file = self.module_map.get(f"{module}.{edge.target_attr}")
-            if (
-                target_file is not None
-                and "router" in self.indexes[target_file].routers
-            ):
-                return (target_file, "router")
-            target_file = self.module_map.get(module)
-            if target_file is not None and edge.target_attr in self.indexes[target_file].routers:
-                return (target_file, edge.target_attr)
+            module = f"{module}.{attr}"
+        final = attrs[-1]
+        # ``from a import items`` + ``items.router``: try a.items first.
+        target_file = self.module_map.get(f"{module}.{final}")
+        if target_file is not None and "router" in self.indexes[target_file].routers:
+            return (target_file, "router")
+        current = self.module_map.get(module)
+        if current is not None and final in self.indexes[current].routers:
+            return (current, final)
+        if current is not None:
+            # ``pkg.attr`` where attr is a package-attribute binding
+            # (``__init__.py`` assignment or re-export).
+            return self._module_binding_target(module, final)
         return None
 
     def _module_router(
         self, relpath: str, ref: tuple[str | None, int, str], var: str,
     ) -> tuple[str, str] | None:
         """(file, var) for an imported router name, or None."""
-        module = _resolve_import(relpath, ref, self.module_map)
-        if module is None:
+        target, _ = self._module_router_ex(relpath, ref, var)
+        return target
+
+    def _module_router_ex(
+        self, relpath: str, ref: tuple[str | None, int, str], var: str,
+    ) -> tuple[tuple[str, str] | None, ImportResolution | None]:
+        """(file, var) for an imported router name plus its resolution.
+
+        The imported name resolves through the target module's own
+        module-level bindings when it is not itself a router var or
+        submodule: a package ``__init__.py`` re-export
+        (``from pkg import router`` where the package does
+        ``from .endpoints import router``) is followed, bounded by
+        ``MAX_RESOLUTION_DEPTH`` hops. Ambiguity is returned as proof —
+        never guessed.
+        """
+        resolution = _resolve_import(relpath, ref, self.module_map, self.import_roots, self.scanned)
+        if resolution.module is None:
+            return None, resolution
+        target = self._module_binding_target(resolution.module, var)
+        if target is not None:
+            return target, resolution
+        return None, resolution
+
+    def _module_binding_target(
+        self, module: str, var: str, depth: int = 0,
+    ) -> tuple[str, str] | None:
+        """(file, var) for module member ``var``, following bindings.
+
+        In order: a scanned submodule ``<module>.<var>`` whose ``var`` is a
+        router (the module-of-same-name shape), a router var of the module
+        itself (``var = APIRouter()`` — e.g. in a package ``__init__.py``),
+        then a module-level import binding of the module
+        (``from .endpoints import router``) followed recursively. Bounded;
+        cycles return None (typed unresolved at the caller, as before).
+        """
+        if depth > MAX_RESOLUTION_DEPTH:
             return None
         target_file = self.module_map.get(f"{module}.{var}") or self.module_map.get(module)
-        if target_file is not None and var in self.indexes[target_file].routers:
+        if target_file is None:
+            return None
+        index = self.indexes[target_file]
+        if var in index.routers:
             return (target_file, var)
-        return None
+        ref = index.imports.get(var)
+        if ref is None or ref.name is None:
+            return None
+        resolution = _resolve_import(
+            target_file, (ref.module, ref.level, ref.name),
+            self.module_map, self.import_roots, self.scanned,
+        )
+        if resolution.module is None:
+            return None
+        return self._module_binding_target(resolution.module, ref.name, depth + 1)
 
     def _walk(
         self,
@@ -545,16 +1132,28 @@ class _Resolver:
         router = index.routers.get(var)
         if router is not None:
             if router.alias_of is not None:
-                target = self._module_router(relpath, router.alias_of, router.alias_of[2])
+                target, resolution = self._module_router_ex(relpath, router.alias_of, router.alias_of[2])
                 if target is None:
-                    self.unresolved.append({
-                        "code": "FASTAPI_PREFIX_UNRESOLVED",
-                        "detail": (
-                            f"router '{var}' in {relpath} is an import alias whose "
-                            "target router cannot be resolved in the scanned set"
-                        ),
-                        "location": loc(relpath, router.prefix_node),
-                    })
+                    if resolution is not None and resolution.ambiguous is not None:
+                        self.unresolved.append({
+                            "code": FASTAPI_PREFIX_UNRESOLVED,
+                            "detail": (
+                                f"router '{var}' in {relpath} is an import alias whose target "
+                                f"module matches multiple scanned files under the configured "
+                                f"import roots ({', '.join(resolution.ambiguous)}); the target "
+                                "router cannot be proven uniquely"
+                            ),
+                            "location": loc(relpath, router.prefix_node),
+                        })
+                    else:
+                        self.unresolved.append({
+                            "code": FASTAPI_PREFIX_UNRESOLVED,
+                            "detail": (
+                                f"router '{var}' in {relpath} is an import alias whose "
+                                "target router cannot be resolved in the scanned set"
+                            ),
+                            "location": loc(relpath, router.prefix_node),
+                        })
                     return
                 self._walk(target[0], target[1], prefix, chain + (node_key,), mount, included)
                 return
@@ -576,26 +1175,42 @@ class _Resolver:
         for edge in index.include_edges:
             if edge.owner_var != var:
                 continue
-            target = self._resolve_target(relpath, edge)
+            # Materialized (registry-function) edges resolve and locate at
+            # the file the include call is written in, not the instance's.
+            edge_home = edge.file or relpath
+            target, resolution = self._resolve_target(edge_home, edge)
             if target is None:
+                if resolution is not None and resolution.ambiguous is not None:
+                    self.unresolved.append({
+                        "code": FASTAPI_PREFIX_UNRESOLVED,
+                        "detail": (
+                            f"include_router target "
+                            f"'{edge.target_var or (edge.target_attrs[0] if edge.target_attrs else None)}' "
+                            f"in {edge_home} matches multiple scanned files under the configured "
+                            f"import roots ({', '.join(resolution.ambiguous)}); the target "
+                            "router cannot be proven uniquely"
+                        ),
+                        "location": loc(edge_home, edge.node),
+                    })
+                    continue
                 self.unresolved.append({
-                    "code": "FASTAPI_PREFIX_UNRESOLVED",
+                    "code": FASTAPI_PREFIX_UNRESOLVED,
                     "detail": (
                         f"include_router target "
-                        f"'{edge.target_var or edge.target_attr}' in {relpath} "
+                        f"'{edge.target_var or (edge.target_attrs[0] if edge.target_attrs else None)}' in {edge_home} "
                         "cannot be resolved in the scanned set"
                     ),
-                    "location": loc(relpath, edge.node),
+                    "location": loc(edge_home, edge.node),
                 })
                 continue
             if edge.prefix is None:
                 self.unresolved.append({
                     "code": "FASTAPI_PREFIX_UNRESOLVED",
                     "detail": (
-                        f"include_router prefix in {relpath} is computed; "
+                        f"include_router prefix in {edge_home} is computed; "
                         "the effective path cannot be proven statically"
                     ),
-                    "location": loc(relpath, edge.node),
+                    "location": loc(edge_home, edge.node),
                 })
                 continue
             self._walk(
@@ -673,8 +1288,18 @@ def _fact(relpath: str, route: RouteDef, method: str, effective_path: str, mount
     }
 
 
-def scan(paths: list[str], root: Path | None = None) -> dict:
+def scan(paths: list[str], root: Path | None = None, import_roots: list[str] | None = None) -> dict:
     """Collect the full deterministic discovery outcome for one request.
+
+    Args:
+        paths: Repo-relative files to scan.
+        root: Scan root (default: process cwd); every path resolves under it.
+        import_roots: Optional repo-root-relative directories that act as
+            Python import roots for ABSOLUTE imports (the central-router-
+            registry pattern). Each is validated like a scan path; a bad
+            root raises (fail closed). Uniqueness of resolution is
+            mandatory: an import matching several scanned files across the
+            roots is a typed unresolved entry, never a guess.
 
     Raises:
         OSError: A scanned file is missing/unreadable — surfaced as a
@@ -682,6 +1307,7 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
     """
     base = root if root is not None else Path.cwd()
     relpaths = [_normalize_path(p) for p in paths]
+    roots = tuple(_normalize_path(r) for r in (import_roots or ()))
 
     indexes: dict[str, FileIndex] = {}
     findings: list[dict] = []
@@ -696,7 +1322,7 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
         scanned.append(relpath)
         indexes[relpath] = index
 
-    resolver = _Resolver(indexes)
+    resolver = _Resolver(indexes, roots)
     resolver.resolve()
 
     for relpath in sorted(indexes):

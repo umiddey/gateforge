@@ -25,4 +25,6 @@ export const ALL_FIXTURE_PATHS = [
   'recurring.ts',
   'decorator.ts',
   'ambiguous.ts',
+  'browser-registration.ts',
+  'browser-registration-multiline.ts',
 ] as const;

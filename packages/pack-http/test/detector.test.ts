@@ -1,14 +1,15 @@
 /**
  * Detector suite for the generic HTTP exposure pack (plan phase 4):
- * route/controller/client-call discovery, path-derived resource names,
- * signal emission, and fail-closed signal hygiene.
+ * route/controller/client-call discovery, contract-fact emission, and
+ * phase-4 signal hygiene — the pack mints NO classification signals
+ * (path-derived targets were STALE_SIGNAL_TARGET noise; see
+ * classifier-linkage.test.ts for the classification fallback proof).
  */
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ClassificationSignalSchema } from '@gateforge/core';
-import { createHttpDetector, resourceNameFromPath } from '../src/index.js';
+import { createHttpDetector } from '../src/index.js';
 
 function project(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'gateforge-pack-http-'));
@@ -20,27 +21,72 @@ function project(files: Record<string, string>): string {
   return dir;
 }
 
-describe('resourceNameFromPath (path-derived identity)', () => {
-  it('derives the last non-parameter segment, lower-cased, extension-stripped', () => {
-    expect(resourceNameFromPath('/api/accounts')).toBe('accounts');
-    expect(resourceNameFromPath('/api/accounts/:id')).toBe('accounts');
-    expect(resourceNameFromPath('/accounts/{id}/orders/{orderNo}')).toBe('orders');
-    expect(resourceNameFromPath('/api/users.json')).toBe('users');
-    expect(resourceNameFromPath('/API/Accounts/')).toBe('accounts');
-    expect(resourceNameFromPath('/billing/refunds?limit=5')).toBe('refunds');
+describe('path-derived targets emit NO signals (dogfood remediation phase 4)', () => {
+  // Red/green: the pre-phase-4 pack minted `exposure` + `lifecycle.<op>`
+  // signals targeted at the path-derived resource name here ('accounts',
+  // 'refunds', 'session', 'users'), every one a guess that mostly named no
+  // discovered resource and surfaced as STALE_SIGNAL_TARGET noise.
+  it('a route whose derived name matches no model emits no signal at all', () => {
+    const dir = project({
+      'src/express-app.ts': [
+        `import express from 'express';`,
+        `const app = express();`,
+        `app.get('/api/accounts', (req, res) => res.json({}));`,
+        `app.post('/api/accounts', (req, res) => res.json({}));`,
+        `app.delete('/api/accounts/:id', (req, res) => res.json({}));`,
+        `app.get('/', (req, res) => res.json({}));`,
+        `app.all('/api/session', (req, res) => res.json({}));`,
+      ].join('\n'),
+      'src/nest-controller.ts': [
+        `import { Controller, Get, Post } from '@nestjs/common';`,
+        `@Controller('billing')`,
+        `export class BillingController {`,
+        `  @Get('refunds')`,
+        `  listRefunds() { return []; }`,
+        `  @Post()`,
+        `  create() { return {}; }`,
+        `}`,
+      ].join('\n'),
+    });
+    try {
+      const detector = createHttpDetector({ root: dir });
+      const outcome = detector.discover(['src']);
+      // Old code emitted exposure:accounts / lifecycle.*:accounts /
+      // exposure:refunds / exposure:session here. Now: silence — the
+      // CLI endpoint compiler owns route→resource linkage.
+      expect(outcome.classificationSignals).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
-  it('returns null for underivable paths (never guesses a target)', () => {
-    expect(resourceNameFromPath('/')).toBe(null);
-    expect(resourceNameFromPath('/:id')).toBe(null);
-    expect(resourceNameFromPath('/api/accounts/9')).toBe('accounts');
-    expect(resourceNameFromPath('/*')).toBe(null);
-    expect(resourceNameFromPath('/{id}')).toBe(null);
+  it('frontend calls whose derived names match no model emit no signal either', () => {
+    const dir = project({
+      'web/client.ts': [
+        `const res = await fetch('/api/accounts');`,
+        `await axios.post('/api/accounts', body);`,
+        `await axios.delete('/api/accounts/9');`,
+      ].join('\n'),
+    });
+    try {
+      const detector = createHttpDetector({ root: dir });
+      const outcome = detector.discover(['web/client.ts']);
+      // Old code emitted exposure:frontend-call + lifecycle.* targeted at
+      // 'accounts' from these very callsites. Now: silence.
+      expect(outcome.classificationSignals).toEqual([]);
+      // The contract facts still flow to the endpoint compiler.
+      const methods = outcome.resources
+        .map((resource) => resource.attributes['method'])
+        .sort();
+      expect(methods).toEqual(['DELETE', 'GET', 'POST']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
 describe('detector: route and client-call discovery', () => {
-  it('discovers express/fastify/hono routes and nestjs controllers with signals', async () => {
+  it('discovers express/fastify/hono routes and nestjs controllers as contract facts', async () => {
     const dir = project({
       'src/express-app.ts': [
         `import express from 'express';`,
@@ -76,36 +122,15 @@ describe('detector: route and client-call discovery', () => {
         expect(resource.attributes['role']).toBe('server-route');
       }
       expect(outcome.resources.length).toBeGreaterThanOrEqual(6);
-      const signalTargets = outcome.classificationSignals.map(
-        (s) => `${s.dimension}:${s.target.resourceName ?? ''}`,
-      );
-      // Express GET /api/accounts: exposure + lifecycle.read; POST/DELETE
-      // add create/delete. NestJS prefix + suffix join under 'refunds'.
-      expect(signalTargets).toContain('exposure:accounts');
-      expect(signalTargets).toContain('lifecycle.read:accounts');
-      expect(signalTargets).toContain('lifecycle.create:accounts');
-      expect(signalTargets).toContain('lifecycle.delete:accounts');
-      expect(signalTargets).toContain('exposure:refunds');
-      // The underivable '/' route emits NO signal.
-      expect(signalTargets).not.toContain('exposure:');
-      // app.all asserts exposure but no lifecycle.
-      expect(signalTargets.filter((t) => t.endsWith(':session'))).toEqual(['exposure:session']);
-      // The artifact facts live in the signal locations (route file, exact line).
-      const refundsSignal = outcome.classificationSignals.find(
-        (s) => s.dimension === 'exposure' && s.target.resourceName === 'refunds',
-      );
-      expect(refundsSignal?.location.file).toBe('src/nest-controller.ts');
-      expect(refundsSignal?.assertion).toBe('route');
-      // Every signal validates against the frozen core schema.
-      for (const signal of outcome.classificationSignals) {
-        expect(ClassificationSignalSchema.safeParse(signal).success).toBe(true);
-      }
+      // No classification signals at all (phase 4): the underivable '/'
+      // route never had one, and the derivable ones lost their guesses.
+      expect(outcome.classificationSignals).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('discovers frontend fetch/axios calls as frontend-call exposure', async () => {
+  it('discovers frontend fetch/axios calls as frontend-call contract facts', async () => {
     const dir = project({
       'web/client.ts': [
         `const res = await fetch('/api/accounts');`,
@@ -116,16 +141,15 @@ describe('detector: route and client-call discovery', () => {
     try {
       const detector = createHttpDetector({ root: dir });
       const outcome = detector.discover(['web/client.ts']);
-      const exposures = outcome.classificationSignals.filter((s) => s.dimension === 'exposure');
-      expect(exposures).toHaveLength(3);
-      for (const exposure of exposures) {
-        expect(exposure.assertion).toBe('frontend-call');
-        expect(exposure.target.resourceName).toBe('accounts');
+      const facts = outcome.resources.filter(
+        (resource) => resource.attributes['role'] === 'frontend-call',
+      );
+      expect(facts).toHaveLength(3);
+      for (const fact of facts) {
+        expect(fact.kind).toBe('http.contract');
       }
-      const ops = outcome.classificationSignals
-        .filter((s) => s.dimension.startsWith('lifecycle.'))
-        .map((s) => s.dimension);
-      expect(ops.sort()).toEqual(['lifecycle.create', 'lifecycle.delete', 'lifecycle.read']);
+      // No signals (phase 4): exposure defaults user-facing without them.
+      expect(outcome.classificationSignals).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -188,9 +212,10 @@ describe('detector: route and client-call discovery', () => {
       // recursed, symlinked files are not collected, dangling links are
       // not errors (mirrors the CLI walker's scope-integrity rule).
       expect(outcome.scannedPaths).toEqual(['src/real.ts']);
-      const targets = outcome.classificationSignals.map((s) => s.target.resourceName);
-      expect(targets).toContain('real');
-      expect(targets).not.toContain('ghost');
+      // Only the real file produced a fact (and no signals exist at all).
+      const factFiles = outcome.resources.map((resource) => resource.location.file);
+      expect(factFiles).toEqual(['src/real.ts']);
+      expect(outcome.classificationSignals).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

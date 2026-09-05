@@ -116,7 +116,7 @@ function bindDecision(
 ): GraphResource {
   if (decision === undefined || decision.classification === null) return resource;
   const bound = decision.classification;
-  const { exposure, plane, primaryKey, evidenceAdapter } = bound;
+  const { exposure, plane, primaryKey, evidenceAdapter, evidenceLane } = bound;
   return {
     ...resource,
     id: `${plane}.${resource.name}`,
@@ -127,6 +127,10 @@ function bindDecision(
       plane,
       lifecycle: bound.lifecycle,
       primaryKey,
+      // The claims lane rides with the classification: without it a
+      // user-facing endpoint bound here would fail ClassificationSchema
+      // (user-facing without adapter) at graph validation.
+      ...(evidenceLane !== undefined ? { evidenceLane } : {}),
       ...(evidenceAdapter !== undefined ? { evidenceAdapter } : {}),
     },
     classificationTrace: {

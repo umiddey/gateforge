@@ -45,11 +45,29 @@ guess.
 dynamic methods (callers must emit `HTTP_METHOD_DYNAMIC`; defaulting to
 `GET` is forbidden).
 
-## Join engine (ADR 0004 D3)
+## Join engine (ADR 0004 D3, phase 3 literal precedence)
 
 `joinFrontendCalls(routes, calls)` implements exactly-one cardinality:
 equal method, equal segment count, position-wise match where a frontend
 `{}` matches any single route segment and a route `{*}` matches one or
-more trailing segments. Zero matches → `FRONTEND_ROUTE_UNWIRED`; more than
-one distinct match → `FRONTEND_ROUTE_AMBIGUOUS`. Duplicate identical
-routes collapse into one endpoint carrying every source.
+more trailing segments.
+
+Candidates are then partitioned by match quality before the exactly-one
+check (**literal precedence**): a match is *literal* when it consumed no
+slot generality — every position is exact segment equality, counting a
+route `{}` mirrored by the call's own `{}` — and *parameter* otherwise
+(route `{}` absorbing a call literal, a call `{}` relaxed onto a route
+literal, or any `{*}` absorption; a wildcard match is never literal). If
+any literal matches exist they are THE candidates; parameter-only matches
+are considered only when zero literal matches exist.
+
+Why: routers resolve literal path segments before parameterized ones at
+runtime (FastAPI included), so `/messages/search` never reaches
+`/messages/{}` with `id="search"`. The static join mirrors that runtime
+truth: a template call `/messages/${id}` joins `/messages/{}` despite
+literal siblings, and a literal call joins the literal route.
+
+Zero matches → `FRONTEND_ROUTE_UNWIRED`; more than one distinct surviving
+candidate (in either tier) → `FRONTEND_ROUTE_AMBIGUOUS`. There is no
+scoring and no first-match-wins beyond the documented partition. Duplicate
+identical routes collapse into one endpoint carrying every source.
