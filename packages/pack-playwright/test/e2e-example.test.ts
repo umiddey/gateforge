@@ -658,4 +658,106 @@ test('claims an obligation but never collects evidence', {
 	});
 });
 
+describe('packaging: the reporter resolves from CJS contexts', () => {
+	it('require.resolve + require() drive the real witness path (CJS playwright configs)', async () => {
+		// The phase-7 dogfood blocker: `exports['./reporter']` carried only
+		// an `import` condition, so Playwright's CJS-config
+		// `require.resolve('@gateforge/pack-playwright/reporter')` died
+		// with ERR_PACKAGE_PATH_NOT_EXPORTED. Prove the documented usage
+		// end-to-end from a REAL downstream-shaped project: a CJS driver
+		// resolves the `require` condition, loads the class, and drives a
+		// live witness (the shim lazily imports the ESM implementation).
+		const project = makeTempProject('cjs-reporter');
+		writeFixtureProject(project);
+		writeHonestAdapter(project);
+		const stateDir = join(project, '.gateforge/test-gates');
+		mkdirSync(stateDir, { recursive: true });
+		writeFileSync(
+			join(stateDir, 'obligations.json'),
+			JSON.stringify({
+				schemaVersion: 1,
+				obligations: [
+					{
+						id: CLAIMS.update,
+						resourceId: 'tenant.accounts',
+						contract: 'persistence:update',
+						policyId: 'crud',
+						lifecycle: LIFECYCLE,
+						fingerprint: 'f-update',
+						source: 'src/accounts.js',
+						location: { file: 'src/accounts.js', line: 1, col: 0 },
+					},
+				],
+			}),
+		);
+		writeFileSync(
+			join(project, 'cjs-reporter-driver.cjs'),
+			[
+				"'use strict';",
+				"const assert = require('node:assert');",
+				// The exact call a CJS playwright.config.js forces:
+				"const resolved = require.resolve('@gateforge/pack-playwright/reporter');",
+				"assert(resolved.endsWith('reporter.cjs'), 'unexpected resolution: ' + resolved);",
+				"const GateforgeReporter = require('@gateforge/pack-playwright/reporter');",
+				"assert.strictEqual(typeof GateforgeReporter, 'function');",
+				'const reporter = new GateforgeReporter({});',
+				// Buffered until the ESM implementation loads, then replayed.
+				`reporter.onTestEnd({ id: 'cjs-driver-test', annotations: [{ type: 'gateforge', description: '${CLAIMS.update}' }], location: { file: 'driver.cjs', line: 1, column: 0 } }, { status: 'passed' });`,
+				'reporter.onEnd().then(() => process.stdout.write(\'CJS-REPORTER-OK\\n\'), (error) => { console.error(error); process.exit(1); });',
+				'',
+			].join('\n'),
+		);
+		const token = randomUUID();
+		const witness = await startWitness({
+			runId: randomUUID(),
+			token,
+			classificationsPath: join(project, '.gateforge/effective-classifications.yml'),
+		});
+		try {
+			// Async spawn: the in-process witness lives on this worker's
+			// event loop — a sync spawn would deadlock every reporter call.
+			const outcome = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
+				(resolve) => {
+					const child = spawn(process.execPath, [join(project, 'cjs-reporter-driver.cjs')], {
+						cwd: project,
+						env: {
+							GATEFORGE_WITNESS_URL: witness.url,
+							GATEFORGE_RUN_TOKEN: token,
+							GATEFORGE_STATE_DIR: stateDir,
+							GATEFORGE_OBLIGATIONS: join(stateDir, 'obligations.json'),
+						},
+					});
+					let stdout = '';
+					let stderr = '';
+					child.stdout.on('data', (chunk: Buffer) => {
+						stdout += chunk.toString();
+					});
+					child.stderr.on('data', (chunk: Buffer) => {
+						stderr += chunk.toString();
+					});
+					const killer = setTimeout(() => child.kill('SIGKILL'), 120_000);
+					child.on('exit', (status: number | null) => {
+						clearTimeout(killer);
+						resolve({ status, stdout, stderr });
+					});
+				},
+			);
+			expect(outcome.status, `driver failed:\n${outcome.stderr}`).toBe(0);
+			expect(outcome.stdout).toContain('CJS-REPORTER-OK');
+			// The CJS-loaded reporter actually wrote the claim registry the
+			// same way the ESM entry does.
+			const claims = readJson(join(stateDir, 'claims.json')) as Array<{
+				obligationId: string;
+				testId: string;
+			}> | null;
+			expect(Array.isArray(claims)).toBe(true);
+			expect(claims?.[0]?.obligationId).toBe(CLAIMS.update);
+			expect(claims?.[0]?.testId).toBe('cjs-driver-test');
+		} finally {
+			await witness.stop();
+			removeTempProject(project);
+		}
+	});
+});
+
 void randomUUID;
