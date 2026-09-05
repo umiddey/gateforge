@@ -1,15 +1,16 @@
 /**
  * The pack's discover entry: a pure TypeScript GPP/3 in-process
  * detector that scans `.ts`/`.js`/`.mjs` files for background-task
- * signatures and emits one `task.resource` per detected task plus a
- * set of typed findings (`DUPLICATE_TASK_ID`, `AMBIGUOUS_HANDLER`,
- * `PARSE_ERROR`).
+ * signatures. The outcome carries the pack's typed blocking
+ * vocabulary (`AMBIGUOUS_HANDLER`, `PARSE_ERROR` findings and the
+ * typed `UNPROVEN_QUEUE_REGISTRATION` unresolved entry) plus per-file
+ * scan coverage; it emits no resources and no classification signals
+ * (see the phase 4 note below).
  *
  * Mirrors the public shape of `packages/pack-sqlalchemy/src/detector.ts`:
  *   - `discover(paths: string[])` returns the GPP/3 `DiscoveryOutcome`
  *     shape (resources, unresolved, findings).
  *   - `createTaskDetector()` is the factory.
- *   - Resource ids are stable, dotted (`task.<name>`, e.g. `task.email.send`).
  *   - The output is deterministic (no `Date.now()` / `Math.random()`).
  *
  * Patterns detected (regex-based AST-light; matches pack-auth's strategy):
@@ -23,6 +24,48 @@
  *   - Recurring: `setInterval(handler, ms, ...)` / `setImmediate(handler, ...)`.
  *   - Decorators: `@Task` / `@Queue` annotations on exports.
  *
+ * Precision guards (Phase 3): the single-line `register('name', ...)`
+ * shape is receiver-agnostic by nature, so it is narrowed two ways.
+ *   - Browser/platform registration APIs (service workers, caches,
+ *     workbox routes) are NEVER queue registrations: a receiver rooted
+ *     at a browser global (`navigator`/`window`/`document`/`caches`/
+ *     `workbox`) — or any `*.serviceWorker.register(...)` chain — is
+ *     out of scope and produces no detector output at all. The receiver
+ *     is rebuilt across MULTI-LINE call expressions too (bounded
+ *     lookback): in `navigator.serviceWorker\n  .register('/sw.js')`
+ *     the receiver sits on the previous line, and a line-only
+ *     extraction used to miss it (real dogfood false positive).
+ *   - A handler-less `register('name')` is only task-shaped when the
+ *     file shows real queue evidence (a known queue-library import or
+ *     a queue constructor). Otherwise the shape is not provably a task
+ *     registration: the detector emits a typed
+ *     `UNPROVEN_QUEUE_REGISTRATION` unresolved entry instead of a
+ *     vague `AMBIGUOUS_HANDLER` finding (never a silent swallow, and
+ *     never a FALSE reason).
+ *
+ * Classification signals (dogfood remediation phase 4): NONE. This
+ * pack once minted `internality`/`worker` reachability signals for
+ * every detected task, targeted at model names GUESSED from the
+ * worker file (model/repository import-path segments, every
+ * PascalCase identifier, stripped task-name fragments). Those targets
+ * are guesses about OTHER detectors' resources — this pack emits no
+ * resources of its own — so in real repos they mostly matched nothing
+ * and every miss surfaced as a `STALE_SIGNAL_TARGET` blocker (236 in
+ * the unified dogfood) while adding no information: a reachability
+ * signal can only ever SUPPORT an internality certificate, and
+ * guessed certification is exactly what the certificate must not
+ * rest on. Unknown exposure already defaults user-facing and unknown
+ * lifecycle already defaults enabled (ADR 0003 D5), so removal flips
+ * no classification and shrinks no obligation set — it only stops
+ * false certification and stale-target noise. Core's
+ * `STALE_SIGNAL_TARGET` detection remains for genuinely stale
+ * authority signals; the `trustedInternalEntryPoints` worker binding
+ * (`detector: gateforge.pack-task`) simply stays unexercised, so
+ * internality certification via that category is honestly unavailable
+ * (`INCOMPLETE_PROOF_SCOPE`, user-facing) instead of guess-based.
+ * The `classificationSignals` outcome field stays in the wire shape
+ * (protocol contract) and is always empty.
+ *
  * The detector never executes user code. Each detection is a regex
  * match against the file's text, with an attached line/col offset.
  */
@@ -30,7 +73,6 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, relative, sep, posix } from 'node:path';
 import { GATEFORGE_SCHEMA_VERSION, type Resource } from '@gateforge/core';
 import type { DiscoveryOutcome, Finding } from '@gateforge/plugin-protocol';
-import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
 /** Attributes attached to every detected `task.resource`. */
 export interface TaskResourceAttributes {
@@ -85,6 +127,32 @@ const SKIP_DIRS: Record<string, true> = {
   coverage: true,
   '.git': true,
 };
+
+/**
+ * Receiver roots that are browser/platform globals and therefore can
+ * never be task queues. WHY: the single-line `register('name', ...)`
+ * heuristic is receiver-agnostic, so a browser Service Worker
+ * registration like `navigator.serviceWorker.register('/sw.js',
+ * { scope: '/' })` used to be misread as a custom-queue registration
+ * (real dogfood false positive). A call whose receiver is rooted at
+ * one of these globals is a platform registration API by definition.
+ */
+const BROWSER_RECEIVER_ROOTS: Record<string, true> = {
+  navigator: true,
+  window: true,
+  document: true,
+  caches: true,
+  workbox: true,
+};
+
+/**
+ * Module names that mark a file as task-queue domain (real queue
+ * evidence): known queue libraries the detector recognizes elsewhere
+ * (`bullmq`, `bee-queue`, celery, ...). Tested against import/require
+ * specifiers only — never the whole file text — so a comment mention
+ * cannot fabricate evidence.
+ */
+const QUEUE_LIBRARY_MODULE = /\b(?:bullmq|bull|bee-queue|celery|kue|agenda|pg-boss|sidekiq)\b/i;
 /**
  * One internal detection, before signal-construction.
  */
@@ -103,8 +171,6 @@ interface RawDetection {
   observability: boolean;
   /** Source declaration location (file + line + col). */
   location: Location;
-  /** Target business model names (derived from imports, repositories, task name). */
-  targetModels: string[];
 }
 /**
  * Creates a discover-capable detector module. The default export of the
@@ -140,7 +206,7 @@ export function createTaskDetector(options: TaskDetectorOptions = {}): TaskDetec
         continue;
       }
       scanned.push(relPath);
-      detections.push(...scanFile(relPath, text, findings));
+      detections.push(...scanFile(relPath, text, findings, unresolved));
     }
 
     return finalize(detections, findings, unresolved, scanned);
@@ -205,20 +271,34 @@ async function collectFiles(rootDir: string, paths: string[]): Promise<string[]>
 
 /**
  * Scans one file's source text, returning one `RawDetection` per
- * matched pattern. Emits `AMBIGUOUS_HANDLER` findings for detections
- * that lack a resolvable handler reference.
+ * matched pattern. Emits `AMBIGUOUS_HANDLER` findings for queue-proven
+ * registrations that lack a resolvable handler reference, and typed
+ * `UNPROVEN_QUEUE_REGISTRATION` unresolved entries for handler-less
+ * `register(...)` calls in files with no queue evidence. Browser /
+ * platform registration calls (service workers, caches, workbox)
+ * produce no output at all.
  *
  * Args:
  *   relPath: Repo-relative file path.
  *   text: The file's full text content.
  *   findings: Findings array to push diagnostic codes into.
+ *   unresolved: Unresolved array to push typed reasons into.
  *
  * Returns:
  *   RawDetection[]: One entry per matched pattern (pre-dedup).
  */
-function scanFile(relPath: string, text: string, findings: Finding[]): RawDetection[] {
+function scanFile(relPath: string, text: string, findings: Finding[], unresolved: DiscoveryOutcome['unresolved']): RawDetection[] {
   const detections: RawDetection[] = [];
   const lines = text.split('\n');
+
+  // Queue evidence is file-scoped and only needed when a `register(`
+  // call lacks a resolvable handler; computed lazily (at most once
+  // per file) to keep the per-line hot path regex-only.
+  let queueEvidence: boolean | null = null;
+  const hasQueueEvidenceCached = (): boolean => {
+    if (queueEvidence === null) queueEvidence = hasQueueEvidence(text);
+    return queueEvidence;
+  };
 
   for (let idx = 0; idx < lines.length; idx += 1) {
     const line = lines[idx] ?? '';
@@ -235,7 +315,6 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf(bullmq) },
-        targetModels: extractTargetModels(text, bullmq),
       });
       continue;
     }
@@ -251,30 +330,49 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf(bee) },
-        targetModels: extractTargetModels(text, bee),
       });
       continue;
     }
 
-    // Single-line custom queue: `register('name'[, handler])`
-    const regMatch = matchRegisterLine(line);
+    // Custom queue: `register('name'[, handler])`. A bare receiver is
+    // the pack's custom-queue runtime; a receiver rooted at a browser
+    // global is a platform registration (service worker, caches,
+    // workbox) and is skipped entirely. The receiver is rebuilt across
+    // multi-line call expressions (see `receiverOfCall`), so a browser
+    // chain split over lines is excluded just like the single-line one.
+    const regMatch = matchRegisterLine(line, lines, idx);
     if (regMatch) {
-      detections.push({
-        name: regMatch.name,
-        framework: 'custom-queue',
-        retryPolicy: extractRetryPolicy(text, idx) ?? DEFAULT_RETRY_POLICY,
-        idempotencyKey: text.includes('idempotencyKey') || text.includes('dedupe'),
-        terminalOn: extractTerminalOn(text),
-        observability: extractObservabilityHint(text),
-        location: { file: relPath, line: lineNumber, col: line.indexOf(regMatch.name) },
-        targetModels: extractTargetModels(text, regMatch.name),
-      });
-      if (!regMatch.hasHandler) {
-        findings.push({
-          code: 'AMBIGUOUS_HANDLER',
-          detail: `custom-queue registration at ${relPath}:${lineNumber} has no resolvable handler reference`,
-          locations: [{ file: relPath, line: lineNumber, col: 0 }],
-        });
+      if (!isBrowserRegistrationReceiver(regMatch.receiver)) {
+        if (regMatch.hasHandler || hasQueueEvidenceCached()) {
+          detections.push({
+            name: regMatch.name,
+            framework: 'custom-queue',
+            retryPolicy: extractRetryPolicy(text, idx) ?? DEFAULT_RETRY_POLICY,
+            idempotencyKey: text.includes('idempotencyKey') || text.includes('dedupe'),
+            terminalOn: extractTerminalOn(text),
+            observability: extractObservabilityHint(text),
+            location: { file: relPath, line: lineNumber, col: line.indexOf(regMatch.name) },
+          });
+          if (!regMatch.hasHandler) {
+            findings.push({
+              code: 'AMBIGUOUS_HANDLER',
+              detail: `custom-queue registration at ${relPath}:${lineNumber} has no resolvable handler reference`,
+              locations: [{ file: relPath, line: lineNumber, col: 0 }],
+            });
+          }
+        } else {
+          // Handler-less `register('name')` in a file with no queue
+          // evidence: the shape is not provably a task registration, so
+          // it must NOT yield a vague AMBIGUOUS_HANDLER finding (and,
+          // since phase 4, no signal exists to mint either). Keep the
+          // blocking contract with a typed unresolved reason that is
+          // TRUE instead.
+          unresolved.push({
+            code: 'UNPROVEN_QUEUE_REGISTRATION',
+            detail: `register('${regMatch.name}') at ${relPath}:${lineNumber} has no resolvable handler reference and the file shows no task-queue evidence (known queue-library import or queue constructor)`,
+            location: { file: relPath, line: lineNumber, col: 0 },
+          });
+        }
       }
       continue;
     }
@@ -294,7 +392,6 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
           line: lineNumber,
           col: Math.max(0, line.indexOf(message)),
         },
-        targetModels: extractTargetModels(text, message),
       });
       continue;
     }
@@ -310,7 +407,6 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf(recurring) },
-        targetModels: extractTargetModels(text, recurring),
       });
       continue;
     }
@@ -326,7 +422,6 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
         terminalOn: extractTerminalOn(text),
         observability: extractObservabilityHint(text),
         location: { file: relPath, line: lineNumber, col: line.indexOf('@') },
-        targetModels: extractTargetModels(text, 'decorated'),
       });
     }
   }
@@ -335,6 +430,10 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
   // entire source as one string so the regex can span newlines. The
   // body may contain inner `{}` (e.g. destructured types), so we look
   // for `name:` first and then walk braces to find the matching `}`.
+  // No queue-evidence gate is needed here: the `CustomQueue` receiver
+  // is constructed from the pack's own queue runtime, so the shape is
+  // provably queue-related (unlike the receiver-agnostic single-line
+  // `register(...)` heuristic).
   for (const m of text.matchAll(/new\s+CustomQueue\s*\(/g)) {
     const openIdx = text.indexOf('{', m.index ?? 0);
     if (openIdx < 0) continue;
@@ -355,7 +454,6 @@ function scanFile(relPath: string, text: string, findings: Finding[]): RawDetect
       terminalOn: extractTerminalOn(block),
       observability: /observability\s*:\s*true/.test(block),
       location: { file: relPath, line: lineNumber, col: 0 },
-      targetModels: extractTargetModels(text, name),
     });
     if (!hasHandler) {
       findings.push({
@@ -382,7 +480,7 @@ function matchBeeLine(line: string): string | null {
 }
 
 /** Matches a single-line `register('name'[, handler])` call. */
-function matchRegisterLine(line: string): { name: string; hasHandler: boolean } | null {
+function matchRegisterLine(line: string, lines: string[], idx: number): { name: string; hasHandler: boolean; receiver: string | null } | null {
   const m = /register\s*\(\s*['"]([^'"]+)['"]\s*(?=,|\))/.exec(line);
   if (!m || m[1] === undefined) return null;
   // A handler is anything substantive after the second positional arg:
@@ -390,7 +488,127 @@ function matchRegisterLine(line: string): { name: string; hasHandler: boolean } 
   // token, or another identifier. If the comma has nothing after it on
   // the same line, ambiguous.
   const hasHandler = /(?:async|function|=>|handler\b|\bfn\b|\bcb\b|\bfnc\b)/.test(line);
-  return { name: m[1], hasHandler };
+  return { name: m[1], hasHandler, receiver: receiverOfCall(lines, idx, m.index) };
+}
+
+/**
+ * Extracts the receiver chain preceding a `register(` call, e.g.
+ * `navigator.serviceWorker` in `navigator.serviceWorker.register(...)`.
+ * Returns null for a bare `register(...)` call (the pack's custom-queue
+ * runtime shape). Tolerates optional chaining (`obj?.register(...)`).
+ */
+function receiverOf(line: string, callIndex: number): string | null {
+  const before = line.slice(0, callIndex).replace(/\?\.$/, '.');
+  const m = /([\w$]+(?:\.[\w$]+)*)\.$/.exec(before);
+  return m && m[1] !== undefined ? m[1] : null;
+}
+
+/**
+ * How many previous non-empty lines the multi-line receiver rebuild may
+ * inspect. Bounded so a runaway chain can never scan the whole file.
+ */
+const RECEIVER_LOOKBACK_LINES = 3;
+
+/**
+ * Receiver extraction with multi-line support (dogfood phase 4): when
+ * the match line itself carries no receiver, the call is a MULTI-LINE
+ * member expression —
+ *
+ *     navigator.serviceWorker
+ *       .register('/sw.js', { scope: '/' })
+ *
+ * — and the receiver lives on the preceding line(s). The chain is
+ * rebuilt by joining the tail of each previous non-empty line with the
+ * head accumulated so far and re-running the exact single-line
+ * receiver grammar, so a receiver split over up to three continuation
+ * lines (`navigator` / `.serviceWorker` / `.register(...)`) resolves to
+ * `navigator.serviceWorker`. Comment lines never contribute a receiver
+ * (a mention in a comment is not a receiver), and a statement
+ * terminator (`;`/`{`/`}`) breaks the chain. Single-line calls return
+ * from the direct extraction before any lookback, so their behavior is
+ * byte-identical.
+ */
+function receiverOfCall(lines: string[], idx: number, callIndex: number): string | null {
+  const line = lines[idx] ?? '';
+  const direct = receiverOf(line, callIndex);
+  if (direct !== null) return direct;
+  // Only a member continuation (head ends with the access dot — `.`,
+  // `?.`, `(expr).`) or a bare call (head empty) can be continued from
+  // a previous line; anything else has no receiver to rebuild.
+  let head = line.slice(0, callIndex).trim();
+  if (head !== '' && !head.endsWith('.')) return null;
+  let inspected = 0;
+  for (let back = idx - 1; back >= 0 && inspected < RECEIVER_LOOKBACK_LINES; back -= 1) {
+    const raw = lines[back] ?? '';
+    const trimmed = raw.trim();
+    if (
+      trimmed.length === 0 ||
+      trimmed.startsWith('//') ||
+      trimmed.startsWith('/*') ||
+      trimmed.startsWith('*')
+    ) {
+      continue;
+    }
+    inspected += 1;
+    const candidate = raw.trimEnd() + head;
+    const receiver = receiverOf(candidate, candidate.length);
+    // A previous line that itself begins with a member dot is an
+    // INTERMEDIATE continuation (`navigator` / `.serviceWorker` /
+    // `.register(...)`): keep accumulating instead of returning the
+    // partial chain rooted mid-expression.
+    if (receiver !== null && !trimmed.startsWith('.')) return receiver;
+    head = candidate.trimStart();
+    if (/[;{}]$/.test(head)) return null;
+  }
+  return null;
+}
+
+/**
+ * True when the receiver of a `register(` call is a browser/platform
+ * registration API rather than a task queue. WHY: service-worker,
+ * cache, and workbox registrations share the `register('...')` shape
+ * but have nothing to do with background tasks (real dogfood false
+ * positive on `navigator.serviceWorker.register('/sw.js', ...)`).
+ * Conservative by design: a receiver rooted at a browser global is
+ * NEVER a queue, and the service-worker handle is often aliased
+ * (`serviceWorkerRegistration`), so both the root and any
+ * `serviceWorker` segment are checked.
+ */
+function isBrowserRegistrationReceiver(receiver: string | null): boolean {
+  if (receiver === null) return false;
+  const segments = receiver.split('.');
+  const root = segments[0] ?? '';
+  // Rooted at a browser global: `navigator.*`, `window.*`,
+  // `document.*`, `caches.*`, `workbox.*`.
+  if (BROWSER_RECEIVER_ROOTS[root] === true) return true;
+  // Any `*.serviceWorker.register(...)` chain (aliased receivers too).
+  if (segments.includes('serviceWorker')) return true;
+  // The conventional alias for the `navigator.serviceWorker.ready` handle.
+  return receiver === 'serviceWorkerRegistration';
+}
+
+/**
+ * True when the file shows real task-queue evidence: an import (or
+ * require / dynamic import) from a known queue library — bullmq, bull,
+ * celery, kue, agenda, pg-boss, sidekiq, bee-queue — or from any
+ * queue-named module (the pack's custom-queue runtime, e.g.
+ * `./custom-queue-runtime.js`), or a queue constructor
+ * (`new Queue|Bee|CustomQueue(`) in the file. Used to gate the loose
+ * single-line `register('name')` heuristic so it only fires on shapes
+ * that are provably queue-related.
+ */
+function hasQueueEvidence(text: string): boolean {
+  const specifierRe = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*(?:\(\s*)?)['"]([^'"]+)['"]/g;
+  for (const m of text.matchAll(specifierRe)) {
+    const spec = m[1];
+    if (spec === undefined) continue;
+    if (QUEUE_LIBRARY_MODULE.test(spec)) return true;
+    if (/queue/i.test(spec)) return true;
+  }
+  // A receiver constructed from a queue library in the same file is
+  // evidence too (`new Queue(...)` then `queue.register(...)`), as is
+  // the pack's own custom-queue constructor.
+  return /\bnew\s+(?:BullMQ\.Queue|Queue|Bee|CustomQueue)\s*\(/.test(text);
 }
 
 /** Matches a message-handler registration; returns the handler identifier. */
@@ -508,134 +726,30 @@ function surroundingWindow(source: string, anchorLine: number, radius: number): 
 }
 
 /**
- * Converts a PascalCase identifier to snake_case.
- */
-function pascalToSnake(str: string): string {
-  return str.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
-}
-
-/**
- * Traces target models from worker file imports, repository/service calls, and task naming.
- * e.g. `import { Account } from '../models/account'`, `accountRepository.save()`, `sync_accounts`.
- */
-function extractTargetModels(text: string, taskName: string): string[] {
-  const targets = new Set<string>();
-
-  // 1. Model / entity file imports: from '../models/account[.ts|.py]'
-  const modelImportMatches = text.matchAll(/from\s+['"][^'"]*\/models(?:\/([^/'"]+))?['"]/g);
-  for (const m of modelImportMatches) {
-    if (m[1]) {
-      const name = m[1].replace(/\.(ts|js|py|mjs)$/, '').toLowerCase();
-      targets.add(name);
-      targets.add(name.endsWith('s') ? name : `${name}s`);
-    }
-  }
-
-  // 2. Repository file imports: from '../repositories/account_repository'
-  const repoImportMatches = text.matchAll(/from\s+['"][^'"]*\/repositories\/([^/'"]+)['"]/g);
-  for (const m of repoImportMatches) {
-    if (m[1]) {
-      const name = m[1].replace(/_repository.*$/, '').replace(/\.(ts|js|py|mjs)$/, '').toLowerCase();
-      targets.add(name);
-      targets.add(name.endsWith('s') ? name : `${name}s`);
-    }
-  }
-
-  // 3. Class/Repository/Service identifiers: e.g. AccountRepository, AuditLog, Account
-  const idMatches = text.matchAll(/\b([A-Z][a-zA-Z0-9]+)(?:Repository|Service|Model|Table)?\b/g);
-  for (const m of idMatches) {
-    const raw = m[1];
-    if (
-      raw &&
-      ![
-        'Task',
-        'Queue',
-        'Job',
-        'Worker',
-        'Bullmq',
-        'Bee',
-        'Promise',
-        'Error',
-        'CustomQueue',
-        'Array',
-        'String',
-        'Object',
-      ].includes(raw)
-    ) {
-      const snake = pascalToSnake(raw);
-      targets.add(snake);
-      targets.add(snake.endsWith('s') ? snake : `${snake}s`);
-    }
-  }
-
-  // 4. Task name: strip action prefixes/suffixes
-  const stripped = taskName
-    .replace(/^(sync|send|process|run|dispatch|flush|index|reindex|resize)[_.-]/i, '')
-    .replace(/[_.-](sync|send|process|run|dispatch|flush|index|reindex|resize)$/i, '')
-    .replace(/[^a-zA-Z0-9_]/g, '_')
-    .toLowerCase();
-  if (stripped.length > 0) {
-    targets.add(stripped);
-    targets.add(stripped.endsWith('s') ? stripped : `${stripped}s`);
-  }
-
-  if (targets.size === 0) {
-    const bare = bareResourceName(taskName);
-    targets.add(bare);
-  }
-  return [...targets].sort();
-}
-
-/**
- * Normalizes a task's queue/registration name into the graph's bare
- * resource-name grammar (`^[^.]+$`): dots (as in `email.send`) become
- * dashes.
- */
-function bareResourceName(name: string): string {
-  return name.replace(/[^A-Za-z0-9_-]/g, '-');
-}
-
-/**
- * Finalizes raw detections into internality reachability signals:
- * routes signals to target models and returns empty resources.
+ * Finalizes raw detections into the discovery outcome (dogfood
+ * remediation phase 4): NO classification signals are minted. The
+ * targets this pack once guessed for its `internality`/`worker`
+ * reachability signals (model/repository import-path segments, every
+ * PascalCase identifier in the file, stripped task-name fragments) are
+ * path-derived guesses about OTHER detectors' resources — this pack
+ * emits no resources of its own — so in real repos they mostly matched
+ * nothing and every miss became a `STALE_SIGNAL_TARGET` blocker while
+ * adding no information. Unknown exposure already defaults user-facing
+ * and unknown lifecycle already defaults enabled (ADR 0003 D5), so the
+ * removal flips no classification and shrinks no obligation set. Core
+ * keeps detecting genuinely stale authority signals; the field stays
+ * in the wire shape (protocol contract) and is always empty.
+ *
+ * `_detections` is intentionally unused: the detection inventory still
+ * drives the register-branch findings/unresolved gates inside
+ * `scanFile`, and the pack's outcome carries no resource channel.
  */
 function finalize(
-  detections: RawDetection[],
+  _detections: RawDetection[],
   findings: Finding[],
   unresolved: DiscoveryOutcome['unresolved'],
   scanned: string[] = [],
 ): DiscoveryOutcome {
-  const classificationSignals: Array<{
-    schemaVersion: 1;
-    target: { resourceName: string };
-    dimension: 'internality';
-    assertion: { category: string };
-    basis: 'code-positive';
-    source: string;
-    location: Location;
-    detector: { id: string; version: string };
-  }> = [];
-  for (const detection of detections) {
-    for (const targetModel of detection.targetModels) {
-      classificationSignals.push({
-        schemaVersion: 1,
-        target: { resourceName: targetModel },
-        dimension: 'internality',
-        assertion: { category: 'worker' },
-        basis: 'code-positive',
-        source: PACK_PLUGIN_ID,
-        location: detection.location,
-        detector: { id: PACK_PLUGIN_ID, version: PACK_VERSION },
-      });
-    }
-  }
-
-  classificationSignals.sort((a, b) => {
-    const aj = JSON.stringify(a);
-    const bj = JSON.stringify(b);
-    return aj < bj ? -1 : aj > bj ? 1 : 0;
-  });
-
   findings.sort((a, b) => {
     if (a.code !== b.code) return a.code < b.code ? -1 : 1;
     return a.detail < b.detail ? -1 : a.detail > b.detail ? 1 : 0;
@@ -645,7 +759,7 @@ function finalize(
     resources: [],
     unresolved,
     findings,
-    classificationSignals,
+    classificationSignals: [],
     scannedPaths: scanned.sort(),
   };
 }

@@ -1,6 +1,7 @@
 /**
  * Phase 1 engine tests: the deterministic frontend-call/server-route join
- * (ADR 0004 D3, plan phase 1 verification checklist). Pure and offline.
+ * (ADR 0004 D3, plan phase 1 verification checklist), plus the phase 3
+ * literal-precedence refinement. Pure and offline.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -10,6 +11,7 @@ import {
   canonicalEndpointIdentity,
   endpointResourceName,
   joinFrontendCalls,
+  routeMatchKind,
   routeMatchesCall,
   type HttpContractFact,
   type HttpMethod,
@@ -72,6 +74,23 @@ describe('positional join semantics', () => {
     expect(endpoint?.calls[0]?.rawPath).toBe('/api/v1/accounts/${id}');
     expect(endpoint?.calls[0]?.normalizedPath).toBe('/api/v1/accounts/{}');
     expect(endpoint?.canonicalPath).toBe('/api/v1/accounts/{}');
+  });
+
+  it('joins a trailing-slash call to the slashless route (dogfood regression)', () => {
+    // Dogfood: 24 misses where the frontend called `/api/v2/accounts/`
+    // while the backend declared `/api/v2/accounts`. Trailing slashes are
+    // not significant (routers normalize/redirect the variant), so the
+    // canonical forms coincide and the call joins. The raw call spelling
+    // is preserved for explain.
+    const result = joinFrontendCalls(
+      [route('GET', '/api/v2/accounts')],
+      [call('GET', '/api/v2/accounts/', '/api/v2/accounts')],
+    );
+    expect(identities(result)).toEqual(['GET /api/v2/accounts']);
+    expect(result.blocks).toEqual([]);
+    expect(result.endpoints[0]?.calls[0]?.rawPath).toBe('/api/v2/accounts/');
+    expect(result.endpoints[0]?.calls[0]?.normalizedPath).toBe('/api/v2/accounts');
+    expect(result.endpoints[0]?.routes[0]?.rawPath).toBe('/api/v2/accounts');
   });
 
   it('does not require parameter-name equality', () => {
@@ -141,18 +160,22 @@ describe('cardinality and blocking', () => {
     expect(block?.detail).toContain('/invoices');
   });
 
-  it('blocks ambiguous joins listing every distinct candidate — the red probe', () => {
-    // Deliberately break the one-to-one rule: two DISTINCT routes both
-    // match (param vs literal overlap). The join must refuse to guess.
+  it('blocks ambiguous parameter-tier joins listing every distinct candidate — the red probe', () => {
+    // Updated for phase 3 literal precedence: the old probe (routes
+    // `/billing/{}` + `/billing/summary` vs call `/billing/{}`) now joins
+    // the exact-shape route because the literal tier shadows the literal
+    // sibling. Two PARAMETER-tier candidates still refuse to guess.
+    // Deliberately break the one-to-one rule with two parameter matches:
+    // a route param and a route wildcard both absorb the literal call.
     const result = joinFrontendCalls(
-      [route('GET', '/billing/{account_id}', '/billing/{}'), route('GET', '/billing/summary')],
-      [call('GET', '/billing/{}')],
+      [route('GET', '/billing/{account_id}', '/billing/{}'), route('GET', '/billing/{*}')],
+      [call('GET', '/billing/x')],
     );
     expect(result.endpoints).toEqual([]);
     expect(result.blocks).toHaveLength(1);
     const block = result.blocks[0];
     expect(block?.code).toBe(FRONTEND_ROUTE_AMBIGUOUS);
-    expect(block?.candidates).toEqual(['GET /billing/summary', 'GET /billing/{}']);
+    expect(block?.candidates).toEqual(['GET /billing/{*}', 'GET /billing/{}']);
   });
 
   it('collapses duplicate identical routes into one endpoint, not ambiguity', () => {
@@ -177,6 +200,126 @@ describe('cardinality and blocking', () => {
   });
 });
 
+describe('literal precedence (phase 3 refinement)', () => {
+  const dogfoodRoutes = () => [
+    route('GET', '/api/v1/contractor/messages/{message_id}', '/api/v1/contractor/messages/{}'),
+    route('GET', '/api/v1/contractor/messages/search'),
+    route('GET', '/api/v1/contractor/messages/unread-count'),
+  ];
+
+  it('joins the dogfood template call to the param route despite literal siblings', () => {
+    // Real dogfood ambiguity: `GET /api/v1/contractor/messages/${id}` used
+    // to be FRONTEND_ROUTE_AMBIGUOUS against `/messages/{}`,
+    // `/messages/search`, `/messages/unread-count`. Routers resolve
+    // literals before params at runtime, so the static join picks
+    // `/messages/{}` and the gate unblocks.
+    const result = joinFrontendCalls(dogfoodRoutes(), [
+      call('GET', '/api/v1/contractor/messages/${id}', '/api/v1/contractor/messages/{}'),
+    ]);
+    expect(result.blocks).toEqual([]);
+    expect(identities(result)).toEqual(['GET /api/v1/contractor/messages/{}']);
+    expect(result.endpoints[0]?.calls).toHaveLength(1);
+    expect(result.endpoints[0]?.routes).toHaveLength(1);
+  });
+
+  it('joins the dogfood literal call to the literal route only', () => {
+    const result = joinFrontendCalls(dogfoodRoutes(), [
+      call('GET', '/api/v1/contractor/messages/unread-count'),
+    ]);
+    expect(result.blocks).toEqual([]);
+    expect(identities(result)).toEqual(['GET /api/v1/contractor/messages/unread-count']);
+  });
+
+  it('joins /faqs/${id} to /faqs/{} despite the /faqs/suggestions literal sibling', () => {
+    const result = joinFrontendCalls(
+      [route('GET', '/faqs/{faq_id}', '/faqs/{}'), route('GET', '/faqs/suggestions')],
+      [call('GET', '/faqs/${id}', '/faqs/{}')],
+    );
+    expect(result.blocks).toEqual([]);
+    expect(identities(result)).toEqual(['GET /faqs/{}']);
+  });
+
+  it('classifies match quality: literal, parameter, or none', () => {
+    const literalCall = call('GET', '/x/y');
+    expect(routeMatchKind(route('GET', '/x/y'), literalCall)).toBe('literal');
+    // Slot-for-slot: the route declares exactly the shape the call has.
+    expect(routeMatchKind(route('GET', '/x/{}'), call('GET', '/x/{}'))).toBe('literal');
+    expect(routeMatchKind(route('GET', '/'), call('GET', '/'))).toBe('literal');
+    // Route param absorbed a call literal.
+    expect(routeMatchKind(route('GET', '/x/{}'), literalCall)).toBe('parameter');
+    // Call slot relaxed onto a route literal.
+    expect(routeMatchKind(route('GET', '/x/y'), call('GET', '/x/{}'))).toBe('parameter');
+    // A wildcard match is never a literal match.
+    expect(routeMatchKind(route('GET', '/x/{*}'), literalCall)).toBe('parameter');
+    expect(routeMatchKind(route('GET', '/x/{*}'), call('GET', '/x/{}'))).toBe('parameter');
+    expect(routeMatchKind(route('GET', '/x/z'), literalCall)).toBeNull();
+  });
+
+  it('keeps routeMatchesCall as the boolean view over the partition', () => {
+    expect(routeMatchesCall(route('GET', '/x/{}'), call('GET', '/x/y'))).toBe(true);
+    expect(routeMatchesCall(route('GET', '/x/y'), call('GET', '/x/{}'))).toBe(true);
+    expect(routeMatchesCall(route('GET', '/x/{*}'), call('GET', '/x/a/b'))).toBe(true);
+    expect(routeMatchesCall(route('GET', '/x/z'), call('GET', '/x/y'))).toBe(false);
+  });
+
+  it('keeps the parameter-only fallback when no literal sibling exists', () => {
+    const routeFact = route('GET', '/billing/{account_id}', '/billing/{}');
+    const callFact = call('GET', '/billing/summary');
+    const result = joinFrontendCalls([routeFact], [callFact]);
+    expect(result.blocks).toEqual([]);
+    expect(identities(result)).toEqual(['GET /billing/{}']);
+    expect(routeMatchKind(routeFact, callFact)).toBe('parameter');
+  });
+
+  it('a wildcard candidate loses to a literal-tier sibling', () => {
+    // Under the pre-phase-3 rules this was FRONTEND_ROUTE_AMBIGUOUS; the
+    // wildcard `/files/{*}` is a parameter match and never shadows the
+    // exact-shape `/files/{}`.
+    const result = joinFrontendCalls(
+      [route('GET', '/files/{*}'), route('GET', '/files/{name}', '/files/{}')],
+      [call('GET', '/files/${name}', '/files/{}')],
+    );
+    expect(result.blocks).toEqual([]);
+    expect(identities(result)).toEqual(['GET /files/{}']);
+  });
+
+  it('blocks a slotted call whose only candidates are literal siblings', () => {
+    // No literal tier exists (a call `{}` relaxed onto route literals is a
+    // parameter match), so the parameter fallback sees two distinct
+    // literal routes and must refuse to guess.
+    const result = joinFrontendCalls(
+      [route('GET', '/messages/search'), route('GET', '/messages/unread-count')],
+      [call('GET', '/messages/${id}', '/messages/{}')],
+    );
+    expect(result.endpoints).toEqual([]);
+    expect(result.blocks).toHaveLength(1);
+    expect(result.blocks[0]?.code).toBe(FRONTEND_ROUTE_AMBIGUOUS);
+    expect(result.blocks[0]?.candidates).toEqual([
+      'GET /messages/search',
+      'GET /messages/unread-count',
+    ]);
+  });
+
+  it('never guesses inside the literal tier itself (more than one literal candidate)', () => {
+    // With normalized facts the literal tier holds at most one distinct
+    // identity (identity == canonical path). If facts disagree only
+    // cosmetically (same segment sequence, different identity strings,
+    // e.g. an un-normalized trailing slash), the engine still refuses to
+    // guess: more than one literal candidate is AMBIGUOUS with both listed.
+    const result = joinFrontendCalls(
+      [
+        route('GET', '/messages/{id}', '/messages/{}'),
+        route('GET', '/messages/{id}/', '/messages/{}/'),
+      ],
+      [call('GET', '/messages/${id}', '/messages/{}')],
+    );
+    expect(result.endpoints).toEqual([]);
+    expect(result.blocks).toHaveLength(1);
+    expect(result.blocks[0]?.code).toBe(FRONTEND_ROUTE_AMBIGUOUS);
+    expect(result.blocks[0]?.candidates).toEqual(['GET /messages/{}', 'GET /messages/{}/']);
+  });
+});
+
 describe('determinism', () => {
   it('is invariant under input permutation (byte-identical output)', () => {
     const routes = [
@@ -184,6 +327,10 @@ describe('determinism', () => {
       route('POST', '/accounts'),
       route('DELETE', '/accounts/{}'),
       route('GET', '/files/{*}'),
+      // Phase 3: literal siblings that a slotted call must not be
+      // ambiguous with, in either input order.
+      route('GET', '/accounts/search'),
+      route('GET', '/files/{}'),
     ];
     const calls = [
       call('POST', '/accounts'),

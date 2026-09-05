@@ -8,15 +8,19 @@
  *     `@Controller` + `@Get/@Post/…` decorators.
  *   - Frontend API-client calls: `fetch('/…')` and `axios.<method>('/…')`.
  *
- * Every artifact becomes an `http-route` resource with a stable id and
- * typed attributes (`method`, `path`, `origin`), and — plan phase 4
- * (ADR 0003 D1/D2) — classification SIGNALS: a code-positive `exposure`
- * signal per artifact and `lifecycle.<op>` signals from the HTTP
- * method, targeted at the path-derived resource name so the core
- * classifier converges routes with tables deterministically. A signal
- * whose target names no discovered resource surfaces as a typed
- * STALE_SIGNAL_TARGET block (a link the engine cannot resolve blocks
- * rather than guesses); a route with no derivable name emits no signal.
+ * Every artifact becomes an `http.contract` evidence fact (ADR 0004 D1)
+ * with typed attributes (`method`, `normalizedPath`, `origin`, schema
+ * symbols, handler names) for the engine's endpoint-compiler join. The
+ * pack mints NO classification signals (dogfood remediation phase 4): a
+ * path-derived target is a guess that mostly names no discovered
+ * resource (route `/absences` vs table `employee_absences` ⇒
+ * STALE_SIGNAL_TARGET noise) while unknown exposure already defaults
+ * user-facing and unknown lifecycle operations default enabled
+ * (ADR 0003 D5). Route→resource linkage is the CLI endpoint compiler's
+ * exclusive job (schema-symbol/handler corroboration; typed
+ * ENDPOINT_RESOURCE_LINK_UNRESOLVED blocks for ambiguity). Core's
+ * STALE_SIGNAL_TARGET detection remains for genuinely stale authority
+ * signals — this pack simply produces no false targets.
  *
  * Default export is the CLI in-process plugin contract
  * (`discover(paths)`); see README.md for setup.
@@ -27,7 +31,6 @@ export { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
 export {
   createHttpDetector,
-  resourceNameFromPath,
   type HttpDetector,
   type HttpDetectorOptions,
   type HttpOrigin,

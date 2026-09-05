@@ -226,3 +226,286 @@ describe('detector integration (phase 3)', () => {
     }
   });
 });
+
+describe('instance baseURL joining (phase 3 dogfood)', () => {
+  it('joins a proven literal baseURL into emitted paths, rawPath untouched (the 443-calls dogfood shape)', () => {
+    // The exact dogfood shape: the instance is created with a baseURL in
+    // one module, callsites are baseURL-relative ('/v1/...') while the
+    // backend routes are '/api/v1/...'. The alias specifier is outside
+    // the bounded import machinery, so the unique same-named creation
+    // across the scanned set proves the base (tier 3).
+    const files = new Map<string, string>([
+      ['frontend/src/lib/apiClient.ts', `export const apiClient = axios.create({ baseURL: '/api' });\n`],
+      ['frontend/src/me.ts', [
+        `import { apiClient } from '@/lib/apiClient';`,
+        `await apiClient.get('/v1/employee-roles/me/roles');`,
+        `await apiClient.post('/v1/accounts', body);`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls(
+      'frontend/src/me.ts',
+      files.get('frontend/src/me.ts') ?? '',
+      { clientSymbols: ['apiClient'] },
+      files,
+    );
+    expect(calls.unresolved).toEqual([]);
+    expect(calls.calls.map((call) => `${call.method} ${call.canonicalPath}`).sort()).toEqual([
+      'GET /api/v1/employee-roles/me/roles',
+      'POST /api/v1/accounts',
+    ]);
+    for (const call of calls.calls) {
+      expect(call.joinedBaseURL).toBe('/api');
+      expect(call.rawPath.startsWith('/v1/')).toBe(true); // exactly as written
+    }
+  });
+
+  it('joins same-file creations and relative-imported creations with a constant config object', () => {
+    const files = new Map<string, string>([
+      ['src/client.ts', [
+        `const config = { baseURL: '/api' };`,
+        `export const apiClient = axios.create(config);`,
+      ].join('\n')],
+      ['src/app.ts', [
+        `import { apiClient } from './client';`,
+        `apiClient.post('/v1/accounts', body);`,
+        `const local = axios.create({ baseURL: '/other' });`,
+        `local.get('/v1/x');`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/app.ts', files.get('src/app.ts') ?? '', { clientSymbols: ['apiClient', 'local'] }, files);
+    expect(calls.unresolved).toEqual([]);
+    expect(calls.calls.map((call) => `${call.method} ${call.canonicalPath} [${call.joinedBaseURL}]`).sort()).toEqual([
+      'GET /other/v1/x [/other]',
+      'POST /api/v1/accounts [/api]',
+    ]);
+  });
+
+  it('leaves empty and / bases byte-identical, and joins with exactly one slash seam', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const empty = axios.create({ baseURL: '' });`,
+        `const root = axios.create({ baseURL: '/' });`,
+        `const slashed = axios.create({ baseURL: '/api/' });`,
+        `const plain = axios.create({ baseURL: '/api' });`,
+        `empty.get('/v1/x');`,
+        `root.get('/v1/x');`,
+        `slashed.get('/v1/x');`,
+        `plain.get('v1/relative');`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls(
+      'src/a.ts',
+      files.get('src/a.ts') ?? '',
+      { clientSymbols: ['empty', 'root', 'slashed', 'plain'] },
+      files,
+    );
+    expect(calls.unresolved).toEqual([]);
+    expect(calls.calls.map((call) => `${call.canonicalPath} [${call.joinedBaseURL ?? '-'}]`).sort()).toEqual([
+      // A relative call path roots onto the base, as axios resolves it.
+      '/api/v1/relative [/api]',
+      // Trailing/leading slashes collapse to exactly one seam.
+      '/api/v1/x [/api/]',
+      // '' and '/' join nothing: byte-identical to the pre-feature output.
+      '/v1/x [-]',
+      '/v1/x [-]',
+    ]);
+  });
+
+  it('resolves the base through declared constant config objects, spread or assigned, last writer wins', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const common = { timeout: 5 };`,
+        `const withBase = { ...common, baseURL: '/api' };`,
+        `const directWins = axios.create({ ...withBase, baseURL: '/v2' });`,
+        `const spreadWins = axios.create({ baseURL: '/v2', ...withBase });`,
+        `directWins.get('/v1/x');`,
+        `spreadWins.get('/v1/x');`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', { clientSymbols: ['directWins', 'spreadWins'] }, files);
+    expect(calls.unresolved).toEqual([]);
+    expect(calls.calls.map((call) => `${call.canonicalPath} [${call.joinedBaseURL}]`).sort()).toEqual([
+      // JavaScript object semantics: the later writer of baseURL prevails.
+      '/api/v1/x [/api]',
+      '/v2/v1/x [/v2]',
+    ]);
+  });
+
+  it('never joins a non-literal base: env-dependent bases behave exactly as without the feature', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const env = axios.create({ baseURL: process.env.API_URL });`,
+        `const templated = axios.create({ baseURL: \`\${process.env.API_URL}/api\` });`,
+        `env.get('/v1/x');`,
+        `templated.get('/v1/x');`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', { clientSymbols: ['env', 'templated'] }, files);
+    // Typed resolved emission, paths unchanged, no new blockers.
+    expect(calls.unresolved).toEqual([]);
+    expect(calls.calls.map((call) => `${call.canonicalPath} [${call.joinedBaseURL ?? '-'}]`).sort()).toEqual([
+      '/v1/x [-]',
+      '/v1/x [-]',
+    ]);
+  });
+
+  it('follows the existing absolute-URL rules: absolute call URLs ignore the base; absolute bases canonicalize via sameOriginHosts', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const api = axios.create({ baseURL: 'https://app.example.com/spa' });`,
+        `api.get('/v1/x');`,
+        `api.get('https://app.example.com/v2/y');`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls(
+      'src/a.ts',
+      files.get('src/a.ts') ?? '',
+      { clientSymbols: ['api'], sameOriginHosts: ['app.example.com'] },
+      files,
+    );
+    expect(calls.unresolved).toEqual([]);
+    expect(calls.calls.map((call) => `${call.rawPath} -> ${call.canonicalPath}`).sort()).toEqual([
+      // The absolute call URL keeps its own base (axios isAbsoluteURL).
+      // (Sorted output; the literal-joined call sorts before 'https'.)
+      '/v1/x -> /spa/v1/x',
+      'https://app.example.com/v2/y -> /v2/y',
+    ]);
+  });
+
+  it('joins config-object instance calls (api({...}) and api.request({...})) too', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const api = axios.create({ baseURL: '/api' });`,
+        `api({ url: '/v1/session', method: 'POST' });`,
+        `api.request({ url: '/v1/session' });`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', { clientSymbols: ['api'] }, files);
+    expect(calls.unresolved).toEqual([]);
+    expect(calls.calls.map((call) => `${call.method} ${call.canonicalPath}`).sort()).toEqual([
+      'GET /api/v1/session',
+      'POST /api/v1/session',
+    ]);
+  });
+
+  it('keeps normalization identical for joined paths: slots stay positional (literal-precedence safe downstream)', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const api = axios.create({ baseURL: '/api' });`,
+        'api.get(`/v1/accounts/${id}`);',
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', { clientSymbols: ['api'] }, files);
+    expect(calls.unresolved).toEqual([]);
+    const call = calls.calls[0];
+    expect(call?.rawPath).toBe('/v1/accounts/${}');
+    expect(call?.canonicalPath).toBe('/api/v1/accounts/{}');
+  });
+
+  it('fails closed: disagreeing or unprovable same-named creations veto the unique-declaration join', () => {
+    const disagreeing = new Map<string, string>([
+      ['src/lib/a.ts', `export const apiClient = axios.create({ baseURL: '/api' });\n`],
+      ['src/lib/b.ts', `export const apiClient = axios.create({ baseURL: '/other' });\n`],
+      ['src/app.ts', `import { apiClient } from '@/lib/a';\napiClient.get('/v1/x');\n`],
+    ]);
+    const vetoed = scanClientCalls('src/app.ts', disagreeing.get('src/app.ts') ?? '', { clientSymbols: ['apiClient'] }, disagreeing);
+    expect(vetoed.unresolved).toEqual([]);
+    expect(vetoed.calls.map((call) => `${call.canonicalPath} [${call.joinedBaseURL ?? '-'}]`)).toEqual(['/v1/x [-]']);
+
+    const unmodeled = new Map<string, string>([
+      ['src/lib/a.ts', `export const apiClient = axios.create({ baseURL: '/api' });\n`],
+      ['src/lib/b.ts', `export const apiClient = getClient();\n`],
+      ['src/app.ts', `import { apiClient } from '@/lib/a';\napiClient.get('/v1/x');\n`],
+    ]);
+    const stillVetoed = scanClientCalls('src/app.ts', unmodeled.get('src/app.ts') ?? '', { clientSymbols: ['apiClient'] }, unmodeled);
+    expect(stillVetoed.calls.map((call) => `${call.canonicalPath} [${call.joinedBaseURL ?? '-'}]`)).toEqual(['/v1/x [-]']);
+  });
+
+  it('never joins the bare axios global to a same-named creation in another file', () => {
+    const files = new Map<string, string>([
+      ['src/other.ts', `const axios = axios.create({ baseURL: '/api' });\naxios.get('/shadowed');\n`],
+      ['src/app.ts', `axios.get('/v1/x');\n`],
+    ]);
+    const calls = scanClientCalls('src/app.ts', files.get('src/app.ts') ?? '', {}, files);
+    expect(calls.unresolved).toEqual([]);
+    // The global axios has no provable base; only the shadowing file's
+    // own calls join (its creation is the binding there).
+    expect(calls.calls.map((call) => call.canonicalPath)).toEqual(['/v1/x']);
+    const shadowed = scanClientCalls('src/other.ts', files.get('src/other.ts') ?? '', {}, files);
+    expect(shadowed.calls.map((call) => call.canonicalPath)).toEqual(['/api/shadowed']);
+  });
+
+  it('wrapper-wrapped instance calls keep today\u2019s emission (documented boundary: wrappers do not join instance bases)', () => {
+    const files = new Map<string, string>([
+      ['src/wrap.ts', [
+        `const api = axios.create({ baseURL: '/api' });`,
+        `const apiGet = (path: string) => api.get(path);`,
+        `apiGet('/v1/x');`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls(
+      'src/wrap.ts',
+      files.get('src/wrap.ts') ?? '',
+      { clientSymbols: ['api'], wrapperFunctions: [{ name: 'apiGet', method: 'GET' }] },
+      files,
+    );
+    expect(calls.unresolved).toEqual([]);
+    expect(calls.calls.map((call) => `${call.canonicalPath} [${call.joinedBaseURL ?? '-'}]`)).toEqual(['/v1/x [-]']);
+  });
+});
+
+describe('detector integration: baseURL joining (phase 3 dogfood)', () => {
+  it('emits the joined path as normalizedPath while rawPath stays as written; without a base, output is byte-identical to before', () => {
+    const withBase = project({
+      'frontend/src/lib/apiClient.ts': `export const apiClient = axios.create({ baseURL: '/api' });\n`,
+      'frontend/src/me.ts': `import { apiClient } from '@/lib/apiClient';\nawait apiClient.get('/v1/employee-roles/me/roles');\n`,
+    });
+    const withoutBase = project({
+      'frontend/src/lib/apiClient.ts': `export const apiClient = axios.create({});\n`,
+      'frontend/src/me.ts': `import { apiClient } from '@/lib/apiClient';\nawait apiClient.get('/v1/employee-roles/me/roles');\n`,
+    });
+    try {
+      const joined = createHttpDetector({ root: withBase, clientScan: { clientSymbols: ['apiClient'] } }).discover(['frontend']);
+      expect(frontendFacts(joined)).toEqual(['GET /api/v1/employee-roles/me/roles']);
+      const fact = joined.resources[0];
+      expect(fact?.attributes['rawPath']).toBe('/v1/employee-roles/me/roles');
+      expect(fact?.attributes['normalizedPath']).toBe('/api/v1/employee-roles/me/roles');
+      expect(joined.unresolved).toEqual([]);
+
+      // Back-compat control: an instance with no baseURL anywhere emits
+      // exactly the pre-feature fact.
+      const plain = createHttpDetector({ root: withoutBase, clientScan: { clientSymbols: ['apiClient'] } }).discover(['frontend']);
+      expect(frontendFacts(plain)).toEqual(['GET /v1/employee-roles/me/roles']);
+      expect(plain.unresolved).toEqual([]);
+    } finally {
+      rmSync(withBase, { recursive: true, force: true });
+      rmSync(withoutBase, { recursive: true, force: true });
+    }
+  });
+
+  it('composes with clientScanRoots: e2e mock instances outside the roots cannot poison or veto the product join', () => {
+    const dir = project({
+      'frontend/src/lib/apiClient.ts': `export const apiClient = axios.create({ baseURL: '/api' });\n`,
+      'frontend/src/app.ts': `import { apiClient } from '@/lib/apiClient';\nawait apiClient.get('/v1/x');\n`,
+      // Harness mock instance with a DIFFERENT base: outside the product
+      // scan roots it is invisible to the join.
+      'e2e/helpers/api.ts': `export const apiClient = axios.create({ baseURL: '/mock' });\n`,
+    });
+    try {
+      const scoped = createHttpDetector({
+        root: dir,
+        clientScan: { clientScanRoots: ['frontend/**'], clientSymbols: ['apiClient'] },
+      }).discover(['frontend', 'e2e']);
+      expect(frontendFacts(scoped)).toEqual(['GET /api/v1/x']);
+      expect(scoped.unresolved).toEqual([]);
+
+      // Without roots the harness instance is product-class by the
+      // pre-existing contract — its disagreement vetoes the join (fail
+      // closed), never silently picks a side.
+      const unscoped = createHttpDetector({ root: dir, clientScan: { clientSymbols: ['apiClient'] } }).discover(['frontend', 'e2e']);
+      expect(frontendFacts(unscoped)).toEqual(['GET /v1/x']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

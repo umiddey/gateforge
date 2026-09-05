@@ -21,6 +21,17 @@
  *   builders** (`buildApiPath('/v1/x')` with an optional declared base)
  *   are configuration-declared resolvable APIs — never coverage
  *   exemptions: unresolved flows still block.
+ * - **Instance baseURL joining**: when an instance symbol's creation is
+ *   modeled — a module-scope `const apiClient = axios.create({...})`
+ *   whose config carries a proven LITERAL `baseURL` (a direct property,
+ *   or one reaching it through a declared constant config object the
+ *   creation is assigned from or spreads, resolved by the same bounded
+ *   value table) — the base joins into the emitted call path:
+ *   `normalizedPath = normalize(baseURL + callPath)` with exactly one
+ *   slash seam. Empty/`/` bases, absolute call URLs, and unprovable
+ *   (env-dependent) bases join nothing: the callsite behaves exactly as
+ *   it would without the feature, and joining never turns a passing
+ *   callsite into a blocker. The raw path stays exactly as written.
  * - **Simple wrapper functions**: a configured wrapper whose declaration
  *   in the scanned set is a single `return <client call>(...)` arrow or
  *   function resolves its internal call with the callsite's first
@@ -38,24 +49,191 @@ import {
   normalizeHttpPath,
 } from '@gateforge/http-contract';
 import type { HttpMethod } from '@gateforge/http-contract';
-import type { Location } from '@gateforge/core';
+import { pathInScope, type Location } from '@gateforge/core';
 
-/** Configuration for the client-call scanner (all optional). */
+/**
+ * Optional per-entry file scoping (phase 3 scan-scoping). Globs are
+ * repo-root-relative posix (`frontend/src/**`), matched with core's
+ * deterministic `pathInScope` machinery — the same wildcards as the
+ * classification policy's scan roots.
+ */
+export interface ClientSymbolScoping {
+  /**
+   * Files the entry applies to. Absent = every scanned file (the
+   * back-compat default); present = at least one glob must match.
+   */
+  include?: readonly string[];
+  /**
+   * Files the entry never applies to. Any match wins over `include` —
+   * a deterministic precedence (documented in the README).
+   */
+  exclude?: readonly string[];
+}
+
+/** A configured client symbol: plain string (unscoped) or scoped object. */
+export interface ClientSymbolConfig extends ClientSymbolScoping {
+  /** Instance symbol exposing verb methods, e.g. `apiClient`. */
+  name: string;
+}
+
+/** A configured wrapper callable: `name` + concrete method + scoping. */
+export interface WrapperFunctionConfig extends ClientSymbolScoping {
+  name: string;
+  /**
+   * The concrete method the wrapper always issues (wrappers with
+   * computed methods stay unresolved).
+   */
+  method: HttpMethod;
+}
+
+/** A configured pure URL builder: `name` + optional base + scoping. */
+export interface UrlBuilderConfig extends ClientSymbolScoping {
+  name: string;
+  /** Optional literal base the builder prepends. */
+  base?: string;
+}
+
+/**
+ * Configuration for the client-call scanner (all optional).
+ *
+ * Scan scoping (phase 3): `clientScanRoots` / `serverScanRoots` narrow
+ * WHERE client-call and generic server-route scanning apply at all —
+ * two real dogfood failures drove this. A consumer's e2e specs defined
+ * a helper also named `api`, and every harness call was scanned as
+ * product frontend consumption (20 FRONTEND_CALL_TARGET_UNRESOLVED
+ * blockers + phantom consumption); another repo discovered false
+ * `http.endpoint` server routes inside `tests/e2e` because test-harness
+ * mock servers matched the generic route regex. Test-harness calls are
+ * a different contract class, so a file outside the roots produces NO
+ * facts of that kind at all. Absent keys scan everything — the
+ * byte-identical back-compat contract.
+ */
 export interface ClientScanConfig {
   /** Instance symbols exposing verb methods, e.g. `['apiClient']`. */
-  clientSymbols?: readonly string[];
+  clientSymbols?: ReadonlyArray<string | ClientSymbolConfig>;
   /**
    * Wrapper callables: `name` plus the concrete method the wrapper
    * always issues (wrappers with computed methods stay unresolved).
    */
-  wrapperFunctions?: ReadonlyArray<{ name: string; method: HttpMethod }>;
+  wrapperFunctions?: ReadonlyArray<WrapperFunctionConfig>;
   /** Pure URL builders with an optional literal base they prepend. */
-  urlBuilders?: ReadonlyArray<{ name: string; base?: string }>;
+  urlBuilders?: ReadonlyArray<UrlBuilderConfig>;
   /** Absolute-URL hosts treated as same-origin (canonicalized to path). */
   sameOriginHosts?: readonly string[];
+  /**
+   * Repo-root-relative globs limiting client-call scanning (fetch,
+   * axios, configured symbols, wrappers, builders). Files outside
+   * produce NO client-call facts and NO unresolved entries.
+   */
+  clientScanRoots?: readonly string[];
+  /**
+   * Repo-root-relative globs limiting generic server-route scanning
+   * (`scanServerRoutes` / `scanNestControllers`). Files outside produce
+   * NO server-route facts — test servers are not product routes.
+   */
+  serverScanRoots?: readonly string[];
 }
 
 export const DEFAULT_CLIENT_SCAN_CONFIG: ClientScanConfig = {};
+
+/**
+ * Whether `file` (repo-root-relative posix) is inside the top-level
+ * client-call scan roots. Absent roots admit EVERY file — the
+ * back-compat contract: without the key, scanning is exactly as before.
+ */
+export function fileInClientScanRoots(config: ClientScanConfig, file: string): boolean {
+  return config.clientScanRoots === undefined || pathInScope(file, config.clientScanRoots);
+}
+
+/**
+ * Whether `file` is inside the top-level server-route scan roots.
+ * Absent roots admit every file (back-compat, same rule as above).
+ */
+export function fileInServerScanRoots(config: ClientScanConfig, file: string): boolean {
+  return config.serverScanRoots === undefined || pathInScope(file, config.serverScanRoots);
+}
+
+/** Whether one entry's own include/exclude scoping admits `file`. */
+function entryInScope(file: string, entry: ClientSymbolScoping): boolean {
+  // Exclude wins over include: a file named by both is out of scope.
+  // Deterministic precedence, documented in the README.
+  if (entry.exclude !== undefined && pathInScope(file, entry.exclude)) return false;
+  if (entry.include !== undefined && !pathInScope(file, entry.include)) return false;
+  return true;
+}
+
+/** Whether ANY configured client-symbol entry named `name` admits `file`. */
+function clientSymbolEntriesAdmit(config: ClientScanConfig, name: string, file: string): boolean {
+  return (
+    config.clientSymbols?.some((entry) =>
+      typeof entry === 'string' ? entry === name : entry.name === name && entryInScope(file, entry),
+    ) ?? false
+  );
+}
+
+/**
+ * Whether a callsite in `file` uses the configured client symbol
+ * `name`: the file must match the top-level clientScanRoots (if
+ * present) AND the symbol's own include/exclude (if present). Both
+ * gates must pass — per-symbol scoping composes with (never relaxes)
+ * the top-level roots.
+ */
+export function clientSymbolActiveIn(config: ClientScanConfig, name: string, file: string): boolean {
+  if (!fileInClientScanRoots(config, file)) return false;
+  return clientSymbolEntriesAdmit(config, name, file);
+}
+
+/** The active configured wrapper named `name` for `file`, if any. */
+function activeWrapperIn(config: ClientScanConfig, name: string, file: string): WrapperFunctionConfig | undefined {
+  if (!fileInClientScanRoots(config, file)) return undefined;
+  return config.wrapperFunctions?.find((entry) => entry.name === name && entryInScope(file, entry));
+}
+
+/** The active configured URL builder named `name` for `file`, if any. */
+function activeUrlBuilderIn(config: ClientScanConfig, name: string, file: string): UrlBuilderConfig | undefined {
+  if (!fileInClientScanRoots(config, file)) return undefined;
+  return config.urlBuilders?.find((entry) => entry.name === name && entryInScope(file, entry));
+}
+
+/**
+ * True when `name` is declared somewhere in the configuration but NO
+ * entry for it admits `file` — the e2e helper that happens to share a
+ * configured symbol's name. Such calls are IGNORED, neither resolved
+ * nor blocked: the configuration has explicitly spoken about the name
+ * and scoped it elsewhere, so interpreting out-of-scope calls (or
+ * firing the undeclared-wrapper evidence rule on them) would resurface
+ * exactly the harness false positives this scoping removes. Names with
+ * no configuration mention never take this path (the evidence rule
+ * still blocks undeclared wrappers).
+ */
+function declaredElsewhere(config: ClientScanConfig, name: string, file: string): boolean {
+  const mentioned =
+    (config.clientSymbols?.some((entry) => (typeof entry === 'string' ? entry : entry.name) === name) ?? false) ||
+    (config.wrapperFunctions?.some((entry) => entry.name === name) ?? false) ||
+    (config.urlBuilders?.some((entry) => entry.name === name) ?? false);
+  if (!mentioned) return false;
+  return (
+    !clientSymbolEntriesAdmit(config, name, file) &&
+    config.wrapperFunctions?.some((entry) => entry.name === name && entryInScope(file, entry)) !== true &&
+    config.urlBuilders?.some((entry) => entry.name === name && entryInScope(file, entry)) !== true
+  );
+}
+
+/**
+ * The configured client-symbol names ACTIVE for `file` — used by the
+ * server-route scanner to disambiguate `api.get('/x')`-shaped client
+ * calls from router registrations. Scope-aware: a symbol scoped away
+ * from this file does not suppress route discovery in it (out of client
+ * scope, `<symbol>.<verb>(path, handler)` can only be a router).
+ */
+export function activeClientSymbolNamesIn(config: ClientScanConfig, file: string): string[] {
+  const names = new Set<string>();
+  for (const entry of config.clientSymbols ?? []) {
+    const name = typeof entry === 'string' ? entry : entry.name;
+    if (clientSymbolActiveIn(config, name, file)) names.add(name);
+  }
+  return [...names].sort();
+}
 
 /** One discovered frontend call (one row per source callsite). */
 export interface ClientCall {
@@ -64,6 +242,15 @@ export interface ClientCall {
   rawPath: string;
   /** Canonical positional form of {@link rawPath} (ADR 0004 D2). */
   canonicalPath: string;
+  /**
+   * The proven literal instance `baseURL` that was joined into
+   * {@link canonicalPath} (`normalize(baseURL + rawPath)`), present ONLY
+   * when a join actually happened. Fact emission canonicalizes the joined
+   * path while {@link rawPath} stays as written; without a joined base
+   * this is absent and emission is byte-identical to the pre-feature
+   * contract.
+   */
+  joinedBaseURL?: string;
   /** Producing client, e.g. `fetch`, `axios`, `apiClient`, `apiGet`. */
   framework: string;
   location: Location;
@@ -129,7 +316,7 @@ function parseSource(sourceText: string, file: string): ts.SourceFile {
 }
 
 /** Collects module-scope constants and configured wrapper declarations. */
-function modelFile(source: ts.SourceFile, config: ClientScanConfig): FileModel {
+function modelFile(source: ts.SourceFile, config: ClientScanConfig, file: string): FileModel {
   const constants = new Map<string, ts.Expression>();
   const clientFunctions = new Set<string>();
   const wrappers = new Map<string, {
@@ -167,7 +354,7 @@ function modelFile(source: ts.SourceFile, config: ClientScanConfig): FileModel {
         const init = declaration.initializer;
         if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
           modelWrapper(declaration.name.text, init, wrappers);
-          if (containsClientCall(init, config)) clientFunctions.add(declaration.name.text);
+          if (containsClientCall(init, config, file)) clientFunctions.add(declaration.name.text);
         }
       }
     }
@@ -176,7 +363,7 @@ function modelFile(source: ts.SourceFile, config: ClientScanConfig): FileModel {
       (ts.isVariableStatement(node))
     ) {
       // Named function declarations can be client wrappers too.
-      if (ts.isFunctionDeclaration(node) && node.name !== undefined && containsClientCall(node, config)) {
+      if (ts.isFunctionDeclaration(node) && node.name !== undefined && containsClientCall(node, config, file)) {
         clientFunctions.add(node.name.text);
       }
     }
@@ -187,7 +374,7 @@ function modelFile(source: ts.SourceFile, config: ClientScanConfig): FileModel {
 }
 
 /** True when the subtree contains a direct fetch/axios/client call. */
-function containsClientCall(node: ts.Node, config: ClientScanConfig): boolean {
+function containsClientCall(node: ts.Node, config: ClientScanConfig, file: string): boolean {
   let found = false;
   const visit = (current: ts.Node): void => {
     if (found || !ts.isCallExpression(current)) {
@@ -201,11 +388,11 @@ function containsClientCall(node: ts.Node, config: ClientScanConfig): boolean {
     }
     if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
       const objectName = expression.expression.text;
-      if (
-        objectName === 'axios' ||
-        expression.name.text === 'fetch' ||
-        (config.clientSymbols?.includes(objectName) ?? false)
-      ) {
+    if (
+      objectName === 'axios' ||
+      expression.name.text === 'fetch' ||
+      clientSymbolActiveIn(config, objectName, file)
+    ) {
         found = true;
         return;
       }
@@ -266,6 +453,15 @@ function calleeClientName(call: ts.CallExpression): string | null {
  * Scans one file for frontend API-client calls under the bounded model.
  * `scannedFiles` maps repo-relative paths to source text for every file
  * in the discovery request (import resolution stays inside the set).
+ *
+ * Scan scoping (phase 3): a file outside `clientScanRoots` (when the
+ * key is present) returns EMPTY — no calls AND no unresolved entries.
+ * The gate comes first on purpose: even bare `fetch` extraction must
+ * not run, because a scoped-out file (an e2e spec, a test harness) is
+ * not product frontend consumption and must be invisible to this
+ * channel, blockers included. Files outside the roots still participate
+ * in the value table as import targets — scoping narrows fact
+ * emission, not the dataflow's ability to resolve product code.
  */
 export function scanClientCalls(
   file: string,
@@ -273,6 +469,7 @@ export function scanClientCalls(
   config: ClientScanConfig,
   scannedFiles: ReadonlyMap<string, string>,
 ): ClientScanResult {
+  if (!fileInClientScanRoots(config, file)) return { calls: [], unresolved: [] };
   const source = parseSource(sourceText, file);
   const table = new ValueTable(config, scannedFiles);
   const model = table.modelOf(file);
@@ -344,17 +541,23 @@ function extractCall(
       extractClientCall(call, 'fetch', 'GET', file, config, table, calls, unresolved, location);
       return;
     }
-    const configured = config.clientSymbols?.includes(objectName) ?? false;
+    // Per-symbol scoping (phase 3): the symbol counts only where its
+    // include/exclude (and the top-level roots) admit this file.
+    const configured = clientSymbolActiveIn(config, objectName, file);
     if ((objectName === 'axios' || configured) && VERB_METHODS.has(verb)) {
       const method = VERB_METHODS.get(verb) ?? 'GET';
-      extractClientCall(call, objectName, method, file, config, table, calls, unresolved, location);
+      // Instance baseURL joining: a modeled `axios.create` creation with a
+      // proven literal baseURL joins into the emitted path (fetch has no
+      // instance and never joins).
+      const baseURL = table.instanceBaseURL(objectName, file);
+      extractClientCall(call, objectName, method, file, config, table, calls, unresolved, location, baseURL);
       return;
     }
   }
   // axios(url[, config]) / axios.request(config) / instance(config)
   let configCall: ts.CallExpression | null = null;
   let framework: string | null = null;
-  if (ts.isIdentifier(expression) && (expression.text === 'axios' || (config.clientSymbols?.includes(expression.text) ?? false))) {
+  if (ts.isIdentifier(expression) && (expression.text === 'axios' || clientSymbolActiveIn(config, expression.text, file))) {
     configCall = call;
     framework = expression.text;
   } else if (
@@ -362,13 +565,14 @@ function extractCall(
     ts.isIdentifier(expression.expression) &&
     expression.name.text === 'request' &&
     (expression.expression.text === 'axios' ||
-      (config.clientSymbols?.includes(expression.expression.text) ?? false))
+      clientSymbolActiveIn(config, expression.expression.text, file))
   ) {
     configCall = call;
     framework = expression.expression.text;
   }
   if (configCall !== null && framework !== null) {
-    extractConfiguredCall(configCall, framework, file, config, table, calls, unresolved, location);
+    const baseURL = table.instanceBaseURL(framework, file);
+    extractConfiguredCall(configCall, framework, file, config, table, calls, unresolved, location, baseURL);
     return;
   }
   // Configured wrapper: the declaration must exist in the scanned set as
@@ -376,9 +580,8 @@ function extractCall(
   // with the callsite's first argument substituted for the parameter,
   // method from configuration. Anything else is typed unresolved — a
   // first-arg-only guess could join the wrong route.
-  if (ts.isIdentifier(expression) && (config.wrapperFunctions?.some((w) => w.name === expression.text) ?? false)) {
-    const wrapperConfig = config.wrapperFunctions?.find((w) => w.name === expression.text);
-    if (wrapperConfig === undefined) return;
+  const wrapperConfig = ts.isIdentifier(expression) ? activeWrapperIn(config, expression.text, file) : undefined;
+  if (wrapperConfig !== undefined) {
     const wrapperModel = table.modelOf(file)?.wrappers.get(wrapperConfig.name);
     if (wrapperModel === undefined) {
       unresolved.push({
@@ -418,7 +621,14 @@ function extractCall(
   // A module-scope function whose body issues client calls IS a client
   // wrapper — evidence from the code itself. Calling it without
   // declaring it in the configuration is a typed block, never silence.
-  if (ts.isIdentifier(expression) && (model?.clientFunctions.has(expression.text) ?? false)) {
+  // EXCEPTION (phase 3 scan-scoping): a name the configuration DOES
+  // declare but scopes to other files is the e2e-helper collision —
+  // declaredElsewhere ignores it instead of blocking (see there).
+  if (
+    ts.isIdentifier(expression) &&
+    !declaredElsewhere(config, expression.text, file) &&
+    (model?.clientFunctions.has(expression.text) ?? false)
+  ) {
     unresolved.push({
       code: FRONTEND_CALL_TARGET_UNRESOLVED,
       detail: (
@@ -481,6 +691,7 @@ function extractClientCall(
   calls: ClientCall[],
   unresolved: ClientScanUnresolved[],
   location: Location,
+  baseURL?: string,
 ): void {
   const urlNode = call.arguments[0];
   if (urlNode === undefined) {
@@ -527,7 +738,7 @@ function extractClientCall(
     }
   }
   if (method === null) return;
-  resolveAndRecord(urlNode, framework, method, file, config, table, calls, unresolved, location);
+  resolveAndRecord(urlNode, framework, method, file, config, table, calls, unresolved, location, baseURL);
 }
 
 function extractConfiguredCall(
@@ -539,6 +750,7 @@ function extractConfiguredCall(
   calls: ClientCall[],
   unresolved: ClientScanUnresolved[],
   location: Location,
+  baseURL?: string,
 ): void {
   const configNode = call.arguments[0];
   if (configNode === undefined || !ts.isObjectLiteralExpression(configNode)) {
@@ -584,7 +796,47 @@ function extractConfiguredCall(
     });
     return;
   }
-  resolveAndRecord(urlNode, framework, method, file, config, table, calls, unresolved, location);
+  resolveAndRecord(urlNode, framework, method, file, config, table, calls, unresolved, location, baseURL);
+}
+
+/**
+ * axios `isAbsoluteURL`: a call URL beginning `<scheme>://` or a
+ * protocol-relative `//` is absolute and IGNORES the configured
+ * instance baseURL at runtime — the static join must agree.
+ */
+const ABSOLUTE_CALL_URL_RE = /^([a-z][a-z\d+\-.]*:)?\/\//i;
+
+/** Outcome of applying a proven instance baseURL to one call path. */
+interface BaseJoin {
+  /** The path normalization runs on (joined when a join happened). */
+  path: string;
+  /** The base actually joined; absent when nothing was joined. */
+  joined: string | undefined;
+}
+
+/**
+ * Joins a proven literal instance baseURL onto one call path — the
+ * instance-side mirror of the `urlBuilders[].base` join, with axios
+ * `combineURLs` seam semantics: trailing base slashes and leading path
+ * slashes collapse so exactly one slash separates base and path
+ * (normalization then treats the result like any other raw path —
+ * identical query/fragment stripping and `${}`/`{}` slotting). Empty
+ * and `/` bases add no prefix (byte-identical output), and an absolute
+ * call URL keeps its own base, exactly as axios resolves it at runtime.
+ * The raw written path is never mutated; the join affects only the
+ * canonical/emitted form.
+ */
+function joinInstanceBaseURL(baseURL: string | undefined, callPath: string): BaseJoin {
+  if (baseURL === undefined || baseURL === '' || baseURL === '/') {
+    return { path: callPath, joined: undefined };
+  }
+  if (ABSOLUTE_CALL_URL_RE.test(callPath)) {
+    return { path: callPath, joined: undefined };
+  }
+  return {
+    path: `${baseURL.replace(/\/+$/, '')}/${callPath.replace(/^\/+/, '')}`,
+    joined: baseURL,
+  };
 }
 
 function resolveAndRecord(
@@ -597,6 +849,7 @@ function resolveAndRecord(
   calls: ClientCall[],
   unresolved: ClientScanUnresolved[],
   location: Location,
+  baseURL?: string,
 ): void {
   const resolved = table.evaluate(urlNode, file);
   if (resolved.kind === 'unresolved') {
@@ -607,16 +860,24 @@ function resolveAndRecord(
     });
     return;
   }
-  const canonical = normalizeHttpPath(resolved.text, { sameOriginHosts: config.sameOriginHosts });
+  const joined = joinInstanceBaseURL(baseURL, resolved.text);
+  const canonical = normalizeHttpPath(joined.path, { sameOriginHosts: config.sameOriginHosts });
   if (!canonical.ok) {
     unresolved.push({
       code: FRONTEND_CALL_TARGET_UNRESOLVED,
-      detail: `call target '${resolved.text}': ${canonical.detail}`,
+      detail: `call target '${joined.path}': ${canonical.detail}`,
       location,
     });
     return;
   }
-  calls.push({ method, rawPath: resolved.text, canonicalPath: canonical.canonical, framework, location });
+  calls.push({
+    method,
+    rawPath: resolved.text,
+    canonicalPath: canonical.canonical,
+    ...(joined.joined !== undefined ? { joinedBaseURL: joined.joined } : {}),
+    framework,
+    location,
+  });
 }
 
 function normalizeHttpMethodValue(raw: string): HttpMethod | null {
@@ -627,10 +888,39 @@ function normalizeHttpMethodValue(raw: string): HttpMethod | null {
   return null;
 }
 
+/**
+ * The one modeled instance-creation shape: `axios.create(...)`. Chained
+ * or aliased factories (`getInstance().create`, `makeClient()`) are
+ * outside the bounded model — fail closed, no base, unchanged emission.
+ */
+function isAxiosCreateCall(node: ts.Expression): node is ts.CallExpression {
+  return (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === 'axios' &&
+    node.expression.name.text === 'create'
+  );
+}
+
+/**
+ * baseURL proof for one creation: `absent` (no modeled creation for the
+ * binding), `unproven` (a creation exists but its base is not a proven
+ * literal — env-dependent, computed, or an unmodeled factory), or
+ * `proven` with the literal base text (empty string when the creation
+ * provably carries no baseURL).
+ */
+type BaseProof = { state: 'absent' } | { state: 'unproven' } | { state: 'proven'; base: string };
+
+const ABSENT_PROOF: BaseProof = { state: 'absent' };
+const UNPROVEN_PROOF: BaseProof = { state: 'unproven' };
+const PROVEN_EMPTY_PROOF: BaseProof = { state: 'proven', base: '' };
+
 /** Bounded value resolution over the scanned file set. */
 class ValueTable {
   private readonly models = new Map<string, FileModel>();
   private readonly evaluating = new Set<string>();
+  private readonly baseMemo = new Map<string, string | undefined>();
 
   constructor(
     private readonly config: ClientScanConfig,
@@ -642,7 +932,7 @@ class ValueTable {
     if (cached !== undefined) return cached;
     const text = this.scannedFiles.get(file);
     if (text === undefined) return undefined;
-    const model = modelFile(parseSource(text, file), this.config);
+    const model = modelFile(parseSource(text, file), this.config, file);
     this.models.set(file, model);
     return model;
   }
@@ -698,9 +988,12 @@ class ValueTable {
       return UNRESOLVED_VALUE;
     }
     // URL builder calls: `buildApiPath('/v1/x')` → base + resolved arg.
+    // Per-symbol scoping (phase 3): a builder scoped away from `file`
+    // does not resolve here — an in-scope enclosing call whose target
+    // needs it fails closed (typed unresolved), never silently.
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
       const callee = node.expression;
-      const builder = this.config.urlBuilders?.find((entry) => entry.name === callee.text);
+      const builder = activeUrlBuilderIn(this.config, callee.text, file);
       if (builder !== undefined) {
         const argument = node.arguments[0];
         if (argument === undefined) return UNRESOLVED_VALUE;
@@ -714,6 +1007,159 @@ class ValueTable {
       }
     }
     return UNRESOLVED_VALUE;
+  }
+
+  /**
+   * The proven literal baseURL of the axios instance `symbol` for a
+   * callsite in `file`, or `undefined` when no base is proven (the
+   * callsite then behaves exactly as without this feature — never a new
+   * blocker). Precedence, most specific wins:
+   *
+   *  1. The symbol's module-scope creation IN the callsite file.
+   *  2. The creation in the relative-import module that provides the
+   *     binding (the existing bounded import machinery, nothing looser).
+   *  3. A UNIQUE declaration of the symbol across the scanned product
+   *     set (the configured-symbol channel already treats the name as
+   *     global, and real clients are singletons) — alias-imported
+   *     creations resolve here. Every same-named creation found must be
+   *     a modeled `axios.create` and all proven bases must agree;
+   *     disagreement, a second distinct base, or any unprovable
+   *     same-named creation vetoes the join (fail closed). The search
+   *     never leaves the top-level clientScanRoots (when present) so an
+   *     out-of-scope e2e mock instance cannot poison product calls, and
+   *     it never applies to the bare `axios` global, whose base is
+   *     axiomatically absent unless shadowed in the callsite file itself.
+   *
+   * An unprovable base at tiers 1–2 is authoritative for that binding —
+   * no fallback to the name search.
+   */
+  instanceBaseURL(symbol: string, file: string): string | undefined {
+    const memoKey = `${file}::${symbol}`;
+    if (this.baseMemo.has(memoKey)) return this.baseMemo.get(memoKey);
+    let result: string | undefined;
+    const own = this.creationBase(symbol, file, new Set([memoKey]));
+    if (own.state === 'absent') {
+      result = symbol === 'axios' ? undefined : this.uniqueDeclaredBase(symbol);
+    } else {
+      result = own.state === 'proven' ? own.base : undefined;
+    }
+    this.baseMemo.set(memoKey, result);
+    return result;
+  }
+
+  /**
+   * Resolves the symbol's creation in `file` (local constant first, then
+   * a relative-imported binding) and extracts its base. Absent means no
+   * modeled creation was found for this binding.
+   */
+  private creationBase(symbol: string, file: string, seen: Set<string>): BaseProof {
+    const local = this.modelOf(file)?.constants.get(symbol);
+    if (local !== undefined) {
+      return this.creationInitializerBase(local, file, seen);
+    }
+    const imported = this.importedFrom(file, symbol);
+    if (imported !== null) {
+      const initializer = this.modelOf(imported)?.constants.get(symbol);
+      if (initializer !== undefined) {
+        return this.creationInitializerBase(initializer, imported, seen);
+      }
+    }
+    return ABSENT_PROOF;
+  }
+
+  private creationInitializerBase(initializer: ts.Expression, file: string, seen: Set<string>): BaseProof {
+    if (!isAxiosCreateCall(initializer)) return UNPROVEN_PROOF;
+    return this.axiosCreateBase(initializer.arguments[0], file, seen);
+  }
+
+  /**
+   * The unique same-named creation across the scanned product set, with
+   * the agreement rules from {@link instanceBaseURL} tier 3. Files are
+   * visited in sorted order; the verdict is a pure function of the set.
+   */
+  private uniqueDeclaredBase(symbol: string): string | undefined {
+    let unique: string | undefined;
+    for (const candidateFile of [...this.scannedFiles.keys()].sort()) {
+      if (!fileInClientScanRoots(this.config, candidateFile)) continue;
+      const initializer = this.modelOf(candidateFile)?.constants.get(symbol);
+      if (initializer === undefined) continue;
+      const proof = this.creationInitializerBase(initializer, candidateFile, new Set([`${candidateFile}::${symbol}`]));
+      if (proof.state !== 'proven') return undefined;
+      if (unique === undefined) unique = proof.base;
+      else if (unique !== proof.base) return undefined;
+    }
+    return unique;
+  }
+
+  /** Extracts the baseURL proof from one `axios.create(...)` argument. */
+  private axiosCreateBase(argument: ts.Expression | undefined, file: string, seen: Set<string>): BaseProof {
+    if (argument === undefined) return PROVEN_EMPTY_PROOF;
+    return this.baseFromConfigExpression(argument, file, seen);
+  }
+
+  private baseFromConfigExpression(node: ts.Expression, file: string, seen: Set<string>): BaseProof {
+    if (ts.isObjectLiteralExpression(node)) return this.baseFromConfigObject(node, file, seen);
+    if (ts.isIdentifier(node)) return this.baseFromConstantObject(node.text, file, seen);
+    return UNPROVEN_PROOF;
+  }
+
+  /**
+   * Resolves a config CONSTANT (`axios.create(config)`) through the
+   * same local/relative-import machinery as the value table, cycle-
+   * guarded via `seen`.
+   */
+  private baseFromConstantObject(name: string, file: string, seen: Set<string>): BaseProof {
+    const local = this.resolveConstantInitializer(name, file, seen);
+    if (local !== undefined) {
+      const [initializer, originFile] = local;
+      const key = `${originFile}::${name}`;
+      seen.add(key);
+      const result = this.baseFromConfigExpression(initializer, originFile, seen);
+      seen.delete(key);
+      return result;
+    }
+    return UNPROVEN_PROOF;
+  }
+
+  /**
+   * One config object literal, honoring JavaScript property semantics:
+   * source order, last writer wins — a direct `baseURL` property and a
+   * spread of a proven constant config participate equally, so
+   * `{...a, baseURL: '/x'}` proves '/x' and `{baseURL: '/x', ...a}`
+   * proves only what `a` proves.
+   */
+  private baseFromConfigObject(object: ts.ObjectLiteralExpression, file: string, seen: Set<string>): BaseProof {
+    let result: BaseProof = PROVEN_EMPTY_PROOF; // no baseURL member: proven baseless
+    for (const property of object.properties) {
+      if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) {
+        if (!ts.isIdentifier(property.name) || property.name.text !== 'baseURL') continue;
+        const initializer = ts.isPropertyAssignment(property) ? property.initializer : property.name;
+        const resolved = this.evaluate(initializer, file);
+        result = resolved.kind === 'literal' ? { state: 'proven', base: resolved.text } : UNPROVEN_PROOF;
+      } else if (ts.isSpreadAssignment(property)) {
+        const spread = property.expression;
+        result = ts.isIdentifier(spread)
+          ? this.baseFromConstantObject(spread.text, file, seen)
+          : UNPROVEN_PROOF;
+      }
+    }
+    return result;
+  }
+
+  /** Local constant initializer, else the relative-imported one. */
+  private resolveConstantInitializer(
+    name: string,
+    file: string,
+    seen: Set<string>,
+  ): [ts.Expression, string] | undefined {
+    const local = this.modelOf(file)?.constants.get(name);
+    if (local !== undefined && !seen.has(`${file}::${name}`)) return [local, file];
+    const imported = this.importedFrom(file, name);
+    if (imported !== null && !seen.has(`${imported}::${name}`)) {
+      const initializer = this.modelOf(imported)?.constants.get(name);
+      if (initializer !== undefined) return [initializer, imported];
+    }
+    return undefined;
   }
 
   /** `import { NAME } from './m'` — resolves NAME's declaring scanned file. */
@@ -777,9 +1223,45 @@ class ValueTable {
 }
 
 /**
+ * Validates the include/exclude scoping fields of one object-form
+ * entry. New surface, so strict: a present-but-not-array include or
+ * exclude is malformed and throws (fail closed — silently ignoring a
+ * scoping directive would scan MORE than the configuration asked for,
+ * resurfacing the harness false positives scoping exists to remove).
+ */
+function parseEntryScoping(
+  record: Record<string, unknown>,
+  kind: string,
+  path: string,
+): { include?: string[]; exclude?: string[] } {
+  const scoping: { include?: string[]; exclude?: string[] } = {};
+  for (const key of ['include', 'exclude'] as const) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (!Array.isArray(value)) {
+      throw new Error(`invalid http client config: ${kind} '${String(record['name'])}' ${key} must be an array of globs at ${path}`);
+    }
+    scoping[key] = value.map((glob) => String(glob));
+  }
+  return scoping;
+}
+
+/**
  * Reads a client-scan config document. Returns the default config when
  * the file is absent; malformed documents throw (fail closed — the CLI
  * surfaces the error instead of scanning with partial trust).
+ *
+ * Accepted shapes (phase 3 scan-scoping): `clientSymbols` entries are a
+ * plain string (back-compat, unscoped) or `{ name, include?, exclude? }`;
+ * `wrapperFunctions` / `urlBuilders` entries carry the same optional
+ * include/exclude next to their existing `method` / `base` fields; the
+ * top-level `clientScanRoots` / `serverScanRoots` arrays scope where
+ * client-call and server-route scanning apply at all. Consistent with
+ * the pre-existing parser posture: unknown keys are ignored, non-array
+ * known keys are ignored, but malformed ENTRY values throw (the wrapper
+ * verb check predates this; the new scoping fields throw on wrong
+ * shapes and missing names because silently dropping a scope widens the
+ * scan instead of narrowing it).
  */
 export function readClientScanConfigOrNull(path: string | null): ClientScanConfig {
   if (path === null) return DEFAULT_CLIENT_SCAN_CONFIG;
@@ -798,8 +1280,25 @@ export function readClientScanConfigOrNull(path: string | null): ClientScanConfi
   }
   const document = parsed as Record<string, unknown>;
   const config: ClientScanConfig = {};
+  if (Array.isArray(document['clientScanRoots'])) {
+    config.clientScanRoots = document['clientScanRoots'].map((root) => String(root));
+  }
+  if (Array.isArray(document['serverScanRoots'])) {
+    config.serverScanRoots = document['serverScanRoots'].map((root) => String(root));
+  }
   if (Array.isArray(document['clientSymbols'])) {
-    config.clientSymbols = document['clientSymbols'].map((name) => String(name));
+    config.clientSymbols = document['clientSymbols'].map((entry) => {
+      // Plain string: the original shape, unscoped — byte-identical.
+      if (typeof entry === 'string') return entry;
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`invalid http client config: clientSymbols entries must be a name or a {name, include?, exclude?} object at ${path}`);
+      }
+      const record = entry as Record<string, unknown>;
+      if (record['name'] === undefined) {
+        throw new Error(`invalid http client config: clientSymbols object entries must carry a name at ${path}`);
+      }
+      return { name: String(record['name']), ...parseEntryScoping(record, 'clientSymbols', path) };
+    });
   }
   if (Array.isArray(document['wrapperFunctions'])) {
     config.wrapperFunctions = document['wrapperFunctions'].map((entry) => {
@@ -808,14 +1307,18 @@ export function readClientScanConfigOrNull(path: string | null): ClientScanConfi
       if (method === null) {
         throw new Error(`invalid http client config: wrapper method must be a concrete verb at ${path}`);
       }
-      return { name: String(record['name']), method };
+      return { name: String(record['name']), method, ...parseEntryScoping(record, 'wrapperFunctions', path) };
     });
   }
   if (Array.isArray(document['urlBuilders'])) {
     config.urlBuilders = document['urlBuilders'].map((entry) => {
       if (typeof entry === 'string') return { name: entry };
       const record = entry as Record<string, unknown>;
-      return { name: String(record['name']), base: record['base'] === undefined ? undefined : String(record['base']) };
+      return {
+        name: String(record['name']),
+        base: record['base'] === undefined ? undefined : String(record['base']),
+        ...parseEntryScoping(record, 'urlBuilders', path),
+      };
     });
   }
   if (Array.isArray(document['sameOriginHosts'])) {

@@ -32,7 +32,61 @@ export const ALL_FIXTURES = [
   'app/main.py',
   'app/routers.py',
   'app/alias.py',
+  'import-roots/backend/main.py',
+  'import-roots/backend/api/__init__.py',
+  'import-roots/backend/api/v1/__init__.py',
+  'import-roots/backend/api/v1/activities.py',
+  'import-roots/backend/api/v1/endpoints/__init__.py',
+  'import-roots/backend/api/v1/endpoints/leases.py',
+  'import-roots/backend/api/v1/endpoints/health.py',
+  'import-roots/backend/api/v1/endpoints/reports.py',
+  'import-roots/backend/api/v1/endpoints/archive.py',
+  'import-roots/backend/api/v1/routers.py',
+  'import-roots/backend/registry.py',
+  'import-roots/backend/server.py',
+  'import-roots/backend/ops/__init__.py',
+  'import-roots/backend/ops/endpoints.py',
+  'import-roots/admin/api/v1/activities.py',
 ] as const;
+
+/** The registry fixture files (backend + the ambiguous second root). */
+export const IMPORT_ROOTS_FIXTURES = [
+  'import-roots/backend/main.py',
+  'import-roots/backend/api/__init__.py',
+  'import-roots/backend/api/v1/__init__.py',
+  'import-roots/backend/api/v1/activities.py',
+  'import-roots/backend/api/v1/endpoints/__init__.py',
+  'import-roots/backend/api/v1/endpoints/leases.py',
+  'import-roots/backend/api/v1/endpoints/health.py',
+  'import-roots/backend/api/v1/routers.py',
+  'import-roots/admin/api/v1/activities.py',
+] as const;
+
+/**
+ * The registry-FUNCTION fixture files (phase 3): includes written on a
+ * function parameter, mounted from module-level call sites whose
+ * arguments are `FastAPI()` instances — the dogfood
+ * `register_all_routers(fastapi_app)` shape — plus a chained helper, a
+ * never-called orphan, an unresolvable-argument negative, and a
+ * `from ops import router` package-attribute re-export.
+ */
+export const REGISTRY_FIXTURES = [
+  'import-roots/backend/server.py',
+  'import-roots/backend/registry.py',
+  'import-roots/backend/ops/__init__.py',
+  'import-roots/backend/ops/endpoints.py',
+  'import-roots/backend/api/__init__.py',
+  'import-roots/backend/api/v1/__init__.py',
+  'import-roots/backend/api/v1/endpoints/__init__.py',
+  'import-roots/backend/api/v1/endpoints/reports.py',
+  'import-roots/backend/api/v1/endpoints/archive.py',
+] as const;
+
+/** Import-root config that points at the fixture's `backend` tree. */
+export const BACKEND_IMPORT_ROOTS = ['import-roots/backend'] as const;
+
+/** Both fixture trees declare the same `api.v1.activities` module path. */
+export const AMBIGUOUS_IMPORT_ROOTS = ['import-roots/backend', 'import-roots/admin'] as const;
 
 /** The subprocess environment: host env + deterministic PYTHONPATH. */
 export function pythonEnv(extra: string[] = []): NodeJS.ProcessEnv {
@@ -79,5 +133,21 @@ export interface WrapperOutcome {
  */
 export function runDetector(paths: readonly string[]): Promise<WrapperOutcome> {
   const detector = createFastapiDetector({ env: pythonEnv(), cwd: FIXTURE_ROOT });
+  return detector.discover(paths) as Promise<WrapperOutcome>;
+}
+
+/**
+ * The full pack surface with explicit import roots (the
+ * `.gateforge/fastapi.json` `importRoots` option path).
+ */
+export function runDetectorWithImportRoots(
+  paths: readonly string[],
+  importRoots: readonly string[],
+): Promise<WrapperOutcome> {
+  const detector = createFastapiDetector({
+    env: pythonEnv(),
+    cwd: FIXTURE_ROOT,
+    importRoots,
+  });
   return detector.discover(paths) as Promise<WrapperOutcome>;
 }

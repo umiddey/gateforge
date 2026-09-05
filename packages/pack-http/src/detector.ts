@@ -17,10 +17,13 @@
  *     `fetch`/Axios, `fetch(url, { method })`, Axios instances and
  *     config objects, configured client symbols, pure URL builders,
  *     module constants (local and imported within the scanned set),
- *     and simple single-return wrapper functions. Computed methods,
- *     arbitrary concatenation, environment-dependent hosts, and wrapper
- *     flows outside the model emit typed unresolved entries — they never
- *     disappear and never default to GET.
+ *     and simple single-return wrapper functions. A modeled
+ *     `axios.create` creation with a proven literal `baseURL` joins the
+ *     base into the emitted `normalizedPath` (`rawPath` stays as
+ *     written); unprovable bases join nothing, byte-identically.
+ *     Computed methods, arbitrary concatenation, environment-dependent
+ *     hosts, and wrapper flows outside the model emit typed unresolved
+ *     entries — they never disappear and never default to GET.
  *
  * Both sides additionally emit `http.contract` evidence facts (ADR 0004
  * D1) — one per server artifact and one per frontend callsite — which the
@@ -28,19 +31,22 @@
  * Facts are engine-owned evidence-only resources: never business
  * resources, never classified directly.
  *
- * Signals (facts, never classifications):
- *   - `exposure` code-positive per discovered artifact (assertion
- *     `route` for server routes, `frontend-call` for API-client calls),
- *     targeted at the PATH-DERIVED resource name (last non-parameter
- *     path segment, lower-cased). The classifier converges route and
- *     table by that name; when no resource with the name exists the
- *     signal surfaces as a typed STALE_SIGNAL_TARGET block — a link the
- *     engine could not resolve blocks rather than guesses.
- *   - `lifecycle.<op>` code-positive from the HTTP method
- *     (POST⇒create, GET/HEAD⇒read, PUT/PATCH⇒update, DELETE⇒delete);
- *     `app.all` asserts nothing.
- *   - A route whose resource name is underivable (`/`, all-parameter)
- *     emits NO signal — nothing is claimed about an unnamed target.
+ * Signals (dogfood remediation phase 4): NONE. This pack once minted
+ * `exposure`/`lifecycle.<op>` signals targeted at the PATH-DERIVED
+ * resource name (last non-parameter path segment); in real repos those
+ * names are guesses that mostly match no discovered resource (route
+ * `/absences` vs table `employee_absences`), and every minted signal
+ * surfaced as a STALE_SIGNAL_TARGET blocker while adding no information:
+ * unknown exposure already defaults user-facing and unknown lifecycle
+ * operations already default enabled (ADR 0003 D5). Route→resource
+ * linkage is the CLI endpoint compiler's exclusive job
+ * (`derivePathResourceName` + schema-symbol/handler corroboration, with
+ * typed ENDPOINT_RESOURCE_LINK_UNRESOLVED blocks for ambiguity); the
+ * schema symbols and handler names this pack discovers travel on the
+ * `http.contract` facts the compiler corroborates against. Core's
+ * STALE_SIGNAL_TARGET detection remains for genuinely stale authority
+ * signals (declaration markers, adapter bindings, read-only
+ * declarations) — this pack simply no longer produces false targets.
  *
  * No negative proof exists anywhere in this pack (plan §4.3: no
  * regex-only negative proof, no "not found means internal"); it never
@@ -53,7 +59,7 @@ import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
 import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
 import type { z } from 'zod';
-import { LocationSchema, type ClassificationSignal } from '@gateforge/core';
+import { LocationSchema } from '@gateforge/core';
 import {
   HTTP_CONTRACT_KIND,
   normalizeHttpMethod,
@@ -62,12 +68,14 @@ import {
   type HttpLocation,
 } from '@gateforge/http-contract';
 import {
+  activeClientSymbolNamesIn,
+  fileInServerScanRoots,
   readClientScanConfigOrNull,
   scanClientCalls,
   type ClientCall,
   type ClientScanConfig,
 } from './client-calls.js';
-import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
+import { PACK_VERSION } from './version.js';
 
 /** Inferred location shape (file, 1-based line, 0-based col). */
 type Location = z.infer<typeof LocationSchema>;
@@ -180,47 +188,6 @@ function lineColumnFor(text: string, index: number): { line: number; col: number
 }
 
 /**
- * Derives the resource name a path speaks about: the LAST non-empty,
- * non-parameter path segment, lower-cased, file extension stripped.
- * Purely-numeric segments are item selectors (`/accounts/9`), not
- * resource names, and are skipped the same as parameters. Returns
- * `null` when no such segment exists (`/`, `*`, `:id`) — the caller
- * emits NO signal rather than guessing a target.
- */
-export function resourceNameFromPath(rawPath: string): string | null {
-  const path = rawPath.split('?')[0]?.split('#')[0] ?? '';
-  const segments = path.split('/').filter((segment) => segment.length > 0);
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const segment = segments[i];
-    if (segment === undefined) continue;
-    if (segment.startsWith(':') || segment.startsWith('{') || segment.startsWith('*')) continue;
-    if (/^\d+$/.test(segment)) continue;
-    const cleaned = segment.replace(/\.(json|xml|txt|html)$/i, '');
-    if (cleaned.length === 0) continue;
-    return cleaned.toLowerCase();
-  }
-  return null;
-}
-
-/** The lifecycle operation an HTTP method evidences, if any. */
-function operationForMethod(method: string): string | null {
-  switch (method) {
-    case 'POST':
-      return 'create';
-    case 'GET':
-    case 'HEAD':
-      return 'read';
-    case 'PUT':
-    case 'PATCH':
-      return 'update';
-    case 'DELETE':
-      return 'delete';
-    default:
-      return null;
-  }
-}
-
-/**
  * Scans one file's text for server route registrations. Express/Fastify/
  * Hono share the `app|server|router|api.<method>( '<path>' …` shape;
  * framework attribution follows the module the file imports (pack-auth
@@ -282,26 +249,6 @@ function scanNestControllers(text: string, file: string): HttpArtifact[] {
 }
 
 
-/** Builds the stable resource id for one artifact. */
-/** One canonical classification signal (facts only). */
-function signal(
-  dimension: string,
-  assertion: string | boolean,
-  location: Location,
-  targetName: string,
-): ClassificationSignal {
-  return {
-    schemaVersion: 1,
-    target: { resourceName: targetName },
-    dimension: dimension as ClassificationSignal['dimension'],
-    assertion,
-    basis: 'code-positive',
-    source: PACK_PLUGIN_ID,
-    location,
-    detector: { id: PACK_PLUGIN_ID, version: PACK_VERSION },
-  };
-}
-
 /**
  * Creates the discover-capable detector module. The default export of
  * the pack is `createHttpDetector()` — the CLI in-process contract.
@@ -345,8 +292,24 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
         const sourceRel = relative(root, file).split(sep).join('/');
         scanned.push(sourceRel);
         texts.set(sourceRel, text);
-        for (const artifact of scanServerRoutes(text, file, clientScan?.clientSymbols)) artifacts.push(artifact);
-        for (const artifact of scanNestControllers(text, file)) artifacts.push(artifact);
+        // Server-route scan scoping (phase 3): generic route regexes and
+        // NestJS decorators apply ONLY inside serverScanRoots — another
+        // repo discovered false http.endpoint resources inside tests/e2e
+        // because test-harness mock servers matched the generic shape,
+        // and test servers are not product routes. Files outside the
+        // roots yield no server artifacts at all (they still count as
+        // scanned: the walk read them; scoping narrows facts, not
+        // coverage reporting).
+        if (fileInServerScanRoots(clientScan, sourceRel)) {
+          // Client-symbol disambiguation stays scope-aware: a symbol
+          // admits this file only where its scoping does (see
+          // activeClientSymbolNamesIn) — out of client scope,
+          // `api.get('/x', handler)` can only be a router registration.
+          for (const artifact of scanServerRoutes(text, file, activeClientSymbolNamesIn(clientScan, sourceRel))) {
+            artifacts.push(artifact);
+          }
+          for (const artifact of scanNestControllers(text, file)) artifacts.push(artifact);
+        }
       }
       artifacts.sort((a, b) => {
         const keyA = `${a.file}:${a.line}:${a.col}:${a.method}:${a.path}:${a.origin}`;
@@ -357,10 +320,11 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
       // Routes are EVIDENCE, not business resources (red-team round 2):
       // emitting a classifiable resource with the path-derived bare name
       // would collide with the converged table at the same plane-
-      // qualified id. The signals below bind the exposure/lifecycle facts
-      // onto the entity resource the name converges with; contract facts
-      // (ADR 0004 D1) carry both raw and canonical paths to the compiler.
-      const signals: ClassificationSignal[] = [];
+      // qualified id, and (phase 4) no classification signals are minted:
+      // a path-derived target is a guess that mostly names no discovered
+      // resource (STALE_SIGNAL_TARGET noise). The contract facts below
+      // carry raw/canonical paths, schema symbols, and handler names to
+      // the endpoint compiler — the sole sanctioned linkage mechanism.
       const resources: ContractResource[] = [];
       const unresolved: Array<{ code: string; detail: string; location: HttpLocation }> = [];
       for (const artifact of artifacts) {
@@ -374,22 +338,14 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
           if (fact.ok) resources.push(fact.resource);
           else unresolved.push(fact.unresolved);
         }
-        // Without a derived name the engine claims NOTHING about the
-        // artifact's classification targets (no guess, no stale block).
-        const derived = resourceNameFromPath(artifact.path);
-        if (derived === null) continue;
-        const assertion = artifact.origin === 'fetch' || artifact.origin === 'axios'
-          ? 'frontend-call'
-          : 'route';
-        signals.push(signal('exposure', assertion, location, derived));
-        const operation = operationForMethod(artifact.method);
-        if (operation !== null) {
-          signals.push(signal(`lifecycle.${operation}`, true, location, derived));
-        }
       }
 
       // Frontend calls: bounded static dataflow (client-calls.ts) — one
-      // fact per source callsite, exposure assertion `frontend-call`.
+      // fact per source callsite. Every scanned file is offered as an
+      // import-resolution target, but clientScanRoots fact emission is
+      // enforced inside scanClientCalls: files outside the roots return
+      // empty there (no facts, no unresolved entries) while still
+      // resolving product imports.
       for (const sourceRel of [...texts.keys()].sort(compareStringsHttp)) {
         const text = texts.get(sourceRel);
         if (text === undefined) continue;
@@ -398,13 +354,6 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
           const fact = contractFactFromClientCall(clientCall, sourceRel);
           if (fact.ok) resources.push(fact.resource);
           else unresolved.push(fact.unresolved);
-          const derived = resourceNameFromPath(clientCall.rawPath);
-          if (derived === null) continue;
-          signals.push(signal('exposure', 'frontend-call', clientCall.location, derived));
-          const operation = operationForMethod(clientCall.method);
-          if (operation !== null) {
-            signals.push(signal(`lifecycle.${operation}`, true, clientCall.location, derived));
-          }
         }
         unresolved.push(...result.unresolved);
       }
@@ -418,15 +367,10 @@ export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetec
           compareStringsHttp(a.code, b.code) ||
           compareStringsHttp(a.detail, b.detail),
       );
-      signals.sort((a, b) =>
-        JSON.stringify(a) < JSON.stringify(b)
-          ? -1
-          : JSON.stringify(a) > JSON.stringify(b)
-            ? 1
-            : 0,
-      );
       findings.sort((a, b) => a.detail < b.detail ? -1 : a.detail > b.detail ? 1 : 0);
-      return { resources, unresolved, findings, classificationSignals: signals, scannedPaths: scanned.sort(compareStringsHttp) };
+      // classificationSignals stays in the wire shape (protocol contract)
+      // and is always empty: this pack mints NO classification signals.
+      return { resources, unresolved, findings, classificationSignals: [], scannedPaths: scanned.sort(compareStringsHttp) };
     },
   };
 }
@@ -476,6 +420,11 @@ function contractFactFromClientCall(
     role: 'frontend-call',
     method: clientCall.method,
     rawPath: clientCall.rawPath,
+    // baseURL-joined calls (phase 3) canonicalize the JOINED path — the
+    // instance prefix is real at runtime. rawPath stays exactly as
+    // written for provenance. Without a joined base this is undefined
+    // and buildFact normalizes rawPath exactly as before (byte-identical).
+    canonicalPath: clientCall.joinedBaseURL === undefined ? undefined : clientCall.canonicalPath,
     framework: clientCall.framework,
     file: sourceRel,
     location,
@@ -488,6 +437,13 @@ function buildFact(input: {
   role: 'server-route' | 'frontend-call';
   method: string;
   rawPath: string;
+  /**
+   * Precomputed canonical path from the client dataflow (already
+   * normalizeHttpPath-approved, including the joined instance baseURL
+   * and sameOriginHosts); used verbatim as `normalizedPath`. Absent:
+   * normalize {@link rawPath} here, exactly as before.
+   */
+  canonicalPath?: string;
   framework: string;
   handler?: string;
   file: string;
@@ -506,7 +462,10 @@ function buildFact(input: {
       },
     };
   }
-  const canonical = normalizeHttpPath(input.rawPath);
+  const canonical =
+    input.canonicalPath !== undefined
+      ? { ok: true as const, canonical: input.canonicalPath }
+      : normalizeHttpPath(input.rawPath);
   if (!canonical.ok) {
     return {
       ok: false,

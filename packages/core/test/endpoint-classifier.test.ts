@@ -172,3 +172,160 @@ describe('endpoint plane inheritance', () => {
     expect(result.decisions.find((d) => d.name === second.name)?.classification).toBeNull();
   });
 });
+
+describe('endpoints carry no EntityAdapter demand (claims lane); pure probes stay internal', () => {
+  /**
+   * The endpoint compiler's identity fact for one endpoint (the only
+   * signal every compiled endpoint always carries).
+   */
+  function identitySignalFor(endpointName: string): ClassificationSignal {
+    return signal({
+      target: { resourceName: endpointName },
+      dimension: 'identity',
+      assertion: ['method', 'path'],
+      location: ENDPOINT_LOC,
+      source: 'gateforge.endpoint-compiler',
+      detector: { id: 'gateforge.endpoint-compiler', version: '1' },
+    });
+  }
+
+  function classifyOneEndpoint(
+    resource: ClassifierResourceRef,
+    signals: ClassificationSignal[],
+    adapters: readonly string[],
+  ) {
+    return classifyResources({
+      resources: [resource],
+      signals,
+      policy: policy(),
+      adapters,
+      scan: { requestedPaths: [], scannedPaths: [], findings: [], unresolved: [] },
+    });
+  }
+
+  it('a health probe with an empty adapters directory classifies without ADAPTER_MISSING', () => {
+    // The dogfood shape: GET /health (backend/api/ops/endpoints.py) with
+    // capability exactly `health-operations`, no business link, and no
+    // adapter file. Before the operational exposure lane this blocked as
+    // ADAPTER_MISSING despite being an operational probe.
+    const health = endpointResource({
+      name: 'http-get-health-74fac65f',
+      attributes: { capabilities: ['health-operations'] },
+    });
+    const entry = classifyOneEndpoint(health, [identitySignalFor(health.name)], []).decisions.find(
+      (d) => d.name === health.name,
+    );
+    expect(entry?.blocks).toEqual([]);
+    // Plane still comes from the operational rule (engine-issued).
+    expect(entry?.classification?.plane).toBe('global');
+    expect(entry?.classification?.exposure).toBe('internal');
+    // The trace records WHY no adapter is demanded.
+    expect(entry?.classification?.rules).toContain('EXPOSURE_OPERATIONAL_PROBE');
+    expect(entry?.classification?.evidenceAdapter).toBeUndefined();
+  });
+
+  it('a consumed health probe still takes the operational lane, not the adapter demand', () => {
+    // The frontend polls /health: the compiler emits a code-positive
+    // exposure signal. Consumption must not turn the probe into a
+    // user-facing UI-evidence obligation.
+    const health = endpointResource({
+      name: 'http-get-health-74fac65f',
+      attributes: { capabilities: ['health-operations'] },
+    });
+    const consumed = signal({
+      target: { resourceName: health.name },
+      dimension: 'exposure',
+      assertion: 'frontend-consumed',
+      location: ENDPOINT_LOC,
+      source: 'gateforge.endpoint-compiler',
+      detector: { id: 'gateforge.endpoint-compiler', version: '1' },
+    });
+    const entry = classifyOneEndpoint(
+      health,
+      [identitySignalFor(health.name), consumed],
+      [],
+    ).decisions.find((d) => d.name === health.name);
+    expect(entry?.blocks).toEqual([]);
+    expect(entry?.classification?.exposure).toBe('internal');
+    expect(entry?.classification?.rules).toContain('EXPOSURE_OPERATIONAL_PROBE');
+  });
+
+  it('a linked user-facing endpoint classifies WITHOUT an adapter (the claims lane)', () => {
+    // FIX (dogfood): demanding a reviewed EntityAdapter for every
+    // user-facing endpoint was a category error — endpoints are witnessed
+    // through the claims/witness-proxy lane (`http:frontend-request-observed`),
+    // not through entity persistence adapters (whose contract is read by
+    // id / normalize body / deletion kind — business-entity persistence).
+    // The endpoint classifies user-facing cleanly with NO adapter of its
+    // own; the mirrored red side for business resources (a user-facing
+    // table still demands its adapter) lives in classifier.test.ts.
+    const business = businessResource();
+    const endpoint = endpointResource(); // linkedResourceName: 'accounts'
+    const result = classifyResources({
+      resources: [business, endpoint],
+      signals: [...structural(), identitySignalFor(endpoint.name)],
+      policy: policy(),
+      adapters: ['accounts'], // the table binds; the endpoint has no adapter of its own
+      scan: { requestedPaths: [], scannedPaths: [], findings: [], unresolved: [] },
+    });
+    const endpointEntry = result.decisions.find((d) => d.name === endpoint.name);
+    expect(endpointEntry?.classification).not.toBeNull();
+    expect(endpointEntry?.blocks).toEqual([]);
+    expect(endpointEntry?.classification?.exposure).toBe('user-facing');
+    expect(endpointEntry?.classification?.evidenceAdapter).toBeUndefined();
+    // The decision records WHY no adapter is present: the claims lane.
+    expect(endpointEntry?.classification?.evidenceLane).toBe('claims');
+  });
+
+  it('a user-facing endpoint classifies clean with an EMPTY adapters directory', () => {
+    // The dogfood shape (473/746 ADAPTER_MISSING blocks on endpoints):
+    // a plain unlinked endpoint — no capabilities, no business link, a
+    // plane from detector evidence, and no adapter file anywhere — must
+    // classify user-facing without blocking on an adapter.
+    const plain = endpointResource({
+      name: 'http-get-api-v1-agent-metrics-e5f6a7b8',
+      id: null,
+      attributes: {}, // no link, no capabilities
+    });
+    const plane = signal({
+      target: { resourceName: plain.name },
+      dimension: 'plane',
+      assertion: 'global',
+      location: ENDPOINT_LOC,
+      source: 'gateforge.endpoint-compiler',
+      detector: { id: 'gateforge.endpoint-compiler', version: '1' },
+    });
+    const entry = classifyOneEndpoint(plain, [identitySignalFor(plain.name), plane], []).decisions.find(
+      (d) => d.name === plain.name,
+    );
+    expect(entry?.blocks).toEqual([]);
+    expect(entry?.classification?.exposure).toBe('user-facing');
+    expect(entry?.classification?.evidenceAdapter).toBeUndefined();
+    expect(entry?.classification?.evidenceLane).toBe('claims');
+    // The conservative user-facing default decided the exposure — NOT the
+    // operational probe lane (that stays reserved for pure health probes).
+    expect(entry?.classification?.rules).toContain('EXPOSURE_DEFAULT_USER_FACING');
+    expect(entry?.classification?.rules).not.toContain('EXPOSURE_OPERATIONAL_PROBE');
+  });
+
+  it('health-operations plus any other capability stays user-facing, not operational', () => {
+    // The operational lane is only for the EXACT probe class: a
+    // health-path route whose response model also corroborated crud-read
+    // carries a business capability and keeps the full user-facing
+    // lattice. Since endpoints are claims-witnessed it no longer demands
+    // an adapter, but it must NOT resolve to the operational `internal`
+    // posture either — fail closed on the lane, not on invented evidence.
+    const status = endpointResource({
+      name: 'http-get-status-e5f6a7b8',
+      attributes: { capabilities: ['crud-read', 'health-operations'] },
+    });
+    const entry = classifyOneEndpoint(status, [identitySignalFor(status.name)], []).decisions.find(
+      (d) => d.name === status.name,
+    );
+    expect(entry?.classification).not.toBeNull();
+    expect(entry?.blocks).toEqual([]);
+    expect(entry?.classification?.exposure).toBe('user-facing');
+    expect(entry?.classification?.rules).toContain('EXPOSURE_DEFAULT_USER_FACING');
+    expect(entry?.classification?.rules).not.toContain('EXPOSURE_OPERATIONAL_PROBE');
+  });
+});

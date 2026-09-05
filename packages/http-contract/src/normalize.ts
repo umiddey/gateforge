@@ -95,7 +95,13 @@ export function normalizeHttpPath(
     working = working.slice(0, queryStart);
   }
 
-  // 2. slash normalization.
+  // 2. slash normalization. Trailing slashes are NOT significant: runtime
+  //    frameworks treat `/api/v2/accounts` and `/api/v2/accounts/` as the
+  //    same resource (routers normalize or redirect-accept the variant),
+  //    so the canonical form strips them and the static join mirrors that
+  //    equivalence — a frontend call written with a trailing slash still
+  //    joins the route declared without one. The root `/` is the bare
+  //    resource and stays.
   working = working.replace(/\/{2,}/g, '/');
   if (!working.startsWith('/')) {
     working = `/${working}`;

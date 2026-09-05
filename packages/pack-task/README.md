@@ -4,22 +4,43 @@ Background-task discovery pack: a pure-TypeScript GPP/3 in-process detector that
 
 ## How discovery works
 
-The detector scans `.ts`/`.tsx`/`.js`/`.mjs` files with regex-based AST-light patterns (matching `pack-auth`'s strategy) and emits:
+The detector scans `.ts`/`.tsx`/`.js`/`.mjs` files with regex-based AST-light patterns (matching `pack-auth`'s strategy). It recognizes the task constructs below and reports its verdict through the discovery outcome's typed blocking vocabulary — the pack emits no resources and no classification signals of its own:
 
-| Source construct | Emitted as |
+| Source construct | Recognized as |
 | --- | --- |
-| `new Queue('email.send', ...)` / `new BullMQ.Queue(...)` | `task.resource` with `framework: 'bullmq'` + retry policy from `defaultJobOptions` |
-| `new Bee('image.resize', ...)` | `task.resource` with `framework: 'bee-queue'` |
-| `register('webhook.dispatch', handler)` | `task.resource` with `framework: 'custom-queue'` (single-line) |
-| `new CustomQueue({ name, handler, ... })` | `task.resource` with `framework: 'custom-queue'` (multi-line, balanced-brace walk) |
-| `onmessage = handler` / `.on('message', ...)` / `addEventListener('message', ...)` | `task.resource` with `framework: 'message-handler'` |
-| `setInterval(handler, ms, ...)` / `setImmediate(handler, ...)` | `task.resource` with `framework: 'recurring'` |
-| `@Task(...)` / `@Queue(...)` decorator annotations | `task.resource` with `framework: 'decorator'` |
+| `new Queue('email.send', ...)` / `new BullMQ.Queue(...)` | BullMQ task + retry policy from `defaultJobOptions` |
+| `new Bee('image.resize', ...)` | Bee-Queue task |
+| `register('webhook.dispatch', handler)` | custom-queue task (single-line) |
+| `new CustomQueue({ name, handler, ... })` | custom-queue task (multi-line, balanced-brace walk) |
+| `navigator.serviceWorker.register(...)` / `*.serviceWorker.register(...)` / `serviceWorkerRegistration.register(...)` / `workbox.*` / `caches.*` / `window.*` / `document.*` | nothing — browser/platform registration APIs, never task queues (excluded before matching). The receiver chain is rebuilt across MULTI-LINE call expressions too, so `navigator.serviceWorker` on its own line above the `register(...)` continuation line is still excluded (the exact unified-dogfood false positive) |
+| `onmessage = handler` / `.on('message', ...)` / `addEventListener('message', ...)` | message-handler task |
+| `setInterval(handler, ms, ...)` / `setImmediate(handler, ...)` | recurring task |
+| `@Task(...)` / `@Queue(...)` decorator annotations | decorator task |
+
+### Classification signals (phase 4): none
+
+The pack mints **no** `classificationSignals`. It once emitted
+`internality`/`worker` reachability signals targeted at model names
+GUESSED from the worker file (model/repository import-path segments,
+every PascalCase identifier, stripped task-name fragments). Those
+targets are guesses about OTHER detectors' resources — this pack
+discovers no resources itself — so in real repos they mostly matched
+nothing and every miss surfaced as a `STALE_SIGNAL_TARGET` blocker
+(236 in the unified dogfood) while adding no information: unknown
+exposure already defaults user-facing and unknown lifecycle already
+defaults enabled (ADR 0003 D5), so removal flips no classification and
+shrinks no obligation set. Core's `STALE_SIGNAL_TARGET` detection
+remains for genuinely stale authority signals. The
+`trustedInternalEntryPoints` worker category binding
+(`detector: gateforge.pack-task`) stays syntactically valid but is
+unexercised: internality certification that relied on guessed worker
+reachability is now honestly unavailable
+(`INCOMPLETE_PROOF_SCOPE`, conservative user-facing default) instead
+of guess-based.
 
 ### Detector vocabulary
 
-- **Business task resource** — `kind: "task.resource"`, identity in
-  `attributes.taskName`, plus:
+- **Recognized task inventory** — each recognized construct carries:
   - `retryPolicy: { maxAttempts: number, backoff: 'fixed' | 'exponential' }` — extracted from `defaultJobOptions.attempts` / `.backoff.type`, defaults to `{maxAttempts: 1, backoff: 'fixed'}`.
   - `idempotencyKey: boolean` — true if `jobId` / `dedupKey` / `idempotencyKey` / `dedupe` appears in source.
   - `terminalOn: string[]` — error types from `terminalOn: [...]` (terminal = no retry).
@@ -27,19 +48,21 @@ The detector scans `.ts`/`.tsx`/`.js`/`.mjs` files with regex-based AST-light pa
   - `source: { file, line, col }` — declaration location.
   - `framework: 'bullmq' | 'bee-queue' | 'custom-queue' | 'message-handler' | 'recurring' | 'decorator'`.
 
+  The inventory itself is not emitted on the wire (no resources, no
+  signals — phase 4); it drives the blocking vocabulary below and the
+  obligation contracts the pack claims.
+
 - **Findings**
   - `DUPLICATE_TASK_ID` — same id discovered twice; first wins.
-  - `AMBIGUOUS_HANDLER` — `register(...)` or `new CustomQueue(...)` with no resolvable handler reference.
+  - `AMBIGUOUS_HANDLER` — `register(...)` or `new CustomQueue(...)` with no resolvable handler reference. For the single-line `register(...)` shape this fires only when the file shows real queue evidence (an import from a known queue library — `bullmq`, `bull`, `bee-queue`, `celery`, `kue`, `agenda`, `pg-boss`, `sidekiq` — a queue-named module, or a queue constructor such as `new Queue(...)` / `new CustomQueue(...)`).
   - `PARSE_ERROR` — file could not be read.
 
-## Resource id shape
-
-`task.<name>` where `<name>` is the literal extracted from the source.
-Examples: `task.email.send`, `task.billing.refund`, `task.image.resize`.
+- **Unresolved**
+  - `UNPROVEN_QUEUE_REGISTRATION` — a handler-less `register('name')` in a file with no queue evidence: the shape is not provably a task registration, so the detector emits no worker signal and reports this typed blocking reason instead of the vague `AMBIGUOUS_HANDLER` finding (a browser service-worker registration produces nothing at all).
 
 ## Obligation contract vocabulary
 
-Five contracts, every detected `task.resource` generates all of them:
+Five contracts, every detected task generates all of them:
 
 | Contract | Meaning | Example test in `example/task/` |
 | --- | --- | --- |

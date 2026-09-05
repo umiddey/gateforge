@@ -9,6 +9,9 @@ import {
   classifyResources,
   evaluatePolicies,
   isEvidenceOnlyKind,
+  withTempRepo,
+  type ClassificationPolicy,
+  type ClassificationResult,
   type ClassificationSignal,
   type ClassifierResourceRef,
   type PolicyFile,
@@ -18,7 +21,11 @@ import {
   type HttpContractFact,
   type HttpMethod,
 } from '@gateforge/http-contract';
-import { compileEndpointContribution, extractContractFacts } from '../src/endpoint-compiler.js';
+import {
+  compileEndpointContribution,
+  extractContractFacts,
+  type CompileResult,
+} from '../src/endpoint-compiler.js';
 
 let seq = 100;
 function routeFact(
@@ -80,6 +87,37 @@ function contribution(facts: readonly HttpContractFact[]): {
       detectorVersion: '1',
       attributes: { ...fact } as Record<string, unknown>,
     })),
+    unresolved: [],
+    findings: [],
+    classificationSignals: [],
+  };
+}
+
+/** A business-resource-only contribution, as model packs emit it. */
+function businessTable(
+  name: string,
+): {
+  detectorId: string;
+  detectorVersion: string;
+  resources: Array<{ schemaVersion: 1; id: string; kind: string; source: string; location: { file: string; line: number; col: number }; detectorVersion: string; attributes: Record<string, unknown> }>;
+  unresolved: never[];
+  findings: never[];
+  classificationSignals: never[];
+} {
+  return {
+    detectorId: 'test.models',
+    detectorVersion: '1',
+    resources: [
+      {
+        schemaVersion: 1,
+        id: `sqlalchemy.table:${name}`,
+        kind: 'sqlalchemy.table',
+        source: `backend/models/${name}.py`,
+        location: { file: `backend/models/${name}.py`, line: 4, col: 0 },
+        detectorVersion: '1',
+        attributes: { resourceName: name },
+      },
+    ],
     unresolved: [],
     findings: [],
     classificationSignals: [],
@@ -162,11 +200,83 @@ describe('endpoint capabilities (facts decide, methods are candidates)', () => {
     expect(endpoint?.capabilities).not.toContain('crud-create');
   });
 
+  it('classifies PUT command paths as workflow-command, never crud-update', () => {
+    // Capability rules compose: without the crud-update exclusion this
+    // PUT carries BOTH workflow-command and crud-update (commands beat
+    // methods, plan §5.4 — the command capability must win exclusively).
+    const route = routeFact('PUT', '/api/v1/invoices/{invoice_id}/approve', {
+      handlerSymbol: 'app.approve_invoice',
+      requestSchemaSymbols: ['ApprovalIn'],
+    });
+    const { inventory } = compileEndpointContribution([contribution([route])]);
+    const endpoint = inventory.endpoints[0];
+    expect(endpoint?.capabilities).toContain('workflow-command');
+    expect(endpoint?.capabilities).not.toContain('crud-update');
+  });
+
+  it('classifies command handlers on PUT as workflow-command, never crud-update', () => {
+    // Same exclusion keyed on the HANDLER suffix: `invoice_approve`
+    // corroborates the path-derived 'invoices' candidate, so the endpoint
+    // is even linked — the command capability still excludes the method
+    // fallback.
+    const route = routeFact('PUT', '/api/v1/invoices/{invoice_id}', {
+      handlerSymbol: 'app.invoice_approve',
+      requestSchemaSymbols: ['ApprovalIn'],
+    });
+    const business = businessTable('invoices');
+    const { inventory } = compileEndpointContribution([contribution([route]), business as never]);
+    const endpoint = inventory.endpoints[0];
+    expect(endpoint?.capabilities).toContain('workflow-command');
+    expect(endpoint?.capabilities).not.toContain('crud-update');
+    expect(endpoint?.linkedResourceName).toBe('invoices');
+  });
+
+  it('classifies a plain corroborated PUT as crud-update', () => {
+    // Red-side anchor for the exclusion: without a command suffix in the
+    // path or handler, the schema+link-corroborated PUT IS crud-update.
+    const route = routeFact('PUT', '/api/v1/invoices/{invoice_id}', {
+      requestSchemaSymbols: ['InvoiceIn'],
+    });
+    const business = businessTable('invoices');
+    const { inventory } = compileEndpointContribution([contribution([route]), business as never]);
+    const endpoint = inventory.endpoints[0];
+    expect(endpoint?.capabilities).toContain('crud-update');
+    expect(endpoint?.capabilities).not.toContain('workflow-command');
+    expect(endpoint?.linkedResourceName).toBe('invoices');
+  });
+
   it('classifies health GETs as health-operations, never business crud-read', () => {
     const route = routeFact('GET', '/health/ready', { handlerSymbol: 'app.readiness' });
     const { inventory } = compileEndpointContribution([contribution([route])]);
     const endpoint = inventory.endpoints[0];
     expect(endpoint?.capabilities).toEqual(['health-operations']);
+  });
+
+  it('classifies only GENUINE infrastructure probes as health-operations (dogfood regression)', () => {
+    // The old rule matched probe-sounding words at ANY depth, so business
+    // sub-resources were classified operational-global and silently
+    // exempted from adapters/obligations (a dogfood enforcement hole).
+    // The operational shape is now segment-exact probe words on routes of
+    // depth <= 2 (plus the bare root); `readiness`/`status` are NOT probe
+    // words, and depth > 2 never qualifies — deep business routes stay in
+    // the full user-facing lattice.
+    const businessShapes = [
+      '/api/v1/agent-metrics', // AI-token business metrics
+      '/api/v1/operating-costs/buildings/{}/meter-readings/readiness', // business readiness state
+      '/api/v1/operating-costs/settlements/{}/readiness', // business readiness state
+      '/admin/imports/task/{}/status', // business job status
+      '/admin/clients/{}/health', // per-client business sub-resource
+      '/api/v1/health', // depth 3: business nesting, not a root probe
+    ];
+    for (const path of businessShapes) {
+      const { inventory } = compileEndpointContribution([contribution([routeFact('GET', path)])]);
+      expect(inventory.endpoints[0]?.capabilities, path).not.toContain('health-operations');
+    }
+    const probeShapes = ['/', '/health', '/health/live', '/ready', '/metrics', '/health/drain'];
+    for (const path of probeShapes) {
+      const { inventory } = compileEndpointContribution([contribution([routeFact('GET', path)])]);
+      expect(inventory.endpoints[0]?.capabilities, path).toContain('health-operations');
+    }
   });
 
   it('withholds crud-delete from DELETEs whose semantics have no positive evidence', () => {
@@ -268,20 +378,60 @@ describe('linkage and blocks', () => {
     ).toBe(true);
   });
 
-  it('emits typed unwired and ambiguous blocks', () => {
+  it('joins a slotted call to its exact-shape route despite literal siblings', () => {
+    // LITERAL PRECEDENCE (phase 3 refinement): the call's own `{}` slot
+    // mirrored by the parameter route's `{}` slot is a LITERAL-tier match
+    // (zero generality consumed beyond the call's own shape), while
+    // relaxing the call slot onto the literal `summary` is only
+    // parameter-tier. The literal tier shadows the parameter tier, so the
+    // call JOINS `/billing/{account_id}` — the pre-phase-3
+    // FRONTEND_ROUTE_AMBIGUOUS outcome for this shape is gone (mirrors
+    // join.test.ts 'literal precedence').
     const wired = routeFact('GET', '/api/v1/accounts');
-    const ambiguousA = routeFact('GET', '/billing/{account_id}');
-    const ambiguousB = routeFact('GET', '/billing/summary');
+    const paramRoute = routeFact('GET', '/billing/{account_id}', { normalizedPath: '/billing/{}' });
+    const literalSibling = routeFact('GET', '/billing/summary');
     const unwiredCall = callFact('DELETE', '/api/v1/accounts/7');
-    const ambiguousCall = callFact('GET', '/billing/{}');
+    const slottedCall = callFact('GET', '/billing/{}');
     const { inventory } = compileEndpointContribution([
-      contribution([wired, ambiguousA, ambiguousB, unwiredCall, ambiguousCall]),
+      contribution([wired, paramRoute, literalSibling, unwiredCall, slottedCall]),
     ]);
+    // The only typed block left is the genuinely unwired call.
+    expect(inventory.ambiguous).toEqual([]);
     expect(inventory.unwired.map((block) => block.detail)).toEqual([
       expect.stringContaining('DELETE /api/v1/accounts/7'),
     ]);
+    // The slotted call joined the parameterized route — the raw path
+    // proves WHICH route fact joined.
+    const joined = inventory.endpoints.find((e) => e.identity === 'GET /billing/{}');
+    expect(joined?.frontendConsumed).toBe(true);
+    expect(joined?.calls.map((c) => c.rawPath)).toEqual(['/billing/{}']);
+    expect(joined?.routes.map((r) => r.rawPath)).toEqual(['/billing/{account_id}']);
+    // The literal sibling still compiles — unconsumed.
+    expect(
+      inventory.endpoints.find((e) => e.identity === 'GET /billing/summary')?.frontendConsumed,
+    ).toBe(false);
+  });
+
+  it('still blocks parameter-tier ambiguity — one literal call, two absorbing routes', () => {
+    // The documented AMBIGUOUS case under literal precedence: BOTH
+    // candidates exercised slot generality (the route `{}` absorbed the
+    // call literal `x`; the trailing `{*}` absorbed it too), so no literal
+    // tier exists and the engine refuses to guess — the block lists every
+    // distinct candidate (mirrors join.test.ts's parameter-tier red probe).
+    const paramRoute = routeFact('GET', '/billing/{account_id}', { normalizedPath: '/billing/{}' });
+    const wildcardRoute = routeFact('GET', '/billing/{*}');
+    const literalCall = callFact('GET', '/billing/x');
+    const { inventory } = compileEndpointContribution([
+      contribution([paramRoute, wildcardRoute, literalCall]),
+    ]);
+    // The routes still compile into the inventory (unconsumed).
+    expect(inventory.endpoints.map((e) => e.identity)).toEqual([
+      'GET /billing/{*}',
+      'GET /billing/{}',
+    ]);
     expect(inventory.ambiguous).toHaveLength(1);
-    expect(inventory.ambiguous[0]?.candidates).toHaveLength(2);
+    expect(inventory.ambiguous[0]?.candidates).toEqual(['GET /billing/{*}', 'GET /billing/{}']);
+    expect(inventory.unwired).toEqual([]);
   });
 });
 
@@ -617,5 +767,348 @@ describe('pipeline integration: endpoints classify and keep routes off the table
       'http:frontend-request-observed',
       'persistence:create',
     ]);
+  });
+});
+
+describe('endpoint plane config channel (.gateforge/planes.json, plan phase 5)', () => {
+  const PLANE_POLICY: ClassificationPolicy = {
+    schemaVersion: 1,
+    scanRoots: [],
+    trustedInternalEntryPoints: [{ category: 'migration', patterns: [] }],
+    internalRules: [],
+    declarations: { internality: 'gateforge:internal', archiveState: 'gateforge:archive-state' },
+    volatileFields: [],
+  };
+
+  /** A POST /api/v1/accounts router fact living under the v1 router tree. */
+  function accountsRoute(): HttpContractFact {
+    return routeFact('POST', '/api/v1/accounts', {
+      requestSchemaSymbols: ['AccountIn'],
+      handlerSymbol: 'app.create_account',
+      source: { file: 'backend/api/v1/accounts.py', line: 12, col: 0 },
+    });
+  }
+
+  /** A pure operational probe under the ops tree. */
+  function healthRoute(): HttpContractFact {
+    return routeFact('GET', '/health/ready', {
+      source: { file: 'backend/api/ops/health.py', line: 40, col: 0 },
+    });
+  }
+
+  /** A business table contribution + classifier ref + signals, as model packs emit them. */
+  function businessFixture(
+    name: string,
+    plane: 'tenant' | 'master' | null,
+  ): {
+    contribution: unknown;
+    ref: ClassifierResourceRef;
+    signals: ClassificationSignal[];
+  } {
+    const location = { file: `backend/models/${name}.py`, line: 4, col: 0 };
+    const signal = (dimension: string, assertion: unknown): Record<string, unknown> => ({
+      schemaVersion: 1,
+      target: { resourceName: name },
+      dimension,
+      assertion,
+      basis: 'code-positive',
+      source: 'test.models',
+      location,
+      detector: { id: 'test.models', version: '1' },
+    });
+    const signals = [
+      signal('identity', ['id']),
+      signal('delete-semantics', 'hard'),
+      signal('adapter-binding', name),
+    ] as unknown as ClassificationSignal[];
+    return {
+      contribution: {
+        detectorId: 'test.models',
+        detectorVersion: '1',
+        resources: [
+          {
+            schemaVersion: 1,
+            id: `sqlalchemy.table:${name}`,
+            kind: 'sqlalchemy.table',
+            source: location.file,
+            location,
+            detectorVersion: '1',
+            attributes: plane === null ? { resourceName: name } : { resourceName: name, plane },
+          },
+        ],
+        unresolved: [],
+        findings: [],
+        classificationSignals: signals,
+      },
+      ref: {
+        name,
+        id: null,
+        kind: 'sqlalchemy.table',
+        source: location.file,
+        location,
+        detector: { id: 'test.models', version: '1' },
+        attributes: plane === null ? {} : { plane },
+      },
+      signals,
+    };
+  }
+
+  /** Maps compiled resources into classifier refs exactly like the pipeline does. */
+  function endpointRefs(compiled: CompileResult): ClassifierResourceRef[] {
+    return compiled.contribution.resources.map((resource) => ({
+      name: String((resource as { attributes: Record<string, unknown> }).attributes['resourceName']),
+      id: null,
+      kind: String((resource as { kind: string }).kind),
+      source: String((resource as { source: string }).source),
+      location: (resource as { location: { file: string; line: number; col: number } }).location,
+      detector: { id: 'gateforge.endpoint-compiler', version: '1' },
+      attributes: (resource as { attributes: Record<string, unknown> }).attributes,
+    }));
+  }
+
+  /** Runs the compiled contribution (plus optional business fixture) through the classifier. */
+  function classifyCompiled(
+    compiled: CompileResult,
+    business: ReturnType<typeof businessFixture> | null,
+    adapters: readonly string[],
+  ): ClassificationResult {
+    return classifyResources({
+      resources: [
+        ...endpointRefs(compiled),
+        ...(business !== null ? [business.ref] : []),
+      ],
+      signals: [
+        ...(compiled.contribution.classificationSignals as unknown as ClassificationSignal[]),
+        ...(business?.signals ?? []),
+      ],
+      policy: PLANE_POLICY,
+      adapters: [...adapters],
+      scan: { requestedPaths: [], scannedPaths: [], findings: [], unresolved: [] },
+    });
+  }
+
+  const planeSignalsOf = (compiled: CompileResult): Array<Record<string, unknown>> =>
+    compiled.contribution.classificationSignals.filter(
+      (signal) => (signal as { dimension?: string }).dimension === 'plane',
+    ) as Array<Record<string, unknown>>;
+
+  it('an endpoint match rule applies its plane and qualifies the id', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [
+            { match: 'backend/api/v1/**', plane: 'tenant', reason: 'tenant middleware requires a subdomain' },
+          ],
+        }),
+      });
+      const compiled = compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root });
+      const resourceName = compiled.inventory.endpoints[0]?.resourceName ?? '';
+
+      // Exactly one plane signal, on the config channel, at the router source.
+      const planeSignals = planeSignalsOf(compiled);
+      expect(planeSignals).toHaveLength(1);
+      expect(planeSignals[0]).toMatchObject({
+        target: { resourceName },
+        dimension: 'plane',
+        assertion: 'tenant',
+        basis: 'declaration',
+        source: 'gateforge.endpoint-compiler:config',
+        location: { file: 'backend/api/v1/accounts.py' },
+      });
+      expect(compiled.contribution.unresolved).toEqual([]);
+
+      // The classifier resolves the plane from it; the endpoint binds its
+      // own-name adapter so the user-facing default stays resolvable.
+      const result = classifyCompiled(compiled, null, [resourceName]);
+      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+      expect(decision?.classification?.plane).toBe('tenant');
+      expect(decision?.blocks).toEqual([]);
+      // The id the graph binds is plane-qualified from this decision.
+      expect(`${decision?.classification?.plane}.${decision?.name}`).toBe(`tenant.${resourceName}`);
+    });
+  });
+
+  it('two matching rules that disagree block as PLANE_RULE_CONTRADICTION with no plane evidence', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [
+            { match: 'backend/api/v1/**', plane: 'tenant', reason: 'router-level tenant rule' },
+            { match: 'backend/api/v1/accounts.py', plane: 'master', reason: 'accounts is master control-plane' },
+          ],
+        }),
+      });
+      const compiled = compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root });
+
+      const contradictions = compiled.contribution.unresolved.filter(
+        (entry) => entry.code === 'PLANE_RULE_CONTRADICTION',
+      );
+      expect(contradictions).toHaveLength(1);
+      expect(contradictions[0]?.detail).toContain('master vs tenant');
+      expect(contradictions[0]?.detail).toContain('router-level tenant rule');
+      expect(contradictions[0]?.detail).toContain('accounts is master control-plane');
+      expect(contradictions[0]?.location.file).toBe('backend/api/v1/accounts.py');
+      // No plane evidence on a conflict — never first-match-wins.
+      expect(planeSignalsOf(compiled)).toEqual([]);
+
+      // The endpoint stays plane-unresolved in the classifier too.
+      const result = classifyCompiled(compiled, null, []);
+      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+      expect(decision?.classification).toBeNull();
+      expect(decision?.blocks.some((block) => block.code === 'PLANE_UNRESOLVED')).toBe(true);
+    });
+  });
+
+  it('an agreeing linked-resource plane resolves alongside the config plane', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [{ match: 'backend/api/**', plane: 'tenant', reason: 'tenant middleware requires a subdomain' }],
+        }),
+      });
+      const business = businessFixture('accounts', 'tenant');
+      const compiled = compileEndpointContribution(
+        [contribution([accountsRoute()]), business.contribution as never],
+        { cwd: repo.root },
+      );
+
+      // Agreement adds no mirror signal: one config assertion only.
+      const planeSignals = planeSignalsOf(compiled);
+      expect(planeSignals).toHaveLength(1);
+      expect(planeSignals[0]).toMatchObject({
+        assertion: 'tenant',
+        source: 'gateforge.endpoint-compiler:config',
+      });
+
+      const result = classifyCompiled(compiled, business, ['accounts']);
+      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+      expect(decision?.classification?.plane).toBe('tenant');
+      expect(decision?.blocks).toEqual([]);
+    });
+  });
+
+  it('a contradicting linked-resource plane surfaces both assertions and blocks PLANE_CONTRADICTION', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [{ match: 'backend/api/**', plane: 'tenant', reason: 'tenant middleware requires a subdomain' }],
+        }),
+      });
+      const business = businessFixture('accounts', 'master');
+      const compiled = compileEndpointContribution(
+        [contribution([accountsRoute()]), business.contribution as never],
+        { cwd: repo.root },
+      );
+
+      // Both channels are emitted: the config rule AND the linked table's
+      // plane (mirrored so the classifier sees both — the config channel
+      // must never silently override inheritance).
+      const planeSignals = planeSignalsOf(compiled);
+      expect(planeSignals).toHaveLength(2);
+      expect(planeSignals.map((signal) => signal['source']).sort()).toEqual([
+        'gateforge.endpoint-compiler:config',
+        'gateforge.endpoint-compiler:linked-resource',
+      ]);
+      const mirror = planeSignals.find(
+        (signal) => signal['source'] === 'gateforge.endpoint-compiler:linked-resource',
+      );
+      expect(mirror).toMatchObject({
+        assertion: 'master',
+        location: { file: 'backend/models/accounts.py' },
+      });
+
+      const result = classifyCompiled(compiled, business, ['accounts']);
+      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+      expect(decision?.classification).toBeNull();
+      const contradiction = decision?.blocks.find((block) => block.code === 'PLANE_CONTRADICTION');
+      expect(contradiction?.detail).toContain('master, tenant');
+      expect(contradiction?.locations.map((location) => location.file).sort()).toEqual([
+        'backend/api/v1/accounts.py',
+        'backend/models/accounts.py',
+      ]);
+    });
+  });
+
+  it('a config plane contradicting the operational global rule blocks; agreement resolves', () => {
+    const rules = (plane: string): string =>
+      JSON.stringify({
+        rules: [{ match: 'backend/api/**', plane, reason: 'ops routers are declared explicitly' }],
+      });
+
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({ '.gateforge/planes.json': rules('tenant') });
+      const compiled = compileEndpointContribution([contribution([healthRoute()])], { cwd: repo.root });
+      const planeSignals = planeSignalsOf(compiled);
+      expect(planeSignals.map((signal) => [signal['source'], signal['assertion']]).sort()).toEqual([
+        ['gateforge.endpoint-compiler:config', 'tenant'],
+        ['gateforge.endpoint-compiler:operational', 'global'],
+      ]);
+      const result = classifyCompiled(compiled, null, []);
+      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+      expect(decision?.classification).toBeNull();
+      expect(decision?.blocks.some((block) => block.code === 'PLANE_CONTRADICTION')).toBe(true);
+    });
+
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({ '.gateforge/planes.json': rules('global') });
+      const compiled = compileEndpointContribution([contribution([healthRoute()])], { cwd: repo.root });
+      expect(planeSignalsOf(compiled)).toHaveLength(1);
+      const result = classifyCompiled(compiled, null, []);
+      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+      expect(decision?.classification?.plane).toBe('global');
+      expect(decision?.blocks).toEqual([]);
+    });
+  });
+
+  it('tables rules never apply to endpoints', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [{ tables: ['accounts'], plane: 'tenant', reason: 'a table rule' }],
+        }),
+      });
+      const compiled = compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root });
+      expect(planeSignalsOf(compiled)).toEqual([]);
+      expect(compiled.contribution.unresolved).toEqual([]);
+    });
+  });
+
+  it('absence of the config file is byte-identical to the channel being absent', () => {
+    const facts = [
+      accountsRoute(),
+      healthRoute(),
+      callFact('POST', '/api/v1/accounts'),
+    ];
+    withTempRepo({}, (repo) => {
+      const withoutFile = compileEndpointContribution([contribution(facts)]);
+      const withEmptyRepo = compileEndpointContribution([contribution(facts)], { cwd: repo.root });
+      expect(JSON.stringify(withEmptyRepo.contribution)).toBe(JSON.stringify(withoutFile.contribution));
+      expect(JSON.stringify(withEmptyRepo.inventory)).toBe(JSON.stringify(withoutFile.inventory));
+    });
+  });
+
+  it('a malformed planes document throws (fail closed)', () => {
+    withTempRepo({}, (repo) => {
+      // Missing required `reason` — the human review artifact.
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({ rules: [{ match: 'a/**', plane: 'tenant' }] }),
+      });
+      expect(() =>
+        compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root }),
+      ).toThrow(/invalid planes config.*reason/s);
+
+      // Unknown top-level key — a typo'd document must not scan with
+      // partial trust.
+      repo.writeFiles({ '.gateforge/planes.json': '{"ruls": []}' });
+      expect(() =>
+        compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root }),
+      ).toThrow(/invalid planes config.*unknown key/s);
+
+      // Not JSON at all.
+      repo.writeFiles({ '.gateforge/planes.json': 'not json' });
+      expect(() =>
+        compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root }),
+      ).toThrow();
+    });
   });
 });
