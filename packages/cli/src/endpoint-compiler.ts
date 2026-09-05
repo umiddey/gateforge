@@ -654,40 +654,89 @@ export function compileEndpointContribution(
     // -- Declarative endpoint-plane config channel (plan phase 5) ----------
     // The router SOURCE FILE path is the only thing an endpoint rule can
     // key on (`match` glob; `tables` rules never apply — endpoints carry
-    // no table identity). ALL matching rules must agree: agreement yields
-    // the config plane; disagreement emits a typed blocking entry and NO
-    // plane evidence (never first-match-wins); no matching rule leaves
-    // the endpoint on the inheritance/operational/unresolved channels.
+    // no table identity). An endpoint identity can be CONTRIBUTED TO by
+    // routes from MULTIPLE router files (duplicate/merged identities), so
+    // every contributing file is evaluated; the endpoint is only as
+    // plane-qualified as its least-covered contributor:
+    //   - any per-file rule conflict → typed contradiction, no evidence;
+    //   - cross-file disagreement (a.py tenant vs b.py master) → typed
+    //     contradiction naming both, no evidence (never first-file-wins);
+    //   - PARTIAL coverage (some files match no rule) → typed blocking
+    //     entry naming the uncovered files, no evidence — a silent
+    //     contributor would otherwise inherit the covered file's plane;
+    //   - all files covered and agreeing → the config plane applies;
+    //   - no file matches any rule → unchanged (inheritance/operational/
+    //     unresolved channels decide).
     // The configured `reason` (a required human review artifact) rides
-    // the conflict diagnostic.
+    // the conflict diagnostics.
     let configPlane: 'tenant' | 'master' | 'global' | null = null;
-    const routerFile = endpointRoutes[0]?.source.file ?? null;
-    if (planesConfig !== null && routerFile !== null) {
-      const resolution = resolvePlaneByRules(planesConfig, {
-        sourcePath: routerFile,
-        tableName: '', // an endpoint has no table identity: `tables` rules can never match
-        classSimpleName: null,
-      });
-      if (resolution.conflict) {
-        const key = `plane-config:${identity}`;
+    const routerFiles = [...new Set(endpointRoutes.map((route) => route.source.file))].sort(compareText);
+    if (planesConfig !== null && routerFiles.length > 0) {
+      const resolved: Array<{ file: string; plane: 'tenant' | 'master' | 'global' }> = [];
+      const uncovered: string[] = [];
+      for (const file of routerFiles) {
+        const resolution = resolvePlaneByRules(planesConfig, {
+          sourcePath: file,
+          tableName: '', // an endpoint has no table identity: `tables` rules can never match
+          classSimpleName: null,
+        });
+        if (resolution.conflict) {
+          const key = `plane-config:${identity}:${file}`;
+          if (!seenEndpointUnresolved.has(key)) {
+            seenEndpointUnresolved.add(key);
+            const asserted = [...new Set(resolution.hits.map((hit) => hit.plane))].sort(compareText);
+            unresolved.push({
+              code: PLANE_RULE_CONTRADICTION,
+              detail:
+                `endpoint '${identity}' (router '${file}') matches ${resolution.hits.length} ` +
+                `endpoint-plane rules asserting ${asserted.join(' vs ')}: ` +
+                resolution.hits
+                  .map((hit) => `rules[${String(hit.index)}] -> '${hit.plane}' (${hit.reason})`)
+                  .join('; ') +
+                '; endpoint-plane rules are explicit declarations for the router source path — ' +
+                'make the matching rules agree or remove the losing rule',
+              location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+            });
+          }
+          continue;
+        }
+        if (resolution.plane !== null) resolved.push({ file, plane: resolution.plane });
+        else uncovered.push(file);
+      }
+      const distinctPlanes = [...new Set(resolved.map((entry) => entry.plane))].sort(compareText);
+      if (resolved.length > 1 && distinctPlanes.length > 1) {
+        const key = `plane-config:${identity}:cross-file`;
         if (!seenEndpointUnresolved.has(key)) {
           seenEndpointUnresolved.add(key);
-          const asserted = [...new Set(resolution.hits.map((hit) => hit.plane))].sort(compareText);
           unresolved.push({
             code: PLANE_RULE_CONTRADICTION,
             detail:
-              `endpoint '${identity}' (router '${routerFile}') matches ${resolution.hits.length} ` +
-              `endpoint-plane rules asserting ${asserted.join(' vs ')}: ` +
-              resolution.hits
-                .map((hit) => `rules[${String(hit.index)}] -> '${hit.plane}' (${hit.reason})`)
-                .join('; ') +
-              '; endpoint-plane rules are explicit declarations for the router source path — ' +
-              'make the matching rules agree or remove the losing rule',
+              `endpoint '${identity}' is contributed by routes from ${routerFiles.length} router ` +
+              `files whose endpoint-plane rules disagree: ` +
+              resolved.map((entry) => `'${entry.file}' -> '${entry.plane}'`).join('; ') +
+              '; a merged identity cannot carry two planes — make the contributing files agree ' +
+              'or split the identity',
             location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
           });
         }
-      } else if (resolution.plane !== null) {
-        configPlane = resolution.plane;
+      } else if (resolved.length > 0 && uncovered.length > 0) {
+        const key = `plane-config:${identity}:partial`;
+        if (!seenEndpointUnresolved.has(key)) {
+          seenEndpointUnresolved.add(key);
+          unresolved.push({
+            code: PLANE_RULE_CONTRADICTION,
+            detail:
+              `endpoint '${identity}' is contributed by routes from ${routerFiles.length} router ` +
+              `files but endpoint-plane rules cover only ${resolved.length}: ` +
+              resolved.map((entry) => `'${entry.file}' -> '${entry.plane}'`).join('; ') +
+              `; uncovered: ${uncovered.map((file) => `'${file}'`).join(', ')} — a partially ` +
+              'covered merged identity must not silently inherit the covered file\'s plane; ' +
+              'extend the rules or split the identity',
+            location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+          });
+        }
+      } else if (resolved.length > 0) {
+        configPlane = resolved[0].plane;
       }
     }
 
