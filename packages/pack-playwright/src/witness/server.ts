@@ -452,9 +452,18 @@ function normalizeObservedPath(rawPath: string): string {
 
 /**
  * Consumes one engine-observed request matching (method, path) and
- * issues the witnessed `http.request` record bound to the caller's
- * obligation claim (ADR 0004 D7). Single-use: an observation proves one
- * request for one obligation, never a replayable credit. The payload is
+ * issues witnessed `http.request` records bound to the declaring test's
+ * obligation claims (ADR 0004 D7). Single-use at the EXCHANGE level: an
+ * observation proves exactly one real request — it is consumed on first
+ * match and can never be re-claimed, replayed, or extended later. One
+ * genuine exchange genuinely instantiates every contract its endpoint
+ * declares of it (a compiler emits `http:frontend-request-observed` AND
+ * `http:response-status-ok` per consumed endpoint; ADR 0004 D8 calls the
+ * latter "the same witnessed record carrying a 2xx status"), so the
+ * consumed exchange issues one record PER claim id the declaring test
+ * itself declared — all carrying the identical engine-observed payload,
+ * each still independently provenance-verified and shape/status-checked
+ * by the verdict engine. The payload is
  * `{method, url, status, bodySha256, bodyBytes}` — the bounded response
  * snapshot hash and total byte count ride in the record, a tamper-evident
  * trace of exactly what the engine observed.
@@ -464,25 +473,40 @@ async function handleHttpObservation(
   res: ServerResponse,
   body: Record<string, unknown>,
 ): Promise<void> {
-  const obligationId = body['obligationId'];
   const testId = body['testId'];
-  const claimId = body['claimId'];
   const method = body['method'];
   const path = body['path'];
+  // Claim binding: `claimIds` (the declaring test's claimed obligation
+  // ids for this endpoint) — with the singular legacy `claimId` /
+  // `obligationId` pair still accepted and folded in.
+  const rawClaimIds = Array.isArray(body['claimIds'])
+    ? [...body['claimIds'], body['claimId'], body['obligationId']]
+    : [body['claimIds'], body['claimId'], body['obligationId']];
+  const claimIds: string[] = [];
+  for (const entry of rawClaimIds) {
+    if (entry === undefined || entry === null) continue;
+    if (typeof entry !== 'string' || !OBLIGATION_ID_PATTERN.test(entry)) {
+      sendJson(res, 400, {
+        error:
+          'http observation requires claimIds as obligation-id strings ' +
+          "'<resourceId>:<contract>' (a singular legacy claimId/obligationId is still accepted)",
+      });
+      return;
+    }
+    if (!claimIds.includes(entry)) claimIds.push(entry);
+  }
   if (
-    typeof obligationId !== 'string' ||
-    !OBLIGATION_ID_PATTERN.test(obligationId) ||
+    claimIds.length === 0 ||
     typeof testId !== 'string' ||
     testId.length === 0 ||
-    typeof claimId !== 'string' ||
-    claimId.length === 0 ||
     typeof method !== 'string' ||
     typeof path !== 'string' ||
     path.length === 0
   ) {
     sendJson(res, 400, {
       error:
-        'http observation requires obligationId, testId, claimId, method, and path strings',
+        'http observation requires testId, method, and path strings plus at least one ' +
+        "claimed obligation id ('<resourceId>:<contract>')",
     });
     return;
   }
@@ -499,26 +523,26 @@ async function handleHttpObservation(
     return;
   }
   const observedRequest = state.observed[index] as ObservedExchange;
+  // Consume the exchange FIRST (single-use), then issue one record per
+  // distinct claimed obligation id — same payload, per-claim identity.
   state.observed.splice(index, 1);
-  const record = issueRecord(
-    state,
-    obligationId,
-    'http.request',
-    testId,
-    {
-      method: observedRequest.method,
-      url: observedRequest.path,
-      status: observedRequest.status,
-      bodySha256: observedRequest.bodySha256,
-      bodyBytes: observedRequest.bodyBytes,
-    },
-    'engine-observed',
-  );
-  sendJson(res, 200, {
-    recordId: record.recordId,
-    runId: record.runId,
-    trust: record.trust,
+  const payload = {
+    method: observedRequest.method,
+    url: observedRequest.path,
     status: observedRequest.status,
+    bodySha256: observedRequest.bodySha256,
+    bodyBytes: observedRequest.bodyBytes,
+  };
+  const issued = claimIds.map((claimId) =>
+    issueRecord(state, claimId, 'http.request', testId, payload, 'engine-observed'),
+  );
+  const first = issued[0] as IssuedRecord;
+  sendJson(res, 200, {
+    recordId: first.recordId,
+    runId: first.runId,
+    trust: first.trust,
+    status: observedRequest.status,
+    records: issued.map((record) => ({ recordId: record.recordId, obligationId: record.obligationId })),
   });
 }
 

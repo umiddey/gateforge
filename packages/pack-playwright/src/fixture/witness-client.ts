@@ -102,13 +102,39 @@ export class WitnessClient {
 
   /**
    * POST /witness/http-observation (ADR 0004 D7): consumes one
-   * engine-observed request matching (method, path) and issues the
-   * witnessed `http.request` record for the obligation claim.
+   * engine-observed request matching (method, path) and issues witnessed
+   * `http.request` records for the declaring test's claimed obligations.
+   * The claim set may be given as `claimIds`, or as the singular legacy
+   * `claimId`/`obligationId` pair (folded in by the server).
    */
   async observeHttp(
-    request: { obligationId: string; testId: string; claimId: string; method: string; path: string },
-  ): Promise<{ recordId: string; runId: string; trust: string; status: number }> {
-    return this.request('/witness/http-observation', request);
+    request: {
+      claimIds?: string[];
+      claimId?: string;
+      obligationId?: string;
+      testId: string;
+      method: string;
+      path: string;
+    },
+  ): Promise<{
+    recordId: string;
+    runId: string;
+    trust: string;
+    status: number;
+    records: Array<{ recordId: string; obligationId: string }>;
+  }> {
+    const body = await this.request<Record<string, unknown>>('/witness/http-observation', request);
+    const records = Array.isArray(body['records'])
+      ? (body['records'] as Array<{ recordId: string; obligationId: string }>)
+      : // Legacy single-record response shape.
+        [{ recordId: String(body['recordId'] ?? ''), obligationId: String(request.claimId ?? request.obligationId ?? '') }];
+    return {
+      recordId: String(body['recordId'] ?? records[0]?.recordId ?? ''),
+      runId: String(body['runId'] ?? ''),
+      trust: String(body['trust'] ?? ''),
+      status: typeof body['status'] === 'number' ? body['status'] : 0,
+      records,
+    };
   }
 
   async verifyPersistence(

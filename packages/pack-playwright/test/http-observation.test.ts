@@ -258,6 +258,178 @@ describe('no claimed-side path around the trust model', () => {
   });
 });
 
+describe('one exchange, every claimed obligation of the declaring test', () => {
+  const REQUEST_CLAIM = 'tenant.http-post-api-contracts-x1:http:frontend-request-observed';
+  const STATUS_CLAIM = 'tenant.http-post-api-contracts-x1:http:response-status-ok';
+
+  it('issues one witnessed record per declared claim from a single consumed exchange', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      await callProxy(witness.proxyUrl as string, '/api/contracts');
+
+      // One consume call carrying BOTH claims the test declares.
+      const consumed = await new Promise<{ statusCode: number; body: Record<string, unknown> }>(
+        (resolve, reject) => {
+          const forward = httpRequest(
+            `${witness.url}/witness/http-observation`,
+            { method: 'POST', headers: { 'x-gateforge-run': TOKEN, 'content-type': 'application/json' } },
+            (res) => {
+              let data = '';
+              res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+              res.on('end', () =>
+                resolve({ statusCode: res.statusCode ?? 0, body: JSON.parse(data) }),
+              );
+            },
+          );
+          forward.on('error', reject);
+          forward.end(
+            JSON.stringify({
+              claimIds: [REQUEST_CLAIM, STATUS_CLAIM],
+              testId: 'journey-1',
+              method: 'POST',
+              path: '/api/contracts',
+            }),
+          );
+        },
+      );
+      expect(consumed.statusCode).toBe(200);
+      const records = consumed.body['records'] as Array<{ recordId: string; obligationId: string }>;
+      expect(records).toHaveLength(2);
+      expect(records.map((entry) => entry.obligationId).sort()).toEqual(
+        [REQUEST_CLAIM, STATUS_CLAIM].sort(),
+      );
+      // Distinct identities (recordId hashes the obligation id).
+      expect(records[0]?.recordId).not.toBe(records[1]?.recordId);
+      // Backward-compat surface: first record id + observed status.
+      expect(consumed.body['recordId']).toBe(records[0]?.recordId);
+      expect(consumed.body['status']).toBe(201);
+
+      // The exchange was consumed ONCE: both ledger records exist, each
+      // witnessed + engine-observed, bound to its own obligation.
+      const ledgerResponse = await fetch(`${witness.url}/records`, {
+        headers: { 'x-gateforge-run': TOKEN },
+      });
+      const ledger = (await ledgerResponse.json()) as {
+        records: Array<{
+          kind: string;
+          trust: string;
+          origin: string;
+          obligationId: string;
+          testId: string;
+          payload: Record<string, unknown>;
+        }>;
+      };
+      const httpRecords = ledger.records.filter((entry) => entry.kind === 'http.request');
+      expect(httpRecords).toHaveLength(2);
+      for (const entry of httpRecords) {
+        expect(entry.trust).toBe('witnessed');
+        expect(entry.origin).toBe('engine-observed');
+        expect(entry.testId).toBe('journey-1');
+        expect(entry.payload).toMatchObject({ method: 'POST', url: '/api/contracts', status: 201 });
+      }
+      expect(new Set(httpRecords.map((entry) => entry.obligationId))).toEqual(
+        new Set([REQUEST_CLAIM, STATUS_CLAIM]),
+      );
+
+      // Single-use at the exchange level: nothing left to claim.
+      const replay = await observe(witness);
+      expect(replay.statusCode).toBe(409);
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('fails closed on a claimIds payload with no valid obligation id', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      const bad = await new Promise<{ statusCode: number }>((resolve, reject) => {
+        const forward = httpRequest(
+          `${witness.url}/witness/http-observation`,
+          { method: 'POST', headers: { 'x-gateforge-run': TOKEN, 'content-type': 'application/json' } },
+          (res) => {
+            void res.resume();
+            resolve({ statusCode: res.statusCode ?? 0 });
+          },
+        );
+        forward.on('error', reject);
+        forward.end(
+          JSON.stringify({ claimIds: ['not-an-obligation-id'], testId: 'j', method: 'POST', path: '/api/contracts' }),
+        );
+      });
+      expect(bad.statusCode).toBe(400);
+      // The malformed consume consumed nothing.
+      const consumed = await observe(witness);
+      expect(consumed.statusCode).toBe(200);
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('both claims grade satisfied in the real engine (anchor per claim)', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      const consumed = await new Promise<{ statusCode: number }>((resolve, reject) => {
+        const forward = httpRequest(
+          `${witness.url}/witness/http-observation`,
+          { method: 'POST', headers: { 'x-gateforge-run': TOKEN, 'content-type': 'application/json' } },
+          (res) => {
+            void res.resume();
+            resolve({ statusCode: res.statusCode ?? 0 });
+          },
+        );
+        forward.on('error', reject);
+        forward.end(
+          JSON.stringify({
+            claimIds: [REQUEST_CLAIM, STATUS_CLAIM],
+            testId: 'journey-1',
+            method: 'POST',
+            path: '/api/contracts',
+          }),
+        );
+      });
+      expect(consumed.statusCode).toBe(200);
+
+      const ledgerResponse = await fetch(`${witness.url}/records`, {
+        headers: { 'x-gateforge-run': TOKEN },
+      });
+      const ledger = (await ledgerResponse.json()) as { records: Array<Record<string, unknown>> };
+
+      for (const obligation of [
+        { ...OBLIGATION, id: REQUEST_CLAIM },
+        { ...OBLIGATION, id: STATUS_CLAIM, contract: 'http:response-status-ok' },
+      ]) {
+        const anchor = record({ obligationId: obligation.id });
+        const outcome = evaluateObligation(obligation, {
+          claims: [{ schemaVersion: 1, obligationId: obligation.id, testId: 'journey-1' }],
+          records: [...ledger.records, anchor],
+          waivers: [],
+          classification: {
+            exposure: 'user-facing',
+            plane: 'tenant',
+            primaryKey: ['method', 'path'],
+            lifecycle: { create: false, read: false, update: false, delete: false },
+            evidenceAdapter: 'x',
+          },
+          now: '2026-01-01T00:00:00.000Z',
+        });
+        if (outcome.verdict !== 'satisfied') {
+          throw new Error(`${obligation.id}: got ${outcome.verdict}: ${outcome.reason}`);
+        }
+      }
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+});
+
 describe('observation-proxy mount path (deployment-topology declaration)', () => {
   it('strips the mount prefix: /api/ops/x is forwarded AND recorded as /ops/x', async () => {
     const target = await startTarget();
