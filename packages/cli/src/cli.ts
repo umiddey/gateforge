@@ -26,7 +26,7 @@ export const USAGE = `\
 usage: gateforge <command> [options]
 
 commands:
-  init [--languages <comma,list>]        create .gateforge.yml + skeleton (idempotent, never overwrites)
+  init [--languages <comma,list>] [--blocking]  create .gateforge.yml + skeleton; --blocking wires pre-commit + CI gate (idempotent)
   discover [--json]                      run detectors and dump the resource graph
   classify [--json] [--write-snapshot P] inspect effective classifications + typed blocks
   explain <resourceId> [--json]          full signal/rule/obligation trace for one resource
