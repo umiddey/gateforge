@@ -34,5 +34,5 @@ export declare class AdapterRegistryError extends Error {
     constructor(message: string);
 }
 /** The transport the witness hands to adapter `read` calls (GET-only). */
-export declare function makeAdapterContext(baseUrl: string, resourceId: string, get: AdapterContext['get']): AdapterContext;
+export declare function makeAdapterContext(baseUrl: string, resourceId: string, get: AdapterContext['get'], headers?: Record<string, string>): AdapterContext;
 //# sourceMappingURL=adapter-registry.d.ts.map

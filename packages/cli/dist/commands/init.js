@@ -16,13 +16,15 @@
  * from detector signals on every run.
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline/promises';
+import { ensureBlockingWiring } from './blocking.js';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { ClassificationPolicySchema, parseConfig, serializeBaseline, } from '@gateforge/core';
 import { parseArgs } from '../args.js';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
-export const INIT_USAGE = 'usage: gateforge init [--languages <comma,list>]';
+export const INIT_USAGE = 'usage: gateforge init [--languages <comma,list>] [--blocking]';
 const BUNDLED_PLUGIN_MODULES = Object.freeze({
     'gateforge.pack-fastapi': '@gateforge/pack-fastapi',
     'gateforge.pack-http': '@gateforge/pack-http',
@@ -227,6 +229,29 @@ clock:
 `;
 }
 /**
+ * Asks (TTY only) whether gateforge should be a blocking gate. Flags win:
+ * --blocking forces yes, --no-blocking forces no, and non-interactive
+ * runs default to no so tests and CI never hang on a prompt.
+ */
+async function resolveBlocking(io, options) {
+    if (options['blocking'] === true)
+        return true;
+    if (options['no-blocking'] === true)
+        return false;
+    if (!process.stdin.isTTY) {
+        writeLine(io.stdout, 'tip: gateforge init --blocking wires a pre-commit + CI blocking gate (idempotent)');
+        return false;
+    }
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+        const answer = (await rl.question('Enforce gateforge as a blocking gate (pre-commit + CI wiring)? [y/N] ')).trim().toLowerCase();
+        return answer === 'y' || answer === 'yes';
+    }
+    finally {
+        rl.close();
+    }
+}
+/**
  * Runs `gateforge init` in the io cwd.
  *
  * Args:
@@ -236,7 +261,7 @@ clock:
  * Returns:
  *   number: exit code (0).
  */
-export function initCommand(io, argv) {
+export async function initCommand(io, argv) {
     const { options } = parseArgs(argv);
     if (options['help'] === true) {
         writeLine(io.stdout, INIT_USAGE);
@@ -299,6 +324,11 @@ export function initCommand(io, argv) {
         }
         target.write();
         writeLine(io.stdout, `created: ${target.path}`);
+    }
+    const blocking = await resolveBlocking(io, options);
+    if (blocking) {
+        ensureBlockingWiring(io);
+        writeLine(io.stdout, 'blocking gate wired: pre-commit (gateforge check --changed) + .gitlab-ci.yml include');
     }
     writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');
     return 0;

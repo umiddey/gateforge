@@ -1,5 +1,5 @@
 import type { Io } from '../io.js';
-export declare const INIT_USAGE = "usage: gateforge init [--languages <comma,list>]";
+export declare const INIT_USAGE = "usage: gateforge init [--languages <comma,list>] [--blocking]";
 /**
  * The starter policies document (plan phase 5): the gradable
  * `persistence:*` namespace for automatically classified resources.
@@ -17,5 +17,5 @@ export declare const POLICIES_TEMPLATE = "# Declarative policies: when a resourc
  * Returns:
  *   number: exit code (0).
  */
-export declare function initCommand(io: Io, argv: readonly string[]): number;
+export declare function initCommand(io: Io, argv: readonly string[]): Promise<number>;
 //# sourceMappingURL=init.d.ts.map
