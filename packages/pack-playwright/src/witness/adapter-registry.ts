@@ -158,6 +158,7 @@ export function makeAdapterContext(
   baseUrl: string,
   resourceId: string,
   get: AdapterContext['get'],
+  headers?: Record<string, string>,
 ): AdapterContext {
-  return Object.freeze({ baseUrl, resourceId, get });
+  return Object.freeze({ baseUrl, resourceId, get, ...(headers ? { headers } : {}) });
 }

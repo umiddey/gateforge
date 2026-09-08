@@ -76,6 +76,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   'target-base-url',
   'target-fingerprint',
   'adapter-base-url',
+  'adapter-read-authorization',
 ]);
 
 interface WitnessBinFlags {
@@ -193,6 +194,8 @@ export async function main(
     targetBaseUrl: flagOrEnv(flags, 'target-base-url', env[ENV_TARGET_BASE_URL]),
     targetFingerprint: flagOrEnv(flags, 'target-fingerprint', env[ENV_TARGET_FINGERPRINT]),
     adapterBaseUrl: flagOrEnv(flags, 'adapter-base-url', env[ENV_ADAPTER_BASE_URL]),
+    adapterReadAuthorization:
+      flagOrEnv(flags, 'adapter-read-authorization', env['GATEFORGE_ADAPTER_READ_AUTHORIZATION']) ?? null,
     verifierKey,
   });
 }
