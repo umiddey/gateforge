@@ -31,6 +31,35 @@ describe('gateforge init', () => {
     });
   });
 
+  it('--blocking wires the pre-commit hook, check script, and CI template', async () => {
+    await withTempRepo({}, async (repo) => {
+      const first = await runCli(repo, ['init', '--blocking']);
+      expect(first.code).toBe(0);
+      const hook = repo.path('.gateforge/hooks/gateforge-check.sh');
+      expect(existsSync(hook)).toBe(true);
+      const precommit = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8');
+      expect(precommit).toContain('gateforge-check');
+      expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(true);
+      expect(readFileSync(repo.path('.gitlab-ci.yml'), 'utf8')).toContain('gitlab-gateforge.yml');
+      // idempotent: second run must not duplicate the hook entry
+      const again = await runCli(repo, ['init', '--blocking']);
+      expect(again.code).toBe(0);
+      expect(again.stdout).toContain('exists, leaving untouched');
+      const count = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8').split('id: gateforge-check').length - 1;
+      expect(count).toBe(1);
+    });
+  });
+
+  it('without --blocking it writes no enforcement files and prints the tip', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code).toBe(0);
+      expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.sh'))).toBe(false);
+      expect(existsSync(repo.path('.pre-commit-config.yaml'))).toBe(false);
+      expect(stdout).toContain('--blocking');
+    });
+  });
+
   it('preconfigures trusted detectors and makes discovery runnable', async () => {
     await withTempRepo({}, async (repo) => {
       const initialized = await runCli(repo, ['init', '--languages', 'python,javascript,typescript']);
