@@ -137,7 +137,7 @@ export class AdapterRegistryError extends Error {
     }
 }
 /** The transport the witness hands to adapter `read` calls (GET-only). */
-export function makeAdapterContext(baseUrl, resourceId, get) {
-    return Object.freeze({ baseUrl, resourceId, get });
+export function makeAdapterContext(baseUrl, resourceId, get, headers) {
+    return Object.freeze({ baseUrl, resourceId, get, ...(headers ? { headers } : {}) });
 }
 //# sourceMappingURL=adapter-registry.js.map

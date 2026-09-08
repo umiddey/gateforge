@@ -12,6 +12,7 @@ import { UsageError, runWithExitCodes } from './errors.js';
 import { processIo, writeLine } from './io.js';
 import { VERSION } from './commands/common.js';
 import { initCommand } from './commands/init.js';
+import { enforceCommand } from './commands/enforce.js';
 import { discoverCommand } from './commands/discover.js';
 import { obligationsCommand } from './commands/obligations.js';
 import { checkCommand } from './commands/check.js';
@@ -24,7 +25,8 @@ export const USAGE = `\
 usage: gateforge <command> [options]
 
 commands:
-  init [--languages <comma,list>]        create .gateforge.yml + skeleton (idempotent, never overwrites)
+  init [--languages <comma,list>] [--blocking]  create .gateforge.yml + skeleton; --blocking wires pre-commit + CI gate (idempotent)
+  enforce                                 wire the blocking pre-commit + CI gate into an initialized repo (idempotent)
   discover [--json]                      run detectors and dump the resource graph
   classify [--json] [--write-snapshot P] inspect effective classifications + typed blocks
   explain <resourceId> [--json]          full signal/rule/obligation trace for one resource
@@ -65,6 +67,8 @@ export async function main(argv, io = processIo()) {
     }
     const rest = first === '--' ? argv.slice(2) : argv.slice(1);
     switch (command) {
+        case 'enforce':
+            return runWithExitCodes(io, () => Promise.resolve(enforceCommand(io, rest)));
         case 'init':
             return runWithExitCodes(io, () => Promise.resolve(initCommand(io, rest)));
         case 'discover':

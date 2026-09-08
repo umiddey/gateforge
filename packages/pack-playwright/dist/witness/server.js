@@ -616,7 +616,10 @@ async function handlePersistence(state, res, body) {
         before = { entityAbsent: true }; // refined below for ids-kind snapshots
     }
     // Execute the adapter's GET-only read through the mediated transport.
-    const ctx = makeAdapterContext(baseUrl, resourceId, (path) => adapterGet(baseUrl, state.options.requestTimeoutMs, path));
+    const adapterHeaders = state.options.adapterReadAuthorization
+        ? { authorization: state.options.adapterReadAuthorization }
+        : undefined;
+    const ctx = makeAdapterContext(baseUrl, resourceId, (path) => adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization), adapterHeaders);
     let bodyRaw;
     try {
         bodyRaw = await adapter.read(ctx, entityId);
@@ -721,7 +724,10 @@ async function handlePreObservation(state, res, body) {
         throw new HttpError(400, "claimId must be an obligation id '<resourceId>:<contract>'");
     }
     const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
-    const ctx = makeAdapterContext(baseUrl, resourceId, (path) => adapterGet(baseUrl, state.options.requestTimeoutMs, path));
+    const adapterHeaders = state.options.adapterReadAuthorization
+        ? { authorization: state.options.adapterReadAuthorization }
+        : undefined;
+    const ctx = makeAdapterContext(baseUrl, resourceId, (path) => adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization), adapterHeaders);
     const observationId = randomUUID();
     if (entityId !== undefined) {
         // Entity-fields snapshot (update postconditions).
@@ -826,14 +832,20 @@ async function adapterReadContext(state, resourceId) {
  * (http(s)://…) or relative to the adapter base. Timeout is enforced by
  * aborting the underlying fetch.
  */
-async function adapterGet(baseUrl, timeoutMs, path) {
+async function adapterGet(baseUrl, timeoutMs, path, readAuthorization) {
     const target = /^https?:\/\//.test(path) ? path : `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
         const response = await fetch(target, {
             method: 'GET',
-            headers: { accept: 'application/json, text/html' },
+            headers: {
+                accept: 'application/json, text/html',
+                // Operator-issued read-only service credential for the ENGINE's own
+                // adapter reads (see WitnessOptions.adapterReadAuthorization); never
+                // forwarded to the suite and never attached to browser traffic.
+                ...(readAuthorization ? { authorization: readAuthorization } : {}),
+            },
             signal: controller.signal,
             redirect: 'follow',
         });

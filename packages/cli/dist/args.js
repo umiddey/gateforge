@@ -7,7 +7,7 @@
  */
 import { UsageError } from './errors.js';
 /** Flags that carry no value (bare presence). */
-const BOOLEAN_FLAGS = new Set(['json', 'changed', 'help', 'version']);
+const BOOLEAN_FLAGS = new Set(['json', 'changed', 'help', 'version', 'blocking', 'no-blocking']);
 /**
  * Parses argv (without node/script) into options + positionals.
  *
