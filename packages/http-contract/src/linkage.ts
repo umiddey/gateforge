@@ -3,7 +3,10 @@
  *
  * Mirrors `resourceNameFromPath` in pack-http and the fastapi wrapper:
  * the LAST non-empty, non-parameter, non-numeric path segment,
- * lower-cased, extension stripped. This is a NON-AUTHORITATIVE linkage
+ * lower-cased, extension stripped, dashes normalized to underscores
+ * (kebab-case route segments derive their snake_case form, e.g.
+ * `/email-accounts/{id}` derives `email_accounts`). This is a
+ * NON-AUTHORITATIVE linkage
  * CANDIDATE only — the endpoint compiler links an endpoint to a business
  * resource solely when the derived name matches exactly one discovered
  * business resource; ambiguity is `ENDPOINT_RESOURCE_LINK_UNRESOLVED`.
@@ -18,7 +21,13 @@ export function derivePathResourceName(rawPath: string): string | null {
     if (segment.includes('$') && segment.includes('{')) continue; // unresolved slot
     const cleaned = segment.replace(/\.(json|xml|txt|html)$/i, '');
     if (cleaned.length === 0) continue;
-    return cleaned.toLowerCase();
+    // Dash→underscore NAME-FORM normalization only: kebab-case route
+    // segments must derive the snake_case form so the candidate can link
+    // an existing snake_case resource. Fail-closed doctrine: this never
+    // guesses a plane, mints a new identity, or widens matching — a
+    // candidate that names no discovered resource stays unlinked exactly
+    // as before.
+    return cleaned.toLowerCase().replaceAll('-', '_');
   }
   return null;
 }
