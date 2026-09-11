@@ -37,6 +37,29 @@ export declare function loadBaseline(path: string): Baseline;
  */
 export declare function canUpdate(current: Baseline, next: Baseline): boolean;
 /**
+ * THE ONE SANCTIONED BULK-ADD (phase 8 workstream C, `gateforge adopt`):
+ * builds the adoption baseline from every currently-unresolved
+ * fingerprint, WITHOUT the strict-subset check. This is the controlled
+ * escape GF-07/08's anti-laundering invariant demands: adoption is a
+ * dated, count-annotated, loudly-printed event recorded in
+ * `adoption.json` (see baselines/adoption.ts), and it happens at most
+ * once per repo — the adopt command refuses a second bulk-add and sends
+ * subsequent debt to `updateBaseline` (shrink-only) or the gate itself.
+ * The companion record gates enforcement: `check` honors a baseline only
+ * when its adoption record exists, so this function's output can never
+ * forgive silently. Input order is irrelevant; duplicates are collapsed
+ * (the red set is collected from disjoint sources — verdicts and
+ * blocking entries — so duplicates are expected to be absent, not an
+ * error like in `updateBaseline`).
+ *
+ * Args:
+ *   fingerprints: the unresolved fingerprints captured at adoption time.
+ *
+ * Returns:
+ *   Baseline: the validated initial baseline document (sorted, unique).
+ */
+export declare function adoptBaseline(fingerprints: readonly string[]): Baseline;
+/**
  * Builds the next baseline from raw fingerprints, enforcing the strict-
  * subset rule (invariant 4) against `current`. Input order is irrelevant:
  * the result is sorted; duplicates in the input are an error.

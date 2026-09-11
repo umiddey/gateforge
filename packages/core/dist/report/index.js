@@ -107,6 +107,12 @@ function jsonReport(entries, options, blocking) {
             blocking: blockingCount,
             blockingEntries: blocking.length,
             ...counts,
+            ...(options.baseline !== undefined
+                ? {
+                    baselinedObligations: options.baseline.obligations,
+                    baselinedBlockingEntries: options.baseline.blockingEntries,
+                }
+                : {}),
         },
         verdicts: entries.map((entry) => {
             const record = {
@@ -245,6 +251,11 @@ function textReport(entries, options, blocking) {
         const wc = options.waiverCounts;
         lines.push(`waivers: ${wc.total} total, ${wc.active} active, ${wc.expired} expired, ` +
             `${wc.staleOwner} stale-owner`);
+    }
+    if (options.baseline !== undefined) {
+        lines.push(`baseline (adopted): ${options.baseline.obligations} obligation(s) + ` +
+            `${options.baseline.blockingEntries} blocking entry(ies) forgiven — ` +
+            `shrink-only: resolve debt, then 'gateforge baseline update'`);
     }
     for (const entry of entries) {
         if (entry.verdict === 'satisfied')

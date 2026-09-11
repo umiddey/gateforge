@@ -268,6 +268,17 @@ export async function startWitness(options) {
                 // claims. With no declared mount path the URL is forwarded and
                 // recorded byte-identical to today.
                 const forwardUrl = stripMountPath(req.url ?? '/', state.options.mountPath);
+                // b59/b60 lesson (Q1-v11): `agent: false` is load-bearing. On Node >=19
+                // the default global agent keeps sockets alive, while dev servers (vite)
+                // close idle keep-alive sockets at their 5s server keepAliveTimeout.
+                // Reusing a socket the target closed mid-handshake intermittently killed
+                // exactly one browser exchange per batch: the forward either hung with no
+                // response (x_pers_20 b56/b57 — POST /invoices/zugferd never reached the
+                // backend, axios's 30s timeout swallowed it under the 35s claim window)
+                // or reset after the upstream answered (x_http_n b59/b60 — backend 200
+                // witnessed, but the observation was never appended and the browser saw
+                // the exchange die at claim time). A fresh loopback connection per
+                // forwarded exchange costs nothing and removes the reuse race.
                 const forward = request({
                     protocol: proxyTargetUrl.protocol,
                     hostname: proxyTargetUrl.hostname,
@@ -275,6 +286,7 @@ export async function startWitness(options) {
                     method: req.method,
                     path: forwardUrl,
                     headers: { ...req.headers, host: proxyTargetUrl.host },
+                    agent: false,
                 }, (upstream) => {
                     const status = upstream.statusCode ?? 0;
                     const observedPath = normalizeObservedPath(forwardUrl);

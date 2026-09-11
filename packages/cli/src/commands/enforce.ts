@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
-import { ensureBlockingWiring } from './blocking.js';
+import { ensureBlockingWiring, engineRootFromInvocation } from './blocking.js';
 
 export const ENFORCE_USAGE = 'usage: gateforge enforce';
 
@@ -32,18 +32,13 @@ export const ENFORCE_USAGE = 'usage: gateforge enforce';
  *   number: exit code — 0 wired, 2 config/usage.
  */
 export function enforceCommand(io: Io, argv: readonly string[]): number {
-  const options = ((): Record<string, unknown> => {
-    void argv;
-    return {};
-  })();
-  void options;
   if (argv.length > 0) {
     throw new UsageError(`unknown arguments for enforce (${ENFORCE_USAGE}): ${argv.join(' ')}`);
   }
   if (!existsSync(join(io.cwd, '.gateforge.yml'))) {
     throw new UsageError('no .gateforge.yml found — run `gateforge init` first');
   }
-  ensureBlockingWiring(io);
+  ensureBlockingWiring(io, engineRootFromInvocation());
   writeLine(io.stdout, 'blocking gate wired: pre-commit (gateforge check --changed) + .gitlab-ci.yml include');
   return 0;
 }
