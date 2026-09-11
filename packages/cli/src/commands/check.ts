@@ -15,16 +15,44 @@
  * (`.gateforge/test-gates/` by default) — the same surface the
  * `test-gates` suite contract writes.
  */
-import { renderRun, runExitCode } from '@gateforge/core';
+import {
+  loadAdoptionRecord,
+  loadBaseline,
+  renderRun,
+  runExitCode,
+  ADOPTION_RECORD_FILENAME,
+} from '@gateforge/core';
+import { dirname, join } from 'node:path';
 import { parseArgs, stringFlag } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { evaluateRun } from '../evaluate.js';
-import { runPipeline } from '../pipeline.js';
-import { resolveProvider } from '../providers.js';
+import { runPipeline, resolveRepoPath } from '../pipeline.js';
 import { resolveStateDir } from '../state.js';
+import { resolveProvider } from '../providers.js';
 import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
 import { renderEndpointInventory } from '../endpoint-report.js';
+
+/**
+ * Resolves the adopted-baseline forgiveness set for this repo (phase 8 C).
+ *
+ * Fail-closed semantics:
+ * - NO adoption record (the normal pre-adoption state) → nothing is
+ *   forgiven, even if a baseline file exists: an unrecorded bulk-add is
+ *   unsanctioned and forgives nothing.
+ * - Record present but baseline missing/corrupt → throws (exit 2): the
+ *   receipt without the document it sanctions is a broken adoption.
+ * - Record present and baseline valid → the recorded fingerprint set.
+ */
+export function resolveAdoptedBaseline(
+  cwd: string,
+  baselinesPath: string,
+): { fingerprints: ReadonlySet<string> } | null {
+  const baselinePath = resolveRepoPath(cwd, baselinesPath);
+  const adoption = loadAdoptionRecord(join(dirname(baselinePath), ADOPTION_RECORD_FILENAME));
+  if (adoption === null) return null;
+  return { fingerprints: new Set(loadBaseline(baselinePath).fingerprints) };
+}
 
 export const CHECK_USAGE = 'usage: gateforge check [--changed] [--format text|json|sarif]';
 
@@ -76,12 +104,14 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
     now: pipeline.now,
     changedFiles: diffScoped ? pipeline.changedFiles : null,
     witnessVerifierKey,
+    baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
   });
 
   const report = renderRun(evaluated.verdicts, {
     format,
     blocking: evaluated.blocking,
     waiverCounts: evaluated.waiverCounts,
+    baseline: evaluated.baselined ?? undefined,
     run: pipeline.manifest,
     toolVersion: VERSION,
   });
