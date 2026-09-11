@@ -7,6 +7,7 @@
  * input is irrelevant — canonical JSON sorts keys before hashing.
  */
 import { z } from 'zod';
+import { type BlockingEntry } from './policy/evaluate.js';
 /** Exactly the identity fields hashed into an obligation fingerprint. */
 export declare const FingerprintInputSchema: z.ZodObject<{
     resourceId: z.ZodString;
@@ -39,4 +40,17 @@ export type FingerprintInput = z.infer<typeof FingerprintInputSchema>;
  *   the identity object. Stable across key order and process runs.
  */
 export declare function fingerprint(input: FingerprintInput): string;
+/**
+ * The BLOCKING-ENTRY fingerprint (phase 8 workstream C): the stable
+ * identity a baseline stores for gate red that is not an obligation —
+ * unclassified/unresolved resources, detector/graph findings, and stale
+ * references. sha256 over the GF-canonical-JSON of the whole entry
+ * (kind, resourceId, name, detail, location): any change to the cause —
+ * including wording or location of the underlying problem — mints a NEW
+ * fingerprint, which the baseline does not contain, which blocks again.
+ * That is the fail-closed direction: the adoption baseline forgives the
+ * debt exactly as it stood at adoption; anything that shifts must be
+ * re-proven, never re-forgiven (the baseline is shrink-only).
+ */
+export declare function blockingEntryFingerprint(entry: BlockingEntry): string;
 //# sourceMappingURL=fingerprints.d.ts.map

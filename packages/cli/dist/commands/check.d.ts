@@ -1,4 +1,18 @@
 import type { Io } from '../io.js';
+/**
+ * Resolves the adopted-baseline forgiveness set for this repo (phase 8 C).
+ *
+ * Fail-closed semantics:
+ * - NO adoption record (the normal pre-adoption state) → nothing is
+ *   forgiven, even if a baseline file exists: an unrecorded bulk-add is
+ *   unsanctioned and forgives nothing.
+ * - Record present but baseline missing/corrupt → throws (exit 2): the
+ *   receipt without the document it sanctions is a broken adoption.
+ * - Record present and baseline valid → the recorded fingerprint set.
+ */
+export declare function resolveAdoptedBaseline(cwd: string, baselinesPath: string): {
+    fingerprints: ReadonlySet<string>;
+} | null;
 export declare const CHECK_USAGE = "usage: gateforge check [--changed] [--format text|json|sarif]";
 /**
  * Runs the check subcommand.
