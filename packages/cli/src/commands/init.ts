@@ -17,7 +17,7 @@
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
-import { ensureBlockingWiring } from './blocking.js';
+import { ensureBlockingWiring, engineRootFromInvocation } from './blocking.js';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -359,7 +359,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   }
   const blocking = await resolveBlocking(io, options);
   if (blocking) {
-    ensureBlockingWiring(io);
+    ensureBlockingWiring(io, engineRootFromInvocation());
     writeLine(io.stdout, 'blocking gate wired: pre-commit (gateforge check --changed) + .gitlab-ci.yml include');
   }
   writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');
