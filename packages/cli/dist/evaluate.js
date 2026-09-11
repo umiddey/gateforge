@@ -13,11 +13,24 @@
  * at changed files survive — the `check --changed` contract (GF-09's
  * resource-change set).
  */
-import { BLOCKING_VERDICTS, evaluateObligations, loadWaivers, verifyLedgerMac, } from '@gateforge/core';
+import { BLOCKING_VERDICTS, blockingEntryFingerprint, evaluateObligations, fingerprint, loadWaivers, verifyLedgerMac, } from '@gateforge/core';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveRepoPath, sourceByResourceId, sourcesByResourceId } from './pipeline.js';
 import { readJsonArray } from './state.js';
+/**
+ * Pin-#2 fingerprint of an obligation — the identity the baseline
+ * stores. Shared by `check` (baseline application) and `adopt` (red-set
+ * capture) so both sides hash exactly the same way.
+ */
+export function obligationFingerprint(obligation) {
+    return fingerprint({
+        resourceId: obligation.resourceId,
+        contract: obligation.contract,
+        policyId: obligation.policyId,
+        lifecycle: obligation.lifecycle,
+    });
+}
 /** Keeps only blocking entries plausibly tied to a changed file. */
 function scopeBlocking(blocking, changed, sources) {
     const kept = [];
@@ -94,10 +107,16 @@ export function evaluateRun(input) {
     const blocking = input.changedFiles === null || input.changedFiles === undefined
         ? [...input.blocking]
         : scopeBlocking(input.blocking, new Set(input.changedFiles), sources);
-    const blockingRun = blocking.length > 0 || verdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
+    // Adoption-baseline forgiveness (phase 8 C) runs LAST — after diff
+    // scoping — and only over what this run actually evaluated, so the
+    // baseline can never resurrect forgivable-looking debt outside scope.
+    const applied = applyBaseline(input.baseline?.fingerprints ?? null, { verdicts, blocking });
+    const blockingRun = applied.blocking.length > 0 ||
+        applied.verdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
     return {
-        verdicts,
-        blocking,
+        verdicts: applied.verdicts,
+        blocking: applied.blocking,
+        baselined: applied.baselined,
         waiverCounts: {
             total: waiverLoad.waivers.length + waiverLoad.staleOwner.length + waiverLoad.expired.length,
             active: waiverLoad.waivers.length,
@@ -106,6 +125,42 @@ export function evaluateRun(input) {
         },
         blockingRun,
     };
+}
+/**
+ * Applies the adoption baseline (phase 8 C): baselined blocking verdicts
+ * are re-graded `waived` — a recorded, dated forgiveness whose reason
+ * names the receipt — and baselined blocking entries are dropped, with
+ * counts returned so every report stays loud about how much debt the
+ * baseline carries (never silently green). Everything unbaselined blocks
+ * exactly as before; a null/empty set changes nothing.
+ */
+function applyBaseline(fingerprints, run) {
+    if (fingerprints === null || fingerprints.size === 0) {
+        return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
+    }
+    let obligations = 0;
+    const verdicts = run.verdicts.map((entry) => {
+        if (!BLOCKING_VERDICTS.includes(entry.verdict))
+            return entry;
+        if (!fingerprints.has(obligationFingerprint(entry.obligation)))
+            return entry;
+        obligations += 1;
+        return {
+            ...entry,
+            verdict: 'waived',
+            reason: `baselined: adopted as forgiven (was ${entry.verdict}); baseline is shrink-only`,
+        };
+    });
+    const blocking = [];
+    let blockingEntries = 0;
+    for (const entry of run.blocking) {
+        if (fingerprints.has(blockingEntryFingerprint(entry))) {
+            blockingEntries += 1;
+            continue;
+        }
+        blocking.push(entry);
+    }
+    return { verdicts, blocking, baselined: { obligations, blockingEntries } };
 }
 /** Diff-scopes the obligation list itself (check --changed). */
 function scopeObligations(input) {
