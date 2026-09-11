@@ -15,7 +15,9 @@
  */
 import {
   BLOCKING_VERDICTS,
+  blockingEntryFingerprint,
   evaluateObligations,
+  fingerprint,
   loadWaivers,
   verifyLedgerMac,
   type BlockingEntry,
@@ -29,6 +31,20 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveRepoPath, sourceByResourceId, sourcesByResourceId } from './pipeline.js';
 import { readJsonArray } from './state.js';
+
+/**
+ * Pin-#2 fingerprint of an obligation — the identity the baseline
+ * stores. Shared by `check` (baseline application) and `adopt` (red-set
+ * capture) so both sides hash exactly the same way.
+ */
+export function obligationFingerprint(obligation: Obligation): string {
+  return fingerprint({
+    resourceId: obligation.resourceId,
+    contract: obligation.contract,
+    policyId: obligation.policyId,
+    lifecycle: obligation.lifecycle,
+  });
+}
 
 
 
@@ -75,6 +91,15 @@ export interface EvaluateInput {
     recordIds: readonly string[];
     mac: string;
   } | null;
+  /**
+   * Adoption-baseline forgiveness (phase 8 C): the fingerprint set of
+   * the ADOPTED baseline. Deliberately caller-provided, never loaded
+   * here: `check` honors a baseline only when its sibling adoption
+   * record exists (an unrecorded bulk-add forgives nothing — fail
+   * closed), and that gate lives with the config, not the evaluator.
+   * Callers that pass nothing (test-gates) never forgive.
+   */
+  baseline?: { fingerprints: ReadonlySet<string> } | null;
 }
 
 /** The evaluated run. */
@@ -87,6 +112,12 @@ export interface EvaluateResult {
   waiverCounts: WaiverCounts;
   /** Whether any blocking verdict or blocking entry exists. */
   blockingRun: boolean;
+  /**
+   * Adoption-baseline forgiveness counts (phase 8 C) — kept LOUD: the
+   * report prints them on every run so baselined debt is never silently
+   * green. Null when no baseline was applied.
+   */
+  baselined: { obligations: number; blockingEntries: number } | null;
 }
 
 /** Keeps only blocking entries plausibly tied to a changed file. */
@@ -175,12 +206,19 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
       ? [...input.blocking]
       : scopeBlocking(input.blocking, new Set(input.changedFiles), sources);
 
+  // Adoption-baseline forgiveness (phase 8 C) runs LAST — after diff
+  // scoping — and only over what this run actually evaluated, so the
+  // baseline can never resurrect forgivable-looking debt outside scope.
+  const applied = applyBaseline(input.baseline?.fingerprints ?? null, { verdicts, blocking });
+
   const blockingRun =
-    blocking.length > 0 || verdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
+    applied.blocking.length > 0 ||
+    applied.verdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
 
   return {
-    verdicts,
-    blocking,
+    verdicts: applied.verdicts,
+    blocking: applied.blocking,
+    baselined: applied.baselined,
     waiverCounts: {
       total: waiverLoad.waivers.length + waiverLoad.staleOwner.length + waiverLoad.expired.length,
       active: waiverLoad.waivers.length,
@@ -189,6 +227,48 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     },
     blockingRun,
   };
+}
+
+/**
+ * Applies the adoption baseline (phase 8 C): baselined blocking verdicts
+ * are re-graded `waived` — a recorded, dated forgiveness whose reason
+ * names the receipt — and baselined blocking entries are dropped, with
+ * counts returned so every report stays loud about how much debt the
+ * baseline carries (never silently green). Everything unbaselined blocks
+ * exactly as before; a null/empty set changes nothing.
+ */
+function applyBaseline(
+  fingerprints: ReadonlySet<string> | null,
+  run: { verdicts: ObligationVerdict[]; blocking: BlockingEntry[] },
+): {
+  verdicts: ObligationVerdict[];
+  blocking: BlockingEntry[];
+  baselined: { obligations: number; blockingEntries: number } | null;
+} {
+  if (fingerprints === null || fingerprints.size === 0) {
+    return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
+  }
+  let obligations = 0;
+  const verdicts = run.verdicts.map((entry) => {
+    if (!BLOCKING_VERDICTS.includes(entry.verdict)) return entry;
+    if (!fingerprints.has(obligationFingerprint(entry.obligation))) return entry;
+    obligations += 1;
+    return {
+      ...entry,
+      verdict: 'waived' as const,
+      reason: `baselined: adopted as forgiven (was ${entry.verdict}); baseline is shrink-only`,
+    };
+  });
+  const blocking: BlockingEntry[] = [];
+  let blockingEntries = 0;
+  for (const entry of run.blocking) {
+    if (fingerprints.has(blockingEntryFingerprint(entry))) {
+      blockingEntries += 1;
+      continue;
+    }
+    blocking.push(entry);
+  }
+  return { verdicts, blocking, baselined: { obligations, blockingEntries } };
 }
 
 /** Diff-scopes the obligation list itself (check --changed). */
