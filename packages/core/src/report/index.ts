@@ -62,6 +62,13 @@ export interface RenderRunOptions {
    * fingerprint change) is auditable — never authoritative input.
    */
   classificationTraces?: Record<string, ClassificationDecisionTrace>;
+  /**
+   * Adoption-baseline forgiveness counts (phase 8 C), included in the
+   * json summary and the text report when provided. Baselined debt is
+   * LOUD on every run — a forgiveness that never announces itself is a
+   * silent waiver, and there are none of those in gateforge.
+   */
+  baseline?: { obligations: number; blockingEntries: number };
 }
 
 /** A run's exit code (architecture contract 4). */
@@ -167,6 +174,12 @@ function jsonReport(
       blocking: blockingCount,
       blockingEntries: blocking.length,
       ...counts,
+      ...(options.baseline !== undefined
+        ? {
+            baselinedObligations: options.baseline.obligations,
+            baselinedBlockingEntries: options.baseline.blockingEntries,
+          }
+        : {}),
     },
     verdicts: entries.map((entry) => {
       const record: Record<string, unknown> = {
@@ -321,6 +334,13 @@ function textReport(
     lines.push(
       `waivers: ${wc.total} total, ${wc.active} active, ${wc.expired} expired, ` +
         `${wc.staleOwner} stale-owner`,
+    );
+  }
+  if (options.baseline !== undefined) {
+    lines.push(
+      `baseline (adopted): ${options.baseline.obligations} obligation(s) + ` +
+        `${options.baseline.blockingEntries} blocking entry(ies) forgiven — ` +
+        `shrink-only: resolve debt, then 'gateforge baseline update'`,
     );
   }
   for (const entry of entries) {
