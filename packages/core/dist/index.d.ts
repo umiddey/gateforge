@@ -349,6 +349,11 @@ export { CRUD_CONTRACT_PREFIX } from './policy/index.js';
 export { BlockingEntrySchema } from './policy/index.js';
 /** Inferred blocking-entry type. */
 export type { BlockingEntry } from './policy/index.js';
+/**
+ * The adopted identity of a classification-blocked resource (two-layer
+ * adoption) — the canonical string `adopt` records and `check` matches.
+ */
+export { classificationBlockedIdentity } from './policy/index.js';
 /** Assessment of one claim against the generated obligations. */
 export { ClaimAssessmentSchema } from './policy/index.js';
 /** Inferred claim-assessment type. */
@@ -432,13 +437,20 @@ export { GateforgeBaselineError } from './baselines/index.js';
  */
 export { adoptBaseline } from './baselines/index.js';
 /** The adoption record (phase 8 C): the loud, one-time bulk-add receipt. */
-export { AdoptionRecordSchema } from './schemas/adoption.js';
+export { AdoptionRecordSchema, ClassificationBlockedIdsSchema } from './schemas/adoption.js';
 /** Inferred adoption-record type. */
 export type { AdoptionRecord } from './schemas/adoption.js';
 /** Loads `.gateforge/baselines/adoption.json` (null = pre-adoption). */
 export { loadAdoptionRecord, ADOPTION_RECORD_FILENAME } from './baselines/adoption.js';
 /** Writes the adoption record, creating parent directories as needed. */
 export { writeAdoptionRecord } from './baselines/adoption.js';
+/**
+ * The classification layer of the adoption (two-layer adoption):
+ * `adoptClassificationBlocked` normalizes the captured ids for the
+ * receipt; `shrinkClassificationBlocked` is the set's ONLY post-adoption
+ * mutation — strict-subset, shrink-only (GF-07/08 mirrored).
+ */
+export { adoptClassificationBlocked, shrinkClassificationBlocked } from './baselines/adoption.js';
 /**
  * Renders per-obligation verdicts: `json` (GF-canonical JSON),
  * `sarif` (SARIF 2.1.0 projection, pin #10), or `text` (the

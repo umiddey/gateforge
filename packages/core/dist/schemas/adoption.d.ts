@@ -19,6 +19,13 @@
  * schema existed, including empty init skeletons).
  */
 import { z } from 'zod';
+/**
+ * The classification layer's id list shape, NON-optional: the record
+ * field wraps this in `.optional()` (absent = pre-layer receipt), while
+ * the capture/shrink helpers validate against THIS schema so a present
+ * list is always a sorted, duplicate-free, non-empty-string array.
+ */
+export declare const ClassificationBlockedIdsSchema: z.ZodArray<z.ZodString>;
 /** The adoption record: who forgave how much, when, on what commit. */
 export declare const AdoptionRecordSchema: z.ZodObject<{
     schemaVersion: z.ZodLiteral<1>;
@@ -26,6 +33,7 @@ export declare const AdoptionRecordSchema: z.ZodObject<{
     gitSha: z.ZodNullable<z.ZodString>;
     adopted: z.ZodNumber;
     proven: z.ZodNumber;
+    classificationBlocked: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strict>;
 /** Inferred adoption-record shape. */
 export type AdoptionRecord = z.infer<typeof AdoptionRecordSchema>;
