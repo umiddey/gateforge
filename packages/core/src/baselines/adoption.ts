@@ -12,6 +12,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { compareStrings } from '../graph/util.js';
 import { GateforgeBaselineError } from './index.js';
 import { AdoptionRecordSchema, type AdoptionRecord } from '../schemas/adoption.js';
 
@@ -73,4 +74,102 @@ export function writeAdoptionRecord(path: string, record: AdoptionRecord): void 
       `adoption record '${path}' could not be written: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+/**
+ * The classification layer of the sanctioned bulk-add (two-layer
+ * adoption): normalizes the classification-blocked resource ids captured
+ * at adoption time into the receipt's canonical form — sorted, duplicate-
+ * free, schema-validated. Input order is irrelevant; duplicates are
+ * collapsed (the ids are collected from blocking entries, so exact
+ * duplicates are expected to be absent, not an error).
+ *
+ * Args:
+ *   resourceIds: the classification-blocked resource ids captured at
+ *     adoption time (entries with kind 'classification' and a derived id).
+ *
+ * Returns:
+ *   string[]: the validated, sorted, unique id list for the receipt.
+ *
+ * Throws:
+ *   GateforgeBaselineError: when any id fails schema validation.
+ */
+export function adoptClassificationBlocked(resourceIds: readonly string[]): string[] {
+  const seen: Record<string, true> = {};
+  const unique: string[] = [];
+  for (const id of resourceIds) {
+    if (id in seen) continue;
+    seen[id] = true;
+    unique.push(id);
+  }
+  unique.sort(compareStrings);
+  const result = AdoptionRecordSchema.shape.classificationBlocked.safeParse(unique);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((issue) => `${issue.path.join('.') || '<classificationBlocked>'}: ${issue.message}`)
+      .join('; ');
+    throw new GateforgeBaselineError(
+      `adoption classification set failed validation: ${issues}`,
+    );
+  }
+  return result.data;
+}
+
+/**
+ * The classification set's ONLY mutation after adoption (the shrink path,
+ * mirroring `updateBaseline`'s GF-07/08 semantics): replaces the receipt's
+ * `classificationBlocked` with the given ids, which must be a STRICT
+ * SUBSET of the current set — every id kept must exist today AND at least
+ * one id must be removed. A resource leaves the set only when it gained a
+ * real classification; adding or re-listing ids fails closed (the adopted
+ * set can never grow, so new classification debt can never be laundered
+ * into the sanctioned starting point).
+ *
+ * Args:
+ *   current: the adopted record on disk (its effective classification set,
+ *     [] when the field is absent).
+ *   resourceIds: the ids to keep (duplicates are an error, as in
+ *     `updateBaseline`).
+ *
+ * Returns:
+ *   AdoptionRecord: the next record — identical to `current` except for
+ *   the (always-present, possibly empty) shrunk `classificationBlocked`.
+ *
+ * Throws:
+ *   GateforgeBaselineError: on duplicate input, schema-invalid ids, or a
+ *   non-strict-subset update (naming the added ids).
+ */
+export function shrinkClassificationBlocked(
+  current: AdoptionRecord,
+  resourceIds: readonly string[],
+): AdoptionRecord {
+  const seen: Record<string, true> = {};
+  const unique: string[] = [];
+  for (const id of resourceIds) {
+    if (id in seen) continue;
+    seen[id] = true;
+    unique.push(id);
+  }
+  if (unique.length !== resourceIds.length) {
+    throw new GateforgeBaselineError(
+      'classification shrink input contains duplicate resource ids',
+    );
+  }
+  const currentSet = current.classificationBlocked ?? [];
+  const known: Record<string, true> = {};
+  for (const id of currentSet) known[id] = true;
+  const unknown = unique.filter((id) => !(id in known));
+  if (unique.length >= currentSet.length || unknown.length > 0) {
+    throw new GateforgeBaselineError(
+      `classification shrink rejected: not a strict subset of the adopted set ` +
+        `(the adopted classification set is shrink-only) — unknown or added id(s): ` +
+        `${(unknown.length > 0 ? unknown : unique).join(', ') || '<none>'}`,
+    );
+  }
+  const validated = adoptClassificationBlocked(unique);
+  const next: AdoptionRecord =
+    validated.length > 0
+      ? { ...current, classificationBlocked: validated }
+      : { ...current, classificationBlocked: [] };
+  return AdoptionRecordSchema.parse(next);
 }

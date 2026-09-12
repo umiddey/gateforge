@@ -608,6 +608,13 @@ export type { AdoptionRecord } from './schemas/adoption.js';
 export { loadAdoptionRecord, ADOPTION_RECORD_FILENAME } from './baselines/adoption.js';
 /** Writes the adoption record, creating parent directories as needed. */
 export { writeAdoptionRecord } from './baselines/adoption.js';
+/**
+ * The classification layer of the adoption (two-layer adoption):
+ * `adoptClassificationBlocked` normalizes the captured ids for the
+ * receipt; `shrinkClassificationBlocked` is the set's ONLY post-adoption
+ * mutation — strict-subset, shrink-only (GF-07/08 mirrored).
+ */
+export { adoptClassificationBlocked, shrinkClassificationBlocked } from './baselines/adoption.js';
 
 // ---------------------------------------------------------------------------
 // Reports (contract 4, pin #10) — canonical JSON / SARIF 2.1.0 / text
