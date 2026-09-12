@@ -21,6 +21,14 @@
 import { z } from 'zod';
 import { SchemaVersionField } from './common.js';
 
+/**
+ * The classification layer's id list shape, NON-optional: the record
+ * field wraps this in `.optional()` (absent = pre-layer receipt), while
+ * the capture/shrink helpers validate against THIS schema so a present
+ * list is always a sorted, duplicate-free, non-empty-string array.
+ */
+export const ClassificationBlockedIdsSchema = z.array(z.string().min(1));
+
 /** The adoption record: who forgave how much, when, on what commit. */
 export const AdoptionRecordSchema = z
   .object({
@@ -48,7 +56,7 @@ export const AdoptionRecordSchema = z
      * leaves only through the explicit `baseline update` path once it
      * carries a real classification; NEW blocked resources never enter.
      */
-    classificationBlocked: z.array(z.string().min(1)).optional(),
+    classificationBlocked: ClassificationBlockedIdsSchema.optional(),
   })
   .strict()
   .superRefine((record, ctx) => {

@@ -42,16 +42,26 @@ import { renderEndpointInventory } from '../endpoint-report.js';
  *   unsanctioned and forgives nothing.
  * - Record present but baseline missing/corrupt → throws (exit 2): the
  *   receipt without the document it sanctions is a broken adoption.
- * - Record present and baseline valid → the recorded fingerprint set.
+ * - Record present and baseline valid → the recorded fingerprint set,
+ *   plus the classification layer (two-layer adoption) when the receipt
+ *   carries it. A pre-layer receipt (no `classificationBlocked` field) is
+ *   simply NOT ADOPTED for that layer — nothing classification-shaped is
+ *   waived without the recorded set (fail closed, backward compatible).
  */
 export function resolveAdoptedBaseline(
   cwd: string,
   baselinesPath: string,
-): { fingerprints: ReadonlySet<string> } | null {
+): { fingerprints: ReadonlySet<string>; classificationBlocked?: ReadonlySet<string> } | null {
   const baselinePath = resolveRepoPath(cwd, baselinesPath);
   const adoption = loadAdoptionRecord(join(dirname(baselinePath), ADOPTION_RECORD_FILENAME));
   if (adoption === null) return null;
-  return { fingerprints: new Set(loadBaseline(baselinePath).fingerprints) };
+  return {
+    fingerprints: new Set(loadBaseline(baselinePath).fingerprints),
+    classificationBlocked:
+      adoption.classificationBlocked !== undefined
+        ? new Set(adoption.classificationBlocked)
+        : undefined,
+  };
 }
 
 export const CHECK_USAGE = 'usage: gateforge check [--changed] [--format text|json|sarif]';

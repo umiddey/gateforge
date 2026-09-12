@@ -14,7 +14,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { compareStrings } from '../graph/util.js';
 import { GateforgeBaselineError } from './index.js';
-import { AdoptionRecordSchema, type AdoptionRecord } from '../schemas/adoption.js';
+import {
+  AdoptionRecordSchema,
+  ClassificationBlockedIdsSchema,
+  type AdoptionRecord,
+} from '../schemas/adoption.js';
 
 /** The adoption record's fixed file name, beside the baseline document. */
 export const ADOPTION_RECORD_FILENAME = 'adoption.json';
@@ -103,7 +107,7 @@ export function adoptClassificationBlocked(resourceIds: readonly string[]): stri
     unique.push(id);
   }
   unique.sort(compareStrings);
-  const result = AdoptionRecordSchema.shape.classificationBlocked.safeParse(unique);
+  const result = ClassificationBlockedIdsSchema.safeParse(unique);
   if (!result.success) {
     const issues = result.error.issues
       .map((issue) => `${issue.path.join('.') || '<classificationBlocked>'}: ${issue.message}`)

@@ -479,6 +479,11 @@ export { CRUD_CONTRACT_PREFIX } from './policy/index.js';
 export { BlockingEntrySchema } from './policy/index.js';
 /** Inferred blocking-entry type. */
 export type { BlockingEntry } from './policy/index.js';
+/**
+ * The adopted identity of a classification-blocked resource (two-layer
+ * adoption) — the canonical string `adopt` records and `check` matches.
+ */
+export { classificationBlockedIdentity } from './policy/index.js';
 
 /** Assessment of one claim against the generated obligations. */
 export { ClaimAssessmentSchema } from './policy/index.js';
@@ -601,7 +606,7 @@ export { GateforgeBaselineError } from './baselines/index.js';
 export { adoptBaseline } from './baselines/index.js';
 
 /** The adoption record (phase 8 C): the loud, one-time bulk-add receipt. */
-export { AdoptionRecordSchema } from './schemas/adoption.js';
+export { AdoptionRecordSchema, ClassificationBlockedIdsSchema } from './schemas/adoption.js';
 /** Inferred adoption-record type. */
 export type { AdoptionRecord } from './schemas/adoption.js';
 /** Loads `.gateforge/baselines/adoption.json` (null = pre-adoption). */
