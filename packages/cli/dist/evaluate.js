@@ -13,7 +13,7 @@
  * at changed files survive — the `check --changed` contract (GF-09's
  * resource-change set).
  */
-import { BLOCKING_VERDICTS, blockingEntryFingerprint, evaluateObligations, fingerprint, loadWaivers, verifyLedgerMac, } from '@gateforge/core';
+import { BLOCKING_VERDICTS, blockingEntryFingerprint, classificationBlockedIdentity, evaluateObligations, fingerprint, loadWaivers, verifyLedgerMac, } from '@gateforge/core';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveRepoPath, sourceByResourceId, sourcesByResourceId } from './pipeline.js';
@@ -110,7 +110,7 @@ export function evaluateRun(input) {
     // Adoption-baseline forgiveness (phase 8 C) runs LAST — after diff
     // scoping — and only over what this run actually evaluated, so the
     // baseline can never resurrect forgivable-looking debt outside scope.
-    const applied = applyBaseline(input.baseline?.fingerprints ?? null, { verdicts, blocking });
+    const applied = applyBaseline(input.baseline ?? null, { verdicts, blocking });
     const blockingRun = applied.blocking.length > 0 ||
         applied.verdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
     return {
@@ -133,9 +133,29 @@ export function evaluateRun(input) {
  * counts returned so every report stays loud about how much debt the
  * baseline carries (never silently green). Everything unbaselined blocks
  * exactly as before; a null/empty set changes nothing.
+ *
+ * The classification layer (two-layer adoption) waives by RESOURCE
+ * IDENTITY (`classificationBlockedIdentity`), which is merge-stable where
+ * whole-entry fingerprints are not (they bake in detail text and line
+ * numbers, so an upstream merge would otherwise un-forgive the same
+ * resource): a `classification` or `unclassified` entry whose adopted
+ * identity is in the receipt's set is waived — loudly counted (as
+ * DISTINCT resources), not exit-counted, not in the blocking list. The
+ * layer runs FIRST; entries it waives are never double-counted under the
+ * fingerprint pass. Fail-closed edges: entries without an identity
+ * (document-level classifier blocks — stale targets, invalid signals) are
+ * never waived here; a NEW blocked resource is by definition not in the
+ * shrink-only set and still blocks.
  */
-function applyBaseline(fingerprints, run) {
-    if (fingerprints === null || fingerprints.size === 0) {
+function applyBaseline(baseline, run) {
+    if (baseline === null) {
+        return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
+    }
+    const fingerprints = baseline.fingerprints;
+    const classificationIds = baseline.classificationBlocked;
+    const classificationProvided = classificationIds !== undefined;
+    const classification = classificationIds !== undefined && classificationIds.size > 0 ? classificationIds : null;
+    if (fingerprints.size === 0 && classification === null) {
         return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
     }
     let obligations = 0;
@@ -153,14 +173,28 @@ function applyBaseline(fingerprints, run) {
     });
     const blocking = [];
     let blockingEntries = 0;
+    const waivedClassifications = new Set();
     for (const entry of run.blocking) {
+        const identity = classificationBlockedIdentity(entry);
+        if (identity !== null && classification !== null && classification.has(identity)) {
+            waivedClassifications.add(identity);
+            continue;
+        }
         if (fingerprints.has(blockingEntryFingerprint(entry))) {
             blockingEntries += 1;
             continue;
         }
         blocking.push(entry);
     }
-    return { verdicts, blocking, baselined: { obligations, blockingEntries } };
+    return {
+        verdicts,
+        blocking,
+        baselined: {
+            obligations,
+            blockingEntries,
+            classificationBlocked: classificationProvided ? waivedClassifications.size : undefined,
+        },
+    };
 }
 /** Diff-scopes the obligation list itself (check --changed). */
 function scopeObligations(input) {

@@ -1,5 +1,5 @@
 import type { Io } from '../io.js';
-export declare const BASELINE_USAGE = "usage: gateforge baseline update <fingerprint> [<fingerprint> ...]";
+export declare const BASELINE_USAGE: string;
 /**
  * Runs the baseline subcommand.
  *

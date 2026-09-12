@@ -111,6 +111,9 @@ function jsonReport(entries, options, blocking) {
                 ? {
                     baselinedObligations: options.baseline.obligations,
                     baselinedBlockingEntries: options.baseline.blockingEntries,
+                    ...(options.baseline.classificationBlocked !== undefined
+                        ? { baselinedClassificationBlocked: options.baseline.classificationBlocked }
+                        : {}),
                 }
                 : {}),
         },
@@ -254,8 +257,11 @@ function textReport(entries, options, blocking) {
     }
     if (options.baseline !== undefined) {
         lines.push(`baseline (adopted): ${options.baseline.obligations} obligation(s) + ` +
-            `${options.baseline.blockingEntries} blocking entry(ies) forgiven — ` +
-            `shrink-only: resolve debt, then 'gateforge baseline update'`);
+            `${options.baseline.blockingEntries} blocking entry(ies)` +
+            (options.baseline.classificationBlocked !== undefined
+                ? ` + ${options.baseline.classificationBlocked} classification-blocked resource(s)`
+                : '') +
+            ` forgiven — shrink-only: resolve debt, then 'gateforge baseline update'`);
     }
     for (const entry of entries) {
         if (entry.verdict === 'satisfied')

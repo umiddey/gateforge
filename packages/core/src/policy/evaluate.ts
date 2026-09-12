@@ -95,6 +95,37 @@ export const BlockingEntrySchema = z
 /** Inferred blocking-entry shape. */
 export type BlockingEntry = z.infer<typeof BlockingEntrySchema>;
 
+/**
+ * The adopted identity of a classification-blocked resource (two-layer
+ * adoption): the ONE canonical string both `gateforge adopt` captures
+ * into the receipt's `classificationBlocked` set and the check matches
+ * against when waiving — so the two sides can never disagree.
+ *
+ * - The plane-qualified `resourceId` when the entry carries one (blocks
+ *   on otherwise-classified resources, e.g. delete-semantics).
+ * - Else the bare resource name under a `name:` namespace — a resource
+ *   with NO derivable plane (PLANE_UNRESOLVED) has no plane-qualified id
+ *   by definition, and its bare name is the stable, merge-surviving
+ *   identity. The `name:` prefix keeps the fallback out of the
+ *   plane-qualified id space (`tenant.users` et al.).
+ * - Both the `classification` entry (the typed block) AND the
+ *   `unclassified` shadow entry (the definitional "no effective
+ *   classification" block the policy engine emits for the SAME resource)
+ *   map to the same identity: waiving the resource waives its whole
+ *   adopted block, or the gate could never return to green.
+ *
+ * Returns null for entries that are never resource-scoped (document-level
+ * classifier blocks — stale targets, invalid signals — and
+ * unresolved/finding/stale-reference kinds): those can never be adopted
+ * by this layer.
+ */
+export function classificationBlockedIdentity(entry: BlockingEntry): string | null {
+  if (entry.kind !== 'classification' && entry.kind !== 'unclassified') return null;
+  if (entry.resourceId !== null) return entry.resourceId;
+  if (entry.name !== null) return `name:${entry.name}`;
+  return null;
+}
+
 /** Assessment of one watched claim against the generated obligations. */
 export const ClaimAssessmentSchema = z
   .strictObject({
