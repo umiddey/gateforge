@@ -14,14 +14,17 @@ import {
   AdoptionRecordSchema,
   GateforgeBaselineError,
   adoptBaseline,
+  adoptClassificationBlocked,
   blockingEntryFingerprint,
   canUpdate,
   loadAdoptionRecord,
   loadBaseline,
   sha256Canonical,
+  shrinkClassificationBlocked,
   updateBaseline,
   writeAdoptionRecord,
   writeBaseline,
+  type AdoptionRecord,
   type Baseline,
   type BlockingEntry,
 } from '../src/index.js';
@@ -173,5 +176,108 @@ describe('adoption record — the loud receipt (fail-closed load)', () => {
   it('accepts a null gitSha (repo without commits)', () => {
     const parsed = AdoptionRecordSchema.parse({ ...record, gitSha: null });
     expect(parsed.gitSha).toBeNull();
+  });
+});
+
+describe('adoption record classificationBlocked — the two-layer receipt', () => {
+  const base: AdoptionRecord = AdoptionRecordSchema.parse({
+    schemaVersion: 1,
+    adoptedAt: '2026-09-11T00:00:00.000Z',
+    gitSha: null,
+    adopted: 3,
+    proven: 0,
+  });
+
+  it('accepts a receipt WITH the classification layer (sorted, unique ids)', () => {
+    const parsed = AdoptionRecordSchema.parse({ ...base, classificationBlocked: ['raw.legacy', 'raw.planeless'] });
+    expect(parsed.classificationBlocked).toEqual(['raw.legacy', 'raw.planeless']);
+  });
+
+  it('accepts a receipt WITHOUT the field (pre-layer engine — backward compatible)', () => {
+    expect(base.classificationBlocked).toBeUndefined();
+    // And it round-trips: a legacy receipt still loads.
+    const dir = tempDir();
+    const path = join(dir, 'adoption.json');
+    writeAdoptionRecord(path, base);
+    expect(loadAdoptionRecord(path)).toEqual(base);
+  });
+
+  it('rejects unsorted, duplicate, and empty ids (fail closed on shape)', () => {
+    const attempt = (ids: string[]): string => {
+      const dir = tempDir();
+      const path = join(dir, `${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(path, JSON.stringify({ ...base, classificationBlocked: ids }), 'utf8');
+      try {
+        loadAdoptionRecord(path);
+        return 'loaded';
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    };
+    expect(attempt(['raw.b', 'raw.a'])).toContain('must be sorted');
+    expect(attempt(['raw.a', 'raw.a'])).toContain("duplicate classification-blocked resource id 'raw.a'");
+    expect(attempt([''])).toContain('classificationBlocked.0');
+  });
+});
+
+describe('adoptClassificationBlocked — the classification bulk-capture', () => {
+  it('sorts and collapses duplicates (input order irrelevant)', () => {
+    expect(adoptClassificationBlocked(['raw.b', 'raw.a', 'raw.b'])).toEqual(['raw.a', 'raw.b']);
+  });
+
+  it('returns an empty list for an adoption with no classification blocks', () => {
+    expect(adoptClassificationBlocked([])).toEqual([]);
+  });
+
+  it('rejects schema-invalid ids (fail closed)', () => {
+    expect(() => adoptClassificationBlocked([''])).toThrow(GateforgeBaselineError);
+  });
+});
+
+describe('shrinkClassificationBlocked — the classification set is shrink-only', () => {
+  const adopted: AdoptionRecord = AdoptionRecordSchema.parse({
+    schemaVersion: 1,
+    adoptedAt: '2026-09-11T00:00:00.000Z',
+    gitSha: null,
+    adopted: 3,
+    proven: 0,
+    classificationBlocked: ['raw.a', 'raw.b', 'raw.c'],
+  });
+
+  it('GF-08 mirrored: shrinking to a strict subset passes and stays sorted', () => {
+    const shrunk = shrinkClassificationBlocked(adopted, ['raw.c', 'raw.a']);
+    expect(shrunk.classificationBlocked).toEqual(['raw.a', 'raw.c']);
+    // Nothing else on the receipt moves: the adoption event is history.
+    expect(shrunk.adoptedAt).toBe(adopted.adoptedAt);
+    expect(shrunk.adopted).toBe(adopted.adopted);
+  });
+
+  it('shrinking to empty is allowed (every resource gained a real classification)', () => {
+    const empty = shrinkClassificationBlocked(adopted, []);
+    expect(empty.classificationBlocked).toEqual([]);
+  });
+
+  it('GF-07 mirrored: re-listing the full set (no removal) is rejected', () => {
+    expect(() => shrinkClassificationBlocked(adopted, ['raw.a', 'raw.b', 'raw.c'])).toThrow(
+      GateforgeBaselineError,
+    );
+  });
+
+  it('adding an id NOT in the adopted set is rejected (laundering fails closed)', () => {
+    expect(() => shrinkClassificationBlocked(adopted, ['raw.a', 'raw.new'])).toThrow(
+      GateforgeBaselineError,
+    );
+  });
+
+  it('rejects duplicate input ids', () => {
+    expect(() => shrinkClassificationBlocked(adopted, ['raw.a', 'raw.a'])).toThrow(
+      GateforgeBaselineError,
+    );
+  });
+
+  it('a receipt WITHOUT the layer has an empty effective set — nothing can be kept', () => {
+    expect(() => shrinkClassificationBlocked({ ...adopted, classificationBlocked: undefined }, ['raw.a'])).toThrow(
+      GateforgeBaselineError,
+    );
   });
 });
