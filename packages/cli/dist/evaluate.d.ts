@@ -73,6 +73,16 @@ export interface EvaluateInput {
      */
     baseline?: {
         fingerprints: ReadonlySet<string>;
+        /**
+         * The classification layer (two-layer adoption): resource ids adopted
+         * as classification-blocked in the receipt. A classification-kind
+         * blocking entry whose resource id is in this set is waived (loudly
+         * counted, not exit-counted); every other classification entry —
+         * above all a NEW blocked resource — still blocks. Absent/empty = the
+         * receipt carries no classification layer (or none left): nothing is
+         * waived here, fail closed.
+         */
+        classificationBlocked?: ReadonlySet<string>;
     } | null;
 }
 /** The evaluated run. */
@@ -93,6 +103,13 @@ export interface EvaluateResult {
     baselined: {
         obligations: number;
         blockingEntries: number;
+        /**
+         * Blocking entries waived via the adopted classification set.
+         * Undefined when the receipt carries NO classification layer at all
+         * (pre-layer receipt): not-adopted must stay distinguishable from
+         * adopted-with-zero-left — both forgive nothing differently.
+         */
+        classificationBlocked: number | undefined;
     } | null;
 }
 /**

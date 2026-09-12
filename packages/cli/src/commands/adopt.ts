@@ -7,16 +7,23 @@
  *    fingerprint — blocking obligation verdicts via the pin-#2
  *    obligation fingerprint, blocking entries (unclassified/unresolved
  *    resources, detector/graph findings, stale references) via the
- *    whole-entry fingerprint.
+ *    whole-entry fingerprint — PLUS the classification-blocked RESOURCE
+ *    identities ([classification] entries and their `unclassified`
+ *    shadows) as the receipt's classification layer (two-layer
+ *    adoption): resource-scoped, merge-stable identity where the
+ *    whole-entry fingerprint is not (detail text and line numbers move
+ *    in an upstream merge; a plane-unresolved resource has no
+ *    plane-qualified id at all).
  * 2. Writes those fingerprints as the INITIAL baseline via
  *    `adoptBaseline` — THE ONE SANCTIONED BULK-ADD this engine ever
  *    performs. It is sanctioned by a loud sibling receipt,
  *    `.gateforge/baselines/adoption.json` (dated, count-annotated,
- *    commit-referenced); `check` honors a baseline only when that record
+ *    commit-referenced, and carrying the adopted `classificationBlocked`
+ *    resource set); `check` honors a baseline only when that record
  *    exists, so the bulk-add can never act silently. Everything after
  *    adoption stays fail-closed: `baseline update` remains
- *    subset-only (GF-07/08), new debt blocks, and the baseline is
- *    SHRINK-ONLY from here.
+ *    subset-only (GF-07/08), new debt blocks, and both adopted layers
+ *    are SHRINK-ONLY from here.
  * 3. Applies the enforcement wiring through the shared `init --blocking`
  *    path (pre-commit hook block + CI template + engine reference),
  *    idempotent like every gateforge write.
@@ -34,8 +41,10 @@ import { existsSync } from 'node:fs';
 import {
   ADOPTION_RECORD_FILENAME,
   adoptBaseline,
+  adoptClassificationBlocked,
   blockingEntryFingerprint,
   BLOCKING_VERDICTS,
+  classificationBlockedIdentity,
   loadAdoptionRecord,
   loadBaseline,
   writeAdoptionRecord,
@@ -94,10 +103,14 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
   const existingRecord = loadAdoptionRecord(recordPath);
   if (existingRecord !== null) {
     ensureBlockingWiring(io, engineRootFromInvocation());
+    const adoptedClassifications = existingRecord.classificationBlocked?.length ?? 0;
     writeLine(
       io.stdout,
-      `already adopted at ${existingRecord.adoptedAt} — ${existingRecord.adopted} fingerprint(s) in the baseline; ` +
-        'a second bulk-add is refused (GF-07/08). Shrink it as debt resolves: `gateforge baseline update`.',
+      `already adopted at ${existingRecord.adoptedAt} — ${existingRecord.adopted} fingerprint(s) in the baseline` +
+        (existingRecord.classificationBlocked !== undefined
+          ? ` + ${adoptedClassifications} classification-blocked resource(s) in the receipt`
+          : ' (receipt predates the classification layer: not adopted for it)') +
+        '; a second bulk-add is refused (GF-07/08). Shrink as debt resolves: `gateforge baseline update`.',
     );
     return 0;
   }
@@ -126,6 +139,14 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
     baseline: null,
   });
   const reds = new Map<string, string>();
+  // The classification layer (two-layer adoption): the resource ids of
+  // the classification-blocked ([classification] entries with a derived
+  // identity, plus their `unclassified` shadows — the same resource's
+  // definitional block), captured as the adopted starting point alongside
+  // the fingerprint baseline. Identity, not the whole-entry fingerprint:
+  // a plane-unresolved resource has no plane-qualified id, and its bare
+  // name survives upstream merges that shift every line number.
+  const classificationBlocked = new Set<string>();
   let proven = 0;
   for (const verdict of evaluated.verdicts) {
     if (!BLOCKING_VERDICTS.includes(verdict.verdict)) {
@@ -136,6 +157,8 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
   }
   for (const entry of evaluated.blocking) {
     reds.set(blockingEntryFingerprint(entry), `entry:${entry.kind}`);
+    const identity = classificationBlockedIdentity(entry);
+    if (identity !== null) classificationBlocked.add(identity);
   }
 
   // An unadopted baseline can only be a crashed previous adopt or a
@@ -155,6 +178,9 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
 
   // Step 2: the sanctioned bulk-add, receipt written last (see module
   // doc for the crash window — the state in between forgives nothing).
+  // The receipt carries BOTH adopted layers: the fingerprint baseline and
+  // the classification-blocked resource ids (sorted, unique, possibly
+  // empty — the field's presence is this receipt claiming the layer).
   writeBaseline(baselinePath, adoptBaseline([...reds.keys()]));
   writeAdoptionRecord(recordPath, {
     schemaVersion: 1,
@@ -162,6 +188,7 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
     gitSha: headSha(io.cwd),
     adopted: reds.size,
     proven,
+    classificationBlocked: adoptClassificationBlocked([...classificationBlocked]),
   });
 
   // Step 3: enforcement wiring through the shared init --blocking path.
@@ -173,6 +200,12 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
     writeLine(io.stdout, 'adoption set (grouped):');
     for (const line of groupReds(reds)) writeLine(io.stdout, line);
   }
+  writeLine(
+    io.stdout,
+    `classification layer adopted: ${classificationBlocked.size} blocked resource(s) recorded in the receipt ` +
+      '(waived by identity; the set is shrink-only — a resource leaves it via `gateforge baseline update ' +
+      '--classification-blocked` once it carries a real classification)',
+  );
   writeLine(io.stdout, `adoption record: ${recordPath} (${pipeline.now})`);
   writeLine(
     io.stdout,
