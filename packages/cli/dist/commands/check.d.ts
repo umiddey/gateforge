@@ -8,10 +8,15 @@ import type { Io } from '../io.js';
  *   unsanctioned and forgives nothing.
  * - Record present but baseline missing/corrupt → throws (exit 2): the
  *   receipt without the document it sanctions is a broken adoption.
- * - Record present and baseline valid → the recorded fingerprint set.
+ * - Record present and baseline valid → the recorded fingerprint set,
+ *   plus the classification layer (two-layer adoption) when the receipt
+ *   carries it. A pre-layer receipt (no `classificationBlocked` field) is
+ *   simply NOT ADOPTED for that layer — nothing classification-shaped is
+ *   waived without the recorded set (fail closed, backward compatible).
  */
 export declare function resolveAdoptedBaseline(cwd: string, baselinesPath: string): {
     fingerprints: ReadonlySet<string>;
+    classificationBlocked?: ReadonlySet<string>;
 } | null;
 export declare const CHECK_USAGE = "usage: gateforge check [--changed] [--format text|json|sarif]";
 /**
