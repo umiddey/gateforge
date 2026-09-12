@@ -67,8 +67,14 @@ export interface RenderRunOptions {
    * json summary and the text report when provided. Baselined debt is
    * LOUD on every run — a forgiveness that never announces itself is a
    * silent waiver, and there are none of those in gateforge.
+   * `classificationBlocked` (two-layer adoption) counts blocking entries
+   * waived via the receipt's adopted classification set.
    */
-  baseline?: { obligations: number; blockingEntries: number };
+  baseline?: {
+    obligations: number;
+    blockingEntries: number;
+    classificationBlocked?: number;
+  };
 }
 
 /** A run's exit code (architecture contract 4). */
@@ -178,6 +184,9 @@ function jsonReport(
         ? {
             baselinedObligations: options.baseline.obligations,
             baselinedBlockingEntries: options.baseline.blockingEntries,
+            ...(options.baseline.classificationBlocked !== undefined
+              ? { baselinedClassificationBlocked: options.baseline.classificationBlocked }
+              : {}),
           }
         : {}),
     },
@@ -339,8 +348,11 @@ function textReport(
   if (options.baseline !== undefined) {
     lines.push(
       `baseline (adopted): ${options.baseline.obligations} obligation(s) + ` +
-        `${options.baseline.blockingEntries} blocking entry(ies) forgiven — ` +
-        `shrink-only: resolve debt, then 'gateforge baseline update'`,
+        `${options.baseline.blockingEntries} blocking entry(ies)` +
+        (options.baseline.classificationBlocked !== undefined
+          ? ` + ${options.baseline.classificationBlocked} classification-blocked resource(s)`
+          : '') +
+        ` forgiven — shrink-only: resolve debt, then 'gateforge baseline update'`,
     );
   }
   for (const entry of entries) {
