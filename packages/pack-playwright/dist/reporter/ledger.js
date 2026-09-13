@@ -92,18 +92,28 @@ export function parseObligationsDocument(raw) {
 /**
  * Computes one ledger row for a claim.
  *
+ * Advisory only (plan §9): the reporter runs inside the suite-side
+ * runtime, so its rows can never be authoritative. HTTP rows grade
+ * against the CLI-derived route inventory when the caller supplies it;
+ * without route context the core resolver blocks with a missing-context
+ * result — the reporter never shows an authoritative pass merely
+ * because it lacked the inventory.
+ *
  * Args:
  *   claim: the claim under judgment.
  *   obligations: the run's obligations (state doc).
  *   classifications: per-resource classification map (witness surface).
  *   records: the full run ledger.
  *   now: injected instant for the verdict engine.
+ *   httpRoutes: advisory route inventory (CLI-derived `http-routes.json`
+ *     when present, else null). The authoritative CLI recomputes this
+ *     from source and never trusts a reporter-supplied list.
  *
  * Returns:
  *   LedgerRow: verdict + reason + considered record ids. `verdict:
  *   null` (with reason) when required context is missing.
  */
-export function ledgerRowFor(claim, obligations, classifications, records, now) {
+export function ledgerRowFor(claim, obligations, classifications, records, now, httpRoutes) {
     if (obligations === null) {
         return {
             claim: claim.obligationId,
@@ -153,6 +163,10 @@ export function ledgerRowFor(claim, obligations, classifications, records, now) 
         records: records,
         waivers: [],
         classification,
+        // Advisory route context (plan §9): supplied by the caller from the
+        // CLI-derived inventory when available; null/undefined lets the
+        // core resolver return its blocking missing-context result.
+        httpRoutes: httpRoutes ?? null,
         now,
     });
     const mine = records.filter((record) => record.testId === claim.testId);

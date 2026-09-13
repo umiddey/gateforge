@@ -1,10 +1,13 @@
 /**
- * Phase 6 engine tests: the witness-owned loopback observation proxy
- * (ADR 0004 D7). Red probe: claiming an http observation without real
- * proxied traffic fails (409). Happy path: traffic through the proxy
- * yields a witnessed `http.request` record that — together with a
- * provenanced claimed ui anchor — satisfies `http:frontend-request-observed`
- * in the real verdict engine. Suite-forged network records stay invalid.
+ * Plan §8 / D1 engine tests: the witness-owned loopback observation
+ * proxy (ADR 0004 D7) proves TRANSPORT only — the witness observed an
+ * HTTP exchange; test attribution is suite-claimed. Red probe: claiming
+ * an http observation without real proxied traffic fails (409). Happy
+ * path: Node-driven traffic through the proxy yields a witnessed
+ * `http.request` record that — together with a provenanced claimed ui
+ * anchor — satisfies `http:request-observed` in the real verdict
+ * engine, while `http:frontend-request-observed` stays blocking
+ * `missing` on the same run. Suite-forged network records stay invalid.
  *
  * Mount-path coverage (phase 7): with an explicit `mountPath` the proxy
  * forwards AND records the STRIPPED backend path; without one the
@@ -13,6 +16,9 @@
 import { describe, expect, it } from 'vitest';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import { evaluateObligation, recordIdOf, type Obligation } from '@gateforge/core';
+import type { Page, TestInfo } from 'playwright/test';
+import { createEvidence } from '../src/fixture/evidence.js';
+import type { WitnessClient } from '../src/fixture/witness-client.js';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
 
 const RUN_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
@@ -25,6 +31,20 @@ const OBLIGATION: Obligation = {
   contract: 'http:frontend-request-observed',
   policyId: 'p',
   lifecycle: { create: false, read: false, update: false, delete: false },
+};
+
+/** The explicit transport contract (plan §8 / D1): same exchange, narrower promise. */
+const TRANSPORT_OBLIGATION: Obligation = {
+  ...OBLIGATION,
+  id: 'tenant.http-post-api-contracts-x1:http:request-observed',
+  contract: 'http:request-observed',
+};
+
+/** Status-ok is the same transport proof additionally requiring 2xx (plan §10: ≥1 2xx satisfies). */
+const STATUS_OBLIGATION: Obligation = {
+  ...OBLIGATION,
+  id: 'tenant.http-post-api-contracts-x1:http:response-status-ok',
+  contract: 'http:response-status-ok',
 };
 
 /** Minimal loopback target app: POST /api/contracts → 201. */
@@ -89,9 +109,8 @@ function observe(
 ): Promise<{ status: number; statusCode: number }> {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
-      obligationId: OBLIGATION.id,
+      claimId: TRANSPORT_OBLIGATION.id,
       testId: 'journey-1',
-      claimId: OBLIGATION.id,
       method: 'POST',
       path: '/api/contracts',
       ...overrides,
@@ -157,7 +176,7 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
     }
   });
 
-  it('the real verdict engine: witnessed observation + claimed anchor satisfies; forged fails', async () => {
+  it('the real verdict engine: witnessed observation + claimed anchor satisfies transport; frontend stays missing; forged fails', async () => {
     const target = await startTarget();
     const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
     try {
@@ -173,19 +192,29 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
       const witnessedRequest = body.records.find((entry) => entry.kind === 'http.request');
       expect(witnessedRequest).toBeDefined();
 
-      const anchor = record({});
+      const classification = {
+        exposure: 'user-facing',
+        plane: 'tenant',
+        primaryKey: ['method', 'path'],
+        lifecycle: { create: false, read: false, update: false, delete: false },
+        evidenceAdapter: 'x',
+      } as const;
+      const transportAnchor = record({ obligationId: TRANSPORT_OBLIGATION.id });
 
-      const satisfied = evaluateObligation(OBLIGATION, {
-        claims: [{ schemaVersion: 1, obligationId: OBLIGATION.id, testId: 'journey-1' }],
-        records: [anchor, witnessedRequest],
+      const satisfied = evaluateObligation(TRANSPORT_OBLIGATION, {
+        claims: [{ schemaVersion: 1, obligationId: TRANSPORT_OBLIGATION.id, testId: 'journey-1' }],
+        records: [transportAnchor, witnessedRequest],
         waivers: [],
-        classification: {
-          exposure: 'user-facing',
-          plane: 'tenant',
-          primaryKey: ['method', 'path'],
-          lifecycle: { create: false, read: false, update: false, delete: false },
-          evidenceAdapter: 'x',
-        },
+        classification,
+        // Complete inventory (plan §9, D2): the observation attributes
+        // to the obligation's own endpoint within this set.
+        httpRoutes: [
+          {
+            resourceId: TRANSPORT_OBLIGATION.resourceId,
+            method: 'POST',
+            canonicalPath: '/api/contracts',
+          },
+        ],
         now: '2026-01-01T00:00:00.000Z',
       });
       if (satisfied.verdict !== 'satisfied') {
@@ -193,29 +222,299 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
       }
       expect(satisfied.verdict).toBe('satisfied');
 
+      // The SAME real exchange cannot satisfy the frontend contract: no
+      // independent browser/test observation channel exists.
+      const frontendAnchor = record({ obligationId: OBLIGATION.id });
+      const frontendWitnessed = { ...(witnessedRequest as Record<string, unknown>), obligationId: OBLIGATION.id };
+      const frontendOutcome = evaluateObligation(OBLIGATION, {
+        claims: [{ schemaVersion: 1, obligationId: OBLIGATION.id, testId: 'journey-1' }],
+        records: [frontendAnchor, frontendWitnessed],
+        waivers: [],
+        classification,
+        now: '2026-01-01T00:00:00.000Z',
+      });
+      expect(frontendOutcome.verdict).toBe('missing');
+      expect(frontendOutcome.reason).toContain("'http:frontend-request-observed'");
+      expect(frontendOutcome.reason).toContain('no independent browser/test observation channel');
+
       // Suite-forged network record instead of the engine observation:
       // the gate grades it invalid, never satisfied.
       const forged = record({
+        obligationId: TRANSPORT_OBLIGATION.id,
         kind: 'http.request',
         origin: 'suite-submitted',
         trust: 'claimed',
         payload: { method: 'POST', url: '/api/contracts', status: 201 },
       });
-      const forgedOutcome = evaluateObligation(OBLIGATION, {
-        claims: [{ schemaVersion: 1, obligationId: OBLIGATION.id, testId: 'journey-1' }],
-        records: [anchor, forged],
+      const forgedOutcome = evaluateObligation(TRANSPORT_OBLIGATION, {
+        claims: [{ schemaVersion: 1, obligationId: TRANSPORT_OBLIGATION.id, testId: 'journey-1' }],
+        records: [transportAnchor, forged],
         waivers: [],
-        classification: {
-          exposure: 'user-facing',
-          plane: 'tenant',
-          primaryKey: ['method', 'path'],
-          lifecycle: { create: false, read: false, update: false, delete: false },
-          evidenceAdapter: 'x',
-        },
+        classification,
         now: '2026-01-01T00:00:00.000Z',
       });
       expect(forgedOutcome.verdict).toBe('invalid');
       expect(forgedOutcome.reason).toContain('HTTP_OBSERVATION_UNTRUSTED');
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('F6: two real exchanges grade identically in both ledger orders; junk-first cannot move the selection', async () => {
+    // Real loopback target + real witness: two distinct paths yield two
+    // distinct witnessed records (identical exchanges would collapse to
+    // one ledger entry since ids hash the payload). The engine must
+    // return the same verdict and selected ids for every permutation,
+    // and a suite-forged record appearing first must not change them.
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      await callProxy(witness.proxyUrl as string, '/api/contracts/a');
+      await observe(witness, { path: '/api/contracts/a' });
+      await callProxy(witness.proxyUrl as string, '/api/contracts/b');
+      await observe(witness, { path: '/api/contracts/b' });
+
+      const ledgerResponse = await fetch(`${witness.url}/records`, {
+        headers: { 'x-gateforge-run': TOKEN },
+      });
+      const ledger = (await ledgerResponse.json()) as { records: Array<Record<string, unknown>> };
+      const exchanges = ledger.records.filter((entry) => entry['kind'] === 'http.request');
+      expect(exchanges).toHaveLength(2);
+      const [firstExchange, secondExchange] = exchanges as [
+        Record<string, unknown>,
+        Record<string, unknown>,
+      ];
+
+      const classification = {
+        exposure: 'user-facing',
+        plane: 'tenant',
+        primaryKey: ['method', 'path'],
+        lifecycle: { create: false, read: false, update: false, delete: false },
+        evidenceAdapter: 'x',
+      } as const;
+      // One parameter candidate: both observations attribute uniquely to
+      // the obligation's own endpoint (no literal overlap by design).
+      const inventory = [
+        {
+          resourceId: TRANSPORT_OBLIGATION.resourceId,
+          method: 'POST',
+          canonicalPath: '/api/contracts/{}',
+        },
+      ];
+      const gradeTransport = (records: unknown[]) =>
+        evaluateObligation(TRANSPORT_OBLIGATION, {
+          claims: [{ schemaVersion: 1, obligationId: TRANSPORT_OBLIGATION.id, testId: 'journey-1' }],
+          records,
+          waivers: [],
+          classification,
+          httpRoutes: inventory,
+          now: '2026-01-01T00:00:00.000Z',
+        });
+      const anchor = record({ obligationId: TRANSPORT_OBLIGATION.id });
+      const complete = (outcome: { verdict: string; reason: string | null; recordIds: string[] }) => ({
+        verdict: outcome.verdict,
+        reason: outcome.reason,
+        recordIds: outcome.recordIds,
+      });
+
+      const forward = complete(gradeTransport([anchor, firstExchange, secondExchange]));
+      const reversed = complete(gradeTransport([anchor, secondExchange, firstExchange]));
+      expect(forward.verdict).toBe('satisfied');
+      expect(reversed).toEqual(forward);
+
+      // Two further real exchanges, consumed directly under the
+      // status-ok obligation (rebinding an issued recordId would break
+      // its provenance hash — the engine demotes it to claimed): the
+      // loopback target answers 201 for every exchange.
+      await callProxy(witness.proxyUrl as string, '/api/contracts/a');
+      await observe(witness, { claimId: STATUS_OBLIGATION.id, path: '/api/contracts/a' });
+      await callProxy(witness.proxyUrl as string, '/api/contracts/b');
+      await observe(witness, { claimId: STATUS_OBLIGATION.id, path: '/api/contracts/b' });
+      const statusLedger = (await (
+        await fetch(`${witness.url}/records`, { headers: { 'x-gateforge-run': TOKEN } })
+      ).json()) as { records: Array<Record<string, unknown>> };
+      const statusExchanges = statusLedger.records.filter(
+        (entry) =>
+          entry['kind'] === 'http.request' && entry['obligationId'] === STATUS_OBLIGATION.id,
+      );
+      expect(statusExchanges).toHaveLength(2);
+      const statusAnchor = record({ obligationId: STATUS_OBLIGATION.id });
+      const gradeStatus = (records: unknown[]) =>
+        evaluateObligation(STATUS_OBLIGATION, {
+          claims: [{ schemaVersion: 1, obligationId: STATUS_OBLIGATION.id, testId: 'journey-1' }],
+          records,
+          waivers: [],
+          classification,
+          httpRoutes: inventory,
+          now: '2026-01-01T00:00:00.000Z',
+        });
+      const [statusFirst, statusSecond] = statusExchanges as [
+        Record<string, unknown>,
+        Record<string, unknown>,
+      ];
+      const statusForward = complete(gradeStatus([statusAnchor, statusFirst, statusSecond]));
+      const statusReversed = complete(gradeStatus([statusAnchor, statusSecond, statusFirst]));
+      expect(statusForward.verdict).toBe('satisfied');
+      expect(statusReversed).toEqual(statusForward);
+
+      // Junk-first still satisfies with the same selection: the
+      // suite-submitted record is invalid weight, never proof.
+      const forged = record({
+        obligationId: TRANSPORT_OBLIGATION.id,
+        kind: 'http.request',
+        origin: 'suite-submitted',
+        trust: 'claimed',
+        payload: { method: 'POST', url: '/api/contracts/a', status: 201 },
+      });
+      const junkFirst = complete(gradeTransport([anchor, forged, firstExchange, secondExchange]));
+      expect(junkFirst).toEqual(forward);
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('F1: Node-only attack under an uninvolved testId — frontend missing, transport satisfied', async () => {
+    // The attack uses plain Node HTTP (fetch-style), never Playwright: it
+    // proves the proxy cannot tell a browser apart from any suite-side
+    // client, and that testId binding is suite-claimed attribution.
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      // Attacker traffic (Node, not a browser) creates the observation…
+      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      // …then claims it under a testId that never sent anything.
+      const claimed = await observe(witness, { testId: 'test-that-never-made-a-request' });
+      expect(claimed.statusCode).toBe(200);
+
+      const ledgerResponse = await fetch(`${witness.url}/records`, {
+        headers: { 'x-gateforge-run': TOKEN },
+      });
+      const ledger = (await ledgerResponse.json()) as { records: Array<Record<string, unknown>> };
+      const attackRecords = ledger.records.filter(
+        (entry) => (entry as { testId?: unknown }).testId === 'test-that-never-made-a-request',
+      );
+      expect(attackRecords.length).toBeGreaterThan(0);
+
+      const classification = {
+        exposure: 'user-facing',
+        plane: 'tenant',
+        primaryKey: ['method', 'path'],
+        lifecycle: { create: false, read: false, update: false, delete: false },
+        evidenceAdapter: 'x',
+      } as const;
+      // Transport: the witness DID observe the exchange — satisfied even
+      // though the claiming testId sent nothing (suite-claimed).
+      const transportAnchor = record({
+        obligationId: TRANSPORT_OBLIGATION.id,
+        testId: 'test-that-never-made-a-request',
+      });
+      const transportOutcome = evaluateObligation(TRANSPORT_OBLIGATION, {
+        claims: [
+          {
+            schemaVersion: 1,
+            obligationId: TRANSPORT_OBLIGATION.id,
+            testId: 'test-that-never-made-a-request',
+          },
+        ],
+        records: [transportAnchor, ...attackRecords],
+        waivers: [],
+        classification,
+        httpRoutes: [
+          {
+            resourceId: TRANSPORT_OBLIGATION.resourceId,
+            method: 'POST',
+            canonicalPath: '/api/contracts',
+          },
+        ],
+        now: '2026-01-01T00:00:00.000Z',
+      });
+      expect(transportOutcome.verdict).toBe('satisfied');
+
+      // Frontend: the same attack ledger stays blocking missing.
+      const frontendAnchor = record({
+        obligationId: OBLIGATION.id,
+        testId: 'test-that-never-made-a-request',
+      });
+      const frontendRecords = attackRecords.map((entry) => ({
+        ...(entry as Record<string, unknown>),
+        obligationId: OBLIGATION.id,
+      }));
+      const frontendOutcome = evaluateObligation(OBLIGATION, {
+        claims: [
+          { schemaVersion: 1, obligationId: OBLIGATION.id, testId: 'test-that-never-made-a-request' },
+        ],
+        records: [frontendAnchor, ...frontendRecords],
+        waivers: [],
+        classification,
+        now: '2026-01-01T00:00:00.000Z',
+      });
+      expect(frontendOutcome.verdict).toBe('missing');
+      expect(frontendOutcome.reason).toContain('no independent browser/test observation channel');
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('anchor-only and empty ledgers leave the frontend contract missing', async () => {
+    const frontendAnchor = record({ obligationId: OBLIGATION.id });
+    const classification = {
+      exposure: 'user-facing',
+      plane: 'tenant',
+      primaryKey: ['method', 'path'],
+      lifecycle: { create: false, read: false, update: false, delete: false },
+      evidenceAdapter: 'x',
+    } as const;
+    const anchorOnly = evaluateObligation(OBLIGATION, {
+      claims: [{ schemaVersion: 1, obligationId: OBLIGATION.id, testId: 'journey-1' }],
+      records: [frontendAnchor],
+      waivers: [],
+      classification,
+      now: '2026-01-01T00:00:00.000Z',
+    });
+    expect(anchorOnly.verdict).toBe('missing');
+    const empty = evaluateObligation(OBLIGATION, {
+      claims: [{ schemaVersion: 1, obligationId: OBLIGATION.id, testId: 'journey-1' }],
+      records: [],
+      waivers: [],
+      classification,
+      now: '2026-01-01T00:00:00.000Z',
+    });
+    expect(empty.verdict).toBe('missing');
+    expect(empty.reason).toContain('no independent browser/test observation channel');
+  });
+
+  it('the witness refuses a split claimId/obligationId assignment (400)', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      const statusCode = await new Promise<number>((resolve, reject) => {
+        const forward = httpRequest(
+          `${witness.url}/witness/http-observation`,
+          { method: 'POST', headers: { 'x-gateforge-run': TOKEN, 'content-type': 'application/json' } },
+          (res) => {
+            void res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        forward.on('error', reject);
+        forward.end(
+          JSON.stringify({
+            claimId: TRANSPORT_OBLIGATION.id,
+            obligationId: 'tenant.other:http:request-observed',
+            testId: 'journey-1',
+            method: 'POST',
+            path: '/api/contracts',
+          }),
+        );
+      });
+      expect(statusCode).toBe(400);
+      // The refused consume consumed nothing: the exchange is still claimable.
+      const retry = await observe(witness);
+      expect(retry.statusCode).toBe(200);
     } finally {
       await witness.stop();
       await target.stop();
@@ -259,7 +558,7 @@ describe('no claimed-side path around the trust model', () => {
 });
 
 describe('one exchange, every claimed obligation of the declaring test', () => {
-  const REQUEST_CLAIM = 'tenant.http-post-api-contracts-x1:http:frontend-request-observed';
+  const REQUEST_CLAIM = 'tenant.http-post-api-contracts-x1:http:request-observed';
   const STATUS_CLAIM = 'tenant.http-post-api-contracts-x1:http:response-status-ok';
 
   it('issues one witnessed record per declared claim from a single consumed exchange', async () => {
@@ -402,7 +701,7 @@ describe('one exchange, every claimed obligation of the declaring test', () => {
       const ledger = (await ledgerResponse.json()) as { records: Array<Record<string, unknown>> };
 
       for (const obligation of [
-        { ...OBLIGATION, id: REQUEST_CLAIM },
+        { ...OBLIGATION, id: REQUEST_CLAIM, contract: 'http:request-observed' },
         { ...OBLIGATION, id: STATUS_CLAIM, contract: 'http:response-status-ok' },
       ]) {
         const anchor = record({ obligationId: obligation.id });
@@ -417,6 +716,13 @@ describe('one exchange, every claimed obligation of the declaring test', () => {
             lifecycle: { create: false, read: false, update: false, delete: false },
             evidenceAdapter: 'x',
           },
+          httpRoutes: [
+            {
+              resourceId: obligation.resourceId,
+              method: 'POST',
+              canonicalPath: '/api/contracts',
+            },
+          ],
           now: '2026-01-01T00:00:00.000Z',
         });
         if (outcome.verdict !== 'satisfied') {
@@ -440,7 +746,7 @@ describe('observation-proxy mount path (deployment-topology declaration)', () =>
       mountPath: '/api',
     });
     try {
-      // The browser calls the frontend-mounted path; the target must see
+      // The caller hits the frontend-mounted path; the target must see
       // the STRIPPED backend path (query preserved).
       const forwarded = await callProxy(witness.proxyUrl as string, '/api/ops/x?y=1');
       expect(forwarded.status).toBe(201);
@@ -564,6 +870,193 @@ describe('status-narrowed consume (phase 7: multi-status shapes)', () => {
     try {
       const bad = await observe(witness, { expectedStatus: '2xx' });
       expect(bad.statusCode).toBe(400);
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+});
+
+describe('explicit http claim selection (plan §8 step 7)', () => {
+  const CLAIM_A = 'tenant.http-post-api-contracts-x1:http:request-observed';
+  const CLAIM_B = 'tenant.http-post-api-contracts-x1:http:response-status-ok';
+
+  /** A Page stand-in: http.observe never reaches the browser. */
+  function dummyPage(): Page {
+    return new Proxy(
+      {},
+      {
+        get: (_target, prop) => {
+          throw new Error(`dummy page: browser method '${String(prop)}' must not be reached`);
+        },
+      },
+    ) as unknown as Page;
+  }
+
+  function testInfoOf(claims: string[]): TestInfo {
+    return {
+      annotations: claims.map((description) => ({ type: 'gateforge', description })),
+      testId: 'selection-test-1',
+      title: 'selection test',
+    } as unknown as TestInfo;
+  }
+
+  /** A WitnessClient stand-in capturing the claim binding. */
+  function stubClient(captured: { claimIds?: unknown }): WitnessClient {
+    return {
+      observeHttp: async (request: {
+        claimIds?: string[];
+        testId: string;
+        method: string;
+        path: string;
+      }) => {
+        captured.claimIds = request.claimIds;
+        return {
+          recordId: 'r1',
+          runId: RUN_ID,
+          trust: 'witnessed',
+          status: 201,
+          records: (request.claimIds ?? []).map((obligationId) => ({
+            recordId: `r-${obligationId}`,
+            obligationId,
+          })),
+        };
+      },
+    } as unknown as WitnessClient;
+  }
+
+  function evidenceFor(claims: string[], captured: { claimIds?: unknown }) {
+    return createEvidence({
+      page: dummyPage(),
+      testInfo: testInfoOf(claims),
+      baseURL: 'http://127.0.0.1:9',
+      client: stubClient(captured),
+    });
+  }
+
+  it('explicit-wrong: targeting an undeclared obligation throws', async () => {
+    const captured: { claimIds?: unknown } = {};
+    const evidence = evidenceFor([CLAIM_A], captured);
+    await expect(
+      evidence.http.observe({ method: 'POST', path: '/api/contracts', obligationId: CLAIM_B }),
+    ).rejects.toThrow(/did not declare/);
+    expect(captured.claimIds).toBeUndefined();
+  });
+
+  it('ambiguous-omitted: two declared claims without an explicit target throws', async () => {
+    const captured: { claimIds?: unknown } = {};
+    const evidence = evidenceFor([CLAIM_A, CLAIM_B], captured);
+    await expect(evidence.http.observe({ method: 'POST', path: '/api/contracts' })).rejects.toThrow(
+      /ambiguous.*explicit obligationId/,
+    );
+    expect(captured.claimIds).toBeUndefined();
+  });
+
+  it('explicit-correct: the declared target binds exactly', async () => {
+    const captured: { claimIds?: unknown } = {};
+    const evidence = evidenceFor([CLAIM_A, CLAIM_B], captured);
+    const result = await evidence.http.observe({
+      method: 'POST',
+      path: '/api/contracts',
+      obligationId: CLAIM_A,
+    });
+    expect(captured.claimIds).toEqual([CLAIM_A]);
+    expect(result.recordIds).toEqual([`r-${CLAIM_A}`]);
+  });
+
+  it('single-claim omission still binds the only claim', async () => {
+    const captured: { claimIds?: unknown } = {};
+    const evidence = evidenceFor([CLAIM_A], captured);
+    const result = await evidence.http.observe({ method: 'POST', path: '/api/contracts' });
+    expect(captured.claimIds).toEqual([CLAIM_A]);
+    expect(result.recordIds).toEqual([`r-${CLAIM_A}`]);
+  });
+});
+
+describe('F4 witness/verifier path alignment (plan §9 step 3)', () => {
+  const classification = {
+    exposure: 'user-facing',
+    plane: 'tenant',
+    primaryKey: ['method', 'path'],
+    lifecycle: { create: false, read: false, update: false, delete: false },
+    evidenceAdapter: 'x',
+  } as const;
+
+  /**
+   * Grades one real witness-issued record for the transport contract
+   * against the obligation's own endpoint inventory.
+   *
+   * Args:
+   *   ledger: the witness-issued records.
+   *   obligationId: the obligation the record was issued for.
+   *
+   * Returns:
+   *   The engine outcome (expected `invalid` for noncanonical paths).
+   */
+  function gradeLedgerRecord(
+    ledger: Array<Record<string, unknown>>,
+    obligationId: string,
+  ): ReturnType<typeof evaluateObligation> {
+    const anchor = record({ obligationId });
+    const obligation: Obligation = {
+      ...TRANSPORT_OBLIGATION,
+      id: obligationId,
+      resourceId: TRANSPORT_OBLIGATION.resourceId,
+    };
+    return evaluateObligation(obligation, {
+      claims: [{ schemaVersion: 1, obligationId, testId: 'journey-1' }],
+      records: [anchor, ...ledger.filter((entry) => entry['kind'] === 'http.request')],
+      waivers: [],
+      classification,
+      httpRoutes: [
+        { resourceId: obligation.resourceId, method: 'POST', canonicalPath: '/api/contracts' },
+      ],
+      now: '2026-01-01T00:00:00.000Z',
+    });
+  }
+
+  it('duplicate-slash traffic: clean-path consume 409s, exact consume issues a record the verifier blocks', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      // Neither side collapses: the observation is stored with `//`.
+      const emitted = await callProxy(witness.proxyUrl as string, '/api//contracts');
+      expect(emitted.status).toBe(201);
+      // The canonical clean path does NOT match the stored observation.
+      const clean = await observe(witness);
+      expect(clean.statusCode).toBe(409);
+      // The exact noncanonical path consumes — but the verifier blocks
+      // instead of substituting the canonical route.
+      const exact = await observe(witness, { path: '/api//contracts' });
+      expect(exact.statusCode).toBe(200);
+      const ledgerResponse = await fetch(`${witness.url}/records`, {
+        headers: { 'x-gateforge-run': TOKEN },
+      });
+      const ledger = (await ledgerResponse.json()) as { records: Array<Record<string, unknown>> };
+      const outcome = gradeLedgerRecord(ledger.records, TRANSPORT_OBLIGATION.id);
+      expect(outcome.verdict).toBe('invalid');
+      expect(outcome.reason).toContain('duplicate slash');
+    } finally {
+      await witness.stop();
+      await target.stop();
+    }
+  });
+
+  it('encoded-slash traffic: the verifier never decodes it into a separator', async () => {
+    const target = await startTarget();
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    try {
+      const emitted = await callProxy(witness.proxyUrl as string, '/api%2Fcontracts');
+      expect(emitted.status).toBe(201);
+      const exact = await observe(witness, { path: '/api%2Fcontracts' });
+      expect(exact.statusCode).toBe(200);
+      const ledgerResponse = await fetch(`${witness.url}/records`, {
+        headers: { 'x-gateforge-run': TOKEN },
+      });
+      const ledger = (await ledgerResponse.json()) as { records: Array<Record<string, unknown>> };
+      const outcome = gradeLedgerRecord(ledger.records, TRANSPORT_OBLIGATION.id);
+      expect(outcome.verdict).toBe('invalid');
+      expect(outcome.reason).toContain('encoded slash');
     } finally {
       await witness.stop();
       await target.stop();

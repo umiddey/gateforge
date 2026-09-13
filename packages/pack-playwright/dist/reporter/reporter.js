@@ -100,7 +100,12 @@ export class GateforgeReporter {
         const obligations = obligationsRaw === null ? null : parseObligationsDocument(obligationsRaw);
         const classifications = await this.fetchClassifications();
         const now = this.runInstant(stateDir);
-        const ledger = this.ledgerRows(obligations, classifications, records, now);
+        // Advisory route inventory (plan §9): the CLI-derived
+        // `http-routes.json` when present. Absent → null, and the core
+        // resolver returns its blocking missing-context result for HTTP
+        // rows. Never authoritative: the CLI recomputes from source.
+        const httpRoutes = readHttpRoutes(stateDir);
+        const ledger = this.ledgerRows(obligations, classifications, records, now, httpRoutes);
         writeJson(stateDir, 'ledger.json', ledger);
         this.printLedger(ledger);
         this.printRegistryMismatches(obligations, records);
@@ -174,7 +179,7 @@ export class GateforgeReporter {
             return {};
         }
     }
-    ledgerRows(obligations, classifications, records, now) {
+    ledgerRows(obligations, classifications, records, now, httpRoutes) {
         const classMap = {};
         for (const [resourceId, view] of Object.entries(classifications)) {
             const primaryKey = view.primaryKey.length > 0 ? view.primaryKey : ['id'];
@@ -199,7 +204,7 @@ export class GateforgeReporter {
                             line: row.location.line,
                             column: row.location.col,
                         },
-                }), obligations, classMap, records, now));
+                }), obligations, classMap, records, now, httpRoutes));
             }
         }
         return rows.sort((a, b) => a.claim === b.claim ? (a.testId < b.testId ? -1 : 1) : a.claim < b.claim ? -1 : 1);
@@ -267,6 +272,57 @@ export class GateforgeReporter {
 }
 // Playwright custom reporters MUST be the module's default export.
 export default GateforgeReporter;
+/**
+ * Reads the CLI-derived advisory route inventory (`http-routes.json`,
+ * written by `test-gates` beside the obligations document). Returns
+ * null when absent or malformed — the core resolver then returns its
+ * blocking missing-context result for HTTP rows. Advisory only: the
+ * authoritative CLI recomputes this list from source.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   readonly HttpRouteCandidate[] | null: the advisory inventory or null.
+ */
+function readHttpRoutes(stateDir) {
+    let raw;
+    try {
+        raw = readFileSync(join(stateDir, 'http-routes.json'), 'utf8');
+    }
+    catch {
+        return null;
+    }
+    let document;
+    try {
+        document = JSON.parse(raw);
+    }
+    catch {
+        return null;
+    }
+    if (typeof document !== 'object' || document === null || Array.isArray(document))
+        return null;
+    const routes = document['routes'];
+    if (!Array.isArray(routes))
+        return null;
+    const candidates = [];
+    for (const entry of routes) {
+        if (typeof entry !== 'object' || entry === null || Array.isArray(entry))
+            return null;
+        const candidate = entry;
+        if (typeof candidate['resourceId'] !== 'string' ||
+            typeof candidate['method'] !== 'string' ||
+            typeof candidate['canonicalPath'] !== 'string') {
+            return null;
+        }
+        candidates.push({
+            resourceId: candidate['resourceId'],
+            method: candidate['method'],
+            canonicalPath: candidate['canonicalPath'],
+        });
+    }
+    return candidates;
+}
 /** Reads the obligations document path from env (null when unset/broken). */
 function readObligationsRaw() {
     const path = process.env[ENV_OBLIGATIONS];

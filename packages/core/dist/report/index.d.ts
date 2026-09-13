@@ -13,6 +13,18 @@ export interface WaiverCounts {
     /** Failed the owner check (GF-17) — blocking as `stale`. */
     staleOwner: number;
 }
+/**
+ * Effective evaluation scope (plan §12.4): one decision, applied to
+ * obligations and blockers alike. Output-only — the input-snapshot
+ * digest never covers scope labels or report formats, so evidence reuse
+ * for identical inputs is unaffected by scope selection.
+ */
+export interface ScopeMetadata {
+    /** `all` = every obligation evaluated; `changed` = diff-narrowed. */
+    mode: 'all' | 'changed';
+    /** Sorted gate-defining inputs/reasons that forced expansion. */
+    expandedBecause: readonly string[];
+}
 /** Options for {@link renderRun}. */
 export interface RenderRunOptions {
     /** Output format. */
@@ -25,6 +37,12 @@ export interface RenderRunOptions {
     run?: RunManifest;
     /** Tool version stamped into SARIF `tool.driver.version`. */
     toolVersion?: string;
+    /**
+     * Effective evaluation scope (plan §12.4); included in json/SARIF and
+     * summarized in text when the scope expanded. Defaults to the full
+     * `all` scope when omitted.
+     */
+    scope?: ScopeMetadata;
     /**
      * Classification decision provenance per resource id (ADR 0003):
      * decision fingerprint + rule trace, included in json/SARIF/text when

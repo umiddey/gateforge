@@ -66,6 +66,26 @@ export declare function isProvenancedRecord(record: unknown): boolean;
  *   boolean: witnessed tier with verified provenance.
  */
 export declare function isWitnessedRecord(record: unknown): boolean;
+/** Domain tag binding v2 attestation MACs to the ledger envelope format. */
+export declare const ATTESTATION_DOMAIN = "gateforge.ledger.v2";
+/** The only attestation envelope version this code produces or honors. */
+export declare const ATTESTATION_VERSION = 2;
+/**
+ * The unsigned v2 attestation body: the witness run identity, the fresh
+ * trusted invocation identity, the tested input digest, and the issued
+ * record set. The MAC covers exactly these fields plus the domain tag —
+ * never `mac` itself.
+ */
+export interface AttestationBody {
+    /** Witness run UUID. */
+    runId: string;
+    /** Fresh UUID minted by the trusted test-gates caller per invocation. */
+    invocationId: string;
+    /** 64-char lowercase hex digest of the canonical input snapshot. */
+    inputDigest: string;
+    /** Issued record ids (normalized internally: sorted, unique). */
+    recordIds: readonly string[];
+}
 /**
  * Computes the witness-ledger MAC (pin #7): HMAC-SHA256 over the
  * GF-canonical JSON of `{runId, recordIds}` keyed by the witness's
@@ -103,4 +123,48 @@ export declare function ledgerMac(verifierKey: string, runId: string, recordIds:
  *   boolean: true only when the MAC verifies over the exact set.
  */
 export declare function verifyLedgerMac(verifierKey: string, runId: string, recordIds: readonly string[], mac: unknown): boolean;
+/**
+ * Computes the v2 attestation MAC (plan §11.3): HMAC-SHA256 over the
+ * GF-canonical JSON of `{domain, attestationVersion: 2, runId,
+ * invocationId, inputDigest, recordIds}` keyed by the witness's VERIFIER
+ * KEY — a secret the tested suite never receives. The fixed domain tag
+ * prevents cross-format signature acceptance: a legacy `{runId,
+ * recordIds}` MAC can never verify as a v2 attestation, and a v2 MAC
+ * can never verify as anything else.
+ *
+ * Args:
+ *   verifierKey: the witness verifier secret (non-empty).
+ *   body: runId, invocationId, 64-hex inputDigest, and issued record ids
+ *     (normalized internally: deduplicated, codepoint-sorted).
+ *
+ * Returns:
+ *   string: 64-char lowercase hex HMAC.
+ *
+ * Throws:
+ *   TypeError: when the verifier key is empty, an identity is empty, or
+ *   the input digest is not 64-char lowercase hex.
+ */
+export declare function attestationMac(verifierKey: string, body: AttestationBody): string;
+/**
+ * Verifies a v2 attestation MAC ({@link attestationMac}) in constant
+ * time where the inputs allow it. Adversary-controlled input never
+ * throws. A legacy `{runId, recordIds}` MAC is structurally incapable
+ * of verifying here — the domain tag and the extra fields change the
+ * signed bytes — so old evidence can never authorize through this path.
+ *
+ * Args:
+ *   verifierKey: the witness verifier secret (non-empty).
+ *   body: the claimed attestation body (runId, invocationId,
+ *     inputDigest, recordIds).
+ *   mac: the claimed MAC (64-char lowercase hex).
+ *
+ * Returns:
+ *   boolean: true only when the MAC verifies over the exact v2 body.
+ */
+export declare function verifyAttestationMac(verifierKey: string, body: {
+    runId: unknown;
+    invocationId: unknown;
+    inputDigest: unknown;
+    recordIds: unknown;
+}, mac: unknown): boolean;
 //# sourceMappingURL=provenance.d.ts.map

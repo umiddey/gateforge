@@ -59,6 +59,16 @@ export { isProvenancedRecord, isWitnessedRecord } from './provenance.js';
  * live.
  */
 export { ledgerMac, verifyLedgerMac } from './provenance.js';
+/**
+ * V2 evidence attestation (plan §11.3): HMAC-SHA256 over the canonical
+ * `{domain: 'gateforge.ledger.v2', attestationVersion: 2, runId,
+ * invocationId, inputDigest, recordIds}` set, keyed by the verifier key
+ * the tested suite never receives. Binds issued evidence to the tested
+ * source/policy inputs and the fresh invocation identity. A legacy v1
+ * `{runId, recordIds}` MAC can never verify here (different signed
+ * bytes) and never authorizes evidence.
+ */
+export { ATTESTATION_DOMAIN, ATTESTATION_VERSION, attestationMac, verifyAttestationMac, } from './provenance.js';
 // ---------------------------------------------------------------------------
 // Schema version (ADR 0001)
 // ---------------------------------------------------------------------------
@@ -137,7 +147,7 @@ export { BaselineSchema, FingerprintHexSchema } from './schemas/baseline.js';
  * null), provider, plugin set, attestationScope. Every verdict and
  * witnessed record references its run.
  */
-export { RunManifestSchema, ChangedProviderSchema } from './schemas/run-manifest.js';
+export { RunManifestSchema, ChangedProviderSchema, AttestationSchema } from './schemas/run-manifest.js';
 /**
  * Verdict (ADR 0001): the seven verdicts — satisfied, missing, invalid,
  * unclassified, unresolved, waived, stale. Blocking verdicts are all
@@ -313,6 +323,13 @@ export { evaluateObligations } from './verdict/index.js';
 /** The five gate-blocking verdicts (`satisfied`/`waived` are clean). */
 export { BLOCKING_VERDICTS } from './verdict/index.js';
 export { registerContractVerifier, verifierFor, registeredNamespaces, } from './verdict/index.js';
+/**
+ * Deterministic runtime route attribution (plan §9, D2): the single
+ * path interpretation plus the complete-inventory resolver the HTTP
+ * transport verifier grades against. No literal-precedence shortcut;
+ * ambiguity blocks.
+ */
+export { interpretObservedPath, resolveHttpRoute, pathMatchesShape } from './verdict/index.js';
 /** Fail-closed verdict-engine error (malformed obligation / clock). */
 export { GateforgeVerdictError } from './verdict/index.js';
 /** Normalizes the injected clock (`Date | string`) to a `Date`. */

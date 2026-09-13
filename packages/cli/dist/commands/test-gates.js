@@ -24,12 +24,17 @@
  * to be clean — a broken run must never report success.
  */
 import { spawnSync } from 'node:child_process';
-import { renderRun, runExitCode, verifyLedgerMac } from '@gateforge/core';
+import { randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { AttestationSchema, canonicalJson, renderRun, runExitCode, verifyAttestationMac, } from '@gateforge/core';
 import { parseArgs, stringFlag } from '../args.js';
+import { UsageError } from '../errors.js';
 import { writeLine } from '../io.js';
 import { evaluateRun } from '../evaluate.js';
+import { collectInputFiles, computeInputSnapshot, diffInputFiles, SnapshotUnavailableError, UnsupportedSnapshotError, } from '../input-snapshot.js';
 import { runPipeline } from '../pipeline.js';
-import { resolveStateDir, stateObligations, writeClassificationsView, writeEnv, writeManifest, writeObligations, writeReport, } from '../state.js';
+import { httpRoutesView, resolveStateDir, stateObligations, writeClassificationsView, writeEnv, writeHttpRoutesView, writeManifest, writeObligations, writeReport, } from '../state.js';
 import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
 export const TEST_GATES_USAGE = 'usage: gateforge test-gates [--suite <command>] [--out <dir>] ' +
     '[--format text|json|sarif] [--witness-url <url>] [--run-token <token>] ' +
@@ -69,6 +74,27 @@ export async function testGatesCommand(io, argv) {
     const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
     const config = loadConfigAt(io.cwd);
     const stateDir = resolveStateDir(io.cwd, out);
+    // 1. Inventory/hash inputs BEFORE discovery (plan §11.5). Only file
+    // bytes exist yet; the gate context joins after discovery. Unsafe
+    // --out overlap and uncapturable inputs fail closed (exit 2) before
+    // witness binding, suite start, or any state artifact write.
+    let preFiles = null;
+    let snapshotUnavailable = false;
+    try {
+        preFiles = collectInputFiles(io.cwd, config, stateDir);
+    }
+    catch (error) {
+        if (error instanceof SnapshotUnavailableError) {
+            snapshotUnavailable = true;
+        }
+        else if (error instanceof UnsupportedSnapshotError) {
+            throw new UsageError(`unsupported input snapshot: ${error.message}`);
+        }
+        else {
+            throw error;
+        }
+    }
+    // 2. Run discovery and compile the gate context.
     const pipeline = await runPipeline({
         cwd: io.cwd,
         env: io.env,
@@ -76,6 +102,51 @@ export async function testGatesCommand(io, argv) {
         provider: 'all-files',
         stateDir,
     });
+    // 3. Stability around discovery + full input digest. A tree that moved
+    // under discovery cannot establish a reliable digest — fail closed
+    // before binding or writing state.
+    const httpRoutes = httpRoutesView(pipeline.graph);
+    let trustedDigest = null;
+    if (!snapshotUnavailable) {
+        try {
+            const postDiscovery = collectInputFiles(io.cwd, config, stateDir);
+            const drift = preFiles === null ? [] : diffInputFiles(preFiles, postDiscovery);
+            if (drift.length > 0) {
+                throw new UsageError(`input tree changed around discovery (${drift.slice(0, 3).join('; ')}${drift.length > 3 ? '; …' : ''}); ` +
+                    'no reliable digest can be established — refusing the run');
+            }
+            trustedDigest = computeInputSnapshot({
+                cwd: io.cwd,
+                config,
+                stateDir,
+                classifications: pipeline.classificationsView.resources,
+                obligations: pipeline.policy.obligations,
+                httpRoutes,
+                plugins: pipeline.manifest.plugins.map((plugin) => ({
+                    id: plugin.id,
+                    version: plugin.version,
+                })),
+            }).inputDigest;
+        }
+        catch (error) {
+            if (error instanceof UsageError)
+                throw error;
+            if (error instanceof SnapshotUnavailableError) {
+                snapshotUnavailable = true;
+            }
+            else if (error instanceof UnsupportedSnapshotError) {
+                throw new UsageError(`unsupported input snapshot: ${error.message}`);
+            }
+            else {
+                throw error;
+            }
+        }
+    }
+    // 4. Mint the fresh invocation ID and establish the witness context in
+    // trusted process memory (plan §11.4) — never by rereading env.json
+    // or manifest.json after the suite runs.
+    const invocationId = randomUUID();
+    const expectedDigest = snapshotUnavailable ? null : trustedDigest;
     // Run identity: an external witness (loopback service) OWNS the run —
     // every record it stamps carries its runId, and pin-#4 provenance
     // binds records to THIS manifest. The CLI therefore adopts the
@@ -88,8 +159,31 @@ export async function testGatesCommand(io, argv) {
         }
         manifest = await adoptWitnessRunId(manifest, witnessUrl, runToken);
     }
+    if (expectedDigest !== null) {
+        manifest = { ...manifest, invocationId, inputDigest: expectedDigest };
+    }
+    // Bind the trusted context BEFORE the suite starts (plan §11.4): the
+    // witness freezes runId/invocationId/inputDigest and only then may
+    // observe or issue. A witness already used by an older invocation is
+    // rejected — start a fresh witness for a new invocation. Without a
+    // verifier key there is nothing to bind with: the run proceeds, but
+    // no attestation can ever authorize its witnessed records.
+    if (witnessUrl !== undefined &&
+        runToken !== undefined &&
+        witnessVerifierKey !== undefined &&
+        expectedDigest !== null) {
+        await bindWitnessContext(witnessUrl, runToken, witnessVerifierKey, {
+            runId: manifest.runId,
+            invocationId,
+            inputDigest: expectedDigest,
+        });
+    }
     writeManifest(stateDir, manifest);
     writeObligations(stateDir, stateObligations(pipeline.policy.obligations, pipeline.graph));
+    // Derived route inventory (plan §9, D2) for the suite-side reporter:
+    // advisory context only — the verifier recomputes it from the graph
+    // and never reads this file.
+    writeHttpRoutesView(stateDir, httpRoutesView(pipeline.graph));
     // The effective-classification view (plan phase 5): derived from this
     // run's signals, for verifier-side consumers only — never engine input.
     writeClassificationsView(stateDir, pipeline.classificationsView);
@@ -127,6 +221,33 @@ export async function testGatesCommand(io, argv) {
             writeLine(io.stderr, `test-gates: suite exited with status ${String(result.status)}`);
         }
     }
+    // 6. Recompute the input snapshot after the suite (plan §11.5).
+    // Source or configuration changes make this run blocking — the
+    // pre-change evidence must not certify the changed tree. The flag
+    // flows into evaluation, which demotes every witnessed record and
+    // raises an explicit evidence-context blocker (exit 1, never a pass).
+    let changedInputs = false;
+    if (!snapshotUnavailable && preFiles !== null) {
+        try {
+            const postSuite = collectInputFiles(io.cwd, config, stateDir);
+            changedInputs = diffInputFiles(preFiles, postSuite).length > 0;
+        }
+        catch {
+            // A post-suite inventory failure is itself evidence the tree is
+            // no longer the tested one — block rather than certify.
+            changedInputs = true;
+        }
+    }
+    // 7–8. Fetch and validate the live attestation, persisting the
+    // authenticated v2 envelope as the durable fallback before the
+    // witness stops; then require digest/run/invocation match from
+    // trusted memory (never reread).
+    const liveAttestation = await fetchWitnessAttestation(io, witnessUrl, runToken, witnessVerifierKey, expectedDigest === null
+        ? null
+        : { runId: manifest.runId, invocationId, inputDigest: expectedDigest });
+    if (liveAttestation !== null) {
+        persistLiveAttestation(stateDir, liveAttestation);
+    }
     const evaluated = evaluateRun({
         cwd: io.cwd,
         config,
@@ -137,7 +258,14 @@ export async function testGatesCommand(io, argv) {
         now: pipeline.now,
         changedFiles: null,
         witnessVerifierKey,
-        witnessAttestation: await fetchWitnessLedgerAttestation(witnessUrl, runToken, witnessVerifierKey),
+        witnessAttestation: liveAttestation,
+        evidenceContext: {
+            expectedInputDigest: expectedDigest,
+            snapshotUnavailable,
+            expectedInvocationId: expectedDigest === null ? null : invocationId,
+            requireInvocationId: true,
+            changedInputs,
+        },
     });
     const report = renderRun(evaluated.verdicts, {
         format,
@@ -158,61 +286,187 @@ export async function testGatesCommand(io, argv) {
     return suiteFailed && gateCode === 0 ? 1 : gateCode;
 }
 /**
- * Fetches the live ledger attestation from a still-running wired witness
- * (pin #7, GF-23). A wired witness appends its ids to the run manifest
- * only at its own shutdown — which typically happens AFTER `test-gates`
- * evaluates — so while it is up, the verifier-authenticated
- * `GET /ledger-attestation` response is the issuance attestation of
- * record. The response is MAC-verified here, and the gate verifies
- * again at evaluation; a response that fails either check contributes
- * no trust. Best-effort: any failure (already stopped, unreachable,
- * wrong key, malformed body) yields null and the MAC-verified manifest
- * append remains the sole durable channel; with neither, witnessed
- * records demote to claimed-tier (fail closed — the suite-writable
- * manifest alone never proves issuance).
+ * Binds the trusted run context on a wired witness (plan §11.4):
+ * authenticated `POST /run-context` with the run token AND the
+ * verifier key, freezing the current runId/invocationId/inputDigest
+ * before any observation or issuance.
  *
  * Args:
- *   witnessUrl: the wired witness base URL, when provided.
- *   runToken: the witness's run token (outer auth gate), when provided.
- *   verifierKey: the witness verifier key (attestation auth), when provided.
+ *   witnessUrl: the wired witness base URL.
+ *   runToken: the witness's run token (outer auth gate).
+ *   verifierKey: the witness verifier key (attestation auth; never the
+ *     suite run token).
+ *   body: the validated current runId, fresh invocationId, and tested
+ *     inputDigest from trusted caller memory.
  *
- * Returns:
- *   {runId, recordIds, mac} | null: the attestation, or null when
- *   unavailable or unverified.
+ * Throws:
+ *   Error: fail-closed when the witness refuses (used witness, changed
+ *   rebinding, missing key) or is unreachable — without a bound context
+ *   no attestation can authorize this run's evidence. Diagnostics name
+ *   only the failure class, never verifier material.
+ *
+ * Transport note: every witness fetch sends `connection: close`. The
+ * CLI's calls straddle a multi-second suite run, far beyond the
+ * server's idle keep-alive — reusing a pooled socket the server
+ * already closed fails with a transport error (observed under
+ * full-suite load), so no witness connection is ever pooled.
  */
-async function fetchWitnessLedgerAttestation(witnessUrl, runToken, verifierKey) {
-    if (witnessUrl === undefined || runToken === undefined || verifierKey === undefined) {
-        return null;
-    }
+async function bindWitnessContext(witnessUrl, runToken, verifierKey, body) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5_000);
     try {
-        const response = await fetch(`${witnessUrl}/ledger-attestation`, {
-            headers: { 'x-gateforge-run': runToken, 'x-gateforge-verifier': verifierKey, accept: 'application/json' },
+        const response = await fetch(`${witnessUrl}/run-context`, {
+            method: 'POST',
+            headers: {
+                'x-gateforge-run': runToken,
+                'x-gateforge-verifier': verifierKey,
+                'content-type': 'application/json',
+                accept: 'application/json',
+                connection: 'close',
+            },
+            body: canonicalJson(body),
             signal: controller.signal,
         });
-        if (!response.ok)
-            return null;
-        const body = (await response.json());
-        if (typeof body.runId !== 'string' ||
-            body.runId.length === 0 ||
-            !Array.isArray(body.recordIds) ||
-            !body.recordIds.every((id) => typeof id === 'string') ||
-            typeof body.mac !== 'string') {
+        if (response.ok)
+            return;
+        const status = response.status;
+        let detail = '';
+        try {
+            const errorBody = (await response.json());
+            if (typeof errorBody.error === 'string')
+                detail = `: ${errorBody.error}`;
+        }
+        catch {
+            detail = '';
+        }
+        throw new Error(`test-gates: witness ${witnessUrl} refused run-context binding (HTTP ${status})${detail}; ` +
+            'start a fresh witness for a new invocation');
+    }
+    catch (error) {
+        if (error instanceof Error && error.message.startsWith('test-gates: witness'))
+            throw error;
+        throw new Error(`test-gates: witness ${witnessUrl} run-context binding failed (transport): ${error.message}`);
+    }
+    finally {
+        clearTimeout(timer);
+    }
+}
+/**
+ * Fetches the live v2 attestation from a still-running wired witness
+ * (pin #7, GF-23, plan §11.3/§11.5). A wired witness appends its
+ * envelope to the run manifest only at its own shutdown — which
+ * typically happens AFTER `test-gates` evaluates — so while it is up,
+ * the verifier-authenticated `GET /ledger-attestation` response is the
+ * issuance attestation of record. The response must be the versioned
+ * envelope the shutdown append would write (same signed object), and it
+ * is validated here against the trusted expected context (runId,
+ * invocationId, inputDigest from caller memory) plus its MAC; the gate
+ * verifies again at evaluation. A response that fails any check
+ * contributes no trust. Best-effort: any failure yields null and the
+ * MAC-verified manifest append remains the sole durable channel; with
+ * neither, witnessed records demote to claimed-tier (fail closed — the
+ * suite-writable manifest alone never proves issuance).
+ *
+ * Args:
+ *   io: process context (one-line failure-class diagnostics go to
+ *     stderr; never verifier material).
+ *   witnessUrl: the wired witness base URL, when provided.
+ *   runToken: the witness's run token (outer auth gate), when provided.
+ *   verifierKey: the witness verifier key (attestation auth), when provided.
+ *   expected: the trusted runId/invocationId/inputDigest, or null when
+ *     the snapshot is unavailable (then no live envelope can validate).
+ *
+ * Returns:
+ *   Attestation | null: the validated envelope, or null when
+ *   unavailable or unverified.
+ */
+async function fetchWitnessAttestation(io, witnessUrl, runToken, verifierKey, expected) {
+    if (witnessUrl === undefined || runToken === undefined || verifierKey === undefined) {
+        return null;
+    }
+    if (expected === null) {
+        writeLine(io.stderr, 'test-gates: live attestation unavailable (snapshot-unavailable)');
+        return null;
+    }
+    // Bounded live-attestation budget: full-suite load can exceed a tight
+    // bound while records stay valid. No retry, no weakened validation.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+        const response = await fetch(`${witnessUrl}/ledger-attestation`, {
+            headers: {
+                'x-gateforge-run': runToken,
+                'x-gateforge-verifier': verifierKey,
+                accept: 'application/json',
+                connection: 'close',
+            },
+            signal: controller.signal,
+        });
+        if (!response.ok) {
+            writeLine(io.stderr, `test-gates: live attestation unavailable (status ${response.status})`);
             return null;
         }
-        const recordIds = body.recordIds;
-        // Verify before handing it to the gate; the gate re-verifies.
-        if (!verifyLedgerMac(verifierKey, body.runId, recordIds, body.mac))
+        const body = await response.json();
+        const parsed = AttestationSchema.safeParse(body);
+        if (!parsed.success) {
+            writeLine(io.stderr, 'test-gates: live attestation unavailable (schema)');
             return null;
-        return { runId: body.runId, recordIds, mac: body.mac };
+        }
+        const attestation = parsed.data;
+        if (attestation.runId !== expected.runId ||
+            attestation.invocationId !== expected.invocationId ||
+            attestation.inputDigest !== expected.inputDigest) {
+            writeLine(io.stderr, 'test-gates: live attestation rejected (context)');
+            return null;
+        }
+        // Verify before handing it to the gate; the gate re-verifies.
+        if (!verifyAttestationMac(verifierKey, {
+            runId: attestation.runId,
+            invocationId: attestation.invocationId,
+            inputDigest: attestation.inputDigest,
+            recordIds: attestation.recordIds,
+        }, attestation.mac)) {
+            writeLine(io.stderr, 'test-gates: live attestation rejected (mac)');
+            return null;
+        }
+        return attestation;
     }
     catch {
+        writeLine(io.stderr, 'test-gates: live attestation unavailable (transport)');
         return null;
     }
     finally {
         clearTimeout(timer);
     }
+}
+/**
+ * Persists a validated live v2 attestation into the run manifest as the
+ * durable fallback (plan §11.5): the witness may still be serving at
+ * evaluation time, so the manifest must already carry the current
+ * envelope before witness shutdown. Only a fully validated envelope is
+ * ever written; all other manifest fields are preserved.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   attestation: the validated v2 envelope.
+ */
+function persistLiveAttestation(stateDir, attestation) {
+    const manifestPath = join(stateDir, 'manifest.json');
+    let manifest;
+    try {
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    }
+    catch {
+        return; // missing/unreadable manifest: durable channel stays unavailable
+    }
+    const updated = {
+        ...manifest,
+        invocationId: attestation.invocationId,
+        inputDigest: attestation.inputDigest,
+        attestation: attestation,
+    };
+    delete updated['recordIdsMac'];
+    writeFileSync(manifestPath, `${canonicalJson(updated)}\n`, 'utf8');
 }
 /**
  * Adopts an external witness's runId as the run-manifest identity.
@@ -236,7 +490,7 @@ async function adoptWitnessRunId(manifest, witnessUrl, runToken) {
     let response;
     try {
         response = await fetch(`${witnessUrl}/health`, {
-            headers: { 'x-gateforge-run': runToken, accept: 'application/json' },
+            headers: { 'x-gateforge-run': runToken, accept: 'application/json', connection: 'close' },
             signal: controller.signal,
         });
     }

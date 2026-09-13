@@ -14,18 +14,24 @@
  *    record's own contents (structural integrity; catches arbitrary or
  *    transplanted hex ids). Verified here, in the engine, so every
  *    consumer of `evaluateObligation` gets it.
- * 2. Authenticated issuance membership — the id appears in a set whose
- *    integrity is protected by a secret the tested suite never
+ * 2. Authenticated single-envelope membership (plan §11.5–§11.6) — the
+ *    id appears in a v2 attestation envelope ({@link attestationMac})
+ *    whose integrity is protected by a secret the tested suite never
  *    receives: the witness's verifier key. The witness serves the live
- *    set at `GET /ledger-attestation` (verifier-key header) and stamps
- *    the durable manifest append with {@link ledgerMac}. Hash
+ *    envelope at `GET /ledger-attestation` (verifier-key header, bound
+ *    context only) and stamps the durable manifest append with the same
+ *    signed object. The envelope binds the run id, the fresh invocation
+ *    id, the tested input digest, and the issued set — one envelope must
+ *    match all four at once; contexts are never merged. Hash
  *    recomputation is public, and the run manifest lives in the
  *    suite-writable state directory, so PLAIN manifest membership is
  *    trustworthiness-neutral: a hostile suite can fabricate both the
- *    records and the id list, but it cannot produce a valid MAC for an
- *    id set the witness never attested.
- * 3. Run identity — record.runId equals the manifest's runId, so ids
- *    cannot be transplanted across runs.
+ *    records and the id list, but it cannot produce a valid MAC for a
+ *    context the witness never attested. The legacy {@link ledgerMac}
+ *    over `{runId, recordIds}` stays readable for diagnostics but NEVER
+ *    authorizes evidence (it binds no input snapshot).
+ * 3. Run identity — record.runId equals the authorizing envelope's
+ *    runId, so ids cannot be transplanted across runs.
  *
  * Enforcement lives in the CLI's provenance gate (packages/cli), which
  * owns the run manifest and the verifier key surface.
@@ -144,6 +150,12 @@ export function isWitnessedRecord(record) {
 }
 /** Shape a 64-char lowercase hex MAC must have. */
 const MAC_PATTERN = /^[0-9a-f]{64}$/;
+/** Domain tag binding v2 attestation MACs to the ledger envelope format. */
+export const ATTESTATION_DOMAIN = 'gateforge.ledger.v2';
+/** The only attestation envelope version this code produces or honors. */
+export const ATTESTATION_VERSION = 2;
+/** Shape a 64-char lowercase hex input digest must have. */
+const INPUT_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 /**
  * Normalizes a record-id set for MAC computation: deduplicated and
  * sorted by codepoint, so the witness and every verifier hash the same
@@ -203,6 +215,87 @@ export function verifyLedgerMac(verifierKey, runId, recordIds, mac) {
         return false;
     try {
         const expected = Buffer.from(ledgerMac(verifierKey, runId, recordIds), 'hex');
+        const claimed = Buffer.from(mac, 'hex');
+        return expected.length === claimed.length && timingSafeEqual(expected, claimed);
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * Computes the v2 attestation MAC (plan §11.3): HMAC-SHA256 over the
+ * GF-canonical JSON of `{domain, attestationVersion: 2, runId,
+ * invocationId, inputDigest, recordIds}` keyed by the witness's VERIFIER
+ * KEY — a secret the tested suite never receives. The fixed domain tag
+ * prevents cross-format signature acceptance: a legacy `{runId,
+ * recordIds}` MAC can never verify as a v2 attestation, and a v2 MAC
+ * can never verify as anything else.
+ *
+ * Args:
+ *   verifierKey: the witness verifier secret (non-empty).
+ *   body: runId, invocationId, 64-hex inputDigest, and issued record ids
+ *     (normalized internally: deduplicated, codepoint-sorted).
+ *
+ * Returns:
+ *   string: 64-char lowercase hex HMAC.
+ *
+ * Throws:
+ *   TypeError: when the verifier key is empty, an identity is empty, or
+ *   the input digest is not 64-char lowercase hex.
+ */
+export function attestationMac(verifierKey, body) {
+    if (typeof verifierKey !== 'string' || verifierKey.length === 0) {
+        throw new TypeError('attestationMac: verifier key must be a non-empty string');
+    }
+    if (typeof body.runId !== 'string' || body.runId.length === 0) {
+        throw new TypeError('attestationMac: runId must be a non-empty string');
+    }
+    if (typeof body.invocationId !== 'string' || body.invocationId.length === 0) {
+        throw new TypeError('attestationMac: invocationId must be a non-empty string');
+    }
+    if (typeof body.inputDigest !== 'string' || !INPUT_DIGEST_PATTERN.test(body.inputDigest)) {
+        throw new TypeError('attestationMac: inputDigest must be 64-char lowercase hex');
+    }
+    return createHmac('sha256', verifierKey)
+        .update(canonicalJson({
+        domain: ATTESTATION_DOMAIN,
+        attestationVersion: ATTESTATION_VERSION,
+        runId: body.runId,
+        invocationId: body.invocationId,
+        inputDigest: body.inputDigest,
+        recordIds: canonicalIdSet(body.recordIds),
+    }))
+        .digest('hex');
+}
+/**
+ * Verifies a v2 attestation MAC ({@link attestationMac}) in constant
+ * time where the inputs allow it. Adversary-controlled input never
+ * throws. A legacy `{runId, recordIds}` MAC is structurally incapable
+ * of verifying here — the domain tag and the extra fields change the
+ * signed bytes — so old evidence can never authorize through this path.
+ *
+ * Args:
+ *   verifierKey: the witness verifier secret (non-empty).
+ *   body: the claimed attestation body (runId, invocationId,
+ *     inputDigest, recordIds).
+ *   mac: the claimed MAC (64-char lowercase hex).
+ *
+ * Returns:
+ *   boolean: true only when the MAC verifies over the exact v2 body.
+ */
+export function verifyAttestationMac(verifierKey, body, mac) {
+    if (typeof mac !== 'string' || !MAC_PATTERN.test(mac))
+        return false;
+    if (typeof body !== 'object' ||
+        body === null ||
+        typeof body.runId !== 'string' ||
+        typeof body.invocationId !== 'string' ||
+        typeof body.inputDigest !== 'string' ||
+        !Array.isArray(body.recordIds)) {
+        return false;
+    }
+    try {
+        const expected = Buffer.from(attestationMac(verifierKey, body), 'hex');
         const claimed = Buffer.from(mac, 'hex');
         return expected.length === claimed.length && timingSafeEqual(expected, claimed);
     }

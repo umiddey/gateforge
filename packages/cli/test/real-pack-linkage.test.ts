@@ -7,12 +7,17 @@
  *    from the endpoint compiler's corroborated linkage.
  * 2. REAL pack-task (worker reachability) + REAL pack-sqlalchemy (model)
  *    converge into an internality certificate (closed-world proof).
- * 3. Complete green pipeline: init -> discover -> classify -> obligations -> test-gates
- *    with witness test execution, MAC attestation, and green exit 0.
+ * 3. Hostile-suite red proof (plan §11.6/§11.8): fabricated witnessed
+ *    records plus a legacy v1 MAC in the suite-writable manifest never
+ *    authorize (exit 1, legacy-format blocker), and the suite proves the
+ *    verifier key never reaches its environment or state files. The
+ *    honest green test-gates path lives in `attestation.test.ts`
+ *    (transport) and `e2e-example.test.ts` (browser + persistence).
  */
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ledgerMac, withTempRepo } from '@gateforge/core';
+import { withTempRepo } from '@gateforge/core';
 import { runCli } from './helpers.js';
 
 describe('real production-pack linkage', () => {
@@ -391,15 +396,21 @@ function listAccounts(req, res) { res.json({}); }
 app.get('/api/accounts', listAccounts);
 `,
         '.gateforge/adapters/accounts.mjs': 'export default {};\n',
-        'suite.mjs': `import { writeFileSync, mkdirSync } from 'node:fs';
+        'suite.mjs': `import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordIdOf, ledgerMac } from '${coreDist}';
 const stateDir = process.env.GATEFORGE_STATE_DIR;
 if (!stateDir) throw new Error('missing GATEFORGE_STATE_DIR');
 const runId = process.env.GATEFORGE_RUN_ID || '00000000-0000-4000-8000-000000000001';
-const verifierKey = process.env.GATEFORGE_WITNESS_VERIFIER_KEY || 'c'.repeat(64);
+// Plan §11.8: the suite process must never see the verifier key — not
+// in its environment and not in any generated state file. Record the
+// observation where the parent can assert it.
+const keyAbsent =
+  process.env.GATEFORGE_WITNESS_VERIFIER_KEY === undefined &&
+  !readFileSync(join(stateDir, 'env.json'), 'utf8').includes('VERIFIER');
 
 mkdirSync(stateDir, { recursive: true });
+writeFileSync(join(stateDir, 'key-check.json'), JSON.stringify({ keyAbsent }));
 const obligationId = 'tenant.accounts:persistence:read';
 const testId = 't1';
 
@@ -424,8 +435,12 @@ const persistenceRecordId = recordIdOf({
   payload: persistencePayload,
 });
 
+// Hostile-suite fabrication (plan §11.6, F2): hash-consistent ids the
+// witness never issued, planted in the suite-writable manifest with a
+// legacy v1 MAC. Without a v2 attestation binding the tested inputs,
+// none of this authorizes — the run must block.
 const recordIds = [actionRecordId, persistenceRecordId];
-const mac = ledgerMac(verifierKey, runId, recordIds);
+const mac = ledgerMac('c'.repeat(64), runId, recordIds);
 
 writeFileSync(join(stateDir, 'claims.json'), JSON.stringify([
   { schemaVersion: 1, obligationId, testId, testFile: 'routes.test.ts' }
@@ -479,10 +494,14 @@ console.log('suite-passed');
         ['test-gates', '--suite', `node ${repo.path('suite.mjs')}`, '--format', 'json'],
         { GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey },
       );
-      if (result.code !== 0) {
-        throw new Error(`TEST3 RESULT FAILED (code ${result.code}):\nSTDOUT: ${result.stdout}\nSTDERR: ${result.stderr}`);
-      }
-      expect(result.code).toBe(0);
+      // The fabrication is rejected (exit 1): no v2 attestation binds
+      // the tested inputs, and the legacy v1 MAC never authorizes.
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('legacy v1');
+      const keyCheck = JSON.parse(
+        readFileSync(repo.path('.gateforge/test-gates/key-check.json'), 'utf8'),
+      ) as { keyAbsent: boolean };
+      expect(keyCheck.keyAbsent).toBe(true);
     });
   });
 });

@@ -1,8 +1,27 @@
-import { type Obligation, type ResourceGraph, type RunManifest } from '@gateforge/core';
+import { type HttpRouteCandidate, type Obligation, type ResourceGraph, type RunManifest } from '@gateforge/core';
 /** Default run-state directory, repo-root-relative. */
 export declare const DEFAULT_STATE_DIR = ".gateforge/test-gates";
 /** Resolves the run-state directory: override (absolute or relative) or default. */
 export declare function resolveStateDir(cwd: string, override?: string): string;
+/**
+ * Builds the COMPLETE runtime route inventory for HTTP attribution
+ * (plan §9, D2): one candidate per `http.endpoint` graph resource —
+ * including routes with no frontend consumer and no generated
+ * obligation. Derived from the graph only; never from a claim or
+ * evidence payload. Sorted by resourceId codepoint-wise so the
+ * context is deterministic (Phase 6 snapshots it).
+ *
+ * A malformed endpoint resource (missing method/canonicalPath) is
+ * NEVER dropped: it is carried with empty fields so the core resolver
+ * flags the inventory incomplete instead of claiming completeness.
+ *
+ * Args:
+ *   graph: built resource graph.
+ *
+ * Returns:
+ *   HttpRouteCandidate[]: sorted complete candidate list.
+ */
+export declare function httpRoutesView(graph: ResourceGraph): HttpRouteCandidate[];
 /** One obligation as the suite must see it (identity + fingerprint). */
 export interface StateObligation {
     id: string;
@@ -51,6 +70,13 @@ export declare function readJsonArray(stateDir: string, name: string): unknown[]
 export declare function writeManifest(stateDir: string, manifest: RunManifest): void;
 /** Persists the suite-visible obligations document (sorted by id). */
 export declare function writeObligations(stateDir: string, obligations: readonly StateObligation[]): void;
+/**
+ * Persists the derived runtime route inventory (plan §9, D2) for the
+ * suite-side reporter: advisory context ONLY so the reporter can show
+ * useful per-claim rows. The authoritative CLI recomputes this list
+ * from the graph on every run and never reads this file.
+ */
+export declare function writeHttpRoutesView(stateDir: string, routes: readonly HttpRouteCandidate[]): void;
 /**
  * Persists the run's effective-classification view (plan phase 5) as a
  * derived artifact for the verifier side (e.g. the witness service's

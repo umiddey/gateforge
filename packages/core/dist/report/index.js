@@ -100,6 +100,7 @@ function jsonReport(entries, options, blocking) {
         counts.unresolved +
         counts.stale +
         blocking.length;
+    const scope = options.scope ?? { mode: 'all', expandedBecause: [] };
     const report = {
         schemaVersion: 1,
         summary: {
@@ -108,6 +109,9 @@ function jsonReport(entries, options, blocking) {
             blockingEntries: blocking.length,
             ...counts,
         },
+        // Effective scope (§12.4): which obligations were evaluated and why
+        // the scope expanded. Output-only — never part of the snapshot digest.
+        scope: { mode: scope.mode, expandedBecause: [...scope.expandedBecause] },
         verdicts: entries.map((entry) => {
             const record = {
                 obligationId: entry.obligation.id,
@@ -147,6 +151,7 @@ function jsonReport(entries, options, blocking) {
 /** Builds the SARIF 2.1.0 projection (pin #10). */
 function sarifReport(entries, options) {
     const ruleIds = [...new Set(entries.map((entry) => entry.obligation.policyId))].sort(compareStrings);
+    const scope = options.scope ?? { mode: 'all', expandedBecause: [] };
     const ruleIndex = {};
     ruleIds.forEach((ruleId, index) => {
         ruleIndex[ruleId] = index;
@@ -205,6 +210,11 @@ function sarifReport(entries, options) {
                         rules: ruleIds.map((ruleId) => ({ ruleId })),
                     },
                 },
+                // Effective evaluation scope (§12.4) in the run property bag:
+                // which obligations were evaluated and why the scope expanded.
+                properties: {
+                    scope: { mode: scope.mode, expandedBecause: [...scope.expandedBecause] },
+                },
                 // Blocking policy entries (unclassified/unresolved resources,
                 // detector findings, stale references) are not obligation
                 // verdicts, so they surface as tool-execution notifications
@@ -241,6 +251,10 @@ function textReport(entries, options, blocking) {
         blocking.length;
     lines.push(`gateforge run: ${entries.length} obligation(s) — ` +
         `${counts.satisfied} satisfied, ${counts.waived} waived, ${blockingCount} blocking`);
+    const scope = options.scope;
+    if (scope !== undefined && scope.expandedBecause.length > 0) {
+        lines.push(`scope: all obligations; expanded because ${[...scope.expandedBecause].join(', ')}`);
+    }
     if (options.waiverCounts !== undefined) {
         const wc = options.waiverCounts;
         lines.push(`waivers: ${wc.total} total, ${wc.active} active, ${wc.expired} expired, ` +

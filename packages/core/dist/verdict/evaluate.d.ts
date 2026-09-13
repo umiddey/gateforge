@@ -1,3 +1,4 @@
+import { type HttpRouteCandidate } from './registry.js';
 import { type Obligation } from '../schemas/obligation.js';
 import type { TrustTier } from '../schemas/common.js';
 import type { Verdict } from '../schemas/verdict.js';
@@ -67,6 +68,12 @@ export interface VerdictContext {
         kind: string;
         attributes: Record<string, unknown>;
     } | null;
+    /**
+     * The COMPLETE runtime route inventory for HTTP attribution (plan
+     * §9, D2). Host-derived from the graph; absent blocks HTTP
+     * satisfaction (no any-endpoint fallback).
+     */
+    httpRoutes?: readonly HttpRouteCandidate[] | null;
     /** Injected clock instant (invariant 7) — the only time source. */
     now: Date | string;
 }

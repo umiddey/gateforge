@@ -37,7 +37,13 @@ import { createServer, request, type IncomingMessage, type Server, type ServerRe
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { ledgerMac, recordIdOf, type Classification, type RecordOrigin } from '@gateforge/core';
+import {
+  ATTESTATION_VERSION,
+  attestationMac,
+  recordIdOf,
+  type Classification,
+  type RecordOrigin,
+} from '@gateforge/core';
 import { canonicalOf } from '../json.js';
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
@@ -146,6 +152,19 @@ interface WitnessState {
   proxyServer: Server | null;
   nowIso: () => string;
   stopped: boolean;
+  /**
+   * Trusted run context bound via `POST /run-context` (plan §11.4): the
+   * frozen `{runId, invocationId, inputDigest}` the witness attests.
+   * Set once, before any observation or issuance; a witness that already
+   * observed, issued, or holds an in-flight proxy exchange refuses
+   * binding (409). `observedSeqAtBind` watermarks observations that
+   * completed before binding — they are never consumable under the new
+   * context, closing the bind/observe race.
+   */
+  runContext: { runId: string; invocationId: string; inputDigest: string } | null;
+  observedSeqAtBind: number;
+  /** Proxy exchanges currently in flight (request received, response open). */
+  proxyInFlight: number;
 }
 
 /** Codepoint-wise comparison for deterministic ordering. */
@@ -327,6 +346,9 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     preObservations: new Map(),
     observed: [],
     observedSeq: 0,
+    runContext: null,
+    observedSeqAtBind: 0,
+    proxyInFlight: 0,
     proxyServer: null,
     server: undefined as unknown as Server,
     nowIso: options.now ?? (() => new Date().toISOString()),
@@ -349,8 +371,8 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   }
   const url = `http://${formatHost(state.options.host)}:${address.port}`;
 
-  // ADR 0004 D7: the witness-owned loopback reverse proxy. Browser
-  // traffic aimed at the proxy is forwarded to the attested target and
+  // ADR 0004 D7: the witness-owned loopback reverse proxy. Traffic
+  // aimed at the proxy is forwarded to the attested target and
   // (method, path, status, bounded body snapshot, total body bytes)
   // recorded as an ENGINE observation; a suite-callable endpoint consumes
   // a matching observation to issue a witnessed record. The proxy never
@@ -371,6 +393,18 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
         // claims. With no declared mount path the URL is forwarded and
         // recorded byte-identical to today.
         const forwardUrl = stripMountPath(req.url ?? '/', state.options.mountPath);
+        // In-flight accounting (plan §11.4): a proxy exchange that
+        // starts before `/run-context` binds must refuse the bind —
+        // otherwise traffic from an older invocation could be signed
+        // under the new context.
+        state.proxyInFlight += 1;
+        let settledFlight = false;
+        const settleFlight = (): void => {
+          if (!settledFlight) {
+            settledFlight = true;
+            state.proxyInFlight -= 1;
+          }
+        };
         const forward = request(
           {
             protocol: proxyTargetUrl.protocol,
@@ -409,12 +443,15 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
                 bodySha256: createHash('sha256').update(Buffer.concat(snapshot)).digest('hex'),
                 bodyBytes: totalBytes,
               });
+              settleFlight();
             });
+            upstream.on('error', settleFlight);
             res.writeHead(status, upstream.headers);
             upstream.pipe(res);
           },
         );
         forward.on('error', () => {
+          settleFlight();
           if (!res.headersSent) sendJson(res, 502, { error: 'observation proxy upstream failed' });
           else res.end();
         });
@@ -442,7 +479,14 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   return handle;
 }
 
-/** Canonicalizes an observed request path (query stripped, one slash). */
+/**
+ * Canonicalizes an observed request path (query/fragment stripped, one
+ * leading slash, trailing slashes dropped, root '/' stays '/').
+ * Lockstep with core's `interpretObservedPath` (plan §9 steps 1-3):
+ * duplicate slashes are NOT collapsed and percent-encodings are NEVER
+ * decoded on either side — noncanonical routing meaning stays visible
+ * so the verifier blocks instead of matching a different endpoint.
+ */
 function normalizeObservedPath(rawPath: string): string {
   let path = rawPath.split('?')[0]?.split('#')[0] ?? '/';
   if (!path.startsWith('/')) path = `/${path}`;
@@ -453,7 +497,10 @@ function normalizeObservedPath(rawPath: string): string {
 /**
  * Consumes one engine-observed request matching (method, path) and
  * issues witnessed `http.request` records bound to the declaring test's
- * obligation claims (ADR 0004 D7). Single-use at the EXCHANGE level: an
+ * obligation claims (ADR 0004 D7, plan §8 / D1 transport-only semantics).
+ * The witness observes that an HTTP exchange traversed the proxy; WHICH
+ * browser, UI action, or test produced it is suite-claimed attribution,
+ * never independent proof. Single-use at the EXCHANGE level: an
  * observation proves exactly one real request — it is consumed on first
  * match and can never be re-claimed, replayed, or extended later. One
  * genuine exchange genuinely instantiates every contract its endpoint
@@ -486,6 +533,23 @@ async function handleHttpObservation(
   const method = body['method'];
   const path = body['path'];
   const expectedStatus = body['expectedStatus'];
+  // A split legacy assignment (distinct `claimId` vs `obligationId`)
+  // is ambiguous caller intent — fail closed instead of silently
+  // picking one (plan §8 step 7: no silent wrong-obligation binding).
+  if (
+    typeof body['claimId'] === 'string' &&
+    body['claimId'].length > 0 &&
+    typeof body['obligationId'] === 'string' &&
+    body['obligationId'].length > 0 &&
+    body['claimId'] !== body['obligationId']
+  ) {
+    sendJson(res, 400, {
+      error:
+        'http observation refuses a split claimId/obligationId assignment: supply one ' +
+        'explicit obligation id (or a claimIds list)',
+    });
+    return;
+  }
   // Claim binding: `claimIds` (the declaring test's claimed obligation
   // ids for this endpoint) — with the singular legacy `claimId` /
   // `obligationId` pair still accepted and folded in.
@@ -524,8 +588,14 @@ async function handleHttpObservation(
     return;
   }
   const wanted = normalizeObservedPath(path);
+  // Bind watermark (plan §11.4): observations that completed before the
+  // trusted context bound predate it and are never consumable under the
+  // new invocation — closing the proxy/bind race where a request started
+  // before binding but its response ends after it.
+  const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
   const index = state.observed.findIndex(
     (entry) =>
+      entry.seq > watermark &&
       entry.method === method.toUpperCase() &&
       entry.path === wanted &&
       (expectedStatus === undefined || entry.status === expectedStatus),
@@ -534,8 +604,8 @@ async function handleHttpObservation(
     sendJson(res, 409, {
       error:
         `no engine-observed request matches ${method.toUpperCase()} ${wanted}` +
-        `${expectedStatus === undefined ? '' : ` with status ${String(expectedStatus)}`}; drive the ` +
-        'browser through the observation proxy before claiming the obligation',
+        `${expectedStatus === undefined ? '' : ` with status ${String(expectedStatus)}`}; drive traffic ` +
+        'through the observation proxy before claiming the obligation',
     });
     return;
   }
@@ -600,6 +670,10 @@ async function handleRequest(
     }
     if (req.method === 'GET' && path === '/ledger-attestation') {
       handleLedgerAttestation(state, res, req.headers[VERIFIER_HEADER]);
+      return;
+    }
+    if (req.method === 'POST' && path === '/run-context') {
+      await handleRunContext(state, res, req.headers[VERIFIER_HEADER], await readBody(req));
       return;
     }
     if (req.method === 'GET' && path === '/classifications') {
@@ -1127,14 +1201,120 @@ function issuePersistenceRecord(
   return issueRecord(state, claimId, PERSISTENCE_KIND, testId, payload, 'engine-observed');
 }
 
+/** UUID shape for run/invocation identities (validated, never compared across runs). */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 64-char lowercase hex shape for input digests. */
+const INPUT_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+
 /**
- * Serves the authenticated live ledger set (pin #7, GF-23): runId plus
- * the issued recordIds, bound by a verifier-key MAC. Requires the
- * verifier key — a secret the tested suite never receives — so only an
+ * Binds the trusted run context (plan §11.4): the validated current
+ * `{runId, invocationId, inputDigest}` from the trusted CLI/orchestrator
+ * is frozen in witness memory. Requires BOTH the run token (outer gate)
+ * and the verifier key header — a suite holding only the run token gets
+ * 401 and the context is unchanged. Binding is allowed only before any
+ * proxy exchange, pre-observation, or evidence issuance, and while no
+ * proxy exchange is in flight; a used witness answers 409. Repeating the
+ * identical binding is idempotent (200); any change to a bound value is
+ * 409 — bound state is never relabeled.
+ *
+ * Args:
+ *   state: running witness state.
+ *   res: response to answer.
+ *   verifier: the `x-gateforge-verifier` header value.
+ *   body: parsed request body (must carry runId/invocationId/inputDigest).
+ */
+async function handleRunContext(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: unknown,
+): Promise<void> {
+  const verifierKey = state.options.verifierKey;
+  if (verifierKey === null || verifierKey === undefined) {
+    sendJson(res, 409, { error: 'witness has no verifier key; run-context binding is unavailable' });
+    return;
+  }
+  if (typeof verifier !== 'string' || !timingSafeEqual(verifier, verifierKey)) {
+    sendJson(res, 401, { error: 'unauthorized: expected x-gateforge-verifier with the verifier key' });
+    return;
+  }
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'run-context body must be an object');
+  }
+  const record = body as Record<string, unknown>;
+  const runId = record['runId'];
+  const invocationId = record['invocationId'];
+  const inputDigest = record['inputDigest'];
+  if (
+    typeof runId !== 'string' ||
+    !UUID_PATTERN.test(runId) ||
+    typeof invocationId !== 'string' ||
+    !UUID_PATTERN.test(invocationId) ||
+    typeof inputDigest !== 'string' ||
+    !INPUT_DIGEST_PATTERN.test(inputDigest)
+  ) {
+    throw new HttpError(
+      400,
+      'run-context requires runId (UUID), invocationId (UUID), and inputDigest (64-char lowercase hex)',
+    );
+  }
+  if (runId !== state.options.runId) {
+    sendJson(res, 409, {
+      error:
+        `run-context runId '${runId}' does not match this witness run '${state.options.runId}'; ` +
+        'adopt the witness run id first, then bind — a witness already used by an older ' +
+        'invocation is rejected, start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  const existing = state.runContext;
+  if (existing !== null) {
+    if (
+      existing.runId === runId &&
+      existing.invocationId === invocationId &&
+      existing.inputDigest === inputDigest
+    ) {
+      sendJson(res, 200, { bound: true, ...existing });
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'run context is already bound and differs; bound state is never relabeled — ' +
+        'start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (
+    state.ledger.size > 0 ||
+    state.observed.length > 0 ||
+    state.preObservations.size > 0 ||
+    state.proxyInFlight > 0
+  ) {
+    sendJson(res, 409, {
+      error:
+        'witness already observed or issued evidence; run-context binding is allowed only ' +
+        'before any proxy exchange, pre-observation, or issuance — start a fresh witness ' +
+        'for a new invocation',
+    });
+    return;
+  }
+  state.runContext = { runId, invocationId, inputDigest };
+  state.observedSeqAtBind = state.observedSeq;
+  sendJson(res, 200, { bound: true, runId, invocationId, inputDigest });
+}
+
+/**
+ * Serves the authenticated live attestation (pin #7, GF-23, plan §11.3):
+ * the SAME v2 signed envelope object the shutdown append writes —
+ * `{attestationVersion: 2, runId, invocationId, inputDigest, recordIds,
+ * mac}` with the MAC over the domain-tagged body. Requires the verifier
+ * key — a secret the tested suite never receives — so only an
  * orchestrator-grade caller (the evaluating CLI) can certify issuance;
  * the suite's run token authorizes submissions, never attestation.
- * Without a configured verifier key the witness answers 409: an
- * unauthenticated ledger is not an attestation.
+ * Without a configured verifier key the witness answers 409, and an
+ * unbound witness answers 409 as well: it must not sign whatever digest
+ * a suite-writable manifest happens to carry.
  */
 function handleLedgerAttestation(
   state: WitnessState,
@@ -1150,11 +1330,28 @@ function handleLedgerAttestation(
     sendJson(res, 401, { error: 'unauthorized: expected x-gateforge-verifier with the verifier key' });
     return;
   }
+  const bound = state.runContext;
+  if (bound === null) {
+    sendJson(res, 409, {
+      error:
+        'witness has no bound run context; bind POST /run-context before observation — ' +
+        'an unbound witness issues no authenticated attestation',
+    });
+    return;
+  }
   const recordIds = [...state.ledger.keys()].sort(compareStrings);
   sendJson(res, 200, {
-    runId: state.options.runId,
+    attestationVersion: ATTESTATION_VERSION,
+    runId: bound.runId,
+    invocationId: bound.invocationId,
+    inputDigest: bound.inputDigest,
     recordIds,
-    mac: ledgerMac(verifierKey, state.options.runId, recordIds),
+    mac: attestationMac(verifierKey, {
+      runId: bound.runId,
+      invocationId: bound.invocationId,
+      inputDigest: bound.inputDigest,
+      recordIds,
+    }),
   });
 }
 
@@ -1176,16 +1373,20 @@ async function stopWitness(state: WitnessState): Promise<void> {
 }
 
 /**
- * Pin #4/#7: at shutdown, append the issued recordIds to the run
- * manifest in the state dir (sorted, deduplicated; preserves every
- * other field). Absent manifest → no-op (standalone witness).
+ * Pin #4/#7, plan §11.3–§11.4: at shutdown, append the issued recordIds
+ * to the run manifest in the state dir (sorted, deduplicated; preserves
+ * every other field). Absent manifest → no-op (standalone witness).
  *
- * With a verifier key configured, the append is AUTHENTICATED: a
- * `recordIdsMac` (HMAC over the canonical `{runId, recordIds}`) is
- * stamped alongside the ids, making the suite-writable manifest
- * tamper-evident for the evaluating CLI (GF-23). Without one the ids
- * are appended for reporting only — downstream evaluation treats an
- * unauthenticated set as untrusted and fails closed.
+ * The append NEVER reads a digest from the suite-writable manifest: the
+ * v2 `attestation` envelope is built from the FROZEN bound context
+ * (bound via authenticated `POST /run-context` before any observation)
+ * plus EXACTLY the ids this witness issued — nothing more. The
+ * pre-existing `recordIds` in the manifest came from the suite-writable
+ * file, so merging them in would let a hostile suite have its forged
+ * computed ids signed as issued (audit round 3). They are discarded,
+ * not merged. An unbound witness appends the bare ids for reporting
+ * only — no attestation, so downstream evaluation fails closed.
+ * No legacy `recordIdsMac` is written: v1 MACs never authorize evidence.
  */
 function appendRecordIdsToManifest(state: WitnessState): void {
   const stateDir = state.options.stateDir;
@@ -1203,24 +1404,29 @@ function appendRecordIdsToManifest(state: WitnessState): void {
   } catch {
     return; // malformed manifest: never corrupt it; evaluation reads it leniently
   }
-  // The authenticated set is EXACTLY what this witness issued — nothing
-  // more. The pre-existing `recordIds` in the manifest came from the
-  // suite-writable file, so merging them in would let a hostile suite
-  // have its forged computed ids signed as issued (audit round 3).
-  // They are discarded, not merged.
   const issued = [...state.ledger.keys()].sort(compareStrings);
   const updated: Record<string, unknown> = { ...manifest, recordIds: issued };
+  // Drop any legacy v1 MAC the suite (or an older writer) left behind:
+  // it must never authorize evidence, not even when it verifies.
+  delete updated['recordIdsMac'];
   const verifierKey = state.options.verifierKey;
-  const manifestRunId = typeof manifest['runId'] === 'string' ? manifest['runId'] : null;
-  if (
-    verifierKey !== null &&
-    verifierKey !== undefined &&
-    manifestRunId !== null &&
-    manifestRunId.length > 0
-  ) {
-    // Bind the set to the MANIFEST's runId: the CLI verifies against the
-    // same value it checks each record's runId against.
-    updated['recordIdsMac'] = ledgerMac(verifierKey, manifestRunId, issued);
+  const bound = state.runContext;
+  if (verifierKey !== null && verifierKey !== undefined && bound !== null) {
+    updated['invocationId'] = bound.invocationId;
+    updated['inputDigest'] = bound.inputDigest;
+    updated['attestation'] = {
+      attestationVersion: ATTESTATION_VERSION,
+      runId: bound.runId,
+      invocationId: bound.invocationId,
+      inputDigest: bound.inputDigest,
+      recordIds: issued,
+      mac: attestationMac(verifierKey, {
+        runId: bound.runId,
+        invocationId: bound.invocationId,
+        inputDigest: bound.inputDigest,
+        recordIds: issued,
+      }),
+    };
   }
   writeFileSync(manifestPath, `${canonicalOf(updated)}\n`, 'utf8');
 }
