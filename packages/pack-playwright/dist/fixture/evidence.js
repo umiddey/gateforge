@@ -294,14 +294,44 @@ export function createEvidence({ page, testInfo, baseURL, client, }) {
             };
         },
     };
-    // ---------- http observation (ADR 0004 D7) ----------
-    // Consumes one witness-proxy observation for the browser request the
-    // journey caused and binds the witnessed `http.request` record to the
-    // declared http:* obligation claims. Without real proxied traffic the
-    // witness answers 409 — the suite cannot mint network evidence.
+    // ---------- http observation (ADR 0004 D7, plan §8 / D1) ----------
+    // Consumes one witness-observed HTTP exchange the journey caused and
+    // binds the witnessed `http.request` record to the declared http:*
+    // obligation claims. Transport-only: test attribution is
+    // suite-claimed. Without real proxied traffic the witness answers
+    // 409 — the suite cannot mint network evidence.
     async function observeHttp(request) {
+        // Explicit claim selection (plan §8 step 7): an explicit target
+        // outside the test's declared claims is caller error, never a
+        // silent binding to the wrong obligation.
+        if (request.obligationId !== undefined) {
+            if (!claims.includes(request.obligationId)) {
+                throw new Error(`http.observe targets '${request.obligationId}' which this test did not declare ` +
+                    `(declared: ${claims.join(', ') || '<none>'})`);
+            }
+            const targets = [request.obligationId];
+            const result = await witness.observeHttp({
+                claimIds: [...targets],
+                testId,
+                method: request.method.toUpperCase(),
+                path: request.path,
+                ...(request.expectedStatus !== undefined ? { expectedStatus: request.expectedStatus } : {}),
+            });
+            return {
+                status: result.status,
+                recordId: result.records[0]?.recordId ?? '',
+                recordIds: result.records.map((record) => record.recordId),
+            };
+        }
         const httpClaims = claims.filter((claim) => claim.includes(':http:'));
-        const targets = httpClaims.length > 0 ? httpClaims : claims;
+        const candidates = httpClaims.length > 0 ? httpClaims : claims;
+        // Ambiguous omitted selection must fail with a useful error — never
+        // silently assign evidence to the first claim.
+        if (candidates.length > 1) {
+            throw new Error(`http.observe is ambiguous: the test declares ${candidates.length} claims ` +
+                `(${candidates.join(', ')}); pass an explicit obligationId`);
+        }
+        const targets = candidates;
         const result = await witness.observeHttp({
             claimIds: [...targets],
             testId,

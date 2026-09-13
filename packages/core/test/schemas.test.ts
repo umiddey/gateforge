@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ClassificationSchema } from '../src/index.js';
 import {
+  AttestationSchema,
   BaselineSchema,
   ClassificationFileSchema,
   ClaimSchema,
@@ -196,6 +197,58 @@ policies:
       recordIdsMac: 'not-a-mac',
     });
     expect(bad.success).toBe(false);
+  });
+
+  it('AttestationSchema accepts a versioned v2 envelope and rejects legacy/unsorted shapes', () => {
+    const envelope = {
+      attestationVersion: 2,
+      runId: RUN_ID,
+      invocationId: 'aaaaaaaa-0000-4000-8000-000000000001',
+      inputDigest: 'c'.repeat(64),
+      recordIds: ['a'.repeat(64), RECORD_ID],
+      mac: 'd'.repeat(64),
+    };
+    expect(AttestationSchema.parse(envelope).attestationVersion).toBe(2);
+    // Wrong version, unsorted ids, duplicated ids, rewritten legacy
+    // field names, and extra keys are all schema-invalid (strict).
+    for (const bad of [
+      { ...envelope, attestationVersion: 1 },
+      { ...envelope, recordIds: [RECORD_ID, 'a'.repeat(64)] },
+      { ...envelope, recordIds: [RECORD_ID, RECORD_ID] },
+      { ...envelope, recordIdsMac: 'd'.repeat(64) },
+      { ...envelope, inputDigest: 'xyz' },
+    ]) {
+      expect(AttestationSchema.safeParse(bad).success).toBe(false);
+    }
+  });
+
+  it('RunManifest carries invocationId/inputDigest/attestation and stays strict', () => {
+    const manifest = RunManifestSchema.parse({
+      schemaVersion: 1,
+      runId: RUN_ID,
+      startedAt: '2026-08-30T12:00:00.000Z',
+      gitSha: null,
+      provider: 'local-staged',
+      plugins: [],
+      attestationScope: null,
+      invocationId: 'aaaaaaaa-0000-4000-8000-000000000001',
+      inputDigest: 'c'.repeat(64),
+      recordIds: [RECORD_ID],
+      attestation: {
+        attestationVersion: 2,
+        runId: RUN_ID,
+        invocationId: 'aaaaaaaa-0000-4000-8000-000000000001',
+        inputDigest: 'c'.repeat(64),
+        recordIds: [RECORD_ID],
+        mac: 'd'.repeat(64),
+      },
+    });
+    expect(manifest.invocationId).toBe('aaaaaaaa-0000-4000-8000-000000000001');
+    expect(manifest.attestation?.attestationVersion).toBe(2);
+    // Unknown keys still rejected (no loosened strict()).
+    expect(
+      RunManifestSchema.safeParse({ ...(manifest as object), unknownField: 1 }).success,
+    ).toBe(false);
   });
 
   it('all seven verdicts are valid (ADR 0001)', () => {

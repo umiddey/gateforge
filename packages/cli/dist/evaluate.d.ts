@@ -48,15 +48,33 @@ export interface EvaluateInput {
      */
     witnessVerifierKey?: string | null;
     /**
-     * Live `GET /ledger-attestation` response fetched by `test-gates`
-     * while a wired witness was still serving (runId + issued id set +
-     * verifier-key MAC). Verified again here before it contributes trust.
+     * Live v2 attestation envelope fetched by `test-gates` while a wired
+     * witness was still serving (plan §11.3: the same signed object the
+     * shutdown append writes). Verified again here before it contributes
+     * trust. Legacy v1 `{runId, recordIds, mac}` shapes never verify here.
      */
-    witnessAttestation?: {
-        runId: string;
-        recordIds: readonly string[];
-        mac: string;
-    } | null;
+    witnessAttestation?: unknown;
+    /**
+     * Evidence authorization context (plan §11.5–§11.6).
+     *
+     * `test-gates` holds its mint (`invocationId`) and digest in trusted
+     * process memory and passes them here — never by rereading state
+     * files after the suite ran. `check` recomputes the current digest
+     * itself and requires no invocation match (D3: a completed signed run
+     * for identical inputs is reusable).
+     */
+    evidenceContext?: {
+        /** Trusted current input digest, or null when the snapshot is unavailable. */
+        expectedInputDigest: string | null;
+        /** True when no usable Git inventory exists (non-Git checkout). */
+        snapshotUnavailable?: boolean;
+        /** Trusted invocation id (test-gates memory; null for check). */
+        expectedInvocationId?: string | null;
+        /** True for test-gates: the invocation identity must match. */
+        requireInvocationId?: boolean;
+        /** True when the test-gates run mutated its own inputs post-suite. */
+        changedInputs?: boolean;
+    };
 }
 /** The evaluated run. */
 export interface EvaluateResult {

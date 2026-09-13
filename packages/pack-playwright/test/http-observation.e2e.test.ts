@@ -1,13 +1,16 @@
 /**
- * Phase 6 REAL-browser proof (playwright-evidence class per
+ * Plan §8 REAL-browser transport proof (playwright-evidence class per
  * docs/testing/TESTING_POLICY.md): a real chromium run issues the HTTP
  * request THROUGH the witness-owned observation proxy, and the witness
  * turns that engine observation into a witnessed `http.request` record.
+ * Transport-only: the witness observed an HTTP exchange; test
+ * attribution is suite-claimed — even real browser traffic leaves
+ * `http:frontend-request-observed` blocking `missing`, while
+ * `http:request-observed` grades `satisfied` through the real engine.
  *
- * The transport-only sibling (`test/http-observation.test.ts`) drives
- * the proxy with node `http.request`; this test proves the actual
- * browser path — `page.goto(proxyUrl)` + a native form submission — so
- * "the browser issued the request" is engine-observed, not asserted.
+ * The Node-driven sibling (`test/http-observation.test.ts`) drives the
+ * proxy with node `http.request`; this test proves the actual browser
+ * path — `page.goto(proxyUrl)` + a native form submission.
  *
  * Honest marking: this test needs a real chromium binary. If the
  * environment lacks one it FAILS (testing policy forbids silent skips).
@@ -16,12 +19,14 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { evaluateObligation, recordIdOf } from '@gateforge/core';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
 import { RUN_HEADER } from '../src/constants.js';
 
 const RUN_ID = '2b4a6c80-1e3d-4f5a-8b7c-9d0e1f2a3b4c';
 const TOKEN = 'browser-observation-run-token';
-const OBLIGATION_ID = 'tenant.http-post-api-contracts-browser:http:frontend-request-observed';
+const FRONTEND_OBLIGATION_ID = 'tenant.http-post-api-contracts-browser:http:frontend-request-observed';
+const TRANSPORT_OBLIGATION_ID = 'tenant.http-post-api-contracts-browser:http:request-observed';
 const TEST_ID = 'browser-journey-1';
 
 const TARGET_PAGE = `<!doctype html>
@@ -70,9 +75,8 @@ function observe(
   overrides: Record<string, unknown> = {},
 ): Promise<{ statusCode: number; body: { error?: string; status?: number; recordId?: string } }> {
   const body = JSON.stringify({
-    obligationId: OBLIGATION_ID,
+    claimId: TRANSPORT_OBLIGATION_ID,
     testId: TEST_ID,
-    claimId: OBLIGATION_ID,
     method: 'POST',
     path: '/api/contracts',
     ...overrides,
@@ -138,24 +142,106 @@ describe('browser-driven observation proxy (real chromium, playwright-evidence)'
         headers: { [RUN_HEADER]: TOKEN },
       });
       const ledger = (await recordsResponse.json()) as {
-        records: Array<{
-          kind: string;
-          trust: string;
-          origin: string;
-          obligationId: string;
-          payload: Record<string, unknown>;
-        }>;
+        records: Array<Record<string, unknown>>;
       };
-      const httpRecords = ledger.records.filter((entry) => entry.kind === 'http.request');
+      const httpRecords = ledger.records.filter(
+        (entry) => (entry as { kind?: unknown }).kind === 'http.request',
+      );
       expect(httpRecords).toHaveLength(1);
-      expect(httpRecords[0]?.trust).toBe('witnessed');
-      expect(httpRecords[0]?.origin).toBe('engine-observed');
-      expect(httpRecords[0]?.obligationId).toBe(OBLIGATION_ID);
-      expect(httpRecords[0]?.payload).toMatchObject({
+      const first = httpRecords[0] as unknown as Record<string, unknown>;
+      expect(first['trust']).toBe('witnessed');
+      expect(first['origin']).toBe('engine-observed');
+      expect(first['obligationId']).toBe(TRANSPORT_OBLIGATION_ID);
+      expect(first['payload']).toMatchObject({
         method: 'POST',
         url: '/api/contracts',
         status: 201,
       });
+
+      // Through the real engine: the browser-driven exchange satisfies
+      // the explicit transport contract but leaves the frontend contract
+      // blocking missing (no independent browser/test channel).
+      const classification = {
+        exposure: 'user-facing',
+        plane: 'tenant',
+        primaryKey: ['method', 'path'],
+        lifecycle: { create: false, read: false, update: false, delete: false },
+        evidenceAdapter: 'x',
+      } as const;
+      function provenancedAnchor(obligationId: string): Record<string, unknown> {
+        const payload = { operation: 'create', entityId: 'browser-1' };
+        const base: Record<string, unknown> = {
+          schemaVersion: 1,
+          runId: RUN_ID,
+          trust: 'claimed',
+          obligationId,
+          testId: TEST_ID,
+          kind: 'ui.action',
+          origin: 'suite-submitted',
+          payload,
+        };
+        base['recordId'] = recordIdOf({
+          runId: RUN_ID,
+          obligationId,
+          kind: 'ui.action',
+          testId: TEST_ID,
+          origin: 'suite-submitted',
+          payload,
+        });
+        return base;
+      }
+      const transportOutcome = evaluateObligation(
+        {
+          schemaVersion: 1,
+          id: TRANSPORT_OBLIGATION_ID,
+          resourceId: 'tenant.http-post-api-contracts-browser',
+          contract: 'http:request-observed',
+          policyId: 'p',
+          lifecycle: { create: false, read: false, update: false, delete: false },
+        },
+        {
+          claims: [{ schemaVersion: 1, obligationId: TRANSPORT_OBLIGATION_ID, testId: TEST_ID }],
+          records: [provenancedAnchor(TRANSPORT_OBLIGATION_ID), ...(ledger.records as unknown[])],
+          waivers: [],
+          classification,
+          // Complete inventory (plan §9, D2): the browser-driven
+          // observation attributes to the obligation's own endpoint.
+          httpRoutes: [
+            {
+              resourceId: 'tenant.http-post-api-contracts-browser',
+              method: 'POST',
+              canonicalPath: '/api/contracts',
+            },
+          ],
+          now: '2026-01-01T00:00:00.000Z',
+        },
+      );
+      expect(transportOutcome.verdict).toBe('satisfied');
+      const frontendOutcome = evaluateObligation(
+        {
+          schemaVersion: 1,
+          id: FRONTEND_OBLIGATION_ID,
+          resourceId: 'tenant.http-post-api-contracts-browser',
+          contract: 'http:frontend-request-observed',
+          policyId: 'p',
+          lifecycle: { create: false, read: false, update: false, delete: false },
+        },
+        {
+          claims: [{ schemaVersion: 1, obligationId: FRONTEND_OBLIGATION_ID, testId: TEST_ID }],
+          records: [
+            provenancedAnchor(FRONTEND_OBLIGATION_ID),
+            ...(ledger.records as unknown[]).map((entry) => ({
+              ...((entry as Record<string, unknown>) ?? {}),
+              obligationId: FRONTEND_OBLIGATION_ID,
+            })),
+          ],
+          waivers: [],
+          classification,
+          now: '2026-01-01T00:00:00.000Z',
+        },
+      );
+      expect(frontendOutcome.verdict).toBe('missing');
+      expect(frontendOutcome.reason).toContain('no independent browser/test observation channel');
     } finally {
       await witness.stop();
       await target.stop();

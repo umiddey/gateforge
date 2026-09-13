@@ -11,6 +11,24 @@
  */
 import type { Claim, Obligation } from '../schemas/index.js';
 import type { TrustTier } from '../schemas/common.js';
+/**
+ * One runtime route candidate for HTTP attribution (plan §9, D2).
+ * Core-owned: the host (CLI) derives the COMPLETE list from its
+ * resource graph — every applicable `http.endpoint` resource, including
+ * routes with no frontend consumer and no generated obligation. A
+ * caller may never supply only the route it wants to satisfy, and the
+ * list is never accepted from a claim or evidence payload (Phase 6
+ * snapshots this context; the producer sorts it codepoint-wise by
+ * resourceId so it is deterministic).
+ */
+export interface HttpRouteCandidate {
+    /** Graph resource id of the endpoint (e.g. `http.endpoint:GET /a/{}`). */
+    resourceId: string;
+    /** Concrete uppercase method as compiled (e.g. `GET`). */
+    method: string;
+    /** Compiled canonical path shape (e.g. `/accounts/{}`). */
+    canonicalPath: string;
+}
 /** Lenient record view (same shape the verdict engine reads). */
 export interface RegistryRecordLike {
     readonly recordId: unknown;
@@ -34,14 +52,21 @@ export interface ClaimEvidenceInput {
     primaryKey: readonly string[];
     /**
      * The obligation's graph resource (kind + attributes), when the host
-     * can supply it. Verifiers use it to bind evidence to identity — e.g.
-     * an `http.request` observation must come from the obligation's own
-     * endpoint. Absent/null (fixture harnesses) keeps historical behavior.
+     * can supply it. Verifiers use it to bind evidence to identity.
      */
     resource?: {
         kind: string;
         attributes: Record<string, unknown>;
     } | null;
+    /**
+     * The COMPLETE runtime route inventory for HTTP attribution (plan
+     * §9, D2): every applicable `http.endpoint` resource, host-derived
+     * from the graph — never from a claim or evidence payload. Absent
+     * (null/undefined) blocks HTTP satisfaction: without the full
+     * candidate set no endpoint-specific pass is authoritative (no
+     * any-endpoint fallback).
+     */
+    httpRoutes?: readonly HttpRouteCandidate[] | null;
 }
 /** Per-claim grading outcome (same shape the aggregation consumes). */
 export type ClaimOutcome = {

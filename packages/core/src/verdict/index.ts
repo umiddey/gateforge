@@ -22,5 +22,17 @@ export {
   type ClaimEvidenceInput,
   type ClaimOutcome,
   type ContractVerifier,
+  type HttpRouteCandidate,
 } from './registry.js';
-export { registerPackVerifiers } from './pack-verifiers.js';
+/**
+ * Deterministic runtime route attribution (plan §9, D2): the single
+ * path interpretation plus the complete-inventory resolver the HTTP
+ * transport verifier grades against. No literal-precedence shortcut;
+ * ambiguity blocks.
+ */
+export {
+  registerPackVerifiers,
+  interpretObservedPath,
+  resolveHttpRoute,
+  pathMatchesShape,
+} from './pack-verifiers.js';

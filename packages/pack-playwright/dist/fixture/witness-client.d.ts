@@ -40,11 +40,14 @@ export declare class WitnessClient {
      */
     preObserve(request: PreObservationRequest): Promise<PreObservationResponse>;
     /**
-     * POST /witness/http-observation (ADR 0004 D7): consumes one
-     * engine-observed request matching (method, path) and issues witnessed
-     * `http.request` records for the declaring test's claimed obligations.
-     * The claim set may be given as `claimIds`, or as the singular legacy
-     * `claimId`/`obligationId` pair (folded in by the server).
+     * POST /witness/http-observation (ADR 0004 D7, plan §8 / D1):
+     * consumes one witness-observed HTTP exchange matching (method, path)
+     * and issues witnessed `http.request` records for the declaring
+     * test's claimed obligations. Transport-only: test attribution is
+     * suite-claimed, never independently verified. The claim set may be
+     * given as `claimIds`, or as the singular legacy `claimId`/
+     * `obligationId` pair (folded in by the server; a split assignment
+     * with distinct values is refused with 400).
      */
     observeHttp(request: {
         claimIds?: string[];

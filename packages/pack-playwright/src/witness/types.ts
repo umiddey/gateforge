@@ -74,10 +74,12 @@ export interface PersistenceResponse {
 /** Witness runtime configuration (env-derived by the bin, explicit in tests). */
 export interface WitnessOptions {
   /**
-   * ADR 0004 D7: when set, the witness also starts a loopback reverse
-   * proxy forwarding to this base URL and records every forwarded
-   * request as an engine observation (the runtime HTTP evidence
-   * channel). Must be loopback.
+   * ADR 0004 D7 (plan §8 / D1): when set, the witness also starts a
+   * loopback reverse proxy forwarding to this base URL and records
+   * every forwarded request as an engine observation (the runtime HTTP
+   * evidence channel). Transport-only: the observation proves the
+   * witness observed an HTTP exchange; test attribution is
+   * suite-claimed. Must be loopback.
    */
   proxyTarget?: string;
   /**
@@ -104,12 +106,14 @@ export interface WitnessOptions {
   /** Per-run token; every call must carry `x-gateforge-run: <token>`. */
   token: string;
   /**
-   * Verifier key for the attestation surface (`GET /ledger-attestation`
-   * and the manifest `recordIdsMac`): shared by the orchestrator with
-   * the witness and the evaluating CLI, NEVER with the tested suite.
-   * When absent the witness serves no attestation and its manifest
-   * append stays unauthenticated (downstream evaluation fails closed
-   * for witnessed records).
+   * Verifier key for the attestation surface (authenticated
+   * `POST /run-context` binding, `GET /ledger-attestation`, and the
+   * manifest v2 `attestation` envelope): shared by the orchestrator
+   * with the witness and the evaluating CLI, NEVER with the tested
+   * suite. When absent the witness serves no attestation and its
+   * manifest append stays unauthenticated (downstream evaluation fails
+   * closed for witnessed records). Environment ONLY (see
+   * `witness/bin.ts`) — never argv, stdout, state files, or suite env.
    */
   verifierKey?: string | null;
   /** Run-state dir; the witness appends its issued recordIds to manifest.json at shutdown. */

@@ -6,12 +6,16 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  ATTESTATION_DOMAIN,
+  ATTESTATION_VERSION,
+  attestationMac,
   canonicalJson,
   isProvenancedRecord,
   isWitnessedRecord,
   ledgerMac,
   recordIdOf,
   sha256Hex,
+  verifyAttestationMac,
   verifyLedgerMac,
 } from '../src/index.js';
 
@@ -165,5 +169,100 @@ describe('ledgerMac / verifyLedgerMac (verifier-key attestation, GF-23)', () => 
   it('throws on an empty verifier key (never mint unauthenticated MACs)', () => {
     expect(() => ledgerMac('', RUN, IDS)).toThrow(TypeError);
     expect(() => verifyLedgerMac('', RUN, IDS, 'a'.repeat(64))).not.toThrow();
+  });
+});
+
+describe('attestationMac / verifyAttestationMac (v2 envelope, plan §11.3)', () => {
+  const KEY = 'verifier-secret-the-suite-never-sees';
+  const OTHER_KEY = 'another-verifier-secret';
+  const BODY = {
+    runId: '6f1c3f90-2d5e-4b1a-9c6d-0f0e2b8a1c9d',
+    invocationId: 'aaaaaaaa-0000-4000-8000-000000000001',
+    inputDigest: 'b'.repeat(64),
+    recordIds: ['b'.repeat(64), 'a'.repeat(64)],
+  };
+
+  it('uses the versioned domain tag and normalizes the id set', () => {
+    expect(ATTESTATION_DOMAIN).toBe('gateforge.ledger.v2');
+    expect(ATTESTATION_VERSION).toBe(2);
+    expect(attestationMac(KEY, BODY)).toBe(
+      attestationMac(KEY, { ...BODY, recordIds: [...BODY.recordIds].reverse() }),
+    );
+    expect(
+      verifyAttestationMac(
+        KEY,
+        { runId: BODY.runId, invocationId: BODY.invocationId, inputDigest: BODY.inputDigest, recordIds: BODY.recordIds },
+        attestationMac(KEY, BODY),
+      ),
+    ).toBe(true);
+  });
+
+  it('binds run, invocation, digest, and key: any change invalidates', () => {
+    const mac = attestationMac(KEY, BODY);
+    const verify = (body: typeof BODY): boolean =>
+      verifyAttestationMac(
+        KEY,
+        { runId: body.runId, invocationId: body.invocationId, inputDigest: body.inputDigest, recordIds: body.recordIds },
+        mac,
+      );
+    expect(verify({ ...BODY, recordIds: [...BODY.recordIds, 'c'.repeat(64)] })).toBe(false);
+    expect(verify({ ...BODY, inputDigest: 'c'.repeat(64) })).toBe(false);
+    expect(
+      verify({ ...BODY, invocationId: 'bbbbbbbb-0000-4000-8000-000000000002' }),
+    ).toBe(false);
+    expect(verify({ ...BODY, runId: '00000000-0000-4000-8000-000000000009' })).toBe(false);
+    expect(
+      verifyAttestationMac(
+        OTHER_KEY,
+        { runId: BODY.runId, invocationId: BODY.invocationId, inputDigest: BODY.inputDigest, recordIds: BODY.recordIds },
+        mac,
+      ),
+    ).toBe(false);
+  });
+
+  it('a legacy v1 MAC never verifies as v2 (F2: old evidence authorizes nothing)', () => {
+    const legacy = ledgerMac(KEY, BODY.runId, BODY.recordIds);
+    expect(
+      verifyAttestationMac(
+        KEY,
+        { runId: BODY.runId, invocationId: BODY.invocationId, inputDigest: BODY.inputDigest, recordIds: BODY.recordIds },
+        legacy,
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects malformed bodies and MACs without throwing', () => {
+    const mac = attestationMac(KEY, BODY);
+    const hostile: Array<{ body: unknown; mac: unknown }> = [
+      { body: null, mac },
+      { body: { ...BODY, recordIds: 'not-an-array' }, mac },
+      { body: { ...BODY, inputDigest: 'xyz' }, mac },
+      { body: BODY, mac: 'made-up-mac' },
+      { body: BODY, mac: 'A'.repeat(64) },
+      { body: BODY, mac: null },
+    ];
+    for (const { body, mac: claimed } of hostile) {
+      expect(() =>
+        verifyAttestationMac(
+          KEY,
+          body as { runId: unknown; invocationId: unknown; inputDigest: unknown; recordIds: unknown },
+          claimed,
+        ),
+      ).not.toThrow();
+      expect(
+        verifyAttestationMac(
+          KEY,
+          body as { runId: unknown; invocationId: unknown; inputDigest: unknown; recordIds: unknown },
+          claimed,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('throws on empty key, empty identities, or a non-hex digest', () => {
+    expect(() => attestationMac('', BODY)).toThrow(TypeError);
+    expect(() => attestationMac(KEY, { ...BODY, runId: '' })).toThrow(TypeError);
+    expect(() => attestationMac(KEY, { ...BODY, invocationId: '' })).toThrow(TypeError);
+    expect(() => attestationMac(KEY, { ...BODY, inputDigest: 'xyz' })).toThrow(TypeError);
   });
 });

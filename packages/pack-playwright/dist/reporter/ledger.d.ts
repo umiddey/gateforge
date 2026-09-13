@@ -13,7 +13,7 @@
  * (`GET /classifications`). When either is unavailable the row carries
  * `verdict: null` and the reason says exactly what is missing.
  */
-import { type Classification, type Verdict } from '@gateforge/core';
+import { type Classification, type HttpRouteCandidate, type Verdict } from '@gateforge/core';
 import type { IssuedLedgerRecord } from '../fixture/witness-client.js';
 /** One suite-visible obligation from `obligations.json` (state contract). */
 export interface StateObligationEntry {
@@ -78,18 +78,28 @@ export declare function parseObligationsDocument(raw: string): ObligationsDocume
 /**
  * Computes one ledger row for a claim.
  *
+ * Advisory only (plan §9): the reporter runs inside the suite-side
+ * runtime, so its rows can never be authoritative. HTTP rows grade
+ * against the CLI-derived route inventory when the caller supplies it;
+ * without route context the core resolver blocks with a missing-context
+ * result — the reporter never shows an authoritative pass merely
+ * because it lacked the inventory.
+ *
  * Args:
  *   claim: the claim under judgment.
  *   obligations: the run's obligations (state doc).
  *   classifications: per-resource classification map (witness surface).
  *   records: the full run ledger.
  *   now: injected instant for the verdict engine.
+ *   httpRoutes: advisory route inventory (CLI-derived `http-routes.json`
+ *     when present, else null). The authoritative CLI recomputes this
+ *     from source and never trusts a reporter-supplied list.
  *
  * Returns:
  *   LedgerRow: verdict + reason + considered record ids. `verdict:
  *   null` (with reason) when required context is missing.
  */
-export declare function ledgerRowFor(claim: LedgerClaim, obligations: ObligationsDocument | null, classifications: Record<string, Classification>, records: readonly IssuedLedgerRecord[], now: string): LedgerRow;
+export declare function ledgerRowFor(claim: LedgerClaim, obligations: ObligationsDocument | null, classifications: Record<string, Classification>, records: readonly IssuedLedgerRecord[], now: string, httpRoutes?: readonly HttpRouteCandidate[] | null): LedgerRow;
 /** Blocks the run? (satisfied/waived are clean.) */
 export declare function isBlocking(verdict: Verdict | null): boolean;
 //# sourceMappingURL=ledger.d.ts.map
