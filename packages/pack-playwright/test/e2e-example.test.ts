@@ -143,11 +143,6 @@ async function scaffoldSuite(
 			location: { file: 'src/accounts.js', line: 1, col: 0 },
 		};
 	});
-	writeFileSync(
-		join(stateDir, 'obligations.json'),
-		`${JSON.stringify({ schemaVersion: 1, obligations })}\n`,
-	);
-
 	const configPath = join(project, 'playwright.config.mjs');
 	writeFileSync(
 		configPath,
@@ -167,6 +162,18 @@ async function scaffoldSuite(
 		].join('\n'),
 	);
 	writeFileSync(join(project, 'specs/run.spec.js'), spec);
+	// Plan §11.2/§11.7: the CLI binds evidence to a Git-tracked input
+	// snapshot, so every scenario project is a COMMITTED fixture repo.
+	// Ephemeral Playwright/test outputs are gitignored up front so the
+	// post-suite digest still matches the bound pre-suite digest. The
+	// run-state obligations document stays OUT of the commit: it is
+	// generated state the CLI rewrites on every run, and committing it
+	// would trip the --out overlap guard.
+	commitScenarioFixture(project);
+	writeFileSync(
+		join(stateDir, 'obligations.json'),
+		`${JSON.stringify({ schemaVersion: 1, obligations })}\n`,
+	);
 
 	const suiteCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(PLAYWRIGHT_CLI)} test --config ${JSON.stringify(configPath)}`;
 	const dispose = async () => {
@@ -241,6 +248,48 @@ async function runTestGates(
 		verdicts?: Array<{ obligationId: string; verdict: string; reason: string | null }>;
 	} | null;
 	return { result, report };
+}
+
+/**
+ * Commits a scenario project as a fixture repo (plan §11.7): `git init`
+ * plus a commit of the complete pre-run tree, with Playwright/test
+ * ephemera gitignored so suite outputs never invalidate the bound
+ * input snapshot.
+ *
+ * Args:
+ *   project: absolute temp project path.
+ */
+function commitScenarioFixture(project: string): void {
+	writeFileSync(
+		join(project, '.gitignore'),
+		// No trailing slashes: `node_modules` is a SYMLINK to the
+		// monorepo tree, and directory-only patterns do not match
+		// symlinks — the link would leak into the untracked inventory
+		// and fail the snapshot as an escaping link.
+		['node_modules', 'test-results', 'playwright-report', '.playwright', ''].join('\n'),
+	);
+	const gitEnv = {
+		GIT_AUTHOR_NAME: 'gateforge fixtures',
+		GIT_AUTHOR_EMAIL: 'fixtures@gateforge.invalid',
+		GIT_COMMITTER_NAME: 'gateforge fixtures',
+		GIT_COMMITTER_EMAIL: 'fixtures@gateforge.invalid',
+		GIT_AUTHOR_DATE: '2026-01-01T00:00:00+0000',
+		GIT_COMMITTER_DATE: '2026-01-01T00:00:00+0000',
+		GIT_CONFIG_GLOBAL: '/dev/null',
+		GIT_CONFIG_NOSYSTEM: '1',
+	};
+	const git = (args: readonly string[]): void => {
+		const outcome = run('git', ['-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', '-c', 'gc.auto=0', ...args], {
+			cwd: project,
+			env: gitEnv,
+		});
+		if (outcome.status !== 0) {
+			throw new Error(`scenario git ${args.join(' ')} failed:\n${outcome.stderr}`);
+		}
+	};
+	git(['init', '--initial-branch', 'main', '--quiet']);
+	git(['add', '-A']);
+	git(['commit', '--no-gpg-sign', '--allow-empty', '--quiet', '-m', 'e2e scenario fixture']);
 }
 
 /** Verdict lookup by obligation id from the CLI report. */

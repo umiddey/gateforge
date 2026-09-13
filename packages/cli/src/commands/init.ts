@@ -97,6 +97,33 @@ function sourceIncludePatterns(languages: readonly string[]): string[] {
  * UI-semantic `crud:*` stays opt-in and visibly fail-closed until a
  * trusted UI observer exists (ADR 0003 §3).
  */
+/**
+ * Opt-in transport-only endpoint policy (plan §8 / D1): proves only that
+ * the witness observed a matching HTTP exchange in the bound run. Test
+ * attribution is suite-claimed — it does not prove which browser, UI
+ * action, or test produced the exchange. Selecting this document
+ * changes the guarantee: it is a SEPARATE opt-in policy, never an
+ * automatic migration of the default frontend requirement, baselines,
+ * or waivers.
+ */
+export const TRANSPORT_ONLY_POLICY_EXAMPLE = `\
+# Transport-only endpoint policy (plan §8 / D1, explicit opt-in).
+# Each obligation proves only that the witness observed a matching HTTP
+# exchange in the bound run ("witness observed an HTTP exchange");
+# test attribution is suite-claimed ("suite-claimed"), never proven
+# browser-issued by an independent channel. Selecting this policy narrows the
+# guarantee relative to the default frontend requirement below.
+schemaVersion: 1
+policies:
+  - id: frontend-consumed-endpoints-transport-only
+    when:
+      kind: http.endpoint
+      consumed: true
+    require:
+      - http:request-observed
+      - http:response-status-ok
+`;
+
 export const POLICIES_TEMPLATE = `\
 # Declarative policies: when a resource matches, the required contracts
 # become obligations. Lifecycle-gated persistence:* contracts are emitted
@@ -108,8 +135,17 @@ export const POLICIES_TEMPLATE = `\
 schemaVersion: 1
 policies:
   - id: frontend-consumed-endpoints
-    # ADR 0004 D8: only endpoints the frontend actually consumes (static
-    # join) owe browser-exercise obligations; server-only routes never do.
+    # ADR 0004 D8 + plan §8 / D1: only endpoints the frontend actually
+    # consumes (static join) owe browser-exercise obligations;
+    # server-only routes never do. NOTE: 'http:frontend-request-observed'
+    # is BLOCKING with the current observer — no independent
+    # browser/test observation channel exists yet, so the verifier
+    # returns missing before examining evidence (test attribution is
+    # suite-claimed). Keep this requirement to hold the frontend-proof
+    # bar; or SEPARATELY opt in to the narrower transport-only policy
+    # (TRANSPORT_ONLY_POLICY_EXAMPLE: 'http:request-observed', proving
+    # only a witness-observed HTTP exchange) when that smaller guarantee
+    # suffices. Never auto-migrate policies, baselines, or waivers.
     when:
       kind: http.endpoint
       consumed: true

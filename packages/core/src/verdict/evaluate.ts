@@ -44,7 +44,7 @@
  *   a waiver whose owner is stale yields `stale` (GF-17).
  */
 import { z } from 'zod';
-import { registerContractVerifier, verifierFor } from './registry.js';
+import { registerContractVerifier, verifierFor, type HttpRouteCandidate } from './registry.js';
 import { registerPackVerifiers } from './pack-verifiers.js';
 import { canonicalJson, type JsonValue } from '../canonical-json.js';
 import { fingerprint } from '../fingerprints.js';
@@ -134,6 +134,12 @@ export interface VerdictContext {
   classification: unknown;
   /** The obligation's graph resource (kind + attributes), when the host can supply it. Verifiers use it to bind evidence to identity. */
   resource?: { kind: string; attributes: Record<string, unknown> } | null;
+  /**
+   * The COMPLETE runtime route inventory for HTTP attribution (plan
+   * §9, D2). Host-derived from the graph; absent blocks HTTP
+   * satisfaction (no any-endpoint fallback).
+   */
+  httpRoutes?: readonly HttpRouteCandidate[] | null;
   /** Injected clock instant (invariant 7) — the only time source. */
   now: Date | string;
 }
@@ -557,6 +563,7 @@ function evaluateClaimEvidence(
   obligation: Obligation,
   primaryKey: readonly string[],
   resource: { kind: string; attributes: Record<string, unknown> } | null | undefined,
+  httpRoutes: readonly HttpRouteCandidate[] | null | undefined,
 ): ClaimOutcome {
   const verifier = verifierFor(obligation.contract);
   if (verifier === null) {
@@ -568,7 +575,7 @@ function evaluateClaimEvidence(
         'blocking until its pack-specific verifier grades the evidence',
     };
   }
-  return verifier({ claim, obligation, evidence, primaryKey, resource });
+  return verifier({ claim, obligation, evidence, primaryKey, resource, httpRoutes });
 }
 
 // Built-in registrations: persistence/crud semantics stay owned by this
@@ -960,6 +967,7 @@ export function evaluateObligation(
       verified,
       classification.primaryKey,
       context.resource,
+      context.httpRoutes,
     );
     if (outcome.status === 'satisfied') {
       return { verdict: 'satisfied', reason: null, recordIds: outcome.recordIds };

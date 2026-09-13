@@ -17,6 +17,7 @@ import {
   evaluateObligation,
   isWitnessedRecord,
   type Classification,
+  type HttpRouteCandidate,
   type Obligation,
   type Verdict,
 } from '@gateforge/core';
@@ -158,12 +159,22 @@ export function parseObligationsDocument(raw: string): ObligationsDocument | nul
 /**
  * Computes one ledger row for a claim.
  *
+ * Advisory only (plan §9): the reporter runs inside the suite-side
+ * runtime, so its rows can never be authoritative. HTTP rows grade
+ * against the CLI-derived route inventory when the caller supplies it;
+ * without route context the core resolver blocks with a missing-context
+ * result — the reporter never shows an authoritative pass merely
+ * because it lacked the inventory.
+ *
  * Args:
  *   claim: the claim under judgment.
  *   obligations: the run's obligations (state doc).
  *   classifications: per-resource classification map (witness surface).
  *   records: the full run ledger.
  *   now: injected instant for the verdict engine.
+ *   httpRoutes: advisory route inventory (CLI-derived `http-routes.json`
+ *     when present, else null). The authoritative CLI recomputes this
+ *     from source and never trusts a reporter-supplied list.
  *
  * Returns:
  *   LedgerRow: verdict + reason + considered record ids. `verdict:
@@ -175,6 +186,7 @@ export function ledgerRowFor(
   classifications: Record<string, Classification>,
   records: readonly IssuedLedgerRecord[],
   now: string,
+  httpRoutes?: readonly HttpRouteCandidate[] | null,
 ): LedgerRow {
   if (obligations === null) {
     return {
@@ -225,6 +237,10 @@ export function ledgerRowFor(
     records: records as unknown[],
     waivers: [],
     classification,
+    // Advisory route context (plan §9): supplied by the caller from the
+    // CLI-derived inventory when available; null/undefined lets the
+    // core resolver return its blocking missing-context result.
+    httpRoutes: httpRoutes ?? null,
     now,
   });
   const mine = records.filter((record) => record.testId === claim.testId);

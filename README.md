@@ -78,6 +78,28 @@ in the engine — they stay blocking `missing` until each pack ships a
 semantic verifier; the packs' current suites exercise their example servers
 directly, not the CLI/witness/verdict engine.
 
+HTTP endpoint obligations (plan §8 / D1) are honest about transport:
+`http:frontend-request-observed` is blocking with the current observer —
+no independent browser/test observation channel exists, so it grades
+`missing` before examining evidence. `http:request-observed` proves only
+that the witness observed an HTTP exchange in the bound run (test
+attribution is suite-claimed); `http:response-status-ok` adds the 2xx
+requirement. Reports say "witness observed an HTTP exchange" and
+"suite-claimed", never "browser verified".
+
+Evidence binds to tested inputs (plan §11, F2): the witness attests a
+v2 envelope (`attestationVersion: 2`, domain `gateforge.ledger.v2`)
+over its run id, a fresh per-invocation id, a deterministic snapshot
+digest of all pipeline inputs (tracked + untracked + ignored-but-
+configured files, policies, adapters, plugin modules, lockfiles,
+obligations/classifications/routes), and the issued record set. Old
+evidence blocks after any source/configuration change; restored old
+bundles cannot satisfy new invocations; legacy v1 MACs never
+authorize. Existing bundles need a fresh run — nothing signs old
+records into the new format. Details and migration notes live in
+[`packages/cli/README.md`](packages/cli/README.md) (test-gates
+protocol + Layer 2).
+
 ## Development
 
 ```sh

@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { recordIdOf } from '@gateforge/core';
 import { GateforgeReporter } from '../src/reporter/reporter.js';
 import { ledgerRowFor } from '../src/reporter/ledger.js';
 import { startWitness } from '../src/witness/server.js';
@@ -472,8 +473,11 @@ describe('reporter ledger grading', () => {
     // re-validation failed ("user-facing resources require an
     // 'evidenceAdapter'") and the claim graded unclassified. The full
     // real path must now round-trip: witness view → reporter fetch →
-    // engine classification → witnessed http observation satisfies.
-    const HTTP_CLAIM = 'tenant.http-frontend-errors:http:frontend-request-observed';
+    // engine classification → witnessed http observation satisfies the
+    // explicit transport contract (plan §8 / D1: the frontend contract
+    // stays blocking missing on the same ledger).
+    const HTTP_CLAIM = 'tenant.http-frontend-errors:http:request-observed';
+    const FRONTEND_CLAIM = 'tenant.http-frontend-errors:http:frontend-request-observed';
     const project = makeTempProject('reporter-lane');
     const stateDir = join(project, 'state');
     mkdirSync(stateDir, { recursive: true });
@@ -485,7 +489,7 @@ describe('reporter ledger grading', () => {
           {
             id: HTTP_CLAIM,
             resourceId: 'tenant.http-frontend-errors',
-            contract: 'http:frontend-request-observed',
+            contract: 'http:request-observed',
             policyId: 'crud',
             lifecycle: { create: false, read: false, update: false, delete: false },
             fingerprint: 'f-http',
@@ -498,6 +502,22 @@ describe('reporter ledger grading', () => {
     writeFileSync(
       join(stateDir, 'manifest.json'),
       `${JSON.stringify({ schemaVersion: 1, runId: RUN_ID, startedAt: '2026-08-30T12:00:00.000Z' })}\n`,
+    );
+    // Advisory route inventory (plan §9, D2): the CLI-derived
+    // `http-routes.json` the reporter threads into its advisory rows.
+    // The authoritative CLI recomputes this from source.
+    writeFileSync(
+      join(stateDir, 'http-routes.json'),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        routes: [
+          {
+            resourceId: 'tenant.http-frontend-errors',
+            method: 'POST',
+            canonicalPath: '/ops/frontend-errors',
+          },
+        ],
+      })}\n`,
     );
     // Claims-lane classification: user-facing, NO evidenceAdapter.
     writeFileSync(
@@ -546,7 +566,7 @@ describe('reporter ledger grading', () => {
       process.env.GATEFORGE_STATE_DIR = stateDir;
       process.env.GATEFORGE_OBLIGATIONS = join(project, '.gateforge/test-gates/obligations.json');
 
-      // Real proxied traffic (the browser request, engine-observed)…
+      // Real proxied traffic (a witness-observed HTTP exchange)…
       const forward = await fetch(`${witness.proxyUrl as string}/ops/frontend-errors`, {
         method: 'POST',
       });
@@ -584,9 +604,118 @@ describe('reporter ledger grading', () => {
       expect(ledger[0]?.reason ?? '').not.toContain('evidenceAdapter');
       expect(ledger[0]?.verdict).toBe('satisfied');
       expect(ledger[0]?.trustTier).toBe('witnessed');
+      expect(JSON.stringify(ledger)).not.toMatch(/browser verified/i);
+
+      // The same ledger through the frontend contract stays blocking
+      // missing (plan §8 / D1): grade the identical records against a
+      // frontend obligation via the real engine.
+      const frontendDoc = {
+        schemaVersion: 1,
+        obligations: [
+          {
+            id: FRONTEND_CLAIM,
+            resourceId: 'tenant.http-frontend-errors',
+            contract: 'http:frontend-request-observed',
+            policyId: 'crud',
+            lifecycle: { create: false, read: false, update: false, delete: false },
+            fingerprint: 'f-http',
+            source: 'src/http.ts',
+            location: { file: 'src/http.ts', line: 1, col: 0 },
+          },
+        ],
+      };
+      const frontendRow = ledgerRowFor(
+        { obligationId: FRONTEND_CLAIM, testId: TEST_ID, testFile: 'spec.js', location: null },
+        frontendDoc,
+        {
+          'tenant.http-frontend-errors': {
+            exposure: 'user-facing',
+            plane: 'tenant',
+            lifecycle: { create: false, read: false, update: false, delete: false },
+            primaryKey: ['method', 'path'],
+            evidenceLane: 'claims',
+          },
+        },
+        [],
+        '2026-08-30T12:00:02.000Z',
+      );
+      expect(frontendRow.verdict).toBe('missing');
+      expect(frontendRow.reason ?? '').toContain('no independent browser/test observation channel');
+      expect(frontendRow.reason ?? '').not.toMatch(/browser verified/i);
     } finally {
       await witness.stop();
       await target.stop();
     }
+  });
+
+  it('F4: an HTTP row without route context blocks missing — never an advisory pass', async () => {
+    // The reporter is advisory and suite-writable (plan §9): when the
+    // CLI-derived `http-routes.json` is absent it must surface the
+    // core missing-context block, never display an authoritative pass
+    // merely because it lacked the inventory.
+    const HTTP_CLAIM = 'tenant.http-frontend-errors:http:request-observed';
+    const doc = {
+      schemaVersion: 1,
+      obligations: [
+        {
+          id: HTTP_CLAIM,
+          resourceId: 'tenant.http-frontend-errors',
+          contract: 'http:request-observed',
+          policyId: 'crud',
+          lifecycle: { create: false, read: false, update: false, delete: false },
+          fingerprint: 'f-http',
+          source: 'src/http.ts',
+          location: null,
+        },
+      ],
+    };
+    // A provenanced claimed anchor (so grading reaches the route
+    // stage) plus a witnessed exchange-shaped record — still no
+    // advisory pass without the inventory.
+    const anchorPayload = { operation: 'create', entityId: 'frontend-error-1', fields: {} };
+    const exchangePayload = { method: 'POST', url: '/ops/frontend-errors', status: 201 };
+    const issued = (
+      kind: string,
+      origin: 'engine-observed' | 'suite-submitted',
+      trust: string,
+      payload: Record<string, unknown>,
+    ): Record<string, unknown> => ({
+      schemaVersion: 1,
+      runId: RUN_ID,
+      trust,
+      obligationId: HTTP_CLAIM,
+      testId: TEST_ID,
+      kind,
+      origin,
+      payload,
+      recordId: recordIdOf({
+        runId: RUN_ID,
+        obligationId: HTTP_CLAIM,
+        kind,
+        testId: TEST_ID,
+        origin,
+        payload,
+      }),
+    });
+    const anchor = issued('ui.action', 'suite-submitted', 'claimed', anchorPayload);
+    const exchange = issued('http.request', 'engine-observed', 'witnessed', exchangePayload);
+    const row = ledgerRowFor(
+      { obligationId: HTTP_CLAIM, testId: TEST_ID, testFile: 'spec.js', location: null },
+      doc,
+      {
+        'tenant.http-frontend-errors': {
+          exposure: 'user-facing',
+          plane: 'tenant',
+          lifecycle: { create: false, read: false, update: false, delete: false },
+          primaryKey: ['method', 'path'],
+          evidenceLane: 'claims',
+        },
+      },
+      [anchor, exchange] as never,
+      '2026-08-30T12:00:02.000Z',
+    );
+    expect(row.verdict).toBe('missing');
+    expect(row.verdict).not.toBe('satisfied');
+    expect(row.reason ?? '').toContain('no route inventory context');
   });
 });

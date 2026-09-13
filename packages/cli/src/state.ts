@@ -33,7 +33,9 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   canonicalJson,
+  compareStrings,
   fingerprint,
+  type HttpRouteCandidate,
   type JsonValue,
   type Obligation,
   type ResourceGraph,
@@ -47,6 +49,40 @@ export const DEFAULT_STATE_DIR = '.gateforge/test-gates';
 /** Resolves the run-state directory: override (absolute or relative) or default. */
 export function resolveStateDir(cwd: string, override?: string): string {
   return resolve(cwd, override ?? DEFAULT_STATE_DIR);
+}
+
+/**
+ * Builds the COMPLETE runtime route inventory for HTTP attribution
+ * (plan §9, D2): one candidate per `http.endpoint` graph resource —
+ * including routes with no frontend consumer and no generated
+ * obligation. Derived from the graph only; never from a claim or
+ * evidence payload. Sorted by resourceId codepoint-wise so the
+ * context is deterministic (Phase 6 snapshots it).
+ *
+ * A malformed endpoint resource (missing method/canonicalPath) is
+ * NEVER dropped: it is carried with empty fields so the core resolver
+ * flags the inventory incomplete instead of claiming completeness.
+ *
+ * Args:
+ *   graph: built resource graph.
+ *
+ * Returns:
+ *   HttpRouteCandidate[]: sorted complete candidate list.
+ */
+export function httpRoutesView(graph: ResourceGraph): HttpRouteCandidate[] {
+  const routes: HttpRouteCandidate[] = [];
+  for (const resource of graph.resources) {
+    if (resource.id === null || resource.kind !== 'http.endpoint') continue;
+    const method = resource.attributes['method'];
+    const canonicalPath = resource.attributes['canonicalPath'];
+    routes.push({
+      resourceId: resource.id,
+      method: typeof method === 'string' ? method : '',
+      canonicalPath: typeof canonicalPath === 'string' ? canonicalPath : '',
+    });
+  }
+  routes.sort((a, b) => compareStrings(a.resourceId, b.resourceId));
+  return routes;
 }
 
 /** One obligation as the suite must see it (identity + fingerprint). */
@@ -155,6 +191,24 @@ export function writeObligations(
   } as unknown as JsonValue);
 }
 
+
+/**
+ * Persists the derived runtime route inventory (plan §9, D2) for the
+ * suite-side reporter: advisory context ONLY so the reporter can show
+ * useful per-claim rows. The authoritative CLI recomputes this list
+ * from the graph on every run and never reads this file.
+ */
+export function writeHttpRoutesView(stateDir: string, routes: readonly HttpRouteCandidate[]): void {
+  const sorted = [...routes].sort((a, b) => compareStrings(a.resourceId, b.resourceId));
+  writeStateFile(stateDir, 'http-routes.json', {
+    schemaVersion: 1,
+    routes: sorted.map((route) => ({
+      resourceId: route.resourceId,
+      method: route.method,
+      canonicalPath: route.canonicalPath,
+    })),
+  } as unknown as JsonValue);
+}
 
 /**
  * Persists the run's effective-classification view (plan phase 5) as a

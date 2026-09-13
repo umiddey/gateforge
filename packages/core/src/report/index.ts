@@ -43,6 +43,19 @@ export interface WaiverCounts {
   staleOwner: number;
 }
 
+/**
+ * Effective evaluation scope (plan §12.4): one decision, applied to
+ * obligations and blockers alike. Output-only — the input-snapshot
+ * digest never covers scope labels or report formats, so evidence reuse
+ * for identical inputs is unaffected by scope selection.
+ */
+export interface ScopeMetadata {
+  /** `all` = every obligation evaluated; `changed` = diff-narrowed. */
+  mode: 'all' | 'changed';
+  /** Sorted gate-defining inputs/reasons that forced expansion. */
+  expandedBecause: readonly string[];
+}
+
 /** Options for {@link renderRun}. */
 export interface RenderRunOptions {
   /** Output format. */
@@ -55,6 +68,12 @@ export interface RenderRunOptions {
   run?: RunManifest;
   /** Tool version stamped into SARIF `tool.driver.version`. */
   toolVersion?: string;
+  /**
+   * Effective evaluation scope (plan §12.4); included in json/SARIF and
+   * summarized in text when the scope expanded. Defaults to the full
+   * `all` scope when omitted.
+   */
+  scope?: ScopeMetadata;
   /**
    * Classification decision provenance per resource id (ADR 0003):
    * decision fingerprint + rule trace, included in json/SARIF/text when
@@ -160,6 +179,7 @@ function jsonReport(
     counts.unresolved +
     counts.stale +
     blocking.length;
+  const scope = options.scope ?? { mode: 'all' as const, expandedBecause: [] as readonly string[] };
   const report: Record<string, unknown> = {
     schemaVersion: 1,
     summary: {
@@ -168,6 +188,9 @@ function jsonReport(
       blockingEntries: blocking.length,
       ...counts,
     },
+    // Effective scope (§12.4): which obligations were evaluated and why
+    // the scope expanded. Output-only — never part of the snapshot digest.
+    scope: { mode: scope.mode, expandedBecause: [...scope.expandedBecause] },
     verdicts: entries.map((entry) => {
       const record: Record<string, unknown> = {
         obligationId: entry.obligation.id,
@@ -211,6 +234,7 @@ function sarifReport(
   options: RenderRunOptions,
 ): Record<string, unknown> {
   const ruleIds = [...new Set(entries.map((entry) => entry.obligation.policyId))].sort(compareStrings);
+  const scope = options.scope ?? { mode: 'all' as const, expandedBecause: [] as readonly string[] };
   const ruleIndex: Record<string, number> = {};
   ruleIds.forEach((ruleId, index) => {
     ruleIndex[ruleId] = index;
@@ -272,6 +296,11 @@ function sarifReport(
             rules: ruleIds.map((ruleId) => ({ ruleId })),
           },
         },
+        // Effective evaluation scope (§12.4) in the run property bag:
+        // which obligations were evaluated and why the scope expanded.
+        properties: {
+          scope: { mode: scope.mode, expandedBecause: [...scope.expandedBecause] },
+        },
         // Blocking policy entries (unclassified/unresolved resources,
         // detector findings, stale references) are not obligation
         // verdicts, so they surface as tool-execution notifications
@@ -316,6 +345,12 @@ function textReport(
     `gateforge run: ${entries.length} obligation(s) — ` +
       `${counts.satisfied} satisfied, ${counts.waived} waived, ${blockingCount} blocking`,
   );
+  const scope = options.scope;
+  if (scope !== undefined && scope.expandedBecause.length > 0) {
+    lines.push(
+      `scope: all obligations; expanded because ${[...scope.expandedBecause].join(', ')}`,
+    );
+  }
   if (options.waiverCounts !== undefined) {
     const wc = options.waiverCounts;
     lines.push(
