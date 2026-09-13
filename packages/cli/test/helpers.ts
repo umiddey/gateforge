@@ -5,8 +5,18 @@
  * path for real GPP/3 round-trips.
  */
 import { fileURLToPath } from 'node:url';
-import { fingerprint, withTempRepo, type TempRepo } from '@gateforge/core';
+import { join } from 'node:path';
+import {
+  attestationMac,
+  fingerprint,
+  loadConfig,
+  withTempRepo,
+  type TempRepo,
+} from '@gateforge/core';
 import { main, CaptureStream, type Io } from '../src/index.js';
+import { computeInputSnapshot } from '../src/input-snapshot.js';
+import { runPipeline } from '../src/pipeline.js';
+import { httpRoutesView, resolveStateDir } from '../src/state.js';
 
 /** The fixed clock all fixture configs use (deterministic verdicts). */
 export const FIXED_AT = '2026-01-01T00:00:00.000Z';
@@ -222,6 +232,111 @@ export async function runCli(
   } finally {
     if (previousCwd !== io.cwd) process.chdir(previousCwd);
   }
+}
+
+/**
+ * Computes the current input digest of a fixture repo with the REAL
+ * pipeline + snapshot helpers (the same computation `check` performs).
+ * Call AFTER writing claims/records/waivers (gate inputs) and BEFORE
+ * writing the manifest (run state, excluded from the digest).
+ *
+ * Args:
+ *   repo: the fixture repository.
+ *
+ * Returns:
+ *   string: 64-char lowercase hex input digest for the current tree.
+ */
+export async function currentInputDigest(repo: TempRepo): Promise<string> {
+  const previousCwd = process.cwd();
+  if (previousCwd !== repo.root) process.chdir(repo.root);
+  try {
+    const config = loadConfig(join(repo.root, '.gateforge.yml'));
+    const stateDir = resolveStateDir(repo.root);
+    const pipeline = await runPipeline({
+      cwd: repo.root,
+      env: { ...process.env },
+      config,
+      provider: 'all-files',
+      stateDir,
+    });
+    return computeInputSnapshot({
+      cwd: repo.root,
+      config,
+      stateDir,
+      classifications: pipeline.classificationsView.resources,
+      obligations: pipeline.policy.obligations,
+      httpRoutes: httpRoutesView(pipeline.graph),
+      plugins: pipeline.manifest.plugins.map((plugin) => ({
+        id: plugin.id,
+        version: plugin.version,
+      })),
+    }).inputDigest;
+  } finally {
+    if (previousCwd !== repo.root) process.chdir(previousCwd);
+  }
+}
+
+/**
+ * Writes a v2 attestation manifest for the repo's CURRENT inputs (plan
+ * §11.3): digest computed with the real snapshot helpers, MAC minted
+ * with the real producer. Use `digestOverride` to simulate stale or
+ * tampered envelopes (the MAC then covers the overridden digest, so a
+ * rewritten envelope without a fresh MAC fails the signature — exactly
+ * the tamper case).
+ *
+ * Args:
+ *   repo: the fixture repository (claims/records/waivers already written).
+ *   options: runId, verifierKey, recordIds, optional invocationId,
+ *     optional digestOverride, optional manifest extras.
+ *
+ * Returns:
+ *   The attested {inputDigest, invocationId} pair.
+ */
+export async function writeV2Manifest(
+  repo: TempRepo,
+  options: {
+    runId: string;
+    verifierKey: string;
+    recordIds: string[];
+    invocationId?: string;
+    digestOverride?: string;
+    manifestExtra?: Record<string, unknown>;
+  },
+): Promise<{ inputDigest: string; invocationId: string }> {
+  const actualDigest = await currentInputDigest(repo);
+  const invocationId = options.invocationId ?? '11111111-1111-4111-8111-111111111111';
+  const inputDigest = options.digestOverride ?? actualDigest;
+  const sorted = [...new Set(options.recordIds)].sort();
+  const mac = attestationMac(options.verifierKey, {
+    runId: options.runId,
+    invocationId,
+    inputDigest,
+    recordIds: sorted,
+  });
+  repo.writeFiles({
+    '.gateforge/test-gates/manifest.json': `${JSON.stringify({
+      schemaVersion: 1,
+      runId: options.runId,
+      startedAt: FIXED_AT,
+      gitSha: null,
+      provider: 'all-files',
+      plugins: [],
+      attestationScope: null,
+      invocationId,
+      inputDigest,
+      recordIds: sorted,
+      attestation: {
+        attestationVersion: 2,
+        runId: options.runId,
+        invocationId,
+        inputDigest,
+        recordIds: sorted,
+        mac,
+      },
+      ...(options.manifestExtra ?? {}),
+    })}\n`,
+  });
+  return { inputDigest: actualDigest, invocationId };
 }
 
 /** Absolute path of the python reference detector (GPP/3 round-trips). */

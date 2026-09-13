@@ -14,7 +14,7 @@ baselines.
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. Snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
 | `gateforge explain <resourceId> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. | 0/1/2 |
 | `gateforge obligations [--json]` | Evaluate policies against the automatically classified graph and dump obligations, blocking entries, and claim assessments. | 0/1/2 |
-| `gateforge check [--changed] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` restricts the gate to files the resolved diff provider reports (see below). `--format` default `text`. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env (see trust model). | 0 clean/waived, 1 unresolved, 2 config/usage |
+| `gateforge check [--changed] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` evaluates one effective scope: only obligations/blockers tied to files the resolved diff provider reports — unless the diff touches a gate-defining input (`.gateforge.yml`, configured policy/classification paths, planes/http-clients/fastapi configs, adapters, waivers, repo-local plugin modules, dependency manifests/lockfiles, ignore controls), which expands the run to all obligations (reported as `scope` metadata with `expandedBecause` reasons). Staged-vs-worktree mismatches under `local-staged` block with an explicit diagnostic. `--format` default `text`. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env (see trust model). | 0 clean/waived, 1 unresolved, 2 config/usage |
 | `gateforge test-gates [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | Orchestrate an evidence run: materialize the run state, optionally run the suite, evaluate its claims/records, and report. A nonzero suite exit fails the run. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env. | 0/1/2 (suite failure forces 1) |
 
 Global flags: `--help`, `--version`. Exit codes per architecture contract 4:
@@ -102,7 +102,7 @@ run closed at startup (exit 2).
 
 | File | Content |
 | --- | --- |
-| `manifest.json` | Pin #4 RunManifest (runId, injected-clock startedAt, gitSha, provider, plugin registrations). At shutdown the witness appends `recordIds` + `recordIdsMac`. |
+| `manifest.json` | Pin #4 RunManifest (runId, injected-clock startedAt, gitSha, provider, plugin registrations, plus the `test-gates`-minted `invocationId` and tested `inputDigest`). At shutdown the witness appends `recordIds` + the v2 `attestation` envelope (never a legacy `recordIdsMac`). |
 | `obligations.json` | Every obligation the suite must cover, with pin #2 fingerprint and resource source/location. |
 | `env.json` | `GATEFORGE_RUN_ID`, `GATEFORGE_RUN_TOKEN`, `GATEFORGE_STATE_DIR`, `GATEFORGE_OBLIGATIONS`, `GATEFORGE_WITNESS_URL`. |
 | `claims.json` / `records.json` | Reporter output consumed by the verifier (written by the suite). |
@@ -171,31 +171,87 @@ Presence alone, contradicted observations, missing pre-observations, or
 absent deltas grade `invalid` — even when every provenance check passes.
 True UI observation (witness-driven browser) is roadmap work.
 
-**Layer 2 — authenticated issuance.** A witnessed record additionally
-requires its id to appear in a set whose integrity is protected by the
-witness **verifier key** — an orchestrator secret the suite never
-receives:
+**Layer 2 — versioned attestation binding evidence to tested inputs
+(plan §11, F2).** A witnessed record is authorized only by ONE validated
+v2 envelope that simultaneously matches its run id, the expected input
+digest, the required invocation identity, and its record id:
 
-- the manifest append, whose `recordIdsMac` (HMAC-SHA256 over canonical
-  `{runId, recordIds}`) must verify — and whose `recordIds` the witness
-  replaces with EXACTLY its own ledger at shutdown (pre-seeded forged
+- the durable manifest `attestation` (`attestationVersion: 2` with
+  `runId`, `invocationId`, `inputDigest`, sorted unique `recordIds`, and
+  `mac` — HMAC-SHA256 over the domain-tagged body
+  `gateforge.ledger.v2`), written by the witness at shutdown from its
+  FROZEN bound context plus EXACTLY its own ledger (pre-seeded forged
   ids are discarded, never signed), or
-- a live `GET /ledger-attestation` response the CLI fetched (and
-  MAC-verified) from a still-running wired witness during `test-gates`
-  (401 to the run token alone).
+- the live `GET /ledger-attestation` response: the SAME signed object,
+  fetched (and MAC-verified) by `test-gates` from a still-running wired
+  witness and persisted into the manifest as the durable fallback
+  before the witness stops (401 to the run token alone).
+
+The `inputDigest` is a deterministic snapshot of everything the
+pipeline examines (all Git-tracked files, nonignored untracked files,
+configured scan inputs even when ignored, `.gateforge.yml`,
+policies/classification/pack configs, adapters, local plugin modules,
+manifests/lockfiles, effective obligations/classifications/routes —
+`packages/cli/src/input-snapshot.ts`). A deleted file, an untracked
+file, a policy edit, or a lockfile change all move the digest, so old
+evidence blocks after any source/configuration change. The
+`invocationId` is fresh per `test-gates` run, so a restored old bundle
+cannot satisfy a new invocation. `check` (no suite) reuses a completed
+signed run only for byte-identical inputs — it never equates its own
+fresh manifest UUID with the evidence run UUID.
+
+The witness never signs what a suite-writable file says: `test-gates`
+binds the context with authenticated `POST /run-context` (run token
+AND verifier key) BEFORE the suite starts, and the witness freezes it
+in memory. Binding is allowed only before any observation or issuance;
+a used witness answers 409, an identical rebind is idempotent, any
+change is 409, and an unbound witness issues no attestation. A proxy
+exchange in flight at bind time refuses the bind, and observations
+that completed before binding are never consumable under the new
+context.
+
+The legacy v1 `recordIdsMac` (HMAC over `{runId, recordIds}` with no
+digest binding) NEVER authorizes evidence — even when it verifies.
+Invalid durable envelopes contribute nothing; live and durable
+contexts are validated independently and never merged; mismatches
+surface as explicit `evidence-context` blockers (missing vs malformed
+vs forged stay distinguished) that waivers cannot hide.
 
 The key travels by ENVIRONMENT (`GATEFORGE_WITNESS_VERIFIER_KEY`),
 never argv — `/proc/<pid>/cmdline` is world-readable. `test-gates`
 strips the var from the suite child's environment so a suite cannot
-inherit it. Residual: a same-uid process can read environ when yama
-`ptrace_scope=0`; for strong isolation run the suite as a distinct user
-or container.
+inherit it, and the witness binary reads it from the TRUSTED parent
+env only (never argv/stdout/state/suite env). A suite-owned
+Playwright global setup therefore cannot bootstrap trusted issuance
+by inheriting the key — it fails closed unless an externally wired
+trusted witness is provided. Residuals (not eliminable by env hygiene
+alone): a same-uid process can read environ when yama
+`ptrace_scope=0`, and env vars never isolate hostile same-user OS
+processes — for strong isolation run the suite as a distinct user or
+container. File-change capture is snapshot-based, not an OS sandbox:
+it guards changes visible at capture points, not a malicious process
+that changes and restores files between snapshots.
 
-Fail closed: without the key, or when neither authenticated set
-verifies, every witnessed record demotes to claimed-tier (blocking,
-never satisfied). The record's `runId` must also equal the manifest's
-(or the live attestation's) `runId`, so sets cannot be transplanted
-across runs.
+Fail closed: without the key, or when no envelope validates for the
+expected context, every witnessed record demotes to claimed-tier
+(blocking, never satisfied).
+
+### Evidence migration (v1 → v2, no auto-migration)
+
+- Existing evidence bundles need a FRESH run: there is no command
+  that signs old records into the new format without observations, and
+  none will be added (signing old records would certify untested code).
+- Policies and waivers keep their explicit semantics: snapshot binding
+  never rewrites their IDs to evade blockers.
+- External witness setup: start `gateforge-witness` (or `startWitness`)
+  with the run id/token from a TRUSTED parent env carrying
+  `GATEFORGE_WITNESS_VERIFIER_KEY`, pass `--witness-url`/`--run-token`
+  to `test-gates`, and start a FRESH witness per invocation (a witness
+  used by an older invocation rejects binding with 409).
+- Non-Git checkouts keep discovery but fail evidence authorization
+  with a `snapshot-unavailable` diagnostic; submodules, escaping
+  symlinks, and `--out` overlapping source fail closed with explicit
+  diagnostics.
 
 ## Development
 

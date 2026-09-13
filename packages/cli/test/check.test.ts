@@ -4,9 +4,10 @@
  * config-error exit 2, `--changed` scoping, and GF-09 provider parity.
  */
 import { describe, expect, it } from 'vitest';
-import { ledgerMac, recordIdOf, withTempRepo } from '@gateforge/core';
+import { attestationMac, ledgerMac, recordIdOf, withTempRepo } from '@gateforge/core';
 import {
   classificationsYml,
+  currentInputDigest,
   fixtureFingerprint,
   installFixture,
   OBLIGATION_ACCOUNTS,
@@ -14,6 +15,7 @@ import {
   PLUGIN_SOURCE,
   pythonPluginBlock,
   runCli,
+  writeV2Manifest,
   type CliResult,
 } from './helpers.js';
 
@@ -34,12 +36,14 @@ function parseReport(report: string): {
   summary: { blocking: number };
   verdicts: Array<{
     obligationId: string;
+    contract: string;
     verdict: string;
+    reason: string | null;
     recordIds: string[];
     policyId: string;
     fingerprint: string;
   }>;
-  blocking: Array<{ kind: string }>;
+  blocking: Array<{ kind: string; detail?: string }>;
   run: { provider: string };
 } {
   return JSON.parse(report);
@@ -313,20 +317,149 @@ describe('gateforge check', () => {
         verdict: 'invalid',
       });
 
-      // Genuine witness attestation: MAC over the set under the verifier
-      // key → the ids prove issuance → satisfied, exit 0.
-      writeManifest({ recordIds, recordIdsMac: ledgerMac(verifierKey, runId, recordIds) });
+      // GENUINE legacy v1 MAC (correct key, correct ids) still never
+      // authorizes (plan §11.3/§11.6, F2): it binds no input snapshot,
+      // so old evidence cannot certify the current tree. The verdict
+      // blocks AND an explicit legacy-format evidence-context blocker
+      // names the migration (fresh test-gates run required).
+      writeManifest({
+        recordIds,
+        recordIdsMac: ledgerMac(verifierKey, runId, recordIds),
+      });
+      expect(await accountsVerdict(['check', '--format', 'json'], withKey)).toMatchObject({
+        code: 1,
+        verdict: 'invalid',
+      });
+      {
+        const result = await runCli(repo, ['check', '--format', 'json'], withKey);
+        const report = parseReport(result.stdout);
+        expect(
+          report.blocking.some(
+            (entry) => entry.kind === 'finding' && (entry.detail ?? '').includes('legacy v1'),
+          ),
+        ).toBe(true);
+      }
+
+      // Genuine v2 witness attestation (plan §11.3): digest computed
+      // over the CURRENT inputs with the real snapshot helpers, MAC
+      // minted with the real producer → the ids prove issuance for
+      // THIS tree → satisfied, exit 0.
+      const invocationId = '22222222-2222-4222-8222-222222222222';
+      await writeV2Manifest(repo, { runId, verifierKey, recordIds, invocationId });
       expect(await accountsVerdict(['check', '--format', 'json'], withKey)).toMatchObject({
         code: 0,
         verdict: 'satisfied',
       });
 
-      // The same genuine MAC is not evaluable without the key: trust
-      // requires verification — fail closed, never "trust on presence".
+      // The same genuine envelope is not evaluable without the key:
+      // trust requires verification — fail closed, never "trust on
+      // presence".
       expect(await accountsVerdict(['check', '--format', 'json'])).toMatchObject({
         code: 1,
         verdict: 'invalid',
       });
+
+      // Tampered digest: the envelope's inputDigest rewritten without a
+      // fresh MAC → signature fails → invalid (missing vs malformed vs
+      // forged stay distinguished: this is a MAC failure).
+      {
+        const digest = await currentInputDigest(repo);
+        const tampered = 'f'.repeat(64);
+        const sortedIds = [...recordIds].sort();
+        const mac = attestationMac(verifierKey, {
+          runId,
+          invocationId,
+          inputDigest: digest,
+          recordIds: sortedIds,
+        });
+        writeManifest({
+          invocationId,
+          inputDigest: tampered,
+          recordIds: sortedIds,
+          attestation: {
+            attestationVersion: 2,
+            runId,
+            invocationId,
+            inputDigest: tampered,
+            recordIds: sortedIds,
+            mac,
+          },
+        });
+        const result = await runCli(repo, ['check', '--format', 'json'], withKey);
+        const report = parseReport(result.stdout);
+        expect(result.code).toBe(1);
+        expect(report.verdicts.find((v) => v.obligationId === OBLIGATION_ACCOUNTS)?.verdict).toBe(
+          'invalid',
+        );
+        expect(
+          report.blocking.some((entry) => (entry.detail ?? '').includes('signature fails')),
+        ).toBe(true);
+      }
+
+      // Transplanted record: an id issued under another run inserted
+      // into the current bundle → demotes (run identity binds per
+      // envelope) → invalid.
+      {
+        await writeV2Manifest(repo, { runId, verifierKey, recordIds, invocationId });
+        const foreignId = recordIdOf({
+          runId: '00000000-0000-4000-8000-000000000099',
+          obligationId: OBLIGATION_ACCOUNTS,
+          kind: 'persistence.entity',
+          testId: 'suite-test',
+          origin: 'engine-observed',
+          payload: persistencePayload,
+        });
+        repo.writeFiles({
+          '.gateforge/test-gates/records.json': JSON.stringify([
+            action,
+            { ...persistence, recordId: foreignId, runId: '00000000-0000-4000-8000-000000000099' },
+            visible,
+          ]),
+        });
+        expect(await accountsVerdict(['check', '--format', 'json'], withKey)).toMatchObject({
+          code: 1,
+          verdict: 'invalid',
+        });
+      }
+    });
+  });
+
+  it('F3: an unknown http contract blocks the gate (exit 1, never waived)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge/policies.yml':
+          'schemaVersion: 1\npolicies:\n  - id: user-facing-crud\n    when:\n      exposure: user-facing\n    require: [http:does-not-exist]\n',
+        '.gateforge/test-gates/claims.json': JSON.stringify([
+          {
+            schemaVersion: 1,
+            obligationId: 'tenant.accounts:http:does-not-exist',
+            testId: 'suite-test',
+            testFile: 'tests/accounts.spec.ts',
+          },
+          {
+            schemaVersion: 1,
+            obligationId: 'tenant.orders:http:does-not-exist',
+            testId: 'suite-test',
+            testFile: 'tests/orders.spec.ts',
+          },
+        ]),
+      });
+      const { code, stdout } = await runCli(repo, ['check', '--format', 'json']);
+      expect(code).toBe(1);
+      const report = parseReport(stdout);
+      expect(report.summary.blocking).toBe(2);
+      expect(report.verdicts.map((v) => v.obligationId).sort()).toEqual([
+        'tenant.accounts:http:does-not-exist',
+        'tenant.orders:http:does-not-exist',
+      ]);
+      expect(report.verdicts.every((v) => v.verdict === 'missing')).toBe(true);
+      expect(report.verdicts.every((v) => v.contract === 'http:does-not-exist')).toBe(true);
+      expect(
+        report.verdicts.every(
+          (v) => v.reason !== null && v.reason.includes("'http:does-not-exist'"),
+        ),
+      ).toBe(true);
     });
   });
 

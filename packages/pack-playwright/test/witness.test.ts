@@ -5,13 +5,14 @@
  * and the classification surface. Real loopback HTTP; no mocks.
  */
 import { afterEach, describe, expect, it } from 'vitest';
+import { createServer, type Server } from 'node:http';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { startWitness, WitnessStartupError, recordIdOf } from '../src/witness/server.js';
-import { RunManifestSchema, ledgerMac, verifyLedgerMac, ClassificationSchema, type Classification } from '@gateforge/core';
+import { RunManifestSchema, attestationMac, ledgerMac, verifyAttestationMac, ClassificationSchema, type Classification } from '@gateforge/core';
 import { toClassificationView } from '../src/witness/classifications.js';
 import { writeHonestAdapter, writeFixtureProject, makeTempProject } from './helpers.js';
 import { AttestationError } from '../src/witness/env-attestation.js';
@@ -486,10 +487,223 @@ describe('classifications surface', () => {
   });
 });
 
-describe('ledger attestation surface (pin #7, GF-23)', () => {
-  it('serves a verifier-key-authenticated, MAC-bound id set', async () => {
+/** Trusted run-context binding body (plan §11.4): fixed valid UUIDs + digest. */
+const INVOCATION_ID = 'aaaaaaaa-0000-4000-8000-000000000001';
+const INPUT_DIGEST = 'b'.repeat(64);
+
+/** Binds the trusted context; asserts 200 and echoes the frozen copy. */
+async function bindContext(
+  url: string,
+  body: { runId: string; invocationId: string; inputDigest: string } = {
+    runId: RUN_ID,
+    invocationId: INVOCATION_ID,
+    inputDigest: INPUT_DIGEST,
+  },
+  verifierKey: string | null = VERIFIER_KEY,
+): Promise<{ runId: string; invocationId: string; inputDigest: string }> {
+  const headers: Record<string, string> = { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' };
+  if (verifierKey !== null) headers[VERIFIER_HEADER] = verifierKey;
+  const res = await fetch(`${url}/run-context`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+  expect(res.status).toBe(200);
+  return (await res.json()) as { runId: string; invocationId: string; inputDigest: string };
+}
+
+describe('run-context binding (plan §11.4)', () => {
+  it('binds the trusted context before observation; identical rebind is idempotent', async () => {
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
     try {
+      const bound = await bindContext(fixture.witness.url);
+      expect(bound).toEqual({ bound: true, runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: INPUT_DIGEST });
+      // Identical rebind: 200, same frozen copy.
+      const rebound = await bindContext(fixture.witness.url);
+      expect(rebound).toEqual(bound);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('suite with the run token only gets 401 and the context is unchanged', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      // No verifier header at all (what the stripped suite can send).
+      const tokenOnly = await fetch(`${fixture.witness.url}/run-context`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: INPUT_DIGEST }),
+      });
+      expect(tokenOnly.status).toBe(401);
+      const wrongKey = await fetch(`${fixture.witness.url}/run-context`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: 'wrong-verifier-key', 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: INPUT_DIGEST }),
+      });
+      expect(wrongKey.status).toBe(401);
+      // Nothing stuck: the trusted bind still works afterwards.
+      await bindContext(fixture.witness.url);
+      // ...but a *changed* rebind is 409: bound state is never relabeled.
+      const changed = await fetch(`${fixture.witness.url}/run-context`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY, 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: 'c'.repeat(64) }),
+      });
+      expect(changed.status).toBe(409);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('rejects malformed bodies with 400 and mismatched run ids with 409', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      const headers = { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY, 'content-type': 'application/json' };
+      for (const bad of [
+        { runId: RUN_ID, invocationId: INVOCATION_ID },
+        { runId: 'not-a-uuid', invocationId: INVOCATION_ID, inputDigest: INPUT_DIGEST },
+        { runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: 'xyz' },
+        'just-a-string',
+      ]) {
+        const res = await fetch(`${fixture.witness.url}/run-context`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(bad),
+        });
+        expect(res.status).toBe(400);
+      }
+      const foreign = await fetch(`${fixture.witness.url}/run-context`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          runId: '00000000-0000-4000-8000-000000000099',
+          invocationId: INVOCATION_ID,
+          inputDigest: INPUT_DIGEST,
+        }),
+      });
+      expect(foreign.status).toBe(409);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('rejects binding to a used witness (issued, observed, or in flight) with 409', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      await fetch(`${fixture.witness.url}/records`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: OBLIGATION,
+          kind: 'ui.action',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
+          testId: TEST_ID,
+        }),
+      });
+      const res = await fetch(`${fixture.witness.url}/run-context`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY, 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: INPUT_DIGEST }),
+      });
+      expect(res.status).toBe(409);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('without a verifier key, binding is refused (never the suite run token as signing key)', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1', verifierKey: null });
+    try {
+      const res = await fetch(`${fixture.witness.url}/run-context`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY, 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: INPUT_DIGEST }),
+      });
+      expect(res.status).toBe(409);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('a proxy exchange in flight at bind time refuses binding (bind/observe race)', async () => {
+    // Upstream holds its response open until released, so the proxy
+    // exchange stays in flight across the bind attempt.
+    let releaseUpstream!: () => void;
+    const upstreamGate = new Promise<void>((resolve) => {
+      releaseUpstream = resolve;
+    });
+    let signalArrival!: () => void;
+    const arrivalGate = new Promise<void>((resolve) => {
+      signalArrival = resolve;
+    });
+    const upstream: Server = createServer((_req, res) => {
+      signalArrival();
+      void upstreamGate.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ held: true }));
+      });
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', () => resolve()));
+    const address = upstream.address();
+    if (address === null || typeof address === 'string') throw new Error('no upstream port');
+    const witness = await startWitness({
+      runId: RUN_ID,
+      token: TOKEN,
+      verifierKey: VERIFIER_KEY,
+      proxyTarget: `http://127.0.0.1:${address.port}`,
+    });
+    try {
+      if (witness.proxyUrl === null) throw new Error('proxy did not start');
+      const pending = fetch(`${witness.proxyUrl}/held`);
+      await arrivalGate; // the exchange is now in flight (response open)
+      const during = await fetch(`${witness.url}/run-context`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY, 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: INPUT_DIGEST }),
+      });
+      // Binding while older-invocation traffic is in flight is refused:
+      // it must never be signed under the new context.
+      expect(during.status).toBe(409);
+      releaseUpstream();
+      const held = await pending;
+      expect(held.status).toBe(200);
+      // The observation completed (response ended) while unbound: the
+      // witness is used, binding stays refused, and no attestation can
+      // ever cover the pre-bind exchange on this witness.
+      const after = await fetch(`${witness.url}/run-context`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY, 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: INPUT_DIGEST }),
+      });
+      expect(after.status).toBe(409);
+      const attestation = await fetch(`${witness.url}/ledger-attestation`, {
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY },
+      });
+      expect(attestation.status).toBe(409);
+    } finally {
+      await witness.stop();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+});
+
+describe('ledger attestation surface (pin #7, GF-23, plan §11.3)', () => {
+  it('serves the versioned v2 envelope for the bound context only', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      // Unbound: no authenticated attestation, even with the right key.
+      const unbound = await fetch(`${fixture.witness.url}/ledger-attestation`, {
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY },
+      });
+      expect(unbound.status).toBe(409);
+
+      await bindContext(fixture.witness.url);
       const post = await fetch(`${fixture.witness.url}/records`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -518,14 +732,62 @@ describe('ledger attestation surface (pin #7, GF-23)', () => {
         headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY },
       });
       expect(ok.status).toBe(200);
-      const body = (await ok.json()) as { runId: string; recordIds: string[]; mac: string };
+      const body = (await ok.json()) as {
+        attestationVersion: number;
+        runId: string;
+        invocationId: string;
+        inputDigest: string;
+        recordIds: string[];
+        mac: string;
+      };
+      expect(body.attestationVersion).toBe(2);
       expect(body.runId).toBe(RUN_ID);
+      expect(body.invocationId).toBe(INVOCATION_ID);
+      expect(body.inputDigest).toBe(INPUT_DIGEST);
       expect(body.recordIds).toEqual([issued.recordId]);
-      expect(verifyLedgerMac(VERIFIER_KEY, body.runId, body.recordIds, body.mac)).toBe(true);
+      expect(
+        verifyAttestationMac(
+          VERIFIER_KEY,
+          {
+            runId: body.runId,
+            invocationId: body.invocationId,
+            inputDigest: body.inputDigest,
+            recordIds: body.recordIds,
+          },
+          body.mac,
+        ),
+      ).toBe(true);
       // A tampered set never verifies (the hostile-suite attack).
       expect(
-        verifyLedgerMac(VERIFIER_KEY, body.runId, [...body.recordIds, 'a'.repeat(64)], body.mac),
+        verifyAttestationMac(
+          VERIFIER_KEY,
+          {
+            runId: body.runId,
+            invocationId: body.invocationId,
+            inputDigest: body.inputDigest,
+            recordIds: [...body.recordIds, 'a'.repeat(64)],
+          },
+          body.mac,
+        ),
       ).toBe(false);
+      // A legacy v1 MAC over the same ids never verifies as v2 (F2: old
+      // evidence cannot pass changed code — different signed bytes).
+      expect(
+        verifyAttestationMac(
+          VERIFIER_KEY,
+          { runId: body.runId, invocationId: body.invocationId, inputDigest: body.inputDigest, recordIds: body.recordIds },
+          ledgerMac(VERIFIER_KEY, body.runId, body.recordIds),
+        ),
+      ).toBe(false);
+      // The producer is deterministic: the same body re-mints the same MAC.
+      expect(
+        attestationMac(VERIFIER_KEY, {
+          runId: body.runId,
+          invocationId: body.invocationId,
+          inputDigest: body.inputDigest,
+          recordIds: [...body.recordIds].reverse(),
+        }),
+      ).toBe(body.mac);
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();
@@ -546,11 +808,13 @@ describe('ledger attestation surface (pin #7, GF-23)', () => {
   });
 });
 
-describe('run-manifest append (pin #4/#7)', () => {
-  it('appends the issued recordIds to manifest.json at shutdown, authenticated by the verifier MAC', async () => {
+describe('run-manifest append (pin #4/#7, plan §11.3)', () => {
+  it('appends the v2 attestation from the frozen bound context at shutdown', async () => {
     const stateDir = join(mkdtempSync(join(tmpdir(), 'gateforge-manifest-')), 'state');
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1', stateDir });
     try {
+      // Bind BEFORE any observation (the trusted CLI order).
+      await bindContext(fixture.witness.url);
       await fetch(`${fixture.witness.url}/records`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -566,23 +830,86 @@ describe('run-manifest append (pin #4/#7)', () => {
         runId: string;
         recordIds?: string[];
         recordIdsMac?: string;
+        invocationId?: string;
+        inputDigest?: string;
+        attestation?: {
+          attestationVersion: number;
+          runId: string;
+          invocationId: string;
+          inputDigest: string;
+          recordIds: string[];
+          mac: string;
+        };
       };
       expect(manifest.runId).toBe(RUN_ID);
       expect(manifest.recordIds).toHaveLength(1);
       expect(manifest.recordIds?.[0]).toMatch(/^[0-9a-f]{64}$/);
-      expect(RunManifestSchema.parse(manifest).recordIds).toEqual(manifest.recordIds);
-      // The append is authenticated: the MAC covers the exact set under
-      // the verifier key — a hostile suite editing manifest.json (adding
-      // a forged id, dropping one, transplanting the set) cannot re-mint it.
-      expect(manifest.recordIdsMac).toBeDefined();
+      // No legacy MAC is written: v1 never authorizes evidence.
+      expect(manifest.recordIdsMac).toBeUndefined();
+      const parsed = RunManifestSchema.parse(manifest);
+      expect(parsed.recordIds).toEqual(manifest.recordIds);
+      // The append carries the SAME signed v2 object the live endpoint
+      // serves: frozen bound context + exactly the issued ids. A hostile
+      // suite editing manifest.json cannot re-mint the MAC.
+      expect(manifest.invocationId).toBe(INVOCATION_ID);
+      expect(manifest.inputDigest).toBe(INPUT_DIGEST);
+      expect(manifest.attestation?.attestationVersion).toBe(2);
+      expect(manifest.attestation?.runId).toBe(RUN_ID);
+      expect(manifest.attestation?.invocationId).toBe(INVOCATION_ID);
+      expect(manifest.attestation?.inputDigest).toBe(INPUT_DIGEST);
+      expect(manifest.attestation?.recordIds).toEqual(manifest.recordIds);
       expect(
-        verifyLedgerMac(VERIFIER_KEY, manifest.runId, manifest.recordIds ?? [], manifest.recordIdsMac),
+        verifyAttestationMac(
+          VERIFIER_KEY,
+          {
+            runId: manifest.attestation?.runId,
+            invocationId: manifest.attestation?.invocationId,
+            inputDigest: manifest.attestation?.inputDigest,
+            recordIds: manifest.attestation?.recordIds,
+          },
+          manifest.attestation?.mac,
+        ),
       ).toBe(true);
       expect(
-        verifyLedgerMac(VERIFIER_KEY, manifest.runId, [...(manifest.recordIds ?? []), 'a'.repeat(64)], manifest.recordIdsMac),
+        verifyAttestationMac(
+          VERIFIER_KEY,
+          {
+            runId: manifest.attestation?.runId,
+            invocationId: manifest.attestation?.invocationId,
+            inputDigest: manifest.attestation?.inputDigest,
+            recordIds: [...(manifest.attestation?.recordIds ?? []), 'a'.repeat(64)],
+          },
+          manifest.attestation?.mac,
+        ),
       ).toBe(false);
-      // The MAC binds the manifest's own runId (what the CLI verifies against).
-      expect(manifest.recordIdsMac).toBe(ledgerMac(VERIFIER_KEY, RUN_ID, manifest.recordIds ?? []));
+    } finally {
+      await fixture.target.stop();
+    }
+  });
+
+  it('an unbound witness appends bare ids with no attestation (fail closed downstream)', async () => {
+    const stateDir = join(mkdtempSync(join(tmpdir(), 'gateforge-manifest-')), 'state');
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1', stateDir });
+    try {
+      await fetch(`${fixture.witness.url}/records`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: OBLIGATION,
+          kind: 'ui.action',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
+          testId: TEST_ID,
+        }),
+      });
+      await fixture.witness.stop(); // shutdown appends
+      const manifest = JSON.parse(readFileSync(join(stateDir, 'manifest.json'), 'utf8')) as {
+        recordIds?: string[];
+        recordIdsMac?: string;
+        attestation?: unknown;
+      };
+      expect(manifest.recordIds).toHaveLength(1);
+      expect(manifest.attestation).toBeUndefined();
+      expect(manifest.recordIdsMac).toBeUndefined();
     } finally {
       await fixture.target.stop();
     }
@@ -592,6 +919,7 @@ describe('run-manifest append (pin #4/#7)', () => {
     const stateDir = join(mkdtempSync(join(tmpdir(), 'gateforge-manifest-')), 'state');
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1', stateDir });
     try {
+      await bindContext(fixture.witness.url);
       // The hostile suite plants a hash-consistent forged id in the
       // suite-writable manifest BEFORE the witness shuts down, hoping the
       // append will merge — and thereby sign — it into the issued set.
@@ -626,17 +954,44 @@ describe('run-manifest append (pin #4/#7)', () => {
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
         recordIds?: string[];
         recordIdsMac?: string;
+        attestation?: {
+          runId: string;
+          invocationId: string;
+          inputDigest: string;
+          recordIds: string[];
+          mac: string;
+        };
       };
       // The appended set is EXACTLY the ledger: the forged id was
-      // discarded, not merged — and the MAC covers exactly that set, so
-      // the gate can never trust the forgery.
+      // discarded, not merged — and the v2 MAC covers exactly that set
+      // under the frozen bound context, so the gate can never trust the
+      // forgery.
       expect(manifest.recordIds).toHaveLength(1);
       expect(manifest.recordIds).not.toContain(forgedId);
+      expect(manifest.recordIdsMac).toBeUndefined();
       expect(
-        verifyLedgerMac(VERIFIER_KEY, RUN_ID, manifest.recordIds ?? [], manifest.recordIdsMac),
+        verifyAttestationMac(
+          VERIFIER_KEY,
+          {
+            runId: manifest.attestation?.runId,
+            invocationId: manifest.attestation?.invocationId,
+            inputDigest: manifest.attestation?.inputDigest,
+            recordIds: manifest.attestation?.recordIds,
+          },
+          manifest.attestation?.mac,
+        ),
       ).toBe(true);
       expect(
-        verifyLedgerMac(VERIFIER_KEY, RUN_ID, [...(manifest.recordIds ?? []), forgedId], manifest.recordIdsMac),
+        verifyAttestationMac(
+          VERIFIER_KEY,
+          {
+            runId: manifest.attestation?.runId,
+            invocationId: manifest.attestation?.invocationId,
+            inputDigest: manifest.attestation?.inputDigest,
+            recordIds: [...(manifest.attestation?.recordIds ?? []), forgedId],
+          },
+          manifest.attestation?.mac,
+        ),
       ).toBe(false);
     } finally {
       await fixture.target.stop();

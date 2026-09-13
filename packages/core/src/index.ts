@@ -77,6 +77,23 @@ export { isProvenancedRecord, isWitnessedRecord } from './provenance.js';
  */
 export { ledgerMac, verifyLedgerMac } from './provenance.js';
 
+/**
+ * V2 evidence attestation (plan §11.3): HMAC-SHA256 over the canonical
+ * `{domain: 'gateforge.ledger.v2', attestationVersion: 2, runId,
+ * invocationId, inputDigest, recordIds}` set, keyed by the verifier key
+ * the tested suite never receives. Binds issued evidence to the tested
+ * source/policy inputs and the fresh invocation identity. A legacy v1
+ * `{runId, recordIds}` MAC can never verify here (different signed
+ * bytes) and never authorizes evidence.
+ */
+export {
+  ATTESTATION_DOMAIN,
+  ATTESTATION_VERSION,
+  attestationMac,
+  verifyAttestationMac,
+  type AttestationBody,
+} from './provenance.js';
+
 // ---------------------------------------------------------------------------
 // Schema version (ADR 0001)
 // ---------------------------------------------------------------------------
@@ -220,9 +237,9 @@ export type { FingerprintHex } from './schemas/baseline.js';
  * null), provider, plugin set, attestationScope. Every verdict and
  * witnessed record references its run.
  */
-export { RunManifestSchema, ChangedProviderSchema } from './schemas/run-manifest.js';
+export { RunManifestSchema, ChangedProviderSchema, AttestationSchema } from './schemas/run-manifest.js';
 /** Inferred run-manifest type. */
-export type { RunManifest } from './schemas/run-manifest.js';
+export type { RunManifest, Attestation } from './schemas/run-manifest.js';
 /** Inferred changed-provider type. */
 export type { ChangedProvider } from './schemas/run-manifest.js';
 
@@ -529,7 +546,16 @@ export {
   type ClaimEvidenceInput,
   type ClaimOutcome,
   type ContractVerifier,
+  type HttpRouteCandidate,
 } from './verdict/index.js';
+
+/**
+ * Deterministic runtime route attribution (plan §9, D2): the single
+ * path interpretation plus the complete-inventory resolver the HTTP
+ * transport verifier grades against. No literal-precedence shortcut;
+ * ambiguity blocks.
+ */
+export { interpretObservedPath, resolveHttpRoute, pathMatchesShape } from './verdict/index.js';
 
 /** Fail-closed verdict-engine error (malformed obligation / clock). */
 export { GateforgeVerdictError } from './verdict/index.js';
@@ -610,6 +636,8 @@ export type { RunExitCode } from './report/index.js';
 export type { WaiverCounts } from './report/index.js';
 /** Options for renderRun (format, blocking entries, counts, manifest). */
 export type { RenderRunOptions } from './report/index.js';
+/** Effective evaluation scope carried by run reports (plan §12.4). */
+export type { ScopeMetadata } from './report/index.js';
 
 // ---------------------------------------------------------------------------
 // Fixture harness (G7) — deterministic temp repos, injected clock/env,
