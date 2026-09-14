@@ -22,9 +22,18 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { evaluateObligation, recordIdOf } from '@gateforge/core';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
 import { RUN_HEADER } from '../src/constants.js';
+import {
+  beginJourneyInterval,
+  endJourneyInterval,
+  openSupervisorSession,
+  type SupervisorSession,
+} from './helpers.js';
 
 const RUN_ID = '2b4a6c80-1e3d-4f5a-8b7c-9d0e1f2a3b4c';
 const TOKEN = 'browser-observation-run-token';
+// Enforcement-review fix 3: this test acts as its own supervisor — the
+// witness gets a verifier key and the session open presents it.
+const VERIFIER_KEY = 'browser-observation-verifier-key';
 const FRONTEND_OBLIGATION_ID = 'tenant.http-post-api-contracts-browser:http:frontend-request-observed';
 const TRANSPORT_OBLIGATION_ID = 'tenant.http-post-api-contracts-browser:http:request-observed';
 const TEST_ID = 'browser-journey-1';
@@ -72,13 +81,16 @@ async function startTargetApp(): Promise<{ url: string; stop: () => Promise<void
 /** Claims one engine observation as a witnessed http.request record. */
 function observe(
   witness: WitnessHandle,
+  session: SupervisorSession,
   overrides: Record<string, unknown> = {},
 ): Promise<{ statusCode: number; body: { error?: string; status?: number; recordId?: string } }> {
   const body = JSON.stringify({
     claimId: TRANSPORT_OBLIGATION_ID,
-    testId: TEST_ID,
+    testId: session.testId,
     method: 'POST',
     path: '/api/contracts',
+    sessionId: session.sessionId,
+    sessionToken: session.sessionToken,
     ...overrides,
   });
   return new Promise((resolve, reject) => {
@@ -99,23 +111,29 @@ function observe(
 describe('browser-driven observation proxy (real chromium, playwright-evidence)', () => {
   it('the BROWSER POSTs through the proxy; the witness witnesses the request (red probe first)', async () => {
     const target = await startTargetApp();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
       expect(witness.proxyUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      // Phase 1: the journey runs under a supervisor-opened session and
+      // a witness-recorded action interval; browser traffic goes through
+      // the session's observation channel.
+      const session = await openSupervisorSession(witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      const intervalId = await beginJourneyInterval(witness.url, TOKEN, session, 'create');
 
       // Red probe: no browser traffic yet — the observation claim is refused.
-      const redProbe = await observe(witness);
+      const redProbe = await observe(witness, session);
       expect(redProbe.statusCode).toBe(409);
 
-      // Real browser: chromium navigates the PROXY and submits the form,
-      // so the POST /api/contracts exchange traverses the witness-owned
-      // observation proxy (engine-side, not suite-asserted).
+      // Real browser: chromium navigates the PROXY (through the session
+      // channel) and submits the form, so the POST /api/contracts
+      // exchange traverses the witness-owned observation proxy
+      // (engine-side, not suite-asserted).
       const { chromium } = await import('playwright');
       const browser = await chromium.launch({ headless: true });
       try {
         const context = await browser.newContext();
         const page = await context.newPage();
-        await page.goto(`${witness.proxyUrl as string}/`);
+        await page.goto(`${session.proxyUrl as string}/`);
         expect((await page.locator('h1').textContent())?.trim()).toBe('Contracts');
         const [response] = await Promise.all([
           page.waitForResponse(
@@ -130,13 +148,14 @@ describe('browser-driven observation proxy (real chromium, playwright-evidence)'
       }
 
       // The browser-driven exchange is consumable exactly once as a
-      // witnessed http.request record.
-      const claimed = await observe(witness);
+      // witnessed http.request record — within this session's interval.
+      const claimed = await observe(witness, session);
       expect(claimed.statusCode).toBe(200);
       expect(claimed.body.status).toBe(201);
 
-      const replay = await observe(witness);
+      const replay = await observe(witness, session);
       expect(replay.statusCode).toBe(409);
+      await endJourneyInterval(witness.url, TOKEN, session, intervalId);
 
       const recordsResponse = await fetch(`${witness.url}/records`, {
         headers: { [RUN_HEADER]: TOKEN },

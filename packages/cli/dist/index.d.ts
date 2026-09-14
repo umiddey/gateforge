@@ -18,6 +18,8 @@ export { localStagedProvider, githubPrProvider, gitlabMrProvider, providerFor, r
 export type { ChangedFileProvider } from '@gateforge/core';
 export { runPipeline, sourceByResourceId, headSha, loadYaml } from './pipeline.js';
 export type { PipelineOptions, PipelineResult } from './pipeline.js';
+export { APPROVED_POLICY_DIGEST_ENV, TRUSTED_CONFIG_ENV, WEAKENED_POLICY_NEXT_ACTION, PROVISION_PIN_NEXT_ACTION, RESEAL_NEXT_ACTION, assertApprovedPolicy, assertReceiptApprovedPolicy, describeApprovedPolicyResolution, evaluateApprovedPolicy, resolveApprovedPolicyDigest, } from './trusted-policy.js';
+export type { ApprovedPolicyGate, ApprovedPolicyInput, ApprovedPolicyOrigin, ApprovedPolicyResolution, ApprovedPolicyResult, } from './trusted-policy.js';
 export { runPlugins } from './plugins.js';
 export type { PluginRunResult, InProcessPluginModule } from './plugins.js';
 export { evaluateRun } from './evaluate.js';

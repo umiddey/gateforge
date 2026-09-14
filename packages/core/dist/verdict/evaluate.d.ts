@@ -1,7 +1,7 @@
 import { type HttpRouteCandidate } from './registry.js';
 import { type Obligation } from '../schemas/obligation.js';
 import type { TrustTier } from '../schemas/common.js';
-import type { Verdict } from '../schemas/verdict.js';
+import type { CauseCode, Verdict } from '../schemas/verdict.js';
 import { type Waiver } from '../schemas/waiver.js';
 /** Verdicts that block a run (exit code 1). Clean: satisfied, waived. */
 export declare const BLOCKING_VERDICTS: readonly Verdict[];
@@ -36,7 +36,10 @@ export interface VerdictOutcome {
 /**
  * A per-obligation verdict enriched for reporting: the batch wrapper adds
  * the obligation identity, the highest trust tier among considered
- * records, and optional detector provenance (invariant 8 trace).
+ * records, optional detector provenance (invariant 8 trace), and the
+ * stable cause code + next action for the shared report model (plan
+ * §5.4). Cause/nextAction are null when the verdict is clean or no
+ * honest mapping exists yet (later phases populate).
  */
 export interface ObligationVerdict extends VerdictOutcome {
     /** The obligation this verdict is about. */
@@ -48,6 +51,10 @@ export interface ObligationVerdict extends VerdictOutcome {
         id: string;
         version: string;
     } | null;
+    /** Stable plan §5.4 cause code; null when unmapped or clean. */
+    readonly cause?: CauseCode | null;
+    /** Human next action for the cause; null when unmapped or clean. */
+    readonly nextAction?: string | null;
 }
 /** Pin-#9 evaluation context. Malformed entries degrade, never crash. */
 export interface VerdictContext {
@@ -113,8 +120,9 @@ export declare function evaluateObligation(obligation: Obligation, context: Verd
 /**
  * Evaluates a batch of obligations against one context and returns
  * report-ready entries sorted by obligation id, each enriched with the
- * highest trust tier among its records (SARIF properties) and optional
- * detector provenance passthrough.
+ * highest trust tier among its records (SARIF properties), optional
+ * detector provenance passthrough, and the plan §5.4 cause code +
+ * next action for the shared report model.
  *
  * Args:
  *   obligations: obligations to evaluate.

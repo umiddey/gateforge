@@ -88,4 +88,37 @@ export declare function writeClassificationsView(stateDir: string, view: Record<
 export declare function writeEnv(stateDir: string, manifest: RunManifest, witnessUrl: string | null, runToken?: string): TestGatesEnv;
 /** Persists the canonical json-format run report. */
 export declare function writeReport(stateDir: string, report: string): void;
+/**
+ * Reads one optional JSON state document (Phase 4): absent → null;
+ * present-but-invalid → UsageError (fail closed — a corrupted
+ * supervision artifact is never silently ignored).
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   name: file name inside the state dir.
+ *
+ * Returns:
+ *   unknown | null: the parsed document, or null when absent.
+ *
+ * Throws:
+ *   UsageError: when the file exists but is not valid JSON.
+ */
+export declare function readStateDocument(stateDir: string, name: string): unknown | null;
+/** Persists the Phase 4 claim-injections document (derived run state). */
+export declare function writeClaimInjections(stateDir: string, injections: Record<string, string[]>): void;
+/** Persists the sealed supervision execution result. */
+export declare function writeExecutionResult(stateDir: string, result: unknown): void;
+/** Persists the authenticated gate receipt. */
+export declare function writeGateReceipt(stateDir: string, receipt: unknown): void;
+/**
+ * Removes the cached gate receipt (plan Phase 4 item 8 / E07): a
+ * failing supervised run invalidates any cached success for its inputs —
+ * a later `check --require-e2e` must block until a fresh complete run.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ */
+export declare function clearGateReceipt(stateDir: string): void;
+/** Persists the §3.5 diagnostics report (separate from the E2E verdict). */
+export declare function writeDiagnosticsReport(stateDir: string, report: unknown): void;
 //# sourceMappingURL=state.d.ts.map

@@ -13,7 +13,7 @@
  * at changed files survive — the `check --changed` contract (GF-09's
  * resource-change set).
  */
-import { type BlockingEntry, type GateforgeConfig, type Obligation, type ObligationVerdict, type ResourceGraph, type WaiverCounts } from '@gateforge/core';
+import { type MappedCoverage, type BlockingEntry, type Claim, type CoverageOperation, type GateforgeConfig, type Obligation, type ObligationVerdict, type ResourceGraph, type WaiverCounts } from '@gateforge/core';
 /** Everything verdict evaluation needs. */
 export interface EvaluateInput {
     /** Repo root; repo-relative config paths resolve against it. */
@@ -38,6 +38,28 @@ export interface EvaluateInput {
      * these changed files are evaluated/reported (check --changed).
      */
     changedFiles?: readonly string[] | null;
+    /**
+     * Declared claims derived from resolved test mappings (plan
+     * 2026-09-13 §5.3, Phase 3): sidecar/native mapping bindings join the
+     * natively annotated claims so an existing mapped test reaches the SAME
+     * authoritative grading path. A mapping declares intent and supplies no
+     * test result — with no witnessed evidence the obligation grades
+     * EVIDENCE_NOT_COLLECTED (blocking), never satisfied. Claims cannot
+     * waive or weaken anything, so strict mode is unaffected. Phase 4 gap:
+     * the runtime fixture submits evidence per annotations with the
+     * reporter's own testIds, so sidecar claims (testId = logical key)
+     * receive no runtime evidence until Phase 4 wires claim injection
+     * through session open.
+     */
+    mappingClaims?: readonly Claim[];
+    /**
+     * Coverage facts derived from resolved test mappings (plan §3.6,
+     * Phase 3): browser-e2e-declared bindings for CRUD-contract
+     * obligations, joined to their inventory tables. Feeds the coverage
+     * policy so a mapped journey clears its table/operation exactly like
+     * an owner disposition; declarations remain inputs, never proof.
+     */
+    mappedCoverage?: readonly MappedCoverage[];
     /**
      * Verifier key for the witness attestation surface — a secret the
      * orchestrator shares with the witness and this CLI, never with the
@@ -87,6 +109,85 @@ export interface EvaluateResult {
     /** Whether any blocking verdict or blocking entry exists. */
     blockingRun: boolean;
 }
+/**
+ * Derives the closed-world coverage inventory from the built graph (plan
+ * 2026-09-13 §3.6): every RESOLVED, USER-FACING business table. HTTP
+ * endpoints are routes, not tables (ADR 0004 D8), and unclassified
+ * resources generate no obligations, so neither participates.
+ *
+ * Args:
+ *   graph: the built resource graph with effective classifications bound.
+ *
+ * Returns:
+ *   CoverageInventoryTable-style entries: name + lifecycle-enabled
+ *   operations, sorted by name (deterministic).
+ */
+export declare function coverageInventory(graph: ResourceGraph): Array<{
+    name: string;
+    operations: readonly CoverageOperation[];
+}>;
+/**
+ * Coverage-policy evaluation for the run (plan §3.6, ADR 0005 D5).
+ * Opt-in: an absent/empty `coveragePolicy` config section means the
+ * feature is off. When enabled, the policy is validated against the
+ * CURRENT run's inventory on EVERY run: unknown table names throw a
+ * UsageError (exit 2), and uncovered/undispositioned requirements become
+ * blocking findings carrying cause `CRUD_COVERAGE_MISSING`. Resolved
+ * test mappings (browser-e2e-declared bindings, plan Phases 2-3) supply
+ * the mapped-coverage facts — a mapped journey clears its table/operation
+ * exactly as a recorded owner disposition does; both remain inputs and
+ * never substitute for runtime proof.
+ *
+ * Args:
+ *   config: the validated `.gateforge.yml`.
+ *   graph: the built resource graph (inventory source).
+ *   mappedCoverage: coverage facts derived from resolved test mappings
+ *     (empty when the sidecar is absent or no binding declares
+ *     browser-e2e).
+ *
+ * Returns:
+ *   BlockingEntry[]: coverage findings (empty when the feature is off).
+ *
+ * Throws:
+ *   UsageError: when a policy table name is absent from the inventory
+ *     (configuration error — fail closed, never silently uncheckable).
+ */
+export declare function coveragePolicyBlocking(config: GateforgeConfig, graph: ResourceGraph, mappedCoverage?: readonly MappedCoverage[]): BlockingEntry[];
+/**
+ * Strict E2E preflight (plan Phase 0 item 4, ADR 0005 D1): when strict
+ * E2E mode is on, every obligation demanding a contract whose proof
+ * channel is unavailable becomes a blocking entry with a PRECISE
+ * capability error (contract + missing observer + next action). A strict
+ * setup lacking browser observation stays visibly incomplete — it cannot
+ * advertise an operational blocking E2E gate.
+ *
+ * Args:
+ *   obligations: the run's obligations (preflight is setup-wide, never
+ *     diff-narrowed).
+ *
+ * Returns:
+ *   BlockingEntry[]: one blocking entry per unsupported obligation.
+ */
+export declare function strictPreflightBlocking(obligations: readonly Obligation[]): BlockingEntry[];
+/**
+ * Strict-mode waiver treatment (plan §3.3, ADR 0005 D4): a waived
+ * in-scope E2E obligation is NOT proof and cannot authorize the change.
+ * Under strict E2E mode the verdict becomes blocking `missing` with cause
+ * `ENFORCEMENT_UNTRUSTED`; the original waiver text stays in the reason
+ * (legacy/reporting use remains explicit). Every obligation in the engine
+ * is an E2E proof obligation — unit/component results never reach the
+ * grader — so all waived verdicts convert. Baselined obligations are
+ * baseline-clean only in later phases' receipt path; `check` does not
+ * consume baselines for grading today.
+ *
+ * Args:
+ *   verdicts: the evaluated verdicts (sorted).
+ *
+ * Returns:
+ *   ObligationVerdict[]: identical unless strict mode converted waived
+ *   entries to blocking ones (order and determinism preserved).
+ */
+export declare function applyStrictE2E(verdicts: readonly ObligationVerdict[]): ObligationVerdict[];
 /**
  * Evaluates obligations and blocks per the run inputs.
  *

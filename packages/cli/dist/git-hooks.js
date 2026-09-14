@@ -1,0 +1,238 @@
+/**
+ * Active commit-hook installation and inspection (plan 2026-09-13
+ * Phase 5 item 1, ADR 0005 D1): `init --blocking` installs AND verifies
+ * an ACTIVE pre-commit hook in the repository's resolved hooks directory
+ * (`git rev-parse --git-path hooks` honors `core.hooksPath`), it does not
+ * merely write a configuration file.
+ *
+ * Safety rules:
+ * - IDEMPOTENT: a hook carrying the gateforge marker block is verified
+ *   (exec bit + verified `--gateforge-verify` invocation), never
+ *   rewritten.
+ * - PRESERVING: a non-gateforge pre-commit hook is NEVER clobbered — the
+ *   install refuses with the exact chaining action (source the
+ *   gateforge staged-gate script from the existing hook) and reports the
+ *   installation incomplete (typed, nonzero exit at the caller).
+ * - FAIL-CLOSED: when activation cannot be completed safely (not a repo,
+ *   unwritable hooks dir, verification failure) the caller receives a
+ *   typed incomplete-installation outcome naming the exact required
+ *   action — never a silently inactive gate.
+ */
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { HOOK_MARKER_BEGIN, HOOK_MARKER_END, HOOK_VERIFY_ARG, gateforgeHookScript, hasGateforgeMarker, resolveHooksDir, verifyHookActivation } from './staged-candidate.js';
+export { HOOK_MARKER_BEGIN, HOOK_MARKER_END, HOOK_VERIFY_ARG, gateforgeHookScript, hasGateforgeMarker, resolveHooksDir, verifyHookActivation };
+/** Name of the hook Git runs before a commit is created. */
+export const PRE_COMMIT_HOOK_NAME = 'pre-commit';
+/**
+ * The standalone staged-gate runner written under `.gateforge/hooks/`:
+ * consumers with a foreign hook manager chain it manually (the exact
+ * action the conflict report names), and it doubles as the verify target
+ * for `check`-less environments. Same engine resolution and strict gate
+ * as the generated pre-commit hook.
+ */
+export const STAGED_GATE_SCRIPT_BASENAME = 'gateforge-staged.sh';
+/**
+ * Installs (or verifies) the active pre-commit hook (plan Phase 5 item
+ * 1). Writing the hook is not enough: after writing or finding a
+ * gateforge-owned hook the activation is VERIFIED — exec bit present and
+ * the script actually executes its verify mode.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   env: process environment.
+ *
+ * Returns:
+ *   HookInstallOutcome: typed outcome; `conflict`/`incomplete` carry the
+ *   exact required action and must be reported as an incomplete
+ *   installation by the caller (nonzero exit).
+ */
+export function installCommitHook(cwd, env) {
+    const hooksDir = resolveHooksDir(cwd, env);
+    if (hooksDir === null) {
+        return {
+            status: 'incomplete',
+            hookPath: null,
+            hooksDir: null,
+            detail: 'no usable Git repository found — the pre-commit hook could not be installed',
+            action: 'Run `gateforge init --blocking` inside a Git repository work tree.',
+        };
+    }
+    const hookPath = join(hooksDir, PRE_COMMIT_HOOK_NAME);
+    if (existsSync(hookPath)) {
+        const body = readFileSync(hookPath, 'utf8');
+        if (hasGateforgeMarker(body)) {
+            // Idempotent rerun: gateforge owns (a block of) this hook — verify
+            // activation, repair only the exec bit, never rewrite content.
+            try {
+                if ((statSync(hookPath).mode & 0o111) === 0)
+                    chmodSync(hookPath, 0o755);
+            }
+            catch (error) {
+                return {
+                    status: 'incomplete',
+                    hookPath,
+                    hooksDir,
+                    detail: `the gateforge hook could not be made executable: ${error.message}`,
+                    action: `Run: chmod +x ${hookPath}`,
+                };
+            }
+            const verified = verifyHookActivation(hookPath);
+            if (!verified.ok) {
+                return {
+                    status: 'incomplete',
+                    hookPath,
+                    hooksDir,
+                    detail: `activation verification failed: ${verified.detail}`,
+                    action: `Inspect '${hookPath}' (it should contain the gateforge marker block and be executable), then re-run \`gateforge init --blocking\`.`,
+                };
+            }
+            return { status: 'verified', hookPath, hooksDir, detail: verified.detail };
+        }
+        // Foreign hook: NEVER clobber. Hand over the exact chaining action.
+        const gateScript = join(cwd, '.gateforge', 'hooks', STAGED_GATE_SCRIPT_BASENAME);
+        return {
+            status: 'conflict',
+            hookPath,
+            hooksDir,
+            detail: `an existing non-gateforge pre-commit hook was found at '${hookPath}'; ` +
+                'gateforge never overwrites foreign hooks, so the commit gate is NOT active yet',
+            action: `Add this line to the existing hook before it exits:\n` +
+                `  "${gateScript}" || exit 1\n` +
+                `then re-run \`gateforge init --blocking\` to verify activation.`,
+        };
+    }
+    const script = gateforgeHookScript();
+    try {
+        mkdirSync(hooksDir, { recursive: true });
+        writeFileSync(hookPath, script, 'utf8');
+        chmodSync(hookPath, 0o755);
+    }
+    catch (error) {
+        return {
+            status: 'incomplete',
+            hookPath,
+            hooksDir,
+            detail: `the hook could not be written to '${hooksDir}': ${error.message}`,
+            action: `Ensure '${hooksDir}' is writable by the current user, then re-run \`gateforge init --blocking\`.`,
+        };
+    }
+    const verified = verifyHookActivation(hookPath);
+    if (!verified.ok) {
+        return {
+            status: 'incomplete',
+            hookPath,
+            hooksDir,
+            detail: `hook written but activation verification failed: ${verified.detail}`,
+            action: `Inspect '${hookPath}', then re-run \`gateforge init --blocking\`.`,
+        };
+    }
+    return {
+        status: 'installed',
+        hookPath,
+        hooksDir,
+        detail: `hook installed and ACTIVE at '${hookPath}' (exec bit set; verified invocation)`,
+    };
+}
+/**
+ * Writes the standalone staged-gate script under `.gateforge/hooks/`
+ * (idempotent, executable) — the chaining target the conflict report
+ * names and a manual-verification entry point.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *
+ * Returns:
+ *   string: absolute path of the script.
+ *
+ * Throws:
+ *   Error: when the script cannot be written (caller reports incomplete).
+ */
+export function writeStandaloneGateScript(cwd) {
+    const dir = join(cwd, '.gateforge', 'hooks');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, STAGED_GATE_SCRIPT_BASENAME);
+    if (!existsSync(path)) {
+        writeFileSync(path, gateforgeHookScript(), 'utf8');
+    }
+    try {
+        chmodSync(path, 0o755);
+    }
+    catch {
+        // A non-executable standalone script still fails activation checks;
+        // the hook installation path reports the honest state.
+    }
+    return path;
+}
+/**
+ * Inspects the hook state for `enforcement doctor` (plan Phase 5 item
+ * 7): hooks directory, hook presence, gateforge marker, exec bit, and
+ * verified activation — reported honestly, never as managed protection.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   env: process environment.
+ *
+ * Returns:
+ *   {installed, hooksDir, hookPath, marker, execBit, verifyOk, detail}:
+ *   the honest inspection record.
+ */
+export function inspectCommitHook(cwd, env) {
+    const hooksDir = resolveHooksDir(cwd, env);
+    if (hooksDir === null) {
+        return {
+            installed: false,
+            hooksDir: null,
+            hookPath: null,
+            marker: false,
+            execBit: false,
+            verifyOk: false,
+            detail: 'no usable Git repository — hooks directory could not be resolved',
+        };
+    }
+    const hookPath = join(hooksDir, PRE_COMMIT_HOOK_NAME);
+    if (!existsSync(hookPath)) {
+        return {
+            installed: false,
+            hooksDir,
+            hookPath,
+            marker: false,
+            execBit: false,
+            verifyOk: false,
+            detail: `no pre-commit hook exists at '${hookPath}' (run \`gateforge init --blocking\`)`,
+        };
+    }
+    const body = readFileSync(hookPath, 'utf8');
+    const marker = hasGateforgeMarker(body);
+    const execBit = (statSync(hookPath).mode & 0o111) !== 0;
+    const verified = verifyHookActivation(hookPath);
+    const detail = marker
+        ? verified.ok
+            ? verified.detail
+            : `installed but NOT active: ${verified.detail}`
+        : execBit
+            ? `a non-gateforge pre-commit hook exists at '${hookPath}' (no gateforge marker; gateforge did not touch it)`
+            : `a non-gateforge pre-commit hook exists at '${hookPath}' (no gateforge marker, not executable)`;
+    return { installed: marker && execBit, hooksDir, hookPath, marker, execBit, verifyOk: verified.ok, detail };
+}
+/**
+ * One-shot activation probe used by tests and the doctor: runs the hook
+ * script's verify mode directly (proves the exec bit + the shebang work
+ * without a commit).
+ *
+ * Args:
+ *   hookPath: absolute hook path.
+ *
+ * Returns:
+ *   {ok, detail}: spawn result (spawnSync is used directly here so a
+ *   spawn-level failure surfaces as `ok: false`, never an exception).
+ */
+export function probeHookExecution(hookPath) {
+    const run = spawnSync(hookPath, [HOOK_VERIFY_ARG], { encoding: 'utf8', timeout: 10_000 });
+    if (run.error !== undefined || run.status !== 0) {
+        return { ok: false, detail: `hook did not execute (exit ${run.status ?? -1})` };
+    }
+    return { ok: true, detail: run.stdout.trim() };
+}
+//# sourceMappingURL=git-hooks.js.map

@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { SchemaVersionField, TransportSchema } from '../schemas/common.js';
+import { CoveragePolicySchema } from '../schemas/coverage-policy.js';
 import { z } from 'zod';
 /**
  * A plugin entry in `.gateforge.yml`. Unlike a run-manifest plugin
@@ -75,6 +76,116 @@ export const ConfigPluginSchema = z
                 message: `in-process plugin '${plugin.id}' must not declare 'command' (subprocess only)`,
             });
         }
+    }
+});
+/**
+ * Enforcement-mode configuration (plan 2026-09-13 §3.4/§3.3, ADR 0005
+ * D1/D4). OPTIONAL and off by default — enabling strict E2E is an
+ * explicit, tracked owner decision.
+ */
+export const EnforcementConfigSchema = z
+    .object({
+    /**
+     * `standard` = local hook + mandatory trusted server check (honest
+     * about --no-verify); `managed` = authoritative commit broker outside
+     * the agent's write/process boundary. Later phases enforce this; the
+     * value is recorded here from Phase 0 on.
+     */
+    mode: z.enum(['standard', 'managed']).default('standard'),
+    /**
+     * Strict E2E mode (plan §3.3): when true, a waived or baselined
+     * in-scope E2E obligation is NOT proof and cannot authorize the
+     * change — the gate reports it blocking (ENFORCEMENT_UNTRUSTED), and
+     * required contracts whose proof channel is unavailable fail the
+     * setup closed (preflight capability validation).
+     */
+    strictE2E: z.boolean().default(false),
+    /**
+     * The OWNER-APPROVED policy revision digest (ADR 0005 D6 enforcement):
+     * the `trustedPolicyDigest` value the owner pinned as the approved
+     * policy revision. Gates compare the candidate's recomputed digest
+     * against it, so a candidate that edits classifiers, exclusions,
+     * waivers, baselines, or coverage cannot authorize its own weaker
+     * checks.
+     *
+     * TRUST BOUNDARY: this value must NEVER come from candidate-controlled
+     * files in strict mode. It is honored only when the config document
+     * carrying it lives OUTSIDE the candidate repository (loaded through
+     * the explicit `GATEFORGE_TRUSTED_CONFIG` path) or when the digest is
+     * provisioned through `GATEFORGE_APPROVED_POLICY_DIGEST` /
+     * `--approved-policy-digest`. Declaring it in the candidate's own
+     * `.gateforge.yml` is never a trusted source: strict gates block with
+     * ENFORCEMENT_UNTRUSTED instead of honoring it.
+     */
+    approvedPolicyDigest: z
+        .string()
+        .regex(/^[0-9a-f]{64}$/, 'approvedPolicyDigest must be 64-char lowercase hex')
+        .optional(),
+})
+    .strict();
+/**
+ * One configured diagnostic suite (plan 2026-09-13 §3.5, phase 2 item
+ * 8): an EXISTING suite the owner registers for the advisory "red means
+ * inspect this" alarm. Gateforge never discovers suites on its own — no
+ * directory scans, no executing commands found on disk; everything comes
+ * from this explicit, tracked configuration.
+ *
+ * Only `pytest` is accepted today: other runners stay explicitly
+ * unsupported until an adapter exists (plan phase 2 item 6) — a typo'd
+ * or aspirational runner name must fail the config load, not silently
+ * disable a suite.
+ */
+export const DiagnosticSuiteSchema = z
+    .object({
+    /** Suite name used in reports and commands, e.g. `backend-pytest`. */
+    name: z.string().min(1),
+    /** The only runner with an adapter today (fail closed otherwise). */
+    runner: z.enum(['pytest']),
+    /** Repo-root-relative working directory the argv runs in. */
+    cwd: z.string().min(1),
+    /**
+     * Interpreter + args, e.g. `['python', '-m', 'pytest']`. The adapter
+     * appends collection/report flags; it never executes anything beyond
+     * this configured argv.
+     */
+    argv: z.array(z.string().min(1)).min(1),
+    /**
+     * Paths handed to the runner VERBATIM (suite-`cwd`-relative), e.g.
+     * `['tests']`. The adapter never widens them: gateforge never scans
+     * directories the owner did not name here.
+     */
+    testPaths: z.array(z.string().min(1)).min(1),
+    /** Finite wall-clock bound for one adapter invocation (seconds). */
+    timeoutMs: z.number().int().min(1),
+})
+    .strict();
+/**
+ * The `diagnostics` config section (plan §3.5): registered diagnostic
+ * suites. ABSENT = no diagnostic suites (the default; the alarm is
+ * opt-in and never a commit blocker by itself).
+ */
+export const DiagnosticsConfigSchema = z
+    .object({
+    /** Explicitly registered diagnostic suites. */
+    suites: z.array(DiagnosticSuiteSchema),
+})
+    .strict()
+    .superRefine((diagnostics, ctx) => {
+    // Duplicate suite names would make `tests diagnose --suite <name>`
+    // and per-suite reporting ambiguous — reject at config load.
+    const seen = new Set();
+    for (let index = 0; index < diagnostics.suites.length; index += 1) {
+        const name = diagnostics.suites[index]?.name;
+        if (name === undefined)
+            continue;
+        if (seen.has(name)) {
+            ctx.addIssue({
+                code: 'custom',
+                path: ['suites', index, 'name'],
+                message: `duplicate diagnostic suite name '${name}': suite selection must be unambiguous`,
+            });
+        }
+        seen.add(name);
     }
 });
 /**
@@ -155,6 +266,27 @@ export const GateforgeConfigSchema = z
             });
         }
     }),
+    /**
+     * Enforcement modes (plan 2026-09-13 §3.3/§3.4, ADR 0005 D1/D4).
+     * ABSENT = feature off (standard mode, strict E2E off) so existing
+     * configs keep their exact behavior; enabling strict E2E is opt-in.
+     */
+    enforcement: EnforcementConfigSchema.optional(),
+    /**
+     * Closed-world CRUD coverage policy (plan 2026-09-13 §3.6, ADR 0005
+     * D5): tracked, owner-owned enumeration of user-facing tables with
+     * required operations and owner dispositions. ABSENT/empty = feature
+     * off (opt-in). Validated against the current run's resource
+     * inventory on every run when present.
+     */
+    coveragePolicy: CoveragePolicySchema.optional(),
+    /**
+     * Registered diagnostic suites (plan 2026-09-13 §3.5). ABSENT = no
+     * suites; the advisory alarm is opt-in via explicit, tracked
+     * configuration — gateforge never scans for or launches anything the
+     * owner did not register here.
+     */
+    diagnostics: DiagnosticsConfigSchema.optional(),
 })
     .strict();
 /** Error raised for any fail-closed config problem. */

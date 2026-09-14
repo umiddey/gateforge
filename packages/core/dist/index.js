@@ -155,10 +155,32 @@ export { RunManifestSchema, ChangedProviderSchema, AttestationSchema } from './s
  */
 export { VerdictSchema } from './schemas/verdict.js';
 /**
+ * CauseCode (plan 2026-09-13 §5.4, ADR 0005): stable blocking-obligation
+ * cause codes plus the three advisory `DIAGNOSTIC_*` result causes. The
+ * seven verdict VALUES are unchanged; causes enrich the shared report
+ * model (text, JSON, and SARIF all carry them).
+ */
+export { CauseCodeSchema, CAUSE_NEXT_ACTIONS } from './schemas/verdict.js';
+/**
+ * CoveragePolicy (plan 2026-09-13 §3.6, ADR 0005 D5): the tracked,
+ * owner-owned `coveragePolicy` config section — user-facing tables,
+ * required real-UI operations, and owner dispositions. Absent/empty =
+ * feature off (opt-in); agent edits never self-approve a disposition.
+ */
+export { COVERAGE_OPERATIONS, CoverageOperationSchema, CoveragePolicySchema, CoverageTableSchema, CoverageDispositionSchema, } from './schemas/coverage-policy.js';
+/**
  * UnresolvedReason (pin #5): `{code, detail, location{file,line,col}}` —
  * single-cause, machine-readable, no stack dumps.
  */
 export { UnresolvedReasonSchema } from './schemas/verdict.js';
+/**
+ * TestCatalog (plan 2026-09-13 §5.1 row 1 + §5.2): the derived inventory
+ * of a repository's existing tests. Logical keys are the stable mapping
+ * identity (line numbers are diagnostics); duplicate keys are a typed
+ * parse error listing both sources; unresolved rows are first-class data
+ * so a failed scan is never misread as "no tests".
+ */
+export { SUPPORTED_TEST_RUNNERS, TestRunnerSchema, TestKindSchema, DiscoveryStatusSchema, ReconciliationStatusSchema, RuleEvidenceSchema, KindSignalSchema, WeakSignalSchema, CategorySignalSchema, SuppressionSignalKindSchema, SuppressionSignalSchema, TestCatalogEntrySchema, CatalogParseErrorSchema, RunnerSummarySchema, TestCatalogSchema, deriveLogicalKey, } from './schemas/test-catalog.js';
 /**
  * PluginRegistration: pinned plugin identity `{id, version, transport}`
  * shared by run manifests (pin #4) and the GPP/3 handshake (pin #5).
@@ -179,10 +201,17 @@ export { fingerprint, FingerprintInputSchema } from './fingerprints.js';
 /**
  * `.gateforge.yml` document schema (pin #6): project paths, plugins,
  * policies/classifications/adapters/waivers/baselines paths, changed
- * provider, witness bounds, clock mode. Unknown keys and unknown
- * schemaVersion are rejected.
+ * provider, witness bounds, clock mode, optional enforcement modes, and
+ * optional coverage policy. Unknown keys and unknown schemaVersion are
+ * rejected.
  */
-export { GateforgeConfigSchema, ConfigPluginSchema } from './config/index.js';
+export { GateforgeConfigSchema, ConfigPluginSchema, EnforcementConfigSchema } from './config/index.js';
+/**
+ * Diagnostics config (plan 2026-09-13 §3.5): explicitly registered
+ * diagnostic suites (pytest today). Absent = feature off; gateforge
+ * never scans for or launches unregistered suites.
+ */
+export { DiagnosticsConfigSchema, DiagnosticSuiteSchema } from './config/index.js';
 /** Error for any fail-closed config problem; carries `.diagnostics`. */
 export { GateforgeConfigError } from './config/index.js';
 /**
@@ -301,6 +330,22 @@ export { PolicyEvaluationError } from './policy/index.js';
  * and claim assessment. Pure; deterministic.
  */
 export { evaluatePolicies, lifecycleAllowsContract } from './policy/index.js';
+/**
+ * Closed-world CRUD coverage evaluator (plan 2026-09-13 §3.6, ADR 0005
+ * D5): pure; returns typed blocking `CRUD_COVERAGE_MISSING` findings per
+ * uncovered/undispositioned required operation and CONFIG-ERROR results
+ * for policy tables absent from the caller-provided resource inventory.
+ */
+export { evaluateCoveragePolicy } from './policy/index.js';
+/**
+ * Protected policy ownership foundation (plan 2026-09-13 Phase 0 item 5,
+ * ADR 0005 D6): the domain-separated trusted policy/config digest for
+ * later receipt binding, plus the pure weakening check — a candidate
+ * whose policy revision differs from the trusted one is a weakening
+ * candidate until a separate trusted update is accepted. Enforcement
+ * lands in Phases 4-5.
+ */
+export { TRUSTED_POLICY_DOMAIN, trustedPolicyDigest, policyWeakenedCandidate } from './policy/index.js';
 // ---------------------------------------------------------------------------
 // Verdict engine (Phase 2, pin #9) — the pure obligation evaluator
 // ---------------------------------------------------------------------------
@@ -324,6 +369,20 @@ export { evaluateObligations } from './verdict/index.js';
 export { BLOCKING_VERDICTS } from './verdict/index.js';
 export { registerContractVerifier, verifierFor, registeredNamespaces, } from './verdict/index.js';
 /**
+ * Verifier capability metadata (plan 2026-09-13 Phase 0 item 3, ADR
+ * 0005): the single source of truth for what each contract namespace can
+ * honestly prove, its required observer channel, supported test kinds,
+ * and availability. First-wins/no-override, like verifier registration.
+ */
+export { registerContractCapabilities, capabilityFor, allCapabilities, } from './verdict/index.js';
+/**
+ * Cause mapping + strict preflight (plan 2026-09-13 §5.4 / Phase 0 item
+ * 4): derives stable cause codes and next actions for blocking verdicts,
+ * and computes the precise capability gaps a strict setup fails closed
+ * on (VERIFIER_UNSUPPORTED).
+ */
+export { causeForVerdict, capabilityGap, strictCapabilityGaps, } from './verdict/index.js';
+/**
  * Deterministic runtime route attribution (plan §9, D2): the single
  * path interpretation plus the complete-inventory resolver the HTTP
  * transport verifier grades against. No literal-precedence shortcut;
@@ -334,6 +393,52 @@ export { interpretObservedPath, resolveHttpRoute, pathMatchesShape } from './ver
 export { GateforgeVerdictError } from './verdict/index.js';
 /** Normalizes the injected clock (`Date | string`) to a `Date`. */
 export { parseInstant } from './verdict/index.js';
+// ---------------------------------------------------------------------------
+// Test-mapping sidecar + resolver (plan 2026-09-13 §5.2/§5.3, Phase 3)
+// ---------------------------------------------------------------------------
+/**
+ * TestMap (plan 2026-09-13 §5.3): the versioned `.gateforge/test-map.yml`
+ * sidecar an agent (or `tests mark`) writes to connect an EXISTING test
+ * to obligations without rewriting a test body. Claims non-empty, kind a
+ * supported TestKind, reason required, duplicate keys rejected naming
+ * both entries; `'*'` wildcards never parse (not obligation ids).
+ */
+export { TestMapSchema, TestMapEntrySchema, TestSelectorSchema } from './schemas/test-map.js';
+/**
+ * The ONE mapping resolver (plan §5.3, Phase 3): normalizes native
+ * claims, sidecar declarations, prior-run hints, and inference into one
+ * resolved surface. Deterministic; contradictions/staleness become typed
+ * problems naming both locations; inference never auto-writes a mapping;
+ * projections into grading claims carry intent only — no evidence — so a
+ * mapped-but-unexecuted obligation still blocks.
+ */
+export { resolveTestMappings, mappingSuggestions, mappingGradingClaims, } from './mapping/resolve.js';
+/**
+ * Execution result (plan 2026-09-13 §5.1, ADR 0005 D2, Phase 4): the
+ * trusted supervisor's sealed run record — planned versus executed
+ * instances, outcomes/attempts, runner exit, fixture/teardown outcome,
+ * shard completeness, selection + catalog digests, engines, and
+ * environment identity — plus the domain-separated selection digest.
+ * Reporter data is input here, never signature authority.
+ */
+export { EXECUTION_RESULT_DOMAIN, SELECTION_DOMAIN, ExecutionResultSchema, PlannedInstanceSchema, ExecutedOutcomeSchema, InstanceStatusSchema, SupervisionFindingSchema, TracedSessionSchema, TracedTestSchema, executionResultDigestOf, selectionDigestOf, } from './schemas/execution-result.js';
+/**
+ * Gate receipt (plan 2026-09-13 §5.1, ADR 0005 D3, Phase 4): the NEW
+ * versioned, domain-separated envelope issued only after complete run
+ * success and evidence grading. Signed by the same authority as witness
+ * records (the verifier key, HMAC over GF-canonical JSON, domain
+ * `gateforge.receipt.v1`) — never a repurposed v2 attestation.
+ */
+export { RECEIPT_DOMAIN, RECEIPT_VERSION, gateReceiptMac, verifyGateReceipt, } from './receipt/index.js';
+export { GateReceiptSchema, ReceiptVerdictSummarySchema } from './schemas/gate-receipt.js';
+/**
+ * Trusted runner supervision (plan Phase 4 item 4, ADR 0005 D2): the
+ * pure expected-set enforcement — planned versus executed instances,
+ * retries, skips/only/fixme, expected failures, teardown errors, shards,
+ * and runner exit, each a typed §5.4 run cause. Any finding fails the
+ * whole run; there is no selective pass out of a failed required suite.
+ */
+export { superviseExecution, enumerationDigestOf, ENUMERATION_DOMAIN } from './supervision/index.js';
 // ---------------------------------------------------------------------------
 // Waivers (GF-15/16/17) — fail-closed directory loading
 // ---------------------------------------------------------------------------

@@ -13,10 +13,14 @@
  * ERR_PACKAGE_PATH_NOT_EXPORTED) and then loads the resolved file with
  * require-or-import. Plain `require()` gets THIS module: a class whose
  * constructor synchronously returns while the ESM implementation loads
- * in the background. The runner's synchronous callback (`onTestEnd`)
- * is buffered until the implementation arrives; `onEnd` is awaited by
- * the runner, so it can wait for the load and fails closed if the
- * implementation never loads (evidence is never silently dropped).
+ * in the background. EVERY runner callback is forwarded (buffered until
+ * the implementation arrives, in call order): `onTestBegin` is the
+ * trusted-supervisor session open (plan Phase 1) — dropping it would
+ * silently strip every test of its witness session and fail all
+ * evidence primitives; `onTestEnd` seals claims + the supervision
+ * outcome row; `onEnd` is awaited by the runner, so it can wait for the
+ * load and fails closed if the implementation never loads (evidence is
+ * never silently dropped).
  *
  * Supported syntaxes (both ESM and CJS playwright configs):
  *

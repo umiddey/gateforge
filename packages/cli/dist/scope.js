@@ -1,10 +1,14 @@
 /**
- * Effective evaluation scope for `check --changed` (plan §12.2, D4).
- *
- * One scope decision is computed BEFORE grading and applied consistently
- * to obligations AND blocking entries. `check` without `--changed` stays
- * all-files. `check --changed` expands to all-files when the diff touches
- * any gate-defining input.
+ * Effective evaluation scope for `check --changed` (plan §12.2, D4) and
+ * the Phase 4 conservative expansion (plan 2026-09-13 Phase 4 item 2,
+ * E15): one scope decision is computed BEFORE grading and applied
+ * consistently to obligations AND blocking entries. `check` without
+ * `--changed` stays all-files. `check --changed` expands to all-files
+ * when the diff touches any gate-defining input, a TEST file, a file in
+ * a test directory (test fixtures/helpers), the runner configuration,
+ * the mapping sidecar — or, under strict E2E mode, any UNCLASSIFIED
+ * changed file (a behavior change nothing can attribute is treated
+ * conservatively and additionally surfaces as `CHANGE_UNMAPPED`).
  *
  * The gate-defining set reuses the Phase 6 input inventory — the same
  * `.gateforge.yml`, policy/classification paths, pack configs, adapter
@@ -16,6 +20,20 @@
  * change that merely points at a new policy file triggers a full check
  * on its own: the pointer change is gate-defining without reading the
  * old policy.
+ *
+ * Journey coverage associations (plan Phase 3 item 7) are NOT
+ * implemented yet, so an unclassified change cannot be excused by a
+ * journey declaration: it stays conservative + `CHANGE_UNMAPPED`
+ * (documented Phase 4 deviation; Phase 5 owns the association surface).
+ *
+ * Docs-only exclusion (plan Phase 5 item 5): a change whose ENTIRE
+ * changed set is Markdown under `docs/` is exempt from the strict-mode
+ * unclassified handling (no expansion, no CHANGE_UNMAPPED). The rule is
+ * deliberately narrow and ENGINE-OWNED — never candidate-configurable:
+ * `docs/*.md` only, never any config/policy path (those are matched as
+ * gate-defining inputs first), and a change that touches BOTH docs and
+ * code is NOT docs-only — in a mixed change the docs files are unknown
+ * changes like any other and stay blocking under strict E2E mode.
  */
 import { spawnSync } from 'node:child_process';
 import { normalizeChangedFiles } from '@gateforge/core';
@@ -88,15 +106,18 @@ function matchGateDefiningInput(file, gate) {
  * Computes one effective evaluation scope for a `--changed` run.
  *
  * Args:
- *   config: validated `.gateforge.yml` (custom policy/classification
- *     paths included by construction — they are read from the config,
- *     never compared against defaults).
- *   changedFiles: actual normalized diff list from the diff provider.
+ *   input: config, actual normalized diff list, and the optional Phase 4
+ *     expansion inputs — catalog test files (with their directories for
+ *     fixture/helper expansion), runner config file names, whether the
+ *     mapping sidecar is present, the known resource source files, and
+ *     whether strict E2E mode is on (unclassified changes then expand
+ *     AND surface as CHANGE_UNMAPPED).
  *
  * Returns:
  *   ScopeDecision: `all` with sorted `expandedBecause` reasons when any
- *   changed file is gate-defining (deleted files included — they are
- *   still in the diff list); otherwise the narrowed `changed` scope.
+ *   changed file is gate-defining, test/fixture/runner-config/mapping
+ *   related, or (strict mode) unclassified; otherwise the narrowed
+ *   `changed` scope with `unmappedFiles` populated (strict mode only).
  */
 export function computeEvaluationScope(input) {
     const changed = normalizeChangedFiles([...input.changedFiles]);
@@ -119,18 +140,78 @@ export function computeEvaluationScope(input) {
         waivers: normalizeRepoPath(input.config.waivers),
         pluginModules,
     };
+    // Phase 4 expansion inputs: test files + their directories (fixtures/
+    // helpers live beside the tests), runner configs, and the sidecar.
+    const testFiles = new Set((input.testFiles ?? []).map(normalizeRepoPath));
+    const testDirs = new Set();
+    for (const file of testFiles) {
+        const dir = file.split('/').slice(0, -1).join('/');
+        if (dir.length > 0)
+            testDirs.add(dir);
+    }
+    const runnerConfigs = new Set((input.runnerConfigs ?? []).map(normalizeRepoPath));
+    const knownSources = new Set((input.knownSourceFiles ?? []).map(normalizeRepoPath));
+    const strictE2E = input.strictE2E === true;
     const reasons = new Set();
+    const unmappedFiles = new Set();
+    // Docs-only exemption candidates: `docs/**.md` files. The exemption
+    // applies ONLY when the whole changed set is such files (checked after
+    // the loop) — a mixed docs+code change is never docs-only.
+    const docsOnlyFiles = new Set();
+    const isDocsOnly = (file) => file.startsWith('docs/') && file.endsWith('.md');
     for (const file of changed) {
         const reason = matchGateDefiningInput(file, gate);
-        if (reason !== null)
+        if (reason !== null) {
             reasons.add(reason);
+            continue;
+        }
+        if (input.mappingSidecar === true && file === TEST_MAP_SIDECAR) {
+            reasons.add(TEST_MAP_SIDECAR);
+            continue;
+        }
+        if (runnerConfigs.has(file)) {
+            reasons.add(file);
+            continue;
+        }
+        if (testFiles.has(file)) {
+            reasons.add(`test:${file}`);
+            continue;
+        }
+        if ([...testDirs].some((dir) => underDir(file, dir))) {
+            reasons.add(`test-infra:${file.split('/').slice(0, -1).join('/')}`);
+            continue;
+        }
+        if (knownSources.has(file))
+            continue;
+        if (isDocsOnly(file)) {
+            docsOnlyFiles.add(file);
+            continue;
+        }
+        // Unclassified change: nothing can attribute it. Strict E2E mode
+        // treats it conservatively (full scope + CHANGE_UNMAPPED); outside
+        // strict mode the historical narrowed contract is unchanged.
+        if (strictE2E) {
+            reasons.add(`unclassified:${file}`);
+            unmappedFiles.add(file);
+        }
+    }
+    // Mixed docs+code change: the docs files keep their unknown-change
+    // treatment (the exemption is denied — candidate-controlled suppression
+    // must stay impossible), so they join the unmapped set under strict mode.
+    if (docsOnlyFiles.size > 0 && docsOnlyFiles.size < changed.length && strictE2E) {
+        for (const file of docsOnlyFiles) {
+            reasons.add(`unclassified:${file}`);
+            unmappedFiles.add(file);
+        }
     }
     const expandedBecause = [...reasons].sort();
     if (expandedBecause.length > 0) {
-        return { mode: 'all', changedFiles: changed, expandedBecause };
+        return { mode: 'all', changedFiles: changed, expandedBecause, unmappedFiles: [...unmappedFiles].sort() };
     }
-    return { mode: 'changed', changedFiles: changed, expandedBecause: [] };
+    return { mode: 'changed', changedFiles: changed, expandedBecause: [], unmappedFiles: [...unmappedFiles].sort() };
 }
+/** The tracked mapping sidecar path (scope-expansion trigger). */
+const TEST_MAP_SIDECAR = '.gateforge/test-map.yml';
 /**
  * Runs one git command for the mismatch check, returning stdout lines.
  *

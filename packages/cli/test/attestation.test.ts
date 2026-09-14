@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { verifyAttestationMac, withTempRepo, type TempRepo } from '@gateforge/core';
 import { startWitness } from '../../pack-playwright/src/witness/server.js';
+import { beginTestInterval, endTestInterval, openTestSession, type TestSession } from './witness-sessions.js';
 import { configYml, currentInputDigest, runCli, writeV2Manifest } from './helpers.js';
 
 /** Absolute path of the compiled CLI bin (child-process runs). */
@@ -168,17 +169,22 @@ async function discoverPingObligation(repo: TempRepo): Promise<string> {
 }
 
 /**
- * Drives real traffic through the witness proxy, consumes the
- * observation for the claim, and anchors it — returning the ledger's
- * issued ids. All over real loopback HTTP against the real witness.
+ * Drives real traffic through the session's dedicated observation
+ * channel, consumes the observation for the claim, and anchors it —
+ * returning the ledger's issued ids. All over real loopback HTTP against
+ * the real witness, under a supervisor-opened session (Phase 1 +
+ * enforcement-review fix 3: the session open presents the verifier key —
+ * the supervisor capability — exactly as the CLI's spool drain does).
  */
 async function observeAndAnchor(
   witnessUrl: string,
-  proxyUrl: string,
   token: string,
   obligationId: string,
 ): Promise<string[]> {
-  const upstream = await fetch(`${proxyUrl}${HEALTH_PATH}`, { method: 'GET' });
+  const session = await openTestSession(witnessUrl, token, VERIFIER_KEY, TEST_ID);
+  if (session.proxyUrl === null) throw new Error('session proxy did not start');
+  const intervalId = await beginTestInterval(witnessUrl, token, session, 'read');
+  const upstream = await fetch(`${session.proxyUrl}${HEALTH_PATH}`, { method: 'GET' });
   expect(upstream.status).toBe(200);
   const headers = { 'x-gateforge-run': token, 'content-type': 'application/json' };
   const consumed = await fetch(`${witnessUrl}/witness/http-observation`, {
@@ -189,9 +195,12 @@ async function observeAndAnchor(
       testId: TEST_ID,
       method: 'GET',
       path: HEALTH_PATH,
+      sessionId: session.sessionId,
+      sessionToken: session.sessionToken,
     }),
   });
   expect(consumed.status).toBe(200);
+  await endTestInterval(witnessUrl, token, session, intervalId);
   const anchored = await fetch(`${witnessUrl}/records`, {
     method: 'POST',
     headers,
@@ -200,6 +209,8 @@ async function observeAndAnchor(
       kind: 'ui.action',
       payload: { operation: 'read', entityId: 'health' },
       testId: TEST_ID,
+      sessionId: session.sessionId,
+      sessionToken: session.sessionToken,
     }),
   });
   expect(anchored.status).toBe(200);
@@ -265,7 +276,7 @@ describe('attestation matrix: valid current run (real CLI + real witness)', () =
           body: JSON.stringify({ runId: RUN_ID, invocationId: INVOCATION_ID, inputDigest: digest }),
         });
         expect(bind.status).toBe(200);
-        const recordIds = await observeAndAnchor(witness.url, witness.proxyUrl as string, TOKEN, obligationId);
+        const recordIds = await observeAndAnchor(witness.url, TOKEN, obligationId);
         const ledger = (await (
           await fetch(`${witness.url}/records`, { headers: { 'x-gateforge-run': TOKEN } })
         ).json()) as { records: Array<Record<string, unknown>> };
@@ -310,7 +321,7 @@ describe('attestation matrix: stale evidence blocks (real CLI)', () => {
       try {
         const digest = await currentInputDigest(repo);
         expect((await awaitBind(witness.url, digest)).status).toBe(200);
-        const recordIds = await observeAndAnchor(witness.url, witness.proxyUrl as string, TOKEN, obligationId);
+        const recordIds = await observeAndAnchor(witness.url, TOKEN, obligationId);
         const ledger = await readLedger(witness.url);
         repo.writeFiles({
           '.gateforge/test-gates/claims.json': JSON.stringify([
@@ -355,7 +366,7 @@ describe('attestation matrix: stale evidence blocks (real CLI)', () => {
       try {
         const digest = await currentInputDigest(repo);
         expect((await awaitBind(witness.url, digest)).status).toBe(200);
-        const recordIds = await observeAndAnchor(witness.url, witness.proxyUrl as string, TOKEN, obligationId);
+        const recordIds = await observeAndAnchor(witness.url, TOKEN, obligationId);
         const ledger = await readLedger(witness.url);
         repo.writeFiles({
           '.gateforge/test-gates/claims.json': JSON.stringify([
@@ -398,7 +409,7 @@ describe('attestation matrix: stale evidence blocks (real CLI)', () => {
       try {
         const digest = await currentInputDigest(repo);
         expect((await awaitBind(witness.url, digest)).status).toBe(200);
-        const recordIds = await observeAndAnchor(witness.url, witness.proxyUrl as string, TOKEN, obligationId);
+        const recordIds = await observeAndAnchor(witness.url, TOKEN, obligationId);
         const ledger = await readLedger(witness.url);
         repo.writeFiles({
           '.gateforge/test-gates/claims.json': JSON.stringify([
@@ -467,7 +478,7 @@ describe('attestation matrix: stale evidence blocks (real CLI)', () => {
       try {
         const digest = await currentInputDigest(repo);
         expect((await awaitBind(witness.url, digest)).status).toBe(200);
-        const recordIds = await observeAndAnchor(witness.url, witness.proxyUrl as string, TOKEN, obligationId);
+        const recordIds = await observeAndAnchor(witness.url, TOKEN, obligationId);
         const ledger = await readLedger(witness.url);
         repo.writeFiles({
           '.gateforge/test-gates/claims.json': JSON.stringify([
@@ -512,7 +523,7 @@ describe('attestation matrix: key, format, and identity rows (real CLI)', () => 
       try {
         const digest = await currentInputDigest(repo);
         expect((await awaitBind(witness.url, digest)).status).toBe(200);
-        const recordIds = await observeAndAnchor(witness.url, witness.proxyUrl as string, TOKEN, obligationId);
+        const recordIds = await observeAndAnchor(witness.url, TOKEN, obligationId);
         const ledger = await readLedger(witness.url);
         repo.writeFiles({
           '.gateforge/test-gates/claims.json': JSON.stringify([
@@ -558,7 +569,7 @@ describe('attestation matrix: key, format, and identity rows (real CLI)', () => 
       try {
         const digest = await currentInputDigest(repo);
         expect((await awaitBind(witness.url, digest)).status).toBe(200);
-        const recordIds = await observeAndAnchor(witness.url, witness.proxyUrl as string, TOKEN, obligationId);
+        const recordIds = await observeAndAnchor(witness.url, TOKEN, obligationId);
         const ledger = await readLedger(witness.url);
         repo.writeFiles({
           '.gateforge/test-gates/claims.json': JSON.stringify([
@@ -603,7 +614,7 @@ describe('attestation matrix: key, format, and identity rows (real CLI)', () => 
       try {
         const digest = await currentInputDigest(repo);
         expect((await awaitBind(witness.url, digest)).status).toBe(200);
-        const recordIds = await observeAndAnchor(witness.url, witness.proxyUrl as string, TOKEN, obligationId);
+        const recordIds = await observeAndAnchor(witness.url, TOKEN, obligationId);
         const ledger = await readLedger(witness.url);
         repo.writeFiles({
           '.gateforge/test-gates/claims.json': JSON.stringify([
@@ -663,7 +674,7 @@ describe('attestation matrix: full test-gates path (real CLI child + real witnes
       installPingRepo(repo);
       const obligationId = await discoverPingObligation(repo);
       repo.writeFiles({
-        'suite.mjs': `import { writeFileSync } from 'node:fs';
+        'suite.mjs': `import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const stateDir = process.env.GATEFORGE_STATE_DIR;
 const witnessUrl = process.env.GATEFORGE_WITNESS_URL;
@@ -674,19 +685,71 @@ if (!stateDir || !witnessUrl || !token || !proxyUrl || !claimId) throw new Error
 const keyAbsent = process.env.GATEFORGE_WITNESS_VERIFIER_KEY === undefined;
 writeFileSync(join(stateDir, 'key-check.json'), JSON.stringify({ keyAbsent }));
 const testId = ${JSON.stringify(TEST_ID)};
-const traffic = await fetch(proxyUrl + ${JSON.stringify(HEALTH_PATH)});
+// Enforcement-review fix 3 — the legitimate session flow: the untrusted
+// suite writes a testBegin lifecycle event to the run-state SPOOL
+// (identities only, no secrets), and the TRUSTED CLI's spool drain
+// performs the supervisor-authenticated witness session open. The suite
+// then resolves its session credential by the exact (workerIndex,
+// testId) pair — a credential the suite can never mint itself.
+const spoolFile = join(stateDir, 'spool', process.env.GATEFORGE_RUN_ID, 'events.jsonl');
+mkdirSync(join(spoolFile, '..'), { recursive: true });
+appendFileSync(spoolFile, JSON.stringify({
+  kind: 'testBegin', testId, workerIndex: 0, file: 'suite.mjs', titlePath: [testId], project: null,
+}) + '\\n');
+let session = null;
+for (let i = 0; i < 100; i++) {
+  const resolveRes = await fetch(witnessUrl + '/sessions/resolve', {
+    method: 'POST', headers: { 'x-gateforge-run': token, 'content-type': 'application/json' },
+    body: JSON.stringify({ testId, workerIndex: 0 }),
+  });
+  if (resolveRes.ok) { session = await resolveRes.json(); break; }
+  if (resolveRes.status !== 404) throw new Error('session resolve failed: ' + (await resolveRes.text()));
+  await new Promise((r) => setTimeout(r, 100));
+}
+if (!session) throw new Error('the supervisor never opened a session (spool drain missing?)');
+if (!session.proxyUrl) throw new Error('session proxy did not start');
+const intervalRes = await fetch(witnessUrl + '/sessions/intervals/open', {
+  method: 'POST', headers: { 'x-gateforge-run': token, 'content-type': 'application/json' },
+  body: JSON.stringify({ sessionId: session.sessionId, sessionToken: session.sessionToken, operation: 'read' }),
+});
+if (!intervalRes.ok) throw new Error('interval open failed');
+const intervalId = (await intervalRes.json()).intervalId;
+const traffic = await fetch(session.proxyUrl + ${JSON.stringify(HEALTH_PATH)});
 if (!traffic.ok) throw new Error('proxy traffic failed');
 const headers = { 'x-gateforge-run': token, 'content-type': 'application/json' };
 const consumed = await fetch(witnessUrl + '/witness/http-observation', {
   method: 'POST', headers,
-  body: JSON.stringify({ claimIds: [claimId], testId, method: 'GET', path: ${JSON.stringify(HEALTH_PATH)} }),
+  body: JSON.stringify({ claimIds: [claimId], testId, method: 'GET', path: ${JSON.stringify(HEALTH_PATH)}, sessionId: session.sessionId, sessionToken: session.sessionToken }),
 });
 if (!consumed.ok) throw new Error('consume failed: ' + (await consumed.text()));
 const anchored = await fetch(witnessUrl + '/records', {
   method: 'POST', headers,
-  body: JSON.stringify({ claimId, kind: 'ui.action', payload: { operation: 'read', entityId: 'health' }, testId }),
+  body: JSON.stringify({ claimId, kind: 'ui.action', payload: { operation: 'read', entityId: 'health' }, testId, sessionId: session.sessionId, sessionToken: session.sessionToken }),
 });
 if (!anchored.ok) throw new Error('anchor failed: ' + (await anchored.text()));
+await fetch(witnessUrl + '/sessions/intervals/close', {
+  method: 'POST', headers,
+  body: JSON.stringify({ sessionId: session.sessionId, sessionToken: session.sessionToken, intervalId }),
+});
+// testEnd: the drain seals the session with the observed outcome. The
+// suite itself has NO reachable session-close path (run-token close
+// answers 401/403).
+appendFileSync(spoolFile, JSON.stringify({
+  kind: 'testEnd', testId, workerIndex: 0, file: 'suite.mjs', titlePath: [testId], project: null,
+  outcome: 'passed', attempt: 1,
+}) + '\\n');
+// The suite cannot seal or mint sessions: run-token lifecycle calls are
+// refused (pinned here from inside the untrusted child).
+const forbiddenOpen = await fetch(witnessUrl + '/sessions/open', {
+  method: 'POST', headers: { 'x-gateforge-run': token, 'content-type': 'application/json' },
+  body: JSON.stringify({ testId: 'invented-by-the-suite', workerIndex: 9 }),
+});
+if (forbiddenOpen.status === 200) throw new Error('run-token session open MUST be refused');
+const forbiddenClose = await fetch(witnessUrl + '/sessions/close', {
+  method: 'POST', headers: { 'x-gateforge-run': token, 'content-type': 'application/json' },
+  body: JSON.stringify({ sessionId: session.sessionId, outcome: 'passed' }),
+});
+if (forbiddenClose.status === 200) throw new Error('run-token session close MUST be refused');
 // Reporter duty (GF-23): records.json is a verbatim copy of the witness
 // ledger — the ONLY input the verifier reads. Fabricated bundles never
 // enter it.
@@ -838,7 +901,7 @@ console.log('restored-old-bundle');
       const digest = await currentInputDigest(repo);
       const OLD_INVOCATION = '77777777-0000-4000-8000-000000000077';
       expect((await awaitBind(witness.url, digest, OLD_INVOCATION)).status).toBe(200);
-      const recordIds = await observeAndAnchor(witness.url, witness.proxyUrl as string, TOKEN, obligationId);
+      const recordIds = await observeAndAnchor(witness.url, TOKEN, obligationId);
       const ledger = await readLedger(witness.url);
       await witness.stop();
       await target.stop();

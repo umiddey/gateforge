@@ -20,6 +20,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createServer, request as httpRequest } from 'node:http';
 
 /** Repo root (the gateforge monorepo). */
 export const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -350,6 +351,229 @@ export function readJson(path: string): unknown {
 	} catch {
 		return null;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 session helpers: tests act as their own TRUSTED SUPERVISOR when
+// they drive the witness directly (the same /sessions channel the pack
+// reporter drives in real runs).
+// ---------------------------------------------------------------------------
+
+/** A supervisor-opened session credential (the witness-issued binding). */
+export interface SupervisorSession {
+	sessionId: string;
+	sessionToken: string;
+	testId: string;
+	workerIndex: number;
+	openedTick: number;
+	/** The session's dedicated observation-proxy origin (null when no proxy). */
+	proxyUrl: string | null;
+}
+
+/**
+ * Opens a test session the way the trusted supervisor (the CLI's spool
+ * drain) does in real runs (enforcement-review fix 3): the session
+ * lifecycle is verifier-key authenticated, so tests acting as the
+ * supervisor present the verifier key — the run token alone answers 403.
+ *
+ * Args:
+ *   witnessUrl: the witness base URL.
+ *   token: the run token.
+ *   testId: the runner-assigned test id to bind.
+ *   workerIndex: the worker the test runs on (default 0).
+ *   verifierKey: the witness verifier key (the supervisor capability;
+ *     omit only in negative tests that assert the 403).
+ *   claims: optional supervisor-carried obligation claims (Phase 4 claim
+ *     injection — what the orchestrating CLI drains from the sidecar in
+ *     real runs).
+ *
+ * Returns:
+ *   SupervisorSession: the session binding (credential + proxy prefix).
+ */
+export async function openSupervisorSession(
+	witnessUrl: string,
+	token: string,
+	testId: string,
+	workerIndex = 0,
+	verifierKey?: string,
+	claims?: readonly string[],
+): Promise<SupervisorSession> {
+	const res = await fetch(`${witnessUrl}/sessions/open`, {
+		method: 'POST',
+		headers: {
+			'x-gateforge-run': token,
+			...(verifierKey !== undefined ? { 'x-gateforge-verifier': verifierKey } : {}),
+			'content-type': 'application/json',
+		},
+		body: JSON.stringify({ testId, workerIndex, ...(claims !== undefined ? { claims } : {}) }),
+	});
+	if (!res.ok) {
+		throw new Error(`sessions/open answered ${res.status}: ${await res.text()}`);
+	}
+	return (await res.json()) as SupervisorSession;
+}
+
+/**
+ * Closes (seals) a supervisor-opened session with the observed outcome
+ * (verifier-key authenticated — see {@link openSupervisorSession}).
+ */
+export async function closeSupervisorSession(
+	witnessUrl: string,
+	token: string,
+	sessionId: string,
+	outcome = 'passed',
+	verifierKey?: string,
+): Promise<void> {
+	const res = await fetch(`${witnessUrl}/sessions/close`, {
+		method: 'POST',
+		headers: {
+			'x-gateforge-run': token,
+			...(verifierKey !== undefined ? { 'x-gateforge-verifier': verifierKey } : {}),
+			'content-type': 'application/json',
+		},
+		body: JSON.stringify({ sessionId, outcome }),
+	});
+	if (!res.ok) {
+		throw new Error(`sessions/close answered ${res.status}: ${await res.text()}`);
+	}
+}
+
+/** Marks the start of a UI-action observation interval (witness clock). */
+export async function beginJourneyInterval(
+	witnessUrl: string,
+	token: string,
+	session: SupervisorSession,
+	operation = 'create',
+): Promise<string> {
+	const res = await fetch(`${witnessUrl}/sessions/intervals/open`, {
+		method: 'POST',
+		headers: { 'x-gateforge-run': token, 'content-type': 'application/json' },
+		body: JSON.stringify({
+			sessionId: session.sessionId,
+			sessionToken: session.sessionToken,
+			operation,
+		}),
+	});
+	if (!res.ok) {
+		throw new Error(`sessions/intervals/open answered ${res.status}: ${await res.text()}`);
+	}
+	const body = (await res.json()) as { intervalId: string };
+	return body.intervalId;
+}
+
+/** Seals a UI-action observation interval. */
+export async function endJourneyInterval(
+	witnessUrl: string,
+	token: string,
+	session: SupervisorSession,
+	intervalId: string,
+): Promise<void> {
+	const res = await fetch(`${witnessUrl}/sessions/intervals/close`, {
+		method: 'POST',
+		headers: { 'x-gateforge-run': token, 'content-type': 'application/json' },
+		body: JSON.stringify({
+			sessionId: session.sessionId,
+			sessionToken: session.sessionToken,
+			intervalId,
+		}),
+	});
+	if (!res.ok) {
+		throw new Error(`sessions/intervals/close answered ${res.status}: ${await res.text()}`);
+	}
+}
+
+/**
+ * Copies the checked-in consumer surface descriptor
+ * (example/e2e/accounts-surface.js) into a temp project as CONSUMER-SIDE
+ * code — exactly how a real consumer ships its surface next to its specs.
+ */
+export function writeAccountsSurface(dir: string): void {
+	const surface = readFileSync(join(ROOT, 'example/e2e/accounts-surface.js'), 'utf8');
+	writeFileSync(join(dir, 'specs/accounts-surface.js'), surface);
+}
+
+/**
+ * Writes an ADVERSARIAL adapter whose backend observation never finds
+ * the entity (probe: a broken backend operation — HTTP transport may
+ * look fine, but the engine-observed state read reports absence).
+ */
+export function writeAbsentAdapter(dir: string, fingerprint = FINGERPRINT): void {
+	writeFileSync(
+		join(dir, '.gateforge/adapters/tenant.accounts.mjs'),
+		[
+			'// Adversarial adapter: the engine-side state read always reports',
+			"// the entity ABSENT (a broken backend operation observed honestly).",
+			'export default {',
+			'  async read() { return null; },',
+			'  normalize() { return { entityId: null, fields: {} }; },',
+			"  deletion: 'archive',",
+			`  environmentFingerprint: '${fingerprint}',`,
+			'};',
+			'',
+		].join('\n'),
+	);
+}
+
+/**
+ * Starts a LYING BACKEND in front of the example app (probe: HTTP 200
+ * with persisted values that differ from the UI-entered input — plan
+ * §3.6): POST /accounts and POST /accounts/:id form bodies get their
+ * `first_name` field rewritten before the store persists them. The UI,
+ * the read API, and the adapter then all observe the MUTATED value while
+ * the journey typed the original — exactly the mutation-path defect the
+ * exact-value echo exists to catch.
+ *
+ * Returns:
+ *   Promise<{url, stop}>: the wrapper's loopback URL (stop kills it).
+ */
+export async function startMutatingExampleApp(
+	field = 'first_name',
+): Promise<{ url: string; stop: () => void }> {
+	const { spawn } = await import('node:child_process');
+	const app = await startExampleApp();
+	const server = createServer((req, res) => {
+		const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+		const isMutation = req.method === 'POST' && /^\/accounts(\/acc-[0-9]+)?$/.test(path);
+		const chunks: Buffer[] = [];
+		req.on('data', (chunk: Buffer) => chunks.push(chunk));
+		req.on('end', () => {
+			let body = Buffer.concat(chunks);
+			if (isMutation) {
+				const fields = new URLSearchParams(body.toString('utf8'));
+				if (fields.has(field)) {
+					fields.set(field, `${fields.get(field)} (mutated)`);
+					body = Buffer.from(fields.toString(), 'utf8');
+				}
+			}
+			const forward = httpRequest(
+				`${app.url}${req.url ?? '/'}`,
+				{
+					method: req.method,
+					headers: { ...req.headers, host: new URL(app.url).host, 'content-length': String(body.length) },
+				},
+				(upstream) => {
+					res.writeHead(upstream.statusCode ?? 502, upstream.headers);
+					upstream.pipe(res);
+				},
+			);
+			forward.on('error', () => {
+				if (!res.headersSent) res.writeHead(502);
+				res.end();
+			});
+			if (body.length > 0) forward.write(body);
+			forward.end();
+		});
+	});
+	await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', () => resolveListen()));
+	const address = server.address();
+	if (address === null || typeof address === 'string') throw new Error('no mutating app port');
+	return {
+		url: `http://127.0.0.1:${address.port}`,
+		stop: () => {
+			server.close();
+			app.stop();
+		},
+	};
 }
 
 export { resolve };

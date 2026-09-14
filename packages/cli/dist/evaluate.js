@@ -13,9 +13,10 @@
  * at changed files survive — the `check --changed` contract (GF-09's
  * resource-change set).
  */
-import { AttestationSchema, BLOCKING_VERDICTS, evaluateObligations, loadWaivers, verifyAttestationMac, } from '@gateforge/core';
+import { AttestationSchema, BLOCKING_VERDICTS, CAUSE_NEXT_ACTIONS, HTTP_ENDPOINT_RESOURCE_KIND, evaluateCoveragePolicy, evaluateObligations, loadWaivers, strictCapabilityGaps, verifyAttestationMac, } from '@gateforge/core';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { UsageError } from './errors.js';
 import { resolveRepoPath, sourcesByResourceId } from './pipeline.js';
 import { httpRoutesView, readJsonArray } from './state.js';
 /** Keeps only blocking entries plausibly tied to a changed file. */
@@ -47,6 +48,142 @@ function scopeBlocking(blocking, changed, multiSources) {
     return kept;
 }
 /**
+ * Derives the closed-world coverage inventory from the built graph (plan
+ * 2026-09-13 §3.6): every RESOLVED, USER-FACING business table. HTTP
+ * endpoints are routes, not tables (ADR 0004 D8), and unclassified
+ * resources generate no obligations, so neither participates.
+ *
+ * Args:
+ *   graph: the built resource graph with effective classifications bound.
+ *
+ * Returns:
+ *   CoverageInventoryTable-style entries: name + lifecycle-enabled
+ *   operations, sorted by name (deterministic).
+ */
+export function coverageInventory(graph) {
+    const ALL = ['create', 'read', 'update', 'delete'];
+    const inventory = [];
+    for (const resource of graph.resources) {
+        if (resource.id === null || resource.exposure !== 'user-facing')
+            continue;
+        if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND)
+            continue;
+        if (resource.classification === null)
+            continue;
+        const lifecycle = resource.classification.lifecycle;
+        inventory.push({
+            name: resource.name,
+            operations: ALL.filter((operation) => lifecycle[operation] === true),
+        });
+    }
+    inventory.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    return inventory;
+}
+/**
+ * Coverage-policy evaluation for the run (plan §3.6, ADR 0005 D5).
+ * Opt-in: an absent/empty `coveragePolicy` config section means the
+ * feature is off. When enabled, the policy is validated against the
+ * CURRENT run's inventory on EVERY run: unknown table names throw a
+ * UsageError (exit 2), and uncovered/undispositioned requirements become
+ * blocking findings carrying cause `CRUD_COVERAGE_MISSING`. Resolved
+ * test mappings (browser-e2e-declared bindings, plan Phases 2-3) supply
+ * the mapped-coverage facts — a mapped journey clears its table/operation
+ * exactly as a recorded owner disposition does; both remain inputs and
+ * never substitute for runtime proof.
+ *
+ * Args:
+ *   config: the validated `.gateforge.yml`.
+ *   graph: the built resource graph (inventory source).
+ *   mappedCoverage: coverage facts derived from resolved test mappings
+ *     (empty when the sidecar is absent or no binding declares
+ *     browser-e2e).
+ *
+ * Returns:
+ *   BlockingEntry[]: coverage findings (empty when the feature is off).
+ *
+ * Throws:
+ *   UsageError: when a policy table name is absent from the inventory
+ *     (configuration error — fail closed, never silently uncheckable).
+ */
+export function coveragePolicyBlocking(config, graph, mappedCoverage = []) {
+    const policy = config.coveragePolicy;
+    if (policy === undefined || policy.tables.length === 0)
+        return [];
+    const result = evaluateCoveragePolicy(policy.tables, coverageInventory(graph), mappedCoverage);
+    if (result.configErrors.length > 0) {
+        const first = result.configErrors[0];
+        throw new UsageError(`${first?.detail}${result.configErrors.length > 1 ? ` (and ${result.configErrors.length - 1} more coverage-policy configuration error(s))` : ''}`);
+    }
+    return result.blocking.map((finding) => ({
+        kind: 'finding',
+        resourceId: null,
+        name: finding.table,
+        detail: finding.detail,
+        location: null,
+        cause: finding.cause,
+        nextAction: finding.nextAction,
+    }));
+}
+/**
+ * Strict E2E preflight (plan Phase 0 item 4, ADR 0005 D1): when strict
+ * E2E mode is on, every obligation demanding a contract whose proof
+ * channel is unavailable becomes a blocking entry with a PRECISE
+ * capability error (contract + missing observer + next action). A strict
+ * setup lacking browser observation stays visibly incomplete — it cannot
+ * advertise an operational blocking E2E gate.
+ *
+ * Args:
+ *   obligations: the run's obligations (preflight is setup-wide, never
+ *     diff-narrowed).
+ *
+ * Returns:
+ *   BlockingEntry[]: one blocking entry per unsupported obligation.
+ */
+export function strictPreflightBlocking(obligations) {
+    return strictCapabilityGaps(obligations.map((obligation) => ({ id: obligation.id, contract: obligation.contract }))).map((gap) => ({
+        kind: 'finding',
+        resourceId: null,
+        name: gap.contract,
+        detail: `${gap.detail} Required observer: ${gap.observer}`,
+        location: null,
+        cause: gap.cause,
+        nextAction: gap.nextAction,
+    }));
+}
+/**
+ * Strict-mode waiver treatment (plan §3.3, ADR 0005 D4): a waived
+ * in-scope E2E obligation is NOT proof and cannot authorize the change.
+ * Under strict E2E mode the verdict becomes blocking `missing` with cause
+ * `ENFORCEMENT_UNTRUSTED`; the original waiver text stays in the reason
+ * (legacy/reporting use remains explicit). Every obligation in the engine
+ * is an E2E proof obligation — unit/component results never reach the
+ * grader — so all waived verdicts convert. Baselined obligations are
+ * baseline-clean only in later phases' receipt path; `check` does not
+ * consume baselines for grading today.
+ *
+ * Args:
+ *   verdicts: the evaluated verdicts (sorted).
+ *
+ * Returns:
+ *   ObligationVerdict[]: identical unless strict mode converted waived
+ *   entries to blocking ones (order and determinism preserved).
+ */
+export function applyStrictE2E(verdicts) {
+    return verdicts.map((entry) => {
+        if (entry.verdict !== 'waived')
+            return entry;
+        const cause = 'ENFORCEMENT_UNTRUSTED';
+        return {
+            ...entry,
+            verdict: 'missing',
+            reason: `strict E2E mode: ${entry.reason ?? 'waived'} — a waiver is not proof and cannot ` +
+                'authorize the change (plan §3.3); the obligation still requires its own witnessed evidence',
+            cause,
+            nextAction: CAUSE_NEXT_ACTIONS[cause],
+        };
+    });
+}
+/**
  * Evaluates obligations and blocks per the run inputs.
  *
  * Args:
@@ -70,7 +207,11 @@ export function evaluateRun(input) {
         resourceById.set(resource.id, { kind: resource.kind, attributes: resource.attributes });
     }
     const waiverLoad = loadWaivers(resolveRepoPath(cwd, config.waivers), { now });
-    const claims = readJsonArray(stateDir, 'claims.json');
+    // Native annotation claims (run state) plus declared mapping claims
+    // (plan §5.3, Phase 3): both normalize through the one resolver seam so
+    // a mapped existing test grades on the SAME path as an annotated one.
+    // Mapping claims carry intent only — dedup happens at the seam.
+    const claims = [...readJsonArray(stateDir, 'claims.json'), ...(input.mappingClaims ?? [])];
     const authorized = authorizeRecords(readJsonArray(stateDir, 'records.json'), stateDir, {
         verifierKey: input.witnessVerifierKey,
         live: input.witnessAttestation,
@@ -115,10 +256,23 @@ export function evaluateRun(input) {
     // Evidence-context blockers are never diff-scoped away and never
     // waived: a changed-input or unauthenticated-evidence run must stay
     // visible even when every obligation is waived or unchanged.
-    const blocking = [...scopedBlocking, ...authorized.evidenceBlocking];
-    const blockingRun = blocking.length > 0 || verdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
+    // Coverage-policy findings are inventory-wide and stay visible too
+    // (plan §3.6: validated against the current inventory on every run).
+    // Strict-capability preflight is setup-wide: a strict setup demanding
+    // an unavailable proof channel cannot advertise an operational gate.
+    const strictE2E = config.enforcement?.strictE2E === true;
+    const strictBlocking = strictE2E ? strictPreflightBlocking(obligations) : [];
+    const blocking = [
+        ...scopedBlocking,
+        ...authorized.evidenceBlocking,
+        ...coveragePolicyBlocking(config, graph, input.mappedCoverage ?? []),
+        ...strictBlocking,
+    ];
+    // Strict E2E mode (plan §3.3): waived obligations are not proof.
+    const gradedVerdicts = strictE2E ? applyStrictE2E(verdicts) : verdicts;
+    const blockingRun = blocking.length > 0 || gradedVerdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
     return {
-        verdicts,
+        verdicts: gradedVerdicts,
         blocking,
         waiverCounts: {
             total: waiverLoad.waivers.length + waiverLoad.staleOwner.length + waiverLoad.expired.length,

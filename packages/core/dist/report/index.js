@@ -120,6 +120,10 @@ function jsonReport(entries, options, blocking) {
                 policyId: entry.obligation.policyId,
                 verdict: entry.verdict,
                 reason: entry.reason,
+                // Stable plan §5.4 cause + next action (ADR 0005): null when the
+                // verdict is clean or no honest mapping exists yet.
+                cause: entry.cause ?? null,
+                nextAction: entry.nextAction ?? null,
                 recordIds: entry.recordIds,
                 fingerprint: fingerprint({
                     resourceId: entry.obligation.resourceId,
@@ -171,6 +175,10 @@ function sarifReport(entries, options) {
                 contract: entry.obligation.contract,
                 verdict: entry.verdict,
                 trustTier: entry.trustTier,
+                // Stable plan §5.4 cause + next action (ADR 0005), carried under
+                // properties so SARIF consumers see the same codes as text/JSON.
+                cause: entry.cause ?? null,
+                nextAction: entry.nextAction ?? null,
                 ...(options.classificationTraces?.[entry.obligation.resourceId] !== undefined
                     ? {
                         classificationFingerprint: options.classificationTraces[entry.obligation.resourceId]?.decisionFingerprint,
@@ -229,6 +237,11 @@ function sarifReport(entries, options) {
                             },
                             properties: {
                                 kind: entry.kind,
+                                // Stable plan §5.4 cause + next action when the entry
+                                // carries one (coverage/strict-enforcement findings).
+                                ...(entry.cause !== undefined && entry.cause !== null
+                                    ? { cause: entry.cause, nextAction: entry.nextAction ?? null }
+                                    : {}),
                                 ...(entry.location !== null ? { location: entry.location } : {}),
                             },
                         })),
@@ -277,6 +290,10 @@ function textReport(entries, options, blocking) {
             lifecycle: entry.obligation.lifecycle,
         })}`);
         lines.push(`  evidence gap: ${entry.reason ?? '<none>'}`);
+        if (entry.cause !== undefined && entry.cause !== null) {
+            lines.push(`  cause: ${entry.cause}`);
+            lines.push(`  next action: ${entry.nextAction ?? '<none>'}`);
+        }
         lines.push(`  records: ${entry.recordIds.length > 0 ? entry.recordIds.join(', ') : '<none consulted>'}`);
     }
     if (blocking.length > 0) {
@@ -284,7 +301,10 @@ function textReport(entries, options, blocking) {
         lines.push('blocking entries (unclassified/unresolved/findings/stale references):');
         for (const entry of blocking) {
             const where = entry.location !== null ? ` at ${entry.location.file}:${entry.location.line}` : '';
-            lines.push(`  [${entry.kind}] ${entry.resourceId ?? entry.name ?? '<unnamed>'} — ${entry.detail}${where}`);
+            const cause = entry.cause !== undefined && entry.cause !== null
+                ? ` (cause: ${entry.cause} → ${entry.nextAction ?? 'no action available'})`
+                : '';
+            lines.push(`  [${entry.kind}] ${entry.resourceId ?? entry.name ?? '<unnamed>'} — ${entry.detail}${where}${cause}`);
         }
     }
     if (options.classificationTraces !== undefined) {

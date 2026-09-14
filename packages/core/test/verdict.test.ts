@@ -126,7 +126,13 @@ function makeRecord(overrides: Record<string, unknown> = {}): Record<string, unk
 }
 
 function witnessedAction(overrides: Record<string, unknown> = {}) {
-  return makeRecord({ kind: 'ui.action', ...overrides });
+  return makeRecord({
+    kind: 'ui.action',
+    // Phase 1 §3.6 exact-value echo: the default action declares the
+    // journey's entered input, echoing the default persisted fields.
+    payload: { operation: 'update', entityId: 'acc-1', fields: { name: 'New Name' } },
+    ...overrides,
+  });
 }
 
 function witnessedPersistence(overrides: Record<string, unknown> = {}) {
@@ -311,7 +317,7 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
     archiveFields: undefined,
   } as const;
 
-  function claimOutcome(contract: string, lifecycle: unknown, records: unknown[]) {
+  function claimOutcome(contract: string, lifecycle: unknown, records: unknown[], httpRoutes?: unknown) {
     const target = makeObligation({
       resourceId: 'tenant.accounts',
       contract,
@@ -347,6 +353,7 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
       records: attributed as never[],
       waivers: [],
       classification,
+      ...(httpRoutes !== undefined ? { httpRoutes: httpRoutes as never } : {}),
       now: NOW,
     });
   }
@@ -453,7 +460,11 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
   });
 
   it('update requires an engine-observed before/after delta, not suite declarations', () => {
-    const action = witnessedAction({ payload: { operation: 'update', entityId: 'acc-1' } });
+    // The declared input echoes the post-update persisted fields (§3.6);
+    // each sub-case below still exercises its own postcondition failure.
+    const action = witnessedAction({
+      payload: { operation: 'update', entityId: 'acc-1', fields: { name: 'New Name' } },
+    });
 
     // No pre-observation at all: nothing proves what "before" was.
     const noBefore = claimOutcome('persistence:update', LIFECYCLE, [
@@ -586,17 +597,206 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
     expect(outcome.reason).toContain('no engine-observed presence observation');
   });
 
-  it('UI-semantic crud: contracts fail closed — no witness-controlled UI observation exists', () => {
-    // A complete, honest, witnessed persistence bundle offered to the
-    // UI-semantic crud:update contract: still blocking missing, with the
-    // explicit reason (round 5).
+  it('UI-semantic crud contracts require engine-observed anchors (plan Phase 1 item 4)', () => {
+    // A persistence-shaped bundle with an engine-observed action but no
+    // session binding, exchange, or visible result still cannot satisfy
+    // a UI-semantic contract — the typed reason names the precise
+    // per-rule gap (session binding here), never a capability hole: the
+    // engine-owned browser channel is available, so grading proceeds
+    // rule by rule.
     const outcome = claimOutcome('crud:update', LIFECYCLE, [
       witnessedAction(),
       witnessedPersistence(),
     ]);
     expect(outcome.verdict).toBe('missing');
-    expect(outcome.reason).toContain('no witness-controlled UI observation channel');
-    expect(outcome.reason).toContain("the UI-semantic contract 'crud:update' cannot be verified");
+    expect(outcome.reason).toContain('session');
+  });
+});
+
+describe('evaluateObligation — crud contracts need engine-observed evidence (plan Phase 1 item 4)', () => {
+  const SESSION = 'sess-0501f7';
+  const OTHER_SESSION = 'sess-aaaaaa';
+  /**
+   * The route inventory the host derives from the graph (plan §9, D2):
+   * kept so the regression record mirrors the reproduced attack exactly.
+   */
+  const INVENTORY = [
+    { resourceId: 'http.endpoint:POST /accounts', method: 'POST', canonicalPath: '/accounts' },
+    { resourceId: 'http.endpoint:POST /accounts/{}', method: 'POST', canonicalPath: '/accounts/{}' },
+    { resourceId: 'http.endpoint:POST /accounts/{}/archive', method: 'POST', canonicalPath: '/accounts/{}/archive' },
+    { resourceId: 'http.endpoint:GET /accounts/{}', method: 'GET', canonicalPath: '/accounts/{}' },
+  ];
+
+  /** A session-bound ui.action record (claimed tier, as the witness stamps them). */
+  function action(overrides: Record<string, unknown> = {}) {
+    return makeRecord({
+      kind: 'ui.action',
+      trust: 'claimed',
+      origin: 'suite-submitted',
+      payload: {
+        operation: 'create',
+        entityId: 'acc-1',
+        fields: { first_name: 'Ada' },
+        sessionId: SESSION,
+      },
+      ...overrides,
+    });
+  }
+
+  /** A session-bound visible-result record for the same entity. */
+  function visible(overrides: Record<string, unknown> = {}) {
+    return makeRecord({
+      kind: 'ui.visible-result',
+      trust: 'claimed',
+      origin: 'suite-submitted',
+      payload: {
+        entityId: 'acc-1',
+        fields: { first_name: 'Ada', status: 'active' },
+        sessionId: SESSION,
+      },
+      ...overrides,
+    });
+  }
+
+  /** The witnessed session-bound exchange (engine-observed via the session port). */
+  function exchange(overrides: Record<string, unknown> = {}) {
+    return makeRecord({
+      kind: 'http.request',
+      payload: {
+        method: 'POST',
+        url: '/accounts',
+        status: 303,
+        bodySha256: 'a'.repeat(64),
+        bodyBytes: 7,
+        sessionId: SESSION,
+      },
+      ...overrides,
+    });
+  }
+
+  /** The witnessed session-bound persistence echo meeting the create postcondition. */
+  function persistence(overrides: Record<string, unknown> = {}) {
+    return makeRecord({
+      kind: 'persistence.entity',
+      payload: {
+        entityId: 'acc-1',
+        found: true,
+        fields: { first_name: 'Ada', status: 'active' },
+        before: { entityAbsent: true },
+        sessionId: SESSION,
+      },
+      ...overrides,
+    });
+  }
+
+  function crudOutcome(
+    contract: string,
+    records: unknown[],
+    httpRoutes: readonly { resourceId: string; method: string; canonicalPath: string }[] | null = INVENTORY,
+  ) {
+    const lifecycle = {
+      ...LIFECYCLE,
+      updateableFields: ['first_name', 'last_name', 'status'],
+    } as unknown as typeof LIFECYCLE;
+    const target = makeObligation({
+      resourceId: 'tenant.accounts',
+      contract,
+      lifecycle: lifecycle as typeof LIFECYCLE,
+    });
+    // Re-stamp provenance onto THIS obligation's identity, exactly as a
+    // witness issuance would (service-issued recordIds).
+    const attributed = (records as Array<Record<string, unknown>>).map((record) => {
+      const rebuilt: Record<string, unknown> = { ...record, obligationId: target.id };
+      delete rebuilt['recordId'];
+      const identity = [
+        rebuilt['runId'],
+        rebuilt['obligationId'],
+        rebuilt['kind'],
+        rebuilt['testId'],
+        rebuilt['origin'],
+      ];
+      if (identity.every((field) => typeof field === 'string' && (field as string).length > 0)) {
+        rebuilt['recordId'] = recordIdOf({
+          runId: rebuilt['runId'] as string,
+          obligationId: rebuilt['obligationId'] as string,
+          kind: rebuilt['kind'] as string,
+          testId: rebuilt['testId'] as string,
+          origin: rebuilt['origin'] as 'engine-observed' | 'suite-submitted',
+          payload: rebuilt['payload'],
+        });
+      }
+      return rebuilt;
+    });
+    return evaluateObligation(target, {
+      claims: [makeClaim('test-1', target.id)],
+      records: attributed as never[],
+      waivers: [],
+      classification,
+      ...(httpRoutes !== null ? { httpRoutes } : { httpRoutes: null }),
+      now: NOW,
+    });
+  }
+
+  it('REGRESSION (bypass 1): the complete session-channel bundle is invalid — claimed-tier UI never satisfies', () => {
+    // The exact reproduced attack shape (review recheck probe 2): the
+    // suite opens an interval, drives its session proxy from Node (a
+    // genuine engine-observed exchange), submits INVENTED session-bound
+    // ui.action + ui.visible-result records, and requests genuine
+    // persistence evidence. With the engine-owned browser channel
+    // available, the verifier grades rule by rule — and the invented
+    // claimed-tier UI records fail closed as invalid (never satisfied):
+    // only engine-observed browser actions satisfy UI-semantic contracts.
+    const outcome = crudOutcome('crud:create', [action(), visible(), exchange(), persistence()]);
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.verdict).not.toBe('satisfied');
+    expect(outcome.reason).toContain('claimed-tier');
+    expect(outcome.reason).toContain('engine-observed');
+  });
+
+  it('REGRESSION: API-only flow with zero invented UI records still fails closed identically', () => {
+    // Even the narrower replay (witnessed exchange + genuine persistence
+    // echo, no UI records at all) cannot earn browser credit: no
+    // engine-observed anchor exists.
+    const outcome = crudOutcome('crud:create', [exchange(), persistence()]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain('ui.action');
+  });
+
+  it('the fail-closed grade is deterministic under record order permutations', () => {
+    const forward = crudOutcome('crud:create', [action(), visible(), exchange(), persistence()]);
+    const backward = crudOutcome('crud:create', [persistence(), exchange(), visible(), action()]);
+    expect(backward).toEqual(forward);
+  });
+
+  it('a genuine-looking bundle under a WRONG-SESSION exchange is also fail-closed (no credit either way)', () => {
+    // The invented claimed-tier action already fails the bundle as
+    // invalid before exchange attribution is even reached — borrowed or
+    // foreign evidence can never repair a bundle with no engine-observed
+    // anchor.
+    const outcome = crudOutcome('crud:create', [
+      action(),
+      visible(),
+      exchange({ payload: { ...exchange().payload as Record<string, unknown>, sessionId: OTHER_SESSION } }),
+      persistence(),
+    ]);
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('claimed-tier');
+  });
+
+  it('an unknown crud operation name stays typed-blocking', () => {
+    const outcome = crudOutcome('crud:export', [action(), visible(), exchange(), persistence()]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain('is not one of the graded UI-semantic operations');
+  });
+
+  it('POSITIVE: a complete engine-observed bundle satisfies crud:create', () => {
+    // The shape the engine-owned browser issues: witnessed-trust
+    // ui.action + visible-result + exchange + persistence echo, all on
+    // the same session and entity with exact-value agreement.
+    const engineAction = action({ trust: 'witnessed', origin: 'engine-observed' });
+    const engineVisible = visible({ trust: 'witnessed', origin: 'engine-observed' });
+    const outcome = crudOutcome('crud:create', [engineAction, engineVisible, exchange(), persistence()]);
+    expect(outcome.verdict).toBe('satisfied');
   });
 });
 
@@ -636,7 +836,7 @@ describe('evaluateObligation — same-entity enforcement (invariant 3, D3)', () 
       records: [
         witnessedAction({
           obligationId: composite.id,
-          payload: { operation: 'update', entityId: entity },
+          payload: { operation: 'update', entityId: entity, fields: { name: 'New Name' } },
         }),
         witnessedPersistence({
           obligationId: composite.id,

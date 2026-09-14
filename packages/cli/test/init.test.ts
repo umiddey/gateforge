@@ -5,6 +5,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import { withTempRepo, loadConfig } from '@gateforge/core';
 import { runCli } from './helpers.js';
 
@@ -41,6 +42,32 @@ describe('gateforge init', () => {
       expect(precommit).toContain('gateforge-check');
       expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(true);
       expect(readFileSync(repo.path('.gitlab-ci.yml'), 'utf8')).toContain('gitlab-gateforge.yml');
+      // The CI template is the strict E2E gate (plan Phase 6): supervised
+      // receipt seal + require-e2e check, never an optional/static-only job.
+      const ciTemplate = readFileSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'), 'utf8');
+      expect(ciTemplate).toContain('gateforge test-gates --changed');
+      expect(ciTemplate).toContain('gateforge check --changed --require-e2e');
+      // Pinned engine install (lockfile-based), with a version assertion.
+      expect(ciTemplate).toContain('npm ci');
+      expect(ciTemplate).toContain('GATEFORGE_VERSION');
+      // The honest limits are carried in the template comments: the
+      // signing material boundary, the approved-policy pin (E17), and
+      // the server-side settings act.
+      expect(ciTemplate).toContain('GATEFORGE_WITNESS_VERIFIER_KEY');
+      expect(ciTemplate).toContain('GATEFORGE_APPROVED_POLICY_DIGEST');
+      expect(ciTemplate).toContain('APPROVED POLICY PIN');
+      expect(ciTemplate).toContain('ENFORCEMENT_UNTRUSTED');
+      expect(ciTemplate).toContain('pipeline execution policy');
+      expect(ciTemplate).toContain('Pipelines must succeed');
+      expect(ciTemplate).toContain('Protected branches');
+      // The template must stay valid, loadable YAML with the gate job —
+      // and the job must never be optional (no allow_failure/manual).
+      const parsed = parseYaml(ciTemplate) as Record<string, Record<string, unknown>>;
+      expect(Object.keys(parsed)).toContain('gateforge:e2e-gate');
+      const gateJob = parsed['gateforge:e2e-gate'] ?? {};
+      expect(gateJob['allow_failure']).toBeUndefined();
+      expect(gateJob['when']).toBeUndefined();
+      expect(gateJob['rules']).toEqual([{ if: '$CI_PIPELINE_SOURCE == "merge_request_event"' }]);
       // idempotent: second run must not duplicate the hook entry
       const again = await runCli(repo, ['init', '--blocking']);
       expect(again.code).toBe(0);

@@ -1,5 +1,5 @@
 import type { Io } from '../io.js';
-export declare const INIT_USAGE = "usage: gateforge init [--languages <comma,list>] [--blocking]";
+export declare const INIT_USAGE = "usage: gateforge init [--languages <comma,list>] [--blocking] [--strict-e2e]";
 /**
  * The starter policies document (plan phase 5): the gradable
  * `persistence:*` namespace for automatically classified resources.
