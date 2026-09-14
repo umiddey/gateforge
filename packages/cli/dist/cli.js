@@ -12,8 +12,6 @@ import { UsageError, runWithExitCodes } from './errors.js';
 import { processIo, writeLine } from './io.js';
 import { VERSION } from './commands/common.js';
 import { initCommand } from './commands/init.js';
-import { enforceCommand } from './commands/enforce.js';
-import { adoptCommand } from './commands/adopt.js';
 import { discoverCommand } from './commands/discover.js';
 import { obligationsCommand } from './commands/obligations.js';
 import { checkCommand } from './commands/check.js';
@@ -31,8 +29,6 @@ usage: gateforge <command> [options]
 commands:
   init [--languages <comma,list>] [--blocking]  create .gateforge.yml + skeleton; --blocking installs AND verifies an
         [--strict-e2e]                           active pre-commit hook (staged gate) + CI wiring (idempotent)
-  enforce                                 wire the blocking pre-commit + CI gate into an initialized repo (idempotent)
-  adopt                                   adopt enforcement: seed the baseline from current debt (the one bulk-add) + wire the gate
   discover [--json]                      run detectors and dump the resource graph
   classify [--json] [--write-snapshot P] inspect effective classifications + typed blocks
   explain <resourceId> [--json]          full signal/rule/obligation trace for one resource
@@ -88,10 +84,6 @@ export async function main(argv, io = processIo()) {
     }
     const rest = first === '--' ? argv.slice(2) : argv.slice(1);
     switch (command) {
-        case 'enforce':
-            return runWithExitCodes(io, () => Promise.resolve(enforceCommand(io, rest)));
-        case 'adopt':
-            return runWithExitCodes(io, () => adoptCommand(io, rest));
         case 'init':
             return runWithExitCodes(io, () => Promise.resolve(initCommand(io, rest)));
         case 'discover':

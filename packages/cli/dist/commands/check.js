@@ -18,8 +18,7 @@
  * `test-gates` suite contract writes.
  */
 import { cpSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { ADOPTION_RECORD_FILENAME, CAUSE_NEXT_ACTIONS, loadAdoptionRecord, loadBaseline, renderRun, runExitCode, } from '@gateforge/core';
+import { CAUSE_NEXT_ACTIONS, renderRun, runExitCode, } from '@gateforge/core';
 import { discoverTestCatalog, findPlaywrightConfig } from '@gateforge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { UsageError } from '../errors.js';
@@ -42,33 +41,6 @@ export const CHECK_USAGE = 'usage: gateforge check [--changed] [--staged] [--req
     '       approved policy digest: the OWNER-APPROVED policy revision pin. Never sourced from\n' +
     '       candidate-controlled files in strict mode — provision it via the protected\n' +
     '       GATEFORGE_APPROVED_POLICY_DIGEST variable, this flag, or GATEFORGE_TRUSTED_CONFIG outside the candidate.';
-/**
- * Resolves the adopted-baseline forgiveness set for this repo (phase 8 C).
- *
- * Fail-closed semantics:
- * - NO adoption record (the normal pre-adoption state) → nothing is
- *   forgiven, even if a baseline file exists: an unrecorded bulk-add is
- *   unsanctioned and forgives nothing.
- * - Record present but baseline missing/corrupt → throws (exit 2): the
- *   receipt without the document it sanctions is a broken adoption.
- * - Record present and baseline valid → the recorded fingerprint set,
- *   plus the classification layer (two-layer adoption) when the receipt
- *   carries it. A pre-layer receipt (no `classificationBlocked` field) is
- *   simply NOT ADOPTED for that layer — nothing classification-shaped is
- *   waived without the recorded set (fail closed, backward compatible).
- */
-export function resolveAdoptedBaseline(cwd, baselinesPath) {
-    const baselinePath = resolveRepoPath(cwd, baselinesPath);
-    const adoption = loadAdoptionRecord(join(dirname(baselinePath), ADOPTION_RECORD_FILENAME));
-    if (adoption === null)
-        return null;
-    return {
-        fingerprints: new Set(loadBaseline(baselinePath).fingerprints),
-        classificationBlocked: adoption.classificationBlocked !== undefined
-            ? new Set(adoption.classificationBlocked)
-            : undefined,
-    };
-}
 /**
  * Runs the check subcommand.
  *
@@ -458,7 +430,6 @@ async function runCheckGate(io, options) {
         mappingClaims,
         mappedCoverage,
         witnessVerifierKey,
-        baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
         evidenceContext: {
             expectedInputDigest: expectedDigest,
             snapshotUnavailable,
@@ -559,7 +530,6 @@ async function runCheckGate(io, options) {
         format,
         blocking: evaluatedBlocking,
         waiverCounts: evaluated.waiverCounts,
-        baseline: evaluated.baselined ?? undefined,
         run: pipeline.manifest,
         toolVersion: VERSION,
         scope: { mode: scopeDecision.mode, expandedBecause: scopeDecision.expandedBecause },

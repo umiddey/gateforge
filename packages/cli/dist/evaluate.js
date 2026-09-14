@@ -13,25 +13,12 @@
  * at changed files survive — the `check --changed` contract (GF-09's
  * resource-change set).
  */
-import { AttestationSchema, BLOCKING_VERDICTS, blockingEntryFingerprint, CAUSE_NEXT_ACTIONS, classificationBlockedIdentity, HTTP_ENDPOINT_RESOURCE_KIND, evaluateCoveragePolicy, evaluateObligations, fingerprint, loadWaivers, strictCapabilityGaps, verifyAttestationMac, } from '@gateforge/core';
+import { AttestationSchema, BLOCKING_VERDICTS, CAUSE_NEXT_ACTIONS, HTTP_ENDPOINT_RESOURCE_KIND, evaluateCoveragePolicy, evaluateObligations, loadWaivers, strictCapabilityGaps, verifyAttestationMac, } from '@gateforge/core';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { UsageError } from './errors.js';
 import { resolveRepoPath, sourcesByResourceId } from './pipeline.js';
 import { httpRoutesView, readJsonArray } from './state.js';
-/**
- * Pin-#2 fingerprint of an obligation — the identity the baseline
- * stores. Shared by `check` (baseline application) and `adopt` (red-set
- * capture) so both sides hash exactly the same way.
- */
-export function obligationFingerprint(obligation) {
-    return fingerprint({
-        resourceId: obligation.resourceId,
-        contract: obligation.contract,
-        policyId: obligation.policyId,
-        lifecycle: obligation.lifecycle,
-    });
-}
 /** Keeps only blocking entries plausibly tied to a changed file. */
 function scopeBlocking(blocking, changed, multiSources) {
     const kept = [];
@@ -282,19 +269,11 @@ export function evaluateRun(input) {
         ...strictBlocking,
     ];
     // Strict E2E mode (plan §3.3): waived obligations are not proof.
-    // Adoption-baseline forgiveness (phase 8 C) runs after diff scoping
-    // but BEFORE strict E2E grading: in strict mode a baselined obligation
-    // is still not proof (plan §3.3) — applyStrictE2E re-grades every
-    // waived verdict, baselined ones included, back to blocking. Non-strict
-    // repos keep the loud, counted baseline forgiveness.
-    const applied = applyBaseline(input.baseline ?? null, { verdicts, blocking });
-    const gradedVerdicts = strictE2E ? applyStrictE2E(applied.verdicts) : applied.verdicts;
-    const blockingRun = applied.blocking.length > 0 ||
-        gradedVerdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
+    const gradedVerdicts = strictE2E ? applyStrictE2E(verdicts) : verdicts;
+    const blockingRun = blocking.length > 0 || gradedVerdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
     return {
         verdicts: gradedVerdicts,
-        blocking: applied.blocking,
-        baselined: applied.baselined,
+        blocking,
         waiverCounts: {
             total: waiverLoad.waivers.length + waiverLoad.staleOwner.length + waiverLoad.expired.length,
             active: waiverLoad.waivers.length,
@@ -302,76 +281,6 @@ export function evaluateRun(input) {
             staleOwner: waiverLoad.staleOwner.length,
         },
         blockingRun,
-    };
-}
-/**
- * Applies the adoption baseline (phase 8 C): baselined blocking verdicts
- * are re-graded `waived` — a recorded, dated forgiveness whose reason
- * names the receipt — and baselined blocking entries are dropped, with
- * counts returned so every report stays loud about how much debt the
- * baseline carries (never silently green). Everything unbaselined blocks
- * exactly as before; a null/empty set changes nothing.
- *
- * The classification layer (two-layer adoption) waives by RESOURCE
- * IDENTITY (`classificationBlockedIdentity`), which is merge-stable where
- * whole-entry fingerprints are not (they bake in detail text and line
- * numbers, so an upstream merge would otherwise un-forgive the same
- * resource): a `classification` or `unclassified` entry whose adopted
- * identity is in the receipt's set is waived — loudly counted (as
- * DISTINCT resources), not exit-counted, not in the blocking list. The
- * layer runs FIRST; entries it waives are never double-counted under the
- * fingerprint pass. Fail-closed edges: entries without an identity
- * (document-level classifier blocks — stale targets, invalid signals) are
- * never waived here; a NEW blocked resource is by definition not in the
- * shrink-only set and still blocks.
- */
-function applyBaseline(baseline, run) {
-    if (baseline === null) {
-        return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
-    }
-    const fingerprints = baseline.fingerprints;
-    const classificationIds = baseline.classificationBlocked;
-    const classificationProvided = classificationIds !== undefined;
-    const classification = classificationIds !== undefined && classificationIds.size > 0 ? classificationIds : null;
-    if (fingerprints.size === 0 && classification === null) {
-        return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
-    }
-    let obligations = 0;
-    const verdicts = run.verdicts.map((entry) => {
-        if (!BLOCKING_VERDICTS.includes(entry.verdict))
-            return entry;
-        if (!fingerprints.has(obligationFingerprint(entry.obligation)))
-            return entry;
-        obligations += 1;
-        return {
-            ...entry,
-            verdict: 'waived',
-            reason: `baselined: adopted as forgiven (was ${entry.verdict}); baseline is shrink-only`,
-        };
-    });
-    const blocking = [];
-    let blockingEntries = 0;
-    const waivedClassifications = new Set();
-    for (const entry of run.blocking) {
-        const identity = classificationBlockedIdentity(entry);
-        if (identity !== null && classification !== null && classification.has(identity)) {
-            waivedClassifications.add(identity);
-            continue;
-        }
-        if (fingerprints.has(blockingEntryFingerprint(entry))) {
-            blockingEntries += 1;
-            continue;
-        }
-        blocking.push(entry);
-    }
-    return {
-        verdicts,
-        blocking,
-        baselined: {
-            obligations,
-            blockingEntries,
-            classificationBlocked: classificationProvided ? waivedClassifications.size : undefined,
-        },
     };
 }
 /** Diff-scopes the obligation list itself (check --changed). */

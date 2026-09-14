@@ -224,13 +224,6 @@ async function startObservedProxy(state, sessionId) {
                     state.proxyInFlight -= 1;
                 }
             };
-            // b59/b60 lesson (phase7-runtime e22ec24): `agent: false` is
-            // load-bearing. On Node >=19 the default global agent keeps sockets
-            // alive while dev servers close idle keep-alive sockets at their
-            // keepAliveTimeout — reusing a socket the target closed mid-handshake
-            // intermittently killed exactly one browser exchange per batch. A
-            // fresh loopback connection per forwarded exchange costs nothing and
-            // removes the reuse race.
             const forward = request({
                 protocol: proxyTargetUrl.protocol,
                 hostname: proxyTargetUrl.hostname,
@@ -238,7 +231,6 @@ async function startObservedProxy(state, sessionId) {
                 method: req.method,
                 path: forwardUrl,
                 headers: { ...req.headers, host: proxyTargetUrl.host },
-                agent: false,
             }, (upstream) => {
                 const status = upstream.statusCode ?? 0;
                 const observedPath = normalizeObservedPath(forwardUrl);
@@ -1669,10 +1661,7 @@ async function handlePersistence(state, res, body) {
         before = { entityAbsent: true }; // refined below for ids-kind snapshots
     }
     // Execute the adapter's GET-only read through the mediated transport.
-    const adapterHeaders = state.options.adapterReadAuthorization
-        ? { authorization: state.options.adapterReadAuthorization }
-        : undefined;
-    const ctx = makeAdapterContext(baseUrl, resourceId, (path) => adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization), adapterHeaders);
+    const ctx = makeAdapterContext(baseUrl, resourceId, (path) => adapterGet(baseUrl, state.options.requestTimeoutMs, path));
     let bodyRaw;
     try {
         bodyRaw = await adapter.read(ctx, entityId);
@@ -1802,10 +1791,7 @@ async function handlePreObservation(state, res, body) {
  */
 async function takePreObservation(state, session, resourceId, entityId) {
     const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
-    const adapterHeaders = state.options.adapterReadAuthorization
-        ? { authorization: state.options.adapterReadAuthorization }
-        : undefined;
-    const ctx = makeAdapterContext(baseUrl, resourceId, (path) => adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization), adapterHeaders);
+    const ctx = makeAdapterContext(baseUrl, resourceId, (path) => adapterGet(baseUrl, state.options.requestTimeoutMs, path));
     const observationId = randomUUID();
     if (entityId !== undefined) {
         // Entity-fields snapshot (update postconditions).
@@ -1913,20 +1899,14 @@ async function adapterReadContext(state, resourceId) {
  * (http(s)://…) or relative to the adapter base. Timeout is enforced by
  * aborting the underlying fetch.
  */
-async function adapterGet(baseUrl, timeoutMs, path, readAuthorization) {
+async function adapterGet(baseUrl, timeoutMs, path) {
     const target = /^https?:\/\//.test(path) ? path : `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
         const response = await fetch(target, {
             method: 'GET',
-            headers: {
-                accept: 'application/json, text/html',
-                // Operator-issued read-only service credential for the ENGINE's own
-                // adapter reads (see WitnessOptions.adapterReadAuthorization); never
-                // forwarded to the suite and never attached to browser traffic.
-                ...(readAuthorization ? { authorization: readAuthorization } : {}),
-            },
+            headers: { accept: 'application/json, text/html' },
             signal: controller.signal,
             redirect: 'follow',
         });

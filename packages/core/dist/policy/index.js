@@ -8,7 +8,7 @@
  * evaluator (§3.6) and the protected-policy-ownership foundation
  * (trusted policy digest + weakening check, ADR 0005 D5/D6).
  */
-export { CRUD_CONTRACT_PREFIX, PERSISTENCE_CONTRACT_PREFIX, BlockingEntrySchema, ClaimAssessmentSchema, PolicyEvaluationError, PolicyEvaluationResultSchema, classificationBlockedIdentity, evaluatePolicies, lifecycleAllowsContract, } from './evaluate.js';
+export { CRUD_CONTRACT_PREFIX, PERSISTENCE_CONTRACT_PREFIX, BlockingEntrySchema, ClaimAssessmentSchema, PolicyEvaluationError, PolicyEvaluationResultSchema, evaluatePolicies, lifecycleAllowsContract, } from './evaluate.js';
 export { evaluateCoveragePolicy, } from './coverage.js';
 export { TRUSTED_POLICY_DOMAIN, trustedPolicyDigest, policyWeakenedCandidate, } from './trusted.js';
 //# sourceMappingURL=index.js.map
