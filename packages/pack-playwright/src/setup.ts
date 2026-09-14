@@ -55,13 +55,17 @@ export async function startWitnessProcess(
   env: NodeJS.ProcessEnv,
   timeoutMs = 15000,
 ): Promise<{ child: ChildProcess; url: string; proxyUrl: string | null }> {
-  const bin = fileURLToPath(new URL('../../bin/gateforge-witness.js', import.meta.url));
+  // Package-root relative (works for both src/ and dist/ layouts — the
+  // bin ships beside the package, not beside the compiled module).
+  const pkgPath = fileURLToPath(new URL('../package.json', import.meta.url));
+  const bin = join(pkgPath.slice(0, -'package.json'.length), 'bin', 'gateforge-witness.js');
   const child = spawn(process.execPath, [bin], {
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const urlPromise = new Promise<{ url: string; proxyUrl: string | null }>((resolveUrl, rejectUrl) => {
     let stdout = '';
+    let stderr = '';
     let proxyUrl: string | null = null;
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
@@ -77,6 +81,9 @@ export async function startWitnessProcess(
         resolveUrl({ url: match[1] as string, proxyUrl });
       }
     });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
     child.once('error', (error) => {
       clearTimeout(timer);
       rejectUrl(new Error(`witness child failed to start: ${error.message}`));
@@ -85,7 +92,10 @@ export async function startWitnessProcess(
       clearTimeout(timer);
       if (code !== 0) {
         rejectUrl(
-          new Error(`witness child exited early (code ${String(code)}): ${stdout.slice(0, 500)}`),
+          new Error(
+            `witness child exited early (code ${String(code)}): ${stdout.slice(0, 500)}` +
+              (stderr.length > 0 ? ` stderr: ${stderr.slice(0, 2000)}` : ''),
+          ),
         );
       }
     });

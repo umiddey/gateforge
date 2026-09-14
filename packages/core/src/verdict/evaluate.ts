@@ -21,11 +21,20 @@
  *   create ⇒ engine-observed absence before + presence after; update ⇒
  *   an engine-observed before/after field delta; read ⇒ presence;
  *   delete ⇒ absent (hard) or matching the classification's
- *   owner-declared `archiveFields` (archive). UI-semantic `crud:`
- *   contracts FAIL CLOSED — no witness-controlled UI observation
- *   channel exists — as do contracts outside the persistence namespace.
- *   Fabricated persistence records demote to claimed and can never
- *   satisfy (D2, GF-23).
+ *   owner-declared `archiveFields` (archive). Fabricated persistence
+ *   records demote to claimed and can never satisfy (D2, GF-23).
+ * - `crud:<op>` (UI-semantic, plan Phase 1 item 8 + §3.6) is graded on
+ *   the SUPERVISED SESSION CHANNEL only: within one witness session the
+ *   claim needs (i) a provenanced session-bound `ui.action` with the
+ *   matching operation, (ii) the witness-observed HTTP exchange of that
+ *   same session — issued only for traffic traversing the session's
+ *   dedicated proxy INSIDE a witness-kept action interval — attributed
+ *   by the complete host route inventory, (iii) a session-bound visible
+ *   result for the same entity, and (iv) the engine-observed
+ *   persistence postcondition + exact-value echo on that entity. Every
+ *   shortcut grades typed-blocking (session binding, unobserved direct
+ *   mutation, value mismatch, missing visible result). Contracts
+ *   outside the persistence/crud namespaces still fail closed.
  * - Records whose provenance does not verify — a recordId that does not
  *   recompute from the record's own contents (sha256 over the canonical
  *   identity) — are demoted to `claimed` regardless of their `trust`
@@ -44,8 +53,16 @@
  *   a waiver whose owner is stale yields `stale` (GF-17).
  */
 import { z } from 'zod';
-import { registerContractVerifier, verifierFor, type HttpRouteCandidate } from './registry.js';
-import { registerPackVerifiers } from './pack-verifiers.js';
+import {
+  capabilityFor,
+  registerContractCapabilities,
+  registerContractVerifier,
+  verifierFor,
+  type ContractCapability,
+  type HttpRouteCandidate,
+} from './registry.js';
+import { registerPackVerifiers, interpretObservedPath, resolveHttpRoute } from './pack-verifiers.js';
+import { causeForVerdict } from './cause.js';
 import { canonicalJson, type JsonValue } from '../canonical-json.js';
 import { fingerprint } from '../fingerprints.js';
 import { compareStrings } from '../graph/util.js';
@@ -54,7 +71,7 @@ import { ClassificationSchema } from '../schemas/classification.js';
 import { ClaimSchema, type Claim } from '../schemas/claim.js';
 import { ObligationSchema, type Obligation } from '../schemas/obligation.js';
 import type { TrustTier } from '../schemas/common.js';
-import type { Verdict } from '../schemas/verdict.js';
+import type { CauseCode, Verdict } from '../schemas/verdict.js';
 import { WaiverSchema, type Waiver } from '../schemas/waiver.js';
 import { CRUD_CONTRACT_PREFIX, PERSISTENCE_CONTRACT_PREFIX } from '../policy/index.js';
 
@@ -107,7 +124,10 @@ export interface VerdictOutcome {
 /**
  * A per-obligation verdict enriched for reporting: the batch wrapper adds
  * the obligation identity, the highest trust tier among considered
- * records, and optional detector provenance (invariant 8 trace).
+ * records, optional detector provenance (invariant 8 trace), and the
+ * stable cause code + next action for the shared report model (plan
+ * §5.4). Cause/nextAction are null when the verdict is clean or no
+ * honest mapping exists yet (later phases populate).
  */
 export interface ObligationVerdict extends VerdictOutcome {
   /** The obligation this verdict is about. */
@@ -116,6 +136,10 @@ export interface ObligationVerdict extends VerdictOutcome {
   trustTier: TrustTier | null;
   /** Detector provenance for the trace; attached by the caller when known. */
   detector?: { id: string; version: string } | null;
+  /** Stable plan §5.4 cause code; null when unmapped or clean. */
+  readonly cause?: CauseCode | null;
+  /** Human next action for the cause; null when unmapped or clean. */
+  readonly nextAction?: string | null;
 }
 
 /** Pin-#9 evaluation context. Malformed entries degrade, never crash. */
@@ -259,13 +283,13 @@ function isJsonValue(value: unknown): value is JsonValue {
  * Extracts the operation a persistence-level contract requires
  * (`persistence:update` → `update`); null for anything else.
  *
- * Dispatch (audit round 5):
+ * Dispatch:
  * - `persistence:<op>` — UI-independent CRUD, graded on the witness's
  *   own engine-side observations with owner/classification-owned
  *   expectations;
- * - `crud:<op>` — UI-SEMANTIC: satisfaction would require observing the
- *   UI itself, and no witness-controlled UI observation channel exists
- *   (the suite owns the browser), so these FAIL CLOSED;
+ * - `crud:<op>` — UI-SEMANTIC: graded by the session-channel verifier
+ *   below (supervised witness session + observed exchange + interval +
+ *   persistence echo);
  * - everything else — no semantic verifier registered, fail closed.
  */
 function persistenceOperation(
@@ -423,6 +447,62 @@ function declaredFieldsMatchFailure(
 }
 
 /**
+ * Exact-value echo (plan §3.6, adopted from the consumer precedent):
+ * for a create/update obligation whose journey collects input in the UI,
+ * the witnessed `ui.action` record's DECLARED INPUT fields (what the
+ * journey entered) must be echoed exactly by the independently fetched
+ * persisted fields on the SAME entity the engine holds. Both sides are
+ * engine-held records past provenance (the witness issued them under the
+ * supervisor-bound session) — the suite cannot forge either. A 2xx
+ * status or row presence alone is insufficient: an echoed value that
+ * differs fails the obligation with `EVIDENCE_VALUE_MISMATCH` even when
+ * the status was 200. Delete (archive) postconditions are owner-graded
+ * via `archiveFields` and carry no entered-input echo.
+ *
+ * Returns:
+ *   string | null: the first echo-violation description, or null when
+ *   every declared input value is echoed exactly by the persisted state.
+ */
+function exactValueEchoFailure(
+  operation: 'create' | 'update',
+  actionRecord: RecordLike,
+  persistenceRecord: RecordLike,
+): string | null {
+  const entered = payloadOf(actionRecord)?.['fields'];
+  if (!isPlainObject(entered) || Object.keys(entered).length === 0) {
+    return (
+      `exact-value echo violation (EVIDENCE_VALUE_MISMATCH): the '${UI_ACTION_KIND}' record ` +
+      `'${labelOf(actionRecord)}' declares no input fields, so the persisted state cannot be ` +
+      `echo-checked for the '${operation}' obligation (plan §3.6 requires the journey's ` +
+      'entered values to come back exactly on the same entity)'
+    );
+  }
+  const persisted = payloadOf(persistenceRecord)?.['fields'];
+  if (!isPlainObject(persisted)) {
+    return (
+      `exact-value echo violation (EVIDENCE_VALUE_MISMATCH): the persistence record ` +
+      `'${labelOf(persistenceRecord)}' observed no persisted fields to echo the ` +
+      `'${operation}' input against`
+    );
+  }
+  for (const key of Object.keys(entered).sort()) {
+    const enteredValue = entered[key];
+    if (!isJsonValue(enteredValue)) continue;
+    const persistedValue = persisted[key];
+    if (!isJsonValue(persistedValue) || canonicalJson(persistedValue) !== canonicalJson(enteredValue)) {
+      return (
+        `exact-value echo violation (EVIDENCE_VALUE_MISMATCH): the '${UI_ACTION_KIND}' declared ` +
+        `input ${key}=${canonicalJson(enteredValue)} but the engine-observed persisted fields on ` +
+        `the same entity carry ${
+          isJsonValue(persistedValue) ? canonicalJson(persistedValue) : '<none>'
+        } — a 2xx status or row presence alone is insufficient (plan §3.6)`
+      );
+    }
+  }
+  return null;
+}
+
+/**
  * The operation-specific postcondition a witnessed persistence record
  * must meet for the claim to be satisfiable. Every EXPECTATION is
  * owner-owned (classification) or engine-observed (pre-observation
@@ -435,11 +515,19 @@ function declaredFieldsMatchFailure(
  * - delete: hard delete ⇒ entity absent; archive ⇒ entity present and
  *   matching the classification's `archiveFields`.
  *
+ * Args:
+ *   obligation: the obligation under grading (lifecycle expectations).
+ *   operation: the CRUD operation the contract requires (from
+ *     `persistence:<op>` or `crud:<op>`).
+ *   record: the witnessed persistence record being graded.
+ *   actionEntityKey: canonical entityId key of the anchoring UI action.
+ *
  * Returns:
  *   string | null: the first postcondition failure, or null when met.
  */
 function persistencePostconditionFailure(
   obligation: Obligation,
+  operation: 'create' | 'read' | 'update' | 'delete',
   record: RecordLike,
   actionEntityKey: string,
 ): string | null {
@@ -454,7 +542,6 @@ function persistencePostconditionFailure(
     );
   }
   const found = payload['found'];
-  const operation = obligation.contract.slice(PERSISTENCE_CONTRACT_PREFIX.length);
   const before = payload['before'];
 
   if (operation === 'create') {
@@ -539,12 +626,10 @@ function persistencePostconditionFailure(
  * persistence.* record for the same entity meeting the operation's
  * postcondition.
  *
- * Dispatch (audit round 5):
- * - `crud:<op>` — UI-SEMANTIC, FAIL-CLOSED: no witness-controlled UI
- *   observation channel exists (the suite owns the browser), so a
- *   claimed UI action can never be verified. These contracts stay
- *   blocking `missing`; persistence-level `persistence:<op>` contracts
- *   are the gradable surface.
+ * Dispatch (ADR 0004 D8, plan phase 5 + Phase 1 item 8):
+ * - `crud:<op>` — UI-semantic, graded by the session-channel verifier
+ *   ({@link crudClaimVerifier}): supervised session binding, witnessed
+ *   interval-gated exchange, visible result, persistence echo;
  * - `persistence:<op>` — graded on the witness's own observations with
  *   OWNER-owned expectations (classification `archiveFields`) and
  *   engine-observed before/after deltas. The tested suite never supplies
@@ -580,28 +665,75 @@ function evaluateClaimEvidence(
 
 // Built-in registrations: persistence/crud semantics stay owned by this
 // module; pack namespaces register through './pack-verifiers.js'.
-registerContractVerifier('crud', (input) => persistenceClaimVerifier(input.claim, input.evidence, input.obligation, input.primaryKey));
+registerContractVerifier('crud', (input) => crudClaimVerifier(input));
 registerContractVerifier('persistence', (input) => persistenceClaimVerifier(input.claim, input.evidence, input.obligation, input.primaryKey));
 registerPackVerifiers();
 
-/** The built-in persistence/crud grader (behavior kept verbatim). */
+/**
+ * Capability metadata for the persistence namespace (plan Phase 0 item 7,
+ * ADR 0005; Phase 1 implements the echo): implemented over the witness
+ * persistence adapter (engine-observed same-entity state reads) plus the
+ * supervisor-bound session channel. The metadata text carries the
+ * exact-value echo requirement (plan §3.6): for a UI-collected mutation,
+ * the independent persistence evidence must echo the user-entered values
+ * exactly on the same entity identity — a 2xx status or row presence
+ * alone is insufficient, and a mismatched echo fails with
+ * `EVIDENCE_VALUE_MISMATCH` even when the status was 2xx.
+ */
+const PERSISTENCE_CAPABILITY: ContractCapability = {
+  namespace: 'persistence',
+  contracts: [
+    'persistence:create',
+    'persistence:read',
+    'persistence:update',
+    'persistence:delete',
+  ],
+  unavailableContracts: [],
+  observer:
+    'witness persistence adapter: engine-observed pre/post state reads on the SAME entity ' +
+    "identity the UI action produced; exact-value echo required and enforced (plan §3.6) — " +
+    'persisted field values must echo the user-entered input exactly on the same entity, and a ' +
+    'mismatched echo fails with EVIDENCE_VALUE_MISMATCH even when the status was 2xx',
+  testKinds: ['browser-e2e', 'api-e2e'],
+  availability: { status: 'available' },
+};
+
+/**
+ * Capability metadata for the UI-semantic crud namespace (plan Phase 0
+ * item 3, Phase 1 item 4/8 + §3.6): AVAILABLE through the engine-owned
+ * browser action/observation channel. The engine creates the browser
+ * context, executes the constrained surface operations itself, observes
+ * the rendered result and the captured application exchange, and issues
+ * engine-observed (witnessed-trust) action/visible-result records.
+ * Suite-submitted UI records and origin-attributed proxy exchanges can
+ * never substitute for it: the anchor and visible-result rules below
+ * require witnessed trust, so worker-side replays grade invalid/missing
+ * instead of satisfying.
+ */
+const CRUD_CAPABILITY: ContractCapability = {
+  namespace: 'crud',
+  contracts: ['crud:create', 'crud:read', 'crud:update', 'crud:delete'],
+  unavailableContracts: [],
+  observer:
+    'the ENGINE-OWNED browser action/observation channel (plan Phase 1 item 4): the engine ' +
+    'creates the browser context, executes the constrained UI actions itself, observes the ' +
+    'rendered result and the captured application exchange, and issues engine-observed ' +
+    "ui.action/ui.visible-result records — suite-submitted UI records and origin-attributed " +
+    'proxy exchanges can never substitute for it (test attribution stays suite-claimed)',
+  testKinds: ['browser-e2e'],
+  availability: { status: 'available' },
+};
+
+registerContractCapabilities(PERSISTENCE_CAPABILITY);
+registerContractCapabilities(CRUD_CAPABILITY);
+
+/** The built-in persistence grader (behavior kept verbatim). */
 function persistenceClaimVerifier(
   claim: Claim,
   evidence: Array<{ record: RecordLike; trust: TrustTier }>,
   obligation: Obligation,
   primaryKey: readonly string[],
 ): ClaimOutcome {
-  // UI-semantic CRUD: fail closed — the suite owns the browser, so a
-  // claimed UI action can never be independently observed (round 5).
-  if (obligation.contract.startsWith(CRUD_CONTRACT_PREFIX)) {
-    return {
-      status: 'missing',
-      reason:
-        `no witness-controlled UI observation channel exists, so the UI-semantic contract ` +
-        `'${obligation.contract}' cannot be verified; use the persistence-level ` +
-        `'${PERSISTENCE_CONTRACT_PREFIX}<operation>' contract (graded on engine-observed state)`,
-    };
-  }
   const requiredOp = persistenceOperation(obligation.contract);
   if (requiredOp === null) {
     return {
@@ -740,7 +872,12 @@ function persistenceClaimVerifier(
   let firstPostconditionFailure: string | null = null;
   let matchingPersistence: { record: RecordLike } | undefined;
   for (const entry of sameEntity) {
-    const failure = persistencePostconditionFailure(obligation, entry.record, actionEntity.key);
+    const failure = persistencePostconditionFailure(
+      obligation,
+      requiredOp,
+      entry.record,
+      actionEntity.key,
+    );
     if (failure === null) {
       matchingPersistence = entry;
       break;
@@ -754,6 +891,22 @@ function persistenceClaimVerifier(
         `${firstPostconditionFailure ?? `no witnessed '${PERSISTENCE_KIND_PREFIX}*' record meets ` +
         `the '${obligation.contract}' postcondition`} (obligation '${obligation.id}')`,
     };
+  }
+
+  // Exact-value echo (plan §3.6): for UI-collected create/update, the
+  // persisted state on the same entity must echo the journey's entered
+  // input EXACTLY — engine-record vs engine-record, never a suite
+  // expectation. A mismatch blocks with EVIDENCE_VALUE_MISMATCH even
+  // when the status was 200 and the row exists.
+  if (requiredOp === 'create' || requiredOp === 'update') {
+    const echoFailure = exactValueEchoFailure(
+      requiredOp,
+      matchingAction.record,
+      matchingPersistence.record,
+    );
+    if (echoFailure !== null) {
+      return { status: 'invalid', reason: `${echoFailure} (obligation '${obligation.id}')` };
+    }
   }
 
   // Consistency hardening: visible vs persisted fields must agree when a
@@ -785,6 +938,534 @@ function persistenceClaimVerifier(
     matchingPersistence.record,
     ...(visible !== undefined ? [visible.record] : []),
   ]
+    .map((record) => (typeof record.recordId === 'string' ? record.recordId : ''));
+  return { status: 'satisfied', recordIds: sortedUnique(used) };
+}
+
+/**
+ * The operation a `crud:` contract requires, or null for any other name
+ * inside the namespace (unknown `crud:*` names stay typed-blocking).
+ */
+function crudOperation(contract: string): 'create' | 'read' | 'update' | 'delete' | null {
+  if (!contract.startsWith(CRUD_CONTRACT_PREFIX)) return null;
+  const operation = contract.slice(CRUD_CONTRACT_PREFIX.length);
+  if (operation === 'create' || operation === 'read' || operation === 'update' || operation === 'delete') {
+    return operation;
+  }
+  return null;
+}
+
+/** A non-empty string payload field (the session-binding shape). */
+function payloadSessionId(record: RecordLike): string | null {
+  const value = payloadOf(record)?.['sessionId'];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * Grades the UI-semantic `crud:<op>` contracts on the SUPERVISED SESSION
+ * CHANNEL (plan Phase 1 items 5/8, §3.6; review finding "Phase 1 browser
+ * proof is absent"). Satisfies ONLY when ALL of the following hold for
+ * the claim, all within the SAME witness session:
+ *
+ *  (i) a provenanced session-bound `ui.action` record with the matching
+ *      operation — the suite-asserted anchor (any trust tier anchors, as
+ *      in the persistence rule, but ONLY records whose provenance
+ *      verifies), carrying the session id the witness stamped at
+ *      issuance;
+ *  (ii) the WITNESSED `http.request` exchange of that same session,
+ *      attributed to the obligation's endpoint. Interval guarantee: the
+ *      witness issues `http.request` records ONLY for exchanges observed
+ *      through THAT session's dedicated proxy port INSIDE one of its
+ *      witness-kept action intervals, so the record's existence is the
+ *      interval proof — setup traffic outside every interval never
+ *      becomes a record at all. Route attribution runs through the
+ *      existing `resolveHttpRoute` machinery over the COMPLETE
+ *      host-derived inventory; without an inventory the claim grades a
+ *      typed missing naming the gap (never satisfied), and
+ *      non-unique/nomatch attribution blocks. A `crud:` obligation
+ *      attaches to a business (entity) resource, so a UNIQUE
+ *      single-route attribution is accepted without comparing the
+ *      endpoint's resource id; when the obligation's resource IS an
+ *      inventoried endpoint id, only the exact match counts;
+ *  (iii) a provenanced session-bound `ui.visible-result` record for the
+ *      same entity (the rendered result read back through the fixture);
+ *  (iv) the engine-observed persistence postcondition + exact-value
+ *      echo on the same entity — the create/update/read/archive rules
+ *      reused VERBATIM from the persistence grader (declared fields,
+ *      updateable delta, archive fields), plus the visible-vs-persisted
+ *      field agreement.
+ *
+ * Typed blocking (deterministic reasons, single grading sites):
+ * - direct-API/Node-side mutation without a session exchange → `missing`
+ *   carrying the `HTTP_OBSERVATION_UNTRUSTED`-style session reason;
+ * - a borrowed cross-session exchange → `invalid` (the session binding
+ *   fails it);
+ * - 2xx with wrong persisted values → `invalid` `EVIDENCE_VALUE_MISMATCH`
+ *   (reused verbatim);
+ * - no visible-result → `missing` `EVIDENCE_NOT_COLLECTED`.
+ *
+ * Sessions are graded as groups (an honest bundle carries exactly one):
+ * each candidate session from rule (i) is evaluated independently in
+ * codepoint order, and `satisfied` beats `invalid` beats `missing`, the
+ * same aggregation the obligation level applies across claims.
+ *
+ * Args:
+ *   input: the claim plus its attributed evidence, obligation, primary
+ *     key, graph resource, and the host-derived route inventory.
+ *
+ * Returns:
+ *   ClaimOutcome: the per-claim grade.
+ */
+/**
+ * Grades the UI-semantic `crud:<op>` contracts. The namespace's
+ * capability is available through the engine-owned browser channel
+ * (see {@link CRUD_CAPABILITY}): only ENGINE-OBSERVED (witnessed-trust)
+ * action/visible records can anchor or confirm — suite-submitted UI
+ * records grade invalid/missing, never satisfied. The session-channel
+ * rules below bind the rendered action, the captured application
+ * exchange with route attribution, the rendered visible result, and the
+ * engine-observed persistence echo on the same entity in the same
+ * session.
+ */
+function crudClaimVerifier(input: {
+  claim: Claim;
+  obligation: Obligation;
+  evidence: Array<{ record: RecordLike; trust: TrustTier }>;
+  primaryKey: readonly string[];
+  httpRoutes?: readonly HttpRouteCandidate[] | null;
+}): ClaimOutcome {
+  const { claim, obligation, evidence, primaryKey } = input;
+  const requiredOp = crudOperation(obligation.contract);
+  if (requiredOp === null) {
+    return {
+      status: 'missing',
+      reason:
+        `contract '${obligation.contract}' is not one of the graded UI-semantic operations ` +
+        `(crud:create, crud:read, crud:update, crud:delete), so '${obligation.id}' stays blocking`,
+    };
+  }
+  // Capability gate FIRST (fail closed): crud contracts are reachable
+  // only while the engine-owned browser observation channel is
+  // available. If a future regression marks it unavailable again, no
+  // evidence can satisfy these contracts.
+  const capability = capabilityFor(obligation.contract);
+  if (capability === null || capability.availability.status === 'unavailable') {
+    return {
+      status: 'missing',
+      reason:
+        `'${obligation.id}': UI-semantic crud contracts fail closed — ` +
+        `${capability?.availability.status === 'unavailable' ? capability.availability.reason : 'no independent browser observation channel exists'}. ` +
+        `The declaring claim '${claim.testId}' carried ${evidence.length} evidence record(s); none of them ` +
+        'can prove a rendered browser action without the engine-owned browser action/observation ' +
+        'channel (plan Phase 1 item 4) — the gate stays blocking instead of granting browser ' +
+        'credit to suite-submitted records',
+    };
+  }
+  if (evidence.length === 0) {
+    return {
+      status: 'missing',
+      reason:
+        `claim '${claim.testId}' declares '${obligation.id}' but produced no evidence records`,
+    };
+  }
+
+  // Rule (i): the ENGINE-OBSERVED ui.action anchor. Only
+  // witnessed-trust records can anchor: suite-submitted UI records are
+  // worker assertions, never browser proof (plan Phase 1 item 4). An
+  // unprovenanced or claimed-tier action is a GF-23 violation.
+  const actions = evidence.filter((entry) => entry.record.kind === UI_ACTION_KIND);
+  const fabricated = actions.find((entry) => !isProvenancedRecord(entry.record));
+  const claimedTier = actions.find((entry) => entry.trust !== 'witnessed');
+  const badAction = fabricated ?? claimedTier;
+  if (badAction !== undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `claimed-tier '${UI_ACTION_KIND}' record '${labelOf(badAction.record)}' cannot ` +
+        `satisfy '${obligation.contract}': only engine-observed browser actions satisfy ` +
+        'UI-semantic contracts (suite-submitted UI records never earn browser credit; GF-23)',
+    };
+  }
+  // Normalize each candidate anchor's entityId up front (D3); a broken
+  // identity is a checkable violation, reported for the smallest anchor.
+  // Lockstep with the persistence grader: only actions whose payload
+  // declares the REQUIRED operation can anchor (a wrong-operation action
+  // blocks only when no qualifying anchor exists).
+  const anchors = actions
+    .filter(
+      (entry) =>
+        isProvenancedRecord(entry.record) &&
+        payloadSessionId(entry.record) !== null &&
+        payloadOf(entry.record)?.['operation'] === requiredOp,
+    )
+    .map((entry) => ({
+      entry,
+      session: payloadSessionId(entry.record) as string,
+      entity: normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey),
+    }))
+    .sort((a, b) => compareStrings(labelOf(a.entry.record), labelOf(b.entry.record)));
+  const firstBroken = anchors.find((anchor) => !anchor.entity.ok);
+  if (firstBroken !== undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `'${UI_ACTION_KIND}' record '${labelOf(firstBroken.entry.record)}': ` +
+        `${firstBroken.entity.ok ? '' : firstBroken.entity.detail}; ` +
+        'same-entity enforcement (invariant 3) is impossible without it',
+    };
+  }
+  const qualifying = anchors.filter((anchor) => anchor.entity.ok);
+  if (qualifying.length === 0) {
+    if (actions.length === 0) {
+      return {
+        status: 'missing',
+        reason:
+          `no session-bound '${UI_ACTION_KIND}' anchor from the declaring test: ` +
+          `'${obligation.id}' requires the supervised witness session the gateforge reporter ` +
+          'opens per test (records without it never carry a session binding)',
+      };
+    }
+    const unbound = actions.find((entry) => payloadSessionId(entry.record) === null);
+    if (unbound !== undefined) {
+      return {
+        status: 'missing',
+        reason:
+          `'${UI_ACTION_KIND}' record '${labelOf(unbound.record)}' carries no witness session ` +
+          `binding, so it cannot anchor the supervised-session contract '${obligation.contract}': ` +
+          'the gateforge reporter must open a test session (records without one never carry a ' +
+          'session id)',
+      };
+    }
+    const wrongOp = actions.find((entry) => payloadOf(entry.record)?.['operation'] !== requiredOp);
+    if (wrongOp !== undefined) {
+      const got = String(payloadOf(wrongOp.record)?.['operation'] ?? '<none>');
+      return {
+        status: 'invalid',
+        reason:
+          `'${UI_ACTION_KIND}' record '${labelOf(wrongOp.record)}' has operation ` +
+          `'${got}' but '${obligation.contract}' requires '${requiredOp}'`,
+      };
+    }
+    return {
+      status: 'missing',
+      reason: `no admissible '${UI_ACTION_KIND}' evidence for '${obligation.id}'`,
+    };
+  }
+
+  // Rules (ii)-(iv) are evaluated PER SESSION GROUP, in codepoint order.
+  const sessions = sortedUnique(qualifying.map((anchor) => anchor.session));
+  let firstInvalid: string | null = null;
+  let firstMissing: string | null = null;
+  for (const session of sessions) {
+    const anchor = qualifying.find((candidate) => candidate.session === session) as {
+      entry: { record: RecordLike };
+      entity: { ok: true; key: string };
+    };
+    const outcome = gradeCrudSession({
+      session,
+      anchorRecord: anchor.entry.record,
+      anchorEntityKey: anchor.entity.key,
+      requiredOp,
+      primaryKey,
+      input,
+    });
+    if (outcome.status === 'satisfied') return outcome;
+    if (outcome.status === 'invalid' && firstInvalid === null) firstInvalid = outcome.reason;
+    if (outcome.status === 'missing' && firstMissing === null) firstMissing = outcome.reason;
+  }
+  if (firstInvalid !== null) return { status: 'invalid', reason: firstInvalid };
+  return { status: 'missing', reason: firstMissing ?? `no admissible evidence for '${obligation.id}'` };
+}
+
+/**
+ * Grades rules (ii)-(iv) for ONE witness session: the witnessed
+ * session-bound exchange with route attribution, the session-bound
+ * visible result, and the engine-observed persistence echo.
+ *
+ * Args:
+ *   params: session id, the anchoring action record, its canonical
+ *     entity key, the required operation, and the verifier input.
+ *
+ * Returns:
+ *   ClaimOutcome: the session group's grade.
+ */
+function gradeCrudSession(params: {
+  session: string;
+  anchorRecord: RecordLike;
+  anchorEntityKey: string;
+  requiredOp: 'create' | 'read' | 'update' | 'delete';
+  primaryKey: readonly string[];
+  input: {
+    claim: Claim;
+    obligation: Obligation;
+    evidence: Array<{ record: RecordLike; trust: TrustTier }>;
+    httpRoutes?: readonly HttpRouteCandidate[] | null;
+  };
+}): ClaimOutcome {
+  const { session, anchorRecord, anchorEntityKey, requiredOp, primaryKey, input } = params;
+  const { obligation, evidence } = input;
+
+  // Rule (ii): the WITNESSED session-bound exchange. The record's
+  // existence proves the interval: the witness issues http.request
+  // records only for exchanges traversing THIS session's dedicated
+  // proxy port inside a witness-kept action interval.
+  const exchanges = evidence.filter((entry) => entry.record.kind === 'http.request');
+  if (exchanges.length === 0) {
+    return {
+      status: 'missing',
+      reason:
+        `'${obligation.id}': no witnessed session-bound 'http.request' exchange was observed ` +
+        `(HTTP_OBSERVATION_UNTRUSTED): a direct API or Node-side mutation never enters the ` +
+        'supervised session channel, and traffic outside a witness-kept action interval is ' +
+        `never issued as evidence, so the UI-semantic contract '${obligation.contract}' has no ` +
+        'independently observed transport; drive the mutation through the rendered UI inside ' +
+        'the fixture\'s recorded action interval',
+    };
+  }
+  const forgedExchange = exchanges.find(
+    (entry) => entry.trust !== 'witnessed' || !isProvenancedRecord(entry.record),
+  );
+  if (forgedExchange !== undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `'${obligation.id}': suite-submitted network record '${labelOf(forgedExchange.record)}' ` +
+        `cannot satisfy '${obligation.contract}' (HTTP_OBSERVATION_UNTRUSTED): only a ` +
+        'witness-issued engine-observed exchange proves transport',
+    };
+  }
+  const foreign = exchanges.find((entry) => payloadSessionId(entry.record) !== session);
+  if (foreign !== undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `'${obligation.id}': witnessed 'http.request' record '${labelOf(foreign.record)}' was ` +
+        `observed on witness session '${String(payloadSessionId(foreign.record) ?? '<none>')}' ` +
+        `but the declaring '${UI_ACTION_KIND}' anchors session '${session}' — exchanges are ` +
+        'consumable only by the session whose channel they traversed; borrowed cross-session ' +
+        'evidence can never satisfy',
+    };
+  }
+  // Inventory gate FIRST (fail closed): without the complete host-derived
+  // route inventory the session exchange can never be attributed.
+  if (input.httpRoutes === null || input.httpRoutes === undefined) {
+    return {
+      status: 'missing',
+      reason:
+        `'${obligation.id}': no route inventory context for '${obligation.contract}': crud ` +
+        'satisfaction requires the complete host-derived route inventory (every applicable ' +
+        'http.endpoint resource) so the witnessed session exchange can be attributed to the ' +
+        "obligation's endpoint — without it the claim stays blocking and is never satisfied",
+    };
+  }
+  // Pick the codepoint-smallest witnessed same-session exchange whose
+  // method/url pair is well-formed; malformed ones are checkable violations.
+  const shaped = exchanges
+    .filter((entry) => payloadSessionId(entry.record) === session)
+    .map((entry) => ({ entry, payload: payloadOf(entry.record) }))
+    .sort((a, b) => compareStrings(labelOf(a.entry.record), labelOf(b.entry.record)));
+  const malformed = shaped.find(
+    (candidate) =>
+      candidate.payload === undefined ||
+      typeof candidate.payload['method'] !== 'string' ||
+      typeof candidate.payload['url'] !== 'string',
+  );
+  if (malformed !== undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `'${obligation.id}': witnessed 'http.request' record '${labelOf(malformed.entry.record)}' ` +
+        'carries no method/url pair',
+    };
+  }
+  let attributed: { entry: (typeof shaped)[number]['entry']; path: string; method: string } | null = null;
+  let exchangeBlock: string | null = null;
+  for (const candidate of shaped) {
+    const payload = candidate.payload as Record<string, unknown>;
+    const method = payload['method'] as string;
+    const interpreted = interpretObservedPath(payload['url']);
+    if (!interpreted.ok) {
+      exchangeBlock = `'${obligation.id}': witnessed 'http.request' record ` +
+        `'${labelOf(candidate.entry.record)}' carries a noncanonical observed path: ${interpreted.reason}`;
+      continue;
+    }
+    const resolution = resolveHttpRoute(
+      method,
+      interpreted.path,
+      input.httpRoutes,
+      obligation.resourceId,
+    );
+    if (resolution.status === 'incomplete') {
+      exchangeBlock = `'${obligation.id}': ${resolution.reason}`;
+      continue;
+    }
+    if (resolution.status === 'nomatch') {
+      exchangeBlock =
+        `'${obligation.id}': witnessed 'http.request' record ` +
+        `'${labelOf(candidate.entry.record)}' ${resolution.reason}`;
+      continue;
+    }
+    if (resolution.status === 'ambiguous') {
+      exchangeBlock =
+        `'${obligation.id}': ambiguous route attribution: observed ` +
+        `${method.toUpperCase()} ${interpreted.path} matches ${resolution.candidates.length} ` +
+        `distinct routes [${resolution.candidates.join('; ')}]; no endpoint-specific claim ` +
+        'passes on an ambiguous exchange';
+      continue;
+    }
+    // 'match' | 'mismatch': the exchange attributes to EXACTLY one
+    // inventoried route. A crud obligation attaches to a business
+    // (entity) resource — never the endpoint resource itself — so a
+    // unique single-route attribution is the honest endpoint binding;
+    // only when the obligation's resource IS an inventoried endpoint id
+    // must the matched route be that exact endpoint.
+    if (resolution.status === 'mismatch' && obligation.resourceId.startsWith('http.endpoint:')) {
+      exchangeBlock =
+        `'${obligation.id}': witnessed 'http.request' record ` +
+        `'${labelOf(candidate.entry.record)}' observed ${method.toUpperCase()} ` +
+        `${interpreted.path} uniquely matches route ${resolution.matched.resourceId} ` +
+        `but the obligation requires endpoint '${obligation.resourceId}'`;
+      continue;
+    }
+    attributed = { entry: candidate.entry, path: interpreted.path, method };
+    break;
+  }
+  if (attributed === null) {
+    return exchangeBlock === null
+      ? { status: 'missing', reason: `'${obligation.id}': no attributable session exchange` }
+      : { status: 'invalid', reason: exchangeBlock };
+  }
+
+  // Rule (iii): the ENGINE-OBSERVED session-bound visible result for
+  // the same entity. Suite-submitted visible records are worker
+  // assertions — only the engine's own readback confirms the rendered
+  // outcome (plan Phase 1 item 4).
+  const visibleRecords = evidence.filter((entry) => entry.record.kind === UI_VISIBLE_KIND);
+  const unprovenancedVisible = visibleRecords.find(
+    (entry) => !isProvenancedRecord(entry.record) || entry.trust !== 'witnessed',
+  );
+  if (unprovenancedVisible !== undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `claimed-tier '${UI_VISIBLE_KIND}' record '${labelOf(unprovenancedVisible.record)}' ` +
+        'cannot satisfy: only the engine-observed rendered readback confirms the visible ' +
+        'outcome (suite-submitted visible records never earn browser credit; GF-23)',
+    };
+  }
+  const sessionVisible = visibleRecords.filter(
+    (entry) => payloadSessionId(entry.record) === session,
+  );
+  if (sessionVisible.length === 0) {
+    const otherSession = visibleRecords.find((entry) => payloadSessionId(entry.record) !== null);
+    return {
+      status: 'missing',
+      reason:
+        otherSession !== undefined
+          ? `'${obligation.id}': witnessed visible-result evidence exists only on witness ` +
+            `session '${String(payloadSessionId(otherSession.record))}', not the declaring ` +
+            `session '${session}' — the visible result must be read back in the same ` +
+            'supervised session'
+          : `no witnessed visible-result record for entity ${anchorEntityKey} of '${obligation.id}' ` +
+            `(EVIDENCE_NOT_COLLECTED): the journey must read the rendered result back through ` +
+            'the fixture\'s visible.confirm inside the same supervised session',
+    };
+  }
+  const matchingVisible = sessionVisible.find((entry) => {
+    const entity = normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey);
+    return entity.ok && entity.key === anchorEntityKey;
+  });
+  if (matchingVisible === undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `same-entity violation: the '${UI_VISIBLE_KIND}' records of session '${session}' target ` +
+        `other entities than the '${UI_ACTION_KIND}' entity ${anchorEntityKey} ` +
+        `(obligation '${obligation.id}')`,
+    };
+  }
+
+  // Rule (iv): the engine-observed persistence postcondition + exact-value
+  // echo on the same entity (rules reused verbatim from the persistence
+  // grader), restricted to the same session.
+  const persistence = evidence.filter(
+    (entry) =>
+      typeof entry.record.kind === 'string' &&
+      entry.record.kind.startsWith(PERSISTENCE_KIND_PREFIX) &&
+      entry.trust === 'witnessed' &&
+      payloadSessionId(entry.record) === session,
+  );
+  const sameEntity = persistence.filter((entry) => {
+    const entity = normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey);
+    return entity.ok && entity.key === anchorEntityKey;
+  });
+  if (sameEntity.length === 0) {
+    const claimedPersistence = evidence.find(
+      (entry) =>
+        typeof entry.record.kind === 'string' &&
+        entry.record.kind.startsWith(PERSISTENCE_KIND_PREFIX) &&
+        entry.trust !== 'witnessed',
+    );
+    if (claimedPersistence !== undefined) {
+      return {
+        status: 'invalid',
+        reason:
+          `claimed-tier '${String(claimedPersistence.record.kind)}' record ` +
+          `'${labelOf(claimedPersistence.record)}' cannot satisfy '${obligation.contract}': ` +
+          'only service-witnessed evidence satisfies (GF-23)',
+      };
+    }
+    return {
+      status: 'missing',
+      reason:
+        `no witnessed '${PERSISTENCE_KIND_PREFIX}*' record for entity ${anchorEntityKey} in ` +
+        `witness session '${session}' of '${obligation.id}' — the engine-observed state read ` +
+        'must run under the same supervised session as the UI action',
+    };
+  }
+  let firstPostconditionFailure: string | null = null;
+  let matchingPersistence: RecordLike | undefined;
+  for (const entry of sameEntity) {
+    const failure = persistencePostconditionFailure(
+      obligation,
+      requiredOp,
+      entry.record,
+      anchorEntityKey,
+    );
+    if (failure === null) {
+      matchingPersistence = entry.record;
+      break;
+    }
+    if (firstPostconditionFailure === null) firstPostconditionFailure = failure;
+  }
+  if (matchingPersistence === undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `${firstPostconditionFailure ?? `no witnessed '${PERSISTENCE_KIND_PREFIX}*' record meets ` +
+        `the '${obligation.contract}' postcondition`} (obligation '${obligation.id}')`,
+    };
+  }
+  if (requiredOp === 'create' || requiredOp === 'update') {
+    const echoFailure = exactValueEchoFailure(requiredOp, anchorRecord, matchingPersistence);
+    if (echoFailure !== null) {
+      return { status: 'invalid', reason: `${echoFailure} (obligation '${obligation.id}')` };
+    }
+  }
+  const disagreement = fieldsDisagreement(
+    payloadOf(matchingVisible.record)?.['fields'],
+    payloadOf(matchingPersistence)?.['fields'],
+  );
+  if (disagreement !== null) {
+    return {
+      status: 'invalid',
+      reason:
+        `visible and persisted fields disagree on ${disagreement} ` +
+        `(obligation '${obligation.id}')`,
+    };
+  }
+
+  const used = [anchorRecord, attributed.entry.record, matchingVisible.record, matchingPersistence]
     .map((record) => (typeof record.recordId === 'string' ? record.recordId : ''));
   return { status: 'satisfied', recordIds: sortedUnique(used) };
 }
@@ -992,8 +1673,9 @@ export function evaluateObligation(
 /**
  * Evaluates a batch of obligations against one context and returns
  * report-ready entries sorted by obligation id, each enriched with the
- * highest trust tier among its records (SARIF properties) and optional
- * detector provenance passthrough.
+ * highest trust tier among its records (SARIF properties), optional
+ * detector provenance passthrough, and the plan §5.4 cause code +
+ * next action for the shared report model.
  *
  * Args:
  *   obligations: obligations to evaluate.
@@ -1019,7 +1701,13 @@ export function evaluateObligations(
         : records.length > 0
           ? 'claimed'
           : null;
-      return { obligation, ...outcome, trustTier };
+      const mapped = causeForVerdict({
+        obligationId: obligation.id,
+        contract: obligation.contract,
+        verdict: outcome.verdict,
+        reason: outcome.reason,
+      });
+      return { obligation, ...outcome, trustTier, cause: mapped.cause, nextAction: mapped.nextAction };
     })
     .sort((a, b) => compareStrings(a.obligation.id, b.obligation.id));
 }

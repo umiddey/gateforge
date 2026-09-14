@@ -23,16 +23,18 @@ export {
   createEvidence,
   claimsFromAnnotations,
   resourceIdOfClaim,
+  SURFACE_DESCRIPTOR_VERSION,
   type EvidenceApi,
   type Receipt,
   type PersistenceOutcome,
   type WitnessRecord,
+  type SurfaceDescriptor,
 } from './fixture/evidence.js';
 export { WitnessClient, WitnessRequestError, resolveWitnessUrl } from './fixture/witness-client.js';
 export type { IssuedLedgerRecord } from './fixture/witness-client.js';
 
-export { GateforgeReporter } from './reporter/reporter.js';
-export type { LedgerRow } from './reporter/ledger.js';
+export { GateforgeReporter, gateSummaryLine } from './reporter/reporter.js';
+export type { GateforgeReporterOptions, LedgerRow, ReporterTest } from './reporter/reporter.js';
 
 export { startWitness, WitnessStartupError, recordIdOf } from './witness/server.js';
 export { loadAdapters, validateAdapter, AdapterRegistryError } from './witness/adapter-registry.js';
@@ -52,6 +54,15 @@ export type {
   RecordsResponse,
   PersistenceRequest,
   PersistenceResponse,
+  SessionCredential,
+  SessionOpenRequest,
+  SessionOpenResponse,
+  SessionCloseRequest,
+  SessionCloseResponse,
+  ExpectedSetRequest,
+  ExpectedSetResponse,
+  ExpectedTestRegistration,
+  ExecutionTraceResponse,
 } from './witness/types.js';
 
 export { startAttestationProxy } from './attestation/proxy.js';
@@ -59,9 +70,103 @@ export type { AttestationProxyHandle } from './attestation/proxy.js';
 
 export { gateforgeGlobalSetup, gateforgeGlobalTeardown, startWitnessProcess } from './setup.js';
 
+/**
+ * Supervisor surface (enforcement-review fixes 2a/3): the lifecycle
+ * spool (runner → CLI), the verifier-key-authenticated supervisor
+ * client, and the spool drain the trusted CLI runs while the suite
+ * executes. The runner child itself holds no supervisor rights.
+ */
+export {
+  appendSpoolEvent,
+  readSpoolEvents,
+  spoolPathFor,
+  startSupervisorSpoolDrain,
+  SupervisorClient,
+  DEFAULT_DRAIN_POLL_MS,
+} from './supervisor/index.js';
+export type { SpoolEvent, SpoolEventKind, SpoolDrainHandle } from './supervisor/index.js';
+export {
+  buildRunnerChildEnv,
+  RunnerEnvError,
+  RUNNER_SECRET_ENV,
+  RUNNER_PARENT_SIDE_ENV,
+  RUNNER_GATEFORGE_ALLOWLIST,
+  RUNNER_SYSTEM_ALLOWLIST,
+} from './discovery/runner-env.js';
+export {
+  synthesizeTrustedConfig,
+  trustedReporterEntry,
+  TRUSTED_CONFIG_FILE,
+  TRUSTED_REPORTER_OPTIONS_FILE,
+} from './discovery/trusted-config.js';
+export type { TrustedConfigInput, TrustedReporterOptions } from './discovery/trusted-config.js';
+
+/**
+ * Test discovery (plan 2026-09-13 phase 2): bounded static scanning,
+ * native `--list` reconciliation, kind/category inference, the
+ * runner-adapter implementations, and the bounded pytest diagnostic
+ * adapter.
+ */
+export {
+  discoverTestCatalog,
+  inferTestKind,
+  listNativePlaywrightTests,
+  findPlaywrightConfig,
+  untrustedEnv,
+  reconciliationKey,
+  splitPytestNodeId,
+  fileDigest,
+  scanTestFiles,
+  parseJunitXml,
+  pytestCollectArgv,
+  pytestExecutionArgv,
+  collectPytestSuite,
+  executePytestSuite,
+  executeSupervisedPlaywright,
+  readRunnerOutcomes,
+  playwrightVersion,
+  PlaywrightAdapter,
+  PytestAdapter,
+  TestDiscoveryError,
+  JunitParseError,
+  AdapterCapabilityError,
+  DEFAULT_LIST_TIMEOUT_MS,
+  DEFAULT_RUN_TIMEOUT_MS,
+  UNRESOLVED_TITLE_PLACEHOLDER,
+  DEFAULT_MAX_TRAVERSED_FILES,
+  DEFAULT_MAX_IMPORT_DEPTH,
+  BROWSER_FIXTURE_PARAMS,
+  API_FIXTURE_PARAMS,
+} from './discovery/index.js';
+export type {
+  StaticScanOptions,
+  StaticScanResult,
+  StaticTestEntry,
+  StaticTestFacts,
+  StaticUnresolved,
+  StaticParseError,
+  NativeInstance,
+  NativeListResult,
+  InferenceFacts,
+  InferenceResult,
+  JunitDocument,
+  JunitTestCase,
+  PytestCollectedCase,
+  PytestCollectionResult,
+  DiscoverOptions,
+  DiscoverResult,
+  AdapterOptions,
+  DiagnosticRunResult,
+  DiagnosticRunStatus,
+  DiagnosticCause,
+  RunnerOutcomesDocument,
+  SupervisedRunOptions,
+} from './discovery/index.js';
+
 export {
   CLAIM_ANNOTATION_TYPE,
   RUN_HEADER,
+  VERIFIER_HEADER,
   ENV_FINGERPRINT_HEADER,
   ATTESTATION_SCOPE_HEADER,
   UI_ACTION_KIND,
@@ -80,5 +185,12 @@ export {
   ENV_ADAPTER_BASE_URL,
   WITNESS_URL_FILE,
   ENV_REPORTER_FAIL_RUN,
+  ENV_OUTCOMES_FILE,
+  CLAIM_INJECTIONS_FILE,
+  EXECUTION_RESULT_FILE,
+  GATE_RECEIPT_FILE,
+  DIAGNOSTICS_REPORT_FILE,
+  SPOOL_DIR_NAME,
+  SPOOL_EVENTS_FILE,
   DEFAULT_REQUEST_TIMEOUT_MS,
 } from './constants.js';

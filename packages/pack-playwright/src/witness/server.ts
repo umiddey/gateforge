@@ -3,20 +3,82 @@
  *
  * A node:http server on an OS-assigned port, reachable ONLY on loopback.
  * Every request must carry `x-gateforge-run: <token>` (per-run token);
- * without it the witness answers 401. Endpoints:
+ * without it the witness answers 401. The run token is the SUITE's
+ * credential; a second, stronger capability — the verifier key
+ * (`x-gateforge-verifier`), which the tested suite NEVER receives —
+ * guards the supervisor surface. Endpoint authority (enforcement-review
+ * fix 3: the runner child holds NO supervisor rights):
  *
+ * | Endpoint                          | Required authority                      |
+ * |-----------------------------------|-----------------------------------------|
+ * | `GET /health`                     | run token                               |
+ * | `GET /records`                    | run token                               |
+ * | `GET /classifications`            | run token                               |
+ * | `POST /records`                   | run token + OPEN session credential     |
+ * | `POST /witness/pre-observation`   | run token + OPEN session credential     |
+ * | `POST /witness/persistence`       | run token + OPEN session credential     |
+ * | `POST /witness/http-observation`  | run token + OPEN session credential     |
+ * | `POST /sessions/resolve`          | run token (worker proves its identity;  |
+ * |                                   | answers only OPEN supervisor sessions)  |
+ * | `POST /sessions/intervals/*`      | run token + OPEN session credential     |
+ * | `POST /browser/surface`           | run token + OPEN session credential     |
+ * | `POST /browser/action`            | run token + OPEN session credential     |
+ * | `POST /browser/visible`           | run token + OPEN session credential     |
+ * | `POST /run-context`               | run token + verifier key (supervisor)   |
+ * | `GET /ledger-attestation`         | run token + verifier key (supervisor)   |
+ * | `POST /runs/expected-set`         | run token + verifier key (supervisor)   |
+ * | `GET /runs/execution-trace`       | run token + verifier key (supervisor)   |
+ * | `POST /sessions/open`             | run token + verifier key (supervisor);  |
+ * |                                   | test must be in the registered set      |
+ * | `POST /sessions/close`            | run token + verifier key (supervisor)   |
+ *
+ * Endpoints:
+ *
+ * - `POST /runs/expected-set` — SUPERVISOR ONLY: registers the expected
+ *   test set BEFORE the run (enforcement-review fix 2a), bound to this
+ *   run; identical re-registration is idempotent, any change or late
+ *   registration is 409. Returns the domain-separated enumeration digest.
+ * - `POST /sessions/open`    — SUPERVISOR ONLY: registers one started
+ *   test as a session binding (runId, sessionId, testId, worker). One
+ *   OPEN session per worker; an identical open (worker, testId)
+ *   re-binds idempotently. When an expected set is registered, the test
+ *   must belong to it (an invented testId is refused typed).
+ * - `POST /sessions/close`   — SUPERVISOR ONLY: seals the session with
+ *   the observed outcome. Closing SEALS: every later submission for the
+ *   session is rejected (no post-hoc record injection).
+ * - `GET /runs/execution-trace` — SUPERVISOR ONLY: the witness-side
+ *   session record (enforcement-review fix 2b) — per expected test,
+ *   every session with its open/seal ticks and outcome. THE execution
+ *   authority supervision grades completeness from.
+ * - `POST /sessions/resolve` — the worker-side fixture proves WHICH open
+ *   session it runs under by the exact (workerIndex, testId) pair; only
+ *   an open session answers, with the session credential.
+ * - `POST /sessions/intervals/{open,close}` — the fixture marks a
+ *   witness-recorded observation interval per UI action (start/end ticks
+ *   from the witness's monotonic clock). Proxy exchanges observed
+ *   OUTSIDE every interval of a session are never consumable as that
+ *   session's evidence — direct setup traffic cannot become browser
+ *   evidence.
  * - `POST /records`          — test-side primitives submit UI evidence
- *   ({claimId, kind, payload, testId}) → the witness ISSUES a record
- *   with service-computed provenance and answers {recordId, trust,
- *   runId}. Unknown primitive kinds → 400 (GF-11, GF-14).
+ *   ({claimId, kind, payload, testId, sessionId, sessionToken}) → the
+ *   witness ISSUES a record with service-computed provenance ONLY under
+ *   a valid OPEN session (the record's testId is forced to the
+ *   session's supervisor-registered value; a mismatching testId is
+ *   refused). Unknown primitive kinds → 400 (GF-11, GF-14).
  * - `POST /witness/persistence` — the fixture asks the witness to run
  *   the engine-side adapter (GET-only) for one entity → the witness
  *   executes the read, stamps a `persistence.entity` record from the
  *   ADAPTER RESPONSE, and returns {recordId, runId, verdictRelevant}.
  *   Raw adapter bodies never cross back into the test process. Wire is
- *   the pin-#7 shape extended with `testId` + `claimId` (the pinned
- *   fields stay honored) so persistence records bind to the claim the
- *   engine grades.
+ *   the pin-#7 shape extended with `testId` + `claimId` + the session
+ *   credential so persistence records bind to the claim the engine
+ *   grades, under the session the supervisor opened.
+ * - `POST /witness/http-observation` — consumes one engine-observed
+ *   proxied exchange for an http:* claim. Phase 1: the caller must hold
+ *   a valid OPEN session and the exchange must have been observed
+ *   through THAT session's proxy prefix WITHIN one of its recorded
+ *   action intervals — another test's/worker's request can never
+ *   satisfy a claim (E11/E12 foundation).
  * - `GET /records`           — the issued ledger (the ONLY input the
  *   reporter copies into `records.json`; fabricated bundles never enter
  *   it — GF-23).
@@ -40,9 +102,11 @@ import { join, resolve } from 'node:path';
 import {
   ATTESTATION_VERSION,
   attestationMac,
+  enumerationDigestOf,
   recordIdOf,
   type Classification,
   type RecordOrigin,
+  type TracedSession,
 } from '@gateforge/core';
 import { canonicalOf } from '../json.js';
 import {
@@ -61,8 +125,28 @@ import {
   probeEnvFingerprint,
 } from './env-attestation.js';
 import { loadClassifications, toClassificationView } from './classifications.js';
+import {
+  EngineBrowserError,
+  EngineBrowserManager,
+  driveEngineAction,
+  readEngineVisible,
+  type EngineOperation,
+} from './browser.js';
+import {
+  SURFACE_DESCRIPTOR_VERSION,
+  validateSurface,
+  type SurfaceDescriptor,
+} from '../surface.js';
 import type {
+  BrowserActionRequest,
+  BrowserActionResponse,
+  BrowserSurfaceRequest,
+  BrowserVisibleRequest,
+  BrowserVisibleResponse,
   EvidenceAdapter,
+  ExpectedSetRequest,
+  ExpectedSetResponse,
+  ExecutionTraceResponse,
   IssuedRecord,
   PersistenceRequest,
   PersistenceResponse,
@@ -70,6 +154,10 @@ import type {
   PreObservationResponse,
   RecordsRequest,
   RecordsResponse,
+  SessionCloseRequest,
+  SessionOpenRequest,
+  SessionResolveRequest,
+  TestSession,
   WitnessHandle,
   WitnessOptions,
 } from './types.js';
@@ -83,7 +171,6 @@ const OBLIGATION_ID_PATTERN = /^[^:]+:.+$/;
  * streams to the browser unbuffered — the snapshot is a tap, not a gate.
  */
 const OBSERVED_BODY_SNAPSHOT_BYTES = 16384;
-
 /** One engine-observed proxied exchange (arrival order via `seq`). */
 interface ObservedExchange {
   method: string;
@@ -94,6 +181,14 @@ interface ObservedExchange {
   bodySha256: string;
   /** TOTAL response body bytes observed (may exceed the snapshot). */
   bodyBytes: number;
+  /**
+   * The OPEN-or-later session whose proxy prefix the exchange arrived
+   * through (Phase 1 attribution); null when the exchange bypassed every
+   * session channel — such exchanges are never consumable as evidence.
+   */
+  sessionId: string | null;
+  /** Witness-monotonic tick stamped when the exchange completed. */
+  tick: number;
 }
 
 /** Fail-closed witness configuration/startup error. */
@@ -153,6 +248,22 @@ interface WitnessState {
   nowIso: () => string;
   stopped: boolean;
   /**
+   * Witness-monotonic clock (plan Phase 1): a strictly increasing
+   * counter stamped at session open/close, interval open/close, and
+   * exchange completion. It orders the session-relative evidence rules
+   * (interval membership) WITHOUT trusting any suite-supplied time.
+   */
+  tick: number;
+  /**
+   * Supervisor-opened test sessions (plan Phase 1) keyed by sessionId.
+   * The suite cannot create, extend, or resurrect one: only the
+   * supervisor channel (`/sessions/open`) mints sessions, and closing
+   * seals permanently.
+   */
+  sessions: Map<string, TestSession>;
+  /** workerIndex → the OPEN session on that worker (one at a time). */
+  workerSessions: Map<number, string>;
+  /**
    * Trusted run context bound via `POST /run-context` (plan §11.4): the
    * frozen `{runId, invocationId, inputDigest}` the witness attests.
    * Set once, before any observation or issuance; a witness that already
@@ -165,11 +276,33 @@ interface WitnessState {
   observedSeqAtBind: number;
   /** Proxy exchanges currently in flight (request received, response open). */
   proxyInFlight: number;
+  /**
+   * The expected test set the supervisor registered BEFORE the run
+   * (enforcement-review fix 2a), keyed by the identity join key
+   * (project, file, titlePath). Once bound, `/sessions/open` accepts
+   * only tests in this set, and the execution trace reports sessions
+   * grouped by these registered identities.
+   */
+  expectedTests: Map<string, { testId: string | null; project: string | null; file: string; titlePath: string[] }>;
+  /** Domain-separated digest over the registered expected set. */
+  enumerationDigest: string | null;
+  /**
+   * The engine-owned browser (plan Phase 1 item 4): Chromium contexts
+   * the witness drives itself, one per session. Test code holds no
+   * handle over these pages — every browser proof comes from engine
+   * observation, never suite assertion.
+   */
+  engineBrowser: EngineBrowserManager;
 }
 
 /** Codepoint-wise comparison for deterministic ordering. */
 function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** The expected-set identity join key (project, file, titlePath). */
+function expectedKey(project: string | null, file: string, titlePath: readonly string[]): string {
+  return `${project ?? '-'}\u0000${file}\u0000${titlePath.join('>')}`;
 }
 
 /**
@@ -209,6 +342,154 @@ function stripMountPath(rawUrl: string, mountPath: string | null): string {
     return `${pathPart.slice(mountPath.length)}${suffix}`;
   }
   return rawUrl;
+}
+
+/**
+ * Starts one loopback reverse-proxy server forwarding to the run's
+ * attested proxy target. `sessionId` names the session the port belongs
+ * to (null = the shared unattributed proxy): every exchange completing
+ * on this port is recorded as an engine observation stamped with that
+ * session id and the witness-monotonic completion tick.
+ *
+ * Args:
+ *   state: running witness state.
+ *   sessionId: owning session id, or null for the shared proxy.
+ *
+ * Returns:
+ *   Promise<Server>: the listening server (OS-assigned loopback port).
+ *
+ * Throws:
+ *   Error: when the server fails to bind.
+ */
+async function startObservedProxy(state: WitnessState, sessionId: string | null): Promise<Server> {
+  const proxyTargetUrl = new URL(state.options.proxyTarget as string);
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      // Mount-prefix handling: forward the backend-facing (STRIPPED)
+      // URL, and record the same STRIPPED path below, so observations
+      // match the backend-derived obligation identities the suite
+      // claims. With no declared mount path the URL is forwarded and
+      // recorded byte-identical to today.
+      const forwardUrl = stripMountPath(req.url ?? '/', state.options.mountPath);
+      // In-flight accounting (plan §11.4): a proxy exchange that starts
+      // before `/run-context` binds must refuse the bind — otherwise
+      // traffic from an older invocation could be signed under the new
+      // context.
+      state.proxyInFlight += 1;
+      let settledFlight = false;
+      const settleFlight = (): void => {
+        if (!settledFlight) {
+          settledFlight = true;
+          state.proxyInFlight -= 1;
+        }
+      };
+      const forward = request(
+        {
+          protocol: proxyTargetUrl.protocol,
+          hostname: proxyTargetUrl.hostname,
+          port: proxyTargetUrl.port,
+          method: req.method,
+          path: forwardUrl,
+          headers: { ...req.headers, host: proxyTargetUrl.host },
+        },
+        (upstream) => {
+          const status = upstream.statusCode ?? 0;
+          const observedPath = normalizeObservedPath(forwardUrl);
+          // Bounded response-body snapshot: the tap is attached BEFORE
+          // piping so both consumers receive the stream; forwarding to
+          // the browser stays unbuffered (the snapshot never gates the
+          // response). Total bytes are counted even beyond the snapshot
+          // limit; only the snapshot is hashed.
+          const snapshot: Buffer[] = [];
+          let snapshotBytes = 0;
+          let totalBytes = 0;
+          upstream.on('data', (chunk: Buffer) => {
+            totalBytes += chunk.length;
+            if (snapshotBytes < OBSERVED_BODY_SNAPSHOT_BYTES) {
+              const room = OBSERVED_BODY_SNAPSHOT_BYTES - snapshotBytes;
+              const taken = chunk.length > room ? chunk.subarray(0, room) : chunk;
+              snapshot.push(Buffer.from(taken)); // copy: detach from the stream pool
+              snapshotBytes += taken.length;
+            }
+          });
+          upstream.on('end', () => {
+            state.observed.push({
+              method: (req.method ?? 'GET').toUpperCase(),
+              path: observedPath,
+              status,
+              seq: (state.observedSeq += 1),
+              bodySha256: createHash('sha256').update(Buffer.concat(snapshot)).digest('hex'),
+              bodyBytes: totalBytes,
+              sessionId,
+              tick: (state.tick += 1),
+            });
+            settleFlight();
+          });
+          upstream.on('error', settleFlight);
+          res.writeHead(status, upstream.headers);
+          upstream.pipe(res);
+        },
+      );
+      forward.on('error', () => {
+        settleFlight();
+        if (!res.headersSent) sendJson(res, 502, { error: 'observation proxy upstream failed' });
+        else res.end();
+      });
+      if (body.length > 0) forward.write(body);
+      forward.end();
+    });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, state.options.host, () => resolveListen());
+  });
+  server.removeAllListeners('error');
+  return server;
+}
+
+/** The base URL of a started observation-proxy server. */
+function proxyUrlOf(state: WitnessState, server: Server): string {
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new WitnessStartupError('observation proxy failed to bind an OS-assigned port');
+  }
+  return `http://${formatHost(state.options.host)}:${address.port}`;
+}
+
+/**
+ * Starts the DEDICATED session proxy port (plan Phase 1) and stores it
+ * on the session. Only called when the run wires an observation proxy;
+ * the worker's browser uses this origin for the whole test, so all of
+ * its traffic — absolute paths included — is attributed to the session.
+ *
+ * Args:
+ *   state: running witness state.
+ *   session: the freshly opened session.
+ */
+async function startSessionProxy(state: WitnessState, session: TestSession): Promise<void> {
+  if (
+    typeof state.options.proxyTarget !== 'string' ||
+    state.options.proxyTarget.length === 0
+  ) {
+    session.proxyUrl = null;
+    return;
+  }
+  const server = await startObservedProxy(state, session.sessionId);
+  session.proxyServer = server;
+  session.proxyUrl = proxyUrlOf(state, server);
+}
+
+/** Closes one session's dedicated proxy port (sealed = channel gone). */
+async function stopSessionProxy(session: TestSession): Promise<void> {
+  const server = session.proxyServer;
+  session.proxyServer = null;
+  if (server === null) return;
+  await new Promise<void>((resolveClose) => {
+    server.close(() => resolveClose());
+  });
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -349,6 +630,12 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     runContext: null,
     observedSeqAtBind: 0,
     proxyInFlight: 0,
+    expectedTests: new Map(),
+    enumerationDigest: null,
+    tick: 0,
+    sessions: new Map(),
+    workerSessions: new Map(),
+    engineBrowser: new EngineBrowserManager(options.engineBrowserLauncher),
     proxyServer: null,
     server: undefined as unknown as Server,
     nowIso: options.now ?? (() => new Date().toISOString()),
@@ -372,103 +659,26 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   const url = `http://${formatHost(state.options.host)}:${address.port}`;
 
   // ADR 0004 D7: the witness-owned loopback reverse proxy. Traffic
-  // aimed at the proxy is forwarded to the attested target and
+  // aimed at a witness proxy is forwarded to the attested target and
   // (method, path, status, bounded body snapshot, total body bytes)
   // recorded as an ENGINE observation; a suite-callable endpoint consumes
-  // a matching observation to issue a witnessed record. The proxy never
+  // a matching observation to issue a witnessed record. A proxy never
   // needs the run token: it serves the browser, holds no authority, and
   // can only add observations the engine itself saw.
+  //
+  // Phase 1 session channels: the shared proxy (below) stays the
+  // UNATTRIBUTED channel — its exchanges carry sessionId null and are
+  // never consumable as a test's evidence. Each supervisor-opened
+  // session additionally gets a DEDICATED loopback proxy port (see
+  // `startSessionProxy`): the worker's browser uses that origin for the
+  // whole test, so every absolute-path form action, link, and fetch on
+  // it lands on the session's own channel — attribution by ORIGIN, not
+  // by URL rewriting.
   let proxyUrl: string | null = null;
   if (typeof state.options.proxyTarget === 'string' && state.options.proxyTarget.length > 0) {
     assertLoopback(state.options.proxyTarget, 'observation proxy target');
-    const proxyTargetUrl = new URL(state.options.proxyTarget);
-    state.proxyServer = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on('data', (chunk: Buffer) => chunks.push(chunk));
-      req.on('end', () => {
-        const body = Buffer.concat(chunks);
-        // Mount-prefix handling: forward the backend-facing (STRIPPED)
-        // URL, and record the same STRIPPED path below, so observations
-        // match the backend-derived obligation identities the suite
-        // claims. With no declared mount path the URL is forwarded and
-        // recorded byte-identical to today.
-        const forwardUrl = stripMountPath(req.url ?? '/', state.options.mountPath);
-        // In-flight accounting (plan §11.4): a proxy exchange that
-        // starts before `/run-context` binds must refuse the bind —
-        // otherwise traffic from an older invocation could be signed
-        // under the new context.
-        state.proxyInFlight += 1;
-        let settledFlight = false;
-        const settleFlight = (): void => {
-          if (!settledFlight) {
-            settledFlight = true;
-            state.proxyInFlight -= 1;
-          }
-        };
-        const forward = request(
-          {
-            protocol: proxyTargetUrl.protocol,
-            hostname: proxyTargetUrl.hostname,
-            port: proxyTargetUrl.port,
-            method: req.method,
-            path: forwardUrl,
-            headers: { ...req.headers, host: proxyTargetUrl.host },
-          },
-          (upstream) => {
-            const status = upstream.statusCode ?? 0;
-            const observedPath = normalizeObservedPath(forwardUrl);
-            // Bounded response-body snapshot: the tap is attached BEFORE
-            // piping so both consumers receive the stream; forwarding to
-            // the browser stays unbuffered (the snapshot never gates the
-            // response). Total bytes are counted even beyond the snapshot
-            // limit; only the snapshot is hashed.
-            const snapshot: Buffer[] = [];
-            let snapshotBytes = 0;
-            let totalBytes = 0;
-            upstream.on('data', (chunk: Buffer) => {
-              totalBytes += chunk.length;
-              if (snapshotBytes < OBSERVED_BODY_SNAPSHOT_BYTES) {
-                const room = OBSERVED_BODY_SNAPSHOT_BYTES - snapshotBytes;
-                const taken = chunk.length > room ? chunk.subarray(0, room) : chunk;
-                snapshot.push(Buffer.from(taken)); // copy: detach from the stream pool
-                snapshotBytes += taken.length;
-              }
-            });
-            upstream.on('end', () => {
-              state.observed.push({
-                method: (req.method ?? 'GET').toUpperCase(),
-                path: observedPath,
-                status,
-                seq: (state.observedSeq += 1),
-                bodySha256: createHash('sha256').update(Buffer.concat(snapshot)).digest('hex'),
-                bodyBytes: totalBytes,
-              });
-              settleFlight();
-            });
-            upstream.on('error', settleFlight);
-            res.writeHead(status, upstream.headers);
-            upstream.pipe(res);
-          },
-        );
-        forward.on('error', () => {
-          settleFlight();
-          if (!res.headersSent) sendJson(res, 502, { error: 'observation proxy upstream failed' });
-          else res.end();
-        });
-        if (body.length > 0) forward.write(body);
-        forward.end();
-      });
-    });
-    await new Promise<void>((resolveListen, rejectListen) => {
-      state.proxyServer?.once('error', rejectListen);
-      state.proxyServer?.listen(0, state.options.host, () => resolveListen());
-    });
-    const proxyAddress = state.proxyServer.address();
-    if (proxyAddress === null || typeof proxyAddress === 'string') {
-      await stopWitness(state);
-      throw new WitnessStartupError('observation proxy failed to bind an OS-assigned port');
-    }
-    proxyUrl = `http://${formatHost(state.options.host)}:${proxyAddress.port}`;
+    state.proxyServer = await startObservedProxy(state, null);
+    proxyUrl = proxyUrlOf(state, state.proxyServer);
   }
 
   const handle = Object.freeze({
@@ -588,24 +798,65 @@ async function handleHttpObservation(
     return;
   }
   const wanted = normalizeObservedPath(path);
+  // Phase 1 (E11/E12 foundation): the consuming side must hold a valid
+  // OPEN session, and only an exchange observed through THAT session's
+  // proxy prefix WITHIN one of its recorded action intervals can be
+  // consumed — a request supplied by another test/worker (different
+  // session channel) or by setup traffic outside every interval is
+  // never credited to this test's claims.
+  const session = requireOpenSession(state, body);
+  requireSessionTestId(session, testId);
   // Bind watermark (plan §11.4): observations that completed before the
   // trusted context bound predate it and are never consumable under the
   // new invocation — closing the proxy/bind race where a request started
   // before binding but its response ends after it.
   const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
+  const matchesShape = (entry: ObservedExchange): boolean =>
+    entry.seq > watermark &&
+    entry.method === method.toUpperCase() &&
+    entry.path === wanted &&
+    (expectedStatus === undefined || entry.status === expectedStatus);
   const index = state.observed.findIndex(
     (entry) =>
-      entry.seq > watermark &&
-      entry.method === method.toUpperCase() &&
-      entry.path === wanted &&
-      (expectedStatus === undefined || entry.status === expectedStatus),
+      entry.sessionId === session.sessionId &&
+      tickWithinSessionInterval(session, entry.tick) &&
+      matchesShape(entry),
   );
   if (index === -1) {
+    // Precise fail-closed diagnostics: distinguish "outside every
+    // interval" from "another session's channel" from "no such traffic".
+    const unattributed = state.observed.find((entry) => entry.sessionId === null && matchesShape(entry));
+    const foreign = state.observed.find(
+      (entry) => entry.sessionId !== null && entry.sessionId !== session.sessionId && matchesShape(entry),
+    );
+    const outsideInterval = state.observed.find(
+      (entry) => entry.sessionId === session.sessionId && matchesShape(entry),
+    );
+    if (outsideInterval !== undefined) {
+      sendJson(res, 409, {
+        error:
+          `an engine-observed ${method.toUpperCase()} ${wanted} exists for this session but its ` +
+          'completion tick falls outside every recorded UI-action observation interval — the ' +
+          'fixture marks an interval per UI action, so traffic outside those windows (setup ' +
+          'calls, stray navigation) is never browser evidence',
+      });
+      return;
+    }
+    if (foreign !== undefined) {
+      sendJson(res, 409, {
+        error:
+          `the engine-observed ${method.toUpperCase()} ${wanted} traversed ANOTHER session's ` +
+          'channel; exchanges are consumable only by the session whose proxy prefix they ' +
+          'arrived through (a request supplied by another test/worker is never credited)',
+      });
+      return;
+    }
     sendJson(res, 409, {
       error:
         `no engine-observed request matches ${method.toUpperCase()} ${wanted}` +
-        `${expectedStatus === undefined ? '' : ` with status ${String(expectedStatus)}`}; drive traffic ` +
-        'through the observation proxy before claiming the obligation',
+        `${expectedStatus === undefined ? '' : ` with status ${String(expectedStatus)}`}` +
+        `${unattributed === undefined ? '' : ' (traffic bypassed every session channel)'}; drive ` +
+        'traffic through this session\'s observation-proxy prefix before claiming the obligation',
     });
     return;
   }
@@ -613,15 +864,20 @@ async function handleHttpObservation(
   // Consume the exchange FIRST (single-use), then issue one record per
   // distinct claimed obligation id — same payload, per-claim identity.
   state.observed.splice(index, 1);
+  // Witness-side activity (review recheck fix 2026-09-14): consuming an
+  // engine-observed session exchange is an observation the witness made;
+  // count it.
+  session.activity += 1;
   const payload = {
     method: observedRequest.method,
     url: observedRequest.path,
     status: observedRequest.status,
     bodySha256: observedRequest.bodySha256,
     bodyBytes: observedRequest.bodyBytes,
+    sessionId: session.sessionId,
   };
   const issued = claimIds.map((claimId) =>
-    issueRecord(state, claimId, 'http.request', testId, payload, 'engine-observed'),
+    issueRecord(state, claimId, 'http.request', session.testId, payload, 'engine-observed'),
   );
   const first = issued[0] as IssuedRecord;
   sendJson(res, 200, {
@@ -631,6 +887,343 @@ async function handleHttpObservation(
     status: observedRequest.status,
     records: issued.map((record) => ({ recordId: record.recordId, obligationId: record.obligationId })),
   });
+}
+
+/**
+ * Resolves the engine browser's UI subject — the ONE attested
+ * application origin the engine may drive (fake-frontend fix
+ * 2026-09-14): `targetBaseUrl`, provisioned through trusted witness
+ * configuration (orchestrator env/flags), never from suite input. A
+ * copyable fingerprint header cannot authenticate application identity,
+ * so origin equality with this provisioned subject is the identity —
+ * loopback + fingerprint remain as attestation defense in depth, never
+ * as identity.
+ *
+ * Args:
+ *   state: running witness state.
+ *
+ * Returns:
+ *   string: the normalized trusted base (no trailing slash).
+ *
+ * Throws:
+ *   HttpError: 409 when no attested subject is provisioned (browser
+ *     proof without a provisioned subject fails closed — it never
+ *     falls back to a suite-supplied origin).
+ */
+function requireTrustedUiBase(state: WitnessState): string {
+  const base = state.options.targetBaseUrl;
+  if (base === null || base === undefined || base === '') {
+    throw new HttpError(
+      409,
+      'no attested UI subject is provisioned for this witness (targetBaseUrl): browser proof ' +
+        'requires the orchestrator to provision the application origin through trusted ' +
+        'configuration — the engine never drives a suite-supplied origin',
+    );
+  }
+  return base.replace(/\/+$/, '');
+}
+
+/**
+ * `POST /browser/surface` (plan Phase 1 item 4): registers the
+ * consumer-declared surface descriptor for one open session. The
+ * descriptor is validated structurally engine-side; selectors are
+ * locators only — registration proves nothing by itself.
+ *
+ * The driven origin is NOT negotiable here (fake-frontend fix
+ * 2026-09-14): a `appBaseUrl` field is rejected outright (400) — the
+ * engine drives exactly the provisioned attested subject
+ * (`requireTrustedUiBase`), which must be loopback (GF-10) and, when
+ * the run pins a target fingerprint, must present it (GF-13). A test
+ * that could name its own frontend could point the engine at a fake
+ * that replays the real API — origin equality with trusted
+ * configuration is the only application identity.
+ */
+async function handleBrowserSurface(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BrowserSurfaceRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'browser surface body must be an object');
+  }
+  const { testId, surface } = body as Record<string, unknown>;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'browser surface requires a non-empty testId');
+  }
+  if ((body as Record<string, unknown>)['appBaseUrl'] !== undefined) {
+    throw new HttpError(
+      400,
+      'browser surface rejects appBaseUrl: the engine drives exactly the provisioned attested ' +
+        'subject from trusted witness configuration — suite-supplied origins are never accepted ' +
+        '(a test-named frontend could replay the real API behind a copied fingerprint header)',
+    );
+  }
+  const session = requireOpenSession(state, body);
+  requireSessionTestId(session, testId);
+  let validated: SurfaceDescriptor;
+  try {
+    validated = validateSurface(surface as SurfaceDescriptor);
+  } catch (error) {
+    throw new HttpError(
+      400,
+      `browser surface descriptor rejected: ${(error as Error).message}`,
+    );
+  }
+  // The trusted subject, resolved BEFORE any browser exists: loopback
+  // attestation (GF-10/GF-13) runs against the provisioned origin, never
+  // a suite URL.
+  const trustedBase = requireTrustedUiBase(state);
+  assertLoopback(trustedBase, 'engine browser base');
+  const pinned = state.options.targetFingerprint ?? null;
+  if (pinned !== null) {
+    const probe = await probeEnvFingerprint(trustedBase, state.options.requestTimeoutMs);
+    const mismatch = envFingerprintMismatch(probe, pinned, pinned);
+    if (mismatch !== null) {
+      throw new HttpError(409, `engine browser subject rejected: ${mismatch}`);
+    }
+  }
+  session.engineSurface = {
+    surface: validated as unknown as Record<string, unknown>,
+  };
+  sendJson(res, 200, { registered: true as const });
+}
+
+/** Requires the session's registered engine surface (409 when absent). */
+function requireEngineSurface(
+  session: TestSession,
+): { surface: SurfaceDescriptor } {
+  const registered = session.engineSurface;
+  if (registered === null) {
+    throw new HttpError(
+      409,
+      'no engine surface is registered for this session: the fixture must register the ' +
+        'consumer-declared surface descriptor first (POST /browser/surface) — the engine ' +
+        'drives no browser without it',
+    );
+  }
+  return {
+    surface: registered.surface as unknown as SurfaceDescriptor,
+  };
+}
+
+/** Validates browser claim ids: non-empty, obligation-shaped, one resource. */
+function requireBrowserClaims(body: Record<string, unknown>): { claimIds: string[]; resourceId: string } {
+  const raw = body['claimIds'];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new HttpError(400, 'browser calls require a non-empty claimIds array of obligation ids');
+  }
+  const claimIds: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || !OBLIGATION_ID_PATTERN.test(entry)) {
+      throw new HttpError(
+        400,
+        `browser claimIds must be obligation ids '<resourceId>:<contract>' (got '${String(entry)}')`,
+      );
+    }
+    if (!claimIds.includes(entry)) claimIds.push(entry);
+  }
+  const resources = new Set(claimIds.map((id) => id.slice(0, id.indexOf(':'))));
+  if (resources.size !== 1) {
+    throw new HttpError(
+      400,
+      'browser calls bind one resource per action: claimIds span several resources ' +
+        `(${[...resources].sort(compareStrings).join(', ')}) — drive one action per resource`,
+    );
+  }
+  return { claimIds, resourceId: [...resources][0] as string };
+}
+
+/**
+ * `POST /browser/action` (plan Phase 1 item 4): performs ONE constrained
+ * surface operation on the session's engine-owned page and issues
+ * engine-observed records for exactly what the engine did. The full
+ * binding in one call: the relevant rendered control + entered values,
+ * the actual action, the resulting application request + entity
+ * identity, the visible outcome — plus the engine-side pre-observation
+ * the persistence read later consumes (create/update). The captured
+ * exchanges join the witness observation log inside the engine's own
+ * action interval, so the existing http-observation consume path binds
+ * them with single-use semantics.
+ */
+async function handleBrowserAction(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BrowserActionRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'browser action body must be an object');
+  }
+  const { testId, operation, fields, entityId } = body as Record<string, unknown>;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'browser action requires a non-empty testId');
+  }
+  if (operation !== 'create' && operation !== 'read' && operation !== 'update' && operation !== 'delete') {
+    throw new HttpError(400, "browser action operation must be one of 'create' | 'read' | 'update' | 'delete'");
+  }
+  if (fields !== undefined && !isPlainObject(fields)) {
+    throw new HttpError(400, 'browser action fields, when present, must be a string-valued object');
+  }
+  if (entityId !== undefined && typeof entityId !== 'string') {
+    throw new HttpError(400, 'browser action entityId, when present, must be a string');
+  }
+  const session = requireOpenSession(state, body);
+  const boundTestId = requireSessionTestId(session, testId);
+  const { claimIds, resourceId } = requireBrowserClaims(body);
+  const { surface } = requireEngineSurface(session);
+  // The driven origin comes from trusted configuration on EVERY call —
+  // never from stored suite input (there is none anymore).
+  const appBaseUrl = requireTrustedUiBase(state);
+
+  // The engine's own observation interval (witness clock, never suite
+  // time): exchanges captured during the drive land inside it.
+  const { intervalId } = openActionInterval(state, session, operation);
+  // Engine-side pre-observation BEFORE the drive (create: id-set
+  // absence; update: entity-fields delta) — the persistence read later
+  // consumes it under the same session.
+  let preObservationId: string | null = null;
+  if (operation === 'create' || operation === 'update') {
+    const pre = await takePreObservation(
+      state,
+      session,
+      resourceId,
+      operation === 'update' ? (entityId ?? '') : undefined,
+    );
+    preObservationId = pre.observationId;
+  }
+  try {
+    const page = await state.engineBrowser.pageFor(session.sessionId);
+    const observation = await driveEngineAction(page, appBaseUrl, surface, operation as EngineOperation, {
+      ...(fields !== undefined ? { fields: fields as Record<string, string> } : {}),
+      ...(entityId !== undefined ? { entityId } : {}),
+    });
+    // Publish the captured exchanges into the witness observation log
+    // INSIDE the engine interval (ticks between open and close), so the
+    // existing single-use http-observation consume path binds them.
+    for (const exchange of observation.exchanges) {
+      state.observed.push({
+        method: exchange.method,
+        path: exchange.path,
+        status: exchange.status,
+        seq: (state.observedSeq += 1),
+        bodySha256: createHash('sha256').update(exchange.body).digest('hex'),
+        bodyBytes: exchange.body.length,
+        sessionId: session.sessionId,
+        tick: (state.tick += 1),
+      });
+    }
+    // Suite-submittable intervals/records stay open-submission; the
+    // ENGINE's own window closes here — late suite traffic after this
+    // tick is outside the engine interval and never credited.
+    closeActionInterval(state, session, intervalId);
+    // Witness-side activity: the engine drove a real browser action
+    // under the session; count it.
+    session.activity += 1;
+    // One engine-observed ui.action per claimed obligation (same
+    // payload, per-claim identity — the http-observation convention).
+    // The payload carries what the ENGINE observed: the operation, the
+    // rendered entity id, and the ENTERED input (exact-value echo
+    // source) — never suite-declared outcomes.
+    const issued = claimIds.map((claimId) =>
+      issueRecord(
+        state,
+        claimId,
+        'ui.action',
+        boundTestId,
+        {
+          operation,
+          entityId: observation.entityId,
+          fields: observation.enteredFields,
+          sessionId: session.sessionId,
+        },
+        'engine-observed',
+      ),
+    );
+    const appStatus =
+      operation === 'read'
+        ? (observation.exchanges[0]?.status ?? 0)
+        : (observation.exchanges.find((entry) => entry.method !== 'GET' && entry.method !== 'HEAD' && entry.status < 400)?.status ?? 0);
+    const response: BrowserActionResponse = {
+      entityId: observation.entityId,
+      enteredFields: observation.enteredFields,
+      renderedFields: observation.renderedFields,
+      appStatus,
+      preObservationId,
+      recordIds: issued.map((record) => record.recordId),
+    };
+    sendJson(res, 200, response);
+  } catch (error) {
+    // The drive failed AFTER the interval opened: seal the window so a
+    // failed action never leaves a dangling interval for later traffic
+    // to borrow, then fail the call (the test fails; the gate blocks).
+    try {
+      closeActionInterval(state, session, intervalId);
+    } catch {
+      // already closed — ignore
+    }
+    if (error instanceof EngineBrowserError) {
+      throw new HttpError(409, `engine browser action failed: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * `POST /browser/visible` (plan Phase 1 item 4): re-reads the rendered
+ * result for the engine-observed entity on the session's engine page
+ * and issues engine-observed visible-result records (row readback for
+ * mutations, form readback for reads).
+ */
+async function handleBrowserVisible(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BrowserVisibleRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'browser visible body must be an object');
+  }
+  const { testId, entityId, operation } = body as Record<string, unknown>;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'browser visible requires a non-empty testId');
+  }
+  if (typeof entityId !== 'string' || entityId.length === 0) {
+    throw new HttpError(400, 'browser visible requires a non-empty entityId');
+  }
+  if (operation !== 'create' && operation !== 'read' && operation !== 'update' && operation !== 'delete') {
+    throw new HttpError(400, "browser visible operation must be one of 'create' | 'read' | 'update' | 'delete'");
+  }
+  const session = requireOpenSession(state, body);
+  const boundTestId = requireSessionTestId(session, testId);
+  const { claimIds } = requireBrowserClaims(body);
+  const { surface } = requireEngineSurface(session);
+  // The driven origin comes from trusted configuration on EVERY call —
+  // never from stored suite input (there is none anymore).
+  const appBaseUrl = requireTrustedUiBase(state);
+  try {
+    const page = await state.engineBrowser.pageFor(session.sessionId);
+    const fields = await readEngineVisible(page, appBaseUrl, surface, operation as EngineOperation, entityId);
+    session.activity += 1;
+    const issued = claimIds.map((claimId) =>
+      issueRecord(
+        state,
+        claimId,
+        'ui.visible-result',
+        boundTestId,
+        { entityId, fields, sessionId: session.sessionId },
+        'engine-observed',
+      ),
+    );
+    const response: BrowserVisibleResponse = {
+      entityId,
+      fields,
+      recordIds: issued.map((record) => record.recordId),
+    };
+    sendJson(res, 200, response);
+  } catch (error) {
+    if (error instanceof EngineBrowserError) {
+      throw new HttpError(409, `engine browser visible read failed: ${error.message}`);
+    }
+    throw error;
+  }
 }
 
 /** Formats the bind host into a URL host (bracketing IPv6 literals). */
@@ -688,6 +1281,42 @@ async function handleRequest(
       await handleRecords(state, res, (await readBody(req)) as RecordsRequest);
       return;
     }
+    if (req.method === 'POST' && path === '/runs/expected-set') {
+      await handleExpectedSet(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ExpectedSetRequest,
+      );
+      return;
+    }
+    if (req.method === 'GET' && path === '/runs/execution-trace') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      sendJson(res, 200, executionTraceOf(state));
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/open') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      await handleSessionOpen(state, res, (await readBody(req)) as SessionOpenRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/close') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      await handleSessionClose(state, res, (await readBody(req)) as SessionCloseRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/resolve') {
+      await handleSessionResolve(state, res, (await readBody(req)) as SessionResolveRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/intervals/open') {
+      await handleIntervalOpen(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/intervals/close') {
+      await handleIntervalClose(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
     if (req.method === 'POST' && path === '/witness/pre-observation') {
       await handlePreObservation(state, res, (await readBody(req)) as PreObservationRequest);
       return;
@@ -698,6 +1327,18 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/witness/http-observation') {
       await handleHttpObservation(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
+    if (req.method === 'POST' && path === '/browser/surface') {
+      await handleBrowserSurface(state, res, (await readBody(req)) as BrowserSurfaceRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/browser/action') {
+      await handleBrowserAction(state, res, (await readBody(req)) as BrowserActionRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/browser/visible') {
+      await handleBrowserVisible(state, res, (await readBody(req)) as BrowserVisibleRequest);
       return;
     }
     sendJson(res, 404, { error: `no witness endpoint at ${req.method} ${path}` });
@@ -733,10 +1374,577 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/**
+ * Enforces the SUPERVISOR capability (enforcement-review fix 3): the
+ * verifier key — the secret the tested suite never receives. The suite's
+ * run token authorizes evidence submission and session resolution, never
+ * session lifecycle, expected-set registration, traces, or attestation.
+ * A witness without a configured verifier key has NO supervisor
+ * capability at all: every supervisor endpoint answers 403 (fail closed)
+ * rather than degrading to run-token authority.
+ *
+ * Args:
+ *   state: running witness state.
+ *   verifier: the `x-gateforge-verifier` header value.
+ *
+ * Throws:
+ *   HttpError: 403 when the witness holds no verifier key (typed
+ *     'supervisor authorization required') or 401 on a key mismatch.
+ */
+function requireSupervisor(state: WitnessState, verifier: unknown): void {
+  const verifierKey = state.options.verifierKey;
+  if (verifierKey === null || verifierKey === undefined) {
+    throw new HttpError(
+      403,
+      'supervisor authorization required: this witness runs without a verifier key, so the ' +
+        'supervisor surface (expected set, session open/close, execution trace) is unavailable — ' +
+        'start the witness with GATEFORGE_WITNESS_VERIFIER_KEY from the orchestrating CLI',
+    );
+  }
+  if (typeof verifier !== 'string' || !timingSafeEqual(verifier, verifierKey)) {
+    throw new HttpError(
+      401,
+      'unauthorized: supervisor endpoints require x-gateforge-verifier with the verifier key ' +
+        '(the run token never authorizes session lifecycle)',
+    );
+  }
+}
+
 /** Sends a GF-canonical JSON response. */
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(canonicalOf(body));
+}
+
+/**
+ * `POST /runs/expected-set` (enforcement-review fix 2a) — SUPERVISOR
+ * ONLY: registers the expected test set BEFORE the run, bound to this
+ * run in witness memory. Once registered, `/sessions/open` accepts only
+ * tests in this set (an invented testId is refused), and the execution
+ * trace groups sessions by these registered identities. Identical
+ * re-registration is idempotent (200); any change is 409; registration
+ * after any session was opened is 409 (the expected set is a PRE-run
+ * fact). The response carries the domain-separated enumeration digest
+ * the sealed execution result binds.
+ *
+ * Args:
+ *   state: running witness state.
+ *   res: response to answer.
+ *   verifier: the `x-gateforge-verifier` header value.
+ *   body: the parsed request body ({tests: [...]}, identity-shaped).
+ */
+async function handleExpectedSet(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ExpectedSetRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || !Array.isArray(body['tests'])) {
+    throw new HttpError(400, 'expected-set body must be {tests: [...]}');
+  }
+  const tests: Array<{ testId: string | null; project: string | null; file: string; titlePath: string[] }> = [];
+  for (const entry of body['tests']) {
+    if (typeof entry !== 'object' || entry === null) {
+      throw new HttpError(400, 'expected-set tests must be objects');
+    }
+    const row = entry as Record<string, unknown>;
+    const testId = row['testId'] === undefined || row['testId'] === null ? null : row['testId'];
+    const project = row['project'] === undefined || row['project'] === null ? null : row['project'];
+    if (
+      (testId !== null && typeof testId !== 'string') ||
+      (project !== null && typeof project !== 'string') ||
+      typeof row['file'] !== 'string' ||
+      row['file'].length === 0 ||
+      !Array.isArray(row['titlePath']) ||
+      (row['titlePath'] as unknown[]).length === 0 ||
+      !(row['titlePath'] as unknown[]).every((part) => typeof part === 'string' && part.length > 0)
+    ) {
+      throw new HttpError(
+        400,
+        'expected-set tests require file (non-empty string), titlePath (non-empty string array), ' +
+          'and optional testId/project strings',
+      );
+    }
+    tests.push({
+      testId: testId,
+      project: project,
+      file: row['file'],
+      titlePath: row['titlePath'] as string[],
+    });
+  }
+  const digest = enumerationDigestOf(tests);
+  if (state.enumerationDigest !== null) {
+    if (state.enumerationDigest === digest) {
+      sendJson(res, 200, { bound: true as const, enumerationDigest: digest, count: state.expectedTests.size });
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'an expected set is already bound to this run and differs; the expected set is a PRE-run ' +
+        'fact and is never relabeled — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (state.sessions.size > 0) {
+    sendJson(res, 409, {
+      error:
+        'sessions were already opened on this witness; the expected set must be registered ' +
+        'BEFORE the run — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  state.expectedTests.clear();
+  for (const test of tests) {
+    state.expectedTests.set(expectedKey(test.project, test.file, test.titlePath), test);
+  }
+  state.enumerationDigest = digest;
+  sendJson(res, 200, { bound: true as const, enumerationDigest: digest, count: state.expectedTests.size });
+}
+
+/**
+ * Builds the witness-side execution trace (enforcement-review fix 2b):
+ * per registered expected test, every recorded session with its open/
+ * seal ticks and outcome. When no expected set is registered, sessions
+ * are grouped by their own open identity (the legacy/standalone shape).
+ * This record lives ONLY in witness memory — the suite cannot mint,
+ * alter, or replay it — and is the authority supervision grades
+ * completeness from.
+ */
+function executionTraceOf(state: WitnessState): ExecutionTraceResponse {
+  const byKey = new Map<
+    string,
+    ExecutionTraceResponse['tests'][number]
+  >();
+  for (const session of state.sessions.values()) {
+    const key =
+      session.registered !== null
+        ? expectedKey(session.registered.project, session.registered.file, session.registered.titlePath)
+        : `runtime\u0000${session.sessionId}`;
+    let entry = byKey.get(key);
+    if (entry === undefined) {
+      entry = {
+        testId: session.registered?.testId ?? session.testId,
+        project: session.registered?.project ?? null,
+        file: session.registered?.file ?? '',
+        titlePath: session.registered?.titlePath ?? [],
+        sessions: [],
+      };
+      byKey.set(key, entry);
+    }
+    const traced: TracedSession = {
+      sessionId: session.sessionId,
+      openedTick: session.openedTick,
+      sealedTick: session.sealedTick,
+      outcome: session.outcome,
+      // Witness-side activity (review recheck fix 2026-09-14): the count
+      // of session-bound observations the witness itself made. A sealed
+      // 'passed' session with zero activity blocks supervision — the
+      // runner-reported outcome alone proves nothing.
+      activity: session.activity,
+    };
+    entry.sessions.push(traced);
+  }
+  return {
+    enumerationDigest: state.enumerationDigest,
+    tests: [...byKey.entries()]
+      .sort((a, b) => compareStrings(a[0], b[0]))
+      .map(([, entry]) => ({ ...entry, sessions: [...entry.sessions].sort((a, b) => a.openedTick - b.openedTick) })),
+  };
+}
+
+/**
+ * `POST /sessions/open` (plan Phase 1; enforcement-review fix 3) —
+ * SUPERVISOR ONLY: the trusted CLI (which owns the verifier key) registers
+ * one started test. The witness issues the session binding — (runId,
+ * sessionId, testId, worker) — and, when an observation proxy is active,
+ * a per-session browser mount segment. One session may be OPEN per worker
+ * at a time (a worker runs one test at a time; overlapping sessions would
+ * make interval attribution ambiguous — fail closed instead). Re-opening
+ * the identical (worker, testId) pair while it is still open is
+ * idempotent (double `testBegin` dispatch safety).
+ *
+ * When an expected set is registered (fix 2a), the opened test must
+ * belong to it — matched by the registered (project, file, titlePath)
+ * identity the supervisor carries from the runner's lifecycle spool — so
+ * a suite-invented testId can never mint a session.
+ *
+ * The suite holds the run token but CANNOT mint sessions with it: the
+ * run token alone answers 403 typed.
+ */
+async function handleSessionOpen(
+  state: WitnessState,
+  res: ServerResponse,
+  body: SessionOpenRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session open body must be an object');
+  }
+  const { testId, workerIndex } = body;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'session open requires a non-empty testId (the runner-assigned test id)');
+  }
+  if (typeof workerIndex !== 'number' || !Number.isInteger(workerIndex) || workerIndex < 0) {
+    throw new HttpError(400, 'session open requires a non-negative integer workerIndex');
+  }
+  // Expected-set membership (fix 2a): once the supervisor registered the
+  // expected tests, sessions exist only for them. Identity comes from the
+  // supervisor's spool drain (file + titlePath + project).
+  let registered: { testId: string | null; project: string | null; file: string; titlePath: string[] } | null = null;
+  if (state.enumerationDigest !== null) {
+    const file = typeof body['file'] === 'string' ? body['file'] : null;
+    const rawTitlePath = Array.isArray(body['titlePath'])
+      ? (body['titlePath'] as unknown[]).filter((part): part is string => typeof part === 'string')
+      : null;
+    const project = typeof body['project'] === 'string' ? body['project'] : null;
+    registered =
+      file !== null && rawTitlePath !== null && rawTitlePath.length > 0
+        ? state.expectedTests.get(expectedKey(project, file, rawTitlePath)) ?? null
+        : null;
+    if (registered === null) {
+      throw new HttpError(
+        403,
+        `session open refused: test '${testId}' is not in the registered expected set — ` +
+          'sessions are minted only for the tests the supervisor registered before the run',
+      );
+    }
+  }
+  const existingWorkerSession = state.workerSessions.get(workerIndex);
+  if (existingWorkerSession !== undefined) {
+    const open = state.sessions.get(existingWorkerSession) as TestSession | undefined;
+    if (open !== undefined && open.testId === testId) {
+      // Idempotent re-open of the identical (worker, testId) session.
+      sendJson(res, 200, sessionView(state, open));
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        `worker ${String(workerIndex)} already carries an open session for testId ` +
+        `'${open === undefined ? existingWorkerSession : open.testId}'; a worker runs one test ` +
+        'at a time — close the session before opening another',
+    });
+    return;
+  }
+  // Phase 4 claim injection: the supervisor carries the mapped obligation
+  // claims for this test on the session-open path. Claims stay
+  // DECLARATIONS (they never satisfy anything by themselves), but the
+  // witness normalizes them — obligation-id-shaped, sorted, deduplicated
+  // — and refuses malformed values so a typo cannot silently redirect
+  // evidence to a nonexistent claim identity.
+  const rawClaims = body['claims'];
+  let claims: string[] = [];
+  if (rawClaims !== undefined) {
+    if (!Array.isArray(rawClaims)) {
+      throw new HttpError(400, 'session open claims, when present, must be an array of obligation ids');
+    }
+    const seen = new Set<string>();
+    for (const claim of rawClaims) {
+      if (typeof claim !== 'string' || !OBLIGATION_ID_PATTERN.test(claim)) {
+        throw new HttpError(
+          400,
+          `session open claims must be obligation ids '<resourceId>:<contract>' (got '${String(claim)}')`,
+        );
+      }
+      seen.add(claim);
+    }
+    claims = [...seen].sort(compareStrings);
+  }
+  const sessionId = randomUUID();
+  const session: TestSession = {
+    sessionId,
+    token: randomUUID(),
+    testId,
+    workerIndex,
+    status: 'open',
+    openedTick: (state.tick += 1),
+    sealedTick: null,
+    outcome: null,
+    intervals: new Map(),
+    // Filled below: the session's DEDICATED observation-proxy port.
+    proxyUrl: null,
+    proxyServer: null,
+    claims,
+    // The registered expected-set identity this session was minted for
+    // (enforcement-review fix 2b); null when no expected set is bound.
+    registered:
+      registered !== null
+        ? {
+            testId: registered.testId,
+            project: registered.project,
+            file: registered.file,
+            titlePath: [...registered.titlePath],
+          }
+        : null,
+    // Witness-side activity counter: incremented at every observation
+    // the witness itself makes under this session (records, intervals,
+    // exchanges, pre-observations). Diagnostic corroboration only —
+    // execution authority is the supervisor-observed trusted lifecycle,
+    // not this count.
+    activity: 0,
+    // Engine-browser surface registration (plan Phase 1 item 4): the
+    // validated consumer descriptor + loopback app base the engine
+    // drives for this session. Null until the fixture registers it.
+    engineSurface: null,
+  };
+  // Session attribution channel (plan Phase 1): a dedicated loopback
+  // proxy port whose traffic is attributed to THIS session. Exists only
+  // when an observation proxy is wired; otherwise nothing browser-side
+  // is attributable.
+  await startSessionProxy(state, session);
+  state.sessions.set(sessionId, session);
+  state.workerSessions.set(workerIndex, sessionId);
+  sendJson(res, 200, sessionView(state, session));
+}
+
+/** The session view returned to supervisor and worker (the credential). */
+function sessionView(state: WitnessState, session: TestSession): {
+  sessionId: string;
+  sessionToken: string;
+  testId: string;
+  workerIndex: number;
+  openedTick: number;
+  proxyUrl: string | null;
+  claims: string[];
+} {
+  void state;
+  return {
+    sessionId: session.sessionId,
+    sessionToken: session.token,
+    testId: session.testId,
+    workerIndex: session.workerIndex,
+    openedTick: session.openedTick,
+    proxyUrl: session.proxyUrl,
+    claims: [...session.claims],
+  };
+}
+
+/**
+ * `POST /sessions/close` (plan Phase 1; enforcement-review fix 3) —
+ * SUPERVISOR ONLY (enforced at dispatch): the supervisor seals the
+ * session with the observed outcome. Sealing is FINAL — every later
+ * submission, interval, or resolve for the session is rejected, so
+ * records cannot be injected after the test ended. Closing an unknown
+ * session fails (400); closing an already-sealed session is idempotent
+ * (safe re-delivery). The suite has NO reachable close path: the run
+ * token alone answers 403 before this handler runs.
+ */
+async function handleSessionClose(
+  state: WitnessState,
+  res: ServerResponse,
+  body: SessionCloseRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session close body must be an object');
+  }
+  const { sessionId, outcome } = body;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw new HttpError(400, 'session close requires a sessionId');
+  }
+  if (outcome !== undefined && typeof outcome !== 'string') {
+    throw new HttpError(400, 'session close outcome, when present, must be a string');
+  }
+  const session = state.sessions.get(sessionId);
+  if (session === undefined) {
+    throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
+  }
+  if (session.status === 'open') {
+    session.status = 'sealed';
+    session.sealedTick = (state.tick += 1);
+    session.outcome = typeof outcome === 'string' ? outcome : null;
+    state.workerSessions.delete(session.workerIndex);
+    // The dedicated channel dies with the session: nothing can observe
+    // (or submit) through it afterwards. The engine browser context dies
+    // too — a sealed session's pages are never driven again.
+    await stopSessionProxy(session);
+    await state.engineBrowser.closeSession(session.sessionId);
+  }
+  sendJson(res, 200, { sealed: true as const });
+}
+
+/**
+ * `POST /sessions/resolve` (plan Phase 1): the worker-side fixture asks
+ * for the session credential of the OPEN session bound to its exact
+ * (workerIndex, testId) pair. Only an open session answers — a sealed
+ * or never-opened session 404s — so the fixture can never obtain a
+ * credential for a session the supervisor did not open for exactly this
+ * test instance.
+ */
+async function handleSessionResolve(
+  state: WitnessState,
+  res: ServerResponse,
+  body: SessionResolveRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session resolve body must be an object');
+  }
+  const { testId, workerIndex } = body;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'session resolve requires a non-empty testId');
+  }
+  if (typeof workerIndex !== 'number' || !Number.isInteger(workerIndex) || workerIndex < 0) {
+    throw new HttpError(400, 'session resolve requires a non-negative integer workerIndex');
+  }
+  const sessionId = state.workerSessions.get(workerIndex);
+  const session = sessionId === undefined ? undefined : state.sessions.get(sessionId);
+  if (session === undefined || session.status !== 'open' || session.testId !== testId) {
+    sendJson(res, 404, {
+      error:
+        `no open session for (workerIndex ${String(workerIndex)}, testId '${testId}'); the ` +
+        'supervisor (the gateforge reporter) opens a session per started test — run under ' +
+        'the pack reporter so evidence primitives can resolve their session',
+    });
+    return;
+  }
+  sendJson(res, 200, sessionView(state, session));
+}
+
+/**
+ * Enforces the supervisor-issued session credential on a submission:
+ * the session must EXIST (403 otherwise), carry a token that matches
+ * (timing-safe), and still be OPEN (409 once sealed — late submissions
+ * after close are rejected fail closed).
+ */
+function requireOpenSession(state: WitnessState, body: Record<string, unknown>): TestSession {
+  const sessionId = body['sessionId'];
+  const sessionToken = body['sessionToken'];
+  if (typeof sessionId !== 'string' || sessionId.length === 0 || typeof sessionToken !== 'string') {
+    throw new HttpError(
+      400,
+      'submissions require the supervisor-issued session credential (sessionId + sessionToken); ' +
+        'run under the gateforge reporter so the test session is opened and resolved',
+    );
+  }
+  const session = state.sessions.get(sessionId);
+  if (session === undefined || !timingSafeEqual(sessionToken, session.token)) {
+    throw new HttpError(
+      403,
+      'session credential is unknown to this witness: sessions are issued only by the ' +
+        'supervisor channel (/sessions/open) and cannot be minted from the run token',
+    );
+  }
+  if (session.status !== 'open') {
+    throw new HttpError(
+      409,
+      `session for testId '${session.testId}' was sealed at tick ${String(session.sealedTick)}: ` +
+        'late submissions after session close are rejected (no post-hoc record injection)',
+    );
+  }
+  return session;
+}
+
+/**
+ * Forces the submission's testId onto the session: the record's test
+ * identity is the supervisor-registered one, never a caller-declared
+ * value — a suite-supplied testId cannot assign evidence to another
+ * test (plan Phase 1 work item 2).
+ */
+function requireSessionTestId(session: TestSession, testId: unknown): string {
+  if (testId !== session.testId) {
+    throw new HttpError(
+      403,
+      `submission testId '${String(testId)}' does not match the open session's ` +
+        `supervisor-registered testId '${session.testId}' — records bind to the session ` +
+        'the supervisor opened, never to a caller-declared test id',
+    );
+  }
+  return session.testId;
+}
+
+/**
+ * Opens a UI-action observation interval on the witness clock (at most
+ * one open per session — opening auto-closes the previous). Shared by
+ * the suite-callable endpoint and the engine browser driver: both
+ * produce witness-stamped windows, never suite-supplied times.
+ */
+function openActionInterval(
+  state: WitnessState,
+  session: TestSession,
+  operation: string,
+): { intervalId: string; startTick: number } {
+  for (const interval of session.intervals.values()) {
+    if (interval.endTick === null) interval.endTick = (state.tick += 1);
+  }
+  const intervalId = randomUUID();
+  const startTick = (state.tick += 1);
+  session.intervals.set(intervalId, { startTick, endTick: null, operation });
+  // Witness-side activity: a recorded UI-action interval is a
+  // witness-kept window; count it.
+  session.activity += 1;
+  return { intervalId, startTick };
+}
+
+/** Seals one UI-action observation interval (unknown/duplicate → throw). */
+function closeActionInterval(
+  state: WitnessState,
+  session: TestSession,
+  intervalId: string,
+): { startTick: number; endTick: number } {
+  const interval = session.intervals.get(intervalId);
+  if (interval === undefined) {
+    throw new HttpError(400, `interval '${intervalId}' is unknown for this session`);
+  }
+  if (interval.endTick !== null) {
+    throw new HttpError(409, `interval '${intervalId}' is already closed (endTick ${String(interval.endTick)})`);
+  }
+  interval.endTick = (state.tick += 1);
+  return { startTick: interval.startTick, endTick: interval.endTick };
+}
+
+/**
+ * `POST /sessions/intervals/open`: the fixture marks the START of a
+ * UI-action observation interval on the witness's monotonic clock. At
+ * most one interval is open per session — opening a new one auto-closes
+ * the previous (a dangling interval must not silently widen the
+ * evidence window).
+ */
+async function handleIntervalOpen(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const session = requireOpenSession(state, body);
+  const operation = body['operation'];
+  if (typeof operation !== 'string' || operation.length === 0) {
+    throw new HttpError(400, 'interval open requires a non-empty operation label');
+  }
+  const { intervalId, startTick } = openActionInterval(state, session, operation);
+  sendJson(res, 200, { intervalId, startTick });
+}
+
+/**
+ * `POST /sessions/intervals/close`: seals a UI-action observation
+ * interval. Closing an unknown interval fails (400); closing twice is
+ * refused (409) — a sealed window must not be stretched after the fact.
+ */
+async function handleIntervalClose(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const session = requireOpenSession(state, body);
+  const intervalId = body['intervalId'];
+  if (typeof intervalId !== 'string' || intervalId.length === 0) {
+    throw new HttpError(400, 'interval close requires an intervalId');
+  }
+  const { startTick, endTick } = closeActionInterval(state, session, intervalId);
+  sendJson(res, 200, { startTick, endTick });
+}
+
+/**
+ * Whether an exchange observed at `tick` falls inside one of the
+ * session's recorded UI-action intervals (open intervals extend to the
+ * current moment — an observe arriving between action end and interval
+ * close still sees the window). Exchanges outside every interval are
+ * NEVER credited: that is setup traffic, not the browser action
+ * (plan Phase 1 item 6).
+ */
+function tickWithinSessionInterval(session: TestSession, tick: number): boolean {
+  for (const interval of session.intervals.values()) {
+    if (tick >= interval.startTick && (interval.endTick === null || tick <= interval.endTick)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -746,7 +1954,10 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  * implementation-gated and does not exist yet). Only the two UI
  * primitives are suite-submittable; `http.request` and persistence
  * records are witness-issued only (engine-side observation), so no
- * claimed-side path can mint them.
+ * claimed-side path can mint them. Phase 1: issuance requires a valid
+ * OPEN session — the record's testId is forced onto the session's
+ * supervisor-registered value and the payload carries the session id,
+ * so every record self-describes the channel it was minted through.
  */
 async function handleRecords(
   state: WitnessState,
@@ -774,7 +1985,22 @@ async function handleRecords(
   if (!isPlainObject(payload)) {
     throw new HttpError(400, 'payload must be a JSON object');
   }
-  const record = issueRecord(state, claimId, kind, testId, payload, 'suite-submitted');
+  const session = requireOpenSession(state, body);
+  requireSessionTestId(session, testId);
+  const record = issueRecord(
+    state,
+    claimId,
+    kind,
+    session.testId,
+    { ...payload, sessionId: session.sessionId },
+    'suite-submitted',
+  );
+  // Witness-side activity (review recheck fix 2026-09-14): a submitted
+  // record under an open session is a session-bound event the witness
+  // issued; count it. (Content trust stays claimed — the count only
+  // corroborates session liveness for supervision, never evidence
+  // strength.)
+  session.activity += 1;
   const response: RecordsResponse = {
     recordId: record.recordId,
     trust: record.trust,
@@ -823,6 +2049,12 @@ async function handlePersistence(
   ) {
     throw new HttpError(400, 'preObservationId must be a non-empty string when present');
   }
+  // Phase 1: engine-side reads run under the supervisor-opened session,
+  // so the persistence record binds to the same channel the UI action
+  // used (and the record's testId is the session's, never caller-declared).
+  const session = requireOpenSession(state, body);
+  const boundTestId = requireSessionTestId(session, testId);
+  const boundClaimId = String(claimId);
 
   const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
 
@@ -921,8 +2153,13 @@ async function handlePersistence(
     found,
     ...(found && normalized !== null ? { fields: normalized.fields } : {}),
     ...(before !== undefined ? { before } : {}),
+    sessionId: session.sessionId,
   };
-  const issued = issuePersistenceRecord(state, String(claimId), testId, payload);
+  const issued = issuePersistenceRecord(state, boundClaimId, boundTestId, payload);
+  // Witness-side activity (review recheck fix 2026-09-14): an
+  // engine-observed persistence read under the session is real work the
+  // witness performed; count it so supervision can corroborate execution.
+  session.activity += 1;
 
   const response: PersistenceResponse = {
     recordId: issued.recordId,
@@ -967,7 +2204,33 @@ async function handlePreObservation(
   if (typeof claimId !== 'string' || !OBLIGATION_ID_PATTERN.test(claimId)) {
     throw new HttpError(400, "claimId must be an obligation id '<resourceId>:<contract>'");
   }
+  // Phase 1: pre-observations belong to the supervisor-opened session of
+  // the claiming test (the persistence read later consumes them under
+  // the same session).
+  const session = requireOpenSession(state, body);
+  requireSessionTestId(session, testId);
 
+  const { observationId, observed } = await takePreObservation(state, session, resourceId, entityId);
+  const response: PreObservationResponse = { observationId, observed };
+  sendJson(res, 200, response);
+}
+
+/**
+ * Takes an engine-side pre-observation snapshot (shared by the
+ * suite-callable endpoint and the engine browser driver): with
+ * `entityId` an entity-fields snapshot (update postconditions),
+ * without it the resource id-set snapshot (create postconditions).
+ * Snapshots live in witness memory, single-use, and their contents —
+ * never suite-declared expectations — are what the engine grades
+ * against. A suite can reference a real observation but cannot
+ * fabricate, replay, or mutate its contents.
+ */
+async function takePreObservation(
+  state: WitnessState,
+  session: TestSession,
+  resourceId: string,
+  entityId: unknown,
+): Promise<{ observationId: string; observed: number }> {
   const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
   const ctx = makeAdapterContext(baseUrl, resourceId, (path: string) =>
     adapterGet(baseUrl, state.options.requestTimeoutMs, path),
@@ -1008,9 +2271,10 @@ async function handlePreObservation(
       found,
       ...(found ? { fields } : {}),
     });
-    const response: PreObservationResponse = { observationId, observed: found ? 1 : 0 };
-    sendJson(res, 200, response);
-    return;
+    // Witness-side activity: the engine-side snapshot ran under the
+    // session; count it.
+    session.activity += 1;
+    return { observationId, observed: found ? 1 : 0 };
   }
 
   // Resource id-set snapshot (create postconditions).
@@ -1049,9 +2313,11 @@ async function handlePreObservation(
     }
   }
   state.preObservations.set(observationId, { resourceId, kind: 'ids', ids: ids.sort(compareStrings) });
+  // Witness-side activity: the engine-side id-set snapshot ran under
+  // the session; count it.
+  session.activity += 1;
 
-  const response: PreObservationResponse = { observationId, observed: ids.length };
-  sendJson(res, 200, response);
+  return { observationId, observed: ids.length };
 }
 
 /**
@@ -1289,13 +2555,14 @@ async function handleRunContext(
     state.ledger.size > 0 ||
     state.observed.length > 0 ||
     state.preObservations.size > 0 ||
+    state.sessions.size > 0 ||
     state.proxyInFlight > 0
   ) {
     sendJson(res, 409, {
       error:
-        'witness already observed or issued evidence; run-context binding is allowed only ' +
-        'before any proxy exchange, pre-observation, or issuance — start a fresh witness ' +
-        'for a new invocation',
+        'witness already observed or issued evidence (or holds an open test session); ' +
+        'run-context binding is allowed only before any proxy exchange, pre-observation, ' +
+        'session, or issuance — start a fresh witness for a new invocation',
     });
     return;
   }
@@ -1366,6 +2633,10 @@ async function stopWitness(state: WitnessState): Promise<void> {
       proxy.close(() => resolveClose());
     });
   }
+  for (const session of state.sessions.values()) {
+    await stopSessionProxy(session);
+  }
+  await state.engineBrowser.closeAll();
   await new Promise<void>((resolveClose) => {
     state.server.close(() => resolveClose());
   });
