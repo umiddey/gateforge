@@ -14,7 +14,15 @@ import { tmpdir } from 'node:os';
 import { startWitness, WitnessStartupError, recordIdOf } from '../src/witness/server.js';
 import { RunManifestSchema, attestationMac, ledgerMac, verifyAttestationMac, ClassificationSchema, type Classification } from '@gateforge/core';
 import { toClassificationView } from '../src/witness/classifications.js';
-import { writeHonestAdapter, writeFixtureProject, makeTempProject } from './helpers.js';
+import {
+  beginJourneyInterval,
+  closeSupervisorSession,
+  endJourneyInterval,
+  makeTempProject,
+  openSupervisorSession,
+  writeFixtureProject,
+  writeHonestAdapter,
+} from './helpers.js';
 import { AttestationError } from '../src/witness/env-attestation.js';
 import { ENV_FINGERPRINT_HEADER, RUN_HEADER, VERIFIER_HEADER } from '../src/constants.js';
 import { startAttestationProxy } from '../src/attestation/proxy.js';
@@ -93,10 +101,19 @@ describe('witness auth (pin #7)', () => {
   });
 });
 
-describe('record issuance (pin #7)', () => {
+describe('record issuance (pin #7, Phase 1 session-bound)', () => {
   it('stamps a submitted ui.action claimed-tier with suite-submitted origin (GF-23 round 3)', async () => {
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
     try {
+      // Phase 1: submissions exist only under the supervisor-opened
+      // session of the declaring test.
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      const payload = {
+        operation: 'update',
+        entityId: 'acc-1',
+        fields: { first_name: 'Ada' },
+        sessionId: session.sessionId, // witness-stamped channel binding
+      };
       const res = await fetch(`${fixture.witness.url}/records`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -105,6 +122,8 @@ describe('record issuance (pin #7)', () => {
           kind: 'ui.action',
           payload: { operation: 'update', entityId: 'acc-1', fields: { first_name: 'Ada' } },
           testId: TEST_ID,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
         }),
       });
       expect(res.status).toBe(200);
@@ -127,7 +146,7 @@ describe('record issuance (pin #7)', () => {
           kind: 'ui.action',
           testId: TEST_ID,
           origin: 'suite-submitted',
-          payload: { operation: 'update', entityId: 'acc-1', fields: { first_name: 'Ada' } },
+          payload,
         }),
       );
       const ledger = (await (
@@ -140,6 +159,78 @@ describe('record issuance (pin #7)', () => {
       expect(ledger.records).toHaveLength(1);
       expect(ledger.records[0]?.trust).toBe('claimed');
       expect(ledger.records[0]?.origin).toBe('suite-submitted');
+      // The record self-describes the session channel it was minted through.
+      expect(ledger.records[0]?.payload).toMatchObject({ sessionId: session.sessionId });
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('rejects a submission without a valid open session (fail closed, Phase 1)', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      const attempts = [
+        // No session credential at all.
+        {
+          claimId: OBLIGATION,
+          kind: 'ui.action',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
+          testId: TEST_ID,
+        },
+        // Unknown sessionId.
+        {
+          claimId: OBLIGATION,
+          kind: 'ui.action',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
+          testId: TEST_ID,
+          sessionId: '00000000-0000-4000-8000-000000000000',
+          sessionToken: 'guessed',
+        },
+      ];
+      for (const [label, expectedStatus] of [
+        ['missing credential', 400],
+        ['unknown session', 403],
+      ] as const) {
+        const res = await fetch(`${fixture.witness.url}/records`, {
+          method: 'POST',
+          headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+          body: JSON.stringify(attempts[expectedStatus === 400 ? 0 : 1]),
+        });
+        expect(
+          res.status,
+          `a submission without a valid open session must be rejected (${label})`,
+        ).toBe(expectedStatus);
+      }
+      const ledger = (await (
+        await fetch(`${fixture.witness.url}/records`, { headers: { [RUN_HEADER]: TOKEN } })
+      ).json()) as { records: unknown[] };
+      expect(ledger.records).toHaveLength(0);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('rejects a submission whose testId differs from the supervisor-registered session test', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      const res = await fetch(`${fixture.witness.url}/records`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: OBLIGATION,
+          kind: 'ui.action',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
+          testId: 'a-different-test',
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+        }),
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/does not match the open session's supervisor-registered testId/);
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();
@@ -195,6 +286,7 @@ describe('persistence endpoint (pin #7)', () => {
   it('runs the adapter engine-side and returns verdictRelevant', async () => {
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
     try {
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
       const res = await fetch(`${fixture.witness.url}/witness/persistence`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -204,6 +296,8 @@ describe('persistence endpoint (pin #7)', () => {
           expectFields: { first_name: 'Ada', last_name: 'Lovelace' },
           testId: TEST_ID,
           claimId: OBLIGATION,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
         }),
       });
       expect(res.status).toBe(200);
@@ -237,6 +331,7 @@ describe('persistence endpoint (pin #7)', () => {
   it('rejects a persistence request for a resource with no adapter (400)', async () => {
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
     try {
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
       const res = await fetch(`${fixture.witness.url}/witness/persistence`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -245,6 +340,8 @@ describe('persistence endpoint (pin #7)', () => {
           entityId: 'x',
           testId: TEST_ID,
           claimId: 'tenant.ghosts:crud:update',
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
         }),
       });
       expect(res.status).toBe(400);
@@ -281,12 +378,14 @@ describe('environment attestation (GF-10, GF-13)', () => {
       const witness = await startWitness({
         runId: RUN_ID,
         token: TOKEN,
+        verifierKey: VERIFIER_KEY, // the test acts as the supervisor (fix 3)
         adaptersDir: join(project, '.gateforge/adapters'),
         targetBaseUrl: proxy.url, // attested subject HAS the marker
         targetFingerprint: 'example-v1',
         adapterBaseUrl: raw.url, // adapter reads the UNMARKED env
       });
       try {
+        const session = await openSupervisorSession(witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
         const res = await fetch(`${witness.url}/witness/persistence`, {
           method: 'POST',
           headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -296,6 +395,8 @@ describe('environment attestation (GF-10, GF-13)', () => {
             expectFields: { first_name: 'Ada' },
             testId: TEST_ID,
             claimId: OBLIGATION,
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         });
         expect(res.status).toBe(409);
@@ -321,12 +422,14 @@ describe('environment attestation (GF-10, GF-13)', () => {
       const witness = await startWitness({
         runId: RUN_ID,
         token: TOKEN,
+        verifierKey: VERIFIER_KEY, // the test acts as the supervisor (fix 3)
         adaptersDir: join(project, '.gateforge/adapters'),
         targetBaseUrl: target.url,
         targetFingerprint: 'example-v1',
         adapterBaseUrl: target.url, // marker example-v1 ≠ adapter's declared fingerprint
       });
       try {
+        const session = await openSupervisorSession(witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
         const res = await fetch(`${witness.url}/witness/persistence`, {
           method: 'POST',
           headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -335,6 +438,8 @@ describe('environment attestation (GF-10, GF-13)', () => {
             entityId: 'acc-1',
             testId: TEST_ID,
             claimId: OBLIGATION,
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         });
         expect(res.status).toBe(409);
@@ -367,11 +472,13 @@ describe('environment attestation (GF-10, GF-13)', () => {
       const witness = await startWitness({
         runId: RUN_ID,
         token: TOKEN,
+        verifierKey: VERIFIER_KEY, // the test acts as the supervisor (fix 3)
         adaptersDir: join(project, '.gateforge/adapters'),
         targetBaseUrl: target.url,
         targetFingerprint: 'example-v1',
       });
       try {
+        const session = await openSupervisorSession(witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
         const res = await fetch(`${witness.url}/witness/persistence`, {
           method: 'POST',
           headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -380,6 +487,8 @@ describe('environment attestation (GF-10, GF-13)', () => {
             entityId: 'acc-1',
             testId: TEST_ID,
             claimId: OBLIGATION,
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         });
         expect(res.status).toBe(409);
@@ -594,6 +703,7 @@ describe('run-context binding (plan §11.4)', () => {
   it('rejects binding to a used witness (issued, observed, or in flight) with 409', async () => {
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
     try {
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
       await fetch(`${fixture.witness.url}/records`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -602,6 +712,8 @@ describe('run-context binding (plan §11.4)', () => {
           kind: 'ui.action',
           payload: { operation: 'update', entityId: 'acc-1', fields: {} },
           testId: TEST_ID,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
         }),
       });
       const res = await fetch(`${fixture.witness.url}/run-context`, {
@@ -704,6 +816,9 @@ describe('ledger attestation surface (pin #7, GF-23, plan §11.3)', () => {
       expect(unbound.status).toBe(409);
 
       await bindContext(fixture.witness.url);
+      // Phase 1: the record exists only under a supervisor-opened session
+      // (opened AFTER the trusted bind, the real orchestrator order).
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
       const post = await fetch(`${fixture.witness.url}/records`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -712,6 +827,8 @@ describe('ledger attestation surface (pin #7, GF-23, plan §11.3)', () => {
           kind: 'ui.action',
           payload: { operation: 'update', entityId: 'acc-1', fields: {} },
           testId: TEST_ID,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
         }),
       });
       expect(post.status).toBe(200);
@@ -813,8 +930,10 @@ describe('run-manifest append (pin #4/#7, plan §11.3)', () => {
     const stateDir = join(mkdtempSync(join(tmpdir(), 'gateforge-manifest-')), 'state');
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1', stateDir });
     try {
-      // Bind BEFORE any observation (the trusted CLI order).
+      // Bind BEFORE any observation (the trusted CLI order), then issue
+      // under the supervisor-opened session.
       await bindContext(fixture.witness.url);
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
       await fetch(`${fixture.witness.url}/records`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -823,6 +942,8 @@ describe('run-manifest append (pin #4/#7, plan §11.3)', () => {
           kind: 'ui.action',
           payload: { operation: 'update', entityId: 'acc-1', fields: {} },
           testId: TEST_ID,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
         }),
       });
       await fixture.witness.stop(); // shutdown appends
@@ -891,6 +1012,7 @@ describe('run-manifest append (pin #4/#7, plan §11.3)', () => {
     const stateDir = join(mkdtempSync(join(tmpdir(), 'gateforge-manifest-')), 'state');
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1', stateDir });
     try {
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
       await fetch(`${fixture.witness.url}/records`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -899,6 +1021,8 @@ describe('run-manifest append (pin #4/#7, plan §11.3)', () => {
           kind: 'ui.action',
           payload: { operation: 'update', entityId: 'acc-1', fields: {} },
           testId: TEST_ID,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
         }),
       });
       await fixture.witness.stop(); // shutdown appends
@@ -938,7 +1062,9 @@ describe('run-manifest append (pin #4/#7, plan §11.3)', () => {
         `${JSON.stringify({ ...seeded, recordIds: [forgedId] })}\n`,
       );
 
-      // The witness issues exactly ONE record (never the forged one).
+      // The witness issues exactly ONE record (never the forged one),
+      // under the supervisor-opened session.
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
       await fetch(`${fixture.witness.url}/records`, {
         method: 'POST',
         headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
@@ -947,6 +1073,8 @@ describe('run-manifest append (pin #4/#7, plan §11.3)', () => {
           kind: 'ui.action',
           payload: { operation: 'update', entityId: 'acc-1', fields: {} },
           testId: TEST_ID,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
         }),
       });
       await fixture.witness.stop(); // shutdown appends
@@ -994,6 +1122,421 @@ describe('run-manifest append (pin #4/#7, plan §11.3)', () => {
         ),
       ).toBe(false);
     } finally {
+      await fixture.target.stop();
+    }
+  });
+});
+
+/**
+ * Phase 1 — supervisor-issued test-session identity (work order item 1)
+ * and its negative probes: sessions exist only by supervisor opening,
+ * resolve answers only for the exact open (worker, testId) pair, closing
+ * seals (late submissions rejected), and proxy exchanges are credited
+ * ONLY to the open session whose channel they traversed, inside one of
+ * its recorded action intervals.
+ */
+describe('test sessions (Phase 1 supervisor binding)', () => {
+  it('open → resolve → submit works; closing seals (late submission rejected)', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      expect(session.testId).toBe(TEST_ID);
+      expect(session.workerIndex).toBe(0);
+      expect(session.proxyUrl).toBeNull(); // no observation proxy wired
+
+      // The worker resolves by the exact pair while the session is open.
+      const resolve = await fetch(`${fixture.witness.url}/sessions/resolve`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ testId: TEST_ID, workerIndex: 0 }),
+      });
+      expect(resolve.status).toBe(200);
+
+      const interval = await beginJourneyInterval(fixture.witness.url, TOKEN, session, 'update');
+      await endJourneyInterval(fixture.witness.url, TOKEN, session, interval);
+
+      // The supervisor closes with the observed outcome → SEALED.
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+
+      // Resolve no longer answers (404), and late submissions are rejected.
+      const lateResolve = await fetch(`${fixture.witness.url}/sessions/resolve`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ testId: TEST_ID, workerIndex: 0 }),
+      });
+      expect(lateResolve.status).toBe(404);
+      const lateSubmission = await fetch(`${fixture.witness.url}/records`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: OBLIGATION,
+          kind: 'ui.action',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
+          testId: TEST_ID,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+        }),
+      });
+      expect(lateSubmission.status).toBe(409);
+      const lateBody = (await lateSubmission.json()) as { error: string };
+      expect(lateBody.error).toMatch(/sealed|late submissions/);
+      const lateInterval = await fetch(`${fixture.witness.url}/sessions/intervals/open`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+          operation: 'update',
+        }),
+      });
+      expect(lateInterval.status).toBe(409);
+      const ledger = (await (
+        await fetch(`${fixture.witness.url}/records`, { headers: { [RUN_HEADER]: TOKEN } })
+      ).json()) as { records: unknown[] };
+      expect(ledger.records).toHaveLength(0);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('resolve answers only for the exact (workerIndex, testId) pair; one open session per worker', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      // Wrong testId on the same worker → 404.
+      const wrongTest = await fetch(`${fixture.witness.url}/sessions/resolve`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ testId: 'another-test', workerIndex: 0 }),
+      });
+      expect(wrongTest.status).toBe(404);
+      // A different worker has no session → 404.
+      const otherWorker = await fetch(`${fixture.witness.url}/sessions/resolve`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ testId: TEST_ID, workerIndex: 1 }),
+      });
+      expect(otherWorker.status).toBe(404);
+      // Opening a DIFFERENT test on the same worker while open → 409
+      // (the supervisor key is presented: the test acts as the supervisor;
+      // the run token alone would answer 401 — pinned below).
+      const overlap = await fetch(`${fixture.witness.url}/sessions/open`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY, 'content-type': 'application/json' },
+        body: JSON.stringify({ testId: 'another-test', workerIndex: 0 }),
+      });
+      expect(overlap.status).toBe(409);
+      // Identical re-open is idempotent (double onTestBegin safety).
+      const again = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      expect(again.sessionId).toBeDefined();
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('PROBE (E11/E12): another worker/test supplies the HTTP request — never credited', async () => {
+    // Minimal loopback upstream: every exchange answers 201 JSON.
+    const upstream: Server = createServer((_req, res) => {
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', () => resolve()));
+    const address = upstream.address();
+    if (address === null || typeof address === 'string') throw new Error('no upstream port');
+    const witness = await startWitness({
+      runId: RUN_ID,
+      token: TOKEN,
+      verifierKey: VERIFIER_KEY,
+      proxyTarget: `http://127.0.0.1:${address.port}`,
+    });
+    try {
+      // Two sessions: the CLAIMING test (worker 0) and the test that
+      // actually drives the traffic (worker 1).
+      const claimer = await openSupervisorSession(witness.url, TOKEN, 'claiming-test', 0, VERIFIER_KEY);
+      const driver = await openSupervisorSession(witness.url, TOKEN, 'driving-test', 1, VERIFIER_KEY);
+      // The OTHER test's browser fires the exchange through ITS channel,
+      // inside ITS interval.
+      const driverInterval = await beginJourneyInterval(witness.url, TOKEN, driver, 'create');
+      await fetch(`${driver.proxyUrl as string}/api/contracts`, {
+        method: 'POST',
+      });
+      await endJourneyInterval(witness.url, TOKEN, driver, driverInterval);
+
+      // The claiming test tries to consume it: refused — the exchange
+      // traversed ANOTHER session's channel (session interval mismatch).
+      const stolen = await fetch(`${witness.url}/witness/http-observation`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: 'tenant.http-post-api-contracts-x1:http:request-observed',
+          testId: 'claiming-test',
+          method: 'POST',
+          path: '/api/contracts',
+          sessionId: claimer.sessionId,
+          sessionToken: claimer.sessionToken,
+        }),
+      });
+      expect(stolen.status).toBe(409);
+      const stolenBody = (await stolen.json()) as { error: string };
+      expect(stolenBody.error).toMatch(/ANOTHER session's channel/);
+      // Interval rule (setup-traffic separation): the driver's OWN
+      // session may consume the exchange inside its interval…
+      const legitimate = await fetch(`${witness.url}/witness/http-observation`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: 'tenant.http-post-api-contracts-x1:http:request-observed',
+          testId: 'driving-test',
+          method: 'POST',
+          path: '/api/contracts',
+          sessionId: driver.sessionId,
+          sessionToken: driver.sessionToken,
+        }),
+      });
+      expect(legitimate.status).toBe(200);
+      // …but an exchange observed OUTSIDE every recorded interval (after
+      // the interval closed — i.e. plain setup traffic) is never credited.
+      await fetch(`${driver.proxyUrl as string}/api/contracts`, {
+        method: 'POST',
+      });
+      const outsideInterval = await fetch(`${witness.url}/witness/http-observation`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: 'tenant.http-post-api-contracts-x1:http:request-observed',
+          testId: 'driving-test',
+          method: 'POST',
+          path: '/api/contracts',
+          sessionId: driver.sessionId,
+          sessionToken: driver.sessionToken,
+        }),
+      });
+      expect(outsideInterval.status).toBe(409);
+      const outsideBody = (await outsideInterval.json()) as { error: string };
+      expect(outsideBody.error).toMatch(/outside every recorded UI-action observation interval/);
+    } finally {
+      await witness.stop();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+
+  it('PROBE: unattributed traffic (no session channel) is never consumable', async () => {
+    const upstream: Server = createServer((_req, res) => {
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', () => resolve()));
+    const address = upstream.address();
+    if (address === null || typeof address === 'string') throw new Error('no upstream port');
+    const witness = await startWitness({
+      runId: RUN_ID,
+      token: TOKEN,
+      verifierKey: VERIFIER_KEY,
+      proxyTarget: `http://127.0.0.1:${address.port}`,
+    });
+    try {
+      const session = await openSupervisorSession(witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      const interval = await beginJourneyInterval(witness.url, TOKEN, session, 'create');
+      // Traffic WITHOUT the session prefix: bypasses every session channel.
+      await fetch(`${witness.proxyUrl as string}/api/contracts`, { method: 'POST' });
+      const consume = await fetch(`${witness.url}/witness/http-observation`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: 'tenant.http-post-api-contracts-x1:http:request-observed',
+          testId: TEST_ID,
+          method: 'POST',
+          path: '/api/contracts',
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+        }),
+      });
+      expect(consume.status).toBe(409);
+      const body = (await consume.json()) as { error: string };
+      expect(body.error).toMatch(/no engine-observed request matches/);
+      await endJourneyInterval(witness.url, TOKEN, session, interval);
+    } finally {
+      await witness.stop();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+});
+
+/**
+ * Enforcement-review fix 3 + fix 2a negative pins (the three review
+ * attacks, leg c): the suite's run token NEVER authorizes session
+ * lifecycle, expected-set registration, or the execution trace — only
+ * the verifier key (the supervisor capability the tested suite never
+ * receives) does — and a supervisor-registered expected set refuses
+ * invented test identities.
+ */
+describe('supervisor authority + expected set (enforcement-review fixes 2a/3)', () => {
+  /** Supervisor-grade POST helper (run token + verifier key). */
+  async function supervisorPost(
+    url: string,
+    path: string,
+    body: unknown,
+    key: string | null = VERIFIER_KEY,
+  ): Promise<Response> {
+    const headers: Record<string, string> = { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' };
+    if (key !== null) headers[VERIFIER_HEADER] = key;
+    return fetch(`${url}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+  }
+
+  it('run-token-only /sessions/open and /sessions/close are refused (the suite cannot mint or seal sessions)', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      // Open with the run token alone → 401 typed (key configured).
+      const tokenOpen = await fetch(`${fixture.witness.url}/sessions/open`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ testId: TEST_ID, workerIndex: 0 }),
+      });
+      expect(tokenOpen.status).toBe(401);
+      expect(((await tokenOpen.json()) as { error: string }).error).toMatch(/run token never authorizes session lifecycle/);
+
+      // A keyless witness answers 403 typed instead of degrading.
+      const keyless = await startFixturedWitness({ fingerprint: 'example-v1', verifierKey: null });
+      try {
+        const keylessOpen = await fetch(`${keyless.witness.url}/sessions/open`, {
+          method: 'POST',
+          headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+          body: JSON.stringify({ testId: TEST_ID, workerIndex: 0 }),
+        });
+        expect(keylessOpen.status).toBe(403);
+        expect(((await keylessOpen.json()) as { error: string }).error).toMatch(/supervisor authorization required/);
+      } finally {
+        await keyless.witness.stop();
+        await keyless.target.stop();
+      }
+
+      // The suite also cannot SEAL: a run-token-only close is refused…
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      const tokenClose = await fetch(`${fixture.witness.url}/sessions/close`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: session.sessionId, outcome: 'passed' }),
+      });
+      expect(tokenClose.status).toBe(401);
+      // …and the session is still OPEN afterwards (nothing was sealed):
+      // a submission under the live credential still works.
+      const submit = await fetch(`${fixture.witness.url}/records`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          claimId: OBLIGATION,
+          kind: 'ui.action',
+          payload: { operation: 'update', entityId: 'acc-1', fields: {} },
+          testId: TEST_ID,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+        }),
+      });
+      expect(submit.status).toBe(200);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('an invented testId is refused once the expected set is registered (fix 2a)', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      const registered = await supervisorPost(fixture.witness.url, '/runs/expected-set', {
+        tests: [{ testId: TEST_ID, project: null, file: 'specs/accounts.spec.js', titlePath: ['Accounts', 'deletes an account'] }],
+      });
+      expect(registered.status).toBe(200);
+      const bound = (await registered.json()) as { bound: boolean; enumerationDigest: string; count: number };
+      expect(bound.bound).toBe(true);
+      expect(bound.count).toBe(1);
+      expect(bound.enumerationDigest).toMatch(/^[0-9a-f]{64}$/);
+
+      // The registered test opens (identity join = project+file+titlePath).
+      const ok = await supervisorPost(fixture.witness.url, '/sessions/open', {
+        testId: TEST_ID,
+        workerIndex: 0,
+        file: 'specs/accounts.spec.js',
+        titlePath: ['Accounts', 'deletes an account'],
+      });
+      expect(ok.status).toBe(200);
+
+      // An INVENTED testId with an unregistered identity → typed refusal.
+      const invented = await supervisorPost(fixture.witness.url, '/sessions/open', {
+        testId: 'invented-by-test-code',
+        workerIndex: 1,
+        file: 'specs/invented.spec.js',
+        titlePath: ['Invented'],
+      });
+      expect(invented.status).toBe(403);
+      expect(((await invented.json()) as { error: string }).error).toMatch(/not in the registered expected set/);
+
+      // Identical re-registration is idempotent (200, same digest)…
+      const again = await supervisorPost(fixture.witness.url, '/runs/expected-set', {
+        tests: [{ testId: TEST_ID, project: null, file: 'specs/accounts.spec.js', titlePath: ['Accounts', 'deletes an account'] }],
+      });
+      expect(again.status).toBe(200);
+      expect(((await again.json()) as { enumerationDigest: string }).enumerationDigest).toBe(bound.enumerationDigest);
+      // …any change is 409 — the expected set is a PRE-run fact, never relabeled.
+      const changed = await supervisorPost(fixture.witness.url, '/runs/expected-set', {
+        tests: [
+          { testId: TEST_ID, project: null, file: 'specs/accounts.spec.js', titlePath: ['Accounts', 'deletes an account'] },
+          { testId: 'extra', project: null, file: 'specs/extra.spec.js', titlePath: ['Extra'] },
+        ],
+      });
+      expect(changed.status).toBe(409);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('the execution trace is supervisor-only and grades from witness-kept sessions (fix 2b)', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1' });
+    try {
+      await supervisorPost(fixture.witness.url, '/runs/expected-set', {
+        tests: [{ testId: TEST_ID, project: null, file: 'specs/accounts.spec.js', titlePath: ['Accounts', 'deletes an account'] }],
+      });
+      const opened = (await (
+        await supervisorPost(fixture.witness.url, '/sessions/open', {
+          testId: TEST_ID,
+          workerIndex: 0,
+          file: 'specs/accounts.spec.js',
+          titlePath: ['Accounts', 'deletes an account'],
+        })
+      ).json()) as { sessionId: string };
+      await closeSupervisorSession(fixture.witness.url, TOKEN, opened.sessionId, 'passed', VERIFIER_KEY);
+
+      // Run token alone / wrong key → refused.
+      const tokenOnly = await fetch(`${fixture.witness.url}/runs/execution-trace`, {
+        headers: { [RUN_HEADER]: TOKEN },
+      });
+      expect(tokenOnly.status).toBe(401);
+      const wrongKey = await fetch(`${fixture.witness.url}/runs/execution-trace`, {
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: 'wrong-verifier-key' },
+      });
+      expect(wrongKey.status).toBe(401);
+
+      // With the key: the trace is the witness-side record supervision
+      // grades from — registered identity, seal tick, observed outcome.
+      const trace = await fetch(`${fixture.witness.url}/runs/execution-trace`, {
+        headers: { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY },
+      });
+      expect(trace.status).toBe(200);
+      const body = (await trace.json()) as {
+        enumerationDigest: string | null;
+        tests: Array<{ testId: string | null; file: string; titlePath: string[]; sessions: Array<{ sessionId: string; sealedTick: number | null; outcome: string | null }> }>;
+      };
+      expect(body.enumerationDigest).toMatch(/^[0-9a-f]{64}$/);
+      expect(body.tests).toHaveLength(1);
+      expect(body.tests[0]).toMatchObject({ testId: TEST_ID, file: 'specs/accounts.spec.js' });
+      expect(body.tests[0]?.sessions).toHaveLength(1);
+      expect(body.tests[0]?.sessions[0]?.sessionId).toBe(opened.sessionId);
+      expect(body.tests[0]?.sessions[0]?.sealedTick).not.toBeNull();
+      expect(body.tests[0]?.sessions[0]?.outcome).toBe('passed');
+    } finally {
+      await fixture.witness.stop();
       await fixture.target.stop();
     }
   });

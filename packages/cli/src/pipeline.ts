@@ -27,6 +27,7 @@ import {
   evaluatePolicies,
   jsonPathFor,
   loadWaivers,
+  normalizeChangedFiles,
   runClassification,
     type ChangedProvider,
   type Claim,
@@ -64,6 +65,13 @@ export interface PipelineOptions {
   stateDir: string;
   /** Fixed run id; default is a fresh random UUID. */
   runId?: string;
+  /**
+   * Fixed changed-file set (Phase 5 staged-candidate runs): when present
+   * it IS the changed set (computed from the frozen index vs base by the
+   * staged-candidate module) and no diff provider runs — the checkout the
+   * pipeline executes in has no diff basis of its own.
+   */
+  changedFilesOverride?: readonly string[];
 }
 
 /** The complete pipeline result. */
@@ -334,7 +342,10 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   });
 
   const now = clock.now();
-  const changedFiles = providerFor(provider, cwd, env).changedFiles();
+  const changedFiles =
+    options.changedFilesOverride !== undefined
+      ? normalizeChangedFiles([...options.changedFilesOverride])
+      : providerFor(provider, cwd, env).changedFiles();
   const manifest = RunManifestSchema.parse({
     schemaVersion: 1,
     runId: options.runId ?? randomUUID(),

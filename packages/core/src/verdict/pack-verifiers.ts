@@ -9,9 +9,17 @@
  * record hashes).
  *
  * HTTP namespace (plan §8 / D1, honest transport semantics):
- * `http:frontend-request-observed` has NO independent browser/test
- * observation channel and always grades blocking `missing` before any
- * evidence is examined. `http:request-observed` requires a
+ * `http:frontend-request-observed` remains REGISTERED BUT UNAVAILABLE:
+ * the supervised session channel (plan Phase 1) now attributes exchanges
+ * to a test session's dedicated proxy port inside witness-kept action
+ * intervals, but that attribution is by ORIGIN, not by browser — any
+ * process holding the session credential can send traffic through the
+ * port — so it still does not prove WHICH browser (or that any browser)
+ * produced an exchange, and enabling the contract on it would silently
+ * change its meaning (a Node-side direct request through the session
+ * port would satisfy "frontend request observed"). It always grades
+ * blocking `missing` before any evidence is examined, naming this gap.
+ * `http:request-observed` requires a
  * witness-observed `http.request` exchange in the bound run PLUS a
  * provenanced claimed `ui.action` anchor from the declaring test; a
  * suite-submitted network record can never satisfy
@@ -44,9 +52,11 @@ import { compareStrings } from '../graph/util.js';
  */
 const HTTP_OBSERVATION_UNTRUSTED = 'HTTP_OBSERVATION_UNTRUSTED';
 import {
+  registerContractCapabilities,
   registerContractVerifier,
   type ClaimEvidenceInput,
   type ClaimOutcome,
+  type ContractCapability,
   type ContractVerifier,
   type HttpRouteCandidate,
 } from './registry.js';
@@ -82,8 +92,16 @@ function payloadOf(record: ClaimEvidenceInput['evidence'][number]['record']): Re
 
 /**
  * Blocking reason for `http:frontend-request-observed` (plan §8 / D1):
- * no independent browser/test observation mechanism exists, so no
- * evidence can satisfy it. Returned BEFORE anchor or record examination.
+ * returned BEFORE anchor or record examination. DECISION (Phase 1
+ * review, 2026-09-13): the supervised session channel provides
+ * browser-SESSION-bound exchange observation (dedicated proxy port,
+ * witness-kept action intervals), but the attribution is by port
+ * ORIGIN, not by browser — a hostile test retains its own process and
+ * can drive its session port from Node inside an interval — so enabling
+ * the contract on that channel would silently change its meaning. It
+ * stays unavailable; the UI-semantic `crud:*` contracts carry the
+ * session-channel proof instead, backed by the persistence echo that a
+ * bare transport claim has no equivalent of.
  */
 function frontendProofUnavailable(input: ClaimEvidenceInput): ClaimOutcome {
   return {
@@ -92,7 +110,12 @@ function frontendProofUnavailable(input: ClaimEvidenceInput): ClaimOutcome {
       `'${input.obligation.id}': contract 'http:frontend-request-observed' has no independent ` +
       'browser/test observation channel: the witness observes HTTP exchanges but cannot prove ' +
       'which browser, UI action, or test produced an exchange; test attribution is suite-claimed. ' +
-      "Select the narrower transport contract 'http:request-observed' when a witness-observed " +
+      'The supervised session channel (plan Phase 1) attributes exchanges to a test session\'s ' +
+      'dedicated proxy port inside witness-kept action intervals, but that attribution is by ' +
+      'ORIGIN, not by browser — any process holding the session credential can send traffic ' +
+      'through the port — so enabling this contract on it would silently change its meaning. ' +
+      'Use the UI-semantic crud contracts for browser proof over the session channel, or the ' +
+      "narrower transport contract 'http:request-observed' when a witness-observed " +
       'HTTP exchange suffices',
     recordIds: [],
   };
@@ -659,9 +682,11 @@ function httpVerifier(input: ClaimEvidenceInput): ClaimOutcome {
   if (!SUPPORTED_HTTP_CONTRACTS.includes(input.obligation.contract)) {
     return unknownContract(input);
   }
-  // D1: the frontend contract has no independent browser/test observation
-  // channel — return blocking `missing` BEFORE anchor or record
-  // examination. No evidence can satisfy it under the current observer.
+  // Decision (pinned by tests, 2026-09-13 Phase 1 review): the frontend
+  // contract stays unavailable — the session channel binds exchanges to a
+  // session's proxy ORIGIN, not to a browser — so return blocking
+  // `missing` BEFORE anchor or record examination. No evidence can
+  // satisfy it; see {@link frontendProofUnavailable}.
   if (input.obligation.contract === 'http:frontend-request-observed') {
     return frontendProofUnavailable(input);
   }
@@ -750,12 +775,65 @@ function unknownContract(input: ClaimEvidenceInput): ClaimOutcome {
 /** True once registrations have run (idempotent across imports). */
 let registered = false;
 
+/**
+ * The http namespace's capability record (plan Phase 0 item 3): the two
+ * transport contracts are implemented over the witness HTTP proxy
+ * channel; `http:frontend-request-observed` stays registered but
+ * unavailable — the supervised session channel (plan Phase 1) binds
+ * exchanges to a session's proxy ORIGIN, not to a browser, so the
+ * independent browser/test observation the contract names still does not
+ * exist and enabling it would silently change its meaning.
+ */
+const HTTP_CAPABILITY: ContractCapability = {
+  namespace: 'http',
+  contracts: ['http:request-observed', 'http:response-status-ok'],
+  unavailableContracts: [
+    {
+      contract: 'http:frontend-request-observed',
+      reason:
+        'no independent browser/test observation channel exists: the witness observes HTTP ' +
+        'exchanges but cannot prove which browser, UI action, or test produced an exchange ' +
+        '(test attribution is suite-claimed). The supervised session channel (plan Phase 1) ' +
+        'attributes exchanges to a test session\'s dedicated proxy port inside witness-kept ' +
+        'action intervals, but that attribution is by ORIGIN, not by browser — a hostile test ' +
+        'retains its own process and can drive the port directly — so the contract stays ' +
+        'fail-closed rather than silently change meaning',
+    },
+  ],
+  observer:
+    'witness HTTP proxy channel: a witness-observed http.request exchange bound to the run ' +
+    '(origin engine-observed) plus a provenanced claimed ui.action anchor from the declaring test',
+  testKinds: ['browser-e2e', 'api-e2e'],
+  availability: { status: 'available' },
+};
+
+/** Builds the fail-closed capability record for one domain namespace. */
+function domainCapability(namespace: string, channel: string): ContractCapability {
+  return {
+    namespace,
+    // none — fail-closed: every contract of the namespace blocks.
+    contracts: [],
+    unavailableContracts: [],
+    observer: `engine-owned observer over application state (${channel})`,
+    testKinds: [],
+    availability: {
+      status: 'unavailable',
+      reason:
+        `no engine-owned state-observing producer exists for ${channel}; every contract of ` +
+        "the namespace fails closed (transport exchanges cannot prove these semantics), so " +
+        "the namespace advertises none — fail-closed",
+    },
+  };
+}
+
 /** Registers every pack namespace + the http namespace. Idempotent. */
 export function registerPackVerifiers(): void {
   if (registered) return;
   registered = true;
   registerContractVerifier('http', httpVerifier);
+  registerContractCapabilities(HTTP_CAPABILITY);
   for (const { namespace, channel } of DOMAIN_NAMESPACES) {
     registerContractVerifier(namespace, failClosedVerifier(namespace, channel));
+    registerContractCapabilities(domainCapability(namespace, channel));
   }
 }

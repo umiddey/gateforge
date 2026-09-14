@@ -32,6 +32,7 @@
     "@gateforge/http-contract": "*",
     "@gateforge/pack-fastapi": "*",
     "@gateforge/pack-http": "*",
+    "@gateforge/pack-playwright": "*",
     "@gateforge/pack-sqlalchemy": "*",
     "@gateforge/pack-task": "*",
     "picomatch": "^4.0.7",

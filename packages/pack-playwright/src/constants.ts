@@ -77,6 +77,48 @@ export const ENV_WITNESS_VERIFIER_KEY = 'GATEFORGE_WITNESS_VERIFIER_KEY';
 /** Opt-in reporter exit-code semantics (standalone runs only). */
 export const ENV_REPORTER_FAIL_RUN = 'GATEFORGE_REPORTER_FAIL_RUN';
 
+/**
+ * Absolute path of the runner-outcomes document the gateforge reporter
+ * writes for trusted runner supervision (plan Phase 4 item 4, ADR 0005
+ * D2): per-instance outcomes, attempts, expected failures, and the
+ * run-level fixture/teardown outcome. Set by the supervised adapter
+ * (`test-gates --changed`); when absent the reporter writes nothing —
+ * supervision then fails closed on the missing outcomes file.
+ */
+export const ENV_OUTCOMES_FILE = 'GATEFORGE_OUTCOMES_FILE';
+
+/**
+ * Run-state file (written by the orchestrating CLI) carrying the mapped
+ * obligation claims for sidecar/native-mapped tests, keyed by
+ * `<file>#<titlePath.join('>')>` (the reconciliation key). The reporter
+ * carries these claims on the session-open path (Phase 4 claim
+ * injection) so their evidence lands on the right claims; native
+ * annotations keep working unchanged.
+ */
+export const CLAIM_INJECTIONS_FILE = 'claim-injections.json';
+
+/** Run-state file carrying the sealed supervision execution result. */
+export const EXECUTION_RESULT_FILE = 'execution-result.json';
+
+/**
+ * Run-state spool directory (enforcement-review fix 3): the runner-side
+ * reporter writes test lifecycle events (testBegin/testEnd with outcome)
+ * as NUL-safe JSON lines under `<stateDir>/spool/<runId>/`; the trusted
+ * CLI drains them and performs the witness supervisor calls (session
+ * open/close) with credentials that exist ONLY in the CLI process. The
+ * runner child holds no supervisor rights.
+ */
+export const SPOOL_DIR_NAME = 'spool';
+
+/** The spool's event file (JSON lines; consumed by the CLI drain loop). */
+export const SPOOL_EVENTS_FILE = 'events.jsonl';
+
+/** Run-state file carrying the authenticated gate receipt. */
+export const GATE_RECEIPT_FILE = 'receipt.json';
+
+/** Run-state diagnostics report (plan §3.5; never witness evidence). */
+export const DIAGNOSTICS_REPORT_FILE = 'diagnostics.json';
+
 /** Witness file inside the state dir carrying the spawned URL. */
 export const WITNESS_URL_FILE = 'witness-url.json';
 

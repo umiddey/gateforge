@@ -14,15 +14,27 @@ import { createServer } from 'node:http';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordIdOf } from '@gateforge/core';
-import { GateforgeReporter } from '../src/reporter/reporter.js';
-import { ledgerRowFor } from '../src/reporter/ledger.js';
+import { gateSummaryLine, GateforgeReporter } from '../src/reporter/reporter.js';
+import { ledgerRowFor, type LedgerRow } from '../src/reporter/ledger.js';
 import { startWitness } from '../src/witness/server.js';
 import { startMarkerServer } from './marker-server.js';
-import { makeTempProject, writeFixtureProject, writeHonestAdapter, FINGERPRINT } from './helpers.js';
+import {
+  makeTempProject,
+  writeFixtureProject,
+  writeHonestAdapter,
+  openSupervisorSession,
+  beginJourneyInterval,
+  endJourneyInterval,
+  FINGERPRINT,
+  type SupervisorSession,
+} from './helpers.js';
 import { WitnessClient } from '../src/fixture/witness-client.js';
 
 const RUN_ID = '6f1c3f90-2d5e-4b1a-9c6d-0f0e2b8a1c9d';
 const TOKEN = 'reporter-token';
+// The supervisor capability (enforcement-review fix 3): session open/close
+// is verifier-key authenticated; tests acting as the supervisor present it.
+const VERIFIER_KEY = 'reporter-verifier-secret';
 const CREATE = 'tenant.accounts:persistence:create';
 const UPDATE = 'tenant.accounts:persistence:update';
 const TEST_ID = 'spec.js > honest create';
@@ -88,6 +100,7 @@ async function setupRun(options: { adapterFingerprint?: string } = {}) {
   const witness = await startWitness({
     runId: RUN_ID,
     token: TOKEN,
+    verifierKey: VERIFIER_KEY,
     stateDir,
     adaptersDir: join(project, '.gateforge/adapters'),
     classificationsPath: join(project, '.gateforge/effective-classifications.yml'),
@@ -103,14 +116,17 @@ async function setupRun(options: { adapterFingerprint?: string } = {}) {
  * Posts one honest create flow's records through the real witness:
  * engine-side pre-observation (entity absent), the app-side create, then
  * the UI-action/visible assertions and the persistence verify bound to
- * the pre-observation (create postcondition, audit round 4).
+ * the pre-observation (create postcondition, audit round 4). Phase 1:
+ * every submission carries the supervisor-opened session credential.
  */
-async function postHonestCreate(client: WitnessClient, appBase: string): Promise<string> {
+async function postHonestCreate(client: WitnessClient, appBase: string, session: SupervisorSession): Promise<string> {
+  const channel = { sessionId: session.sessionId, sessionToken: session.sessionToken };
   // 1. Engine-side "before": the marker target's observed id set.
   const pre = await client.preObserve({
     resourceId: 'tenant.accounts',
     testId: TEST_ID,
     claimId: CREATE,
+    ...channel,
   });
   // 2. The app-side effect of the UI create (mints the entity).
   const created = (await (
@@ -127,6 +143,7 @@ async function postHonestCreate(client: WitnessClient, appBase: string): Promise
     kind: 'ui.action',
     payload: { operation: 'create', entityId, fields: { first_name: 'Ada', last_name: 'Lovelace' } },
     testId: TEST_ID,
+    ...channel,
   });
   await client.postRecords({
     claimId: CREATE,
@@ -136,6 +153,7 @@ async function postHonestCreate(client: WitnessClient, appBase: string): Promise
       fields: { first_name: 'Ada', last_name: 'Lovelace', status: created.status },
     },
     testId: TEST_ID,
+    ...channel,
   });
   // 4. Engine-observed persistence, bound to the pre-observation.
   await client.verifyPersistence({
@@ -143,6 +161,7 @@ async function postHonestCreate(client: WitnessClient, appBase: string): Promise
     entityId,
     testId: TEST_ID,
     claimId: CREATE,
+    ...channel,
     preObservationId: pre.observationId,
   });
   return entityId;
@@ -180,7 +199,8 @@ describe('reporter artifacts (claims.json / records.json)', () => {
       process.env.GATEFORGE_STATE_DIR = run.stateDir;
       process.env.GATEFORGE_OBLIGATIONS = join(run.project, '.gateforge/test-gates/obligations.json');
       const client = new WitnessClient(run.witness.url, TOKEN);
-      await postHonestCreate(client, run.target.url);
+      const session = await openSupervisorSession(run.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      await postHonestCreate(client, run.target.url, session);
 
       // Adversarial: try to plant a fabricated consistent bundle in the
       // state dir BEFORE the reporter writes (the reporter must
@@ -408,11 +428,14 @@ describe('GF-24 registry mismatch', () => {
     try {
       const client = new WitnessClient(run.witness.url, TOKEN);
       // A record submitted under a test that declares NO gateforge claim.
+      const session = await openSupervisorSession(run.witness.url, TOKEN, 'bypass-test-no-claim', 0, VERIFIER_KEY);
       await client.postRecords({
         claimId: UPDATE,
         kind: 'ui.action',
         payload: { operation: 'update', entityId: 'acc-1', fields: {} },
         testId: 'bypass-test-no-claim',
+        sessionId: session.sessionId,
+        sessionToken: session.sessionToken,
       });
       saveEnv('GATEFORGE_WITNESS_URL', 'GATEFORGE_RUN_TOKEN', 'GATEFORGE_STATE_DIR', 'GATEFORGE_OBLIGATIONS');
       process.env.GATEFORGE_WITNESS_URL = run.witness.url;
@@ -445,7 +468,8 @@ describe('reporter ledger grading', () => {
       process.env.GATEFORGE_STATE_DIR = run.stateDir;
       process.env.GATEFORGE_OBLIGATIONS = join(run.project, '.gateforge/test-gates/obligations.json');
       const client = new WitnessClient(run.witness.url, TOKEN);
-      await postHonestCreate(client, run.target.url);
+      const session = await openSupervisorSession(run.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      await postHonestCreate(client, run.target.url, session);
       await runReporter(run.stateDir, [
         {
           id: TEST_ID,
@@ -554,6 +578,7 @@ describe('reporter ledger grading', () => {
     const witness = await startWitness({
       runId: RUN_ID,
       token: TOKEN,
+      verifierKey: VERIFIER_KEY,
       stateDir,
       classificationsPath: join(project, '.gateforge/claims-classifications.yml'),
       proxyTarget: target.url,
@@ -566,8 +591,13 @@ describe('reporter ledger grading', () => {
       process.env.GATEFORGE_STATE_DIR = stateDir;
       process.env.GATEFORGE_OBLIGATIONS = join(project, '.gateforge/test-gates/obligations.json');
 
-      // Real proxied traffic (a witness-observed HTTP exchange)…
-      const forward = await fetch(`${witness.proxyUrl as string}/ops/frontend-errors`, {
+      // Real proxied traffic (a witness-observed HTTP exchange)… — under
+      // the supervisor-opened session, through its observation channel,
+      // inside a recorded action interval (Phase 1).
+      const session = await openSupervisorSession(witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      expect(session.proxyUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      const intervalId = await beginJourneyInterval(witness.url, TOKEN, session, 'create');
+      const forward = await fetch(`${session.proxyUrl as string}/ops/frontend-errors`, {
         method: 'POST',
       });
       expect(forward.status).toBe(201);
@@ -579,13 +609,18 @@ describe('reporter ledger grading', () => {
         claimId: HTTP_CLAIM,
         method: 'POST',
         path: '/ops/frontend-errors',
+        sessionId: session.sessionId,
+        sessionToken: session.sessionToken,
       });
+      await endJourneyInterval(witness.url, TOKEN, session, intervalId);
       // …plus the provenanced claimed ui.action anchor.
       await client.postRecords({
         claimId: HTTP_CLAIM,
         kind: 'ui.action',
         payload: { operation: 'create', entityId: 'frontend-error-1', fields: {} },
         testId: TEST_ID,
+        sessionId: session.sessionId,
+        sessionToken: session.sessionToken,
       });
 
       await runReporter(stateDir, [
@@ -717,5 +752,52 @@ describe('reporter ledger grading', () => {
     expect(row.verdict).toBe('missing');
     expect(row.verdict).not.toBe('satisfied');
     expect(row.reason ?? '').toContain('no route inventory context');
+  });
+});
+
+describe('aggregate honesty (plan Phase 4 item 7): the reporter is never the final gate', () => {
+  const row = (verdict: LedgerRow['verdict']): LedgerRow => ({
+    claim: CREATE,
+    testId: TEST_ID,
+    testFile: 'e2e/accounts.spec.ts',
+    verdict,
+    reason: null,
+    recordIds: [],
+    trustTier: 'witnessed',
+  });
+
+  it('satisfied claimed rows with UNCLAIMED obligations print NOT PASSED, never PASS', () => {
+    const line = gateSummaryLine([row('satisfied')], 1);
+    expect(line).toMatch(/GATEFORGE GATE: NOT PASSED/);
+    expect(line).toMatch(/1 unclaimed obligation\(s\) still block/);
+    expect(line).not.toMatch(/GATEFORGE GATE: PASS/);
+  });
+
+  it('every summary line names the CLI as the only final gate result', () => {
+    for (const line of [
+      gateSummaryLine([row('satisfied')], 0),
+      gateSummaryLine([row('satisfied')], 2),
+      gateSummaryLine([row('missing')], 0),
+      gateSummaryLine([], 0),
+      gateSummaryLine([], 3),
+    ]) {
+      expect(line).toMatch(/final gate result: the gateforge CLI \(test-gates\/check\), never this reporter/);
+    }
+  });
+
+  it('a blocking claimed row prints FAIL even when unclaimed obligations exist', () => {
+    const line = gateSummaryLine([row('missing')], 2);
+    expect(line).toMatch(/GATEFORGE GATE: FAIL/);
+    expect(line).not.toMatch(/PASS \(|NOT PASSED/);
+  });
+
+  it('zero claims with zero unclaimed prints NO CLAIMS (no silent all-clear)', () => {
+    expect(gateSummaryLine([], 0)).toMatch(/GATEFORGE GATE: NO CLAIMS/);
+  });
+
+  it('fully claimed + satisfied + zero unclaimed is the only PASS — still CLI-authority-scoped', () => {
+    const line = gateSummaryLine([row('satisfied'), row('satisfied')], 0);
+    expect(line).toMatch(/GATEFORGE GATE: PASS \(2\/2 claimed obligations satisfied/);
+    expect(line).toMatch(/never this reporter/);
   });
 });

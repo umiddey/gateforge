@@ -1,39 +1,61 @@
 /**
- * Trusted evidence primitives (plan §5.3, invariant 6, GF-22).
+ * Trusted evidence primitives (plan §5.3, invariant 6, GF-22; engine-
+ * browser rewrite per plan Phase 1 item 4).
  *
  * The fixture exposes EXACTLY five surfaces — `ui`, `visible`,
  * `persistence`, `http`, `finalize` — on a frozen object with a
- * closure-private record list. There is no boolean/escape-hatch primitive (no
- * `prove(kind, true)`), no way to state an entity id for persistence
- * evidence, and no way to substitute an adapter: persistence evidence is
- * minted ONLY by the engine-side witness running the reviewed adapter
- * (GET-only), stamped from the ADAPTER RESPONSE.
+ * closure-private record list. It is APPLICATION-INDEPENDENT: the pack
+ * carries no Accounts strings, no product selectors, and no route
+ * knowledge. The CONSUMER supplies a declarative {@link SurfaceDescriptor}
+ * (list page, row/field selectors, form templates, archive control,
+ * status values) — the Accounts description lives in the example tree
+ * (`example/e2e/accounts-surface.js`), not here.
  *
- * UI primitives drive the RENDERED app (create/read/update/archive) and
- * read the visible result back from the DOM, so the entityId in a
- * `ui.action` record is observed, not declared. Receipts returned by UI
- * primitives are frozen and branded with a per-instance symbol —
- * `visible.confirm`/`persistence.verify` reject anything without the
- * own-property brand (GF-22: hand-rolled or `Object.create`-branded
- * forgeries fail closed).
+ * ENGINE-OWNED BROWSER (plan Phase 1 item 4): the `ui.*` primitives no
+ * longer drive a worker-side page. They register the consumer surface
+ * with the witness and ask the ENGINE to perform each constrained
+ * operation on its own page (`POST /browser/action`), then to re-read
+ * the rendered result (`POST /browser/visible`). Test code supplies
+ * INTENT (fields, entity id, claims) only — it never touches the engine
+ * page, so it cannot manufacture DOM state, intercept the application
+ * response, or substitute script/API effects and receive browser
+ * credit. Every `ui.action` / `ui.visible-result` record the gate
+ * grades is issued engine-side with origin `engine-observed`;
+ * suite-submitted UI records never satisfy browser contracts.
  *
- * Every record is submitted to the loopback witness service under EVERY
- * claim the test declares (one obligation id per annotation); the
- * witness issues service provenance, and the ENGINE decides verdicts —
- * never the test. A test using primitives but declaring no claim, or a
- * claim whose evidence was never collected, fails `finalize()` (the
- * gate would grade the claim `missing` anyway; finalize mirrors that
- * fail-fast in the test).
+ * For create/update the action record's `fields` are the ENTERED input
+ * the engine typed (plan §3.6 exact-value echo): the engine
+ * echo-checks them against the independently fetched persisted fields,
+ * and a mismatch fails the obligation with `EVIDENCE_VALUE_MISMATCH`
+ * even when the status was 2xx.
+ *
+ * Receipts returned by UI primitives are frozen and branded with a
+ * per-instance symbol — `visible.confirm`/`persistence.verify` reject
+ * anything without the own-property brand (GF-22: hand-rolled or
+ * `Object.create`-branded forgeries fail closed).
+ *
+ * Every engine call runs under the SUPERVISOR-ISSUED test session. The
+ * trusted reporter opens one session per started test (`runId,
+ * sessionId, testId, worker`) and the fixture resolves it by the exact
+ * (workerIndex, testId) pair; a suite-supplied testId or annotation
+ * alone cannot mint records for an arbitrary session, because the
+ * witness rejects submissions without a valid OPEN session and forces
+ * the record's testId onto the session's supervisor-registered value.
+ * Sealing (test end) rejects all late submissions and closes the
+ * session's engine browser context.
  */
-import type { Locator, Page, TestInfo } from 'playwright/test';
+import type { Page, TestInfo } from 'playwright/test';
+import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
 import {
-  CLAIM_ANNOTATION_TYPE,
-  ENV_APP_BASE_URL,
-  ENV_TARGET_BASE_URL,
-  UI_ACTION_KIND,
-  UI_VISIBLE_RESULT_KIND,
-} from '../constants.js';
+  SURFACE_DESCRIPTOR_VERSION,
+  declaredSurfaceFields,
+  validateSurface,
+  type SurfaceDescriptor,
+} from '../surface.js';
+import type { SessionCredential } from '../witness/types.js';
 import { WitnessClient } from './witness-client.js';
+
+export { SURFACE_DESCRIPTOR_VERSION, type SurfaceDescriptor };
 
 /** A UI-action receipt: the ONLY token `visible`/`persistence` accept. */
 export interface Receipt {
@@ -44,9 +66,9 @@ export interface Receipt {
   readonly fields: Record<string, string>;
   readonly mode: 'row' | 'form';
   /**
-   * Create only: the engine-side pre-observation taken BEFORE the UI
-   * action, bound into the persistence record so the engine can verify
-   * the entity was absent before (create postcondition, audit round 4).
+   * Create/update only: the engine-side pre-observation taken BEFORE the
+   * UI action, bound into the persistence record so the engine can
+   * verify the before/after delta (create postcondition, audit round 4).
    */
   readonly preObservationId?: string;
 }
@@ -65,9 +87,14 @@ export interface PersistenceOutcome {
 /** The frozen, no-escape-hatch evidence surface. */
 export interface EvidenceApi {
   readonly ui: Readonly<{
-    create(input: { fields: { first_name: string; last_name: string } }): Promise<Receipt>;
+    /**
+     * The ENGINE drives the rendered create form with the DECLARED input
+     * fields (plan §3.6: the journey's entered values are what the
+     * engine echo-checks against the persisted state).
+     */
+    create(input: { fields: Record<string, string> }): Promise<Receipt>;
     read(input: { entityId: string }): Promise<Receipt>;
-    update(input: { entityId: string; fields: Partial<{ first_name: string; last_name: string }> }): Promise<Receipt>;
+    update(input: { entityId: string; fields: Record<string, string> }): Promise<Receipt>;
     archive(input: { entityId: string }): Promise<Receipt>;
   }>;
   readonly visible: Readonly<{
@@ -78,11 +105,12 @@ export interface EvidenceApi {
   }>;
   /**
    * ADR 0004 D7 (plan §8 / D1): consumes one witness-observed HTTP
-   * exchange for an http:* claim. Transport-only: the witness observed
-   * the exchange; test attribution is suite-claimed. Pass an explicit
-   * `obligationId` when the test declares more than one claim —
-   * omitted selection with several candidates throws instead of
-   * silently binding the first claim.
+   * exchange for an http:* claim. Only an exchange the ENGINE captured
+   * during its own action interval can be consumed — a request supplied
+   * by another test/worker (or by setup traffic outside every interval)
+   * is never credited. Pass an explicit `obligationId` when the test
+   * declares more than one claim — omitted selection with several
+   * candidates throws instead of silently binding the first claim.
    */
   http: Readonly<{
     observe(request: {
@@ -142,252 +170,259 @@ export function resourceIdOfClaim(claim: string): string {
   return colon === -1 ? claim : claim.slice(0, colon);
 }
 
+/** Bounded wait while the supervisor's session open lands (see below). */
+const DEFAULT_SESSION_RESOLVE_TIMEOUT_MS = 5000;
+/** Poll cadence for the session resolve (supervisor→witness RPC latency). */
+const SESSION_RESOLVE_POLL_MS = 50;
+
+/**
+ * Resolves the supervisor-issued session credential for this test: the
+ * fixture proves it runs on (workerIndex, testId) and the witness
+ * answers only while THAT session is open. `onTestBegin` (supervisor)
+ * and the test body (worker) race, so a bounded poll absorbs the
+ * dispatch latency; a missing session at the deadline fails closed —
+ * there is no fixture path that mints a credential itself.
+ */
+async function resolveSessionCredential(
+  witness: WitnessClient,
+  testInfo: { testId: string; workerIndex: number; title: string },
+  timeoutMs: number,
+): Promise<SessionCredential> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const resolved = await witness.resolveSession({
+      testId: testInfo.testId,
+      workerIndex: testInfo.workerIndex,
+    });
+    if (resolved !== null) {
+      if (resolved.testId !== testInfo.testId) {
+        throw new Error(
+          `session resolve returned testId '${resolved.testId}' for test '${testInfo.title}' ` +
+            `(expected '${testInfo.testId}') — refusing a mismatched session binding`,
+        );
+      }
+      return resolved;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `no open witness session for test '${testInfo.title}' (workerIndex ` +
+          `${String(testInfo.workerIndex)}, testId '${testInfo.testId}'): the trusted supervisor ` +
+          '(the gateforge Playwright reporter) opens one session per started test and evidence ' +
+          'primitives submit only under it — records without a valid open session are rejected ' +
+          'by the witness (fail closed)',
+      );
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, SESSION_RESOLVE_POLL_MS));
+  }
+}
+
 /**
  * Creates the evidence API for one test.
  *
  * Args:
- *   page: the test's page (the primitives drive the rendered UI on it).
- *   testInfo: the running test's info (annotations + testId).
- *   baseURL: the app-under-test base; defaults to GATEFORGE_APP_BASE_URL
- *     then GATEFORGE_TARGET_BASE_URL.
+ *   page: IGNORED for evidence (kept for call-shape compatibility) —
+ *     the engine drives its own page; the worker page is never an
+ *     evidence channel.
+ *   testInfo: the running test's info (annotations, testId, workerIndex).
+ *   surface: REQUIRED consumer-declared {@link SurfaceDescriptor} — the
+ *     pack carries no application-specific selectors (plan Phase 1
+ *     item 7). Registered with the witness; the ENGINE drives it
+ *     against the provisioned attested subject (fake-frontend fix:
+ *     the driven origin comes from trusted witness configuration,
+ *     never from suite input — there is no app-base parameter here
+ *     by design).
  *   client: witness transport override (tests inject their own).
+ *   session: pre-resolved session credential (harnesses that opened the
+ *     session themselves); default resolves it from the supervisor
+ *     channel. A credential whose testId differs from this test's is
+ *     refused.
+ *   sessionResolveTimeoutMs: bounded wait for the supervisor's session
+ *     open (harness tuning; default 5s).
  *
  * Returns:
- *   EvidenceApi: the frozen primitive surface.
+ *   Promise<EvidenceApi>: the frozen primitive surface.
  *
  * Throws:
- *   Error: when the test declares no gateforge claim, when no app base
- *   or witness is wired, or when an action/verification fails fail-closed.
+ *   Error: on a missing/outdated surface descriptor (migration error
+ *     naming the new required `surface` parameter), when the test
+ *     declares no gateforge claim and its session carries no
+ *     supervisor-registered (mapped) claims, when no app base or witness
+ *     or OPEN session is wired, or when an action/verification fails
+ *     fail-closed.
  */
-export function createEvidence({
+export async function createEvidence({
   page,
   testInfo,
-  baseURL,
+  surface,
   client,
+  session,
+  sessionResolveTimeoutMs = DEFAULT_SESSION_RESOLVE_TIMEOUT_MS,
 }: {
-  page: Page;
+  page?: Page;
   testInfo: TestInfo;
-  baseURL?: string;
+  surface?: SurfaceDescriptor;
   client?: WitnessClient;
-}): EvidenceApi {
-  const claims = claimsFromAnnotations(testInfo.annotations);
+  session?: SessionCredential;
+  sessionResolveTimeoutMs?: number;
+}): Promise<EvidenceApi> {
+  void page; // the engine drives its own page; the worker page is never evidence
+  // Versioned compatibility (plan Phase 1 item 7): the old no-surface
+  // shape carried Accounts selectors INSIDE the pack — that behavior was
+  // moved to the consumer. Never silently keep it.
+  if (surface === undefined || surface === null) {
+    throw new Error(
+      "createEvidence now requires a consumer-declared 'surface' descriptor " +
+        `(SurfaceDescriptor, schemaVersion ${String(SURFACE_DESCRIPTOR_VERSION)}): pass the ` +
+        'declarative surface (list page, row/field selectors, form templates, archive control, ' +
+        'status values) with the evidence call or via `test.extend({ surface })`. The previous ' +
+        'Accounts-specific fixture was removed from the pack (plan Phase 1 item 7) — see ' +
+        'example/e2e/accounts-surface.js for a complete consumer declaration',
+    );
+  }
+  // Worker-side structural validation (fail fast with the exact missing
+  // piece); the ENGINE re-validates authoritatively at registration —
+  // worker approval never substitutes for it.
+  const descriptor = validateSurface(surface);
+  const testId = testInfo.testId;
+  // The witness transport is built LAZILY: supplying a pre-resolved
+  // session credential (harnesses) must not require witness env wiring
+  // until a primitive actually talks to the witness.
+  let witnessInstance: WitnessClient | null = null;
+  function witness(): WitnessClient {
+    witnessInstance ??= client ?? new WitnessClient();
+    return witnessInstance;
+  }
+  // The supervisor-issued session credential (Phase 1). Every engine
+  // call carries it; the witness forces the record's testId onto the
+  // session's supervisor-registered value.
+  const credential =
+    session ??
+    (await resolveSessionCredential(
+      witness(),
+      {
+        testId,
+        workerIndex: testInfo.workerIndex,
+        title: testInfo.title,
+      },
+      sessionResolveTimeoutMs,
+    ));
+  if (credential.testId !== testId) {
+    throw new Error(
+      `the supplied session binds testId '${credential.testId}' but this test is '${testId}' — ` +
+        'records can only be minted for the supervisor-registered test of the open session',
+    );
+  }
+  // Effective claims: native annotations first, plus the
+  // supervisor-registered claims this session was opened with (Phase 4
+  // claim injection). The injection covers helper-based journeys with NO
+  // annotation whose obligation claims come from the tracked
+  // `.gateforge/test-map.yml` sidecar (plan E02): the orchestrating CLI
+  // resolves the sidecar against the catalog and the supervisor carries
+  // the mapped claims on the session-open path. Claims remain
+  // DECLARATIONS — they route evidence onto obligation identities; the
+  // witness still forces every record onto the supervisor-registered
+  // session/test identity and the gate grades witnessed evidence only.
+  const claims = [
+    ...new Set([...claimsFromAnnotations(testInfo.annotations), ...(credential.claims ?? [])]),
+  ].sort();
   if (claims.length === 0) {
     throw new Error(
       `test '${testInfo.title}' uses gateforge evidence primitives but declares no ` +
-        `'${CLAIM_ANNOTATION_TYPE}' annotation carrying the claimed obligation id`,
+        `'${CLAIM_ANNOTATION_TYPE}' annotation and its session carries no supervisor-registered ` +
+        '(mapped) claims — annotate the test or map it in .gateforge/test-map.yml',
     );
   }
-  const appBase = baseURL ?? process.env[ENV_APP_BASE_URL] ?? process.env[ENV_TARGET_BASE_URL];
-  if (appBase === undefined || appBase === '') {
-    throw new Error(
-      `no app-under-test base is wired: set ${ENV_APP_BASE_URL} (or ${ENV_TARGET_BASE_URL}) ` +
-        'so UI primitives can drive the rendered app',
-    );
-  }
-  const witness = client ?? new WitnessClient();
-  const testId = testInfo.testId;
+  const sessionChannel = {
+    sessionId: credential.sessionId,
+    sessionToken: credential.sessionToken,
+  };
+  // Register the consumer surface with the witness lazily on the first
+  // UI call (construction performs no I/O): the engine validates it and
+  // drives every later action against the provisioned attested subject.
+  // No origin crosses here — the driven target comes from trusted
+  // witness configuration only. Registration proves nothing by itself.
   const receiptBrand = makeReceiptBrand();
-
-  async function submit(kind: string, payload: unknown): Promise<void> {
-    for (const claim of claims) {
-      await witness.postRecords({ claimId: claim, kind, payload, testId });
-    }
+  let surfaceRegistered = false;
+  async function ensureSurfaceRegistered(): Promise<void> {
+    if (surfaceRegistered) return;
+    await witness().registerBrowserSurface({
+      ...sessionChannel,
+      testId,
+      surface: descriptor as unknown as Record<string, unknown>,
+    });
+    surfaceRegistered = true;
   }
 
-  // ---------- DOM helpers for the rendered example app ----------
-
-  async function gotoList(): Promise<void> {
-    await page.goto(`${appBase}/`);
-    await page.waitForSelector('h1:has-text("Accounts")');
-  }
-
-  async function collectIds(): Promise<Set<string>> {
-    const ids = new Set<string>();
-    const rows = page.locator('tbody tr');
-    const count = await rows.count();
-    for (let i = 0; i < count; i++) {
-      const text = (await rows.nth(i).locator('td').first().textContent())?.trim() ?? '';
-      if (text !== '') ids.add(text);
-    }
-    return ids;
-  }
-
-  async function findRow(entityId: string): Promise<Locator | null> {
-    const rows = page.locator('tbody tr');
-    const count = await rows.count();
-    for (let i = 0; i < count; i++) {
-      const row = rows.nth(i);
-      if (((await row.locator('td').first().textContent())?.trim() ?? '') === entityId) return row;
-    }
-    return null;
-  }
-
-  async function readRowFields(row: Locator): Promise<Record<string, string>> {
-    const cells = row.locator('td');
-    const text = (index: number) =>
-      cells.nth(index).textContent().then((t) => (t ?? '').trim());
-    return { first_name: await text(1), last_name: await text(2), status: await text(3) };
-  }
-
-  async function readFormFields(): Promise<Record<string, string>> {
-    return {
-      first_name: await page.locator('input[name="first_name"]').inputValue(),
-      last_name: await page.locator('input[name="last_name"]').inputValue(),
+  /**
+   * Asks the ENGINE to perform one constrained surface operation and
+   * wraps its observation in a branded receipt. The engine verified the
+   * rendered control, the application request, and the visible outcome
+   * itself — the receipt carries the engine-observed entity id and the
+   * ENTERED input (exact-value echo source), never suite assertions.
+   */
+  async function engineAction(
+    operation: 'create' | 'read' | 'update' | 'delete',
+    resourceId: string,
+    input: { fields?: Record<string, string>; entityId?: string },
+  ): Promise<{ receipt: Omit<Receipt, 'kind'>; preObservationId: string | null }> {
+    await ensureSurfaceRegistered();
+    const response = await witness().browserAction({
+      ...sessionChannel,
+      testId,
+      claimIds: [...claims],
+      operation,
+      ...(input.fields !== undefined ? { fields: input.fields } : {}),
+      ...(input.entityId !== undefined ? { entityId: input.entityId } : {}),
+    });
+    const receipt: Omit<Receipt, 'kind'> = {
+      operation,
+      resourceId,
+      entityId: response.entityId,
+      fields: response.enteredFields,
+      mode: operation === 'read' ? 'form' : 'row',
+      ...(response.preObservationId !== null ? { preObservationId: response.preObservationId } : {}),
     };
+    return { receipt, preObservationId: response.preObservationId };
   }
 
-  async function waitListAfterAction(): Promise<void> {
-    await page.waitForURL((url) => url.pathname === '/');
-    await page.waitForSelector('h1:has-text("Accounts")');
-  }
-
-  // ---------- UI primitives (plan §5.3 step 1) ----------
+  // ---------- UI primitives (engine-driven) ----------
 
   const ui = {
-    async create(input: { fields: { first_name: string; last_name: string } }): Promise<Receipt> {
-      const { first_name, last_name } = input.fields;
-      if (!first_name || !last_name) {
-        throw new Error('ui.create requires { fields: { first_name, last_name } }');
-      }
+    async create(input: { fields: Record<string, string> }): Promise<Receipt> {
+      const fields = declaredSurfaceFields('ui.create', input.fields, descriptor.create.fields);
       const resourceId = resourceIdOfClaim(claims[0] as string);
-      // Engine-side pre-observation BEFORE the action (audit rounds 4-5):
-      // the witness snapshots the observed id set so the persistence
-      // record can prove the entity was absent before the create.
-      const preObservation = await witness.preObserve({
-        resourceId,
-        testId,
-        claimId: claims[0] as string,
-      });
-      await gotoList();
-      const before = await collectIds();
-      await page.goto(`${appBase}/accounts/new`);
-      await page.waitForSelector('form[action="/accounts"]');
-      await page.locator('input[name="first_name"]').fill(first_name);
-      await page.locator('input[name="last_name"]').fill(last_name);
-      await page.locator('button[type="submit"]').click();
-      await waitListAfterAction();
-      const created = [...(await collectIds())].filter((id) => !before.has(id));
-      if (created.length !== 1) {
-        throw new Error(`ui.create expected exactly one new entity, saw ${created.length}`);
-      }
-      const entityId = created[0] as string;
-      const row = await findRow(entityId);
-      if (row === null) throw new Error(`ui.create: rendered UI shows no row for ${entityId}`);
-      const visible = await readRowFields(row);
-      if (visible.status !== 'active') {
-        throw new Error(`ui.create: created entity ${entityId} rendered with status '${visible.status}'`);
-      }
-      const fields = { first_name: visible['first_name'] ?? '', last_name: visible['last_name'] ?? '' };
-      await submit(UI_ACTION_KIND, { operation: 'create', entityId, fields });
-      return receiptBrand.stamp({
-        operation: 'create',
-        resourceId,
-        entityId,
-        fields,
-        mode: 'row',
-        preObservationId: preObservation.observationId,
-      });
+      const { receipt } = await engineAction('create', resourceId, { fields });
+      return receiptBrand.stamp(receipt);
     },
 
     async read(input: { entityId: string }): Promise<Receipt> {
       const { entityId } = input;
       if (!entityId) throw new Error('ui.read requires { entityId }');
       const resourceId = resourceIdOfClaim(claims[0] as string);
-      await gotoList();
-      const row = await findRow(entityId);
-      if (row === null) {
-        throw new Error(`ui.read: rendered UI exposes no row for entity ${entityId}`);
-      }
-      const edit = row.locator('a[href$="/edit"]');
-      if ((await edit.count()) === 0) {
-        throw new Error(`ui.read: rendered UI exposes no navigation control for entity ${entityId}`);
-      }
-      await edit.click();
-      await page.waitForSelector(`form[action="/accounts/${entityId}"]`);
-      const fields = await readFormFields();
-      await submit(UI_ACTION_KIND, { operation: 'read', entityId, fields });
-      return receiptBrand.stamp({ operation: 'read', resourceId, entityId, fields, mode: 'form' });
+      const { receipt } = await engineAction('read', resourceId, { entityId });
+      return receiptBrand.stamp(receipt);
     },
 
     async update(
-      input: { entityId: string; fields: Partial<{ first_name: string; last_name: string }> },
+      input: { entityId: string; fields: Record<string, string> },
     ): Promise<Receipt> {
-      const { entityId, fields } = input;
-      if (!entityId || typeof fields !== 'object' || fields === null) {
-        throw new Error('ui.update requires { entityId, fields }');
-      }
+      const { entityId } = input;
+      const fields = declaredSurfaceFields('ui.update', input.fields, descriptor.edit.fields);
       const resourceId = resourceIdOfClaim(claims[0] as string);
-      // Engine-side entity pre-observation BEFORE the change (audit
-      // rounds 4-5): the witness snapshots the observed fields so the
-      // persistence record can prove an actual before/after delta.
-      const preObservation = await witness.preObserve({
-        resourceId,
-        testId,
-        claimId: claims[0] as string,
-        entityId,
-      });
-      await gotoList();
-      const row = await findRow(entityId);
-      if (row === null) {
-        throw new Error(`ui.update: rendered UI exposes no row for entity ${entityId}`);
-      }
-      await row.locator('a[href$="/edit"]').click();
-      await page.waitForSelector(`form[action="/accounts/${entityId}"]`);
-      if (fields.first_name !== undefined) await page.locator('input[name="first_name"]').fill(fields.first_name);
-      if (fields.last_name !== undefined) await page.locator('input[name="last_name"]').fill(fields.last_name);
-      // The edit page renders TWO submit buttons (save + archive);
-      // scope to the edit form's own save control.
-      await page.locator(`form[action="/accounts/${entityId}"] button:not([formaction])`).first().click();
-      await waitListAfterAction();
-      const updatedRow = await findRow(entityId);
-      if (updatedRow === null) {
-        throw new Error(`ui.update: entity ${entityId} vanished after update`);
-      }
-      const declared = Object.fromEntries(
-        Object.entries(fields).filter(([, value]) => value !== undefined),
-      ) as Record<string, string>;
-      await submit(UI_ACTION_KIND, { operation: 'update', entityId, fields: declared });
-      void (await readRowFields(updatedRow)); // observed; the engine judges agreement
-      return receiptBrand.stamp({
-        operation: 'update',
-        resourceId,
-        entityId,
-        fields: declared,
-        mode: 'row',
-        preObservationId: preObservation.observationId,
-      });
+      const { receipt } = await engineAction('update', resourceId, { fields, entityId });
+      return receiptBrand.stamp(receipt);
     },
 
     async archive(input: { entityId: string }): Promise<Receipt> {
       const { entityId } = input;
       if (!entityId) throw new Error('ui.archive requires { entityId }');
       const resourceId = resourceIdOfClaim(claims[0] as string);
-      await gotoList();
-      const row = await findRow(entityId);
-      if (row === null) {
-        throw new Error(`ui.archive: rendered UI exposes no row for entity ${entityId}`);
-      }
-      const control = row.locator(`form[action="/accounts/${entityId}/archive"] button`);
-      if ((await control.count()) === 0) {
-        throw new Error(`ui.archive: entity ${entityId} is already archived (no archive control rendered)`);
-      }
-      await control.click();
-      await waitListAfterAction();
-      const archivedRow = await findRow(entityId);
-      if (archivedRow === null) {
-        throw new Error(`ui.archive: entity ${entityId} vanished after archive`);
-      }
-      const visible = await readRowFields(archivedRow);
-      if (visible.status !== 'archived') {
-        throw new Error(`ui.archive: entity ${entityId} rendered status '${visible.status}', expected 'archived'`);
-      }
-      const fields = { status: 'archived' };
-      await submit(UI_ACTION_KIND, { operation: 'delete', entityId, fields });
-      return receiptBrand.stamp({ operation: 'delete', resourceId, entityId, fields, mode: 'row' });
+      const { receipt } = await engineAction('delete', resourceId, { entityId });
+      return receiptBrand.stamp({ ...receipt, operation: 'delete' });
     },
   };
 
-  // ---------- visible-result primitive (plan §5.3 step 2) ----------
+  // ---------- visible-result primitive (engine re-read) ----------
 
   const visible = {
     async confirm(receipt: Receipt): Promise<{ entityId: string; fields: Record<string, string> }> {
@@ -397,27 +432,16 @@ export function createEvidence({
             '(hand-rolled objects are rejected — GF-22)',
         );
       }
-      const fields =
-        receipt.mode === 'row'
-          ? await readRowFields((await requireRow(receipt.entityId))!)
-          : await readFormOn(receipt.entityId);
-      await submit(UI_VISIBLE_RESULT_KIND, { entityId: receipt.entityId, fields });
-      return { entityId: receipt.entityId, fields };
+      const response = await witness().browserVisible({
+        ...sessionChannel,
+        testId,
+        claimIds: [...claims],
+        entityId: receipt.entityId,
+        operation: receipt.operation,
+      });
+      return { entityId: response.entityId, fields: response.fields };
     },
   };
-
-  async function requireRow(entityId: string): Promise<Locator> {
-    const row = await findRow(entityId);
-    if (row === null) {
-      throw new Error(`visible.confirm: rendered UI exposes no row for entity ${entityId}`);
-    }
-    return row;
-  }
-
-  async function readFormOn(entityId: string): Promise<Record<string, string>> {
-    await page.waitForSelector(`form[action="/accounts/${entityId}"]`);
-    return readFormFields();
-  }
 
   // ---------- persistence primitive (plan §5.3 steps 3-4) ----------
 
@@ -429,11 +453,12 @@ export function createEvidence({
             '(hand-rolled objects are rejected — GF-22)',
         );
       }
-      const response = await witness.verifyPersistence({
+      const response = await witness().verifyPersistence({
         resourceId: receipt.resourceId,
         entityId: receipt.entityId,
         testId,
         claimId: claims[0] as string,
+        ...sessionChannel,
         ...(receipt.preObservationId !== undefined
           ? { preObservationId: receipt.preObservationId }
           : {}),
@@ -447,11 +472,12 @@ export function createEvidence({
   };
 
   // ---------- http observation (ADR 0004 D7, plan §8 / D1) ----------
-  // Consumes one witness-observed HTTP exchange the journey caused and
-  // binds the witnessed `http.request` record to the declared http:*
-  // obligation claims. Transport-only: test attribution is
-  // suite-claimed. Without real proxied traffic the witness answers
-  // 409 — the suite cannot mint network evidence.
+  // Consumes one ENGINE-CAPTURED exchange the engine's own action caused
+  // and binds the witnessed `http.request` record to the declared http:*
+  // obligation claims. Only an exchange the engine captured inside its
+  // own action interval can be consumed — without a real engine action
+  // the witness answers 409 — the suite cannot mint network evidence,
+  // borrow another test's request, or credit setup traffic.
 
   async function observeHttp(request: {
     method: string;
@@ -470,11 +496,12 @@ export function createEvidence({
         );
       }
       const targets = [request.obligationId];
-      const result = await witness.observeHttp({
+      const result = await witness().observeHttp({
         claimIds: [...targets],
         testId,
         method: request.method.toUpperCase(),
         path: request.path,
+        ...sessionChannel,
         ...(request.expectedStatus !== undefined ? { expectedStatus: request.expectedStatus } : {}),
       });
       return {
@@ -494,11 +521,12 @@ export function createEvidence({
       );
     }
     const targets = candidates;
-    const result = await witness.observeHttp({
+    const result = await witness().observeHttp({
       claimIds: [...targets],
       testId,
       method: request.method.toUpperCase(),
       path: request.path,
+      ...sessionChannel,
       ...(request.expectedStatus !== undefined ? { expectedStatus: request.expectedStatus } : {}),
     });
     return {
@@ -511,7 +539,7 @@ export function createEvidence({
   // ---------- finalize (fail-fast + ledger cross-check) ----------
 
   async function finalize(): Promise<{ claims: string[]; records: WitnessRecord[] }> {
-    const ledger = await witness.listRecords();
+    const ledger = await witness().listRecords();
     const mine = ledger.records.filter(
       (record) => (record as { testId?: unknown })['testId'] === testId,
     );

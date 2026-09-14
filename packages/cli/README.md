@@ -1,24 +1,209 @@
 # @gateforge/cli
 
 The gateforge command-line interface: initialize a project, discover
-resources and classification signals, inspect automatic decisions, evaluate
-obligations, run the gate, orchestrate test-gates evidence runs, and maintain
-baselines.
+resources and classification signals, inspect automatic decisions, reuse a
+repository's existing tests, evaluate obligations, run the supervised E2E
+gate, enforce the exact staged candidate, and maintain baselines.
 
 ## Commands
 
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
-| `gateforge init [--languages <comma,list>]` | Create `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, and the `adapters/` + `waivers/` skeleton dirs. Idempotent — never overwrites existing files. Default language: `python`. Bundled detectors are preconfigured automatically for the selected Python, JavaScript, and TypeScript languages. | 0 |
+| `gateforge init [--languages <comma,list>] [--blocking] [--strict-e2e]` | Create `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, and the `adapters/` + `waivers/` skeleton dirs. Idempotent — never overwrites existing files. Default language: `python`. Bundled detectors are preconfigured automatically for the selected Python, JavaScript, and TypeScript languages. `--strict-e2e` writes the `enforcement` block (standard mode, `strictE2E`) and runs the capability preflight FIRST: a strict setup whose policies require a contract with no available proof channel fails closed (exit 2, nothing written). `--blocking` additionally installs AND verifies an ACTIVE pre-commit hook (the staged gate), writes the standalone staged-gate script, the `.pre-commit-config.yaml` block, and the GitLab strict-gate CI template + include; a foreign existing hook is never clobbered (typed conflict naming the exact chaining action). | 0 (blocking-install failure → 2) |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. Snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
 | `gateforge explain <resourceId> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. | 0/1/2 |
+| `gateforge tests discover [--json] [--pytest]` | Inventory existing tests into the derived run-state catalog: static analysis reconciled with native Playwright enumeration (`--list`). Unresolved wrappers, parse errors, and inventory gaps are DATA (never an empty catalog — failed native enumeration is exit 2). `--pytest` additionally collects the configured diagnostic suites' node ids (`--collect-only`). | 0/2 |
+| `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`) and a `newTestNeeded` verdict per obligation. An inspection surface, NOT a gate: exit 0 even with blocking mapping problems. | 0/2 |
+| `gateforge tests mark --test <key> --kind <kind> [--category <c>]... --obligation <id>... --reason "<text>"` | Declare an existing test in `.gateforge/test-map.yml` (see the test-reuse workflow below). Validates against the CURRENT catalog and obligation registry, writes atomically and idempotently, prints the exact diff. Never edits test files, never adds waivers, refuses contradictions. | 0/2 |
+| `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, `New test needed`. | 0/2 (unknown key → 2) |
+| `gateforge tests diagnose [--suite <name>] [--json]` | Run the configured pytest diagnostic suites once per suite, isolated (own process, `GATEFORGE_*` stripped, finite timeout). Advisory: exit 0 completed run (≥1 pass, no unexpected failures), 1 test failures, 2 unavailable/incomplete (collection error, timeout, missing interpreter, interruption, zero tests, or only skipped/xfail). Never E2E proof. | 0/1/2 |
 | `gateforge obligations [--json]` | Evaluate policies against the automatically classified graph and dump obligations, blocking entries, and claim assessments. | 0/1/2 |
-| `gateforge check [--changed] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` evaluates one effective scope: only obligations/blockers tied to files the resolved diff provider reports — unless the diff touches a gate-defining input (`.gateforge.yml`, configured policy/classification paths, planes/http-clients/fastapi configs, adapters, waivers, repo-local plugin modules, dependency manifests/lockfiles, ignore controls), which expands the run to all obligations (reported as `scope` metadata with `expandedBecause` reasons). Staged-vs-worktree mismatches under `local-staged` block with an explicit diagnostic. `--format` default `text`. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env (see trust model). | 0 clean/waived, 1 unresolved, 2 config/usage |
-| `gateforge test-gates [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | Orchestrate an evidence run: materialize the run state, optionally run the suite, evaluate its claims/records, and report. A nonzero suite exit fails the run. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env. | 0/1/2 (suite failure forces 1) |
+| `gateforge check [--changed] [--staged] [--require-e2e] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` evaluates one effective scope: only obligations/blockers tied to files the resolved diff provider reports — unless the diff touches a gate-defining input (`.gateforge.yml`, configured policy/classification paths, planes/http-clients/fastapi configs, adapters, waivers, repo-local plugin modules, dependency manifests/lockfiles, ignore controls), a test file or helper, the runner configuration, or the mapping sidecar, which expands the run to all obligations (reported as `scope` metadata with `expandedBecause` reasons). `--staged` gates the EXACT staged candidate (frozen index checkout, never the worktree; mutually exclusive with `--changed`). `--require-e2e` blocks without a valid, non-stale gate receipt (see Enforcement). `--format` default `text`. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env (see trust model). | 0 clean/waived, 1 unresolved, 2 config/usage |
+| `gateforge test-gates [--changed] [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | Two modes. Supervised `--changed`: trusted runner supervision over the obligations — resolves catalog + mappings, fixes the expected test set, executes the configured Playwright suite through the adapter, enforces planned-vs-executed completeness, and seals an authenticated gate receipt ONLY after complete success. Legacy `--suite`: the orchestration escape hatch (cannot be combined with `--changed`, and can never redefine the strict gate's expected cases). A nonzero suite exit fails the run. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env. | 0/1/2 (suite failure forces 1) |
+| `gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]` | Managed-mode commit broker (MECHANISM, not deployment): snapshots the workspace bytes into a throwaway index, recomputes the input + trusted-policy digests, verifies a valid non-stale gate receipt for EXACTLY those bytes, then creates the commit via compare-and-swap `git update-ref`. Typed rejections (`ENFORCEMENT_UNTRUSTED` / `EVIDENCE_STALE` / `RUN_INCOMPLETE` / `BROKER_CAS_MISMATCH` / `BROKER_UNSAFE_MESSAGE`); symlinks/submodules are typed rejections. Verifier key via env; runs with cwd = the AUTHORITATIVE repository. | 0/2 |
+| `gateforge enforcement doctor [--json]` | Honest enforcement diagnostics: config, hook presence + ACTIVATION, runner readiness, observer capability, trusted binary/policy ownership, snapshot mode, and the standard/managed boundary. Detecting a hook NEVER counts as managed protection. Diagnostic only: exit 0 whenever it runs. | 0/2 |
+| `gateforge baseline update <fp...>` | Shrink the baseline to a strict subset (invariant 4). | 0/2 |
 
 Global flags: `--help`, `--version`. Exit codes per architecture contract 4:
-`0` clean/waived, `1` unresolved obligations, `2` config/usage error.
+`0` clean/waived, `1` unresolved obligations (or a failed/supervision-blocked
+run), `2` config/usage error. `tests diagnose` has its own advisory contract
+(0/1/2 above).
+
+## Existing-test reuse (`gateforge tests`)
+
+The reuse-first workflow: inspect what exists, declare what is unclear, run
+it, and add a new test only for a confirmed behavior gap. The fixed agent
+sequence is: `tests discover` → `tests suggest` → `tests mark` (or edit the
+sidecar directly) → run the suite under supervision → `check --require-e2e`.
+
+`tests discover` writes the catalog to `.gateforge/test-gates/test-catalog.json`
+— a DERIVED artifact under the excluded run-state directory, never a pipeline
+input and never beside the tests it inventories. Logical keys are stable
+(`playwright:<project>:<file>:<title path>`; `-` when the runner has no
+project) so manual mappings survive comment edits; source digests still move,
+so old evidence goes stale. Renamed/deleted tests and removed parameters
+surface as stale or ambiguous mappings — never a silent reassignment.
+
+`tests mark` validates the declaration against the current catalog AND the
+current obligation registry (an unknown obligation id or test key is a
+precise exit-2 error) before writing `.gateforge/test-map.yml`:
+
+```yaml
+schemaVersion: 1
+tests:
+  - key: playwright:chromium:e2e/accounts.spec.ts:deletes an account
+    selector:
+      runner: playwright
+      project: chromium
+      file: e2e/accounts.spec.ts
+      titlePath: [Accounts, deletes an account]
+    kind: browser-e2e
+    categories: [persistence.delete]
+    claims: [tenant.accounts:persistence:delete]
+    reason: Existing journey deletes the selected account.
+```
+
+`--kind` is one of `browser-e2e`, `api-e2e`, `unit`, `integration`,
+`component`, `unknown`. A declaration is INTENT, never proof:
+
+- Native `{ type: 'gateforge', description: '<obligation id>' }` annotations
+  keep working; sidecar entries and native claims normalize through ONE
+  resolver. Exact duplicate claims deduplicate; contradictions block with
+  both source locations (`TEST_MAPPING_AMBIGUOUS`).
+- An explicit kind may resolve `unknown`, but cannot override observed
+  mocking or a strong code-signal inference — `tests mark` refuses with
+  both locations instead of writing the file.
+- Agents may edit the sidecar directly; both paths receive identical
+  validation. `mark` is idempotent: re-running an exact declaration writes
+  nothing and reports `no changes`.
+- Nothing here waives, weakens, or satisfies anything: a mapped test with no
+  witnessed evidence for this change grades `EVIDENCE_NOT_COLLECTED` —
+  blocking.
+
+`tests suggest` emits `newTestNeeded: true` only when no suitable existing
+candidate survives resolution. An unsupported proof channel produces a
+capability task (`VERIFIER_UNSUPPORTED`), never a request to generate more
+tests.
+
+## Advisory pytest diagnostics
+
+Register existing pytest suites under `diagnostics.suites` in
+`.gateforge.yml` (explicit, tracked configuration — gateforge never scans
+directories or executes commands on its own; only the `pytest` runner has an
+adapter today):
+
+```yaml
+diagnostics:
+  suites:
+    - name: backend-pytest
+      runner: pytest
+      cwd: server
+      argv: [python, -m, pytest]
+      testPaths: [tests]
+      timeoutMs: 600000
+```
+
+`gateforge tests diagnose` runs each configured suite once against the
+current inputs (drift around discovery refuses the run) and prints a SEPARATE
+diagnostic report with `DIAGNOSTIC_TEST_FAILURE` /
+`DIAGNOSTIC_RUN_INCOMPLETE` / `DIAGNOSTIC_RESULT_STALE` causes. Skips and
+expected failures stay explicit counters; a run of only skipped/xfail cases
+is INCOMPLETE (exit 2), never a passing alarm. Diagnostic results are never
+fed into claims, witness records, baselines, waivers, or E2E satisfaction,
+and are never merged into E2E pass counts — 100 passing pytest tests do not
+clear one missing browser obligation. When the supervised run executes the
+same suites, their results are displayed separately without changing the E2E
+exit decision.
+
+## Enforcement
+
+Two named modes (ADR 0005 D1); the CLI never reports a hook as more than it
+is.
+
+**Standard mode** — an active local hook PLUS a mandatory trusted server
+check:
+
+- `gateforge init --blocking` installs the pre-commit hook into the resolved
+  hooks directory (`core.hooksPath` honored), verifies activation (exec bit +
+  a verified `--gateforge-verify` invocation), and writes a standalone
+  staged-gate script (`.gateforge/hooks/gateforge-staged.sh`) for consumers
+  with a foreign hook manager. The hook runs `gateforge check --staged
+  --require-e2e`; a missing engine blocks (fail closed). Idempotent — an
+  existing gateforge-owned hook is verified, never rewritten.
+- The same `init --blocking` run writes `.gateforge/ci/gitlab-gateforge.yml`
+  plus the `.gitlab-ci.yml` include — the SERVER-side strict gate (pinned
+  engine, `test-gates --changed` receipt seal, `check --changed
+  --require-e2e`), with the required server-side settings documented in the
+  template header:
+  "Pipelines must succeed" (skipped ≠ successful), protected branches
+  excluding the agent role from direct pushes, and an organization-controlled
+  pipeline execution policy so a candidate cannot delete the gate job. THE
+  HONEST LIMIT: `--no-verify`, an alternate `core.hooksPath`, direct
+  plumbing, or an unrelated clone bypass any local hook — keeping bypassed
+  commits out of protected history is the server's job, not the hook's.
+- `check --staged [--require-e2e]` gates the EXACT staged bytes: the index
+  tree is frozen, materialized into an isolated scratch checkout, and the
+  regular gate runs against those bytes (never the worktree). The candidate
+  is re-checked after the gate — any index/HEAD drift during the run is a
+  typed `ENFORCEMENT_UNTRUSTED` block. Partial staging is fine; symlinks,
+  submodules, and unmerged index entries are typed blocks, never fallbacks.
+- `check --changed --require-e2e` is the CI-side strict gate over the checked-
+  out candidate.
+- `--strict-e2e` (config `enforcement.strictE2E`) makes waived or baselined
+  in-scope E2E obligations NOT proof (they block with `ENFORCEMENT_UNTRUSTED`
+  — no automatic debt forgiveness), and blocks unclassified changed files as
+  `CHANGE_UNMAPPED` until a resolved mapping covers them. Candidate edits to
+  policies, classification, adapters, waivers, baselines, or the mapping
+  sidecar cannot authorize weaker checks: gates evaluate under the trusted
+  policy digest, so a weakened candidate fails closed until a separate
+  trusted update is accepted.
+
+**Receipts (the strict saved-state gate).** `check --require-e2e` accepts
+only an authenticated gate receipt sealed by a COMPLETE supervised run for
+the current input digest and trusted policy digest:
+
+- no receipt (old record bundles included) → `RUN_INCOMPLETE`;
+- receipt for different bytes/inputs → `EVIDENCE_STALE` (rerun for the
+  exact candidate);
+- forged/tampered receipt → `ENFORCEMENT_UNTRUSTED`.
+
+`test-gates --changed` seals a receipt only after planned-vs-executed
+completeness, evidence grading, and a successful runner exit: zero selected
+tests, skips, `.only`, retries, teardown failures, and incomplete shards all
+fail the run. Identical authenticated inputs may reuse a prior receipt
+(printed as `reused receipt <id>`); any changed input forces a fresh run.
+Without the verifier key in the trusted environment nothing can be sealed
+and `--require-e2e` blocks — it never downgrades to a weaker pass.
+
+**Managed mode** (config `enforcement.mode: managed`) — the literal
+no-bypass guarantee requires putting the authoritative Git metadata, commit
+service, gate executable, policy authority, and signing material OUTSIDE the
+agent's write/process boundary. `gateforge broker commit` ships the
+MECHANISM — verify a receipt for the exact workspace bytes, then commit via
+compare-and-swap ref update — not the deployment. Running the broker inside
+the agent's own boundary provides NO managed guarantee.
+`gateforge enforcement doctor` reports which boundary is actually active:
+hook activation, runner/browser readiness, capability availability, trusted
+binary/policy ownership, snapshot mode, and — in managed mode — an
+agent-writable authoritative Git directory is a `fail`, never a pass.
+
+## Contract capabilities
+
+What the engine can grade today (single source of truth: the core capability
+registry; `init --strict-e2e` preflight rejects setups that require anything
+else):
+
+| Namespace | Status |
+| --- | --- |
+| `persistence:create\|read\|update\|delete` | AVAILABLE — engine-observed same-entity persistence reads with the exact-value echo requirement (`EVIDENCE_VALUE_MISMATCH` on a mismatched echo, even when the status was 2xx) |
+| `http:request-observed`, `http:response-status-ok` | AVAILABLE — transport semantics only: a witness-observed exchange plus a provenance-verified claimed `ui.action` anchor from the declaring test |
+| `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; grades blocking `missing` before examining evidence |
+| `crud:*` (UI-semantic) | FAIL-CLOSED — the tested suite owns the browser; use `persistence:*` |
+| `auth:*`, `task:*`, `validation:*`, `webhook:*`, `workflow:*` | UNSUPPORTED — every contract fail-closed; surfaces as `VERIFIER_UNSUPPORTED` (implement/configure the observer; do not add duplicate tests) |
+
+Unsupported proof stays blocking. Nothing silently replaces browser proof
+with HTTP status proof.
 
 ## Configuration
 
@@ -30,6 +215,22 @@ repo-root-relative. `changed.provider: auto` (the default) picks
 (`git diff --cached --name-only`). `clock.mode: fixed` freezes the run
 instant for deterministic reports; `system` (default) freezes it at run
 start.
+
+Enforcement-relevant sections:
+
+- `enforcement:` — `mode: standard | managed` (default `standard`) and
+  `strictE2E: boolean` (default `false`); see Enforcement above.
+- `coveragePolicy:` (opt-in, fail closed) — the closed-world CRUD coverage
+  policy: enumerated user-facing tables (validated against the run's
+  resource inventory on EVERY run — an unknown table name is a config error,
+  a silently dropped inventory table is a violation), required operations,
+  and owner dispositions (`read-only-surface`, `admin-plane-unreachable`,
+  `not-user-facing`, `other`, with a note). With the policy enabled, an
+  uncovered, undispositioned required operation blocks with
+  `CRUD_COVERAGE_MISSING`. Recording or approving a disposition is a
+  trusted-policy act — the policy participates in the trusted policy
+  revision, so an agent edit never self-approves.
+- `diagnostics.suites:` — the advisory pytest suites (see above).
 
 ## Plugin invocation
 
@@ -106,15 +307,19 @@ run closed at startup (exit 2).
 | `obligations.json` | Every obligation the suite must cover, with pin #2 fingerprint and resource source/location. |
 | `env.json` | `GATEFORGE_RUN_ID`, `GATEFORGE_RUN_TOKEN`, `GATEFORGE_STATE_DIR`, `GATEFORGE_OBLIGATIONS`, `GATEFORGE_WITNESS_URL`. |
 | `claims.json` / `records.json` | Reporter output consumed by the verifier (written by the suite). |
+| `execution-result.json` / `receipt.json` / `diagnostics.json` | Supervised `--changed` mode: the sealed execution result (planned vs executed instances, outcomes, runner exit, completeness), the authenticated gate receipt issued after complete success, and the separate advisory diagnostic report. |
 | `report.json` | Canonical json-format run report after evaluation. |
 
-The suite command (`--suite`) runs with those env vars; its reporter
+The legacy suite command (`--suite`) runs with those env vars; its reporter
 extracts claims from `{type: 'gateforge', description: '<obligation id>'}`
 annotations and posts evidence through the witness service (pin #7, header
 `x-gateforge-run: <token>`; `GATEFORGE_WITNESS_URL` is set when a witness
 service URL is provided via `--witness-url`). `gateforge check` reads the
 same state directory for claims and records. Records whose provenance does
-not verify never satisfy (GF-23).
+not verify never satisfy (GF-23). The legacy escape hatch can never
+redefine the strict gate's expected cases or turn an arbitrary exit-zero
+command into E2E proof — the hook and the CI job run `check
+--staged/--changed --require-e2e`, which accept only supervised receipts.
 
 ### Provenance trust model (GF-23, audited 2026-08-31, three rounds)
 
@@ -137,14 +342,26 @@ hashed identity:
   persistence record for the claimed entity, so fabricated outcomes can
   never satisfy.
 
-Residual (documented, not eliminable without a witness-side observation
-channel such as a witness-driven browser): the SUITE-ASSERTED part of a
-flow — that a UI action happened at all — rests on the suite's word; what
-is provable is that the claimed end-state genuinely exists.
+**Supervised session binding (Phase 1).** The trusted reporter opens ONE
+witness session per started test (`runId`, `sessionId`, `testId`,
+`worker`), and the evidence fixture's five primitives (`ui`, `visible`,
+`persistence`, `http`, `finalize`) submit only under that OPEN session:
+the witness rejects submissions without a session and forces each record's
+testId onto the session's supervisor-registered value; sealing rejects all
+late submissions. Every UI action runs inside a witness-recorded
+observation interval (supervisor-issued session clock), so proxy exchanges
+observed outside the action's interval — direct setup calls, stray
+navigation — are never credited as browser evidence. For a mutation whose
+journey collects input in the UI, the `ui.action` record's `fields` are
+the declared input, and the independent engine-observed persistence read
+must echo those values EXACTLY on the same entity identity: a mismatched
+echo fails the obligation with `EVIDENCE_VALUE_MISMATCH` even when the
+status was 2xx. Primitive receipts are frozen and branded — hand-rolled
+forgeries fail closed (GF-22).
 
-**UI-semantic `crud:*` contracts fail closed (audit round 5).** No
-witness-controlled UI observation channel exists (the suite owns the
-browser), so a claimed UI action can never be verified. The gradable
+**UI-semantic `crud:*` contracts fail closed (audit round 5).** The suite
+still owns the browser, so a claimed UI action cannot be verified at the
+DOM level; the namespace advertises no gradable contract. The gradable
 surface is the lifecycle-gated `persistence:*` namespace, graded on the
 witness's OWN engine-side observation
 (`{resourceId, entityId, found, fields, before}`) with expectations that
@@ -169,7 +386,6 @@ NEVER come from the tested suite:
 
 Presence alone, contradicted observations, missing pre-observations, or
 absent deltas grade `invalid` — even when every provenance check passes.
-True UI observation (witness-driven browser) is roadmap work.
 
 **Layer 2 — versioned attestation binding evidence to tested inputs
 (plan §11, F2).** A witnessed record is authorized only by ONE validated
@@ -241,8 +457,14 @@ expected context, every witnessed record demotes to claimed-tier
 - Existing evidence bundles need a FRESH run: there is no command
   that signs old records into the new format without observations, and
   none will be added (signing old records would certify untested code).
+- Gate receipts (ADR 0005 D3) are a separate versioned, domain-separated
+  envelope — never a repurposed v2 attestation, and never a mutable
+  `passed` flag on a claim. `check --require-e2e` rejects old record
+  bundles that lack the required complete-run receipt.
 - Policies and waivers keep their explicit semantics: snapshot binding
-  never rewrites their IDs to evade blockers.
+  never rewrites their IDs to evade blockers — and in strict E2E mode an
+  in-scope waived/baselined E2E obligation is not proof at all
+  (`ENFORCEMENT_UNTRUSTED`).
 - External witness setup: start `gateforge-witness` (or `startWitness`)
   with the run id/token from a TRUSTED parent env carrying
   `GATEFORGE_WITNESS_VERIFIER_KEY`, pass `--witness-url`/`--run-token`
@@ -252,6 +474,29 @@ expected context, every witnessed record demotes to claimed-tier
   with a `snapshot-unavailable` diagnostic; submodules, escaping
   symlinks, and `--out` overlapping source fail closed with explicit
   diagnostics.
+
+## Limitations
+
+- Staged candidates containing symlinks or submodules (and unmerged index
+  entries) are typed blocks in `check --staged` and `broker commit` —
+  explicit, never fallbacks; support is not implemented.
+- A Playwright config with NO named project yields native rows with an
+  empty project name, which the strict catalog schema rejects as an
+  internal error (exit 2) instead of a typed row. The documented consumer
+  shape uses named projects; a typed empty-project row is open work.
+- Run-state hygiene is enforced, not forgiven: a committed run-state
+  directory (it overlaps source inputs) or config include globs that omit
+  the spec directories produce fail-closed diagnostics — gitignore
+  `.gateforge/test-gates/` and include the spec globs.
+- Consumer-worktree migration (writing `.gateforge` configuration,
+  `coveragePolicy`, or `test-map.yml` into the inventoried ERP consumer
+  worktree) and the server-side GitLab enforcement settings are pending
+  owner actions — the complete template and settings list ship from
+  `init --blocking`, but a local simulation does not complete a server
+  rollout (`docs/plans/immediate/20260913_consumer_migration_record.md`).
+- Managed mode ships the broker MECHANISM only (`gateforge broker commit`);
+  no hardened deployment (authoritative Git dir + signing material outside
+  the agent's write/process boundary) is included in this repository.
 
 ## Development
 

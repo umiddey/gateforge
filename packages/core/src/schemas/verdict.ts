@@ -38,3 +38,63 @@ export const UnresolvedReasonSchema = z
 
 /** Inferred unresolved-reason shape. */
 export type UnresolvedReason = z.infer<typeof UnresolvedReasonSchema>;
+
+/**
+ * Stable cause codes for the shared report model (plan §5.4, ADR 0005).
+ * Blocking-obligation causes name WHY an obligation is not satisfied and
+ * select its next action; the three `DIAGNOSTIC_*` codes are advisory
+ * result causes for the separate diagnostic run (plan §3.5) — never
+ * obligation verdicts. The seven verdict VALUES are unchanged; causes
+ * enrich them without weakening any contract.
+ */
+export const CauseCodeSchema = z.enum([
+  'TEST_INVENTORY_INCOMPLETE',
+  'TEST_KIND_UNKNOWN',
+  'TEST_MAPPING_MISSING',
+  'TEST_MAPPING_AMBIGUOUS',
+  'TEST_MAPPING_STALE',
+  'EVIDENCE_NOT_COLLECTED',
+  'VERIFIER_UNSUPPORTED',
+  'TEST_NOT_EXECUTED',
+  'TEST_FAILED',
+  'RUN_INCOMPLETE',
+  'EVIDENCE_STALE',
+  'CHANGE_UNMAPPED',
+  'ENFORCEMENT_UNTRUSTED',
+  'EVIDENCE_VALUE_MISMATCH',
+  'CRUD_COVERAGE_MISSING',
+  'DIAGNOSTIC_TEST_FAILURE',
+  'DIAGNOSTIC_RUN_INCOMPLETE',
+  'DIAGNOSTIC_RESULT_STALE',
+]);
+
+/** Inferred cause-code union. */
+export type CauseCode = z.infer<typeof CauseCodeSchema>;
+
+/**
+ * The plan §5.4 next action per cause code. Text, JSON, and SARIF
+ * renderings all carry the same strings so every surface agrees on what
+ * to do next.
+ */
+export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.freeze({
+  TEST_INVENTORY_INCOMPLETE: 'Repair discovery or register a supported adapter',
+  TEST_KIND_UNKNOWN: 'Inspect and declare its kind',
+  TEST_MAPPING_MISSING: 'Inspect suggested existing tests first',
+  TEST_MAPPING_AMBIGUOUS: 'Correct the exact mapping',
+  TEST_MAPPING_STALE: 'Correct the exact mapping',
+  EVIDENCE_NOT_COLLECTED: 'Add observation hooks to that test',
+  VERIFIER_UNSUPPORTED: 'Implement/configure the observer; do not add duplicate tests',
+  TEST_NOT_EXECUTED: 'Run or repair the selected suite',
+  TEST_FAILED: 'Run or repair the selected suite',
+  RUN_INCOMPLETE: 'Run or repair the selected suite',
+  EVIDENCE_STALE: 'Rerun for the exact candidate',
+  CHANGE_UNMAPPED: 'Map the behavior or repair detection',
+  ENFORCEMENT_UNTRUSTED: 'Repair enforcement setup',
+  EVIDENCE_VALUE_MISMATCH: 'Fix the mutation path or correct the mapping',
+  CRUD_COVERAGE_MISSING:
+    'Connect/mark existing journeys, add the missing journey, or record an owner disposition',
+  DIAGNOSTIC_TEST_FAILURE: 'Inspect the named test, assertion, and relevant application code',
+  DIAGNOSTIC_RUN_INCOMPLETE:
+    'Repair the run; an incomplete diagnostic run never displays as passing',
+  DIAGNOSTIC_RESULT_STALE: 'Rerun the diagnostic suite for the exact candidate',
+});

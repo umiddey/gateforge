@@ -322,3 +322,74 @@ describe('runExitCode — contract 4 mapping', () => {
     expect(runExitCode({ verdicts: [], configError: true })).toBe(2);
   });
 });
+
+describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR 0005)', () => {
+  const caused = entry(accounts, 'missing', {
+    reason: "no claim declares 'tenant.accounts:crud:update'",
+    cause: 'TEST_MAPPING_MISSING',
+    nextAction: 'Inspect suggested existing tests first',
+  });
+
+  it('json verdicts carry cause and nextAction (null when unmapped)', () => {
+    const report = JSON.parse(
+      renderRun([caused, entry(orders, 'satisfied')], { format: 'json' }),
+    ) as { verdicts: Array<{ obligationId: string; cause: string | null; nextAction: string | null }> };
+    const mapped = report.verdicts.find((v) => v.obligationId === accounts.id);
+    const clean = report.verdicts.find((v) => v.obligationId === orders.id);
+    expect(mapped?.cause).toBe('TEST_MAPPING_MISSING');
+    expect(mapped?.nextAction).toBe('Inspect suggested existing tests first');
+    expect(clean?.cause).toBeNull();
+    expect(clean?.nextAction).toBeNull();
+  });
+
+  it('sarif properties carry cause and nextAction', () => {
+    const sarif = JSON.parse(renderRun([caused], { format: 'sarif' })) as {
+      runs: Array<{ results: Array<{ properties: Record<string, unknown> }> }>;
+    };
+    const properties = sarif.runs[0]?.results[0]?.properties;
+    expect(properties?.['cause']).toBe('TEST_MAPPING_MISSING');
+    expect(properties?.['nextAction']).toBe('Inspect suggested existing tests first');
+  });
+
+  it('text trace prints the cause and next action lines', () => {
+    const text = renderRun([caused], { format: 'text' });
+    expect(text).toContain('cause: TEST_MAPPING_MISSING');
+    expect(text).toContain('next action: Inspect suggested existing tests first');
+    const unmapped = renderRun([entry(orders, 'invalid')], { format: 'text' });
+    expect(unmapped).not.toContain('cause:');
+  });
+
+  it('blocking entries carry their cause through json, sarif, and text', () => {
+    const coverageEntry: BlockingEntry = {
+      kind: 'finding',
+      resourceId: null,
+      name: 'accounts',
+      detail: "coverage policy: table 'accounts' has no mapped browser-e2e 'delete' coverage and no owner disposition",
+      location: null,
+      cause: 'CRUD_COVERAGE_MISSING',
+      nextAction: 'Connect/mark existing journeys, add the missing journey, or record an owner disposition',
+    };
+    const json = JSON.parse(
+      renderRun([], { format: 'json', blocking: [coverageEntry] }),
+    ) as { blocking: Array<{ cause?: string | null; nextAction?: string | null }> };
+    expect(json.blocking[0]?.cause).toBe('CRUD_COVERAGE_MISSING');
+    const sarif = JSON.parse(
+      renderRun([], { format: 'sarif', blocking: [coverageEntry] }),
+    ) as {
+      runs: Array<{
+        invocations?: Array<{
+          toolExecutionNotifications?: Array<{ properties: Record<string, unknown> }>;
+        }>;
+      }>;
+    };
+    const notification = sarif.runs[0]?.invocations?.[0]?.toolExecutionNotifications?.[0];
+    expect(notification?.properties['cause']).toBe('CRUD_COVERAGE_MISSING');
+    expect(notification?.properties['nextAction']).toContain('owner disposition');
+    const text = renderRun([], { format: 'text', blocking: [coverageEntry] });
+    expect(text).toContain('(cause: CRUD_COVERAGE_MISSING → Connect/mark existing journeys');
+    // Entries without a mapping render exactly as before.
+    const plain = renderRun([], { format: 'text', blocking: BLOCKING });
+    expect(plain).toContain('[unclassified] tenant.widgets — no classification entry\n');
+    expect(plain).not.toContain('(cause:');
+  });
+});

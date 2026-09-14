@@ -17,6 +17,7 @@ import { PolicyFileSchema } from '@gateforge/core';
 import { POLICIES_TEMPLATE, TRANSPORT_ONLY_POLICY_EXAMPLE } from '../src/commands/init.js';
 import { installFixture, runCli, writeV2Manifest } from './helpers.js';
 import { startWitness } from '../../pack-playwright/src/witness/server.js';
+import { beginTestInterval, endTestInterval, openTestSession } from './witness-sessions.js';
 
 const parsed = PolicyFileSchema.parse(parseYaml(POLICIES_TEMPLATE));
 const byId = new Map(parsed.policies.map((policy) => [policy.id, policy]));
@@ -141,9 +142,17 @@ describe('plan §8 integration: Node-only attack ledger through the authoritativ
       `tenant.orders:${contract}`,
     ];
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    // Enforcement-review fix 3: the test acts as its own supervisor —
+    // the witness gets the verifier key and the session open presents it.
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      const attack = await fetch(`${witness.proxyUrl as string}/api/contracts`, { method: 'POST' });
+      // Phase 1: the attack ledger exists only under a supervisor-opened
+      // session, through the session's dedicated observation channel,
+      // inside a recorded action interval.
+      const session = await openTestSession(witness.url, TOKEN, VERIFIER_KEY, TEST_ID);
+      if (session.proxyUrl === null) throw new Error('session proxy did not start');
+      const intervalId = await beginTestInterval(witness.url, TOKEN, session, 'create');
+      const attack = await fetch(`${session.proxyUrl}/api/contracts`, { method: 'POST' });
       expect(attack.status).toBe(201);
       const consume = await fetch(`${witness.url}/witness/http-observation`, {
         method: 'POST',
@@ -153,9 +162,12 @@ describe('plan §8 integration: Node-only attack ledger through the authoritativ
           testId: TEST_ID,
           method: 'POST',
           path: '/api/contracts',
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
         }),
       });
       expect(consume.status).toBe(200);
+      await endTestInterval(witness.url, TOKEN, session, intervalId);
       for (const obligationId of obligations) {
         const anchor = await fetch(`${witness.url}/records`, {
           method: 'POST',
@@ -165,6 +177,8 @@ describe('plan §8 integration: Node-only attack ledger through the authoritativ
             kind: 'ui.action',
             payload: { operation: 'create', entityId: 'acc-1' },
             testId: TEST_ID,
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         });
         expect(anchor.status).toBe(200);

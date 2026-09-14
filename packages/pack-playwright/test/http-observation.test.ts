@@ -17,12 +17,26 @@ import { describe, expect, it } from 'vitest';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import { evaluateObligation, recordIdOf, type Obligation } from '@gateforge/core';
 import type { Page, TestInfo } from 'playwright/test';
-import { createEvidence } from '../src/fixture/evidence.js';
+import {
+  createEvidence,
+  SURFACE_DESCRIPTOR_VERSION,
+  type SurfaceDescriptor,
+} from '../src/fixture/evidence.js';
 import type { WitnessClient } from '../src/fixture/witness-client.js';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
+import {
+  openSupervisorSession,
+  beginJourneyInterval,
+  type SupervisorSession,
+} from './helpers.js';
 
 const RUN_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 const TOKEN = 'observation-run-token';
+// Enforcement-review fix 3: session lifecycle is supervisor-only, so the
+// tests act as their own supervisor — the witness is started WITH a
+// verifier key and every session open presents it (the run token alone
+// answers 401/403).
+const VERIFIER_KEY = 'observation-verifier-key';
 
 const OBLIGATION: Obligation = {
   schemaVersion: 1,
@@ -103,16 +117,41 @@ function callProxy(
   });
 }
 
+/**
+ * Phase 1 session channel: opens the supervisor session the journey runs
+ * under and starts a witness-recorded action interval, so proxied
+ * traffic is attributed to THIS session and consumable as its evidence.
+ */
+async function openJourney(
+  witness: WitnessHandle,
+  testId = 'journey-1',
+): Promise<SupervisorSession> {
+  const session = await openSupervisorSession(witness.url, TOKEN, testId, 0, VERIFIER_KEY);
+  await beginJourneyInterval(witness.url, TOKEN, session, 'create');
+  return session;
+}
+
+/** The session-attributed browser-facing proxy origin for one exchange. */
+function journeyProxyUrl(witness: WitnessHandle, session: SupervisorSession): string {
+  void witness;
+  if (session.proxyUrl === null) throw new Error('session has no observation proxy');
+  return session.proxyUrl;
+}
+
 function observe(
   witness: WitnessHandle,
+  session: SupervisorSession | null,
   overrides: Record<string, unknown> = {},
 ): Promise<{ status: number; statusCode: number }> {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
       claimId: TRANSPORT_OBLIGATION.id,
-      testId: 'journey-1',
+      testId: session?.testId ?? 'journey-1',
       method: 'POST',
       path: '/api/contracts',
+      ...(session === null
+        ? {}
+        : { sessionId: session.sessionId, sessionToken: session.sessionToken }),
       ...overrides,
     });
     const forward = httpRequest(
@@ -129,13 +168,14 @@ function observe(
   });
 }
 
-describe('witness-owned observation proxy (ADR 0004 D7)', () => {
+describe('witness-owned observation proxy (ADR 0004 D7, Phase 1 session channel)', () => {
   it('red probe: no proxied traffic — the observation claim is refused (409)', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
       expect(witness.proxyUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-      const result = await observe(witness);
+      const session = await openJourney(witness);
+      const result = await observe(witness, session);
       expect(result.statusCode).toBe(409);
     } finally {
       await witness.stop();
@@ -145,17 +185,18 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
 
   it('real proxied traffic yields a witnessed http.request record, single-use', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      const emitted = await callProxy(witness.proxyUrl as string, '/api/contracts');
+      const session = await openJourney(witness);
+      const emitted = await callProxy(journeyProxyUrl(witness, session), '/api/contracts');
       expect(emitted.status).toBe(201);
 
-      const consumed = await observe(witness);
+      const consumed = await observe(witness, session);
       expect(consumed.statusCode).toBe(200);
       expect(consumed.status).toBe(201);
 
       // Single-use: the same observation cannot be claimed twice.
-      const replay = await observe(witness);
+      const replay = await observe(witness, session);
       expect(replay.statusCode).toBe(409);
 
       // The issued record is witnessed and engine-observed.
@@ -178,10 +219,11 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
 
   it('the real verdict engine: witnessed observation + claimed anchor satisfies transport; frontend stays missing; forged fails', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      await callProxy(witness.proxyUrl as string, '/api/contracts');
-      await observe(witness);
+      const session = await openJourney(witness);
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts');
+      await observe(witness, session);
 
       const recordsResponse = await fetch(`${witness.url}/records`, {
         headers: { 'x-gateforge-run': TOKEN },
@@ -268,12 +310,13 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
     // return the same verdict and selected ids for every permutation,
     // and a suite-forged record appearing first must not change them.
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      await callProxy(witness.proxyUrl as string, '/api/contracts/a');
-      await observe(witness, { path: '/api/contracts/a' });
-      await callProxy(witness.proxyUrl as string, '/api/contracts/b');
-      await observe(witness, { path: '/api/contracts/b' });
+      const session = await openJourney(witness);
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts/a');
+      await observe(witness, session, { path: '/api/contracts/a' });
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts/b');
+      await observe(witness, session, { path: '/api/contracts/b' });
 
       const ledgerResponse = await fetch(`${witness.url}/records`, {
         headers: { 'x-gateforge-run': TOKEN },
@@ -327,10 +370,10 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
       // status-ok obligation (rebinding an issued recordId would break
       // its provenance hash — the engine demotes it to claimed): the
       // loopback target answers 201 for every exchange.
-      await callProxy(witness.proxyUrl as string, '/api/contracts/a');
-      await observe(witness, { claimId: STATUS_OBLIGATION.id, path: '/api/contracts/a' });
-      await callProxy(witness.proxyUrl as string, '/api/contracts/b');
-      await observe(witness, { claimId: STATUS_OBLIGATION.id, path: '/api/contracts/b' });
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts/a');
+      await observe(witness, session, { claimId: STATUS_OBLIGATION.id, path: '/api/contracts/a' });
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts/b');
+      await observe(witness, session, { claimId: STATUS_OBLIGATION.id, path: '/api/contracts/b' });
       const statusLedger = (await (
         await fetch(`${witness.url}/records`, { headers: { 'x-gateforge-run': TOKEN } })
       ).json()) as { records: Array<Record<string, unknown>> };
@@ -375,17 +418,33 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
     }
   });
 
-  it('F1: Node-only attack under an uninvolved testId — frontend missing, transport satisfied', async () => {
+  it('F1: Node-only attack — transport-only honesty kept, foreign-test claiming refused (Phase 1)', async () => {
     // The attack uses plain Node HTTP (fetch-style), never Playwright: it
     // proves the proxy cannot tell a browser apart from any suite-side
-    // client, and that testId binding is suite-claimed attribution.
+    // client (transport-only honesty — the FRONTEND contract therefore
+    // stays unavailable), while Phase 1 session binding closes the old
+    // hole: a testId that never owned the session can no longer claim
+    // the exchange at all.
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      // Attacker traffic (Node, not a browser) creates the observation…
-      await callProxy(witness.proxyUrl as string, '/api/contracts');
-      // …then claims it under a testId that never sent anything.
-      const claimed = await observe(witness, { testId: 'test-that-never-made-a-request' });
+      const session = await openJourney(witness, 'journey-1');
+      // Attacker traffic (Node, not a browser) traverses the session
+      // channel during its recorded interval…
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts');
+
+      // …but a DIFFERENT testId cannot claim it: submissions bind to the
+      // supervisor-registered session test (Phase 1).
+      const foreign = await observe(witness, session, {
+        testId: 'test-that-never-made-a-request',
+      });
+      expect(foreign.statusCode).toBe(403);
+
+      // The claiming testId matching the session is still transport-
+      // satisfied by the exchange (documented boundary: the proxy cannot
+      // distinguish Node from a browser — that is exactly why the
+      // frontend contract stays a separate, unavailable channel).
+      const claimed = await observe(witness, session);
       expect(claimed.statusCode).toBe(200);
 
       const ledgerResponse = await fetch(`${witness.url}/records`, {
@@ -393,9 +452,15 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
       });
       const ledger = (await ledgerResponse.json()) as { records: Array<Record<string, unknown>> };
       const attackRecords = ledger.records.filter(
-        (entry) => (entry as { testId?: unknown }).testId === 'test-that-never-made-a-request',
+        (entry) => (entry as { testId?: unknown }).testId === 'journey-1',
       );
       expect(attackRecords.length).toBeGreaterThan(0);
+      // No record exists for the foreign testId — nothing was credited.
+      expect(
+        ledger.records.some(
+          (entry) => (entry as { testId?: unknown }).testId === 'test-that-never-made-a-request',
+        ),
+      ).toBe(false);
 
       const classification = {
         exposure: 'user-facing',
@@ -404,20 +469,11 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
         lifecycle: { create: false, read: false, update: false, delete: false },
         evidenceAdapter: 'x',
       } as const;
-      // Transport: the witness DID observe the exchange — satisfied even
-      // though the claiming testId sent nothing (suite-claimed).
-      const transportAnchor = record({
-        obligationId: TRANSPORT_OBLIGATION.id,
-        testId: 'test-that-never-made-a-request',
-      });
+      // Transport: the witness DID observe the exchange — satisfied (with
+      // a provenanced claimed anchor from the declaring test).
+      const transportAnchor = record({ obligationId: TRANSPORT_OBLIGATION.id });
       const transportOutcome = evaluateObligation(TRANSPORT_OBLIGATION, {
-        claims: [
-          {
-            schemaVersion: 1,
-            obligationId: TRANSPORT_OBLIGATION.id,
-            testId: 'test-that-never-made-a-request',
-          },
-        ],
+        claims: [{ schemaVersion: 1, obligationId: TRANSPORT_OBLIGATION.id, testId: 'journey-1' }],
         records: [transportAnchor, ...attackRecords],
         waivers: [],
         classification,
@@ -433,17 +489,14 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
       expect(transportOutcome.verdict).toBe('satisfied');
 
       // Frontend: the same attack ledger stays blocking missing.
-      const frontendAnchor = record({
-        obligationId: OBLIGATION.id,
-        testId: 'test-that-never-made-a-request',
-      });
+      const frontendAnchor = record({ obligationId: OBLIGATION.id });
       const frontendRecords = attackRecords.map((entry) => ({
         ...(entry as Record<string, unknown>),
         obligationId: OBLIGATION.id,
       }));
       const frontendOutcome = evaluateObligation(OBLIGATION, {
         claims: [
-          { schemaVersion: 1, obligationId: OBLIGATION.id, testId: 'test-that-never-made-a-request' },
+          { schemaVersion: 1, obligationId: OBLIGATION.id, testId: 'journey-1' },
         ],
         records: [frontendAnchor, ...frontendRecords],
         waivers: [],
@@ -488,9 +541,10 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
 
   it('the witness refuses a split claimId/obligationId assignment (400)', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      const session = await openJourney(witness);
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts');
       const statusCode = await new Promise<number>((resolve, reject) => {
         const forward = httpRequest(
           `${witness.url}/witness/http-observation`,
@@ -508,12 +562,14 @@ describe('witness-owned observation proxy (ADR 0004 D7)', () => {
             testId: 'journey-1',
             method: 'POST',
             path: '/api/contracts',
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         );
       });
       expect(statusCode).toBe(400);
       // The refused consume consumed nothing: the exchange is still claimable.
-      const retry = await observe(witness);
+      const retry = await observe(witness, session);
       expect(retry.statusCode).toBe(200);
     } finally {
       await witness.stop();
@@ -530,7 +586,7 @@ describe('no claimed-side path around the trust model', () => {
     // are not accepted primitives, so domain contracts return to
     // fail-closed until real state-observing producers exist.
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
       const res = await fetch(`${witness.url}/records`, {
         method: 'POST',
@@ -563,9 +619,10 @@ describe('one exchange, every claimed obligation of the declaring test', () => {
 
   it('issues one witnessed record per declared claim from a single consumed exchange', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      const session = await openJourney(witness);
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts');
 
       // One consume call carrying BOTH claims the test declares.
       const consumed = await new Promise<{ statusCode: number; body: Record<string, unknown> }>(
@@ -588,6 +645,8 @@ describe('one exchange, every claimed obligation of the declaring test', () => {
               testId: 'journey-1',
               method: 'POST',
               path: '/api/contracts',
+              sessionId: session.sessionId,
+              sessionToken: session.sessionToken,
             }),
           );
         },
@@ -632,7 +691,7 @@ describe('one exchange, every claimed obligation of the declaring test', () => {
       );
 
       // Single-use at the exchange level: nothing left to claim.
-      const replay = await observe(witness);
+      const replay = await observe(witness, session);
       expect(replay.statusCode).toBe(409);
     } finally {
       await witness.stop();
@@ -642,9 +701,10 @@ describe('one exchange, every claimed obligation of the declaring test', () => {
 
   it('fails closed on a claimIds payload with no valid obligation id', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      const session = await openJourney(witness);
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts');
       const bad = await new Promise<{ statusCode: number }>((resolve, reject) => {
         const forward = httpRequest(
           `${witness.url}/witness/http-observation`,
@@ -656,12 +716,19 @@ describe('one exchange, every claimed obligation of the declaring test', () => {
         );
         forward.on('error', reject);
         forward.end(
-          JSON.stringify({ claimIds: ['not-an-obligation-id'], testId: 'j', method: 'POST', path: '/api/contracts' }),
+          JSON.stringify({
+            claimIds: ['not-an-obligation-id'],
+            testId: 'j',
+            method: 'POST',
+            path: '/api/contracts',
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
+          }),
         );
       });
       expect(bad.statusCode).toBe(400);
       // The malformed consume consumed nothing.
-      const consumed = await observe(witness);
+      const consumed = await observe(witness, session);
       expect(consumed.statusCode).toBe(200);
     } finally {
       await witness.stop();
@@ -671,9 +738,10 @@ describe('one exchange, every claimed obligation of the declaring test', () => {
 
   it('both claims grade satisfied in the real engine (anchor per claim)', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      const session = await openJourney(witness);
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts');
       const consumed = await new Promise<{ statusCode: number }>((resolve, reject) => {
         const forward = httpRequest(
           `${witness.url}/witness/http-observation`,
@@ -690,6 +758,8 @@ describe('one exchange, every claimed obligation of the declaring test', () => {
             testId: 'journey-1',
             method: 'POST',
             path: '/api/contracts',
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         );
       });
@@ -742,18 +812,21 @@ describe('observation-proxy mount path (deployment-topology declaration)', () =>
     const witness = await startWitness({
       runId: RUN_ID,
       token: TOKEN,
+      verifierKey: VERIFIER_KEY,
       proxyTarget: target.url,
       mountPath: '/api',
     });
     try {
-      // The caller hits the frontend-mounted path; the target must see
-      // the STRIPPED backend path (query preserved).
-      const forwarded = await callProxy(witness.proxyUrl as string, '/api/ops/x?y=1');
+      const session = await openJourney(witness);
+      // The caller hits the frontend-mounted path (behind the session
+      // channel); the target must see the STRIPPED backend path (query
+      // preserved).
+      const forwarded = await callProxy(journeyProxyUrl(witness, session), '/api/ops/x?y=1');
       expect(forwarded.status).toBe(201);
       expect(JSON.parse(forwarded.body)).toMatchObject({ path: '/ops/x?y=1' });
 
       // The claim references the backend-derived obligation identity.
-      const consumed = await observe(witness, { path: '/ops/x' });
+      const consumed = await observe(witness, session, { path: '/ops/x' });
       expect(consumed.statusCode).toBe(200);
       expect(consumed.status).toBe(201);
 
@@ -769,7 +842,7 @@ describe('observation-proxy mount path (deployment-topology declaration)', () =>
       expect(httpRecords[0]?.payload).toMatchObject({ method: 'POST', url: '/ops/x', status: 201 });
 
       // Single-use is intact.
-      const replay = await observe(witness, { path: '/ops/x' });
+      const replay = await observe(witness, session, { path: '/ops/x' });
       expect(replay.statusCode).toBe(409);
     } finally {
       await witness.stop();
@@ -782,14 +855,16 @@ describe('observation-proxy mount path (deployment-topology declaration)', () =>
     const witness = await startWitness({
       runId: RUN_ID,
       token: TOKEN,
+      verifierKey: VERIFIER_KEY,
       proxyTarget: target.url,
       mountPath: '/api',
     });
     try {
-      const forwarded = await callProxy(witness.proxyUrl as string, '/other');
+      const session = await openJourney(witness);
+      const forwarded = await callProxy(journeyProxyUrl(witness, session), '/other');
       expect(forwarded.status).toBe(201);
       expect(JSON.parse(forwarded.body)).toMatchObject({ path: '/other' });
-      const consumed = await observe(witness, { path: '/other' });
+      const consumed = await observe(witness, session, { path: '/other' });
       expect(consumed.statusCode).toBe(200);
     } finally {
       await witness.stop();
@@ -802,14 +877,16 @@ describe('observation-proxy mount path (deployment-topology declaration)', () =>
     const witness = await startWitness({
       runId: RUN_ID,
       token: TOKEN,
+      verifierKey: VERIFIER_KEY,
       proxyTarget: target.url,
       mountPath: null,
     });
     try {
-      const forwarded = await callProxy(witness.proxyUrl as string, '/api/ops/x');
+      const session = await openJourney(witness);
+      const forwarded = await callProxy(journeyProxyUrl(witness, session), '/api/ops/x');
       expect(forwarded.status).toBe(201);
       expect(JSON.parse(forwarded.body)).toMatchObject({ path: '/api/ops/x' });
-      const consumed = await observe(witness, { path: '/api/ops/x' });
+      const consumed = await observe(witness, session, { path: '/api/ops/x' });
       expect(consumed.statusCode).toBe(200);
     } finally {
       await witness.stop();
@@ -838,25 +915,26 @@ describe('observation-proxy mount path (deployment-topology declaration)', () =>
 describe('status-narrowed consume (phase 7: multi-status shapes)', () => {
   it('expectedStatus narrows the FIFO match and does not consume on mismatch', async () => {
     const target = await startTarget(); // answers 201 for everything
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      await callProxy(witness.proxyUrl as string, '/api/contracts');
-      await callProxy(witness.proxyUrl as string, '/api/contracts');
+      const session = await openJourney(witness);
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts');
+      await callProxy(journeyProxyUrl(witness, session), '/api/contracts');
 
       // A wrong expected status matches nothing and consumes NOTHING.
-      const miss = await observe(witness, { expectedStatus: 404 });
+      const miss = await observe(witness, session, { expectedStatus: 404 });
       expect(miss.statusCode).toBe(409);
 
       // The right status consumes the OLDEST matching exchange.
-      const hit = await observe(witness, { expectedStatus: 201 });
+      const hit = await observe(witness, session, { expectedStatus: 201 });
       expect(hit.statusCode).toBe(200);
 
       // The second exchange is still available; a status-less consume finds it.
-      const second = await observe(witness);
+      const second = await observe(witness, session);
       expect(second.statusCode).toBe(200);
 
       // And then the shape is exhausted.
-      const exhausted = await observe(witness);
+      const exhausted = await observe(witness, session);
       expect(exhausted.statusCode).toBe(409);
     } finally {
       await witness.stop();
@@ -866,9 +944,9 @@ describe('status-narrowed consume (phase 7: multi-status shapes)', () => {
 
   it('rejects a non-integer expectedStatus (400)', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      const bad = await observe(witness, { expectedStatus: '2xx' });
+      const bad = await observe(witness, null, { expectedStatus: '2xx' });
       expect(bad.statusCode).toBe(400);
     } finally {
       await witness.stop();
@@ -880,6 +958,34 @@ describe('status-narrowed consume (phase 7: multi-status shapes)', () => {
 describe('explicit http claim selection (plan §8 step 7)', () => {
   const CLAIM_A = 'tenant.http-post-api-contracts-x1:http:request-observed';
   const CLAIM_B = 'tenant.http-post-api-contracts-x1:http:response-status-ok';
+
+  /** A minimal VALID consumer surface (never driven by these tests). */
+  const SURFACE_PLACEHOLDER: SurfaceDescriptor = {
+    schemaVersion: SURFACE_DESCRIPTOR_VERSION,
+    list: {
+      path: '/list',
+      readySelector: 'h1',
+      rowSelector: 'tbody tr',
+      idCellIndex: 0,
+      fieldCellIndexes: { status: 3 },
+    },
+    create: {
+      formPath: '/list/new',
+      formReadySelector: 'form',
+      fields: { field_a: 'input[name="field_a"]' },
+      submitSelector: 'button[type="submit"]',
+    },
+    edit: {
+      linkSelector: 'a[href$="/edit"]',
+      formReadySelectorTemplate: 'form[action="/list/{id}"]',
+      fields: { field_a: 'input[name="field_a"]' },
+      saveSelectorTemplate: 'form[action="/list/{id}"] button',
+    },
+    archive: { controlSelectorTemplate: 'form[action="/list/{id}/archive"] button' },
+    status: { field: 'status' },
+    afterAction: { path: '/list' },
+    deleteFields: { status: 'archived' },
+  };
 
   /** A Page stand-in: http.observe never reaches the browser. */
   function dummyPage(): Page {
@@ -925,18 +1031,25 @@ describe('explicit http claim selection (plan §8 step 7)', () => {
     } as unknown as WitnessClient;
   }
 
-  function evidenceFor(claims: string[], captured: { claimIds?: unknown }) {
+  async function evidenceFor(claims: string[], captured: { claimIds?: unknown }) {
     return createEvidence({
       page: dummyPage(),
       testInfo: testInfoOf(claims),
-      baseURL: 'http://127.0.0.1:9',
-      client: stubClient(captured),
+      surface: SURFACE_PLACEHOLDER,
+        client: stubClient(captured),
+      session: {
+        sessionId: 'harness-session',
+        sessionToken: 'harness-secret',
+        testId: 'selection-test-1',
+        workerIndex: 0,
+        proxyUrl: null,
+      },
     });
   }
 
   it('explicit-wrong: targeting an undeclared obligation throws', async () => {
     const captured: { claimIds?: unknown } = {};
-    const evidence = evidenceFor([CLAIM_A], captured);
+    const evidence = await evidenceFor([CLAIM_A], captured);
     await expect(
       evidence.http.observe({ method: 'POST', path: '/api/contracts', obligationId: CLAIM_B }),
     ).rejects.toThrow(/did not declare/);
@@ -945,7 +1058,7 @@ describe('explicit http claim selection (plan §8 step 7)', () => {
 
   it('ambiguous-omitted: two declared claims without an explicit target throws', async () => {
     const captured: { claimIds?: unknown } = {};
-    const evidence = evidenceFor([CLAIM_A, CLAIM_B], captured);
+    const evidence = await evidenceFor([CLAIM_A, CLAIM_B], captured);
     await expect(evidence.http.observe({ method: 'POST', path: '/api/contracts' })).rejects.toThrow(
       /ambiguous.*explicit obligationId/,
     );
@@ -954,7 +1067,7 @@ describe('explicit http claim selection (plan §8 step 7)', () => {
 
   it('explicit-correct: the declared target binds exactly', async () => {
     const captured: { claimIds?: unknown } = {};
-    const evidence = evidenceFor([CLAIM_A, CLAIM_B], captured);
+    const evidence = await evidenceFor([CLAIM_A, CLAIM_B], captured);
     const result = await evidence.http.observe({
       method: 'POST',
       path: '/api/contracts',
@@ -966,7 +1079,7 @@ describe('explicit http claim selection (plan §8 step 7)', () => {
 
   it('single-claim omission still binds the only claim', async () => {
     const captured: { claimIds?: unknown } = {};
-    const evidence = evidenceFor([CLAIM_A], captured);
+    const evidence = await evidenceFor([CLAIM_A], captured);
     const result = await evidence.http.observe({ method: 'POST', path: '/api/contracts' });
     expect(captured.claimIds).toEqual([CLAIM_A]);
     expect(result.recordIds).toEqual([`r-${CLAIM_A}`]);
@@ -1017,17 +1130,18 @@ describe('F4 witness/verifier path alignment (plan §9 step 3)', () => {
 
   it('duplicate-slash traffic: clean-path consume 409s, exact consume issues a record the verifier blocks', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
+      const session = await openJourney(witness);
       // Neither side collapses: the observation is stored with `//`.
-      const emitted = await callProxy(witness.proxyUrl as string, '/api//contracts');
+      const emitted = await callProxy(journeyProxyUrl(witness, session), '/api//contracts');
       expect(emitted.status).toBe(201);
       // The canonical clean path does NOT match the stored observation.
-      const clean = await observe(witness);
+      const clean = await observe(witness, session);
       expect(clean.statusCode).toBe(409);
       // The exact noncanonical path consumes — but the verifier blocks
       // instead of substituting the canonical route.
-      const exact = await observe(witness, { path: '/api//contracts' });
+      const exact = await observe(witness, session, { path: '/api//contracts' });
       expect(exact.statusCode).toBe(200);
       const ledgerResponse = await fetch(`${witness.url}/records`, {
         headers: { 'x-gateforge-run': TOKEN },
@@ -1044,11 +1158,12 @@ describe('F4 witness/verifier path alignment (plan §9 step 3)', () => {
 
   it('encoded-slash traffic: the verifier never decodes it into a separator', async () => {
     const target = await startTarget();
-    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, proxyTarget: target.url });
+    const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      const emitted = await callProxy(witness.proxyUrl as string, '/api%2Fcontracts');
+      const session = await openJourney(witness);
+      const emitted = await callProxy(journeyProxyUrl(witness, session), '/api%2Fcontracts');
       expect(emitted.status).toBe(201);
-      const exact = await observe(witness, { path: '/api%2Fcontracts' });
+      const exact = await observe(witness, session, { path: '/api%2Fcontracts' });
       expect(exact.statusCode).toBe(200);
       const ledgerResponse = await fetch(`${witness.url}/records`, {
         headers: { 'x-gateforge-run': TOKEN },

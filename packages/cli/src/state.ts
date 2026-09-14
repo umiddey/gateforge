@@ -28,7 +28,7 @@
  * state file that exists but is not valid JSON is a usage error (exit 2),
  * never a silent skip.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -245,4 +245,78 @@ export function writeEnv(
 export function writeReport(stateDir: string, report: string): void {
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, 'report.json'), `${report}\n`, 'utf8');
+}
+
+/**
+ * Reads one optional JSON state document (Phase 4): absent → null;
+ * present-but-invalid → UsageError (fail closed — a corrupted
+ * supervision artifact is never silently ignored).
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   name: file name inside the state dir.
+ *
+ * Returns:
+ *   unknown | null: the parsed document, or null when absent.
+ *
+ * Throws:
+ *   UsageError: when the file exists but is not valid JSON.
+ */
+export function readStateDocument(stateDir: string, name: string): unknown | null {
+  const path = join(stateDir, name);
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new UsageError(`cannot read '${path}': ${(error as Error).message}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    throw new UsageError(`state file '${path}' is not valid JSON: ${(error as Error).message}`);
+  }
+}
+
+/** Persists the Phase 4 claim-injections document (derived run state). */
+export function writeClaimInjections(
+  stateDir: string,
+  injections: Record<string, string[]>,
+): void {
+  writeStateFile(stateDir, 'claim-injections.json', {
+    schemaVersion: 1,
+    injections,
+  } as unknown as JsonValue);
+}
+
+/** Persists the sealed supervision execution result. */
+export function writeExecutionResult(stateDir: string, result: unknown): void {
+  writeStateFile(stateDir, 'execution-result.json', result as JsonValue);
+}
+
+/** Persists the authenticated gate receipt. */
+export function writeGateReceipt(stateDir: string, receipt: unknown): void {
+  writeStateFile(stateDir, 'receipt.json', receipt as JsonValue);
+}
+
+/**
+ * Removes the cached gate receipt (plan Phase 4 item 8 / E07): a
+ * failing supervised run invalidates any cached success for its inputs —
+ * a later `check --require-e2e` must block until a fresh complete run.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ */
+export function clearGateReceipt(stateDir: string): void {
+  try {
+    rmSync(join(stateDir, 'receipt.json'), { force: true });
+  } catch {
+    // Best-effort removal; an undeletable receipt still fails the
+    // receipt digest checks below (execution-result no longer matches).
+  }
+}
+
+/** Persists the §3.5 diagnostics report (separate from the E2E verdict). */
+export function writeDiagnosticsReport(stateDir: string, report: unknown): void {
+  writeStateFile(stateDir, 'diagnostics.json', report as JsonValue);
 }
