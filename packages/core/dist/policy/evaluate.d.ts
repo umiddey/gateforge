@@ -65,6 +65,27 @@ export declare const BlockingEntrySchema: z.ZodObject<{
         line: z.ZodNumber;
         col: z.ZodNumber;
     }, z.core.$strict>>;
+    cause: z.ZodOptional<z.ZodNullable<z.ZodEnum<{
+        TEST_INVENTORY_INCOMPLETE: "TEST_INVENTORY_INCOMPLETE";
+        TEST_KIND_UNKNOWN: "TEST_KIND_UNKNOWN";
+        TEST_MAPPING_MISSING: "TEST_MAPPING_MISSING";
+        TEST_MAPPING_AMBIGUOUS: "TEST_MAPPING_AMBIGUOUS";
+        TEST_MAPPING_STALE: "TEST_MAPPING_STALE";
+        EVIDENCE_NOT_COLLECTED: "EVIDENCE_NOT_COLLECTED";
+        VERIFIER_UNSUPPORTED: "VERIFIER_UNSUPPORTED";
+        TEST_NOT_EXECUTED: "TEST_NOT_EXECUTED";
+        TEST_FAILED: "TEST_FAILED";
+        RUN_INCOMPLETE: "RUN_INCOMPLETE";
+        EVIDENCE_STALE: "EVIDENCE_STALE";
+        CHANGE_UNMAPPED: "CHANGE_UNMAPPED";
+        ENFORCEMENT_UNTRUSTED: "ENFORCEMENT_UNTRUSTED";
+        EVIDENCE_VALUE_MISMATCH: "EVIDENCE_VALUE_MISMATCH";
+        CRUD_COVERAGE_MISSING: "CRUD_COVERAGE_MISSING";
+        DIAGNOSTIC_TEST_FAILURE: "DIAGNOSTIC_TEST_FAILURE";
+        DIAGNOSTIC_RUN_INCOMPLETE: "DIAGNOSTIC_RUN_INCOMPLETE";
+        DIAGNOSTIC_RESULT_STALE: "DIAGNOSTIC_RESULT_STALE";
+    }>>>;
+    nextAction: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$strict>;
 /** Inferred blocking-entry shape. */
 export type BlockingEntry = z.infer<typeof BlockingEntrySchema>;
@@ -127,6 +148,27 @@ export declare const PolicyEvaluationResultSchema: z.ZodObject<{
             line: z.ZodNumber;
             col: z.ZodNumber;
         }, z.core.$strict>>;
+        cause: z.ZodOptional<z.ZodNullable<z.ZodEnum<{
+            TEST_INVENTORY_INCOMPLETE: "TEST_INVENTORY_INCOMPLETE";
+            TEST_KIND_UNKNOWN: "TEST_KIND_UNKNOWN";
+            TEST_MAPPING_MISSING: "TEST_MAPPING_MISSING";
+            TEST_MAPPING_AMBIGUOUS: "TEST_MAPPING_AMBIGUOUS";
+            TEST_MAPPING_STALE: "TEST_MAPPING_STALE";
+            EVIDENCE_NOT_COLLECTED: "EVIDENCE_NOT_COLLECTED";
+            VERIFIER_UNSUPPORTED: "VERIFIER_UNSUPPORTED";
+            TEST_NOT_EXECUTED: "TEST_NOT_EXECUTED";
+            TEST_FAILED: "TEST_FAILED";
+            RUN_INCOMPLETE: "RUN_INCOMPLETE";
+            EVIDENCE_STALE: "EVIDENCE_STALE";
+            CHANGE_UNMAPPED: "CHANGE_UNMAPPED";
+            ENFORCEMENT_UNTRUSTED: "ENFORCEMENT_UNTRUSTED";
+            EVIDENCE_VALUE_MISMATCH: "EVIDENCE_VALUE_MISMATCH";
+            CRUD_COVERAGE_MISSING: "CRUD_COVERAGE_MISSING";
+            DIAGNOSTIC_TEST_FAILURE: "DIAGNOSTIC_TEST_FAILURE";
+            DIAGNOSTIC_RUN_INCOMPLETE: "DIAGNOSTIC_RUN_INCOMPLETE";
+            DIAGNOSTIC_RESULT_STALE: "DIAGNOSTIC_RESULT_STALE";
+        }>>>;
+        nextAction: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     }, z.core.$strict>>;
     claims: z.ZodArray<z.ZodObject<{
         claim: z.ZodObject<{

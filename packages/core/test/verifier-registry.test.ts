@@ -12,11 +12,18 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  capabilityFor,
+  allCapabilities,
+  capabilityGap,
+  causeForVerdict,
   evaluateObligation,
   recordIdOf,
+  registerContractCapabilities,
   registerContractVerifier,
   registeredNamespaces,
+  strictCapabilityGaps,
   type Classification,
+  type ContractCapability,
   type HttpRouteCandidate,
   type Obligation,
 } from '../src/index.js';
@@ -492,6 +499,9 @@ describe('http contract grading', () => {
     expect(outcome.reason).toContain("'http:frontend-request-observed'");
     expect(outcome.reason).toContain('no independent browser/test observation channel');
     expect(outcome.reason).toContain('suite-claimed');
+    // The precise 2026-09-13 decision: the session channel binds by
+    // ORIGIN, not by browser, so the contract stays fail-closed.
+    expect(outcome.reason).toContain('by ORIGIN, not by browser');
     expect(outcome.reason).toContain("'http:request-observed'");
   });
 
@@ -500,6 +510,32 @@ describe('http contract grading', () => {
     expect(outcome.verdict).toBe('missing');
     expect(outcome.reason).toContain("'http:frontend-request-observed'");
     expect(outcome.reason).toContain('no independent browser/test observation channel');
+  });
+
+  it('F1: even session-bound exchange evidence cannot satisfy frontend-request-observed', () => {
+    // The strongest possible evidence under the NEW session channel — a
+    // session-bound witnessed exchange plus a session-bound anchor —
+    // still cannot satisfy the frontend contract: the decision text must
+    // stay pinned against regressions in either direction.
+    const sessionAnchor = record(httpObligation.id, {
+      kind: 'ui.action',
+      origin: 'suite-submitted',
+      trust: 'claimed',
+      payload: { operation: 'create', entityId: 'acc-1', sessionId: 'sess-1' },
+    });
+    const sessionObserved = record(httpObligation.id, {
+      kind: 'http.request',
+      payload: { method: 'POST', url: '/api/accounts', status: 201, sessionId: 'sess-1' },
+    });
+    const outcome = httpOutcome(
+      httpObligation,
+      [sessionAnchor, sessionObserved],
+      undefined,
+      'test-1',
+      routes({ method: 'POST', canonicalPath: '/api/accounts' }),
+    );
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain('by ORIGIN, not by browser');
   });
 
   it('F1: a claim cannot borrow another testId’s witnessed exchange (suite-claimed attribution)', () => {
@@ -1232,5 +1268,291 @@ describe('F6 deterministic aggregation over repeated requests (plan §10)', () =
     const outcome = httpOutcome(transportObligation, [otherAnchor, otherObserved], INVENTORY, 'test-B');
     expect(outcome.verdict).toBe('missing');
     expect(outcome.reason).toContain("no 'ui.action' anchor from the declaring test");
+  });
+});
+
+describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005)', () => {
+  it('registers capabilities alongside every verifier namespace', () => {
+    expect(allCapabilities().map((capability) => capability.namespace)).toEqual([
+      'auth',
+      'crud',
+      'http',
+      'persistence',
+      'task',
+      'validation',
+      'webhook',
+      'workflow',
+    ]);
+  });
+
+  it('http: transport contracts available over the witness proxy; frontend contract unavailable', () => {
+    const http = capabilityFor('http:request-observed');
+    expect(http).not.toBeNull();
+    expect(http?.availability.status).toBe('available');
+    expect(http?.contracts).toEqual(['http:request-observed', 'http:response-status-ok']);
+    expect(http?.testKinds).toEqual(['browser-e2e', 'api-e2e']);
+    expect(http?.observer).toContain('witness HTTP proxy channel');
+    const frontend = http?.unavailableContracts.find(
+      (entry) => entry.contract === 'http:frontend-request-observed',
+    );
+    expect(frontend?.reason).toContain('no independent browser/test observation channel');
+    // The decision is pinned: the session channel binds by ORIGIN, not by
+    // browser, so the contract stays fail-closed rather than silently
+    // change meaning.
+    expect(frontend?.reason).toContain('by ORIGIN, not by browser');
+  });
+
+  it('persistence: available via the witness persistence adapter with the exact-value echo requirement', () => {
+    const persistence = capabilityFor('persistence:update');
+    expect(persistence?.availability.status).toBe('available');
+    expect(persistence?.observer).toContain('witness persistence adapter');
+    expect(persistence?.observer).toContain('EVIDENCE_VALUE_MISMATCH');
+    expect(persistence?.observer).toContain('same entity');
+    expect(persistence?.testKinds).toEqual(['browser-e2e', 'api-e2e']);
+  });
+
+  it('crud: AVAILABLE through the engine-owned browser channel (plan Phase 1 item 4)', () => {
+    // The engine-owned browser action/observation channel is implemented
+    // and tested: the engine drives its own Chromium, observes the
+    // rendered action + captured exchange + visible result itself, and
+    // issues engine-observed records. The namespace is available; the
+    // per-rule reasons (not a capability hole) decide each claim.
+    const crud = capabilityFor('crud:update');
+    expect(crud?.availability.status).toBe('available');
+    expect(crud?.contracts).toEqual(['crud:create', 'crud:read', 'crud:update', 'crud:delete']);
+    expect(crud?.testKinds).toEqual(['browser-e2e']);
+    expect(crud?.observer).toContain('ENGINE-OWNED browser');
+    expect(crud?.observer).toContain('suite-submitted UI records');
+    for (const [namespace, channel] of [
+      ['auth', 'identity/role material'],
+      ['task', 'queue/job delivery state'],
+      ['validation', 'boundary semantics'],
+      ['webhook', 'signature/replay verification'],
+      ['workflow', 'workflow state machine'],
+    ] as const) {
+      const capability = capabilityFor(`${namespace}:anything`);
+      expect(capability?.availability.status).toBe('unavailable');
+      expect(capability?.contracts).toEqual([]);
+      expect(capability?.observer).toContain(channel);
+      if (capability?.availability.status === 'unavailable') {
+        expect(capability.availability.reason).toContain('fail');
+      }
+    }
+  });
+
+  it('an unregistered namespace has no capability record', () => {
+    expect(capabilityFor('notapack:thing')).toBeNull();
+  });
+
+  it('capability registration is first-wins: no override, even for a fresh verifier', () => {
+    const duplicate: ContractCapability = {
+      namespace: 'http',
+      contracts: ['http:fake'],
+      unavailableContracts: [],
+      observer: 'fake observer',
+      testKinds: [],
+      availability: { status: 'available' },
+    };
+    expect(() => registerContractCapabilities(duplicate)).toThrow(
+      /already registered; registration cannot override another namespace/,
+    );
+    // The original record survives untouched (no weakening by order).
+    expect(capabilityFor('http:request-observed')?.contracts).toEqual([
+      'http:request-observed',
+      'http:response-status-ok',
+    ]);
+    // A NEW namespace can register; clean it up by registering a unique one.
+    expect(() =>
+      registerContractCapabilities({
+        namespace: 'test-only-namespace',
+        contracts: [],
+        unavailableContracts: [],
+        observer: 'test',
+        testKinds: [],
+        availability: { status: 'unavailable', reason: 'test-only' },
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe('cause mapping (plan 2026-09-13 §5.4)', () => {
+  it('unsupported verifier: no capability record → VERIFIER_UNSUPPORTED', () => {
+    const mapped = causeForVerdict({
+      obligationId: 'tenant.accounts:notapack:thing',
+      contract: 'notapack:thing',
+      verdict: 'missing',
+      reason: "no semantic verifier is registered for contract 'notapack:thing'; 'x' stays blocking",
+    });
+    expect(mapped.cause).toBe('VERIFIER_UNSUPPORTED');
+    expect(mapped.nextAction).toBe('Implement/configure the observer; do not add duplicate tests');
+  });
+
+  it('fail-closed namespaces → VERIFIER_UNSUPPORTED (crud is available, so it is not among them)', () => {
+    for (const contract of [
+      'auth:role-denied',
+      'workflow:persisted-final-state',
+    ]) {
+      const mapped = causeForVerdict({
+        obligationId: `tenant.accounts:${contract}`,
+        contract,
+        verdict: 'missing',
+        reason: 'has no honest evidence channel',
+      });
+      expect(mapped.cause).toBe('VERIFIER_UNSUPPORTED');
+    }
+    // crud:update is AVAILABLE through the engine-owned browser channel
+    // (plan Phase 1 item 4), so a crud block maps by its per-rule reason
+    // — an unmapped precise reason carries no guessed cause.
+    const crud = causeForVerdict({
+      obligationId: 'tenant.accounts:crud:update',
+      contract: 'crud:update',
+      verdict: 'invalid',
+      reason: 'some unmapped precise reason',
+    });
+    expect(crud.cause).toBeNull();
+    expect(crud.nextAction).toBeNull();
+  });
+
+  it('crud session-channel rules map to per-rule causes (engine channel available)', () => {
+    // With the engine-owned browser channel available, the verifier
+    // grades evidence rule by rule, and each rule reason maps to its
+    // per-evidence cause — the channel gap is gone.
+    for (const [reason, cause] of [
+      [
+        "'t': no witnessed session-bound 'http.request' exchange was observed " +
+          '(HTTP_OBSERVATION_UNTRUSTED): a direct API or Node-side mutation never enters the ' +
+          'supervised session channel',
+        'EVIDENCE_NOT_COLLECTED',
+      ],
+      [
+        "no witnessed visible-result record for entity 'acc-1' of 't' " +
+          '(EVIDENCE_NOT_COLLECTED): the journey must read the rendered result back',
+        'EVIDENCE_NOT_COLLECTED',
+      ],
+      [
+        "exact-value echo violation (EVIDENCE_VALUE_MISMATCH): the 'ui.action' declared input first_name=...",
+        'EVIDENCE_VALUE_MISMATCH',
+      ],
+    ] as const) {
+      const mapped = causeForVerdict({
+        obligationId: 'tenant.accounts:crud:create',
+        contract: 'crud:create',
+        verdict: 'missing',
+        reason,
+      });
+      expect(mapped.cause).toBe(cause);
+    }
+    // A borrowed cross-session exchange still fails the session binding
+    // (invalid), and the inventory gap still names the setup hole.
+    const borrowed = causeForVerdict({
+      obligationId: 'tenant.accounts:crud:create',
+      contract: 'crud:create',
+      verdict: 'invalid',
+      reason: "'t': witnessed 'http.request' record 'r' was observed on witness session 's2'",
+    });
+    expect(borrowed.cause).toBeNull();
+    const inventory = causeForVerdict({
+      obligationId: 'tenant.accounts:crud:create',
+      contract: 'crud:create',
+      verdict: 'missing',
+      reason: "'t': no route inventory context for 'crud:",
+    });
+    expect(inventory.cause).toBe('VERIFIER_UNSUPPORTED');
+  });
+
+  it('a registered-but-unavailable contract (frontend-request-observed) → VERIFIER_UNSUPPORTED', () => {
+    const mapped = causeForVerdict({
+      obligationId: 'tenant.accounts:http:frontend-request-observed',
+      contract: 'http:frontend-request-observed',
+      verdict: 'missing',
+      reason: 'no independent browser/test observation channel',
+    });
+    expect(mapped.cause).toBe('VERIFIER_UNSUPPORTED');
+    expect(mapped.nextAction).toContain('do not add duplicate tests');
+  });
+
+  it('evidence absence for a connected test → EVIDENCE_NOT_COLLECTED', () => {
+    const mapped = causeForVerdict({
+      obligationId: 'tenant.accounts:persistence:read',
+      contract: 'persistence:read',
+      verdict: 'missing',
+      reason: "claim 'suite-test' declares 'tenant.accounts:persistence:read' but produced no evidence records",
+    });
+    expect(mapped.cause).toBe('EVIDENCE_NOT_COLLECTED');
+    expect(mapped.nextAction).toBe('Add observation hooks to that test');
+  });
+
+  it('no claim connected → TEST_MAPPING_MISSING (placeholder refined by Phase 2-3)', () => {
+    const mapped = causeForVerdict({
+      obligationId: 'tenant.accounts:persistence:read',
+      contract: 'persistence:read',
+      verdict: 'missing',
+      reason: "no claim declares 'tenant.accounts:persistence:read'",
+    });
+    expect(mapped.cause).toBe('TEST_MAPPING_MISSING');
+    expect(mapped.nextAction).toBe('Inspect suggested existing tests first');
+  });
+
+  it('supported-contract blocks with other reasons carry no Phase 0 cause (later phases populate)', () => {
+    const mapped = causeForVerdict({
+      obligationId: 'tenant.accounts:http:request-observed',
+      contract: 'http:request-observed',
+      verdict: 'invalid',
+      reason: 'HTTP_OBSERVATION_UNTRUSTED: suite-submitted network record',
+    });
+    expect(mapped.cause).toBeNull();
+    expect(mapped.nextAction).toBeNull();
+  });
+
+  it('clean verdicts never carry a cause', () => {
+    for (const verdict of ['satisfied', 'waived'] as const) {
+      const mapped = causeForVerdict({
+        obligationId: 'tenant.accounts:persistence:read',
+        contract: 'persistence:read',
+        verdict,
+        reason: null,
+      });
+      expect(mapped.cause).toBeNull();
+    }
+  });
+});
+
+describe('strict preflight capability gaps (plan 2026-09-13 Phase 0 item 4)', () => {
+  it('a supported contract has no gap', () => {
+    expect(capabilityGap('persistence:read')).toBeNull();
+    expect(capabilityGap('http:request-observed')).toBeNull();
+  });
+
+  it('an unavailable contract yields a precise gap naming contract, observer, and next action', () => {
+    const gap = capabilityGap('http:frontend-request-observed');
+    expect(gap?.cause).toBe('VERIFIER_UNSUPPORTED');
+    expect(gap?.contract).toBe('http:frontend-request-observed');
+    expect(gap?.detail).toContain('no independent browser/test observation channel');
+    expect(gap?.detail).toContain('by ORIGIN, not by browser');
+    expect(gap?.observer).toContain('witness HTTP proxy channel');
+    expect(gap?.nextAction).toBe('Implement/configure the observer; do not add duplicate tests');
+    // The UI-semantic crud contracts are AVAILABLE through the
+    // engine-owned browser channel (plan Phase 1 item 4) — no capability
+    // gap names them; per-rule evidence reasons decide each claim.
+    for (const contract of ['crud:create', 'crud:read', 'crud:update', 'crud:delete']) {
+      expect(capabilityGap(contract)).toBeNull();
+    }
+    // An unknown crud name is unsupported as well.
+    const unknownCrud = capabilityGap('crud:export');
+    expect(unknownCrud?.cause).toBe('VERIFIER_UNSUPPORTED');
+  });
+
+  it('strictCapabilityGaps maps unsupported obligations precisely and sorts by id', () => {
+    const gaps = strictCapabilityGaps([
+      { id: 'tenant.accounts:http:frontend-request-observed', contract: 'http:frontend-request-observed' },
+      { id: 'tenant.accounts:persistence:read', contract: 'persistence:read' },
+      { id: 'tenant.orders:auth:role-denied', contract: 'auth:role-denied' },
+    ]);
+    expect(gaps.map((gap) => gap.obligationId)).toEqual([
+      'tenant.accounts:http:frontend-request-observed',
+      'tenant.orders:auth:role-denied',
+    ]);
+    expect(gaps.every((gap) => gap.cause === 'VERIFIER_UNSUPPORTED')).toBe(true);
+    expect(gaps[0]?.detail).toContain("obligation 'tenant.accounts:http:frontend-request-observed'");
   });
 });

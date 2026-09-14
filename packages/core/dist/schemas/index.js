@@ -13,5 +13,10 @@ export * from './waiver.js';
 export * from './baseline.js';
 export * from './run-manifest.js';
 export * from './verdict.js';
+export * from './coverage-policy.js';
+export * from './test-catalog.js';
+export * from './runner-adapter.js';
 export * from './plugin.js';
+export * from './execution-result.js';
+export * from './gate-receipt.js';
 //# sourceMappingURL=index.js.map

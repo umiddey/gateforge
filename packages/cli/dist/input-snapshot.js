@@ -49,6 +49,39 @@ export const INPUT_SNAPSHOT_VERSION = 1;
  * new constant — never silently reauthorize old digests.
  */
 export const GATEFORGE_VERIFIER_FORMAT = 'gateforge.verdict.v1';
+/**
+ * Domain tag separating environment-identity digests from every other
+ * hash (plan Phase 4 item 3: the execution result binds the run's
+ * environment identity — node/platform/arch/engine versions — so a
+ * receipt-sealed run names the environment it actually ran in).
+ */
+export const ENVIRONMENT_IDENTITY_DOMAIN = 'gateforge.environment.v1';
+/**
+ * Computes the domain-separated environment identity for a run (plan
+ * Phase 4 item 3): a canonical hash over the caller-supplied identity
+ * parts (engine versions) plus the process platform/arch. Deterministic
+ * for identical environments.
+ *
+ * Args:
+ *   parts: named identity parts (e.g. `{node, playwright}` engine
+ *     versions); values must be plain strings.
+ *
+ * Returns:
+ *   string: 64-char lowercase hex environment identity.
+ */
+export function environmentIdentity(parts) {
+    const sorted = {};
+    for (const key of Object.keys(parts).sort(compareStrings)) {
+        const value = parts[key];
+        sorted[key] = value ?? '';
+    }
+    return sha256Canonical({
+        domain: ENVIRONMENT_IDENTITY_DOMAIN,
+        parts: sorted,
+        platform: process.platform,
+        arch: process.arch,
+    });
+}
 /** Known pack configuration files (absence is an explicit entry). */
 export const PACK_CONFIGS = ['.gateforge/planes.json', '.gateforge/http-clients.json', '.gateforge/fastapi.json'];
 /**

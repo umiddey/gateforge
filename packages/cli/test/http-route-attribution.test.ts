@@ -26,6 +26,7 @@ import { createServer, type Server } from 'node:http';
 import { describe, expect, it } from 'vitest';
 import { withTempRepo, type TempRepo } from '@gateforge/core';
 import { startWitness } from '../../pack-playwright/src/witness/server.js';
+import { beginTestInterval, endTestInterval, openTestSession, type TestSession } from './witness-sessions.js';
 import { httpRoutesView } from '../src/state.js';
 import { configYml, runCli, writeV2Manifest } from './helpers.js';
 
@@ -236,8 +237,13 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
         proxyTarget: target.url,
       });
       try {
+        // Phase 1: the exchange exists only under a supervisor-opened
+        // session channel, inside a recorded interval.
+        const session = await openTestSession(witness.url, token, verifierKey, TEST_ID);
+        if (session.proxyUrl === null) throw new Error('session proxy did not start');
+        const intervalId = await beginTestInterval(witness.url, token, session, 'read');
         // The request reaches the LITERAL handler only.
-        const upstream = await fetch(`${witness.proxyUrl as string}${LITERAL_PATH}`, {
+        const upstream = await fetch(`${session.proxyUrl}${LITERAL_PATH}`, {
           method: 'GET',
         });
         expect(upstream.status).toBe(200);
@@ -253,9 +259,12 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
             testId: TEST_ID,
             method: 'GET',
             path: LITERAL_PATH,
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         });
         expect(consumed.status).toBe(200);
+        await endTestInterval(witness.url, token, session, intervalId);
         const anchored = await fetch(`${witness.url}/records`, {
           method: 'POST',
           headers,
@@ -264,6 +273,8 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
             kind: 'ui.action',
             payload: { operation: 'read', entityId: 'x' },
             testId: TEST_ID,
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         });
         expect(anchored.status).toBe(200);
@@ -325,9 +336,12 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
         proxyTarget: target.url,
       });
       try {
+        const session = await openTestSession(witness.url, token, verifierKey, TEST_ID);
+        if (session.proxyUrl === null) throw new Error('session proxy did not start');
+        const intervalId = await beginTestInterval(witness.url, token, session, 'read');
         const headers = { 'x-gateforge-run': token, 'content-type': 'application/json' };
         for (const path of ['/accounts/123', '/accounts/456']) {
-          const upstream = await fetch(`${witness.proxyUrl as string}${path}`, { method: 'GET' });
+          const upstream = await fetch(`${session.proxyUrl}${path}`, { method: 'GET' });
           expect(upstream.status).toBe(200);
           const consumed = await fetch(`${witness.url}/witness/http-observation`, {
             method: 'POST',
@@ -337,10 +351,13 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
               testId: TEST_ID,
               method: 'GET',
               path,
+              sessionId: session.sessionId,
+              sessionToken: session.sessionToken,
             }),
           });
           expect(consumed.status).toBe(200);
         }
+        await endTestInterval(witness.url, token, session, intervalId);
         expect(target.counters).toEqual({ literal: 0, param: 2 });
         const anchored = await fetch(`${witness.url}/records`, {
           method: 'POST',
@@ -350,6 +367,8 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
             kind: 'ui.action',
             payload: { operation: 'read', entityId: '123' },
             testId: TEST_ID,
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         });
         expect(anchored.status).toBe(200);
@@ -409,7 +428,10 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
         proxyTarget: target.url,
       });
       try {
-        const upstream = await fetch(`${witness.proxyUrl as string}${PARAM_PATH}`, {
+        const session = await openTestSession(witness.url, token, verifierKey, TEST_ID);
+        if (session.proxyUrl === null) throw new Error('session proxy did not start');
+        const intervalId = await beginTestInterval(witness.url, token, session, 'read');
+        const upstream = await fetch(`${session.proxyUrl}${PARAM_PATH}`, {
           method: 'GET',
         });
         expect(upstream.status).toBe(200);
@@ -424,9 +446,12 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
             testId: TEST_ID,
             method: 'GET',
             path: PARAM_PATH,
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         });
         expect(consumed.status).toBe(200);
+        await endTestInterval(witness.url, token, session, intervalId);
         const anchored = await fetch(`${witness.url}/records`, {
           method: 'POST',
           headers,
@@ -435,6 +460,8 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
             kind: 'ui.action',
             payload: { operation: 'read', entityId: '123' },
             testId: TEST_ID,
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
           }),
         });
         expect(anchored.status).toBe(200);

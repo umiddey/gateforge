@@ -26,6 +26,7 @@
  */
 import { z } from 'zod';
 import { LocationSchema, SchemaVersionField } from '../schemas/common.js';
+import { CauseCodeSchema } from '../schemas/verdict.js';
 import { ObligationSchema } from '../schemas/obligation.js';
 import { PolicyFileSchema } from '../schemas/policy.js';
 import { ClaimSchema } from '../schemas/claim.js';
@@ -85,6 +86,15 @@ export const BlockingEntrySchema = z
     detail: z.string().min(1),
     /** Source location when known, else `null`. */
     location: LocationSchema.nullable(),
+    /**
+     * Stable plan §5.4 cause code when the entry maps to one (coverage
+     * findings → CRUD_COVERAGE_MISSING, strict-capability preflight →
+     * VERIFIER_UNSUPPORTED, strict-mode waivers → ENFORCEMENT_UNTRUSTED).
+     * Absent/null for entries without a Phase 0 mapping.
+     */
+    cause: CauseCodeSchema.nullish(),
+    /** Human next action accompanying `cause`; absent/null when unmapped. */
+    nextAction: z.string().min(1).nullish(),
 });
 /** Assessment of one watched claim against the generated obligations. */
 export const ClaimAssessmentSchema = z

@@ -18,6 +18,64 @@ export declare const ConfigPluginSchema: z.ZodObject<{
 /** Inferred config-plugin shape. */
 export type ConfigPlugin = z.infer<typeof ConfigPluginSchema>;
 /**
+ * Enforcement-mode configuration (plan 2026-09-13 §3.4/§3.3, ADR 0005
+ * D1/D4). OPTIONAL and off by default — enabling strict E2E is an
+ * explicit, tracked owner decision.
+ */
+export declare const EnforcementConfigSchema: z.ZodObject<{
+    mode: z.ZodDefault<z.ZodEnum<{
+        standard: "standard";
+        managed: "managed";
+    }>>;
+    strictE2E: z.ZodDefault<z.ZodBoolean>;
+    approvedPolicyDigest: z.ZodOptional<z.ZodString>;
+}, z.core.$strict>;
+/** Inferred enforcement-section shape (fields defaulted when the section is present). */
+export type EnforcementConfig = z.infer<typeof EnforcementConfigSchema>;
+/**
+ * One configured diagnostic suite (plan 2026-09-13 §3.5, phase 2 item
+ * 8): an EXISTING suite the owner registers for the advisory "red means
+ * inspect this" alarm. Gateforge never discovers suites on its own — no
+ * directory scans, no executing commands found on disk; everything comes
+ * from this explicit, tracked configuration.
+ *
+ * Only `pytest` is accepted today: other runners stay explicitly
+ * unsupported until an adapter exists (plan phase 2 item 6) — a typo'd
+ * or aspirational runner name must fail the config load, not silently
+ * disable a suite.
+ */
+export declare const DiagnosticSuiteSchema: z.ZodObject<{
+    name: z.ZodString;
+    runner: z.ZodEnum<{
+        pytest: "pytest";
+    }>;
+    cwd: z.ZodString;
+    argv: z.ZodArray<z.ZodString>;
+    testPaths: z.ZodArray<z.ZodString>;
+    timeoutMs: z.ZodNumber;
+}, z.core.$strict>;
+/** Inferred diagnostic-suite shape. */
+export type DiagnosticSuite = z.infer<typeof DiagnosticSuiteSchema>;
+/**
+ * The `diagnostics` config section (plan §3.5): registered diagnostic
+ * suites. ABSENT = no diagnostic suites (the default; the alarm is
+ * opt-in and never a commit blocker by itself).
+ */
+export declare const DiagnosticsConfigSchema: z.ZodObject<{
+    suites: z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        runner: z.ZodEnum<{
+            pytest: "pytest";
+        }>;
+        cwd: z.ZodString;
+        argv: z.ZodArray<z.ZodString>;
+        testPaths: z.ZodArray<z.ZodString>;
+        timeoutMs: z.ZodNumber;
+    }, z.core.$strict>>;
+}, z.core.$strict>;
+/** Inferred diagnostics-section shape. */
+export type DiagnosticsConfig = z.infer<typeof DiagnosticsConfigSchema>;
+/**
  * The `.gateforge.yml` document schema (pin #6). All paths are
  * repo-root-relative. Unknown keys are rejected — a typo must fail the
  * config load, not silently disable a subsystem.
@@ -64,6 +122,46 @@ export declare const GateforgeConfigSchema: z.ZodObject<{
         }>;
         fixedAt: z.ZodOptional<z.ZodISODateTime>;
     }, z.core.$strict>;
+    enforcement: z.ZodOptional<z.ZodObject<{
+        mode: z.ZodDefault<z.ZodEnum<{
+            standard: "standard";
+            managed: "managed";
+        }>>;
+        strictE2E: z.ZodDefault<z.ZodBoolean>;
+        approvedPolicyDigest: z.ZodOptional<z.ZodString>;
+    }, z.core.$strict>>;
+    coveragePolicy: z.ZodOptional<z.ZodObject<{
+        tables: z.ZodArray<z.ZodObject<{
+            name: z.ZodString;
+            requiredOperations: z.ZodArray<z.ZodEnum<{
+                create: "create";
+                read: "read";
+                update: "update";
+                delete: "delete";
+            }>>;
+            disposition: z.ZodOptional<z.ZodObject<{
+                kind: z.ZodEnum<{
+                    "read-only-surface": "read-only-surface";
+                    "admin-plane-unreachable": "admin-plane-unreachable";
+                    "not-user-facing": "not-user-facing";
+                    other: "other";
+                }>;
+                note: z.ZodOptional<z.ZodString>;
+            }, z.core.$strict>>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>;
+    diagnostics: z.ZodOptional<z.ZodObject<{
+        suites: z.ZodArray<z.ZodObject<{
+            name: z.ZodString;
+            runner: z.ZodEnum<{
+                pytest: "pytest";
+            }>;
+            cwd: z.ZodString;
+            argv: z.ZodArray<z.ZodString>;
+            testPaths: z.ZodArray<z.ZodString>;
+            timeoutMs: z.ZodNumber;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>;
 }, z.core.$strict>;
 /** Inferred `.gateforge.yml` shape. */
 export type GateforgeConfig = z.infer<typeof GateforgeConfigSchema>;

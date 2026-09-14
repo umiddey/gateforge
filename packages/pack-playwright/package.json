@@ -45,6 +45,7 @@
   "dependencies": {
     "@gateforge/core": "*",
     "playwright": "1.58.2",
+    "typescript": "^5.9.2",
     "yaml": "^2.8.1"
   }
 }

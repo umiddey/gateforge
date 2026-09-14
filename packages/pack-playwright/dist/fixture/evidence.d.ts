@@ -1,32 +1,54 @@
 /**
- * Trusted evidence primitives (plan §5.3, invariant 6, GF-22).
+ * Trusted evidence primitives (plan §5.3, invariant 6, GF-22; engine-
+ * browser rewrite per plan Phase 1 item 4).
  *
  * The fixture exposes EXACTLY five surfaces — `ui`, `visible`,
  * `persistence`, `http`, `finalize` — on a frozen object with a
- * closure-private record list. There is no boolean/escape-hatch primitive (no
- * `prove(kind, true)`), no way to state an entity id for persistence
- * evidence, and no way to substitute an adapter: persistence evidence is
- * minted ONLY by the engine-side witness running the reviewed adapter
- * (GET-only), stamped from the ADAPTER RESPONSE.
+ * closure-private record list. It is APPLICATION-INDEPENDENT: the pack
+ * carries no Accounts strings, no product selectors, and no route
+ * knowledge. The CONSUMER supplies a declarative {@link SurfaceDescriptor}
+ * (list page, row/field selectors, form templates, archive control,
+ * status values) — the Accounts description lives in the example tree
+ * (`example/e2e/accounts-surface.js`), not here.
  *
- * UI primitives drive the RENDERED app (create/read/update/archive) and
- * read the visible result back from the DOM, so the entityId in a
- * `ui.action` record is observed, not declared. Receipts returned by UI
- * primitives are frozen and branded with a per-instance symbol —
- * `visible.confirm`/`persistence.verify` reject anything without the
- * own-property brand (GF-22: hand-rolled or `Object.create`-branded
- * forgeries fail closed).
+ * ENGINE-OWNED BROWSER (plan Phase 1 item 4): the `ui.*` primitives no
+ * longer drive a worker-side page. They register the consumer surface
+ * with the witness and ask the ENGINE to perform each constrained
+ * operation on its own page (`POST /browser/action`), then to re-read
+ * the rendered result (`POST /browser/visible`). Test code supplies
+ * INTENT (fields, entity id, claims) only — it never touches the engine
+ * page, so it cannot manufacture DOM state, intercept the application
+ * response, or substitute script/API effects and receive browser
+ * credit. Every `ui.action` / `ui.visible-result` record the gate
+ * grades is issued engine-side with origin `engine-observed`;
+ * suite-submitted UI records never satisfy browser contracts.
  *
- * Every record is submitted to the loopback witness service under EVERY
- * claim the test declares (one obligation id per annotation); the
- * witness issues service provenance, and the ENGINE decides verdicts —
- * never the test. A test using primitives but declaring no claim, or a
- * claim whose evidence was never collected, fails `finalize()` (the
- * gate would grade the claim `missing` anyway; finalize mirrors that
- * fail-fast in the test).
+ * For create/update the action record's `fields` are the ENTERED input
+ * the engine typed (plan §3.6 exact-value echo): the engine
+ * echo-checks them against the independently fetched persisted fields,
+ * and a mismatch fails the obligation with `EVIDENCE_VALUE_MISMATCH`
+ * even when the status was 2xx.
+ *
+ * Receipts returned by UI primitives are frozen and branded with a
+ * per-instance symbol — `visible.confirm`/`persistence.verify` reject
+ * anything without the own-property brand (GF-22: hand-rolled or
+ * `Object.create`-branded forgeries fail closed).
+ *
+ * Every engine call runs under the SUPERVISOR-ISSUED test session. The
+ * trusted reporter opens one session per started test (`runId,
+ * sessionId, testId, worker`) and the fixture resolves it by the exact
+ * (workerIndex, testId) pair; a suite-supplied testId or annotation
+ * alone cannot mint records for an arbitrary session, because the
+ * witness rejects submissions without a valid OPEN session and forces
+ * the record's testId onto the session's supervisor-registered value.
+ * Sealing (test end) rejects all late submissions and closes the
+ * session's engine browser context.
  */
 import type { Page, TestInfo } from 'playwright/test';
+import { SURFACE_DESCRIPTOR_VERSION, type SurfaceDescriptor } from '../surface.js';
+import type { SessionCredential } from '../witness/types.js';
 import { WitnessClient } from './witness-client.js';
+export { SURFACE_DESCRIPTOR_VERSION, type SurfaceDescriptor };
 /** A UI-action receipt: the ONLY token `visible`/`persistence` accept. */
 export interface Receipt {
     readonly kind: 'ui';
@@ -36,9 +58,9 @@ export interface Receipt {
     readonly fields: Record<string, string>;
     readonly mode: 'row' | 'form';
     /**
-     * Create only: the engine-side pre-observation taken BEFORE the UI
-     * action, bound into the persistence record so the engine can verify
-     * the entity was absent before (create postcondition, audit round 4).
+     * Create/update only: the engine-side pre-observation taken BEFORE the
+     * UI action, bound into the persistence record so the engine can
+     * verify the before/after delta (create postcondition, audit round 4).
      */
     readonly preObservationId?: string;
 }
@@ -55,21 +77,20 @@ export interface PersistenceOutcome {
 /** The frozen, no-escape-hatch evidence surface. */
 export interface EvidenceApi {
     readonly ui: Readonly<{
+        /**
+         * The ENGINE drives the rendered create form with the DECLARED input
+         * fields (plan §3.6: the journey's entered values are what the
+         * engine echo-checks against the persisted state).
+         */
         create(input: {
-            fields: {
-                first_name: string;
-                last_name: string;
-            };
+            fields: Record<string, string>;
         }): Promise<Receipt>;
         read(input: {
             entityId: string;
         }): Promise<Receipt>;
         update(input: {
             entityId: string;
-            fields: Partial<{
-                first_name: string;
-                last_name: string;
-            }>;
+            fields: Record<string, string>;
         }): Promise<Receipt>;
         archive(input: {
             entityId: string;
@@ -86,11 +107,12 @@ export interface EvidenceApi {
     }>;
     /**
      * ADR 0004 D7 (plan §8 / D1): consumes one witness-observed HTTP
-     * exchange for an http:* claim. Transport-only: the witness observed
-     * the exchange; test attribution is suite-claimed. Pass an explicit
-     * `obligationId` when the test declares more than one claim —
-     * omitted selection with several candidates throws instead of
-     * silently binding the first claim.
+     * exchange for an http:* claim. Only an exchange the ENGINE captured
+     * during its own action interval can be consumed — a request supplied
+     * by another test/worker (or by setup traffic outside every interval)
+     * is never credited. Pass an explicit `obligationId` when the test
+     * declares more than one claim — omitted selection with several
+     * candidates throws instead of silently binding the first claim.
      */
     http: Readonly<{
         observe(request: {
@@ -128,23 +150,42 @@ export declare function resourceIdOfClaim(claim: string): string;
  * Creates the evidence API for one test.
  *
  * Args:
- *   page: the test's page (the primitives drive the rendered UI on it).
- *   testInfo: the running test's info (annotations + testId).
- *   baseURL: the app-under-test base; defaults to GATEFORGE_APP_BASE_URL
- *     then GATEFORGE_TARGET_BASE_URL.
+ *   page: IGNORED for evidence (kept for call-shape compatibility) —
+ *     the engine drives its own page; the worker page is never an
+ *     evidence channel.
+ *   testInfo: the running test's info (annotations, testId, workerIndex).
+ *   surface: REQUIRED consumer-declared {@link SurfaceDescriptor} — the
+ *     pack carries no application-specific selectors (plan Phase 1
+ *     item 7). Registered with the witness; the ENGINE drives it
+ *     against the provisioned attested subject (fake-frontend fix:
+ *     the driven origin comes from trusted witness configuration,
+ *     never from suite input — there is no app-base parameter here
+ *     by design).
  *   client: witness transport override (tests inject their own).
+ *   session: pre-resolved session credential (harnesses that opened the
+ *     session themselves); default resolves it from the supervisor
+ *     channel. A credential whose testId differs from this test's is
+ *     refused.
+ *   sessionResolveTimeoutMs: bounded wait for the supervisor's session
+ *     open (harness tuning; default 5s).
  *
  * Returns:
- *   EvidenceApi: the frozen primitive surface.
+ *   Promise<EvidenceApi>: the frozen primitive surface.
  *
  * Throws:
- *   Error: when the test declares no gateforge claim, when no app base
- *   or witness is wired, or when an action/verification fails fail-closed.
+ *   Error: on a missing/outdated surface descriptor (migration error
+ *     naming the new required `surface` parameter), when the test
+ *     declares no gateforge claim and its session carries no
+ *     supervisor-registered (mapped) claims, when no app base or witness
+ *     or OPEN session is wired, or when an action/verification fails
+ *     fail-closed.
  */
-export declare function createEvidence({ page, testInfo, baseURL, client, }: {
-    page: Page;
+export declare function createEvidence({ page, testInfo, surface, client, session, sessionResolveTimeoutMs, }: {
+    page?: Page;
     testInfo: TestInfo;
-    baseURL?: string;
+    surface?: SurfaceDescriptor;
     client?: WitnessClient;
-}): EvidenceApi;
+    session?: SessionCredential;
+    sessionResolveTimeoutMs?: number;
+}): Promise<EvidenceApi>;
 //# sourceMappingURL=evidence.d.ts.map

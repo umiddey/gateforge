@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
-import { ClaimSchema, ClassificationPolicySchema, ClassificationSignalSchema, PolicyFileSchema, RunManifestSchema, buildResourceGraph, compareStrings, evaluatePolicies, jsonPathFor, loadWaivers, runClassification, } from '@gateforge/core';
+import { ClaimSchema, ClassificationPolicySchema, ClassificationSignalSchema, PolicyFileSchema, RunManifestSchema, buildResourceGraph, compareStrings, evaluatePolicies, jsonPathFor, loadWaivers, normalizeChangedFiles, runClassification, } from '@gateforge/core';
 import { UsageError } from './errors.js';
 import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.js';
 import { clockFromConfig } from './clock.js';
@@ -236,7 +236,9 @@ export async function runPipeline(options) {
         extraBlocking: blocking,
     });
     const now = clock.now();
-    const changedFiles = providerFor(provider, cwd, env).changedFiles();
+    const changedFiles = options.changedFilesOverride !== undefined
+        ? normalizeChangedFiles([...options.changedFilesOverride])
+        : providerFor(provider, cwd, env).changedFiles();
     const manifest = RunManifestSchema.parse({
         schemaVersion: 1,
         runId: options.runId ?? randomUUID(),
