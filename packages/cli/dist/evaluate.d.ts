@@ -14,6 +14,12 @@
  * resource-change set).
  */
 import { type MappedCoverage, type BlockingEntry, type Claim, type CoverageOperation, type GateforgeConfig, type Obligation, type ObligationVerdict, type ResourceGraph, type WaiverCounts } from '@gateforge/core';
+/**
+ * Pin-#2 fingerprint of an obligation — the identity the baseline
+ * stores. Shared by `check` (baseline application) and `adopt` (red-set
+ * capture) so both sides hash exactly the same way.
+ */
+export declare function obligationFingerprint(obligation: Obligation): string;
 /** Everything verdict evaluation needs. */
 export interface EvaluateInput {
     /** Repo root; repo-relative config paths resolve against it. */
@@ -97,6 +103,27 @@ export interface EvaluateInput {
         /** True when the test-gates run mutated its own inputs post-suite. */
         changedInputs?: boolean;
     };
+    /**
+     * Adoption-baseline forgiveness (phase 8 C): the fingerprint set of
+     * the ADOPTED baseline. Deliberately caller-provided, never loaded
+     * here: `check` honors a baseline only when its sibling adoption
+     * record exists (an unrecorded bulk-add forgives nothing — fail
+     * closed), and that gate lives with the config, not the evaluator.
+     * Callers that pass nothing (test-gates) never forgive.
+     */
+    baseline?: {
+        fingerprints: ReadonlySet<string>;
+        /**
+         * The classification layer (two-layer adoption): resource ids adopted
+         * as classification-blocked in the receipt. A classification-kind
+         * blocking entry whose resource id is in this set is waived (loudly
+         * counted, not exit-counted); every other classification entry —
+         * above all a NEW blocked resource — still blocks. Absent/empty = the
+         * receipt carries no classification layer (or none left): nothing is
+         * waived here, fail closed.
+         */
+        classificationBlocked?: ReadonlySet<string>;
+    } | null;
 }
 /** The evaluated run. */
 export interface EvaluateResult {
@@ -108,6 +135,22 @@ export interface EvaluateResult {
     waiverCounts: WaiverCounts;
     /** Whether any blocking verdict or blocking entry exists. */
     blockingRun: boolean;
+    /**
+     * Adoption-baseline forgiveness counts (phase 8 C) — kept LOUD: the
+     * report prints them on every run so baselined debt is never silently
+     * green. Null when no baseline was applied.
+     */
+    baselined: {
+        obligations: number;
+        blockingEntries: number;
+        /**
+         * Blocking entries waived via the adopted classification set.
+         * Undefined when the receipt carries NO classification layer at all
+         * (pre-layer receipt): not-adopted must stay distinguishable from
+         * adopted-with-zero-left — both forgive nothing differently.
+         */
+        classificationBlocked: number | undefined;
+    } | null;
 }
 /**
  * Derives the closed-world coverage inventory from the built graph (plan
