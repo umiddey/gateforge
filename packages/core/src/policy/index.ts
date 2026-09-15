@@ -15,6 +15,7 @@ export {
   ClaimAssessmentSchema,
   PolicyEvaluationError,
   PolicyEvaluationResultSchema,
+  classificationBlockedIdentity,
   evaluatePolicies,
   lifecycleAllowsContract,
 } from './evaluate.js';
