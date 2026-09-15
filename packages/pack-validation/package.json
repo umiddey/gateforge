@@ -1,6 +1,7 @@
 {
   "name": "@gateforge/pack-validation",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "private": true,
   "description": "Validation discovery pack: TS-only AST-light detector (GPP/3) for zod / joi / yup / class-validator request schemas; boundary + side-effect contracts.",
   "type": "module",
