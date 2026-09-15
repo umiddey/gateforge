@@ -40,5 +40,18 @@ export interface DiscoverResult {
  *   throws.
  */
 export declare function discoverTestCatalog(options: DiscoverOptions): Promise<DiscoverResult>;
+/**
+ * Builds the instance-title matcher for a parameterized static title, or
+ * null when the title carries no `${}` template slots. Literal parts
+ * match exactly (regex-escaped); each slot matches any (possibly empty)
+ * text — the same expansion the runner performs over the loop values.
+ *
+ * Args:
+ *   title: the static title (may contain `${}` slots).
+ *
+ * Returns:
+ *   Anchored RegExp, or null for non-parameterized titles.
+ */
+export declare function templateTitlePattern(title: string): RegExp | null;
 export { repoRelative };
 //# sourceMappingURL=discover.d.ts.map

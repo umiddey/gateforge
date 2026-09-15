@@ -46,6 +46,15 @@ const PARSEABLE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mj
 /** Playwright's exported test-function binding names. */
 const TEST_BINDING_NAMES = new Set(['test', 'it']);
 /**
+ * Test-structure names: a bare call through one of these is still a
+ * possible test registration even with no module-scope binding (an
+ * import-less global `test`/`it`/`describe`), so it stays a visible row.
+ * Any OTHER unbound bare identifier is an ordinary local call, not a
+ * test alias (consumer migration, E22: UI callbacks like
+ * `handleAction('export-csv', cb)` defined in function scope).
+ */
+const TEST_STRUCTURE_NAMES = new Set(['test', 'it', 'describe']);
+/**
  * The gateforge pack's own module specifier (`packages/pack-playwright`):
  * its exported `test` IS a playwright test function (`base.extend` over
  * `playwright/test` — see `fixture/fixture.ts`, which documents this
@@ -84,6 +93,15 @@ const NON_TEST_SEGMENTS = new Set([
     'once',
     'addEventListener',
     'route',
+    // Module-mocking shapes (`vi.mock('mod', factory)`,
+    // `jest.mock('mod', factory)`): the vitest/jest module registry, never
+    // a test-case registration. The mock itself is already recorded as a
+    // file-level mock signal (findModuleMock); emitting an unresolved row
+    // per mocked module flooded setup files (consumer migration, E22).
+    'mock',
+    // slowness modifier (`test.slow(...)`): suite/runner control like
+    // `use`/`setTimeout`, never a test declaration.
+    'slow',
 ]);
 function languageKindFor(file) {
     if (file.endsWith('.tsx'))
@@ -149,6 +167,35 @@ function calleeChain(expression) {
         return { base: inner.base, names: [...inner.names, expression.name.text] };
     }
     return null;
+}
+/**
+ * Whether a function body references test-structure names — a wrapper
+ * or factory mentioning `test`/`it`/`describe` can register cases and
+ * must stay visible as unresolvable; a body free of them is an ordinary
+ * helper (seed/step/UI callback) whose calls are never test rows.
+ * Conservative by construction: shadowing, parameters, and property
+ * names also block the plain classification (fail-visible, never
+ * fail-silent).
+ *
+ * Args:
+ *   body: the function body (or whole arrow/function expression) to scan.
+ *
+ * Returns:
+ *   True when any `test`/`it`/`describe` identifier occurs in the subtree.
+ */
+function bodyReferencesTest(body) {
+    let found = false;
+    const visit = (node) => {
+        if (found)
+            return;
+        if (ts.isIdentifier(node) && TEST_STRUCTURE_NAMES.has(node.text)) {
+            found = true;
+            return;
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(body);
+    return found;
 }
 /** Reads a file's text; unreadable content is a parse error row. */
 function readText(state, file) {
@@ -225,29 +272,60 @@ function modelModuleScope(state, cwd, model, source) {
         // import { test [as t] } from '@playwright/test' | './helpers'
         if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && isModuleScope(node)) {
             const clause = node.importClause;
+            const specifier = node.moduleSpecifier.text;
+            const isRelative = specifier.startsWith('./') || specifier.startsWith('../');
+            const markExternal = (local, imported) => {
+                // A named import from outside the scanned set (package, builtin,
+                // alias): an attempted alias, not an ordinary local — later
+                // test-shaped calls through it stay visible rows. Relative
+                // targets that resolve nowhere keep the same marker plus their
+                // own unresolved-import row (fail-visible twice, never silent).
+                if (isRelative) {
+                    const target = resolveSpecifier(state, cwd, model.file, specifier);
+                    if (target !== null) {
+                        model.bindings.set(local, { kind: 'import', target, importedName: imported });
+                        return;
+                    }
+                    model.bindings.set(local, { kind: 'import-broken', importedName: imported });
+                    state.result.unresolved.push({
+                        code: 'unresolved-import',
+                        detail: `import '${imported}' from '${specifier}' does not resolve inside the scanned set`,
+                        file: model.file,
+                        titlePath: [UNRESOLVED_TITLE_PLACEHOLDER],
+                        location: locationOf(model.file, source, node),
+                    });
+                }
+                else {
+                    model.bindings.set(local, { kind: 'external', importedName: imported });
+                }
+            };
             if (clause?.namedBindings !== undefined && ts.isNamedImports(clause.namedBindings)) {
                 for (const element of clause.namedBindings.elements) {
                     const imported = element.propertyName?.text ?? element.name.text;
                     const local = element.name.text;
-                    if (TEST_BINDING_NAMES.has(imported) && isTestModuleSpecifier(node.moduleSpecifier.text)) {
+                    if (TEST_BINDING_NAMES.has(imported) && isTestModuleSpecifier(specifier)) {
                         model.bindings.set(local, { kind: 'test' });
                     }
-                    else if (node.moduleSpecifier.text.startsWith('./') || node.moduleSpecifier.text.startsWith('../')) {
-                        const target = resolveSpecifier(state, cwd, model.file, node.moduleSpecifier.text);
-                        if (target !== null) {
-                            model.bindings.set(local, { kind: 'import', target, importedName: imported });
-                        }
-                        else {
-                            state.result.unresolved.push({
-                                code: 'unresolved-import',
-                                detail: `import '${imported}' from '${node.moduleSpecifier.text}' does not resolve inside the scanned set`,
-                                file: model.file,
-                                titlePath: [UNRESOLVED_TITLE_PLACEHOLDER],
-                                location: locationOf(model.file, source, node),
-                            });
-                        }
+                    else {
+                        markExternal(local, imported);
                     }
                 }
+            }
+            // import * as pw from '@playwright/test' | './helpers' — the module
+            // object (test-module when the specifier is the test module).
+            if (clause?.namedBindings !== undefined && ts.isNamespaceImport(clause.namedBindings)) {
+                const local = clause.namedBindings.name.text;
+                if (isTestModuleSpecifier(specifier)) {
+                    model.bindings.set(local, { kind: 'testmodule' });
+                }
+                else {
+                    markExternal(local, '*');
+                }
+            }
+            // import foo from './helpers' — default import through the target's
+            // exports (or a visible marker when it cannot resolve).
+            if (clause?.name !== undefined) {
+                markExternal(clause.name.text, 'default');
             }
         }
         // export { x [as y] } / export { x } from './m'
@@ -299,9 +377,46 @@ function modelModuleScope(state, cwd, model, source) {
                 }
                 else if (ts.isCallExpression(initializer) &&
                     ts.isPropertyAccessExpression(initializer.expression) &&
-                    initializer.expression.name.text === 'extend' &&
-                    ts.isIdentifier(initializer.expression.expression)) {
-                    model.bindings.set(name, { kind: 'alias', target: initializer.expression.expression.text });
+                    initializer.expression.name.text === 'extend') {
+                    const extended = initializer.expression.expression;
+                    if (ts.isIdentifier(extended)) {
+                        model.bindings.set(name, { kind: 'alias', target: extended.text });
+                    }
+                    else if (ts.isPropertyAccessExpression(extended) &&
+                        (extended.name.text === 'test' || extended.name.text === 'it') &&
+                        ts.isIdentifier(extended.expression)) {
+                        // Member-extend over a module object
+                        // (`const test = base.test.extend({...})` with
+                        // `const base = require('@playwright/test')`): the
+                        // consumer-local harness pattern — resolves through the
+                        // module binding (consumer migration, E22).
+                        model.bindings.set(name, { kind: 'alias', target: extended.expression.text });
+                    }
+                    else {
+                        model.bindings.set(name, { kind: 'unresolvable' });
+                    }
+                }
+                else if (ts.isCallExpression(initializer) &&
+                    ts.isIdentifier(initializer.expression) &&
+                    initializer.expression.text === 'require' &&
+                    initializer.arguments.length > 0 &&
+                    initializer.arguments[0] !== undefined &&
+                    ts.isStringLiteral(initializer.arguments[0]) &&
+                    isTestModuleSpecifier(initializer.arguments[0].text)) {
+                    // `const base = require('@playwright/test')`: the module object
+                    // whose `.test` is the test function. Bare requires of any other
+                    // specifier bind nothing (ordinary library calls, not aliases).
+                    model.bindings.set(name, { kind: 'testmodule' });
+                }
+                else if ((ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) &&
+                    !TEST_STRUCTURE_NAMES.has(name) &&
+                    !bodyReferencesTest(initializer)) {
+                    // A locally-defined plain function with no test-structure
+                    // reference in its body (seed/step/UI helper): calls through it
+                    // are ordinary calls, never test registrations (consumer
+                    // migration, E22). Anything test-referencing stays unresolvable
+                    // (a possible factory — fail-visible).
+                    model.bindings.set(name, { kind: 'plain' });
                 }
                 else {
                     // `const t = makeTest()` and friends: a wrapper the scanner
@@ -345,6 +460,55 @@ function modelModuleScope(state, cwd, model, source) {
                         if (target !== null) {
                             model.bindings.set(local, { kind: 'import', target, importedName: imported });
                         }
+                        else {
+                            // Same failed-binding marker as the ESM path above: the
+                            // name was meant as an alias, so later test-shaped calls
+                            // through it stay visible rows.
+                            model.bindings.set(local, { kind: 'import-broken', importedName: imported });
+                        }
+                    }
+                }
+            }
+        }
+        // Module-scope function declarations: a plain `function seed(...)`
+        // with no test-structure reference in its body is an ordinary helper
+        // (consumer migration, E22: `withStepTimeout`/`runStep` step wrappers).
+        // Test-referencing bodies stay unmodeled (a possible factory), and
+        // `test`/`it`/`describe`-named declarations stay unmodeled (a possible
+        // global registration) — both fail-visible, never fail-silent.
+        if (ts.isFunctionDeclaration(node) &&
+            isModuleScope(node) &&
+            node.name !== undefined &&
+            ts.isIdentifier(node.name) &&
+            node.body !== undefined) {
+            const name = node.name.text;
+            if (!TEST_STRUCTURE_NAMES.has(name) && !bodyReferencesTest(node.body)) {
+                model.bindings.set(name, { kind: 'plain' });
+            }
+            if ((node.modifiers ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+                model.exports.set(name, { local: name });
+            }
+        }
+        // CJS exports: `module.exports = { test, seed: runSeed };` — export
+        // mappings so `require('./helpers')` destructuring resolves through
+        // the defining file (consumer-local harness pattern, E22).
+        if (ts.isExpressionStatement(node) && isModuleScope(node)) {
+            const expr = node.expression;
+            if (ts.isBinaryExpression(expr) &&
+                expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+                ts.isPropertyAccessExpression(expr.left) &&
+                ts.isIdentifier(expr.left.expression) &&
+                expr.left.expression.text === 'module' &&
+                expr.left.name.text === 'exports' &&
+                ts.isObjectLiteralExpression(expr.right)) {
+                for (const prop of expr.right.properties) {
+                    if (ts.isShorthandPropertyAssignment(prop)) {
+                        model.exports.set(prop.name.text, { local: prop.name.text });
+                    }
+                    else if (ts.isPropertyAssignment(prop) &&
+                        ts.isIdentifier(prop.name) &&
+                        ts.isIdentifier(prop.initializer)) {
+                        model.exports.set(prop.name.text, { local: prop.initializer.text });
                     }
                 }
             }
@@ -406,12 +570,25 @@ function resolveTestAlias(state, cwd, file, name, depth) {
     if (binding !== undefined) {
         if (binding.kind === 'test')
             return 'test';
+        if (binding.kind === 'testmodule')
+            return 'testmodule';
+        if (binding.kind === 'plain')
+            return 'not-a-test';
+        if (binding.kind === 'import-broken')
+            return 'unknown';
+        if (binding.kind === 'external')
+            return 'unknown';
         if (binding.kind === 'unresolvable')
             return 'wrapper-unresolvable';
         if (binding.kind === 'alias' && binding.target !== undefined) {
             state.resolving.add(key);
             const resolved = resolveTestAlias(state, cwd, file, binding.target, depth + 1);
             state.resolving.delete(key);
+            // An alias chain rooted in the required test module object
+            // (`base.test.extend(...)` over `require('@playwright/test')`) is
+            // the test function itself.
+            if (resolved === 'testmodule')
+                return 'test';
             return resolved;
         }
         if (binding.kind === 'import' && binding.target !== undefined && binding.importedName !== undefined) {
@@ -619,8 +796,14 @@ function scanFileForTests(state, cwd, model, fileHttpClient, fileMock) {
         const eachCall = names.includes('each');
         const titleArgument = node.arguments[0];
         const callback = node.arguments.find((argument) => ts.isArrowFunction(argument) || ts.isFunctionExpression(argument));
+        // `pw.test(...)` / `base.test(...)` where pw/base is the required or
+        // namespaced test module object: the test function itself (not a
+        // wrapper) — grades exactly like a direct `test(...)` registration.
+        const effectiveResolution = resolution === 'testmodule' && !isExtend && !lifecycle && !isDescribe && (names[0] === 'test' || names[0] === 'it')
+            ? 'test'
+            : resolution;
         // Zero-arg conditional suppression INSIDE a test body: test.skip() / test.fixme()
-        if (resolution === 'test' &&
+        if (effectiveResolution === 'test' &&
             suppression.length > 0 &&
             node.arguments.length === 0 &&
             enclosing !== null) {
@@ -628,12 +811,61 @@ function scanFileForTests(state, cwd, model, fileHttpClient, fileMock) {
             return;
         }
         // Conditional-skip form test.skip(condition, 'reason') inside a body.
-        if (resolution === 'test' &&
+        if (effectiveResolution === 'test' &&
             suppression.length > 0 &&
             node.arguments.length === 2 &&
             callback === undefined &&
             enclosing !== null) {
             enclosing.signals.push({ kind: suppression[0], detail: `${chain.base}.${suppression[0]}(condition) call`, location });
+            return;
+        }
+        // Suppression/control calls that declare NO case
+        // (`test.skip(cond[, reason])` in a helper or hook,
+        // `test.setTimeout`-adjacent modifiers without a title+callback):
+        // suite/runner control, never a test declaration — a non-title
+        // first argument (`true`, a timeout) or a missing callback must not
+        // become a dynamic-title gap (consumer migration, E22:
+        // `test.skip(true, \`...${var}...\`)` in helpers produced phantom
+        // dynamic-title rows). The declaration forms `test.skip(title, fn)`
+        // / `test.only(title, fn)` / `test.fixme(title, fn)` — static OR
+        // parameterized title WITH a callback — fall through to entry
+        // creation with their skip/only/fixme signal, so a zero-instance
+        // skipped template stays a visible blocking row (fail-closed: adding
+        // `.skip` must never complete the inventory by dropping the case).
+        if (suppression.length > 0 &&
+            !isExtend &&
+            !lifecycle &&
+            !isDescribe &&
+            !eachCall) {
+            const controlTitle = titleArgument !== undefined ? titleOf(titleArgument) : null;
+            if (controlTitle === null || callback === undefined) {
+                ts.forEachChild(node, (child) => visit(child, describeStack, enclosing));
+                return;
+            }
+        }
+        // Known-non-test callee: a locally-defined plain function (no
+        // test-structure reference in its body), resolved in-file or through
+        // one import/export hop — an ordinary helper call (step wrappers,
+        // UI callbacks factored into named functions), never a test
+        // registration. No row; nested calls still walked.
+        if (resolution === 'not-a-test' && !isExtend && !isDescribe) {
+            ts.forEachChild(node, (child) => visit(child, describeStack, enclosing));
+            return;
+        }
+        // Bare identifier with no module-scope evidence at all (no import,
+        // no declaration — e.g. a function-scope UI callback or step-label
+        // helper): not a test alias. Test-structure names (test/it/describe)
+        // stay visible — an import-less global registration is still a
+        // possible test. A failed relative import already carries its own
+        // unresolved-import row AND an import-broken marker, so attempted
+        // aliases never take this path.
+        if (resolution === 'unknown' &&
+            names.length === 0 &&
+            !isExtend &&
+            !isDescribe &&
+            !TEST_STRUCTURE_NAMES.has(chain.base) &&
+            !model.bindings.has(chain.base)) {
+            ts.forEachChild(node, (child) => visit(child, describeStack, enclosing));
             return;
         }
         if (isDescribe || (eachCall && names.includes('describe'))) {
@@ -655,7 +887,7 @@ function scanFileForTests(state, cwd, model, fileHttpClient, fileMock) {
             }
             return;
         }
-        if (resolution === 'test' && !isExtend && !lifecycle && !isDescribe && titleArgument !== undefined && !eachCall) {
+        if (effectiveResolution === 'test' && !isExtend && !lifecycle && !isDescribe && titleArgument !== undefined && !eachCall) {
             const title = titleOf(titleArgument);
             if (title === null) {
                 state.result.unresolved.push({
@@ -689,7 +921,7 @@ function scanFileForTests(state, cwd, model, fileHttpClient, fileMock) {
             }
             return;
         }
-        if (resolution === 'test' && eachCall && !isExtend && !lifecycle) {
+        if (effectiveResolution === 'test' && eachCall && !isExtend && !lifecycle) {
             // test.each([...])(title, fn): the OUTER call carries the title.
             const outer = node.parent;
             if (ts.isCallExpression(outer) && outer.expression === node) {

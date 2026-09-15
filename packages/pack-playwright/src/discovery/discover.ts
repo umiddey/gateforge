@@ -180,6 +180,58 @@ class CatalogBuilder {
     const rows: TestCatalogEntry[] = [];
     const matchedStaticKeys = new Set<string>();
 
+    // Parameterized static templates (`for (const x of ITEMS)
+    // test(\`...${x}...\`)`): the template title is not itself runnable —
+    // its concrete instances are. A template whose enumerated instances
+    // all share its file + describe ancestry merges its static facts
+    // into each instance row (origin 'static' + a template-expansion
+    // weak signal) instead of leaving a blocking static-only gap beside
+    // fact-less list-only rows (consumer migration, E22). Templates with
+    // ZERO enumerated instances stay static-only and blocking (a
+    // parameterized case no configuration executes — the owner wires it
+    // into a project or removes it). An instance matching two templates,
+    // or exactly matching a static entry, merges into no template
+    // (ambiguity and exact identity win). Only the LAST titlePath segment
+    // may carry `${}` slots; a template slot in a describe segment stays
+    // static-only (documented limit).
+    const templateConsumed = new Set<string>();
+    const instanceTemplate = new Map<string, StaticScanResult['entries'][number]>();
+    if (this.native.status === 'discovered') {
+      const enumeratedKeys = new Set(this.native.instances.map((instance) => reconciliationKey(instance.file, instance.titlePath)));
+      const templates = [...this.staticByKey.values()].filter(
+        (entry) =>
+          !enumeratedKeys.has(reconciliationKey(entry.file, entry.titlePath)) &&
+          templateTitlePattern(entry.title) !== null,
+      );
+      const claimsByInstance = new Map<string, string[]>();
+      for (const template of templates) {
+        const pattern = templateTitlePattern(template.title);
+        if (pattern === null) continue;
+        const templateKey = reconciliationKey(template.file, template.titlePath);
+        const describes = template.titlePath.slice(0, -1);
+        for (const instance of this.native.instances) {
+          const instanceKey = reconciliationKey(instance.file, instance.titlePath);
+          // Exact static identity wins over template expansion.
+          if (this.staticByKey.has(instanceKey)) continue;
+          if (instance.file !== template.file) continue;
+          if (instance.titlePath.length !== template.titlePath.length) continue;
+          if (!describes.every((segment, index) => segment === instance.titlePath[index])) continue;
+          if (!pattern.test(instance.titlePath[instance.titlePath.length - 1] ?? '')) continue;
+          const claims = claimsByInstance.get(instanceKey) ?? [];
+          claims.push(templateKey);
+          claimsByInstance.set(instanceKey, claims);
+        }
+      }
+      // An instance claimed by two templates merges into neither.
+      for (const [instanceKey, templateKeys] of claimsByInstance) {
+        if (templateKeys.length !== 1 || templateKeys[0] === undefined) continue;
+        const template = this.staticByKey.get(templateKeys[0]);
+        if (template === undefined) continue;
+        templateConsumed.add(templateKeys[0]);
+        instanceTemplate.set(instanceKey, template);
+      }
+    }
+
     // Static unresolved gaps, keyed by reconciliation identity, with
     // duplicates merged (§5.2: line numbers are never identity — two
     // unprovable calls sharing a title path collapse into one gap).
@@ -207,15 +259,16 @@ class CatalogBuilder {
       for (const instance of this.native.instances) {
         const key = reconciliationKey(instance.file, instance.titlePath);
         enumeratedKeys.add(key);
-        const staticEntry = this.staticByKey.get(key);
+        const template = instanceTemplate.get(key);
+        const staticEntry = this.staticByKey.get(key) ?? template;
         if (staticEntry !== undefined) matchedStaticKeys.add(key);
         const gap = gapsByKey.get(key);
-        rows.push(this.playwrightRow(instance, staticEntry, gap));
+        rows.push(this.playwrightRow(instance, staticEntry, gap, template));
       }
     }
 
     for (const [key, staticEntry] of this.staticByKey) {
-      if (matchedStaticKeys.has(key)) continue;
+      if (matchedStaticKeys.has(key) || templateConsumed.has(key)) continue;
       rows.push(this.staticOnlyRow(staticEntry));
     }
 
@@ -243,6 +296,7 @@ class CatalogBuilder {
     instance: NativeListResult['instances'][number],
     staticEntry: StaticScanResult['entries'][number] | undefined,
     staticGap?: StaticScanResult['unresolved'][number],
+    template?: StaticScanResult['entries'][number],
   ): TestCatalogEntry {
     const digest = fileDigest(this.cwd, instance.file);
     // The native list reports '' when the run has no projects; the
@@ -265,6 +319,16 @@ class CatalogBuilder {
       ? suppressionOf(staticEntry, instance.annotations, instance.location)
       : { mocks: nativeSuppression(instance.annotations, instance.location), flags: [] };
     const weakSignals = [...inference.weakSignals];
+    if (template !== undefined) {
+      // The identity is a concrete enumerated instance; the static facts
+      // came from its parameterized template (same loop body, same
+      // fixtures — sound per-instance). Recorded, never silent.
+      weakSignals.push({
+        ruleId: 'template-expansion',
+        evidence: `static parameterized title '${template.title}' expanded over the enumerated instance (same file, same describe ancestry)`,
+        location: template.location,
+      });
+    }
     if (staticGap !== undefined) {
       // The static scan could not PROVE this call a test (wrapper/
       // dynamic title), yet the runner enumerated it: the runner wins
@@ -450,6 +514,24 @@ class CatalogBuilder {
 
 /** sha256 of empty bytes — placeholder ONLY when a digest is unreadable. */
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+/**
+ * Builds the instance-title matcher for a parameterized static title, or
+ * null when the title carries no `${}` template slots. Literal parts
+ * match exactly (regex-escaped); each slot matches any (possibly empty)
+ * text — the same expansion the runner performs over the loop values.
+ *
+ * Args:
+ *   title: the static title (may contain `${}` slots).
+ *
+ * Returns:
+ *   Anchored RegExp, or null for non-parameterized titles.
+ */
+export function templateTitlePattern(title: string): RegExp | null {
+  if (!title.includes('${}')) return null;
+  const escaped = title.split('${}').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return new RegExp(`^${escaped.join('.*')}$`);
+}
 
 /** Stable key for location dedupe. */
 function locationKey(location: Location): string {
