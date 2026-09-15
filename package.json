@@ -4,7 +4,7 @@
   "private": true,
   "description": "Converts recognized source artifacts into explicit, machine-verifiable test obligations.",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=20"
   },
