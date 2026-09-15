@@ -1,6 +1,7 @@
 {
   "name": "@gateforge/http-contract",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "private": true,
   "description": "Framework-neutral canonical HTTP contract: HttpContractFact schema, typed block codes, path/method normalization, and the deterministic frontend-call <-> server-route join engine (ADR 0004 D1-D4).",
   "type": "module",
