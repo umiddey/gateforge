@@ -50,6 +50,19 @@ export interface RenderRunOptions {
      * fingerprint change) is auditable — never authoritative input.
      */
     classificationTraces?: Record<string, ClassificationDecisionTrace>;
+    /**
+     * Adoption-baseline forgiveness counts (phase 8 C), included in the
+     * json summary and the text report when provided. Baselined debt is
+     * LOUD on every run — a forgiveness that never announces itself is a
+     * silent waiver, and there are none of those in gateforge.
+     * `classificationBlocked` (two-layer adoption) counts blocking entries
+     * waived via the receipt's adopted classification set.
+     */
+    baseline?: {
+        obligations: number;
+        blockingEntries: number;
+        classificationBlocked?: number;
+    };
 }
 /** A run's exit code (architecture contract 4). */
 export type RunExitCode = 0 | 1 | 2;

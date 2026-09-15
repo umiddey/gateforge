@@ -16,11 +16,14 @@
 import {
   AttestationSchema,
   BLOCKING_VERDICTS,
+  blockingEntryFingerprint,
   CAUSE_NEXT_ACTIONS,
+  classificationBlockedIdentity,
   HTTP_ENDPOINT_RESOURCE_KIND,
   evaluateCoveragePolicy,
   type MappedCoverage,
   evaluateObligations,
+  fingerprint,
   loadWaivers,
   strictCapabilityGaps,
   verifyAttestationMac,
@@ -40,6 +43,20 @@ import { join } from 'node:path';
 import { UsageError } from './errors.js';
 import { resolveRepoPath, sourcesByResourceId } from './pipeline.js';
 import { httpRoutesView, readJsonArray } from './state.js';
+
+/**
+ * Pin-#2 fingerprint of an obligation — the identity the baseline
+ * stores. Shared by `check` (baseline application) and `adopt` (red-set
+ * capture) so both sides hash exactly the same way.
+ */
+export function obligationFingerprint(obligation: Obligation): string {
+  return fingerprint({
+    resourceId: obligation.resourceId,
+    contract: obligation.contract,
+    policyId: obligation.policyId,
+    lifecycle: obligation.lifecycle,
+  });
+}
 
 
 
@@ -126,6 +143,27 @@ export interface EvaluateInput {
     /** True when the test-gates run mutated its own inputs post-suite. */
     changedInputs?: boolean;
   };
+  /**
+   * Adoption-baseline forgiveness (phase 8 C): the fingerprint set of
+   * the ADOPTED baseline. Deliberately caller-provided, never loaded
+   * here: `check` honors a baseline only when its sibling adoption
+   * record exists (an unrecorded bulk-add forgives nothing — fail
+   * closed), and that gate lives with the config, not the evaluator.
+   * Callers that pass nothing (test-gates) never forgive.
+   */
+  baseline?: {
+    fingerprints: ReadonlySet<string>;
+    /**
+     * The classification layer (two-layer adoption): resource ids adopted
+     * as classification-blocked in the receipt. A classification-kind
+     * blocking entry whose resource id is in this set is waived (loudly
+     * counted, not exit-counted); every other classification entry —
+     * above all a NEW blocked resource — still blocks. Absent/empty = the
+     * receipt carries no classification layer (or none left): nothing is
+     * waived here, fail closed.
+     */
+    classificationBlocked?: ReadonlySet<string>;
+  } | null;
 }
 
 /** The evaluated run. */
@@ -138,6 +176,22 @@ export interface EvaluateResult {
   waiverCounts: WaiverCounts;
   /** Whether any blocking verdict or blocking entry exists. */
   blockingRun: boolean;
+  /**
+   * Adoption-baseline forgiveness counts (phase 8 C) — kept LOUD: the
+   * report prints them on every run so baselined debt is never silently
+   * green. Null when no baseline was applied.
+   */
+  baselined: {
+    obligations: number;
+    blockingEntries: number;
+    /**
+     * Blocking entries waived via the adopted classification set.
+     * Undefined when the receipt carries NO classification layer at all
+     * (pre-layer receipt): not-adopted must stay distinguishable from
+     * adopted-with-zero-left — both forgive nothing differently.
+     */
+    classificationBlocked: number | undefined;
+  } | null;
 }
 
 /** Keeps only blocking entries plausibly tied to a changed file. */
@@ -413,14 +467,22 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     ...strictBlocking,
   ];
   // Strict E2E mode (plan §3.3): waived obligations are not proof.
-  const gradedVerdicts = strictE2E ? applyStrictE2E(verdicts) : verdicts;
+  // Adoption-baseline forgiveness (phase 8 C) runs after diff scoping
+  // but BEFORE strict E2E grading: in strict mode a baselined obligation
+  // is still not proof (plan §3.3) — applyStrictE2E re-grades every
+  // waived verdict, baselined ones included, back to blocking. Non-strict
+  // repos keep the loud, counted baseline forgiveness.
+  const applied = applyBaseline(input.baseline ?? null, { verdicts, blocking });
+  const gradedVerdicts = strictE2E ? applyStrictE2E(applied.verdicts) : applied.verdicts;
 
   const blockingRun =
-    blocking.length > 0 || gradedVerdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
+    applied.blocking.length > 0 ||
+    gradedVerdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
 
   return {
     verdicts: gradedVerdicts,
-    blocking,
+    blocking: applied.blocking,
+    baselined: applied.baselined,
     waiverCounts: {
       total: waiverLoad.waivers.length + waiverLoad.staleOwner.length + waiverLoad.expired.length,
       active: waiverLoad.waivers.length,
@@ -428,6 +490,90 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
       staleOwner: waiverLoad.staleOwner.length,
     },
     blockingRun,
+  };
+}
+
+/**
+ * Applies the adoption baseline (phase 8 C): baselined blocking verdicts
+ * are re-graded `waived` — a recorded, dated forgiveness whose reason
+ * names the receipt — and baselined blocking entries are dropped, with
+ * counts returned so every report stays loud about how much debt the
+ * baseline carries (never silently green). Everything unbaselined blocks
+ * exactly as before; a null/empty set changes nothing.
+ *
+ * The classification layer (two-layer adoption) waives by RESOURCE
+ * IDENTITY (`classificationBlockedIdentity`), which is merge-stable where
+ * whole-entry fingerprints are not (they bake in detail text and line
+ * numbers, so an upstream merge would otherwise un-forgive the same
+ * resource): a `classification` or `unclassified` entry whose adopted
+ * identity is in the receipt's set is waived — loudly counted (as
+ * DISTINCT resources), not exit-counted, not in the blocking list. The
+ * layer runs FIRST; entries it waives are never double-counted under the
+ * fingerprint pass. Fail-closed edges: entries without an identity
+ * (document-level classifier blocks — stale targets, invalid signals) are
+ * never waived here; a NEW blocked resource is by definition not in the
+ * shrink-only set and still blocks.
+ */
+function applyBaseline(
+  baseline: {
+    fingerprints: ReadonlySet<string>;
+    classificationBlocked?: ReadonlySet<string>;
+  } | null,
+  run: { verdicts: ObligationVerdict[]; blocking: BlockingEntry[] },
+): {
+  verdicts: ObligationVerdict[];
+  blocking: BlockingEntry[];
+  baselined: {
+    obligations: number;
+    blockingEntries: number;
+    classificationBlocked: number | undefined;
+  } | null;
+} {
+  if (baseline === null) {
+    return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
+  }
+  const fingerprints = baseline.fingerprints;
+  const classificationIds = baseline.classificationBlocked;
+  const classificationProvided = classificationIds !== undefined;
+  const classification =
+    classificationIds !== undefined && classificationIds.size > 0 ? classificationIds : null;
+  if (fingerprints.size === 0 && classification === null) {
+    return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
+  }
+  let obligations = 0;
+  const verdicts = run.verdicts.map((entry) => {
+    if (!BLOCKING_VERDICTS.includes(entry.verdict)) return entry;
+    if (!fingerprints.has(obligationFingerprint(entry.obligation))) return entry;
+    obligations += 1;
+    return {
+      ...entry,
+      verdict: 'waived' as const,
+      reason: `baselined: adopted as forgiven (was ${entry.verdict}); baseline is shrink-only`,
+    };
+  });
+  const blocking: BlockingEntry[] = [];
+  let blockingEntries = 0;
+  const waivedClassifications = new Set<string>();
+  for (const entry of run.blocking) {
+    const identity = classificationBlockedIdentity(entry);
+    if (identity !== null && classification !== null && classification.has(identity)) {
+      waivedClassifications.add(identity);
+      continue;
+    }
+    if (fingerprints.has(blockingEntryFingerprint(entry))) {
+      blockingEntries += 1;
+      continue;
+    }
+    blocking.push(entry);
+  }
+  return {
+    verdicts,
+    blocking,
+    baselined: {
+      obligations,
+      blockingEntries,
+      classificationBlocked: classificationProvided ? waivedClassifications.size : undefined,
+    },
   };
 }
 

@@ -12,6 +12,8 @@ import { UsageError, runWithExitCodes } from './errors.js';
 import { processIo, writeLine } from './io.js';
 import { VERSION } from './commands/common.js';
 import { initCommand } from './commands/init.js';
+import { enforceCommand } from './commands/enforce.js';
+import { adoptCommand } from './commands/adopt.js';
 import { discoverCommand } from './commands/discover.js';
 import { obligationsCommand } from './commands/obligations.js';
 import { checkCommand } from './commands/check.js';
@@ -19,38 +21,21 @@ import { testGatesCommand } from './commands/test-gates.js';
 import { baselineCommand } from './commands/baseline.js';
 import { classifyCommand } from './commands/classify.js';
 import { explainCommand } from './commands/explain.js';
-import { testsCommand } from './commands/tests.js';
-import { enforcementCommand } from './commands/enforcement.js';
-import { brokerCommand } from './broker.js';
 /** The top-level usage text (also printed for `--help`). */
 export const USAGE = `\
 usage: gateforge <command> [options]
 
 commands:
-  init [--languages <comma,list>] [--blocking]  create .gateforge.yml + skeleton; --blocking installs AND verifies an
-        [--strict-e2e]                           active pre-commit hook (staged gate) + CI wiring (idempotent)
+  init [--languages <comma,list>] [--blocking]  create .gateforge.yml + skeleton; --blocking wires pre-commit + CI gate (idempotent)
+  enforce                                 wire the blocking pre-commit + CI gate into an initialized repo (idempotent)
+  adopt                                   adopt enforcement: seed the baseline from current debt (the one bulk-add) + wire the gate
   discover [--json]                      run detectors and dump the resource graph
   classify [--json] [--write-snapshot P] inspect effective classifications + typed blocks
   explain <resourceId> [--json]          full signal/rule/obligation trace for one resource
-  tests discover [--json] [--pytest]     inventory existing tests into the run-state catalog
-  tests suggest [--changed] [--json]     suggest existing tests for uncovered obligations (inspection, never a gate)
-  tests mark --test K --kind K [--category C]...
-        --obligation ID... --reason "T"  declare an existing test in .gateforge/test-map.yml (atomic, idempotent)
-  tests explain --test K [--json]        requirements/mapping/next action for one existing test
-  tests diagnose [--suite N] [--json]    run the configured pytest diagnostic suites (advisory; exit 0/1/2)
   obligations [--json]                   evaluate policies and dump obligations
-  check [--changed] [--staged]           run the full gate and report (F: text|json|sarif). --staged gates the
-        [--require-e2e] [--format F]     EXACT staged candidate (frozen index checkout, never the worktree);
-                                         --require-e2e blocks without a valid, non-stale gate receipt
-  test-gates [--changed] [--suite CMD]   supervised E2E run over the obligations (--changed) or the
-        [--out DIR] [--format F]         legacy suite escape hatch; seals a gate receipt on complete success
-        [--witness-url URL]
-  broker commit --workspace DIR          managed-mode commit broker (MECHANISM, not deployment): verifies a gate
-        --message MSG [--receipt P]      receipt for the exact workspace bytes, then commits via compare-and-swap
-        [--ref REF]                      ref update. Guaranteed only when the broker runs outside the agent's
-                                         write/process boundary (ADR 0005 D1)
-  enforcement doctor [--json]            honest enforcement diagnostics: hook activation, runner/observer readiness,
-                                         trusted binary/policy ownership, snapshot mode, standard/managed boundary
+  check [--changed] [--format F]         run the full gate and report (F: text|json|sarif)
+  test-gates [--suite CMD] [--out DIR]   orchestrate a suite run over the obligations
+             [--format F] [--witness-url URL]
   baseline update <fp...>                shrink the baseline to a strict subset (invariant 4)
   --version                              print the version
   --help                                 show this help
@@ -84,6 +69,10 @@ export async function main(argv, io = processIo()) {
     }
     const rest = first === '--' ? argv.slice(2) : argv.slice(1);
     switch (command) {
+        case 'enforce':
+            return runWithExitCodes(io, () => Promise.resolve(enforceCommand(io, rest)));
+        case 'adopt':
+            return runWithExitCodes(io, () => adoptCommand(io, rest));
         case 'init':
             return runWithExitCodes(io, () => Promise.resolve(initCommand(io, rest)));
         case 'discover':
@@ -92,18 +81,12 @@ export async function main(argv, io = processIo()) {
             return runWithExitCodes(io, () => classifyCommand(io, rest));
         case 'explain':
             return runWithExitCodes(io, () => explainCommand(io, rest));
-        case 'tests':
-            return runWithExitCodes(io, () => testsCommand(io, rest));
         case 'obligations':
             return runWithExitCodes(io, () => obligationsCommand(io, rest));
         case 'check':
             return runWithExitCodes(io, () => checkCommand(io, rest));
         case 'test-gates':
             return runWithExitCodes(io, () => testGatesCommand(io, rest));
-        case 'enforcement':
-            return runWithExitCodes(io, () => enforcementCommand(io, rest));
-        case 'broker':
-            return runWithExitCodes(io, () => brokerCommand(io, rest));
         case 'baseline':
             return runWithExitCodes(io, () => Promise.resolve(baselineCommand(io, rest)));
         default:

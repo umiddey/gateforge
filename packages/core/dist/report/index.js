@@ -108,6 +108,15 @@ function jsonReport(entries, options, blocking) {
             blocking: blockingCount,
             blockingEntries: blocking.length,
             ...counts,
+            ...(options.baseline !== undefined
+                ? {
+                    baselinedObligations: options.baseline.obligations,
+                    baselinedBlockingEntries: options.baseline.blockingEntries,
+                    ...(options.baseline.classificationBlocked !== undefined
+                        ? { baselinedClassificationBlocked: options.baseline.classificationBlocked }
+                        : {}),
+                }
+                : {}),
         },
         // Effective scope (§12.4): which obligations were evaluated and why
         // the scope expanded. Output-only — never part of the snapshot digest.
@@ -272,6 +281,14 @@ function textReport(entries, options, blocking) {
         const wc = options.waiverCounts;
         lines.push(`waivers: ${wc.total} total, ${wc.active} active, ${wc.expired} expired, ` +
             `${wc.staleOwner} stale-owner`);
+    }
+    if (options.baseline !== undefined) {
+        lines.push(`baseline (adopted): ${options.baseline.obligations} obligation(s) + ` +
+            `${options.baseline.blockingEntries} blocking entry(ies)` +
+            (options.baseline.classificationBlocked !== undefined
+                ? ` + ${options.baseline.classificationBlocked} classification-blocked resource(s)`
+                : '') +
+            ` forgiven — shrink-only: resolve debt, then 'gateforge baseline update'`);
     }
     for (const entry of entries) {
         if (entry.verdict === 'satisfied')

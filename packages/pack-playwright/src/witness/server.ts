@@ -386,6 +386,13 @@ async function startObservedProxy(state: WitnessState, sessionId: string | null)
           state.proxyInFlight -= 1;
         }
       };
+      // b59/b60 lesson (phase7-runtime e22ec24): `agent: false` is
+      // load-bearing. On Node >=19 the default global agent keeps sockets
+      // alive while dev servers close idle keep-alive sockets at their
+      // keepAliveTimeout — reusing a socket the target closed mid-handshake
+      // intermittently killed exactly one browser exchange per batch. A
+      // fresh loopback connection per forwarded exchange costs nothing and
+      // removes the reuse race.
       const forward = request(
         {
           protocol: proxyTargetUrl.protocol,
@@ -394,6 +401,7 @@ async function startObservedProxy(state: WitnessState, sessionId: string | null)
           method: req.method,
           path: forwardUrl,
           headers: { ...req.headers, host: proxyTargetUrl.host },
+          agent: false,
         },
         (upstream) => {
           const status = upstream.statusCode ?? 0;
@@ -2080,8 +2088,12 @@ async function handlePersistence(
   }
 
   // Execute the adapter's GET-only read through the mediated transport.
+  const adapterHeaders = state.options.adapterReadAuthorization
+    ? { authorization: state.options.adapterReadAuthorization }
+    : undefined;
   const ctx = makeAdapterContext(baseUrl, resourceId, (path: string) =>
-    adapterGet(baseUrl, state.options.requestTimeoutMs, path),
+    adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+    adapterHeaders,
   );
   let bodyRaw: unknown;
   try {
@@ -2232,8 +2244,12 @@ async function takePreObservation(
   entityId: unknown,
 ): Promise<{ observationId: string; observed: number }> {
   const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
+  const adapterHeaders = state.options.adapterReadAuthorization
+    ? { authorization: state.options.adapterReadAuthorization }
+    : undefined;
   const ctx = makeAdapterContext(baseUrl, resourceId, (path: string) =>
-    adapterGet(baseUrl, state.options.requestTimeoutMs, path),
+    adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+    adapterHeaders,
   );
   const observationId = randomUUID();
 
@@ -2382,6 +2398,7 @@ async function adapterGet(
   baseUrl: string,
   timeoutMs: number,
   path: string,
+  readAuthorization?: string | null,
 ): Promise<{ status: number; json(): Promise<unknown>; text(): Promise<string>; headers: Headers }> {
   const target = /^https?:\/\//.test(path) ? path : `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
   const controller = new AbortController();
@@ -2389,7 +2406,13 @@ async function adapterGet(
   try {
     const response = await fetch(target, {
       method: 'GET',
-      headers: { accept: 'application/json, text/html' },
+      headers: {
+        accept: 'application/json, text/html',
+        // Operator-issued read-only service credential for the ENGINE's own
+        // adapter reads (see WitnessOptions.adapterReadAuthorization); never
+        // forwarded to the suite and never attached to browser traffic.
+        ...(readAuthorization ? { authorization: readAuthorization } : {}),
+      },
       signal: controller.signal,
       redirect: 'follow',
     });

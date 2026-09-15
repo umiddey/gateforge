@@ -195,6 +195,9 @@ export { PluginRegistrationSchema } from './schemas/plugin.js';
  * Key-order independent; this is the identity baselines store.
  */
 export { fingerprint, FingerprintInputSchema } from './fingerprints.js';
+/** Blocking-entry fingerprint (phase 8 C): baseline identity for gate red
+ * that is not an obligation (findings, unclassified, stale references). */
+export { blockingEntryFingerprint } from './fingerprints.js';
 // ---------------------------------------------------------------------------
 // Config (pin #6) — fail-closed `.gateforge.yml` handling
 // ---------------------------------------------------------------------------
@@ -317,6 +320,11 @@ export { CRUD_CONTRACT_PREFIX } from './policy/index.js';
  * `unresolved` — gate-visible blocking entries (invariants 1, 8).
  */
 export { BlockingEntrySchema } from './policy/index.js';
+/**
+ * The adopted identity of a classification-blocked resource (two-layer
+ * adoption) — the canonical string `adopt` records and `check` matches.
+ */
+export { classificationBlockedIdentity } from './policy/index.js';
 /** Assessment of one claim against the generated obligations. */
 export { ClaimAssessmentSchema } from './policy/index.js';
 /** The complete policy-engine result: obligations + blocking + claims. */
@@ -469,6 +477,25 @@ export { serializeBaseline } from './baselines/index.js';
 export { writeBaseline } from './baselines/index.js';
 /** Fail-closed baseline error (load, validation, or update rejection). */
 export { GateforgeBaselineError } from './baselines/index.js';
+/**
+ * THE ONE SANCTIONED BULK-ADD (phase 8 workstream C): builds the
+ * adoption baseline without the subset check — `gateforge adopt` is the
+ * only caller; `updateBaseline` stays shrink-only (GF-07/08 unchanged).
+ */
+export { adoptBaseline } from './baselines/index.js';
+/** The adoption record (phase 8 C): the loud, one-time bulk-add receipt. */
+export { AdoptionRecordSchema, ClassificationBlockedIdsSchema } from './schemas/adoption.js';
+/** Loads `.gateforge/baselines/adoption.json` (null = pre-adoption). */
+export { loadAdoptionRecord, ADOPTION_RECORD_FILENAME } from './baselines/adoption.js';
+/** Writes the adoption record, creating parent directories as needed. */
+export { writeAdoptionRecord } from './baselines/adoption.js';
+/**
+ * The classification layer of the adoption (two-layer adoption):
+ * `adoptClassificationBlocked` normalizes the captured ids for the
+ * receipt; `shrinkClassificationBlocked` is the set's ONLY post-adoption
+ * mutation — strict-subset, shrink-only (GF-07/08 mirrored).
+ */
+export { adoptClassificationBlocked, shrinkClassificationBlocked } from './baselines/adoption.js';
 // ---------------------------------------------------------------------------
 // Reports (contract 4, pin #10) — canonical JSON / SARIF 2.1.0 / text
 // ---------------------------------------------------------------------------
