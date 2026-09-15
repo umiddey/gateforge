@@ -15,9 +15,8 @@
  * classification file to fill in. Effective classifications are computed
  * from detector signals on every run.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
-import { ensureBlockingWiring, engineRootFromInvocation } from './blocking.js';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
