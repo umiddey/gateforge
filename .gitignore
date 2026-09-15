@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .zcode/
 *.pdf
+
+# Internal research + work-log trees: private-only, never published
+spikes/
+docs/
