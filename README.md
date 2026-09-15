@@ -60,7 +60,7 @@ artifacts automatically creates auditable testing responsibilities.
 | 4 | Playwright evidence pack + witness service | shipped (commit 3fb49e7); provenance hardening 2026-08-31 (see below) |
 | 5 | ClientZero dogfood migration | blocked on human decisions (out of scope) |
 | 6–8 | Five additional contract packs (auth, workflow, webhook, task, validation) | shipped (commit 44b25da) — detectors + example-server integration tests; engine-level grading pending per-pack semantic verifiers |
-| 2026-09-13 | Existing-test reuse + E2E enforcement (`tests` workflow, supervised runs + gate receipts, staged-candidate gate, active hook install, broker mechanism, GitLab strict-gate template) | in-repo work complete — see below; consumer-worktree authoring and server-side GitLab rollout remain owner actions ([migration record](docs/plans/immediate/20260913_consumer_migration_record.md)) |
+| 2026-09-13 | Existing-test reuse + E2E enforcement (`tests` workflow, supervised runs + gate receipts, staged-candidate gate, active hook install, broker mechanism, GitLab strict-gate template) | in-repo work complete — see below; consumer-worktree authoring and server-side GitLab rollout remain owner actions |
 
 **2026-08-31 audit remediation (five rounds).** Evidence trust now rests
 on two layers. First, contracts are scoped by what the engine can actually
@@ -180,7 +180,7 @@ protocol + Layer 2).
   ("Pipelines must succeed", protected branches, pipeline execution policy),
   are pending owner actions — the complete configuration ships from
   `init --blocking`, but a local simulation does not complete a server
-  rollout ([migration record](docs/plans/immediate/20260913_consumer_migration_record.md)).
+  rollout (internal migration record).
 
 ## Development
 
@@ -191,10 +191,9 @@ npm run build      # tsc build per package
 npm run typecheck  # tsc --noEmit per package
 ```
 
-Node >= 20. TypeScript strict, ESM (NodeNext). Testing follows
-[`docs/testing/TESTING_POLICY.md`](docs/testing/TESTING_POLICY.md) — the
-canonical policy: retries 0, no skips on required flows, red-probe proof for
-gates, deterministic offline runs. Known deviation: pack-workflow carries 2
+Node >= 20. TypeScript strict, ESM (NodeNext). Testing policy: retries 0,
+no skips on required flows, red-probe proof for gates, deterministic offline
+runs. Known deviation: pack-workflow carries 2
 skipped cases (a shared-audit e2e flake and a malformed-FSM detector case),
 documented in its test files pending fixes.
 
