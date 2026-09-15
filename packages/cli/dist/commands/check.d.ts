@@ -1,4 +1,5 @@
 import type { Io } from '../io.js';
+export declare const CHECK_USAGE: string;
 /**
  * Resolves the adopted-baseline forgiveness set for this repo (phase 8 C).
  *
@@ -18,7 +19,6 @@ export declare function resolveAdoptedBaseline(cwd: string, baselinesPath: strin
     fingerprints: ReadonlySet<string>;
     classificationBlocked?: ReadonlySet<string>;
 } | null;
-export declare const CHECK_USAGE = "usage: gateforge check [--changed] [--format text|json|sarif]";
 /**
  * Runs the check subcommand.
  *
@@ -27,7 +27,8 @@ export declare const CHECK_USAGE = "usage: gateforge check [--changed] [--format
  *   argv: flags after the subcommand.
  *
  * Returns:
- *   number: exit code — 0 clean/waived, 1 unresolved, 2 config/usage.
+ *   number: exit code — 0 clean/waived, 1 unresolved (or a blocked staged
+ *   candidate), 2 config/usage.
  * @throws fail-closed errors (exit 2) from config/plugin/pipeline layers.
  */
 export declare function checkCommand(io: Io, argv: readonly string[]): Promise<number>;
