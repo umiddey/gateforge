@@ -198,10 +198,3 @@ gates, deterministic offline runs. Known deviation: pack-workflow carries 2
 skipped cases (a shared-audit e2e flake and a malformed-FSM detector case),
 documented in its test files pending fixes.
 
-## Documentation
-
-- Plans: `docs/plans/immediate/20260830_2002_gateforge_test_obligation_engine.md`,
-  `docs/plans/immediate/20260913_0000_existing_test_reuse_and_e2e_enforcement.md`
-- Decisions: `docs/decisions/0001-ontology.md`, `docs/decisions/0002-plugin-boundary.md`,
-  `docs/decisions/0005-existing-test-reuse-and-e2e-enforcement-contracts.md`
-- Adversarial fixtures: `docs/research/adversarial_fixture_suite.md`
