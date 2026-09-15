@@ -307,6 +307,197 @@ describe('static discovery', () => {
   });
 });
 
+describe('non-test call shapes stay out of the inventory (consumer E22)', () => {
+  it('ignores vitest/jest module-mock and slowness-modifier calls', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'src/setup.js': [
+        "vi.mock('react-router-dom', async () => {",
+        '  return {};',
+        '});',
+        "vi.mock('axios', () => ({ default: {} }));",
+        '',
+      ].join('\n'),
+      'e2e/modifiers.spec.ts': [
+        "import { test } from 'playwright/test';",
+        'test.slow(true);',
+        "test('real journey', async () => {});",
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['src/**/*.js', 'e2e/**/*.ts'], exclude: [] });
+    // The mock registrations are file-level mock signals, never test
+    // rows; the slowness modifier is runner control, never a case.
+    expect(result.unresolved).toEqual([]);
+    expect(result.entries.map((entry) => entry.title)).toEqual(['real journey']);
+  });
+
+  it('ignores same-file plain helper functions with test-like call shapes', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/helpers.js': [
+        'async function withStepTimeout(label, fn) {',
+        '  return await fn();',
+        '}',
+        'async function seed() {',
+        "  await withStepTimeout('seed target', async () => {});",
+        '}',
+        'module.exports = { seed };',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.js'], exclude: [] });
+    expect(result.unresolved).toEqual([]);
+    expect(result.entries).toEqual([]);
+  });
+
+  it('resolves CJS helper requires and ignores their step calls', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/support/runStep.js': [
+        'async function runStep(label, fn) {',
+        '  return await fn();',
+        '}',
+        'module.exports = { runStep };',
+        '',
+      ].join('\n'),
+      'e2e/support/seed.js': [
+        "const { runStep } = require('./runStep');",
+        'async function seedAll() {',
+        "  return runStep('seed tracked hierarchy', async () => {});",
+        '}',
+        'module.exports = { seedAll };',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.js'], exclude: [] });
+    expect(result.unresolved).toEqual([]);
+    expect(result.entries).toEqual([]);
+  });
+
+  it('keeps unbound test/it/describe names visible while skipping other bare identifiers', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'src/component.jsx': [
+        'export function Toolbar({ onExport }) {',
+        '  const handleAction = async (actionName, callback) => {',
+        '    await callback();',
+        '  };',
+        "  return handleAction('export-csv', () => onExport('csv'));",
+        '}',
+        '',
+      ].join('\n'),
+      'e2e/mixed.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "test('real journey', async () => {});",
+        "it('import-less global registration stays visible', async () => {});",
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['src/**/*.jsx', 'e2e/**/*.ts'], exclude: [] });
+    // The function-scope UI callback is an ordinary call, never a row.
+    expect(result.unresolved.map((gap) => gap.code)).toEqual(['unresolved-test-alias']);
+    expect(result.unresolved[0]?.titlePath).toEqual(['import-less global registration stays visible']);
+    expect(result.entries.map((entry) => entry.title)).toEqual(['real journey']);
+  });
+
+  it('keeps test-referencing wrapper factories visible (possible registration)', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/factory.spec.ts': [
+        'const wrap = (title, fn) => test(title, fn);',
+        "wrap('possible registration', async () => {});",
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    // The factory body mentions `test`, so calls through it cannot be
+    // proven ordinary — the row stays (fail-visible).
+    expect(result.entries).toEqual([]);
+    expect(result.unresolved.map((gap) => gap.code)).toEqual(['unresolved-wrapper']);
+  });
+
+  it('follows CJS base.test.extend harness chains into test entries', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/support/fixtures.js': [
+        "const base = require('@playwright/test');",
+        'const test = base.test.extend({});',
+        'module.exports = { test };',
+        '',
+      ].join('\n'),
+      'e2e/router.spec.js': [
+        "const { test } = require('./support/fixtures');",
+        "test('navigates', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.js'], exclude: [] });
+    expect(result.parseErrors).toEqual([]);
+    expect(result.unresolved).toEqual([]);
+    expect(result.entries.map((entry) => [entry.title, entry.facts.signatureParams])).toEqual([
+      ['navigates', ['page']],
+    ]);
+  });
+
+  it('never turns suppression control calls into dynamic-title gaps', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/guarded.spec.ts': [
+        "import { test } from 'playwright/test';",
+        'async function guard(page, reasonPrefix) {',
+        '  const ok = await page.goto("/");',
+        '  if (!ok) test.skip(true, `${reasonPrefix}: never rendered`);',
+        '}',
+        "test('real journey', async ({ page }) => {",
+        "  await guard(page, 'setup');",
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    // The helper's conditional skip is runner control, not a case; the
+    // declaration form with a title+callback still registers (see the
+    // signals spec above).
+    expect(result.unresolved).toEqual([]);
+    expect(result.entries.map((entry) => entry.title)).toEqual(['real journey']);
+  });
+
+  it('keeps parameterized skip/only/fixme declarations visible (never dropped)', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/skipped-param.spec.ts': [
+        "import { test } from 'playwright/test';",
+        'const KINDS = ["a", "b"];',
+        'for (const kind of KINDS) {',
+        '  test.skip(`skips ${kind}`, async ({ page }) => {});',
+        '  test.only(`focuses ${kind}`, async ({ page }) => {});',
+        '  test.fixme(`known broken ${kind}`, async ({ page }) => {});',
+        '}',
+        // Genuine conditional controls declare no case and stay silent.
+        'async function guard(cond) {',
+        "  if (cond) test.skip(true, 'static reason');",
+        '  if (cond) test.skip(true, `dynamic ${cond} reason`);',
+        '}',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    // Adding `.skip` (or only/fixme) to a parameterized template must not
+    // complete the inventory by dropping the case: all three templates
+    // register as entries carrying their suppression signal.
+    expect(result.unresolved).toEqual([]);
+    const byTitle = new Map(result.entries.map((entry) => [entry.title, entry]));
+    expect([...byTitle.keys()].sort()).toEqual(['focuses ${}', 'known broken ${}', 'skips ${}']);
+    for (const entry of byTitle.values()) {
+      expect(entry.parameterIdentity).toBe('template');
+    }
+    expect(byTitle.get('skips ${}')?.signals.some((signal) => signal.kind === 'skip')).toBe(true);
+    expect(byTitle.get('focuses ${}')?.signals.some((signal) => signal.kind === 'only')).toBe(true);
+    expect(byTitle.get('known broken ${}')?.signals.some((signal) => signal.kind === 'fixme')).toBe(true);
+  });
+});
+
 describe('kind/category inference rules', () => {
   const baseFacts = {
     pageRoute: null,
@@ -551,6 +742,79 @@ describe('native playwright reconciliation', () => {
     expect(staticOnly[0]?.unresolvedReason?.code).toBe('reconciliation-static-only');
     expect(staticOnly[0]?.discoveryStatus).toBe('unresolved');
     expect(staticOnly[0]?.resolutionOrigin).toBe('static');
+    expect(catalog.inventoryComplete).toBe(false);
+  });
+
+  it('merges parameterized template rows into their enumerated instances (consumer E22)', async () => {
+    const root = makePlaywrightProject({
+      'e2e/matrix.spec.js': [
+        "import { test } from 'playwright/test';",
+        "const ROUTES = ['/a', '/b'];",
+        "test.describe('nav', () => {",
+        '  for (const route of ROUTES) {',
+        '    test(`opens ${route}`, async ({ page }) => {});',
+        '  }',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const config = fixtureConfig(['e2e/**/*.spec.js']);
+    const { catalog } = await discoverTestCatalog({ cwd: root, config });
+    // No blocking template gap: the two concrete instances ARE the
+    // runnable identities, carrying the loop body's static facts.
+    expect(catalog.unresolved).toEqual([]);
+    expect(catalog.inventoryComplete).toBe(true);
+    const matched = catalog.entries.filter((entry) => entry.reconciliation === 'matched');
+    expect(matched.map((entry) => entry.title).sort()).toEqual(['opens /a', 'opens /b']);
+    expect(matched.every((entry) => entry.resolutionOrigin === 'static')).toBe(true);
+    expect(matched.every((entry) => entry.inferredKind === 'browser-e2e')).toBe(true);
+    expect(
+      matched.every((entry) => entry.weakSignals.some((signal) => signal.ruleId === 'template-expansion')),
+    ).toBe(true);
+  });
+
+  it('keeps zero-instance templates static-only and blocking', async () => {
+    const root = makePlaywrightProject({
+      'e2e/probe.spec.js': [
+        "import { test } from 'playwright/test';",
+        "for (const kind of (process.env.PROBE_KINDS || '').split(',').filter(Boolean)) {",
+        '  test(`probes ${kind}`, async ({ page }) => {});',
+        '}',
+        '',
+      ].join('\n'),
+    });
+    const config = fixtureConfig(['e2e/**/*.spec.js']);
+    const { catalog } = await discoverTestCatalog({ cwd: root, config });
+    // Nothing enumerates this template in any configuration: the owner
+    // wires PROBE_KINDS into a project or removes the probe — the gate
+    // must not silently complete over it.
+    const staticOnly = catalog.entries.filter((entry) => entry.reconciliation === 'static-only');
+    expect(staticOnly.map((entry) => entry.title)).toEqual(['probes ${}']);
+    expect(staticOnly[0]?.discoveryStatus).toBe('unresolved');
+    expect(catalog.inventoryComplete).toBe(false);
+  });
+
+  it('keeps zero-instance skipped templates static-only and blocking (no skip bypass)', async () => {
+    const root = makePlaywrightProject({
+      'e2e/skipped-probe.spec.js': [
+        "import { test } from 'playwright/test';",
+        "for (const kind of (process.env.PROBE_KINDS || '').split(',').filter(Boolean)) {",
+        '  test.skip(`skips ${kind}`, async ({ page }) => {});',
+        '}',
+        '',
+      ].join('\n'),
+    });
+    const config = fixtureConfig(['e2e/**/*.spec.js']);
+    const { catalog } = await discoverTestCatalog({ cwd: root, config });
+    // Adding `.skip` to a parameterized template with zero enumerated
+    // instances must not complete the inventory: the skipped template is
+    // a visible blocking row carrying its skip signal, not a dropped case.
+    const staticOnly = catalog.entries.filter((entry) => entry.reconciliation === 'static-only');
+    expect(staticOnly.map((entry) => entry.title)).toEqual(['skips ${}']);
+    expect(staticOnly[0]?.discoveryStatus).toBe('unresolved');
+    expect(staticOnly[0]?.unresolvedReason?.code).toBe('reconciliation-static-only');
+    expect(staticOnly[0]?.suppressionSignals.some((signal) => signal.kind === 'skip')).toBe(true);
+    expect(catalog.unresolved).toHaveLength(1);
     expect(catalog.inventoryComplete).toBe(false);
   });
 
