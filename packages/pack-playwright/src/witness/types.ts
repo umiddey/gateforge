@@ -449,6 +449,21 @@ export interface WitnessOptions {
   stateDir?: string | null;
   /** Directory of reviewed `.mjs` adapters (default `.gateforge/adapters`). */
   adaptersDir?: string | null;
+  /**
+   * Operator-issued credential the witness presents on its OWN engine-side
+   * adapter reads (GF-10 mediation; dogfood deployment, 2026-09-05/07).
+   *
+   * WHY: adapters perform GET-only reads of the app's own collection
+   * routes to observe persisted state, and those routes authenticate —
+   * an unauthenticated loopback read is a 401, so the engine could not
+   * observe state at all. The credential is issued by the DEPLOYMENT
+   * OPERATOR to the WITNESS ONLY (env `GATEFORGE_ADAPTER_READ_AUTHORIZATION`
+   * or `--adapter-read-authorization`), never to the tested suite, and is
+   * a read-only service principal of the same trust class as the verifier
+   * key. When unset, adapter reads stay unauthenticated (previous
+   * behavior) and protected collections simply fail closed with 401/409.
+   */
+  adapterReadAuthorization?: string | null;
   /** Classifications document path (YAML) for the primaryKey map + adapter aliases. */
   classificationsPath?: string | null;
   /**
@@ -510,6 +525,15 @@ export interface AdapterContext {
   get: (
     path: string,
   ) => Promise<{ status: number; json(): Promise<unknown>; text(): Promise<string>; headers: Headers }>;
+  /**
+   * Headers adapters MUST attach to any direct fetch they perform
+   * instead of `get` (dogfood, 2026-09-05): carries the operator-issued
+   * engine read credential (`WitnessOptions.adapterReadAuthorization`)
+   * so engine-side GET-only state observation can authenticate against
+   * the app's own collection routes. Never suite-supplied, never
+   * attached to browser traffic.
+   */
+  headers?: Record<string, string>;
 }
 
 /** Full witness-issued record (superset of the pinned wire response). */

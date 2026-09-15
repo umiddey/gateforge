@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { sha256Canonical } from './canonical-json.js';
 import { ContractNameSchema } from './schemas/common.js';
 import { LifecycleSchema } from './schemas/classification.js';
+import { BlockingEntrySchema, type BlockingEntry } from './policy/evaluate.js';
 
 /** Exactly the identity fields hashed into an obligation fingerprint. */
 export const FingerprintInputSchema = z
@@ -44,4 +45,20 @@ export type FingerprintInput = z.infer<typeof FingerprintInputSchema>;
  */
 export function fingerprint(input: FingerprintInput): string {
   return sha256Canonical(FingerprintInputSchema.parse(input));
+}
+
+/**
+ * The BLOCKING-ENTRY fingerprint (phase 8 workstream C): the stable
+ * identity a baseline stores for gate red that is not an obligation —
+ * unclassified/unresolved resources, detector/graph findings, and stale
+ * references. sha256 over the GF-canonical-JSON of the whole entry
+ * (kind, resourceId, name, detail, location): any change to the cause —
+ * including wording or location of the underlying problem — mints a NEW
+ * fingerprint, which the baseline does not contain, which blocks again.
+ * That is the fail-closed direction: the adoption baseline forgives the
+ * debt exactly as it stood at adoption; anything that shifts must be
+ * re-proven, never re-forgiven (the baseline is shrink-only).
+ */
+export function blockingEntryFingerprint(entry: BlockingEntry): string {
+  return sha256Canonical(BlockingEntrySchema.parse(entry));
 }

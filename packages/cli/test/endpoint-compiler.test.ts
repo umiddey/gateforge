@@ -577,6 +577,110 @@ describe('linkage corroboration (path-name coincidence never links)', () => {
   });
 });
 
+describe('dash-path name-form normalization (kebab route segments link snake_case tables)', () => {
+  it('links a dash-path DELETE to its snake_case table and classifies hard delete', () => {
+    // `/email-accounts/{id}` derives the snake_case candidate
+    // 'email_accounts', which equals the discovered table name; the
+    // handler 'destroy_email_account' corroborates (whole snake word
+    // '_email_account') AND carries hard-delete semantics, so the DELETE
+    // classifies instead of grading classification-blocked forever.
+    const route = routeFact('DELETE', '/api/v1/email-accounts/{email_account_id}', {
+      handlerSymbol: 'app.destroy_email_account',
+    });
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessTable('email_accounts') as never,
+    ]);
+    const endpoint = compiled.inventory.endpoints[0];
+    expect(endpoint?.linkedResourceName).toBe('email_accounts');
+    expect(endpoint?.capabilities).toContain('crud-delete');
+    expect(
+      compiled.contribution.unresolved.some(
+        (entry) =>
+          entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED' ||
+          entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED',
+      ),
+    ).toBe(false);
+  });
+
+  it('stays unlinked when the normalized candidate lacks corroboration (fail-closed)', () => {
+    // Normalization repairs the NAME FORM only — it never fabricates the
+    // corroboration fact; default handler `app.handler_<n>` carries no
+    // resource word, so the link still needs explicit evidence.
+    const route = routeFact('DELETE', '/api/v1/email-accounts/{email_account_id}');
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessTable('email_accounts') as never,
+    ]);
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBeNull();
+    const linkBlocks = compiled.contribution.unresolved.filter(
+      (entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED',
+    );
+    expect(linkBlocks).toHaveLength(1);
+    // The typed block reports the NORMALIZED candidate form.
+    expect(linkBlocks[0]?.detail).toContain("derives resource name 'email_accounts'");
+  });
+
+  it('mints no identity when the normalized candidate matches no resource', () => {
+    const route = routeFact('DELETE', '/api/v1/ghost-accounts/{id}', {
+      handlerSymbol: 'app.destroy_ghost_account',
+    });
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessTable('email_accounts') as never,
+    ]);
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBeNull();
+    expect(
+      compiled.contribution.unresolved.some(
+        (entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps dash-path and plain-path endpoints byte-identical under permutation', () => {
+    const business = {
+      detectorId: 'test.models',
+      detectorVersion: '1',
+      resources: [
+        {
+          schemaVersion: 1 as const,
+          id: 'sqlalchemy.table:email_accounts',
+          kind: 'sqlalchemy.table',
+          source: 'backend/models/email_account.py',
+          location: { file: 'backend/models/email_account.py', line: 4, col: 0 },
+          detectorVersion: '0.1.0',
+          attributes: { resourceName: 'email_accounts' },
+        },
+        {
+          schemaVersion: 1 as const,
+          id: 'sqlalchemy.table:accounts',
+          kind: 'sqlalchemy.table',
+          source: 'backend/models/account.py',
+          location: { file: 'backend/models/account.py', line: 4, col: 0 },
+          detectorVersion: '0.1.0',
+          attributes: { resourceName: 'accounts' },
+        },
+      ],
+      unresolved: [],
+      findings: [],
+      classificationSignals: [],
+    };
+    const facts = [
+      routeFact('DELETE', '/api/v1/email-accounts/{email_account_id}', {
+        handlerSymbol: 'app.destroy_email_account',
+      }),
+      routeFact('GET', '/api/v1/accounts', { handlerSymbol: 'app.list_accounts' }),
+    ];
+    const forward = compileEndpointContribution([contribution(facts), business as never]);
+    const reversed = compileEndpointContribution([
+      contribution([...facts].reverse()),
+      business as never,
+    ]);
+    expect(JSON.stringify(forward.contribution)).toBe(JSON.stringify(reversed.contribution));
+    expect(JSON.stringify(forward.inventory)).toBe(JSON.stringify(reversed.inventory));
+  });
+});
+
 describe('determinism and graph separation', () => {
   it('is byte-identical under input permutation', () => {
     const facts = [
