@@ -12,11 +12,31 @@
  * attestation digest, and the final verdict summary. The MAC is computed
  * with the SAME authority as witness records (the witness verifier key,
  * HMAC-SHA256 over GF-canonical JSON) — see `src/receipt/index.ts`.
+ *
+ * Scope extension (opt-in scoped supervised runs): a receipt also names
+ * its evaluation scope (`scope`, absent = `full` for pre-extension
+ * receipts) and, for `changed`-scope receipts, the pin-#2 fingerprints of
+ * the obligations the sealed slice covers. Both fields sit inside the
+ * signed body (the MAC covers every field but `mac` by construction), so
+ * a covered set cannot be widened or trimmed without breaking the
+ * signature.
  */
 import { z } from 'zod';
 import { SchemaVersionField } from './common.js';
+import { FingerprintHexSchema } from './baseline.js';
 /** Hex pattern shared by every digest field. */
 const HEX64 = /^[0-9a-f]{64}$/;
+/**
+ * The evaluation scope a receipt seals (opt-in scoped supervised runs):
+ * - `full` — the whole relevant suite ran and the whole-repo gate was
+ *   green (the historical, default shape);
+ * - `changed` — only the SLICE of tests claiming obligations affected by
+ *   the changed files ran, and only those obligations were graded.
+ * OPTIONAL/additive like `approvedPolicyDigest`: receipts sealed before
+ * scoped runs existed omit it and are read as `full` (that is exactly
+ * what the old seal process certified).
+ */
+export const ReceiptScopeSchema = z.enum(['full', 'changed']);
 /** The final verdict summary the receipt seals. */
 export const ReceiptVerdictSummarySchema = z
     .object({
@@ -81,6 +101,26 @@ export const GateReceiptSchema = z
         .string()
         .regex(HEX64, 'approvedPolicyDigest must be 64-char lowercase hex')
         .optional(),
+    /**
+     * ADDITIVE v1 field: the evaluation scope the receipt seals. OPTIONAL
+     * for backward compatibility — absent reads as `full`, which is what
+     * the historical seal process (whole relevant suite, whole-repo clean
+     * gate) certified. See {@link ReceiptScopeSchema}.
+     */
+    scope: ReceiptScopeSchema.optional(),
+    /**
+     * ADDITIVE v1 field, `scope: 'changed'` receipts ONLY: the pin-#2
+     * fingerprints of the obligations the sealed slice covers (sorted,
+     * duplicate-free). Fingerprints — not obligation ids — because they
+     * are the SAME identity the baseline/waiver layers hash
+     * (`obligationFingerprint`), so every consumer joins covered sets
+     * through one hash and a policy/lifecycle change (which moves the
+     * fingerprint) cannot let an old receipt claim a reshaped obligation.
+     * A `full` receipt must NOT carry the field (it covers everything by
+     * definition); a `changed` receipt must (an empty slice seals
+     * nothing and is refused at planning, never receipted).
+     */
+    coveredObligationFingerprints: z.array(FingerprintHexSchema).optional(),
     /** Normalized invocation that produced the receipt (e.g. `test-gates --changed`). */
     invocation: z.string().min(1),
     /** 64-hex selection digest (the expected test set, fixed pre-run). */
@@ -102,5 +142,52 @@ export const GateReceiptSchema = z
     /** HMAC-SHA256 over the receipt body, domain `gateforge.receipt.v1`. */
     mac: z.string().regex(HEX64, 'mac must be a 64-char lowercase hex HMAC'),
 })
-    .strict();
+    .strict()
+    .superRefine((receipt, ctx) => {
+    // Scope/coverage coherence (fail closed): the covered set exists only
+    // for changed-scope receipts, and a changed-scope receipt without one
+    // would claim authority over an unnamed slice. Ordering/duplication
+    // are enforced so the canonical signed bytes are deterministic.
+    if (receipt.scope === 'changed') {
+        const covered = receipt.coveredObligationFingerprints;
+        if (covered === undefined || covered.length === 0) {
+            ctx.addIssue({
+                code: 'custom',
+                path: ['coveredObligationFingerprints'],
+                message: "a 'changed'-scope receipt must carry its coveredObligationFingerprints",
+            });
+            return;
+        }
+        const sorted = [...covered].sort();
+        for (let index = 0; index < covered.length; index += 1) {
+            const current = covered[index];
+            const expected = sorted[index];
+            if (current !== expected) {
+                ctx.addIssue({
+                    code: 'custom',
+                    path: ['coveredObligationFingerprints', index],
+                    message: "coveredObligationFingerprints must be sorted; expected '" + expected +
+                        "' at index " + index + ", got '" + current + "'",
+                });
+                return;
+            }
+            if (index > 0 && current === covered[index - 1]) {
+                ctx.addIssue({
+                    code: 'custom',
+                    path: ['coveredObligationFingerprints', index],
+                    message: `duplicate covered fingerprint '${current}'`,
+                });
+                return;
+            }
+        }
+        return;
+    }
+    if (receipt.coveredObligationFingerprints !== undefined) {
+        ctx.addIssue({
+            code: 'custom',
+            path: ['coveredObligationFingerprints'],
+            message: "only a 'changed'-scope receipt may carry coveredObligationFingerprints",
+        });
+    }
+});
 //# sourceMappingURL=gate-receipt.js.map

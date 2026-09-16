@@ -90,7 +90,9 @@ export async function adoptCommand(io, argv) {
             (existingRecord.classificationBlocked !== undefined
                 ? ` + ${adoptedClassifications} classification-blocked resource(s) in the receipt`
                 : ' (receipt predates the classification layer: not adopted for it)') +
-            '; a second bulk-add is refused (GF-07/08). Shrink as debt resolves: `gateforge baseline update`.');
+            '; a second bulk-add is refused (GF-07/08). Shrink as debt resolves: `gateforge baseline update`. ' +
+            'New (never-adopted) work is never baselined — prove it with witnessed test evidence ' +
+            '(docs/guides/new-table-playbook.md) or waive it (`gateforge waive`).');
         return 0;
     }
     // Step 1: the compile + static gate, all-files — adoption captures

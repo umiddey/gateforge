@@ -53,6 +53,7 @@ export declare const TestMapEntrySchema: z.ZodObject<{
     kind: z.ZodOptional<z.ZodEnum<{
         unknown: "unknown";
         "browser-e2e": "browser-e2e";
+        "server-e2e": "server-e2e";
         "api-e2e": "api-e2e";
         unit: "unit";
         integration: "integration";
@@ -82,6 +83,7 @@ export declare const TestMapSchema: z.ZodObject<{
         kind: z.ZodOptional<z.ZodEnum<{
             unknown: "unknown";
             "browser-e2e": "browser-e2e";
+            "server-e2e": "server-e2e";
             "api-e2e": "api-e2e";
             unit: "unit";
             integration: "integration";

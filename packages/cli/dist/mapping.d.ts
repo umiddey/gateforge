@@ -166,4 +166,20 @@ export declare function relativeToRepo(cwd: string, absolute: string): string;
  *   MappedCoverage[]: sorted, deduplicated coverage facts.
  */
 export declare function mappedCoverageFrom(resolution: ResolvedMappings, obligations: readonly Obligation[], graph: ResourceGraph): MappedCoverage[];
+/**
+ * Collects the obligation ids whose resolved bindings declare the
+ * server-e2e kind. Mapping kinds are resolved in this trusted CLI layer
+ * only; the witness honors a server-e2e persistence stamp solely for
+ * obligations the supervisor registered from this set, so it is the
+ * authority for which obligations may produce `channel: 'server'`
+ * evidence during the supervised drain. Sorted and deduplicated: the
+ * registration is a set, not a list.
+ *
+ * Args:
+ *   resolution: the resolver output (per-obligation bindings).
+ *
+ * Returns:
+ *   string[]: sorted obligation ids with at least one server-e2e binding.
+ */
+export declare function serverE2eObligationIds(resolution: ResolvedMappings): string[];
 //# sourceMappingURL=mapping.d.ts.map

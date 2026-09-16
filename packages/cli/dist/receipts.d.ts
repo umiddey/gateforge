@@ -32,6 +32,21 @@ export interface ReceiptExpectations {
     selectionDigest?: string;
     /** Current catalog digest; optional for the same reason. */
     catalogDigest?: string;
+    /**
+     * The evaluation scope this consumption demands (opt-in scoped runs).
+     * OPTIONAL and matched against the receipt's EFFECTIVE scope (an
+     * absent receipt field reads as `full` — what the historical seal
+     * process certified). A mismatch is a typed stale rejection: a slice
+     * receipt never reuses as a full seal and vice versa.
+     */
+    scope?: 'full' | 'changed';
+    /**
+     * The exact covered set a `changed`-scope receipt must seal (sorted
+     * pin-#2 fingerprints). OPTIONAL; when provided together with a
+     * changed-scope expectation, any difference — wider or narrower —
+     * rejects (reuse only over IDENTICAL sealed slices).
+     */
+    coveredObligationFingerprints?: readonly string[];
 }
 /** The outcome of loading a receipt for enforcement or reuse. */
 export type ReceiptLoad = {
@@ -53,6 +68,18 @@ export type ReceiptLoad = {
     status: 'execution-mismatch';
     detail: string;
 };
+/**
+ * A receipt's EFFECTIVE evaluation scope: the field is additive
+ * (pre-extension receipts omit it) and absence means `full` — exactly
+ * what the historical whole-relevant-suite seal certified.
+ *
+ * Args:
+ *   receipt: a schema-valid receipt.
+ *
+ * Returns:
+ *   'full' | 'changed': the effective scope.
+ */
+export declare function receiptScope(receipt: GateReceipt): 'full' | 'changed';
 /**
  * Loads and fully verifies the run-state receipt for an expected context
  * (fail closed, typed outcomes — never throws on untrusted content).
@@ -80,6 +107,38 @@ export declare function loadReceiptFor(stateDir: string, verifierKey: string | n
  *   BlockingEntry[]: one blocking entry per failure (empty on success).
  */
 export declare function receiptGateBlocking(load: ReceiptLoad): BlockingEntry[];
+/** One obligation a changed-scope receipt must cover (id + pin-#2 hash). */
+export interface ScopedObligationRef {
+    /** The obligation id (readable diagnostics). */
+    id: string;
+    /** Its pin-#2 fingerprint (the identity receipts seal). */
+    fingerprint: string;
+}
+/**
+ * Scope-coverage consumption for `check --require-e2e` (opt-in scoped
+ * runs): a FULL receipt (or a legacy one with no scope field) covers
+ * everything, exactly as before. A CHANGED receipt satisfies the gate
+ * only when EVERY obligation arising from the currently-changed files is
+ * inside its sealed covered set; otherwise a typed EVIDENCE_SCOPE_INCOMPLETE
+ * blocker names the uncovered obligations — fail closed, never a silent
+ * partial pass.
+ *
+ * The caller supplies `required` as the obligations demanded by THIS
+ * evaluation (diff-joined by the caller: the changed slice for
+ * `check --changed`, every obligation for an unscoped/expanded run). The
+ * run state holds ONE receipt at a time (each seal overwrites the file),
+ * so the honest "union of valid receipts for this digest" is that single
+ * receipt — documented invariance, not an approximation.
+ *
+ * Args:
+ *   receipt: the verified receipt (load status ok).
+ *   required: the obligations this evaluation must see covered.
+ *
+ * Returns:
+ *   BlockingEntry[]: empty when coverage is complete, else one typed
+ *   blocker naming the uncovered obligations (capped list, full count).
+ */
+export declare function scopedReceiptCoverageBlocking(receipt: GateReceipt, required: readonly ScopedObligationRef[]): BlockingEntry[];
 /**
  * Decides whether the run-state receipt may be REUSED for a fresh
  * `test-gates --changed` invocation (plan Phase 4 item 8): identical

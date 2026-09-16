@@ -18,8 +18,8 @@
  *
  * Loading is synchronous, matching `loadConfig`'s convention.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { compareStrings } from '../graph/util.js';
 import { WaiverSchema } from '../schemas/waiver.js';
 import { parseInstant } from '../verdict/index.js';
@@ -145,5 +145,48 @@ export function loadWaivers(dir, options) {
     staleOwner.sort(byOwner);
     expired.sort(byOwner);
     return { waivers, staleOwner, expired };
+}
+/**
+ * Serializes a waiver for on-disk storage: 2-space JSON with a trailing
+ * newline (the `serializeBaseline` house style — reviewable in diffs and
+ * PRs). Loading is canonical through {@link loadWaivers}'s plain
+ * `JSON.parse`, so key order is irrelevant to the engine; the pretty
+ * form exists for the humans who must review every exception.
+ *
+ * Args:
+ *   waiver: the schema-valid document to serialize.
+ *
+ * Returns:
+ *   string: the file content.
+ */
+export function serializeWaiver(waiver) {
+    return `${JSON.stringify(waiver, null, 2)}\n`;
+}
+/**
+ * Writes a waiver to disk, creating parent directories as needed (the
+ * waivers directory may not exist yet — first waiver in a repo).
+ * Fail-closed: a write failure surfaces as a {@link GateforgeWaiverError}
+ * (config-error → exit 2), never a half-written silent success.
+ *
+ * Args:
+ *   path: destination file path.
+ *   waiver: the schema-valid document to write.
+ *
+ * Throws:
+ *   GateforgeWaiverError: when the file cannot be written.
+ */
+export function writeWaiver(path, waiver) {
+    try {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, serializeWaiver(waiver), 'utf8');
+    }
+    catch (error) {
+        throw new GateforgeWaiverError([
+            {
+                file: basename(path),
+                detail: `could not be written: ${error instanceof Error ? error.message : String(error)}`,
+            },
+        ]);
+    }
 }
 //# sourceMappingURL=index.js.map

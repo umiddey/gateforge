@@ -19,8 +19,10 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { CAUSE_NEXT_ACTIONS, ExecutionResultSchema, GateReceiptSchema, canonicalJson, executionResultDigestOf, gateReceiptMac, selectionDigestOf, sha256Canonical, superviseExecution, trustedPolicyDigest, verifyGateReceipt, } from '@gateforge/core';
+import { CAUSE_NEXT_ACTIONS, ExecutionResultSchema, GateReceiptSchema, canonicalJson, compareStrings, executionResultDigestOf, gateReceiptMac, selectionDigestOf, sha256Canonical, superviseExecution, trustedPolicyDigest, verifyGateReceipt, } from '@gateforge/core';
+import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
+import { sourcesByResourceId } from './pipeline.js';
 import { normalizeRepoModule } from './input-snapshot.js';
 import { UsageError } from './errors.js';
 import { environmentIdentity } from './input-snapshot.js';
@@ -273,6 +275,94 @@ export function planExpectedSet(catalog) {
     return rows;
 }
 /**
+ * The obligation slice a `--scope changed` run must certify (plan Goal 2,
+ * opt-in scoped sealing): the changed files joined to resources through
+ * the SAME join-aware source map the diff scoping grades by
+ * ({@link sourcesByResourceId} — backend source AND every joined
+ * frontend-call source), then resources joined to obligations, then
+ * obligations joined to tests through the ONE mapping resolver.
+ *
+ * Selection granularity is deliberately FILE-grained: the supervised
+ * adapter executes whole spec files (trusted-config `testMatch`), so a
+ * file that claims one affected obligation plans ALL its catalog rows.
+ * Over-selection inside a claimed file is safe — every planned row must
+ * still pass — while under-selection (a claiming test left unplanned)
+ * would seal coverage over an unrun test, the one direction that can
+ * never be allowed.
+ *
+ * Testable claims are DECLARED bindings only (`sidecar` or `native`
+ * origin, unlike {@link claimInjectionsFor} which injects sidecar-only —
+ * selection is not evidence attribution, and a native annotation lives in
+ * the test file itself, so running the file re-claims it in THIS run).
+ * Inferred/prior-run bindings are suggestion data and never count: a
+ * claimed obligation whose only candidates are inferred rows would run
+ * tests that produce no evidence for it, so it is reported UNCLAIMED
+ * instead — the caller turns that into a typed blocking entry (no
+ * guessing a narrower gate).
+ *
+ * Args:
+ *   input: the discovered catalog, the resolved mappings, the run's
+ *     obligations and graph, and the resolved changed-file set.
+ *
+ * Returns:
+ *   ScopedPlan: the sliced planned rows (whole claimed files), the
+ *   affected obligations with their pin-#2 fingerprints (the receipt's
+ *   covered set), and the affected obligations no testable claim covers.
+ */
+export function planScopedExpectedSet(input) {
+    const changed = new Set(input.changedFiles);
+    const sources = sourcesByResourceId(input.graph);
+    const affected = input.obligations
+        .filter((obligation) => (sources.get(obligation.resourceId) ?? []).some((file) => changed.has(file)))
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    // Catalog joins, exactly as {@link claimInjectionsFor} builds them: a
+    // binding counts only when the CURRENT catalog still enumerates its
+    // instance (stale bindings are the resolver's typed problems).
+    const logicalKeyByCatalogKey = new Map(input.catalog.entries.map((entry) => [
+        `${entry.file}#${entry.titlePath.join('>')}`,
+        entry.logicalKey,
+    ]));
+    const entryByLogicalKey = new Map(input.catalog.entries.map((entry) => [entry.logicalKey, entry]));
+    const bindingsByObligation = new Map(input.resolution.obligations.map((group) => [group.obligationId, group.bindings]));
+    const requiredFiles = new Set();
+    const claimedObligations = new Set();
+    const unclaimed = [];
+    for (const obligation of affected) {
+        const bindings = bindingsByObligation.get(obligation.id) ?? [];
+        let testable = false;
+        for (const binding of bindings) {
+            if (binding.origin !== 'sidecar' && binding.origin !== 'native')
+                continue;
+            for (const instance of binding.instances) {
+                const logicalKey = logicalKeyByCatalogKey.get(`${instance.file}#${instance.titlePath.join('>')}`);
+                if (logicalKey === undefined)
+                    continue;
+                const entry = entryByLogicalKey.get(logicalKey);
+                if (entry === undefined)
+                    continue;
+                testable = true;
+                requiredFiles.add(entry.file);
+            }
+        }
+        if (testable) {
+            claimedObligations.add(obligation.id);
+        }
+        else {
+            unclaimed.push({
+                obligationId: obligation.id,
+                detail: `changed-scope planning: obligation '${obligation.id}' is affected by the changed files but ` +
+                    'no declared mapping (sidecar entry or native annotation) resolves to a test the current ' +
+                    'catalog still enumerates — narrower selection is never guessed; map a test or run full scope',
+            });
+        }
+    }
+    const plannedRows = planExpectedSet(input.catalog).filter((row) => requiredFiles.has(row.planned.file));
+    const coveredFingerprints = [
+        ...new Set(affected.map((obligation) => obligationFingerprint(obligation))),
+    ].sort(compareStrings);
+    return { plannedRows, affected, coveredFingerprints, unclaimed };
+}
+/**
  * Resolves executed outcome rows (reporter data, input only) into
  * schema-shaped outcomes: logical keys join through the planned set's
  * instance identity; rows outside the plan keep their framework-side
@@ -340,7 +430,7 @@ function shardCompletenessOf(shards) {
 export function sealExecutionResult(input) {
     const selection = {
         runner: input.runner,
-        mode: 'full-relevant-suite',
+        mode: input.mode ?? 'full-relevant-suite',
         logicalKeys: [...new Set(input.logicalKeys)].sort(),
     };
     const executed = executedOutcomesOf(input.outcomesDoc, input.plannedRows);
@@ -414,6 +504,21 @@ export function issueGateReceipt(input) {
     if (input.verdictSummary.blocking !== 0) {
         throw new UsageError('refusing to issue a gate receipt for a blocking run (fail closed)');
     }
+    // Scope normalization (fail closed): a `changed` receipt MUST name its
+    // covered set (sorted, duplicate-free — the schema re-checks), and a
+    // `full`/unscoped receipt must NOT carry one. An unnamed slice would
+    // claim unbounded authority; a covered full receipt would be dead weight
+    // pretending to bound it.
+    const scoped = input.scope === 'changed';
+    const covered = scoped
+        ? [...new Set(input.coveredObligationFingerprints ?? [])].sort(compareStrings)
+        : undefined;
+    if (scoped && (covered === undefined || covered.length === 0)) {
+        throw new UsageError('refusing to issue a changed-scope gate receipt without coveredObligationFingerprints (fail closed)');
+    }
+    if (!scoped && input.coveredObligationFingerprints !== undefined) {
+        throw new UsageError('refusing to issue a full-scope gate receipt with a coveredObligationFingerprints slice (fail closed)');
+    }
     // Structural validation first: parse the draft under the strict schema
     // with a placeholder mac (the real MAC is computed over the VALIDATED
     // body so the signed bytes are exactly the schema-checked bytes).
@@ -431,6 +536,10 @@ export function issueGateReceipt(input) {
         // included ONLY when strict enforcement provisioned a pin, so
         // receipts sealed without one stay byte-compatible with v1.
         ...(input.approvedPolicyDigest ? { approvedPolicyDigest: input.approvedPolicyDigest } : {}),
+        // Additive scope binding (opt-in scoped supervised runs): present
+        // ONLY for changed-scope seals, so every earlier receipt stays
+        // byte-compatible with v1 (absence reads as `full`).
+        ...(scoped ? { scope: 'changed', coveredObligationFingerprints: covered } : {}),
         invocation: input.invocation,
         selectionDigest: input.selectionDigest,
         catalogDigest: input.catalogDigest,

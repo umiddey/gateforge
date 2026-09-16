@@ -14,6 +14,11 @@ import type {
   ExpectedSetRequest,
   ExpectedSetResponse,
   ExecutionTraceResponse,
+  ServerE2eDeclarationsRequest,
+  ServerE2eDeclarationsResponse,
+  ServerPersistenceIntentRequest,
+  ServerPersistenceResponse,
+  ServerPreObservationResponse,
   SessionCloseRequest,
   SessionCloseResponse,
   SessionOpenRequest,
@@ -81,6 +86,34 @@ export class SupervisorClient {
    */
   async closeSession(request: SessionCloseRequest): Promise<SessionCloseResponse> {
     return this.request<SessionCloseResponse>('/sessions/close', request);
+  }
+
+  /**
+   * POST /runs/server-e2e-declarations: registers the obligations the
+   * trusted mapping layer declared kind `server-e2e` — the witness then
+   * (and only then) stamps `channel: 'server'` records for them.
+   */
+  async registerServerE2eDeclarations(
+    request: ServerE2eDeclarationsRequest,
+  ): Promise<ServerE2eDeclarationsResponse> {
+    return this.request<ServerE2eDeclarationsResponse>('/runs/server-e2e-declarations', request);
+  }
+
+  /**
+   * POST /witness/server-persistence: forwards one drained persistence
+   * claim intent. The witness executes the adapter SERVER PROBE itself
+   * and either stamps a witnessed `channel: 'server'` record (post) or
+   * stores its before-state (pre) — or answers a TYPED failure (the
+   * cause code rides `WitnessRequestError.detail`), which is never
+   * satisfaction.
+   */
+  async verifyServerPersistence(
+    request: ServerPersistenceIntentRequest,
+  ): Promise<ServerPersistenceResponse | ServerPreObservationResponse> {
+    return this.request<ServerPersistenceResponse | ServerPreObservationResponse>(
+      '/witness/server-persistence',
+      request,
+    );
   }
 
   /**

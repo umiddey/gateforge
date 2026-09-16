@@ -21,6 +21,7 @@
 import {
   CAUSE_NEXT_ACTIONS,
   ExecutionResultSchema,
+  compareStrings,
   executionResultDigestOf,
   verifyGateReceipt,
   type BlockingEntry,
@@ -46,6 +47,21 @@ export interface ReceiptExpectations {
   selectionDigest?: string;
   /** Current catalog digest; optional for the same reason. */
   catalogDigest?: string;
+  /**
+   * The evaluation scope this consumption demands (opt-in scoped runs).
+   * OPTIONAL and matched against the receipt's EFFECTIVE scope (an
+   * absent receipt field reads as `full` — what the historical seal
+   * process certified). A mismatch is a typed stale rejection: a slice
+   * receipt never reuses as a full seal and vice versa.
+   */
+  scope?: 'full' | 'changed';
+  /**
+   * The exact covered set a `changed`-scope receipt must seal (sorted
+   * pin-#2 fingerprints). OPTIONAL; when provided together with a
+   * changed-scope expectation, any difference — wider or narrower —
+   * rejects (reuse only over IDENTICAL sealed slices).
+   */
+  coveredObligationFingerprints?: readonly string[];
 }
 
 /** The outcome of loading a receipt for enforcement or reuse. */
@@ -56,6 +72,21 @@ export type ReceiptLoad =
   | { status: 'unverified'; detail: string }
   | { status: 'stale'; detail: string }
   | { status: 'execution-mismatch'; detail: string };
+
+/**
+ * A receipt's EFFECTIVE evaluation scope: the field is additive
+ * (pre-extension receipts omit it) and absence means `full` — exactly
+ * what the historical whole-relevant-suite seal certified.
+ *
+ * Args:
+ *   receipt: a schema-valid receipt.
+ *
+ * Returns:
+ *   'full' | 'changed': the effective scope.
+ */
+export function receiptScope(receipt: GateReceipt): 'full' | 'changed' {
+  return receipt.scope ?? 'full';
+}
 
 /**
  * Loads and fully verifies the run-state receipt for an expected context
@@ -129,6 +160,37 @@ export function loadReceiptFor(
       detail: 'the bound execution result records an incomplete run; receipts exist only for complete runs (fail closed)',
     };
   }
+  // Scope expectations (opt-in scoped runs; additive fields, checked only
+  // when the consumer demands them). A scope or covered-set mismatch is a
+  // STALE rejection — the sealed run certified a different slice than the
+  // one this evaluation needs, which is the E13 staleness contract
+  // extended to the slice axis.
+  if (expected.scope !== undefined) {
+    const effective = receiptScope(verified.receipt);
+    if (effective !== expected.scope) {
+      return {
+        status: 'stale',
+        detail:
+          `gate receipt sealed scope '${effective}' but this evaluation demands '${expected.scope}'; ` +
+          'the sealed run certified a different slice than the one needed (fail closed)',
+      };
+    }
+    if (expected.scope === 'changed' && expected.coveredObligationFingerprints !== undefined) {
+      const sealed = [...new Set(verified.receipt.coveredObligationFingerprints ?? [])].sort();
+      const demanded = [...new Set(expected.coveredObligationFingerprints)].sort();
+      if (
+        sealed.length !== demanded.length ||
+        sealed.some((fingerprint, index) => fingerprint !== demanded[index])
+      ) {
+        return {
+          status: 'stale',
+          detail:
+            'gate receipt coveredObligationFingerprints differ from the demanded slice; ' +
+            'reuse requires the IDENTICAL sealed coverage (fail closed)',
+        };
+      }
+    }
+  }
   return { status: 'ok', receipt: verified.receipt, executionResult };
 }
 
@@ -173,6 +235,68 @@ export function receiptGateBlocking(load: ReceiptLoad): BlockingEntry[] {
     case 'execution-mismatch':
       return [block('ENFORCEMENT_UNTRUSTED', `require-e2e: ${load.detail}`)];
   }
+}
+
+/** One obligation a changed-scope receipt must cover (id + pin-#2 hash). */
+export interface ScopedObligationRef {
+  /** The obligation id (readable diagnostics). */
+  id: string;
+  /** Its pin-#2 fingerprint (the identity receipts seal). */
+  fingerprint: string;
+}
+
+/**
+ * Scope-coverage consumption for `check --require-e2e` (opt-in scoped
+ * runs): a FULL receipt (or a legacy one with no scope field) covers
+ * everything, exactly as before. A CHANGED receipt satisfies the gate
+ * only when EVERY obligation arising from the currently-changed files is
+ * inside its sealed covered set; otherwise a typed EVIDENCE_SCOPE_INCOMPLETE
+ * blocker names the uncovered obligations — fail closed, never a silent
+ * partial pass.
+ *
+ * The caller supplies `required` as the obligations demanded by THIS
+ * evaluation (diff-joined by the caller: the changed slice for
+ * `check --changed`, every obligation for an unscoped/expanded run). The
+ * run state holds ONE receipt at a time (each seal overwrites the file),
+ * so the honest "union of valid receipts for this digest" is that single
+ * receipt — documented invariance, not an approximation.
+ *
+ * Args:
+ *   receipt: the verified receipt (load status ok).
+ *   required: the obligations this evaluation must see covered.
+ *
+ * Returns:
+ *   BlockingEntry[]: empty when coverage is complete, else one typed
+ *   blocker naming the uncovered obligations (capped list, full count).
+ */
+export function scopedReceiptCoverageBlocking(
+  receipt: GateReceipt,
+  required: readonly ScopedObligationRef[],
+): BlockingEntry[] {
+  if (receiptScope(receipt) === 'full') return [];
+  const covered = new Set(receipt.coveredObligationFingerprints ?? []);
+  const uncovered = required.filter((obligation) => !covered.has(obligation.fingerprint));
+  if (uncovered.length === 0) return [];
+  const named = uncovered
+    .slice(0, 5)
+    .map((obligation) => obligation.id)
+    .sort(compareStrings)
+    .join(', ');
+  const more = uncovered.length > 5 ? ` (+${String(uncovered.length - 5)} more)` : '';
+  return [
+    {
+      kind: 'finding',
+      resourceId: null,
+      name: null,
+      detail:
+        `require-e2e: the changed-scope receipt covers ${String(covered.size)} obligation(s) but ` +
+        `${String(uncovered.length)} obligation(s) arising from the current change are uncovered ` +
+        `(${named}${more}) — seal full-scope evidence or widen the slice (fail closed)`,
+      location: null,
+      cause: 'EVIDENCE_SCOPE_INCOMPLETE',
+      nextAction: NEXT_ACTIONS.EVIDENCE_SCOPE_INCOMPLETE,
+    },
+  ];
 }
 
 /**

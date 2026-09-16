@@ -273,6 +273,48 @@ export function writeHonestAdapter(dir: string, fingerprint = FINGERPRINT): void
 	);
 }
 
+/**
+ * Writes an adapter carrying a SERVER PROBE (the server-witnessed
+ * persistence channel): `probeServer` observes the app's own store via
+ * the same GET-only ctx transport, exactly as a backend-only-table
+ * adapter would observe the database witness-side.
+ */
+export function writeProbeAdapter(dir: string, fingerprint = FINGERPRINT): void {
+	writeFileSync(
+		join(dir, '.gateforge/adapters/tenant.accounts.mjs'),
+		[
+			'// Reviewed evidence adapter for tenant.accounts with a server probe.',
+			'export default {',
+			'  async read(ctx, id) {',
+			'    const res = await ctx.get(`/api/accounts/${encodeURIComponent(String(id))}`);',
+			'    if (res.status === 404) return null;',
+			'    if (res.status !== 200) throw new Error(`adapter read failed: HTTP ${res.status}`);',
+			'    return res.json();',
+			'  },',
+			'  normalize(body) {',
+			'    return {',
+			'      entityId: body.id,',
+			'      fields: { first_name: body.first_name, last_name: body.last_name, status: body.status },',
+			'    };',
+			'  },',
+			"  deletion: 'archive',",
+			`  environmentFingerprint: '${fingerprint}',`,
+			'  async probeServer(ctx, subject) {',
+			'    const res = await ctx.get(`/api/accounts/${encodeURIComponent(String(subject))}`);',
+			'    if (res.status === 404) return { found: false, fields: null };',
+			'    const body = await res.json();',
+			'    // The test marker server stamps headers before it can downgrade',
+			'    // the status code, so "absent" arrives as 200 + {error}; the',
+			'    // probe reads the BODY truth, like a real DB probe would read rows.',
+			"    if (res.status !== 200 || (body !== null && typeof body === 'object' && 'error' in body)) return { found: false, fields: null };",
+			'    return { found: true, fields: { first_name: body.first_name, last_name: body.last_name, status: body.status } };',
+			'  },',
+			'};',
+			'',
+		].join('\n'),
+	);
+}
+
 /** Writes the wrong-entity adapter (GF-05: ignores the requested id). */
 export function writeWrongEntityAdapter(dir: string, fingerprint = FINGERPRINT): void {
 	writeFileSync(

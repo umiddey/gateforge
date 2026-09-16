@@ -19,7 +19,11 @@
  *
  * L2 signed statements are deferred per ADR 0002 ("L2 signing deferred").
  */
+import { lookup } from 'node:dns/promises';
 import { ATTESTATION_SCOPE_HEADER, ENV_FINGERPRINT_HEADER, LOOPBACK_HOSTS } from '../constants.js';
+import { clearPinnedLoopbackForTests, pinLoopbackIps, pinnedGet, } from './loopback-pins.js';
+/** Default DNS lookup: the OS resolver, all records. */
+const defaultLookup = (host) => lookup(host, { all: true, verbatim: true });
 /** One failed attestation, carrying the actionable diagnostic. */
 export class AttestationError extends Error {
     constructor(message) {
@@ -59,7 +63,17 @@ export function isLoopbackUrl(baseUrl) {
 /**
  * Asserts the attestation subject is loopback (GF-10). Called at witness
  * startup for the target and before EVERY adapter read for the read
- * base.
+ * base. Hostnames that are not literally loopback are resolved through
+ * the OS resolver (hosts file + DNS): a name whose addresses are ALL
+ * loopback (127.0.0.0/8, ::1) is loopback by construction — the
+ * disposable-stack pattern of tenant subdomains mapped to 127.0.0.1.
+ * Mixed records, unresolvable names, and lookup failures all reject
+ * (fail closed). Approved addresses are PINNED per hostname for the
+ * process lifetime (see `loopback-pins.ts`): later DNS changes never
+ * move established connections — the check validates
+ * OPERATOR-provided bases (never suite input — suites cannot set
+ * target/adapter bases), and every egress binds to the startup
+ * approval.
  *
  * Args:
  *   baseUrl: the base to verify.
@@ -69,11 +83,52 @@ export function isLoopbackUrl(baseUrl) {
  *   AttestationError: when the base is not loopback — the run is BLOCKED
  *   before any request is constructed (plan invariant 5).
  */
-export function assertLoopback(baseUrl, what) {
-    if (!isLoopbackUrl(baseUrl)) {
+export async function assertLoopback(baseUrl, what) {
+    if (!(await isLoopbackUrlResolving(baseUrl))) {
         throw new AttestationError(`${what} base '${baseUrl}' is not loopback; gateforge only attests disposable ` +
             'loopback environments (plan invariant 5, GF-10). A bare URL with no provider ' +
             'contract is not a mutation target.');
+    }
+}
+/** Clears the pin store (tests only — production paths pin once and bind). */
+export function clearLoopbackCacheForTests() {
+    clearPinnedLoopbackForTests();
+}
+/**
+ * Whether a base URL is loopback, resolving non-literal hostnames. The
+ * sync string check (`isLoopbackUrl`) runs first; only names it rejects
+ * reach the resolver, which pins all-loopback answers (see
+ * `loopback-pins.ts` — first resolution wins, later DNS changes never
+ * replace the pins).
+ *
+ * Args:
+ *   baseUrl: absolute http(s) URL.
+ *   lookupFn: DNS lookup (default: OS resolver via `node:dns/promises`).
+ *
+ * Returns:
+ *   Promise<boolean>: true when literally loopback or ALL resolved
+ *   addresses are loopback. False on mixed records, unresolvable names,
+ *   lookup failures, and non-http(s) URLs.
+ */
+export async function isLoopbackUrlResolving(baseUrl, lookupFn = defaultLookup) {
+    if (isLoopbackUrl(baseUrl))
+        return true;
+    let host;
+    try {
+        const parsed = new URL(baseUrl);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+            return false;
+        host = parsed.hostname;
+    }
+    catch {
+        return false;
+    }
+    try {
+        await pinLoopbackIps(host, lookupFn);
+        return true;
+    }
+    catch {
+        return false;
     }
 }
 /**
@@ -93,11 +148,12 @@ export async function probeEnvFingerprint(baseUrl, timeoutMs) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
-            const response = await fetch(baseUrl, {
-                method: 'GET',
-                headers: { accept: 'application/json, text/html' },
+            // Pinned egress: attested hostnames connect to their
+            // startup-approved loopback IPs (Host preserved); unpinned names
+            // behave exactly as before.
+            const response = await pinnedGet(baseUrl, {
+                timeoutMs,
                 signal: controller.signal,
-                redirect: 'follow',
             });
             return {
                 fingerprint: response.headers.get(ENV_FINGERPRINT_HEADER),

@@ -40,10 +40,13 @@ export { startWitness, WitnessStartupError, recordIdOf } from './witness/server.
 export { loadAdapters, validateAdapter, AdapterRegistryError } from './witness/adapter-registry.js';
 export {
   isLoopbackUrl,
+  isLoopbackUrlResolving,
+  clearLoopbackCacheForTests,
   probeEnvFingerprint,
   envFingerprintMismatch,
   AttestationError,
 } from './witness/env-attestation.js';
+export type { DnsLookup } from './witness/env-attestation.js';
 export { loadClassifications, toClassificationView } from './witness/classifications.js';
 export type {
   WitnessOptions,
@@ -75,16 +78,35 @@ export { gateforgeGlobalSetup, gateforgeGlobalTeardown, startWitnessProcess } fr
  * spool (runner → CLI), the verifier-key-authenticated supervisor
  * client, and the spool drain the trusted CLI runs while the suite
  * executes. The runner child itself holds no supervisor rights.
+ *
+ * Server-witnessed persistence channel: `appendPersistenceIntent` is the
+ * documented TS writer for the suite-side intents spool (the CONTRACT is
+ * the JSONL line — a ~30-line Python equivalent ships in
+ * `packages/pack-playwright/python/gateforge_persistence_intents.py`);
+ * the drain forwards intents to the witness, whose adapter SERVER PROBE
+ * (probeServer) runs witness-side and stamps `channel: 'server'`
+ * records for obligations registered `kind: server-e2e`.
  */
 export {
   appendSpoolEvent,
   readSpoolEvents,
   spoolPathFor,
+  appendPersistenceIntent,
+  readPersistenceIntents,
+  persistenceIntentsPathFor,
   startSupervisorSpoolDrain,
   SupervisorClient,
   DEFAULT_DRAIN_POLL_MS,
 } from './supervisor/index.js';
-export type { SpoolEvent, SpoolEventKind, SpoolDrainHandle } from './supervisor/index.js';
+export type {
+  SpoolEvent,
+  SpoolEventKind,
+  SpoolDrainHandle,
+  PersistenceIntent,
+  PersistenceIntentOperation,
+  PersistenceIntentPhase,
+  PersistenceIntentExpectation,
+} from './supervisor/index.js';
 export {
   buildRunnerChildEnv,
   RunnerEnvError,
@@ -192,5 +214,8 @@ export {
   DIAGNOSTICS_REPORT_FILE,
   SPOOL_DIR_NAME,
   SPOOL_EVENTS_FILE,
+  SPOOL_INTENTS_FILE,
+  SERVER_CHANNEL,
+  SERVER_E2E_TEST_KIND,
   DEFAULT_REQUEST_TIMEOUT_MS,
 } from './constants.js';

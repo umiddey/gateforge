@@ -12,8 +12,32 @@
  * attestation digest, and the final verdict summary. The MAC is computed
  * with the SAME authority as witness records (the witness verifier key,
  * HMAC-SHA256 over GF-canonical JSON) — see `src/receipt/index.ts`.
+ *
+ * Scope extension (opt-in scoped supervised runs): a receipt also names
+ * its evaluation scope (`scope`, absent = `full` for pre-extension
+ * receipts) and, for `changed`-scope receipts, the pin-#2 fingerprints of
+ * the obligations the sealed slice covers. Both fields sit inside the
+ * signed body (the MAC covers every field but `mac` by construction), so
+ * a covered set cannot be widened or trimmed without breaking the
+ * signature.
  */
 import { z } from 'zod';
+/**
+ * The evaluation scope a receipt seals (opt-in scoped supervised runs):
+ * - `full` — the whole relevant suite ran and the whole-repo gate was
+ *   green (the historical, default shape);
+ * - `changed` — only the SLICE of tests claiming obligations affected by
+ *   the changed files ran, and only those obligations were graded.
+ * OPTIONAL/additive like `approvedPolicyDigest`: receipts sealed before
+ * scoped runs existed omit it and are read as `full` (that is exactly
+ * what the old seal process certified).
+ */
+export declare const ReceiptScopeSchema: z.ZodEnum<{
+    changed: "changed";
+    full: "full";
+}>;
+/** Inferred receipt-scope shape. */
+export type ReceiptScope = z.infer<typeof ReceiptScopeSchema>;
 /** The final verdict summary the receipt seals. */
 export declare const ReceiptVerdictSummarySchema: z.ZodObject<{
     total: z.ZodNumber;
@@ -38,6 +62,11 @@ export declare const GateReceiptSchema: z.ZodObject<{
     parentSha: z.ZodNullable<z.ZodString>;
     trustedPolicyDigest: z.ZodString;
     approvedPolicyDigest: z.ZodOptional<z.ZodString>;
+    scope: z.ZodOptional<z.ZodEnum<{
+        changed: "changed";
+        full: "full";
+    }>>;
+    coveredObligationFingerprints: z.ZodOptional<z.ZodArray<z.ZodString>>;
     invocation: z.ZodString;
     selectionDigest: z.ZodString;
     catalogDigest: z.ZodString;

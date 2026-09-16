@@ -27,6 +27,10 @@
  * | `POST /run-context`               | run token + verifier key (supervisor)   |
  * | `GET /ledger-attestation`         | run token + verifier key (supervisor)   |
  * | `POST /runs/expected-set`         | run token + verifier key (supervisor)   |
+ * | `POST /runs/server-e2e-declarations` | run token + verifier key (supervisor)|
+ * | `POST /witness/server-persistence` | run token + verifier key (supervisor;  |
+ * |                                   | the drain forwards intents — the suite |
+ * |                                   | can only WRITE spool lines)            |
  * | `GET /runs/execution-trace`       | run token + verifier key (supervisor)   |
  * | `POST /sessions/open`             | run token + verifier key (supervisor);  |
  * |                                   | test must be in the registered set      |
@@ -73,6 +77,17 @@
  *   the pin-#7 shape extended with `testId` + `claimId` + the session
  *   credential so persistence records bind to the claim the engine
  *   grades, under the session the supervisor opened.
+ * - `POST /witness/server-persistence` — SUPERVISOR ONLY: the trusted
+ *   drain forwards one persistence claim INTENT (drained from the
+ *   runner-side `persistence-intents.jsonl` spool the supervised suite
+ *   may only WRITE); the witness executes the resource's adapter SERVER
+ *   PROBE itself (behind the same attestation chain as every adapter
+ *   read) and stamps a WITNESSED `persistence.entity` record carrying
+ *   `channel: 'server'` + `declaredKind: 'server-e2e'` — the
+ *   server-witnessed channel for backend-only tables (a transactional
+ *   outbox) that can never honestly appear in a UI. Probes run ONLY in
+ *   this trusted process; missing adapter/probe/declaration and replayed
+ *   sequences resolve to typed failures, never to satisfaction.
  * - `POST /witness/http-observation` — consumes one engine-observed
  *   proxied exchange for an http:* claim. Phase 1: the caller must hold
  *   a valid OPEN session and the exchange must have been observed
@@ -124,6 +139,7 @@ import {
   envFingerprintMismatch,
   probeEnvFingerprint,
 } from './env-attestation.js';
+import { hostResolverRules, pinnedLoopbackIps, pinnedGet } from './loopback-pins.js';
 import { loadClassifications, toClassificationView } from './classifications.js';
 import {
   EngineBrowserError,
@@ -154,6 +170,11 @@ import type {
   PreObservationResponse,
   RecordsRequest,
   RecordsResponse,
+  ServerE2eDeclarationsRequest,
+  ServerE2eDeclarationsResponse,
+  ServerPersistenceIntentRequest,
+  ServerPersistenceResponse,
+  ServerPreObservationResponse,
   SessionCloseRequest,
   SessionOpenRequest,
   SessionResolveRequest,
@@ -161,6 +182,7 @@ import type {
   WitnessHandle,
   WitnessOptions,
 } from './types.js';
+import { SERVER_CHANNEL, SERVER_E2E_TEST_KIND } from '../constants.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const OBLIGATION_ID_PATTERN = /^[^:]+:.+$/;
@@ -235,6 +257,26 @@ interface WitnessState {
     | { resourceId: string; kind: 'ids'; ids: string[] }
     | { resourceId: string; kind: 'entity'; entityId: string; found: boolean; fields?: unknown }
   >;
+  /**
+   * SERVER-WITNESSED channel state. `serverE2eDeclarations` holds the
+   * obligation ids the TRUSTED supervisor registered as mapping kind
+   * 'server-e2e' BEFORE the run (verifier-key surface, same authority
+   * as the expected set) — null until bound; a server intent for an
+   * unregistered obligation is refused typed, so a browser-kind claim
+   * can never be satisfied through this channel. `serverPreObservations`
+   * holds the witness's own probe observations taken BEFORE a claimed
+   * mutation (create absence / update before-state), single-use, keyed
+   * by claimId + canonical entity key. `serverIntentSequences` is the
+   * last accepted intent sequence per claimId — strictly increasing, so
+   * a replayed or reordered spool line resolves to a typed failure and
+   * no bearer of an intent can re-drive a stale observation.
+   */
+  serverE2eDeclarations: Set<string> | null;
+  serverPreObservations: Map<
+    string,
+    { resourceId: string; kind: 'absence' | 'entity'; found: boolean; fields?: unknown }
+  >;
+  serverIntentSequences: Map<string, number>;
   server: Server;
   /**
    * ADR 0004 D7: requests the witness-owned loopback observation proxy
@@ -591,7 +633,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   // GF-10: the attestation subject must be loopback — block at startup,
   // before any mutation-capable request surface exists.
   if (targetBaseUrl !== null) {
-    assertLoopback(targetBaseUrl, 'attestation subject');
+    await assertLoopback(targetBaseUrl, 'attestation subject');
   }
   // GF-13 minimal v1: when the run pins a fingerprint, the subject's
   // marker must match before the service opens for business.
@@ -633,6 +675,9 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     classifications,
     ledger: new Map(),
     preObservations: new Map(),
+    serverE2eDeclarations: null,
+    serverPreObservations: new Map(),
+    serverIntentSequences: new Map(),
     observed: [],
     observedSeq: 0,
     runContext: null,
@@ -684,10 +729,18 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   // by URL rewriting.
   let proxyUrl: string | null = null;
   if (typeof state.options.proxyTarget === 'string' && state.options.proxyTarget.length > 0) {
-    assertLoopback(state.options.proxyTarget, 'observation proxy target');
+    await assertLoopback(state.options.proxyTarget, 'observation proxy target');
     state.proxyServer = await startObservedProxy(state, null);
     proxyUrl = proxyUrlOf(state, state.proxyServer);
   }
+
+  // DNS binding (loopback-pins): the startup asserts above pinned every
+  // operator-provided hostname to its approved loopback IPs. Hand the
+  // resulting resolver rules to the engine browser BEFORE it can launch —
+  // its traffic for those names then cannot leave loopback even if DNS
+  // changes mid-run, while Host headers and origins (tenant routing)
+  // stay exactly as the suite addresses them.
+  state.engineBrowser.setDnsPinRules(hostResolverRules(pinnedLoopbackIps()));
 
   const handle = Object.freeze({
     url,
@@ -981,7 +1034,7 @@ async function handleBrowserSurface(
   // attestation (GF-10/GF-13) runs against the provisioned origin, never
   // a suite URL.
   const trustedBase = requireTrustedUiBase(state);
-  assertLoopback(trustedBase, 'engine browser base');
+  await assertLoopback(trustedBase, 'engine browser base');
   const pinned = state.options.targetFingerprint ?? null;
   if (pinned !== null) {
     const probe = await probeEnvFingerprint(trustedBase, state.options.requestTimeoutMs);
@@ -1298,6 +1351,15 @@ async function handleRequest(
       );
       return;
     }
+    if (req.method === 'POST' && path === '/runs/server-e2e-declarations') {
+      await handleServerE2eDeclarations(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ServerE2eDeclarationsRequest,
+      );
+      return;
+    }
     if (req.method === 'GET' && path === '/runs/execution-trace') {
       requireSupervisor(state, req.headers[VERIFIER_HEADER]);
       sendJson(res, 200, executionTraceOf(state));
@@ -1331,6 +1393,15 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/witness/persistence') {
       await handlePersistence(state, res, (await readBody(req)) as PersistenceRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/witness/server-persistence') {
+      await handleServerPersistence(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ServerPersistenceIntentRequest,
+      );
       return;
     }
     if (req.method === 'POST' && path === '/witness/http-observation') {
@@ -2337,6 +2408,375 @@ async function takePreObservation(
 }
 
 /**
+ * `POST /runs/server-e2e-declarations` — SUPERVISOR ONLY (verifier key;
+ * the same authority as `POST /runs/expected-set`): registers the
+ * obligation ids the trusted mapping layer declared kind `server-e2e`.
+ * This is the gate that makes the server-witnessed channel kind-honest:
+ * the witness refuses (`409`) any server intent whose claimId is not in
+ * this set, so a browser-kind claim can never be satisfied through the
+ * channel and a suite-written intent can never self-declare its kind
+ * (the kind resolves in the trusted CLI mapping layer, which is exactly
+ * why the fact enters through a verifier-key surface, never through the
+ * suite-writable spool). Bound once BEFORE any issuance — identical
+ * re-registration is idempotent, any change or late registration is 409.
+ */
+async function handleServerE2eDeclarations(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ServerE2eDeclarationsRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || !Array.isArray(body['obligations'])) {
+    throw new HttpError(400, 'server-e2e declarations body must be {obligations: [...]}');
+  }
+  const obligations = new Set<string>();
+  for (const entry of body['obligations']) {
+    if (typeof entry !== 'string' || !OBLIGATION_ID_PATTERN.test(entry)) {
+      throw new HttpError(
+        400,
+        `server-e2e declarations must be obligation ids '<resourceId>:<contract>' (got '${String(entry)}')`,
+      );
+    }
+    obligations.add(entry);
+  }
+  if (state.serverE2eDeclarations !== null) {
+    const identical =
+      state.serverE2eDeclarations.size === obligations.size &&
+      [...obligations].every((id) => state.serverE2eDeclarations?.has(id));
+    if (identical) {
+      sendJson(res, 200, {
+        bound: true as const,
+        count: state.serverE2eDeclarations.size,
+        obligations: [...state.serverE2eDeclarations].sort(compareStrings),
+      });
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'server-e2e declarations are already bound to this run and differ; the declaration set ' +
+        'is a PRE-run fact and is never relabeled — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (state.ledger.size > 0 || state.sessions.size > 0 || state.serverPreObservations.size > 0) {
+    sendJson(res, 409, {
+      error:
+        'witness already issued evidence or holds open sessions; server-e2e declarations must be ' +
+        'registered BEFORE the run — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  state.serverE2eDeclarations = obligations;
+  sendJson(res, 200, {
+    bound: true as const,
+    count: obligations.size,
+    obligations: [...obligations].sort(compareStrings),
+  });
+}
+
+/**
+ * `POST /witness/server-persistence` — SUPERVISOR ONLY (run token +
+ * verifier key; the trusted CLI drain forwards intents the supervised
+ * suite could only WRITE to the spool): one persistence claim intent
+ * resolved against the app's real state. The WITNESS — never the test
+ * process — executes the resource's adapter SERVER PROBE (witness-side,
+ * behind the same attestation chain as every adapter read: GF-10
+ * loopback + GF-13 fingerprint) and, only on a successful observation,
+ * stamps a WITNESSED `persistence.entity` record carrying
+ * `channel: 'server'` + `declaredKind: 'server-e2e'`, bound to
+ * runId/claimId/testId and covered by the ledger attestation exactly
+ * like every witnessed record.
+ *
+ * Fail-closed resolution (typed causes on the error `detail`):
+ * - obligation not registered `server-e2e` → 409, detail
+ *   `TEST_KIND_UNKNOWN` (declare `kind: server-e2e` in the test map);
+ * - replayed/out-of-order intent sequence → 409 (no stale re-drive);
+ * - create/update post intent without the paired pre intent → 409
+ *   (the engine grades before/after; without a witness-side before
+ *   observation there is nothing to stamp);
+ * - missing adapter / missing `probeServer` export / probe throw or
+ *   malformed probe result → 409 with detail `SERVER_PROBE_UNAVAILABLE`
+ *   — the intent NEVER resolves to satisfaction on probe trouble.
+ *
+ * The intent line itself is suite-writable and proves nothing; it only
+ * selects WHICH entity the witness probes and what the suite expects.
+ * Expectation CONTRADICTION (e.g. create-post but the entity is still
+ * absent) is not a probe failure: the record stamps what the witness
+ * observed and the verdict engine grades the postcondition — one
+ * grading site, engine-owned.
+ */
+async function handleServerPersistence(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ServerPersistenceIntentRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'server persistence body must be an object');
+  }
+  const { resourceId, claimId, operation, phase, intent, key, sequence, testId } = body;
+  if (typeof resourceId !== 'string' || resourceId.length === 0) {
+    throw new HttpError(400, 'resourceId must be a non-empty string');
+  }
+  if (typeof claimId !== 'string' || !OBLIGATION_ID_PATTERN.test(claimId)) {
+    throw new HttpError(400, "claimId must be an obligation id '<resourceId>:<contract>'");
+  }
+  if (operation !== 'create' && operation !== 'read' && operation !== 'update' && operation !== 'delete') {
+    throw new HttpError(400, "operation must be one of 'create' | 'read' | 'update' | 'delete'");
+  }
+  // Claim/operation/resource agreement: an intent never steers evidence
+  // onto a different obligation identity than the one it names.
+  if (claimId !== `${resourceId}:persistence:${operation}`) {
+    throw new HttpError(
+      400,
+      `claimId '${claimId}' must equal '<resourceId>:persistence:${operation}' for this intent ` +
+        '(claim, resource, and operation must agree — an intent never redirects evidence)',
+    );
+  }
+  if (phase !== 'pre' && phase !== 'post') {
+    throw new HttpError(400, "phase must be 'pre' or 'post'");
+  }
+  if (intent !== 'expect-present' && intent !== 'expect-absent') {
+    throw new HttpError(400, "intent must be 'expect-present' or 'expect-absent'");
+  }
+  if (typeof sequence !== 'number' || !Number.isInteger(sequence) || sequence < 1) {
+    throw new HttpError(400, 'sequence must be an integer >= 1');
+  }
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'testId must be a non-empty string');
+  }
+  // The entity key is the probe subject: scalar or column-keyed object,
+  // always GF-canonical-JSON-representable (it hashes into the record).
+  let entityKey: string;
+  try {
+    entityKey = canonicalOf(key);
+  } catch {
+    throw new HttpError(400, 'key must be a JSON scalar or a column-keyed JSON object');
+  }
+
+  // Kind gate (trusted mapping layer, never the suite): the witness
+  // stamps the server channel ONLY for obligations the supervisor
+  // registered as mapping kind 'server-e2e'.
+  if (
+    state.serverE2eDeclarations === null ||
+    !state.serverE2eDeclarations.has(claimId)
+  ) {
+    throw new HttpError(
+      409,
+      `server persistence intent refused: obligation '${claimId}' is not registered kind ` +
+        `'${SERVER_E2E_TEST_KIND}' on this witness — declare 'kind: ${SERVER_E2E_TEST_KIND}' in the ` +
+        'test-map sidecar and pass the resolved obligations to the supervisor drain ' +
+        '(a browser-kind claim is never satisfied through the server channel)',
+      'TEST_KIND_UNKNOWN',
+    );
+  }
+  // Replay gate: strictly increasing per claimId. A duplicate line (drain
+  // restart, spool replay, forged re-append) resolves to a typed failure
+  // — an intent is resolved at most once per sequence.
+  const lastSequence = state.serverIntentSequences.get(claimId);
+  if (lastSequence !== undefined && sequence <= lastSequence) {
+    throw new HttpError(
+      409,
+      `server persistence intent refused: sequence ${String(sequence)} for '${claimId}' does not ` +
+        `exceed the last accepted (${String(lastSequence)}) — intents are strictly increasing per ` +
+        'claim and a replayed line is never re-driven',
+    );
+  }
+  state.serverIntentSequences.set(claimId, sequence);
+
+  // WITNESS-SIDE probe: the same attestation chain as every adapter read
+  // (reviewed adapter, GF-10 loopback, GF-13 fingerprint), then the
+  // adapter's own probeServer against the app database. Any trouble here
+  // is a typed SERVER_PROBE_UNAVAILABLE failure — never satisfaction.
+  const { adapterName, adapter } = await serverProbeContext(state, resourceId, claimId);
+  const observation = await runServerProbe(state, adapterName, adapter, resourceId, key);
+
+  if (phase === 'pre') {
+    // Pre intents STORE the witness observation; they stamp no record.
+    if (operation === 'create') {
+      if (intent !== 'expect-absent') {
+        throw new HttpError(400, "create pre intents must declare intent 'expect-absent'");
+      }
+    } else if (operation === 'update') {
+      if (intent !== 'expect-present') {
+        throw new HttpError(400, "update pre intents must declare intent 'expect-present'");
+      }
+    } else {
+      throw new HttpError(
+        400,
+        `pre intents apply only to create/update (operation '${operation}' postconditions need no before-state)`,
+      );
+    }
+    const preKey = `${claimId}\u0000${entityKey}`;
+    if (state.serverPreObservations.has(preKey)) {
+      throw new HttpError(
+        409,
+        `server persistence intent refused: claim '${claimId}' already holds a pending ` +
+          'pre-observation for this entity — advance the sequence and post the mutation first',
+      );
+    }
+    state.serverPreObservations.set(preKey, {
+      resourceId,
+      kind: operation === 'create' ? 'absence' : 'entity',
+      found: observation.found,
+      ...(observation.found ? { fields: observation.fields ?? {} } : {}),
+    });
+    const response: ServerPreObservationResponse = { resolved: 'pre', found: observation.found };
+    sendJson(res, 200, response);
+    return;
+  }
+
+  // Post intents consume the paired pre-observation (create/update) and
+  // stamp ONE self-contained witnessed record — the same `before` shapes
+  // the browser path's persistence reads carry, so the verdict engine
+  // grades BOTH channels with the same postcondition code.
+  let before: { entityAbsent: boolean } | { found: boolean; fields?: unknown } | undefined;
+  if (operation === 'create' || operation === 'update') {
+    const preKey = `${claimId}\u0000${entityKey}`;
+    const pre = state.serverPreObservations.get(preKey);
+    const wantedKind = operation === 'create' ? 'absence' : 'entity';
+    if (pre === undefined || pre.resourceId !== resourceId || pre.kind !== wantedKind) {
+      throw new HttpError(
+        409,
+        `server persistence intent refused: no witness-side pre-observation for '${claimId}' on ` +
+          `entity ${entityKey} — write the pre intent (before the mutation) so the engine can ` +
+          'grade the before/after postcondition from its OWN observations',
+      );
+    }
+    state.serverPreObservations.delete(preKey);
+    before =
+      pre.kind === 'absence'
+        ? { entityAbsent: !pre.found }
+        : pre.found
+          ? { found: true, fields: pre.fields }
+          : { found: false };
+  }
+  const payload: Record<string, unknown> = {
+    resourceId,
+    entityId: key,
+    found: observation.found,
+    ...(observation.found ? { fields: observation.fields ?? {} } : {}),
+    ...(before !== undefined ? { before } : {}),
+    channel: SERVER_CHANNEL,
+    declaredKind: SERVER_E2E_TEST_KIND,
+    intent: { phase: 'post', expectation: intent, sequence },
+  };
+  // The record binds runId/claimId/testId (hashed into its provenance id)
+  // and rides the same ledger attestation MAC as every witnessed record.
+  const issued = issuePersistenceRecord(state, claimId, testId, payload);
+  const response: ServerPersistenceResponse = {
+    recordId: issued.recordId,
+    runId: issued.runId,
+    trust: issued.trust,
+    channel: SERVER_CHANNEL,
+    verdictRelevant: { found: observation.found },
+  };
+  sendJson(res, 200, response);
+}
+
+/**
+ * Resolves the reviewed adapter for a server probe, enforcing the FULL
+ * browser-path attestation chain (ADR 0001 reviewed adapter, GF-10
+ * loopback, GF-13 fingerprint) so a server observation is exactly as
+ * trustworthy as an engine-side adapter read. A missing adapter or a
+ * missing `probeServer` export resolves typed SERVER_PROBE_UNAVAILABLE
+ * (actionable; the intent never resolves to satisfaction).
+ */
+async function serverProbeContext(
+  state: WitnessState,
+  resourceId: string,
+  claimId: string,
+): Promise<{ adapterName: string; adapter: EvidenceAdapter }> {
+  let adapterName: string;
+  let adapter: EvidenceAdapter | undefined;
+  try {
+    const context = await adapterReadContext(state, resourceId);
+    adapterName = context.adapterName;
+    adapter = context.adapter;
+  } catch (error) {
+    if (error instanceof HttpError) {
+      throw new HttpError(
+        error.status,
+        `server persistence intent for '${claimId}' failed: ${error.message}`,
+        'SERVER_PROBE_UNAVAILABLE',
+      );
+    }
+    throw error;
+  }
+  if (typeof adapter.probeServer !== 'function') {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' for resource '${resourceId}' exports no server probe ` +
+        `(add 'async probeServer(ctx, subject) => ({found, fields})' to ` +
+        `'.gateforge/adapters/${adapterName}.mjs'); server-witnessed persistence intents ` +
+        'fail closed without one',
+      'SERVER_PROBE_UNAVAILABLE',
+    );
+  }
+  return { adapterName, adapter };
+}
+
+/**
+ * Executes one adapter server probe (witness process ONLY) and validates
+ * the result shape. A throw or a malformed return is a typed
+ * SERVER_PROBE_UNAVAILABLE failure; a well-shaped result — even one that
+ * contradicts the suite's expectation — is an honest observation the
+ * verdict engine grades.
+ */
+async function runServerProbe(
+  state: WitnessState,
+  adapterName: string,
+  adapter: EvidenceAdapter,
+  resourceId: string,
+  key: unknown,
+): Promise<{ found: boolean; fields: Record<string, unknown> | null }> {
+  const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl;
+  const ctx = makeAdapterContext(
+    baseUrl ?? '',
+    resourceId,
+    (path: string) => adapterGet(baseUrl ?? '', state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+    state.options.adapterReadAuthorization
+      ? { authorization: state.options.adapterReadAuthorization }
+      : undefined,
+  );
+  let raw: unknown;
+  try {
+    raw = await adapter.probeServer?.(ctx, key);
+  } catch (error) {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' server probe failed for resource '${resourceId}': ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      'SERVER_PROBE_UNAVAILABLE',
+    );
+  }
+  if (
+    !isPlainObject(raw) ||
+    typeof raw['found'] !== 'boolean' ||
+    !(raw['fields'] === null || raw['fields'] === undefined || isPlainObject(raw['fields']))
+  ) {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' server probe must return {found: boolean, fields: object|null} ` +
+        `for resource '${resourceId}' (got ${(() => {
+          try {
+            return canonicalOf(raw);
+          } catch {
+            return '<non-JSON>';
+          }
+        })()})`,
+      'SERVER_PROBE_UNAVAILABLE',
+    );
+  }
+  return {
+    found: raw['found'] as boolean,
+    fields: (raw['fields'] as Record<string, unknown> | null | undefined) ?? null,
+  };
+}
+
+/**
  * Resolves the reviewed adapter + mediated read base for one resource,
  * enforcing the full attestation chain (ADR 0001 adapter, GF-10
  * loopback, GF-13 fingerprint). Shared by persistence reads and
@@ -2369,7 +2809,7 @@ async function adapterReadContext(
 
   // GF-10 (per-read mediation): never build a request against a
   // non-loopback base.
-  assertLoopback(baseUrl, `adapter '${adapterName}'`);
+  await assertLoopback(baseUrl, `adapter '${adapterName}'`);
 
   // GF-13 minimal v1 attestation: the adapter target must present the
   // marker the adapter declares, and match the run's attested env.
@@ -2404,17 +2844,18 @@ async function adapterGet(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(target, {
-      method: 'GET',
+    // Pinned egress: attested hostnames connect to their
+    // startup-approved loopback IPs (Host preserved for tenant
+    // routing); unpinned names behave exactly as before.
+    const response = await pinnedGet(target, {
+      timeoutMs,
       headers: {
-        accept: 'application/json, text/html',
         // Operator-issued read-only service credential for the ENGINE's own
         // adapter reads (see WitnessOptions.adapterReadAuthorization); never
         // forwarded to the suite and never attached to browser traffic.
         ...(readAuthorization ? { authorization: readAuthorization } : {}),
       },
       signal: controller.signal,
-      redirect: 'follow',
     });
     return {
       status: response.status,
@@ -2578,6 +3019,8 @@ async function handleRunContext(
     state.ledger.size > 0 ||
     state.observed.length > 0 ||
     state.preObservations.size > 0 ||
+    state.serverPreObservations.size > 0 ||
+    state.serverIntentSequences.size > 0 ||
     state.sessions.size > 0 ||
     state.proxyInFlight > 0
   ) {
@@ -2585,7 +3028,7 @@ async function handleRunContext(
       error:
         'witness already observed or issued evidence (or holds an open test session); ' +
         'run-context binding is allowed only before any proxy exchange, pre-observation, ' +
-        'session, or issuance — start a fresh witness for a new invocation',
+        'server probe, session, or issuance — start a fresh witness for a new invocation',
     });
     return;
   }

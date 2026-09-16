@@ -98,6 +98,26 @@ export const EXECUTION_RESULT_FILE = 'execution-result.json';
 export const SPOOL_DIR_NAME = 'spool';
 /** The spool's event file (JSON lines; consumed by the CLI drain loop). */
 export const SPOOL_EVENTS_FILE = 'events.jsonl';
+/**
+ * The spool's persistence-claim-intent file (JSON lines; same NUL-safe
+ * line protocol as `events.jsonl`): the supervised (UNTRUSTED) test
+ * process reports claim INTENTS here — {entity, operation, phase, intent,
+ * key, claimId, testId, sequence}. The suite can only write intents; it
+ * can NEVER stamp evidence. The trusted CLI's spool drain forwards each
+ * intent to the witness over the verifier-key supervisor surface, where
+ * the resource's adapter SERVER PROBE runs (witness-side) and — only
+ * then — a witnessed `persistence.entity` record stamped
+ * `channel: 'server'` may be issued.
+ */
+export const SPOOL_INTENTS_FILE = 'persistence-intents.jsonl';
+/**
+ * Payload discriminant the witness stamps on server-probed persistence
+ * records (core's verdict engine keys the server-witnessed channel off
+ * this + {@link SERVER_E2E_TEST_KIND}).
+ */
+export const SERVER_CHANNEL = 'server';
+/** The mapping kind that unlocks the server-witnessed channel. */
+export const SERVER_E2E_TEST_KIND = 'server-e2e';
 /** Run-state file carrying the authenticated gate receipt. */
 export const GATE_RECEIPT_FILE = 'receipt.json';
 /** Run-state diagnostics report (plan §3.5; never witness evidence). */

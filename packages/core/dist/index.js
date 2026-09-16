@@ -438,7 +438,7 @@ export { EXECUTION_RESULT_DOMAIN, SELECTION_DOMAIN, ExecutionResultSchema, Plann
  * `gateforge.receipt.v1`) — never a repurposed v2 attestation.
  */
 export { RECEIPT_DOMAIN, RECEIPT_VERSION, gateReceiptMac, verifyGateReceipt, } from './receipt/index.js';
-export { GateReceiptSchema, ReceiptVerdictSummarySchema } from './schemas/gate-receipt.js';
+export { GateReceiptSchema, ReceiptVerdictSummarySchema, ReceiptScopeSchema } from './schemas/gate-receipt.js';
 /**
  * Trusted runner supervision (plan Phase 4 item 4, ADR 0005 D2): the
  * pure expected-set enforcement — planned versus executed instances,
@@ -456,6 +456,14 @@ export { superviseExecution, enumerationDigestOf, ENUMERATION_DOMAIN } from './s
  * by `now` (GF-16), optional stale-owner hook (GF-17). Synchronous.
  */
 export { loadWaivers } from './waivers/index.js';
+/**
+ * Waiver writers (the `waive` CLI's storage path): `serializeWaiver`
+ * renders the reviewable 2-space-JSON + trailing-newline house style,
+ * `writeWaiver` writes it creating parent directories as needed.
+ * The only sanctioned programmatic waiver write — renewal/removal stays
+ * a hand-edit (there is deliberately no overwrite).
+ */
+export { serializeWaiver, writeWaiver } from './waivers/index.js';
 /** Fail-closed waiver-configuration error; carries every problem found. */
 export { GateforgeWaiverError } from './waivers/index.js';
 // ---------------------------------------------------------------------------

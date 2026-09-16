@@ -77,7 +77,26 @@ export declare class EngineBrowserManager {
     private browser;
     private launching;
     private readonly sessions;
+    /**
+     * Pinned `--host-resolver-rules` value binding every attested hostname
+     * to its startup-approved loopback IPs. Set once at witness startup
+     * (before any launch); the browser is then incapable of resolving
+     * those names anywhere but loopback, regardless of later DNS changes.
+     */
+    private dnsPinRules;
     constructor(launcher?: EngineBrowserLauncher);
+    /**
+     * Installs the DNS pin rules for the next (first) launch.
+     *
+     * Args:
+     *   rules: the `--host-resolver-rules` value, or null when nothing is
+     *     pinned (plain launch, previous behavior).
+     *
+     * Throws:
+     *   EngineBrowserError: when the browser already launched — pins must
+     *   precede every navigation (fail closed, never silently unbound).
+     */
+    setDnsPinRules(rules: string | null): void;
     /**
      * Returns the engine page for one session, creating the isolated
      * context on first use.

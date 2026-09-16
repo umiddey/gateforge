@@ -72,4 +72,32 @@ export interface WaiverLoadOptions {
  *   GateforgeWaiverError: when any waiver file fails closed (GF-15).
  */
 export declare function loadWaivers(dir: string, options: WaiverLoadOptions): WaiverLoadResult;
+/**
+ * Serializes a waiver for on-disk storage: 2-space JSON with a trailing
+ * newline (the `serializeBaseline` house style — reviewable in diffs and
+ * PRs). Loading is canonical through {@link loadWaivers}'s plain
+ * `JSON.parse`, so key order is irrelevant to the engine; the pretty
+ * form exists for the humans who must review every exception.
+ *
+ * Args:
+ *   waiver: the schema-valid document to serialize.
+ *
+ * Returns:
+ *   string: the file content.
+ */
+export declare function serializeWaiver(waiver: Waiver): string;
+/**
+ * Writes a waiver to disk, creating parent directories as needed (the
+ * waivers directory may not exist yet — first waiver in a repo).
+ * Fail-closed: a write failure surfaces as a {@link GateforgeWaiverError}
+ * (config-error → exit 2), never a half-written silent success.
+ *
+ * Args:
+ *   path: destination file path.
+ *   waiver: the schema-valid document to write.
+ *
+ * Throws:
+ *   GateforgeWaiverError: when the file cannot be written.
+ */
+export declare function writeWaiver(path: string, waiver: Waiver): void;
 //# sourceMappingURL=index.d.ts.map

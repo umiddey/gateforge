@@ -24,7 +24,7 @@
  */
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { CAUSE_NEXT_ACTIONS, ClaimSchema, mappingGradingClaims, resolveTestMappings, TestMapSchema, } from '@gateforge/core';
 import { discoverTestCatalog, TestDiscoveryError } from '@gateforge/pack-playwright';
@@ -97,14 +97,15 @@ export function serializeTestMap(testMap) {
  */
 export function writeTestMapAtomic(cwd, testMap) {
     const target = join(cwd, TEST_MAP_RELATIVE);
-    const tempDir = mkdtempSync(join(tmpdir(), 'gateforge-test-map-'));
-    const tempFile = join(tempDir, 'test-map.yml');
+    // The temp file MUST live on the target's own filesystem: rename(2) is
+    // atomic only within one device, and /tmp is frequently a different mount.
+    const tempFile = `${target}.tmp-${randomBytes(6).toString('hex')}`;
     try {
         writeFileSync(tempFile, serializeTestMap(testMap), 'utf8');
         renameSync(tempFile, target);
     }
     finally {
-        rmSync(tempDir, { recursive: true, force: true });
+        rmSync(tempFile, { force: true });
     }
 }
 /**
@@ -317,6 +318,30 @@ export function mappedCoverageFrom(resolution, obligations, graph) {
         }
     }
     return coverage.sort((a, b) => a.table < b.table ? -1 : a.table > b.table ? 1 : a.operation < b.operation ? -1 : a.operation > b.operation ? 1 : 0);
+}
+/**
+ * Collects the obligation ids whose resolved bindings declare the
+ * server-e2e kind. Mapping kinds are resolved in this trusted CLI layer
+ * only; the witness honors a server-e2e persistence stamp solely for
+ * obligations the supervisor registered from this set, so it is the
+ * authority for which obligations may produce `channel: 'server'`
+ * evidence during the supervised drain. Sorted and deduplicated: the
+ * registration is a set, not a list.
+ *
+ * Args:
+ *   resolution: the resolver output (per-obligation bindings).
+ *
+ * Returns:
+ *   string[]: sorted obligation ids with at least one server-e2e binding.
+ */
+export function serverE2eObligationIds(resolution) {
+    const ids = new Set();
+    for (const group of resolution.obligations) {
+        if (group.bindings.some((binding) => binding.declaredKind === 'server-e2e')) {
+            ids.add(group.obligationId);
+        }
+    }
+    return [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 /**
  * Extracts the CRUD coverage operation an obligation's contract ends

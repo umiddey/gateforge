@@ -1,4 +1,4 @@
-import { type BlockingEntry, type ExecutionResult, type ExecutedOutcome, type GateReceipt, type PlannedInstance, type ResolvedMappings, type RunnerExecutionEnvelope, type SupervisionFinding, type TestCatalog, type TracedTestInput } from '@gateforge/core';
+import { type BlockingEntry, type ExecutionResult, type ExecutedOutcome, type GateReceipt, type Obligation, type PlannedInstance, type ResolvedMappings, type ResourceGraph, type RunnerExecutionEnvelope, type SupervisionFinding, type TestCatalog, type TracedTestInput } from '@gateforge/core';
 import type { GateforgeConfig } from '@gateforge/core';
 import type { RunnerOutcomesDocument } from '@gateforge/pack-playwright';
 /** The normalized invocation stamped into supervised receipts. */
@@ -109,6 +109,56 @@ export interface PlannedRow {
  */
 export declare function planExpectedSet(catalog: TestCatalog): PlannedRow[];
 /**
+ * The obligation slice a `--scope changed` run must certify (plan Goal 2,
+ * opt-in scoped sealing): the changed files joined to resources through
+ * the SAME join-aware source map the diff scoping grades by
+ * ({@link sourcesByResourceId} — backend source AND every joined
+ * frontend-call source), then resources joined to obligations, then
+ * obligations joined to tests through the ONE mapping resolver.
+ *
+ * Selection granularity is deliberately FILE-grained: the supervised
+ * adapter executes whole spec files (trusted-config `testMatch`), so a
+ * file that claims one affected obligation plans ALL its catalog rows.
+ * Over-selection inside a claimed file is safe — every planned row must
+ * still pass — while under-selection (a claiming test left unplanned)
+ * would seal coverage over an unrun test, the one direction that can
+ * never be allowed.
+ *
+ * Testable claims are DECLARED bindings only (`sidecar` or `native`
+ * origin, unlike {@link claimInjectionsFor} which injects sidecar-only —
+ * selection is not evidence attribution, and a native annotation lives in
+ * the test file itself, so running the file re-claims it in THIS run).
+ * Inferred/prior-run bindings are suggestion data and never count: a
+ * claimed obligation whose only candidates are inferred rows would run
+ * tests that produce no evidence for it, so it is reported UNCLAIMED
+ * instead — the caller turns that into a typed blocking entry (no
+ * guessing a narrower gate).
+ *
+ * Args:
+ *   input: the discovered catalog, the resolved mappings, the run's
+ *     obligations and graph, and the resolved changed-file set.
+ *
+ * Returns:
+ *   ScopedPlan: the sliced planned rows (whole claimed files), the
+ *   affected obligations with their pin-#2 fingerprints (the receipt's
+ *   covered set), and the affected obligations no testable claim covers.
+ */
+export declare function planScopedExpectedSet(input: {
+    catalog: TestCatalog;
+    resolution: ResolvedMappings;
+    obligations: readonly Obligation[];
+    graph: ResourceGraph;
+    changedFiles: readonly string[];
+}): {
+    plannedRows: PlannedRow[];
+    affected: Obligation[];
+    coveredFingerprints: string[];
+    unclaimed: Array<{
+        obligationId: string;
+        detail: string;
+    }>;
+};
+/**
  * Resolves executed outcome rows (reporter data, input only) into
  * schema-shaped outcomes: logical keys join through the planned set's
  * instance identity; rows outside the plan keep their framework-side
@@ -134,6 +184,14 @@ export interface SealExecutionResultInput {
     trustedPolicyDigest: string;
     /** Runner the selection executes under. */
     runner: string;
+    /**
+     * Selection mode (additive, default `full-relevant-suite`): a
+     * `--scope changed` run seals `mapped-selection` — the execution
+     * result, its digest, and every receipt binding it then name the
+     * SLICE that actually ran, so a scoped receipt can never be mistaken
+     * for a whole-suite seal.
+     */
+    mode?: 'full-relevant-suite' | 'mapped-selection';
     /** Logical keys selected. */
     logicalKeys: readonly string[];
     /** The catalog the selection was planned from. */
@@ -221,6 +279,19 @@ export interface IssueGateReceiptInput {
     selectionDigest: string;
     /** Catalog digest. */
     catalogDigest: string;
+    /**
+     * Sealed evaluation scope (additive; default `full`). `changed` seals a
+     * SLICE receipt: the covered set below names exactly the obligations
+     * the run certifies, and the MAC binds both.
+     */
+    scope?: 'full' | 'changed';
+    /**
+     * Pin-#2 fingerprints of the obligations a `changed`-scope receipt
+     * covers (sorted, duplicate-free — normalized here). REQUIRED when
+     * `scope` is `changed`, refused otherwise (a full receipt covers
+     * everything by definition and stays byte-compatible with v1).
+     */
+    coveredObligationFingerprints?: readonly string[];
     /** Sealed execution-result digest. */
     executionResultDigest: string;
     /** Evidence attestation digest, or null when the run carried none. */

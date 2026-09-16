@@ -1,4 +1,4 @@
-import type { ExpectedSetRequest, ExpectedSetResponse, ExecutionTraceResponse, SessionCloseRequest, SessionCloseResponse, SessionOpenRequest, SessionOpenResponse } from '../witness/types.js';
+import type { ExpectedSetRequest, ExpectedSetResponse, ExecutionTraceResponse, ServerE2eDeclarationsRequest, ServerE2eDeclarationsResponse, ServerPersistenceIntentRequest, ServerPersistenceResponse, ServerPreObservationResponse, SessionCloseRequest, SessionCloseResponse, SessionOpenRequest, SessionOpenResponse } from '../witness/types.js';
 /**
  * The supervisor-grade witness client.
  *
@@ -40,6 +40,21 @@ export declare class SupervisorClient {
      * outcome; sealing is final.
      */
     closeSession(request: SessionCloseRequest): Promise<SessionCloseResponse>;
+    /**
+     * POST /runs/server-e2e-declarations: registers the obligations the
+     * trusted mapping layer declared kind `server-e2e` — the witness then
+     * (and only then) stamps `channel: 'server'` records for them.
+     */
+    registerServerE2eDeclarations(request: ServerE2eDeclarationsRequest): Promise<ServerE2eDeclarationsResponse>;
+    /**
+     * POST /witness/server-persistence: forwards one drained persistence
+     * claim intent. The witness executes the adapter SERVER PROBE itself
+     * and either stamps a witnessed `channel: 'server'` record (post) or
+     * stores its before-state (pre) — or answers a TYPED failure (the
+     * cause code rides `WitnessRequestError.detail`), which is never
+     * satisfaction.
+     */
+    verifyServerPersistence(request: ServerPersistenceIntentRequest): Promise<ServerPersistenceResponse | ServerPreObservationResponse>;
     /**
      * GET /runs/execution-trace (fix 2b): the witness-side session record
      * — THE execution authority supervision grades completeness from.

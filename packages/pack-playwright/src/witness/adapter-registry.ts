@@ -12,6 +12,9 @@
  *   deletion: 'hard' | 'archive',
  *   environmentFingerprint: '…',            // must match the target's marker header
  *   baseUrl: 'http://…',                    // optional override of the witness adapter base
+ *   probeServer: async (ctx, subject) => ({ found, fields }), // optional: the
+ *                          // SERVER-WITNESSED persistence channel probe — executed
+ *                          // ONLY in this trusted witness process
  * };
  * ```
  *
@@ -130,6 +133,15 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
   if (adapter['list'] !== undefined && typeof adapter['list'] !== 'function') {
     problems.push('list must be a function (ctx) => entity[] when present');
   }
+  // Server probe (server-witnessed persistence channel): OPTIONAL — an
+  // adapter without it simply cannot serve the channel and every server
+  // intent for the resource resolves to a typed
+  // SERVER_PROBE_UNAVAILABLE failure. A PRESENT but malformed export is
+  // a contract violation caught here at load, fail-closed, not at
+  // intent time.
+  if (adapter['probeServer'] !== undefined && typeof adapter['probeServer'] !== 'function') {
+    problems.push('probeServer must be an async function (ctx, subject) => {found, fields} when present');
+  }
   if (problems.length > 0) {
     throw new AdapterRegistryError(`adapter '${name}' violates the adapter contract: ${problems.join('; ')}`);
   }
@@ -141,6 +153,9 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
     baseUrl: adapter['baseUrl'] as string | undefined,
     ...(adapter['list'] !== undefined
       ? { list: adapter['list'] as EvidenceAdapter['list'] }
+      : {}),
+    ...(adapter['probeServer'] !== undefined
+      ? { probeServer: adapter['probeServer'] as EvidenceAdapter['probeServer'] }
       : {}),
   };
 }

@@ -64,6 +64,25 @@ export class SupervisorClient {
         return this.request('/sessions/close', request);
     }
     /**
+     * POST /runs/server-e2e-declarations: registers the obligations the
+     * trusted mapping layer declared kind `server-e2e` — the witness then
+     * (and only then) stamps `channel: 'server'` records for them.
+     */
+    async registerServerE2eDeclarations(request) {
+        return this.request('/runs/server-e2e-declarations', request);
+    }
+    /**
+     * POST /witness/server-persistence: forwards one drained persistence
+     * claim intent. The witness executes the adapter SERVER PROBE itself
+     * and either stamps a witnessed `channel: 'server'` record (post) or
+     * stores its before-state (pre) — or answers a TYPED failure (the
+     * cause code rides `WitnessRequestError.detail`), which is never
+     * satisfaction.
+     */
+    async verifyServerPersistence(request) {
+        return this.request('/witness/server-persistence', request);
+    }
+    /**
      * GET /runs/execution-trace (fix 2b): the witness-side session record
      * — THE execution authority supervision grades completeness from.
      *

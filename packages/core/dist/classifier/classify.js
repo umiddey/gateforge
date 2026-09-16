@@ -76,24 +76,33 @@ function locationText(location) {
 /**
  * Whether a signal addresses the resource: exact plane-qualified id,
  * bare name, or symbol (matched against the resource's `classQname` or
- * `symbol` attribute).
+ * `symbol` attribute). A symbol-scoped signal binds only to its own
+ * class when the resource carries class identity — bare-name binding
+ * then applies only to class-less resources (bare `Table()` calls), so
+ * a same-named table in another module/plane never inherits another
+ * tree's declaration.
  */
 function signalMatchesResource(signal, resource) {
     const target = signal.target;
     if (target.resourceId !== undefined && resource.id !== null && target.resourceId === resource.id) {
         return true;
     }
-    if (target.resourceName !== undefined && target.resourceName === resource.name)
-        return true;
+    // Symbol-scoped targets bind ONLY to their own class: a same-named
+    // table in another module/plane (the two-declarative-base consumer
+    // shape) carries a different classQname and must never inherit
+    // another tree's declaration (delete semantics, identity, …).
+    // Resources without class identity (bare `Table()` calls) keep the
+    // bare-name binding.
     if (target.symbol !== undefined) {
         const classQname = resource.attributes['classQname'];
-        if (typeof classQname === 'string' && classQname === target.symbol)
-            return true;
         const symbol = resource.attributes['symbol'];
-        if (typeof symbol === 'string' && symbol === target.symbol)
-            return true;
+        if (typeof classQname === 'string' || typeof symbol === 'string') {
+            return classQname === target.symbol || symbol === target.symbol;
+        }
+        if (target.resourceName === undefined)
+            return false;
     }
-    return false;
+    return target.resourceName !== undefined && target.resourceName === resource.name;
 }
 /** Narrows a signal assertion to a boolean, when it is one. */
 function assertionBoolean(assertion) {
