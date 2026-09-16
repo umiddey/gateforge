@@ -6,7 +6,7 @@
  * Envelope: `{protocolVersion, pluginId, pluginVersion, type, seq, payload,
  * digest}` with `digest = sha256(canonical({type, seq, payload}))`.
  */
-import { type JsonValue } from '@gateforge/core';
+import { type JsonValue } from '@gate-forge/core';
 import { type MessageType } from './schema.js';
 /** A fully decoded and verified GPP/3 frame. */
 export interface GppEnvelope {

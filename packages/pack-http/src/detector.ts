@@ -57,16 +57,16 @@
  */
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import type { z } from 'zod';
-import { LocationSchema } from '@gateforge/core';
+import { LocationSchema } from '@gate-forge/core';
 import {
   HTTP_CONTRACT_KIND,
   normalizeHttpMethod,
   normalizeHttpPath,
   type HttpContractFact,
   type HttpLocation,
-} from '@gateforge/http-contract';
+} from '@gate-forge/http-contract';
 import {
   activeClientSymbolNamesIn,
   fileInServerScanRoots,

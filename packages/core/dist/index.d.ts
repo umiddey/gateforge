@@ -1,5 +1,5 @@
 /**
- * @gateforge/core — the frozen public surface of the gateforge engine.
+ * @gate-forge/core — the frozen public surface of the gateforge engine.
  *
  * STABILITY CONTRACT: every export here is a stable name. Later waves
  * (graph, policy, verdict, baselines, waivers, reports, harness) add to
@@ -14,7 +14,7 @@
  * - fingerprints (pin #2) — baseline identity
  * - config loading (pin #6) — fail-closed `.gateforge.yml` handling
  *
- * @module @gateforge/core
+ * @module @gate-forge/core
  */
 /**
  * Any JSON-representable value; the input domain of canonical hashing.

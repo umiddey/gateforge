@@ -1,4 +1,4 @@
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 /** Attributes attached to every detected `task.resource`. */
 export interface TaskResourceAttributes {
     /** Literal task name extracted from the source. */

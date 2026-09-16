@@ -1,4 +1,4 @@
-import { type ChangedFileProvider, type ChangedProvider } from '@gateforge/core';
+import { type ChangedFileProvider, type ChangedProvider } from '@gate-forge/core';
 /** Local staged-diff provider: `git diff --cached --name-only` (pin #5). */
 export declare function localStagedProvider(cwd: string, env: NodeJS.ProcessEnv): ChangedFileProvider;
 /** GitHub Actions merge-base diff provider (`GITHUB_BASE_REF`, pin #5). */

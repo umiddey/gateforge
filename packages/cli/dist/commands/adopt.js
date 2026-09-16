@@ -38,7 +38,7 @@
  * file's, is what sanctions forgiveness.
  */
 import { existsSync } from 'node:fs';
-import { ADOPTION_RECORD_FILENAME, adoptBaseline, adoptClassificationBlocked, blockingEntryFingerprint, BLOCKING_VERDICTS, classificationBlockedIdentity, loadAdoptionRecord, loadBaseline, writeAdoptionRecord, writeBaseline, } from '@gateforge/core';
+import { ADOPTION_RECORD_FILENAME, adoptBaseline, adoptClassificationBlocked, blockingEntryFingerprint, BLOCKING_VERDICTS, classificationBlockedIdentity, loadAdoptionRecord, loadBaseline, writeAdoptionRecord, writeBaseline, } from '@gate-forge/core';
 import { dirname, join } from 'node:path';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';

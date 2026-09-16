@@ -2,7 +2,7 @@
  * Witness-side data shapes (pin #7 wire + adapter contract, pin #8).
  */
 import type { Server } from 'node:http';
-import type { EvidenceRecord, TracedSession, TrustTier } from '@gateforge/core';
+import type { EvidenceRecord, TracedSession, TrustTier } from '@gate-forge/core';
 
 /**
  * Supervisor-issued session credential (plan Phase 1, work item 2): the

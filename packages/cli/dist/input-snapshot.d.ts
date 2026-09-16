@@ -1,4 +1,4 @@
-import { type GateforgeConfig, type HttpRouteCandidate, type Obligation } from '@gateforge/core';
+import { type GateforgeConfig, type HttpRouteCandidate, type Obligation } from '@gate-forge/core';
 /** Snapshot format version hashed into every digest. */
 export declare const INPUT_SNAPSHOT_VERSION = 1;
 /**

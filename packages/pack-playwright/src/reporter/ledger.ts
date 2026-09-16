@@ -20,7 +20,7 @@ import {
   type HttpRouteCandidate,
   type Obligation,
   type Verdict,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import type { IssuedLedgerRecord } from '../fixture/witness-client.js';
 
 /** One suite-visible obligation from `obligations.json` (state contract). */

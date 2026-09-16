@@ -1,5 +1,5 @@
-import { type BlockingEntry, type Claim, type GateforgeConfig, type Obligation, type ResolvedMappings, type ResourceGraph, type TestCatalog, type TestMap } from '@gateforge/core';
-import type { MappedCoverage } from '@gateforge/core';
+import { type BlockingEntry, type Claim, type GateforgeConfig, type Obligation, type ResolvedMappings, type ResourceGraph, type TestCatalog, type TestMap } from '@gate-forge/core';
+import type { MappedCoverage } from '@gate-forge/core';
 /** The tracked sidecar path, repo-root-relative (plan §5.1 row 2). */
 export declare const TEST_MAP_RELATIVE = ".gateforge/test-map.yml";
 /**

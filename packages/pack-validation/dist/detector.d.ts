@@ -1,4 +1,4 @@
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 /** Detector contract: `discover(paths)` is sync (pure over file bytes). */
 export interface ValidationDetector {
     discover(paths: readonly string[]): DiscoveryOutcome;

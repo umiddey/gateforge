@@ -34,8 +34,8 @@
  */
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
-import { DetectorOutputSchema, } from '@gateforge/core';
-import { PluginSession } from '@gateforge/plugin-protocol';
+import { DetectorOutputSchema, } from '@gate-forge/core';
+import { PluginSession } from '@gate-forge/plugin-protocol';
 import { UsageError } from './errors.js';
 /**
  * Runs every configured plugin over the same path list.

@@ -1,4 +1,4 @@
-import { type Classification } from '@gateforge/core';
+import { type Classification } from '@gate-forge/core';
 /** The reporter-visible projection of one resource's classification. */
 export interface ClassificationView {
     primaryKey: string[];

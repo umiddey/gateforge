@@ -114,7 +114,7 @@ import { createServer, request } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { ATTESTATION_VERSION, attestationMac, enumerationDigestOf, recordIdOf, } from '@gateforge/core';
+import { ATTESTATION_VERSION, attestationMac, enumerationDigestOf, recordIdOf, } from '@gate-forge/core';
 import { canonicalOf } from '../json.js';
 import { DEFAULT_REQUEST_TIMEOUT_MS, KNOWN_RECORD_KINDS, LOOPBACK_HOSTNAME, PERSISTENCE_KIND, RUN_HEADER, VERIFIER_HEADER, } from '../constants.js';
 import { loadAdapters, makeAdapterContext } from './adapter-registry.js';

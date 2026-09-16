@@ -1,6 +1,6 @@
-import { type BlockingEntry, type ExecutionResult, type ExecutedOutcome, type GateReceipt, type Obligation, type PlannedInstance, type ResolvedMappings, type ResourceGraph, type RunnerExecutionEnvelope, type SupervisionFinding, type TestCatalog, type TracedTestInput } from '@gateforge/core';
-import type { GateforgeConfig } from '@gateforge/core';
-import type { RunnerOutcomesDocument } from '@gateforge/pack-playwright';
+import { type BlockingEntry, type ExecutionResult, type ExecutedOutcome, type GateReceipt, type Obligation, type PlannedInstance, type ResolvedMappings, type ResourceGraph, type RunnerExecutionEnvelope, type SupervisionFinding, type TestCatalog, type TracedTestInput } from '@gate-forge/core';
+import type { GateforgeConfig } from '@gate-forge/core';
+import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 /** The normalized invocation stamped into supervised receipts. */
 export declare const SUPERVISED_INVOCATION = "test-gates --changed";
 /**

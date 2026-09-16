@@ -26,8 +26,8 @@ import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSyn
 import { join, relative } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { CAUSE_NEXT_ACTIONS, ClaimSchema, mappingGradingClaims, resolveTestMappings, TestMapSchema, } from '@gateforge/core';
-import { discoverTestCatalog, TestDiscoveryError } from '@gateforge/pack-playwright';
+import { CAUSE_NEXT_ACTIONS, ClaimSchema, mappingGradingClaims, resolveTestMappings, TestMapSchema, } from '@gate-forge/core';
+import { discoverTestCatalog, TestDiscoveryError } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 import { readJsonArray } from './state.js';
 /** The tracked sidecar path, repo-root-relative (plan §5.1 row 2). */

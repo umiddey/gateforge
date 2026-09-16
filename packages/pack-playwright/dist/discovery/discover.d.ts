@@ -1,4 +1,4 @@
-import { type GateforgeConfig, type TestCatalog } from '@gateforge/core';
+import { type GateforgeConfig, type TestCatalog } from '@gate-forge/core';
 import { repoRelative } from './pytest-adapter.js';
 /** Options for one discovery run. */
 export interface DiscoverOptions {

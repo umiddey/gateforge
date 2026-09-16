@@ -19,17 +19,17 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { createInterface } from 'node:readline/promises';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { ClassificationPolicySchema, PolicyFileSchema, parseConfig, serializeBaseline, strictCapabilityGaps, } from '@gateforge/core';
+import { ClassificationPolicySchema, PolicyFileSchema, parseConfig, serializeBaseline, strictCapabilityGaps, } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { installCommitHook, writeStandaloneGateScript } from '../git-hooks.js';
 export const INIT_USAGE = 'usage: gateforge init [--languages <comma,list>] [--blocking] [--strict-e2e]';
 const BUNDLED_PLUGIN_MODULES = Object.freeze({
-    'gateforge.pack-fastapi': '@gateforge/pack-fastapi',
-    'gateforge.pack-http': '@gateforge/pack-http',
-    'gateforge.pack-sqlalchemy': '@gateforge/pack-sqlalchemy',
-    'gateforge.pack-task': '@gateforge/pack-task',
+    'gateforge.pack-fastapi': '@gate-forge/pack-fastapi',
+    'gateforge.pack-http': '@gate-forge/pack-http',
+    'gateforge.pack-sqlalchemy': '@gate-forge/pack-sqlalchemy',
+    'gateforge.pack-task': '@gate-forge/pack-task',
 });
 /**
  * Selects the bundled detectors required by the generated coverage and

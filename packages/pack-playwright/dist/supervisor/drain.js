@@ -22,7 +22,7 @@
  * in the logs — never to satisfaction (fail closed; the claim simply
  * stays blocking).
  */
-import { CAUSE_NEXT_ACTIONS } from '@gateforge/core';
+import { CAUSE_NEXT_ACTIONS } from '@gate-forge/core';
 import { WitnessRequestError } from '../fixture/witness-client.js';
 import { SupervisorClient } from './client.js';
 import { persistenceIntentsPathFor, readPersistenceIntents, readSpoolEvents, spoolPathFor, } from './spool.js';

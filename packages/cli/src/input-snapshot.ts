@@ -44,7 +44,7 @@ import {
   type GateforgeConfig,
   type HttpRouteCandidate,
   type Obligation,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { expandIncludePaths } from './glob.js';
 

@@ -17,8 +17,8 @@
  * - stdout never prints an unqualified "all tests passed" that could
  *   hide a diagnostic failure.
  */
-import { type GateforgeConfig } from '@gateforge/core';
-import { type DiagnosticRunResult } from '@gateforge/pack-playwright';
+import { type GateforgeConfig } from '@gate-forge/core';
+import { type DiagnosticRunResult } from '@gate-forge/pack-playwright';
 import type { Io } from './io.js';
 /** The saved diagnostics report document (run state; never tracked input). */
 export interface DiagnosticsReportDocument {

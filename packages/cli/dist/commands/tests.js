@@ -33,8 +33,8 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { canonicalJson, compareStrings, mappingSuggestions, TestKindSchema, } from '@gateforge/core';
-import { discoverTestCatalog, TestDiscoveryError } from '@gateforge/pack-playwright';
+import { canonicalJson, compareStrings, mappingSuggestions, TestKindSchema, } from '@gate-forge/core';
+import { discoverTestCatalog, TestDiscoveryError } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { diagnosticsJson, renderDiagnosticsText, runDiagnosticSuites } from '../diagnostics.js';
 import { UsageError } from '../errors.js';

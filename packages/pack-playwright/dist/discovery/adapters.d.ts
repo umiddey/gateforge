@@ -24,8 +24,8 @@
  * Both adapters fail closed: an undeclared capability is an error, and
  * inventory problems come back as typed catalog rows, never silence.
  */
-import { loadConfig } from '@gateforge/core';
-import type { DiagnosticSuite, RunnerCapabilities, RunnerExecutionEnvelope, RunnerSelection, RunnerExecutionEnv, RunnerTestInstance, TestCatalog, TestCatalogEntry, TestRunnerAdapter } from '@gateforge/core';
+import { loadConfig } from '@gate-forge/core';
+import type { DiagnosticSuite, RunnerCapabilities, RunnerExecutionEnvelope, RunnerSelection, RunnerExecutionEnv, RunnerTestInstance, TestCatalog, TestCatalogEntry, TestRunnerAdapter } from '@gate-forge/core';
 import { type DiscoverOptions } from './discover.js';
 import { type DiagnosticRunResult } from './pytest-adapter.js';
 import { listNativePlaywrightTests } from './reconcile.js';

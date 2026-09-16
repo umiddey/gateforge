@@ -27,7 +27,7 @@ const validConfig = {
       id: 'gateforge.detector-fastapi',
       version: '0.1.0',
       transport: 'in-process',
-      module: '@gateforge/pack-sqlalchemy/detector-fastapi',
+      module: '@gate-forge/pack-sqlalchemy/detector-fastapi',
     },
   ],
   policies: '.gateforge/policies.yml',

@@ -1,4 +1,4 @@
-import { type Location } from '@gateforge/core';
+import { type Location } from '@gate-forge/core';
 /** Default cap on files pulled in through import traversal. */
 export declare const DEFAULT_MAX_TRAVERSED_FILES = 200;
 /** Default bound on import-traversal depth (chain length). */
@@ -92,11 +92,11 @@ export declare const UNRESOLVED_TITLE_PLACEHOLDER = "<unresolved-title>";
  * `playwright/test` — see `fixture/fixture.ts`, which documents this
  * import as the only sanctioned runner). Binding it lets the static scan
  * follow the documented consumer shape
- * (`import { test as gateforgeTest } from '@gateforge/pack-playwright'`)
+ * (`import { test as gateforgeTest } from '@gate-forge/pack-playwright'`)
  * instead of emitting unresolvable rows for it. Every OTHER
  * module-external import stays unresolved — fail-closed is unchanged.
  */
-export declare const GATEFORGE_PACK_SPECIFIER = "@gateforge/pack-playwright";
+export declare const GATEFORGE_PACK_SPECIFIER = "@gate-forge/pack-playwright";
 /**
  * Signature parameter names that prove a real browser is in play.
  * `evidence` is this pack's trusted-evidence fixture — it is built on a

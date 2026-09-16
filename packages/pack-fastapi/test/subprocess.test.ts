@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { ClassificationSignalSchema, ResourceSchema } from '@gateforge/core';
+import { ClassificationSignalSchema, ResourceSchema } from '@gate-forge/core';
 import { createFastapiDetector } from '../src/detector.js';
 import { PACK_VERSION } from '../src/version.js';
 import { ALL_FIXTURES, FIXTURE_ROOT, pythonEnv, runDetector, runDiscover } from './helpers.js';

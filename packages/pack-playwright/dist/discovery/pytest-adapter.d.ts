@@ -1,4 +1,4 @@
-import type { DiagnosticSuite } from '@gateforge/core';
+import type { DiagnosticSuite } from '@gate-forge/core';
 import { TestDiscoveryError } from './reconcile.js';
 /** One collected pytest case, identity preserved (§3.5). */
 export interface PytestCollectedCase {

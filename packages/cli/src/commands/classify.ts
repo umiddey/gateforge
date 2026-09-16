@@ -14,7 +14,7 @@
  * effective decisions agree byte-for-byte (phase-5 checklist).
  */
 import { writeFileSync } from 'node:fs';
-import { canonicalJson, type JsonValue } from '@gateforge/core';
+import { canonicalJson, type JsonValue } from '@gate-forge/core';
 import { stringify as stringifyYaml } from 'yaml';
 import { parseArgs, stringFlag } from '../args.js';
 import type { Io } from '../io.js';

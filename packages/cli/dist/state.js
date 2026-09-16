@@ -31,7 +31,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { canonicalJson, compareStrings, fingerprint, } from '@gateforge/core';
+import { canonicalJson, compareStrings, fingerprint, } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 /** Default run-state directory, repo-root-relative. */
 export const DEFAULT_STATE_DIR = '.gateforge/test-gates';

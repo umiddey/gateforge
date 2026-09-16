@@ -1,4 +1,4 @@
-import { type ChangedProvider, type ClassificationFile, type ClassificationResult, type DetectorOutput, type GateforgeConfig, type PolicyEvaluationResult, type ResourceGraph, type RunManifest } from '@gateforge/core';
+import { type ChangedProvider, type ClassificationFile, type ClassificationResult, type DetectorOutput, type GateforgeConfig, type PolicyEvaluationResult, type ResourceGraph, type RunManifest } from '@gate-forge/core';
 import { type EndpointInventory } from './endpoint-compiler.js';
 /** Everything one pipeline run needs. */
 export interface PipelineOptions {

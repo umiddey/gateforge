@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { CAUSE_NEXT_ACTIONS, ExecutionResultSchema, GateReceiptSchema, canonicalJson, compareStrings, executionResultDigestOf, gateReceiptMac, selectionDigestOf, sha256Canonical, superviseExecution, trustedPolicyDigest, verifyGateReceipt, } from '@gateforge/core';
+import { CAUSE_NEXT_ACTIONS, ExecutionResultSchema, GateReceiptSchema, canonicalJson, compareStrings, executionResultDigestOf, gateReceiptMac, selectionDigestOf, sha256Canonical, superviseExecution, trustedPolicyDigest, verifyGateReceipt, } from '@gate-forge/core';
 import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';

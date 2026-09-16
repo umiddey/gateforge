@@ -1,5 +1,5 @@
 /**
- * `@gateforge/pack-fastapi` — FastAPI server-route detector (ADR 0004,
+ * `@gate-forge/pack-fastapi` — FastAPI server-route detector (ADR 0004,
  * plan phase 2). The default export is the CLI in-process contract.
  */
 export {

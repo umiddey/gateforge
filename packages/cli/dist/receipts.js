@@ -18,7 +18,7 @@
  *   forces a fresh run or a precise block; never reuse across changed
  *   inputs.
  */
-import { CAUSE_NEXT_ACTIONS, ExecutionResultSchema, compareStrings, executionResultDigestOf, verifyGateReceipt, } from '@gateforge/core';
+import { CAUSE_NEXT_ACTIONS, ExecutionResultSchema, compareStrings, executionResultDigestOf, verifyGateReceipt, } from '@gate-forge/core';
 import { readStateDocument } from './state.js';
 /** The §5.4 next action per cause (single source: core). */
 const NEXT_ACTIONS = CAUSE_NEXT_ACTIONS;

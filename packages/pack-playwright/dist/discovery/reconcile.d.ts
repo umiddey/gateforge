@@ -1,4 +1,4 @@
-import type { Location } from '@gateforge/core';
+import type { Location } from '@gate-forge/core';
 /** Default wall-clock bound for one `--list` invocation. */
 export declare const DEFAULT_LIST_TIMEOUT_MS = 60000;
 /** Typed discovery failure: a playwright invocation that could not run

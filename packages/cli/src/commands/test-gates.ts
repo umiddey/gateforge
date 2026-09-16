@@ -73,7 +73,7 @@ import {
   type RunnerExecutionEnvelope,
   type TestCatalog,
   type TracedTestInput,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import {
   discoverTestCatalog,
   listNativePlaywrightTests,
@@ -83,7 +83,7 @@ import {
   startWitnessProcess,
   SupervisorClient,
   TestDiscoveryError,
-} from '@gateforge/pack-playwright';
+} from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
@@ -1021,7 +1021,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   await runDiagnosticsStep(io, config, io.cwd, stateDir, expectedDigest, pipeline.now);
 
   // 6. Execute through the adapter under trusted-config synthesis (see
-  // `@gateforge/pack-playwright` trusted-config.ts): the consumer config
+  // `@gate-forge/pack-playwright` trusted-config.ts): the consumer config
   // file is never loaded; the engine reporter is forced with parent-side
   // paths as constructor options. The child env therefore carries ONLY
   // the witness URL + run token + app base — never run-state paths

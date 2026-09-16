@@ -6,7 +6,7 @@
  * Envelope: `{protocolVersion, pluginId, pluginVersion, type, seq, payload,
  * digest}` with `digest = sha256(canonical({type, seq, payload}))`.
  */
-import { isJsonValue, sha256Canonical } from '@gateforge/core';
+import { isJsonValue, sha256Canonical } from '@gate-forge/core';
 import { FrameJsonError, ProtocolVersionError, SchemaError, UnknownPluginError, UnknownTypeError, } from './codes.js';
 import { MESSAGE_TYPES, PAYLOAD_SCHEMAS, PROTOCOL_VERSION, firstIssueText } from './schema.js';
 /** Splits an accumulated stdout buffer into complete lines. */

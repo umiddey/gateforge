@@ -3,7 +3,7 @@
  * injected clocks and environments, the gate-runner pipeline, the GF-19
  * malformed-source rule, and the RED-PROBE discipline. Everything here is
  * offline and wall-clock-free; the public surface is re-exported from
- * `@gateforge/core`.
+ * `@gate-forge/core`.
  */
 export { FIXED_GIT_DATE, TempRepo, withTempRepo, } from './temp-repo.js';
 export { makeClock, toIso } from './clock.js';

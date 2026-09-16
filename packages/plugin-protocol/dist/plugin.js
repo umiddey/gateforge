@@ -9,7 +9,7 @@
  * real plugin it runs over `process.stdin`/`process.stdout`.
  */
 import { createInterface } from 'node:readline';
-import { isJsonValue } from '@gateforge/core';
+import { isJsonValue } from '@gate-forge/core';
 import { FrameJsonError, ProtocolFailure, SchemaError } from './codes.js';
 import { encodeFrame, extractLines, parseLine, verifyEnvelope, verifyPayload } from './framing.js';
 import { PROTOCOL_VERSION, REQUIRED_CAPABILITY } from './schema.js';

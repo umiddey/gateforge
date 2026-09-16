@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { recordIdOf } from '@gateforge/core';
+import { recordIdOf } from '@gate-forge/core';
 import { gateSummaryLine, GateforgeReporter } from '../src/reporter/reporter.js';
 import { ledgerRowFor, type LedgerRow } from '../src/reporter/ledger.js';
 import { startWitness } from '../src/witness/server.js';

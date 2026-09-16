@@ -37,7 +37,7 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
-import { LocationSchema } from '@gateforge/core';
+import { LocationSchema } from '@gate-forge/core';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 /**
  * Directories the detector skips by name (purely the noisy parts of any

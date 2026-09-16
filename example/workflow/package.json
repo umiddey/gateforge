@@ -1,9 +1,9 @@
 {
-  "name": "@gateforge/example-workflow-app",
+  "name": "@gate-forge/example-workflow-app",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Zero-dep demo workflow server: in-memory contract state machine (draft -> pending -> signed -> terminated) on port 3002 with an append-only audit.json. Driven by @gateforge/pack-workflow.",
+  "description": "Zero-dep demo workflow server: in-memory contract state machine (draft -> pending -> signed -> terminated) on port 3002 with an append-only audit.json. Driven by @gate-forge/pack-workflow.",
   "engines": {
     "node": ">=20"
   },

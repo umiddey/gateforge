@@ -2,7 +2,7 @@
  * The endpoint compiler (ADR 0004 D5/D6, plan phase 4): a deterministic
  * CLI-pipeline stage that consumes every detector contribution's
  * `http.contract` facts, joins frontend calls to backend routes
- * (`@gateforge/http-contract`), classifies endpoint capabilities with
+ * (`@gate-forge/http-contract`), classifies endpoint capabilities with
  * rules over detector FACTS (never framework syntax), links endpoints to
  * business resources only through unambiguous evidence, and emits a
  * synthetic `gateforge.endpoint-compiler` contribution whose endpoint
@@ -52,15 +52,15 @@ import {
   type HttpLocation,
   type HttpMethod,
   type JoinBlock,
-} from '@gateforge/http-contract';
-import { HTTP_ENDPOINT_RESOURCE_KIND, type DetectorOutput, type Finding, type Resource } from '@gateforge/core';
+} from '@gate-forge/http-contract';
+import { HTTP_ENDPOINT_RESOURCE_KIND, type DetectorOutput, type Finding, type Resource } from '@gate-forge/core';
 import {
   PLANE_RULE_CONTRADICTION,
   PLANES_CONFIG_PATH,
   readPlanesConfigOrNull,
   resolvePlaneByRules,
   type PlanesConfig,
-} from '@gateforge/pack-sqlalchemy';
+} from '@gate-forge/pack-sqlalchemy';
 import { UsageError } from './errors.js';
 
 /** Detector id of the synthetic compiler contribution (engine-issued). */

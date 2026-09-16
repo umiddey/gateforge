@@ -1,4 +1,4 @@
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 /** Detected framework of a webhook endpoint. */
 export type WebhookFramework = 'express' | 'fastify' | 'hono' | 'decorator';
 /** Allowed signature algorithms the detector records. */

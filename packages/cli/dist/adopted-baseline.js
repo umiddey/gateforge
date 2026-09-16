@@ -13,7 +13,7 @@
  * only RESOLVES what the current adoption sanctions and never widens it.
  */
 import { dirname, join } from 'node:path';
-import { ADOPTION_RECORD_FILENAME, loadAdoptionRecord, loadBaseline } from '@gateforge/core';
+import { ADOPTION_RECORD_FILENAME, loadAdoptionRecord, loadBaseline } from '@gate-forge/core';
 import { resolveRepoPath } from './pipeline.js';
 /**
  * Resolves the adopted-baseline forgiveness set for this repo (phase 8 C).

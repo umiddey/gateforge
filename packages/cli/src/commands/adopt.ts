@@ -49,7 +49,7 @@ import {
   loadBaseline,
   writeAdoptionRecord,
   writeBaseline,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { dirname, join } from 'node:path';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';

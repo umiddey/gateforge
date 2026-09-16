@@ -7,7 +7,7 @@
  * entries, findings, and stale references. The command never gates —
  * it is the introspection half of the pipeline.
  */
-import { canonicalJson } from '@gateforge/core';
+import { canonicalJson } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import { writeLine } from '../io.js';
 import { runPipeline } from '../pipeline.js';

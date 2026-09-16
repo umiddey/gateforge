@@ -1,5 +1,5 @@
 /**
- * @gateforge/pack-http — Generic HTTP exposure pack.
+ * @gate-forge/pack-http — Generic HTTP exposure pack.
  *
  * Pure TypeScript detector that walks `.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/
  * `.cjs` sources and discovers externally-reachable HTTP artifacts:

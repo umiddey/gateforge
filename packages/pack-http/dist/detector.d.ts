@@ -1,4 +1,4 @@
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import { type ClientScanConfig } from './client-calls.js';
 /** Detector contract: `discover(paths)` is sync (pure over file bytes). */
 export interface HttpDetector {

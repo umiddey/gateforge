@@ -8,7 +8,7 @@
  * its in-code resolution path. Deterministic: re-running the command on
  * an unchanged repository prints byte-identical output.
  */
-import { canonicalJson, fingerprint, type JsonValue } from '@gateforge/core';
+import { canonicalJson, fingerprint, type JsonValue } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';

@@ -32,7 +32,7 @@
  * {@link NO_PLANE_MAPPING}; a malformed document throws (fail closed).
  */
 import { readFileSync } from 'node:fs';
-import { globMatch } from '@gateforge/core';
+import { globMatch } from '@gate-forge/core';
 /** The empty rule; core derives plane from normalized signals. */
 export const NO_PLANE_MAPPING = () => null;
 /** Rule that maps table names to planes; unmapped tables stay null. */

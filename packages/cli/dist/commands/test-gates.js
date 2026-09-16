@@ -57,8 +57,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AttestationSchema, CAUSE_NEXT_ACTIONS, canonicalJson, renderRun, runExitCode, sha256Canonical, selectionDigestOf, verifyAttestationMac, } from '@gateforge/core';
-import { discoverTestCatalog, listNativePlaywrightTests, PlaywrightAdapter, readRunnerOutcomes, startSupervisorSpoolDrain, startWitnessProcess, SupervisorClient, TestDiscoveryError, } from '@gateforge/pack-playwright';
+import { AttestationSchema, CAUSE_NEXT_ACTIONS, canonicalJson, renderRun, runExitCode, sha256Canonical, selectionDigestOf, verifyAttestationMac, } from '@gate-forge/core';
+import { discoverTestCatalog, listNativePlaywrightTests, PlaywrightAdapter, readRunnerOutcomes, startSupervisorSpoolDrain, startWitnessProcess, SupervisorClient, TestDiscoveryError, } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
@@ -863,7 +863,7 @@ async function supervisedTestGates(io, options) {
     // and saved but never change the required E2E decision.
     await runDiagnosticsStep(io, config, io.cwd, stateDir, expectedDigest, pipeline.now);
     // 6. Execute through the adapter under trusted-config synthesis (see
-    // `@gateforge/pack-playwright` trusted-config.ts): the consumer config
+    // `@gate-forge/pack-playwright` trusted-config.ts): the consumer config
     // file is never loaded; the engine reporter is forced with parent-side
     // paths as constructor options. The child env therefore carries ONLY
     // the witness URL + run token + app base — never run-state paths

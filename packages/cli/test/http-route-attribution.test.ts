@@ -24,7 +24,7 @@
  */
 import { createServer, type Server } from 'node:http';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gateforge/core';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { startWitness } from '../../pack-playwright/src/witness/server.js';
 import { beginTestInterval, endTestInterval, openTestSession, type TestSession } from './witness-sessions.js';
 import { httpRoutesView } from '../src/state.js';

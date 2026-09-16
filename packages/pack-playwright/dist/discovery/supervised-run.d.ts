@@ -1,4 +1,4 @@
-import type { RunnerExecutionEnv, RunnerExecutionEnvelope, RunnerSelection } from '@gateforge/core';
+import type { RunnerExecutionEnv, RunnerExecutionEnvelope, RunnerSelection } from '@gate-forge/core';
 /** Default whole-run wall-clock bound for one supervised playwright run. */
 export declare const DEFAULT_RUN_TIMEOUT_MS: number;
 /** The runner-outcomes document the gateforge reporter writes. */

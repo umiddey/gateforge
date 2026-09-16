@@ -27,7 +27,7 @@
  */
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { GATEFORGE_SCHEMA_VERSION } from '@gateforge/core';
+import { GATEFORGE_SCHEMA_VERSION } from '@gate-forge/core';
 import { PACK_VERSION } from './version.js';
 /** Resource kind emitted by this pack. */
 export const VALIDATION_SCHEMA_KIND = 'validation.schema';

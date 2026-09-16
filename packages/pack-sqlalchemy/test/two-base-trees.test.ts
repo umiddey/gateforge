@@ -21,7 +21,7 @@ import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import { createSqlalchemyDetector, type PlaneConfigRule } from '../src/index.js';
 import { FIXTURE_ROOT } from './helpers.js';
 

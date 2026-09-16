@@ -25,7 +25,7 @@
  * project); unresolved/parse errors sort by location.
  */
 import { join } from 'node:path';
-import { canonicalJson, deriveLogicalKey, TestCatalogSchema, } from '@gateforge/core';
+import { canonicalJson, deriveLogicalKey, TestCatalogSchema, } from '@gate-forge/core';
 import { inferTestKind } from './inference.js';
 import { collectPytestSuite, repoRelative, } from './pytest-adapter.js';
 import { fileDigest, listNativePlaywrightTests, reconciliationKey, } from './reconcile.js';

@@ -3,7 +3,7 @@
  *
  * Every frame is `{protocolVersion: 3, pluginId, pluginVersion, type, seq,
  * payload, digest}` with `digest = sha256(canonical({type, seq, payload}))`
- * over the GF-canonical-JSON of @gateforge/core (pin #1).
+ * over the GF-canonical-JSON of @gate-forge/core (pin #1).
  *
  * GPP/3 (ADR 0003 D6) adds `classificationSignals` to the `result`
  * payload — INSIDE the digest-checked envelope, never beside it. There
@@ -14,7 +14,7 @@
  * Payload validation is schema-generated: every payload type below has a
  * zod schema and is validated on receive; any failure is `E_SCHEMA` with a
  * single-cause path/message diagnostic. The result payload matches the
- * frozen @gateforge/core `Resource`, `UnresolvedReason`, and
+ * frozen @gate-forge/core `Resource`, `UnresolvedReason`, and
  * `ClassificationSignal` shapes.
  */
 import { z } from 'zod';
@@ -23,7 +23,7 @@ import {
   LocationSchema,
   ResourceSchema,
   UnresolvedReasonSchema,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 
 /** The GPP version this package speaks. Handshakes pin this value. */
 export const PROTOCOL_VERSION = 3;
@@ -113,7 +113,7 @@ export const ResultPayloadSchema = z
   .object({
     /** Echoes the outstanding discover's `requestId`. */
     requestId: z.string().min(1),
-    /** Discovered resources (@gateforge/core Resource shape). */
+    /** Discovered resources (@gate-forge/core Resource shape). */
     resources: z.array(ResourceSchema),
     /** Reasons discovery could not proceed for parts of the input. */
     unresolved: z.array(UnresolvedReasonSchema),

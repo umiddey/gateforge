@@ -33,7 +33,7 @@
  */
 import { existsSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
-import { loadConfig, policyWeakenedCandidate } from '@gateforge/core';
+import { loadConfig, policyWeakenedCandidate } from '@gate-forge/core';
 /** Env var carrying the owner-approved policy digest (protected CI variable / managed service). */
 export const APPROVED_POLICY_DIGEST_ENV = 'GATEFORGE_APPROVED_POLICY_DIGEST';
 /**

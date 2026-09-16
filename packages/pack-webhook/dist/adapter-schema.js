@@ -1,7 +1,7 @@
 /**
  * Entity-adapter schema (pack deliverable: "entity-adapter schema doc").
  *
- * Mirrors `@gateforge/pack-sqlalchemy`'s adapter contract, scoped to
+ * Mirrors `@gate-forge/pack-sqlalchemy`'s adapter contract, scoped to
  * the webhook pack's delivery-log resources. The witness service loads
  * `.gateforge/adapters/<resourceId>.mjs` and calls `read(ctx, id)`
  * when a test asks for persistence evidence (the

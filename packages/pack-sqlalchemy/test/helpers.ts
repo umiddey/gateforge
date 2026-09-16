@@ -9,7 +9,7 @@ import {
   PluginSession,
   type DiscoveryOutcome,
   type PluginSpawnOptions,
-} from '@gateforge/plugin-protocol';
+} from '@gate-forge/plugin-protocol';
 import { PACK_PLUGIN_ID, PACK_VERSION } from '../src/version.js';
 
 /** Absolute dir of the pack's test fixtures. */

@@ -1,4 +1,4 @@
-import { type CauseCode, type GateforgeConfig } from '@gateforge/core';
+import { type CauseCode, type GateforgeConfig } from '@gate-forge/core';
 /** Env var carrying the owner-approved policy digest (protected CI variable / managed service). */
 export declare const APPROVED_POLICY_DIGEST_ENV = "GATEFORGE_APPROVED_POLICY_DIGEST";
 /**

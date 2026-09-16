@@ -3,7 +3,7 @@
 Runnable as a module so the CLI's subprocess transport can invoke it with
 ``python3 -m gateforge_fastapi_detector``: handshake, one lock-step
 ``discover`` per request, shutdown handshake — all through the reference
-client in @gateforge/plugin-protocol (stdlib only).
+client in @gate-forge/plugin-protocol (stdlib only).
 
 The module locates the ``gateforge_plugin`` client itself: when it is not
 importable from the environment (e.g. only this pack's ``python/`` dir is

@@ -1,5 +1,5 @@
 /**
- * @gateforge/cli — the gateforge command-line interface.
+ * @gate-forge/cli — the gateforge command-line interface.
  *
  * Public surface for the bin wrapper and for programmatic embedding
  * (tests, G6's test-gates integration):

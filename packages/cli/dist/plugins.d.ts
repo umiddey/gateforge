@@ -1,4 +1,4 @@
-import { type ConfigPlugin, type DetectorOutput, type PluginRegistration } from '@gateforge/core';
+import { type ConfigPlugin, type DetectorOutput, type PluginRegistration } from '@gate-forge/core';
 /** One plugin run: detector contributions + pinned registrations. */
 export interface PluginRunResult {
     contributions: DetectorOutput[];

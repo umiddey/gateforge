@@ -33,7 +33,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fingerprint } from '@gateforge/core';
+import { fingerprint } from '@gate-forge/core';
 import {
 	CLI_BIN,
 	FINGERPRINT,
@@ -446,7 +446,7 @@ const CRUD_JOURNEY_SPEC = readFileSync(
 );
 
 const HONEST_LIFECYCLE_SPEC = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 // Phase 1: the consumer extends the gateforge runner with its OWN
@@ -542,7 +542,7 @@ describe('honest end-to-end (real Playwright vs the example app)', () => {
 describe('adversarial fixtures (each red run grades its claim blocking)', () => {
 	it('GF-03: unrelated UI action + API read under a crud:update claim → never satisfied', async () => {
 		const spec = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -578,7 +578,7 @@ test('claims crud:update but only performs unrelated browsing and reads', {
 
 	it('GF-04: create-flow evidence borrowed by a crud:update claim → invalid (operation mismatch)', async () => {
 		const spec = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -621,7 +621,7 @@ test('borrows the create operation under a crud:update claim', {
 
 	it('GF-05: adapter evidence for a different entity → same-entity violation, invalid', async () => {
 		const spec = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -665,7 +665,7 @@ test('updates acc-1 but the adapter returns acc-3 evidence', {
 
 	it('GF-22: forged receipt feeding a trusted primitive → rejected, claim missing', async () => {
 		const spec = `
-import { test as gateforgeTest } from '@gateforge/pack-playwright';
+import { test as gateforgeTest } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -827,7 +827,7 @@ test('performs obligation-relevant flows without any gateforge claim', async ({ 
 describe('Phase 1 probes (each cheat demonstrably fails)', () => {
 	it('PROBE: visible action removed — the session has no ui.action, obligation missing', async () => {
 		const spec = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -867,7 +867,7 @@ test('claims crud:create but performs the mutation through the direct API', {
 
 	it('PROBE: direct Node fetch substituted for the UI action — no observed exchange, missing', async () => {
 		const spec = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -909,7 +909,7 @@ test('claims crud:create but a bare Node fetch performs the mutation', {
 
 	it('PROBE: DOM fabricated via page.evaluate — the fixture observes nothing, missing', async () => {
 		const spec = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -950,7 +950,7 @@ test('claims crud:create and fakes the rendered row with raw script', {
 
 	it('PROBE: backend operation broken (state read reports absence) → postcondition violation, invalid', async () => {
 		const spec = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -996,7 +996,7 @@ test('updates acc-1 while the backend operation is broken', {
 		// differ from what the journey typed. The exact-value echo fails
 		// the obligation even though the status was 2xx (plan §3.6).
 		const spec = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -1032,7 +1032,7 @@ test('creates an account and only checks the transport round-trip', {
 describe('standalone reporter exit-code semantics', () => {
 	it('an unsatisfied claim with a passing test fails the run under GATEFORGE_REPORTER_FAIL_RUN=1', async () => {
 		const spec = `
-import { test } from '@gateforge/pack-playwright';
+import { test } from '@gate-forge/pack-playwright';
 
 test('claims an obligation but never collects evidence', {
   annotation: { type: 'gateforge', description: '${CLAIMS.update}' },
@@ -1092,7 +1092,7 @@ describe('packaging: the reporter resolves from CJS contexts', () => {
 	it('require.resolve + require() drive the real witness path (CJS playwright configs)', async () => {
 		// The phase-7 dogfood blocker: `exports['./reporter']` carried only
 		// an `import` condition, so Playwright's CJS-config
-		// `require.resolve('@gateforge/pack-playwright/reporter')` died
+		// `require.resolve('@gate-forge/pack-playwright/reporter')` died
 		// with ERR_PACKAGE_PATH_NOT_EXPORTED. Prove the documented usage
 		// end-to-end from a REAL downstream-shaped project: a CJS driver
 		// resolves the `require` condition, loads the class, and drives a
@@ -1126,9 +1126,9 @@ describe('packaging: the reporter resolves from CJS contexts', () => {
 				"'use strict';",
 				"const assert = require('node:assert');",
 				// The exact call a CJS playwright.config.js forces:
-				"const resolved = require.resolve('@gateforge/pack-playwright/reporter');",
+				"const resolved = require.resolve('@gate-forge/pack-playwright/reporter');",
 				"assert(resolved.endsWith('reporter.cjs'), 'unexpected resolution: ' + resolved);",
-				"const GateforgeReporter = require('@gateforge/pack-playwright/reporter');",
+				"const GateforgeReporter = require('@gate-forge/pack-playwright/reporter');",
 				"assert.strictEqual(typeof GateforgeReporter, 'function');",
 				'const reporter = new GateforgeReporter({});',
 				// Buffered until the ESM implementation loads, then replayed.
@@ -1243,7 +1243,7 @@ describe('strict flow: real browser journeys through the real CLI gate (review r
 		// journey below is byte-identical to what a consumer ships; the
 		// engine performs every browser step itself.
 		const crudJourney = `\
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -1278,7 +1278,7 @@ test('creates an account through the rendered UI', {
 
 	it('PROBE: pure direct-API substitution (no UI at all) → missing, zero records, blocking cause', async () => {
 		const spec = `
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });

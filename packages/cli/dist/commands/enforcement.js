@@ -23,7 +23,7 @@ import { accessSync, constants as fsConstants, existsSync, readdirSync } from 'n
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { allCapabilities, canonicalJson, policyWeakenedCandidate, } from '@gateforge/core';
+import { allCapabilities, canonicalJson, policyWeakenedCandidate, } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { UsageError } from '../errors.js';

@@ -24,7 +24,7 @@
  * Both adapters fail closed: an undeclared capability is an error, and
  * inventory problems come back as typed catalog rows, never silence.
  */
-import { loadConfig } from '@gateforge/core';
+import { loadConfig } from '@gate-forge/core';
 import { discoverTestCatalog } from './discover.js';
 import { collectPytestSuite, executePytestSuite, pytestExecutionArgv, } from './pytest-adapter.js';
 import { listNativePlaywrightTests } from './reconcile.js';

@@ -1,4 +1,4 @@
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 /** Stable detector kind for every workflow resource this pack emits. */
 export declare const WORKFLOW_CONTRACT_KIND = "workflow.contract";
 /** FSM style enumeration; one per detected machine. */

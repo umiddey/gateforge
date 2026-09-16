@@ -1,4 +1,4 @@
-import { type HttpRouteCandidate, type Obligation, type ResourceGraph, type RunManifest } from '@gateforge/core';
+import { type HttpRouteCandidate, type Obligation, type ResourceGraph, type RunManifest } from '@gate-forge/core';
 /** Default run-state directory, repo-root-relative. */
 export declare const DEFAULT_STATE_DIR = ".gateforge/test-gates";
 /** Resolves the run-state directory: override (absolute or relative) or default. */

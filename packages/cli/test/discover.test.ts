@@ -3,7 +3,7 @@
  * transports (in-process fixture + real GPP/3 python subprocess).
  */
 import { describe, expect, it } from 'vitest';
-import { withTempRepo } from '@gateforge/core';
+import { withTempRepo } from '@gate-forge/core';
 import { configYml, installFixture, pythonPluginBlock, runCli } from './helpers.js';
 
 // A plugin module that forges the ENGINE's suppressive authority: the

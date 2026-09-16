@@ -4,7 +4,7 @@
  * pattern; see ADR 0002 for the two-tier boundary).
  *
  * - **in-process**: `.gateforge.yml` declares
- *   `transport: in-process, module: "@gateforge/pack-fastapi"`; the CLI
+ *   `transport: in-process, module: "@gate-forge/pack-fastapi"`; the CLI
  *   imports this package's default export and calls `discover(paths)`.
  *   The implementation spawns the SAME python detector (GPP/3, hardened
  *   host) with a computed `PYTHONPATH`, so one detector implementation
@@ -15,7 +15,7 @@
  *   plugin directly — see the README.
  *
  * Post-processing (`facts.ts`): effective paths are canonicalized with the
- * shared `@gateforge/http-contract` rules. The wrapper mints NO
+ * shared `@gate-forge/http-contract` rules. The wrapper mints NO
  * classification signals (dogfood remediation phase 4): a path-derived
  * target is a guess that mostly names no discovered resource — route→resource
  * linkage is the CLI endpoint compiler's exclusive job (schema-symbol/
@@ -30,12 +30,12 @@
 import { readFileSync } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PluginSession } from '@gateforge/plugin-protocol';
+import { PluginSession } from '@gate-forge/plugin-protocol';
 import { canonicalizeFacts } from './facts.js';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 /** Absolute dir of this pack's `python/` tree (the detector package). */
 const PACK_PYTHON_DIR = fileURLToPath(new URL('../python', import.meta.url));
-/** Absolute dir of the sibling `@gateforge/plugin-protocol` python client. */
+/** Absolute dir of the sibling `@gate-forge/plugin-protocol` python client. */
 const PROTOCOL_PYTHON_DIR = fileURLToPath(new URL('../../../plugin-protocol/python', import.meta.url));
 /** The subprocess command the in-process transport spawns (G4 surface). */
 export const DEFAULT_COMMAND = ['python3', '-m', 'gateforge_fastapi_detector'];

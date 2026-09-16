@@ -55,7 +55,7 @@ export const EVIDENCE_ONLY_RESOURCE_KINDS = ['http.contract'];
  * own HTTP obligations, but `crud:*`/`persistence:*` contracts never
  * generate against them: CRUD state flows through the LINKED business
  * resource's own obligations — routes are never conflated with tables.
- * Mirrors `HTTP_ENDPOINT_KIND` in `@gateforge/http-contract` (core cannot
+ * Mirrors `HTTP_ENDPOINT_KIND` in `@gate-forge/http-contract` (core cannot
  * depend on it); keep the two in lockstep.
  */
 export const HTTP_ENDPOINT_RESOURCE_KIND = 'http.endpoint';
@@ -88,7 +88,7 @@ export const ClassSymbolAttributesSchema = z
  * Detector finding (discovery-spike lineage, e.g.
  * `DUPLICATE_TABLE_NAME`): a non-resource observation about the
  * scanned sources. This is the canonical home of the shape;
- * `@gateforge/plugin-protocol` carries a wire-compatible copy.
+ * `@gate-forge/plugin-protocol` carries a wire-compatible copy.
  */
 export const FindingSchema = z
     .strictObject({

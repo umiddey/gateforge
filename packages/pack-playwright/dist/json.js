@@ -8,7 +8,7 @@
  * `isJsonValue` guard and renders the canonical form (or throws — a
  * non-JSON payload is a contract violation, never a silent truncation).
  */
-import { canonicalJson, isJsonValue } from '@gateforge/core';
+import { canonicalJson, isJsonValue } from '@gate-forge/core';
 /** Throws unless the value is JSON-representable, then canonicalizes it. */
 export function canonicalOf(value) {
     if (!isJsonValue(value)) {

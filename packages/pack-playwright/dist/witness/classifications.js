@@ -12,7 +12,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
-import { ClassificationFileSchema, } from '@gateforge/core';
+import { ClassificationFileSchema, } from '@gate-forge/core';
 import { AdapterRegistryError } from './adapter-registry.js';
 /**
  * Loads the classifications document.

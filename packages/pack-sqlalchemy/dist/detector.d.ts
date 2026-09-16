@@ -1,4 +1,4 @@
-import { type DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import { type DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import { type PlanesConfig, type PlaneRule } from './planes.js';
 /** The subprocess command the in-process transport spawns (G4 surface). */
 export declare const DEFAULT_COMMAND: string[];

@@ -1,4 +1,4 @@
-# @gateforge/pack-sqlalchemy
+# @gate-forge/pack-sqlalchemy
 
 SQLAlchemy CRUD discovery pack: a Python detector that finds SQLAlchemy
 tables from Python source **using only the stdlib `ast` module** — no
@@ -91,7 +91,7 @@ plugins:
   - id: gateforge.pack-sqlalchemy
     version: 0.1.0
     transport: in-process
-    module: '@gateforge/pack-sqlalchemy'
+    module: '@gate-forge/pack-sqlalchemy'
 ```
 
 The pack's default export is the pinned `{ discover(paths) }` contract.

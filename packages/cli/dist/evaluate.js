@@ -13,7 +13,7 @@
  * at changed files survive — the `check --changed` contract (GF-09's
  * resource-change set).
  */
-import { AttestationSchema, BLOCKING_VERDICTS, blockingEntryFingerprint, CAUSE_NEXT_ACTIONS, classificationBlockedIdentity, HTTP_ENDPOINT_RESOURCE_KIND, evaluateCoveragePolicy, evaluateObligations, fingerprint, loadWaivers, strictCapabilityGaps, verifyAttestationMac, } from '@gateforge/core';
+import { AttestationSchema, BLOCKING_VERDICTS, blockingEntryFingerprint, CAUSE_NEXT_ACTIONS, classificationBlockedIdentity, HTTP_ENDPOINT_RESOURCE_KIND, evaluateCoveragePolicy, evaluateObligations, fingerprint, loadWaivers, strictCapabilityGaps, verifyAttestationMac, } from '@gate-forge/core';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { UsageError } from './errors.js';

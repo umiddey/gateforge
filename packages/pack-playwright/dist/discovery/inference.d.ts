@@ -15,7 +15,7 @@
  *   suppression signals; they can disqualify later proof but do not
  *   classify the test by themselves.
  */
-import type { CategorySignal, KindSignal, RuleEvidence, SuppressionSignal, TestKind, WeakSignal } from '@gateforge/core';
+import type { CategorySignal, KindSignal, RuleEvidence, SuppressionSignal, TestKind, WeakSignal } from '@gate-forge/core';
 import type { StaticTestFacts } from './static-discovery.js';
 /** Signature parameter names that prove a real API context is in play. */
 export declare const API_FIXTURE_PARAMS: readonly string[];

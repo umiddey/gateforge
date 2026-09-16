@@ -19,7 +19,7 @@
  * in one call; a repo without an adoption record has nothing to shrink
  * and fails closed.
  */
-import { loadAdoptionRecord, loadBaseline, shrinkClassificationBlocked, updateBaseline, writeAdoptionRecord, writeBaseline, ADOPTION_RECORD_FILENAME } from '@gateforge/core';
+import { loadAdoptionRecord, loadBaseline, shrinkClassificationBlocked, updateBaseline, writeAdoptionRecord, writeBaseline, ADOPTION_RECORD_FILENAME } from '@gate-forge/core';
 import { dirname, join } from 'node:path';
 import { parseArgs } from '../args.js';
 import { writeLine } from '../io.js';

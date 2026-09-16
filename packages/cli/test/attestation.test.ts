@@ -22,7 +22,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { verifyAttestationMac, withTempRepo, type TempRepo } from '@gateforge/core';
+import { verifyAttestationMac, withTempRepo, type TempRepo } from '@gate-forge/core';
 import { startWitness } from '../../pack-playwright/src/witness/server.js';
 import { beginTestInterval, endTestInterval, openTestSession, type TestSession } from './witness-sessions.js';
 import { configYml, currentInputDigest, runCli, writeV2Manifest } from './helpers.js';

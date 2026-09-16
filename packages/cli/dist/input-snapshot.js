@@ -38,7 +38,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { compareStrings, sha256Canonical, } from '@gateforge/core';
+import { compareStrings, sha256Canonical, } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { expandIncludePaths } from './glob.js';
 /** Snapshot format version hashed into every digest. */

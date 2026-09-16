@@ -36,7 +36,7 @@
  * changes like any other and stay blocking under strict E2E mode.
  */
 import { spawnSync } from 'node:child_process';
-import { normalizeChangedFiles } from '@gateforge/core';
+import { normalizeChangedFiles } from '@gate-forge/core';
 import { GIT_SCOPE_CONTROL_BASENAMES, MANIFEST_NAMES, normalizeRepoModule, PACK_CONFIGS, } from './input-snapshot.js';
 /**
  * Normalizes a repo-relative config path to posix form.

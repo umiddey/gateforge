@@ -5,9 +5,9 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "@gateforge/core": ["../core/src/index.ts"],
-      "@gateforge/http-contract": ["../http-contract/src/index.ts"],
-      "@gateforge/plugin-protocol": ["../plugin-protocol/src/index.ts"]
+      "@gate-forge/core": ["../core/src/index.ts"],
+      "@gate-forge/http-contract": ["../http-contract/src/index.ts"],
+      "@gate-forge/plugin-protocol": ["../plugin-protocol/src/index.ts"]
     }
   },
   "include": ["src", "test", "vitest.config.ts"]

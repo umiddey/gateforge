@@ -38,9 +38,9 @@
  *   argument substituted for the wrapper's first parameter (one level,
  *   one parameter — anything deeper is typed unresolved).
  */
-import { FRONTEND_CALL_TARGET_UNRESOLVED, HTTP_METHOD_DYNAMIC, HTTP_PATH_DYNAMIC } from '@gateforge/http-contract';
-import type { HttpMethod } from '@gateforge/http-contract';
-import { type Location } from '@gateforge/core';
+import { FRONTEND_CALL_TARGET_UNRESOLVED, HTTP_METHOD_DYNAMIC, HTTP_PATH_DYNAMIC } from '@gate-forge/http-contract';
+import type { HttpMethod } from '@gate-forge/http-contract';
+import { type Location } from '@gate-forge/core';
 /**
  * Optional per-entry file scoping (phase 3 scan-scoping). Globs are
  * repo-root-relative posix (`frontend/src/**`), matched with core's

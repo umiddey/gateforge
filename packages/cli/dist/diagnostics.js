@@ -17,8 +17,8 @@
  * - stdout never prints an unqualified "all tests passed" that could
  *   hide a diagnostic failure.
  */
-import { canonicalJson, compareStrings, } from '@gateforge/core';
-import { PytestAdapter } from '@gateforge/pack-playwright';
+import { canonicalJson, compareStrings, } from '@gate-forge/core';
+import { PytestAdapter } from '@gate-forge/pack-playwright';
 import { writeLine } from './io.js';
 import { UsageError } from './errors.js';
 import { readStateDocument, writeDiagnosticsReport } from './state.js';

@@ -27,7 +27,7 @@
  */
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { jsonPathFor, loadWaivers, WaiverSchema, writeWaiver } from '@gateforge/core';
+import { jsonPathFor, loadWaivers, WaiverSchema, writeWaiver } from '@gate-forge/core';
 import { parseArgs, stringFlag } from '../args.js';
 import { UsageError } from '../errors.js';
 import { writeLine } from '../io.js';

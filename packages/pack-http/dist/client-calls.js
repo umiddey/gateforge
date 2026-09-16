@@ -41,8 +41,8 @@
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
 import { posix } from 'node:path';
-import { FRONTEND_CALL_TARGET_UNRESOLVED, HTTP_METHOD_DYNAMIC, HTTP_PATH_DYNAMIC, normalizeHttpPath, } from '@gateforge/http-contract';
-import { pathInScope } from '@gateforge/core';
+import { FRONTEND_CALL_TARGET_UNRESOLVED, HTTP_METHOD_DYNAMIC, HTTP_PATH_DYNAMIC, normalizeHttpPath, } from '@gate-forge/http-contract';
+import { pathInScope } from '@gate-forge/core';
 export const DEFAULT_CLIENT_SCAN_CONFIG = {};
 /**
  * Whether `file` (repo-root-relative posix) is inside the top-level

@@ -17,7 +17,7 @@
  */
 import { lstatSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { compareStrings } from '@gateforge/core';
+import { compareStrings } from '@gate-forge/core';
 import picomatch from 'picomatch';
 /** Directories that are never scanned, whatever the globs say. */
 const ALWAYS_SKIP = new Set(['.git', 'node_modules']);

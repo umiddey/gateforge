@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { GATEFORGE_SCHEMA_VERSION, LocationSchema } from '@gateforge/core';
+import { GATEFORGE_SCHEMA_VERSION, LocationSchema } from '@gate-forge/core';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 /** Stable detector kind for every workflow resource this pack emits. */
 export const WORKFLOW_CONTRACT_KIND = 'workflow.contract';

@@ -1,4 +1,4 @@
-import type { GateforgeConfig } from '@gateforge/core';
+import type { GateforgeConfig } from '@gate-forge/core';
 /** Bundled detector id → the package that MUST provide it. Frozen trust base. */
 export declare const TRUSTED_DETECTOR_PACKAGES: Readonly<Record<string, string>>;
 /**

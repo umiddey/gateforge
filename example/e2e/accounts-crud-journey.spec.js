@@ -14,7 +14,7 @@
 //
 //   import { accountsSurface } from './accounts-surface.js';   // consumer-owned selectors
 //   const test = gateforgeTest.extend({ surface: accountsSurface });
-import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });

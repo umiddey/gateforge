@@ -14,7 +14,7 @@ GPP/2 peers fail closed at the handshake with ``E_PROTOCOL_VERSION``.
 
 Digest rule (pin #5): ``digest = sha256(canonical({type, seq, payload}))``
 over GF-canonical-JSON (UTF-8, recursively key-sorted, no whitespace,
-integers plain) — byte-compatible with @gateforge/core.
+integers plain) — byte-compatible with @gate-forge/core.
 """
 
 from __future__ import annotations

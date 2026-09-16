@@ -33,7 +33,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { globMatch } from '@gateforge/core';
+import { globMatch } from '@gate-forge/core';
 
 /** The plane enum the graph accepts. */
 export type SqlalchemyPlane = 'tenant' | 'master' | 'global';

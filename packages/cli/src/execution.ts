@@ -45,13 +45,13 @@ import {
   type SupervisionFinding,
   type TestCatalog,
   type TracedTestInput,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';
 import { normalizeRepoModule } from './input-snapshot.js';
-import type { GateforgeConfig } from '@gateforge/core';
-import type { RunnerOutcomesDocument } from '@gateforge/pack-playwright';
+import type { GateforgeConfig } from '@gate-forge/core';
+import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 import { environmentIdentity } from './input-snapshot.js';
 

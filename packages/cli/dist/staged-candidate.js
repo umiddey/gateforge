@@ -32,7 +32,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statS
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { CAUSE_NEXT_ACTIONS, normalizeChangedFiles } from '@gateforge/core';
+import { CAUSE_NEXT_ACTIONS, normalizeChangedFiles } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 /** The verify argument a generated hook accepts to prove activation. */
 export const HOOK_VERIFY_ARG = '--gateforge-verify';

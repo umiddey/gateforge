@@ -13,7 +13,7 @@
  * (`GET /classifications`). When either is unavailable the row carries
  * `verdict: null` and the reason says exactly what is missing.
  */
-import { evaluateObligation, isWitnessedRecord, } from '@gateforge/core';
+import { evaluateObligation, isWitnessedRecord, } from '@gate-forge/core';
 /** Load a valid claim-shaped object from the annotation source. */
 export function claimOf(obligationId, test) {
     const location = test.location === undefined || test.location === null

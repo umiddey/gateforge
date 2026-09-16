@@ -37,7 +37,7 @@ import type {
   RunnerExecutionEnvelope,
   RunnerInstanceOutcome,
   RunnerSelection,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { buildRunnerChildEnv } from './runner-env.js';
 import { localPlaywrightCliCandidates } from './reconcile.js';
 import { synthesizeTrustedConfig, trustedReporterEntry } from './trusted-config.js';

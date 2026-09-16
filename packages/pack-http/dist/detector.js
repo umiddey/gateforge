@@ -57,8 +57,8 @@
  */
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
-import { LocationSchema } from '@gateforge/core';
-import { HTTP_CONTRACT_KIND, normalizeHttpMethod, normalizeHttpPath, } from '@gateforge/http-contract';
+import { LocationSchema } from '@gate-forge/core';
+import { HTTP_CONTRACT_KIND, normalizeHttpMethod, normalizeHttpPath, } from '@gate-forge/http-contract';
 import { activeClientSymbolNamesIn, fileInServerScanRoots, readClientScanConfigOrNull, scanClientCalls, } from './client-calls.js';
 import { PACK_VERSION } from './version.js';
 /** Directories the detector never descends into. */

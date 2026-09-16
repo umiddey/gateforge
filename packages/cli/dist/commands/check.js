@@ -18,8 +18,8 @@
  * `test-gates` suite contract writes.
  */
 import { cpSync, existsSync, mkdirSync } from 'node:fs';
-import { CAUSE_NEXT_ACTIONS, renderRun, runExitCode, } from '@gateforge/core';
-import { discoverTestCatalog, findPlaywrightConfig } from '@gateforge/pack-playwright';
+import { CAUSE_NEXT_ACTIONS, renderRun, runExitCode, } from '@gate-forge/core';
+import { discoverTestCatalog, findPlaywrightConfig } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';

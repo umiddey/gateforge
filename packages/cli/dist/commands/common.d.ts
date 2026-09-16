@@ -1,4 +1,4 @@
-import { type GateforgeConfig } from '@gateforge/core';
+import { type GateforgeConfig } from '@gate-forge/core';
 /** Tool version stamped into SARIF `tool.driver.version` (pin #10). */
 export declare const VERSION = "0.1.0";
 /**

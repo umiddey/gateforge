@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, type GateforgeConfig } from '@gateforge/core';
+import { parseConfig, type GateforgeConfig } from '@gate-forge/core';
 import {
   collectPytestSuite,
   discoverTestCatalog,
@@ -832,7 +832,7 @@ describe('native playwright reconciliation', () => {
 /**
  * The documented consumer shape (plan 2026-09-13 E22, consumer-migration
  * record §5.1): playwright specs import the pack's exported runner
- * (`import { test as gateforgeTest } from '@gateforge/pack-playwright'`,
+ * (`import { test as gateforgeTest } from '@gate-forge/pack-playwright'`,
  * possibly through a consumer-local re-export module). The static scan
  * must follow those bindings — the supervised receipt-sealed run depends
  * on it — while every OTHER module-external import stays unresolved
@@ -849,13 +849,13 @@ describe('pack-runner consumer binding (E22)', () => {
   /** A playwright project that can also resolve the pack specifier. */
   function makePackConsumerProject(files: Record<string, string>): string {
     const root = makeTempDir('gateforge-pack-consumer-');
-    mkdirSync(join(root, 'node_modules/@gateforge'), { recursive: true });
+    mkdirSync(join(root, 'node_modules/@gate-forge'), { recursive: true });
     for (const name of ['playwright', 'playwright-core']) {
       symlinkSync(join(ROOT, 'node_modules', name), join(root, 'node_modules', name), 'dir');
     }
     symlinkSync(
-      join(ROOT, 'node_modules', '@gateforge', 'pack-playwright'),
-      join(root, 'node_modules', '@gateforge', 'pack-playwright'),
+      join(ROOT, 'node_modules', '@gate-forge', 'pack-playwright'),
+      join(root, 'node_modules', '@gate-forge', 'pack-playwright'),
       'dir',
     );
     writeTree(root, {
@@ -867,7 +867,7 @@ describe('pack-runner consumer binding (E22)', () => {
   }
 
   const PACK_SPEC = [
-    "import { test as gateforgeTest } from '@gateforge/pack-playwright';",
+    "import { test as gateforgeTest } from '@gate-forge/pack-playwright';",
     "const test = gateforgeTest.extend({});",
     "test('creates an account through the rendered UI', async ({ evidence }) => {});",
     "test('archives the account through the rendered UI', async ({ evidence }) => {});",
@@ -889,7 +889,7 @@ describe('pack-runner consumer binding (E22)', () => {
   it('follows a consumer-local re-export module of the pack runner', () => {
     const root = makeTempDir();
     writeTree(root, {
-      'e2e/helpers.ts': "export { test } from '@gateforge/pack-playwright';\n",
+      'e2e/helpers.ts': "export { test } from '@gate-forge/pack-playwright';\n",
       'e2e/accounts.spec.ts': [
         "import { test } from './helpers';",
         "test('journey through the local runner module', async ({ evidence }) => {});",
@@ -905,7 +905,7 @@ describe('pack-runner consumer binding (E22)', () => {
     const root = makeTempDir();
     writeTree(root, {
       'e2e/accounts.spec.ts': [
-        "const { test } = require('@gateforge/pack-playwright');",
+        "const { test } = require('@gate-forge/pack-playwright');",
         "test('required runner journey', async ({ evidence }) => {});",
         '',
       ].join('\n'),

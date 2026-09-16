@@ -1,4 +1,4 @@
-import { type JsonValue } from '@gateforge/core';
+import { type JsonValue } from '@gate-forge/core';
 import { PROTOCOL_VERSION } from './schema.js';
 /** What a plugin's discover handler must return (GPP/3 contract). */
 export interface DiscoveryResult {

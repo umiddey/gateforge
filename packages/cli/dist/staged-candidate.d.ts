@@ -1,4 +1,4 @@
-import { type CauseCode } from '@gateforge/core';
+import { type CauseCode } from '@gate-forge/core';
 /** The verify argument a generated hook accepts to prove activation. */
 export declare const HOOK_VERIFY_ARG = "--gateforge-verify";
 /** Marker lines delimiting the gateforge-managed block of a hook file. */

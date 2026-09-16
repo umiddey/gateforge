@@ -18,7 +18,7 @@
  *   forces a fresh run or a precise block; never reuse across changed
  *   inputs.
  */
-import { type BlockingEntry, type ExecutionResult, type GateReceipt } from '@gateforge/core';
+import { type BlockingEntry, type ExecutionResult, type GateReceipt } from '@gate-forge/core';
 /** The expected context a reusable receipt must match exactly. */
 export interface ReceiptExpectations {
     /** Current trusted input digest. */

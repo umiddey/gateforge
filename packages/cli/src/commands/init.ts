@@ -25,7 +25,7 @@ import {
   parseConfig,
   serializeBaseline,
   strictCapabilityGaps,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
@@ -36,10 +36,10 @@ export const INIT_USAGE =
   'usage: gateforge init [--languages <comma,list>] [--blocking] [--strict-e2e]';
 
 const BUNDLED_PLUGIN_MODULES: Readonly<Record<string, string>> = Object.freeze({
-  'gateforge.pack-fastapi': '@gateforge/pack-fastapi',
-  'gateforge.pack-http': '@gateforge/pack-http',
-  'gateforge.pack-sqlalchemy': '@gateforge/pack-sqlalchemy',
-  'gateforge.pack-task': '@gateforge/pack-task',
+  'gateforge.pack-fastapi': '@gate-forge/pack-fastapi',
+  'gateforge.pack-http': '@gate-forge/pack-http',
+  'gateforge.pack-sqlalchemy': '@gate-forge/pack-sqlalchemy',
+  'gateforge.pack-task': '@gate-forge/pack-task',
 });
 
 /**

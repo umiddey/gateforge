@@ -3,7 +3,7 @@ import { type HttpRouteCandidate } from './registry.js';
  * Single deterministic path interpretation for runtime observations
  * (plan §9 steps 1-3). Conservative and lockstep with the witness
  * proxy storage (`normalizeObservedPath` in
- * `@gateforge/pack-playwright`'s witness/server.ts — same rules, no
+ * `@gate-forge/pack-playwright`'s witness/server.ts — same rules, no
  * collapsing, no decoding on either side):
  * - query (`?...`) and fragment (`#...`) are stripped;
  * - one leading slash is required (a missing one is added);
@@ -19,7 +19,7 @@ import { type HttpRouteCandidate } from './registry.js';
  * a different endpoint — it fails with a reason so the verifier blocks
  * instead of substituting a route.
  *
- * Local on purpose: core must not depend on `@gateforge/http-contract`.
+ * Local on purpose: core must not depend on `@gate-forge/http-contract`.
  *
  * Args:
  *   rawUrl: the observed URL carried by the witnessed record.

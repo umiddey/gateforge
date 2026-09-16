@@ -1,4 +1,4 @@
-import { type GateforgeConfig } from '@gateforge/core';
+import { type GateforgeConfig } from '@gate-forge/core';
 /** One effective evaluation scope, decided before grading. */
 export interface ScopeDecision {
     /** `all` = evaluate every obligation and blocker; `changed` = diff-narrowed. */

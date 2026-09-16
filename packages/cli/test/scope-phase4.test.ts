@@ -7,7 +7,7 @@
  * mapping sidecar covers it. Known-source changes keep the narrow scope.
  */
 import { describe, expect, it } from 'vitest';
-import { loadConfig, withTempRepo } from '@gateforge/core';
+import { loadConfig, withTempRepo } from '@gate-forge/core';
 import { installFixture, runCli } from './helpers.js';
 import { computeEvaluationScope } from '../src/scope.js';
 

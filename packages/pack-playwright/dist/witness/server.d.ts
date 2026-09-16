@@ -1,4 +1,4 @@
-import { recordIdOf } from '@gateforge/core';
+import { recordIdOf } from '@gate-forge/core';
 import type { WitnessHandle, WitnessOptions } from './types.js';
 /** Fail-closed witness configuration/startup error. */
 export declare class WitnessStartupError extends Error {

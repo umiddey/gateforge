@@ -45,7 +45,7 @@
  */
 import { readFileSync, statSync, readdirSync } from 'node:fs';
 import { join, extname, relative, resolve } from 'node:path';
-import { GATEFORGE_SCHEMA_VERSION } from '@gateforge/core';
+import { GATEFORGE_SCHEMA_VERSION } from '@gate-forge/core';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 /** Default replay window if not otherwise configured: 5 minutes. */
 const DEFAULT_REPLAY_WINDOW_MS = 300_000;

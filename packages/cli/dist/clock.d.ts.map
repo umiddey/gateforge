@@ -1,1 +1,1 @@
-{"version":3,"file":"clock.d.ts","sourceRoot":"","sources":["../src/clock.ts"],"names":[],"mappings":"AAAA;;;;;GAKG;AACH,OAAO,EAAa,KAAK,eAAe,EAAE,KAAK,SAAS,EAAE,MAAM,iBAAiB,CAAC;AAElF;;;;;;;;;GASG;AACH,wBAAgB,eAAe,CAAC,MAAM,EAAE,eAAe,GAAG,SAAS,CASlE"}
+{"version":3,"file":"clock.d.ts","sourceRoot":"","sources":["../src/clock.ts"],"names":[],"mappings":"AAAA;;;;;GAKG;AACH,OAAO,EAAa,KAAK,eAAe,EAAE,KAAK,SAAS,EAAE,MAAM,kBAAkB,CAAC;AAEnF;;;;;;;;;GASG;AACH,wBAAgB,eAAe,CAAC,MAAM,EAAE,eAAe,GAAG,SAAS,CASlE"}

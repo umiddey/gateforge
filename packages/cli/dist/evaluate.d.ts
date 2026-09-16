@@ -13,7 +13,7 @@
  * at changed files survive — the `check --changed` contract (GF-09's
  * resource-change set).
  */
-import { type MappedCoverage, type BlockingEntry, type Claim, type CoverageOperation, type GateforgeConfig, type Obligation, type ObligationVerdict, type ResourceGraph, type WaiverCounts } from '@gateforge/core';
+import { type MappedCoverage, type BlockingEntry, type Claim, type CoverageOperation, type GateforgeConfig, type Obligation, type ObligationVerdict, type ResourceGraph, type WaiverCounts } from '@gate-forge/core';
 /**
  * Pin-#2 fingerprint of an obligation — the identity the baseline
  * stores. Shared by `check` (baseline application) and `adopt` (red-set

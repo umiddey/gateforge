@@ -71,7 +71,7 @@
  */
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, relative, sep, posix } from 'node:path';
-import { GATEFORGE_SCHEMA_VERSION } from '@gateforge/core';
+import { GATEFORGE_SCHEMA_VERSION } from '@gate-forge/core';
 /** Default retry policy when the source omits it. */
 const DEFAULT_RETRY_POLICY = {
     maxAttempts: 1,

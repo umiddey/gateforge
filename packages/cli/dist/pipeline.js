@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
-import { ClaimSchema, ClassificationPolicySchema, ClassificationSignalSchema, PolicyFileSchema, RunManifestSchema, buildResourceGraph, compareStrings, evaluatePolicies, jsonPathFor, loadWaivers, normalizeChangedFiles, runClassification, } from '@gateforge/core';
+import { ClaimSchema, ClassificationPolicySchema, ClassificationSignalSchema, PolicyFileSchema, RunManifestSchema, buildResourceGraph, compareStrings, evaluatePolicies, jsonPathFor, loadWaivers, normalizeChangedFiles, runClassification, } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.js';
 import { clockFromConfig } from './clock.js';

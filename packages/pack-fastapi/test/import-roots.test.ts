@@ -13,7 +13,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { runRedProbe } from '@gateforge/core';
+import { runRedProbe } from '@gate-forge/core';
 import {
   createFastapiDetector,
   DEFAULT_FASTAPI_SCAN_CONFIG,

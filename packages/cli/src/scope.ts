@@ -36,7 +36,7 @@
  * changes like any other and stay blocking under strict E2E mode.
  */
 import { spawnSync } from 'node:child_process';
-import { normalizeChangedFiles, type GateforgeConfig } from '@gateforge/core';
+import { normalizeChangedFiles, type GateforgeConfig } from '@gate-forge/core';
 import {
   GIT_SCOPE_CONTROL_BASENAMES,
   MANIFEST_NAMES,

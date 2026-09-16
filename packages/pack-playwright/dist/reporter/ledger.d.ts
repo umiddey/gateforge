@@ -13,7 +13,7 @@
  * (`GET /classifications`). When either is unavailable the row carries
  * `verdict: null` and the reason says exactly what is missing.
  */
-import { type Classification, type HttpRouteCandidate, type Verdict } from '@gateforge/core';
+import { type Classification, type HttpRouteCandidate, type Verdict } from '@gate-forge/core';
 import type { IssuedLedgerRecord } from '../fixture/witness-client.js';
 /** One suite-visible obligation from `obligations.json` (state contract). */
 export interface StateObligationEntry {

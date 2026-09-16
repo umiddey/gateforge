@@ -55,7 +55,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { canonicalOf } from '../json.js';
-import type { Classification, HttpRouteCandidate } from '@gateforge/core';
+import type { Classification, HttpRouteCandidate } from '@gate-forge/core';
 import {
   CLAIM_ANNOTATION_TYPE,
   CLAIM_INJECTIONS_FILE,

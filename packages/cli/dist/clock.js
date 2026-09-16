@@ -4,7 +4,7 @@
  * `clock.mode` is `system` (the run's instant is frozen once at start)
  * or `fixed` with an ISO-8601 `fixedAt` for deterministic runs.
  */
-import { makeClock } from '@gateforge/core';
+import { makeClock } from '@gate-forge/core';
 /**
  * Builds the run clock from config.
  *

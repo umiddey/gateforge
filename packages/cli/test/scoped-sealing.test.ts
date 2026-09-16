@@ -21,7 +21,7 @@ import {
   type ResourceGraph,
   type TestCatalog,
   type TestCatalogEntry,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { planScopedExpectedSet, issueGateReceipt } from '../src/execution.js';
 import { loadReceiptFor, receiptScope, tryReuseReceipt } from '../src/receipts.js';
 import { writeExecutionResult, writeGateReceipt } from '../src/state.js';

@@ -1,5 +1,5 @@
-import { type HttpContractFact, type HttpMethod, type JoinBlock } from '@gateforge/http-contract';
-import { type DetectorOutput, type Finding } from '@gateforge/core';
+import { type HttpContractFact, type HttpMethod, type JoinBlock } from '@gate-forge/http-contract';
+import { type DetectorOutput, type Finding } from '@gate-forge/core';
 /** Detector id of the synthetic compiler contribution (engine-issued). */
 export declare const ENDPOINT_COMPILER_DETECTOR_ID = "gateforge.endpoint-compiler";
 /** Schema version of the compiler's output payloads. */
