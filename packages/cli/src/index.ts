@@ -1,5 +1,5 @@
 /**
- * @gateforge/cli — the gateforge command-line interface.
+ * @gate-forge/cli — the gateforge command-line interface.
  *
  * Public surface for the bin wrapper and for programmatic embedding
  * (tests, G6's test-gates integration):
@@ -30,7 +30,7 @@ export {
   providerFor,
   resolveProvider,
 } from './providers.js';
-export type { ChangedFileProvider } from '@gateforge/core';
+export type { ChangedFileProvider } from '@gate-forge/core';
 export { runPipeline, sourceByResourceId, headSha, loadYaml } from './pipeline.js';
 export type { PipelineOptions, PipelineResult } from './pipeline.js';
 export {

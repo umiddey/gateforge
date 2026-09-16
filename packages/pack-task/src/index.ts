@@ -1,5 +1,5 @@
 /**
- * @gateforge/pack-task — Background-task discovery pack.
+ * @gate-forge/pack-task — Background-task discovery pack.
  *
  * Detects background-task signatures from `.ts`/`.js`/`.mjs` source
  * (AST-light regex, no Python subprocess, no execution) and exposes

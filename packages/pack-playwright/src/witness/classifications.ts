@@ -15,7 +15,7 @@ import { parse as parseYaml } from 'yaml';
 import {
   ClassificationFileSchema,
   type Classification,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { AdapterRegistryError } from './adapter-registry.js';
 
 /** The reporter-visible projection of one resource's classification. */

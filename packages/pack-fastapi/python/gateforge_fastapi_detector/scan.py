@@ -87,7 +87,7 @@ VERSION = "0.1.0"
 CONTRACT_KIND = "http.contract"
 FRAMEWORK = "fastapi"
 
-# Typed outcome codes (mirrored in @gateforge/http-contract codes.ts).
+# Typed outcome codes (mirrored in @gate-forge/http-contract codes.ts).
 FASTAPI_PREFIX_UNRESOLVED = "FASTAPI_PREFIX_UNRESOLVED"
 
 _DECORATOR_METHODS = {

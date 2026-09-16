@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ResourceGraph } from '@gateforge/core';
+import type { ResourceGraph } from '@gate-forge/core';
 import { sourcesByResourceId } from '../src/pipeline.js';
 import { renderEndpointInventory } from '../src/endpoint-report.js';
 import type { EndpointInventory } from '../src/endpoint-compiler.js';
@@ -171,7 +171,7 @@ describe('endpoint inventory text report', () => {
 
 describe('discover reports the inventory', () => {
   it('the discover --json document carries the endpointInventory key', async () => {
-    const { withTempRepo } = await import('@gateforge/core');
+    const { withTempRepo } = await import('@gate-forge/core');
     const { runCli, installFixture } = await import('./helpers.js');
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

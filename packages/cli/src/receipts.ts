@@ -28,7 +28,7 @@ import {
   type CauseCode,
   type ExecutionResult,
   type GateReceipt,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { readStateDocument } from './state.js';
 
 /** The §5.4 next action per cause (single source: core). */

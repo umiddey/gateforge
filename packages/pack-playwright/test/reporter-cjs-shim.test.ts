@@ -1,8 +1,8 @@
 /**
  * Reporter CJS-shim supervision tests (E22 integration follow-up): the
- * `require` condition of `@gateforge/pack-playwright/reporter` is the
+ * `require` condition of `@gate-forge/pack-playwright/reporter` is the
  * path Playwright ACTUALLY loads for the documented config wiring
- * (`reporter: [['@gateforge/pack-playwright/reporter']]` resolves
+ * (`reporter: [['@gate-forge/pack-playwright/reporter']]` resolves
  * through require). The shim buffers every runner callback until the
  * ESM implementation arrives, and these tests pin the two regressions
  * that silently broke receipt-sealed supervised runs:

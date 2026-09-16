@@ -21,7 +21,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadConfig, withTempRepo, type GateforgeConfig, type TempRepo } from '@gateforge/core';
+import { loadConfig, withTempRepo, type GateforgeConfig, type TempRepo } from '@gate-forge/core';
 import { installFixture, PLUGIN_SOURCE, runCli, FIXED_AT } from './helpers.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';

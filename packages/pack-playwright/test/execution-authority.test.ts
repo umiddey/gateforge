@@ -31,7 +31,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { superviseExecution } from '@gateforge/core';
+import { superviseExecution } from '@gate-forge/core';
 import { startWitness } from '../src/witness/server.js';
 import { startSupervisorSpoolDrain } from '../src/supervisor/drain.js';
 import { appendSpoolEvent, spoolPathFor } from '../src/supervisor/spool.js';

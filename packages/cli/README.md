@@ -1,4 +1,4 @@
-# @gateforge/cli
+# @gate-forge/cli
 
 The gateforge command-line interface: initialize a project, discover
 resources and classification signals, inspect automatic decisions, reuse a
@@ -212,7 +212,7 @@ with HTTP status proof.
 ## Configuration
 
 `.gateforge.yml` is loaded fail-closed from the working directory (the repo
-root); see `@gateforge/core` for the pinned schema. All paths are
+root); see `@gate-forge/core` for the pinned schema. All paths are
 repo-root-relative. `changed.provider: auto` (the default) picks
 `github-pr` when `GITHUB_BASE_REF` is set, `gitlab-mr` when
 `CI_MERGE_REQUEST_DIFF_BASE_SHA` is set, else `local-staged`
@@ -243,7 +243,7 @@ Every configured plugin runs over the same expanded include path list
 never scanned):
 
 - **subprocess** (GPP/3): `command` argv is spawned via
-  `@gateforge/plugin-protocol`'s `PluginSession` — pinned handshake, one
+  `@gate-forge/plugin-protocol`'s `PluginSession` — pinned handshake, one
   lock-step `discover`, shutdown handshake, fail-closed on any protocol
   violation. Plugins run without network.
 - **in-process**: `module` is dynamically imported and its *default

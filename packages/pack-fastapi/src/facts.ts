@@ -3,7 +3,7 @@
  *
  * The Python scanner emits raw effective paths; this module is the single
  * place where contract facts get their canonical `normalizedPath` (via
- * `@gateforge/http-contract`, so canonicalization has exactly one
+ * `@gate-forge/http-contract`, so canonicalization has exactly one
  * implementation across languages).
  *
  * Classification signals (dogfood remediation phase 4): NONE. The wrapper
@@ -28,8 +28,8 @@ import {
   normalizeHttpPath,
   type HttpContractFact,
   type HttpLocation,
-} from '@gateforge/http-contract';
-import type { ClassificationSignal } from '@gateforge/core';
+} from '@gate-forge/http-contract';
+import type { ClassificationSignal } from '@gate-forge/core';
 
 /** Source location shape shared by facts, resources, and signals. */
 type Location = HttpLocation;

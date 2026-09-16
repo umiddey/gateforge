@@ -1,5 +1,5 @@
 /**
- * @gateforge/pack-validation — request-schema validation discovery pack.
+ * @gate-forge/pack-validation — request-schema validation discovery pack.
  *
  * Detects zod / joi / yup / class-validator schemas in TypeScript /
  * JavaScript source and emits one `validation.schema` resource per

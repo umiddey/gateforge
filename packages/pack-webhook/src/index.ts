@@ -1,5 +1,5 @@
 /**
- * @gateforge/pack-webhook — Webhook contract pack.
+ * @gate-forge/pack-webhook — Webhook contract pack.
  *
  * Pure TypeScript detector that walks `.ts`/`.tsx`/`.js`/`.mjs` sources
  * and discovers webhook endpoint patterns across four surfaces:
@@ -17,7 +17,7 @@
  * overwriting; signature-shaped ambiguities emit `AMBIGUOUS_WEBHOOK`.
  *
  * The pack ships an entity-adapter schema (mirror of
- * `@gateforge/pack-sqlalchemy`'s) so the in-memory delivery log can be
+ * `@gate-forge/pack-sqlalchemy`'s) so the in-memory delivery log can be
  * witnessed GET-only for the `webhook:replay-idempotent` and
  * `webhook:retry-bounded` contracts.
  *

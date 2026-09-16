@@ -1,10 +1,10 @@
 import { isAbsolute, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { GATEFORGE_SCHEMA_VERSION, LocationSchema } from '@gateforge/core';
+import { GATEFORGE_SCHEMA_VERSION, LocationSchema } from '@gate-forge/core';
 import type { z } from 'zod';
-import type { DiscoveryOutcome, Finding as ProtocolFinding } from '@gateforge/plugin-protocol';
-import type { Resource, UnresolvedReason } from '@gateforge/core';
+import type { DiscoveryOutcome, Finding as ProtocolFinding } from '@gate-forge/plugin-protocol';
+import type { Resource, UnresolvedReason } from '@gate-forge/core';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 type Location = z.infer<typeof LocationSchema>;
 

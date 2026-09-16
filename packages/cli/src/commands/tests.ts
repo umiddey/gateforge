@@ -47,8 +47,8 @@ import { join } from 'node:path';import {
   type TestKind,
   type TestMap,
   type TestMapEntry,
-} from '@gateforge/core';
-import { discoverTestCatalog, TestDiscoveryError } from '@gateforge/pack-playwright';
+} from '@gate-forge/core';
+import { discoverTestCatalog, TestDiscoveryError } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { diagnosticsJson, renderDiagnosticsText, runDiagnosticSuites } from '../diagnostics.js';
 import { UsageError } from '../errors.js';

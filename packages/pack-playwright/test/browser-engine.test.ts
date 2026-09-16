@@ -29,7 +29,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
-import { ObligationSchema, evaluateObligation, fingerprint } from '@gateforge/core';
+import { ObligationSchema, evaluateObligation, fingerprint } from '@gate-forge/core';
 import { startWitness } from '../src/witness/server.js';
 import { SupervisorClient } from '../src/supervisor/client.js';
 import {

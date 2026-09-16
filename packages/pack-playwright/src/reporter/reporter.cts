@@ -1,14 +1,14 @@
 /**
- * CommonJS entry for `@gateforge/pack-playwright/reporter` (the
+ * CommonJS entry for `@gate-forge/pack-playwright/reporter` (the
  * `require` export condition; compiled from this `.cts` to
  * `dist/reporter/reporter.cjs`).
  *
  * WHY a shim and not a compiled CJS build: the pack AND its dependency
- * `@gateforge/core` are ESM-only (`"type": "module"`), so no CJS
+ * `@gate-forge/core` are ESM-only (`"type": "module"`), so no CJS
  * compilation of the reporter can `require()` the engine on every
  * supported Node runtime. What CJS consumers actually need is a
  * constructor: Playwright resolves custom reporters with
- * `require.resolve('@gateforge/pack-playwright/reporter')` (which needs
+ * `require.resolve('@gate-forge/pack-playwright/reporter')` (which needs
  * this condition to exist — without it CJS playwright configs died with
  * ERR_PACKAGE_PATH_NOT_EXPORTED) and then loads the resolved file with
  * require-or-import. Plain `require()` gets THIS module: a class whose
@@ -24,12 +24,12 @@
  *
  * Supported syntaxes (both ESM and CJS playwright configs):
  *
- *   reporter: [['@gateforge/pack-playwright/reporter']]
+ *   reporter: [['@gate-forge/pack-playwright/reporter']]
  *
  * and from any CJS script:
  *
  *   const GateforgeReporter =
- *     require('@gateforge/pack-playwright/reporter');
+ *     require('@gate-forge/pack-playwright/reporter');
  */
 
 /** Minimal structural types (this file must not import at runtime). */

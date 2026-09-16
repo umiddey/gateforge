@@ -3,7 +3,7 @@
  * Python AST detector, usable from BOTH CLI transports.
  *
  * - **in-process**: `.gateforge.yml` declares
- *   `transport: in-process, module: "@gateforge/pack-sqlalchemy"`; the
+ *   `transport: in-process, module: "@gate-forge/pack-sqlalchemy"`; the
  *   CLI imports this package's default export and calls
  *   `discover(paths)`. The implementation spawns the SAME python
  *   detector (GPP/3, hardened host) with a computed `PYTHONPATH`, so
@@ -24,7 +24,7 @@ import {
   PluginSession,
   type DiscoveryOutcome,
   type Finding,
-} from '@gateforge/plugin-protocol';
+} from '@gate-forge/plugin-protocol';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 import {
   NO_PLANE_MAPPING,
@@ -40,7 +40,7 @@ import {
 /** Absolute dir of this pack's `python/` tree (the detector package). */
 const PACK_PYTHON_DIR = fileURLToPath(new URL('../python', import.meta.url));
 
-/** Absolute dir of the sibling `@gateforge/plugin-protocol` python client. */
+/** Absolute dir of the sibling `@gate-forge/plugin-protocol` python client. */
 const PROTOCOL_PYTHON_DIR = fileURLToPath(
   new URL('../../../plugin-protocol/python', import.meta.url),
 );

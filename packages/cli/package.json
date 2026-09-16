@@ -1,5 +1,5 @@
 {
-  "name": "@gateforge/cli",
+  "name": "@gate-forge/cli",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "description": "Gateforge CLI: init, discover, obligations, check, test-gates, baseline update.",
@@ -22,19 +22,19 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "prebuild": "npm run build -w @gateforge/core && npm run build -w @gateforge/plugin-protocol",
+    "prebuild": "npm run build -w @gate-forge/core && npm run build -w @gate-forge/plugin-protocol",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@gateforge/core": "^0.1.0",
-    "@gateforge/plugin-protocol": "^0.1.0",
-    "@gateforge/http-contract": "^0.1.0",
-    "@gateforge/pack-fastapi": "^0.1.0",
-    "@gateforge/pack-http": "^0.1.0",
-    "@gateforge/pack-playwright": "^0.1.0",
-    "@gateforge/pack-sqlalchemy": "^0.1.0",
-    "@gateforge/pack-task": "^0.1.0",
+    "@gate-forge/core": "^0.1.0",
+    "@gate-forge/plugin-protocol": "^0.1.0",
+    "@gate-forge/http-contract": "^0.1.0",
+    "@gate-forge/pack-fastapi": "^0.1.0",
+    "@gate-forge/pack-http": "^0.1.0",
+    "@gate-forge/pack-playwright": "^0.1.0",
+    "@gate-forge/pack-sqlalchemy": "^0.1.0",
+    "@gate-forge/pack-task": "^0.1.0",
     "picomatch": "^4.0.7",
     "yaml": "^2.8.1"
   },

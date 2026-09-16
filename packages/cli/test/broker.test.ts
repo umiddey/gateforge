@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gateforge/core';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { installFixture, runCli } from './helpers.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 import { BrokerRejection } from '../src/broker.js';

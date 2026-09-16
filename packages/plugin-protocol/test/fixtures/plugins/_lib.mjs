@@ -15,7 +15,7 @@ export const PLUGIN_VERSION = '1.0.0';
 /**
  * GF-canonical-JSON (pin #1): UTF-8, recursively key-sorted (UTF-16 code
  * units), no whitespace, integers plain. Byte-compatible with
- * @gateforge/core's canonicalJson — the cross-language digest tests prove it.
+ * @gate-forge/core's canonicalJson — the cross-language digest tests prove it.
  */
 export function canonicalJson(value) {
   if (value === null) return 'null';

@@ -10,7 +10,7 @@
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadConfig, sha256Canonical, type TempRepo, type TestCatalog } from '@gateforge/core';
+import { loadConfig, sha256Canonical, type TempRepo, type TestCatalog } from '@gate-forge/core';
 import { currentInputDigest, FIXED_AT, PLUGIN_SOURCE, runCli, withTempRepo } from './helpers.js';
 import {
   trustedPolicyDigestForConfig,
@@ -27,7 +27,7 @@ import {
   writeGateReceipt,
 } from '../src/state.js';
 import { VERIFIER_KEY_ENV } from '../src/commands/common.js';
-import type { RunnerOutcomesDocument } from '@gateforge/pack-playwright';
+import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 
 const KEY = 'e2e-receipt-verifier-key';
 const RUN_ID = '11111111-2222-4333-8444-555555555555';

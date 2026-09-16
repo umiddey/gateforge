@@ -10,7 +10,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { fingerprint, withTempRepo, type TempRepo } from '@gateforge/core';
+import { fingerprint, withTempRepo, type TempRepo } from '@gate-forge/core';
 import {
   installFixture,
   LIFECYCLE,

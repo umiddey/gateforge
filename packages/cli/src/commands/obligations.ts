@@ -7,7 +7,7 @@
  * default text form lists obligations, blocking entries, and claims. The
  * command never gates — it is the introspection half of the pipeline.
  */
-import { canonicalJson, type JsonValue } from '@gateforge/core';
+import { canonicalJson, type JsonValue } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';

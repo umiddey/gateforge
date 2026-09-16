@@ -4,7 +4,7 @@
  * config-error exit 2, `--changed` scoping, and GF-09 provider parity.
  */
 import { describe, expect, it } from 'vitest';
-import { attestationMac, ledgerMac, recordIdOf, withTempRepo } from '@gateforge/core';
+import { attestationMac, ledgerMac, recordIdOf, withTempRepo } from '@gate-forge/core';
 import {
   classificationsYml,
   currentInputDigest,

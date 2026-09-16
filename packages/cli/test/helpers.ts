@@ -12,7 +12,7 @@ import {
   loadConfig,
   withTempRepo,
   type TempRepo,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { main, CaptureStream, type Io } from '../src/index.js';
 import { computeInputSnapshot } from '../src/input-snapshot.js';
 import { runPipeline } from '../src/pipeline.js';

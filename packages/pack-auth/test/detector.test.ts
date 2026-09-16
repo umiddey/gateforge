@@ -7,8 +7,8 @@
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { ClassificationSignalSchema, ResourceSchema } from '@gateforge/core';
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import { ClassificationSignalSchema, ResourceSchema } from '@gate-forge/core';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import { createAuthDetector, type AuthDetector } from '../src/index.js';
 
 const FIXTURE_ROOT = fileURLToPath(new URL('../fixtures', import.meta.url));

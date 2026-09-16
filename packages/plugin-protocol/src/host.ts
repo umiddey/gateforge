@@ -13,7 +13,7 @@
  * docs/decisions/0002-plugin-boundary.md.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import type { JsonValue } from '@gateforge/core';
+import type { JsonValue } from '@gate-forge/core';
 import {
   EofError,
   ExitStatusError,

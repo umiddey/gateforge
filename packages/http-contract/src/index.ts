@@ -1,5 +1,5 @@
 /**
- * `@gateforge/http-contract` — framework-neutral canonical HTTP contract
+ * `@gate-forge/http-contract` — framework-neutral canonical HTTP contract
  * (ADR 0004): strict fact schemas, typed outcome codes, path/method
  * normalization, and the deterministic frontend-call/server-route join.
  *

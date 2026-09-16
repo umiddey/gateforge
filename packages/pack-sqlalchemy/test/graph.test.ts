@@ -6,14 +6,14 @@
  * plane classification binding, and graph-level duplicate detection.
  */
 import { describe, expect, it } from 'vitest';
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import {
   buildResourceGraph,
   runClassification,
   type ClassificationSignal,
   type GraphResource,
   type ResourceGraph,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { runDiscover } from './helpers.js';
 
 /** The classifier used by plane-binding tests. */

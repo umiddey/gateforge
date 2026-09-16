@@ -1,5 +1,5 @@
 /**
- * @gateforge/pack-playwright — the Playwright evidence pack.
+ * @gate-forge/pack-playwright — the Playwright evidence pack.
  *
  * Public surface:
  *

@@ -23,18 +23,18 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { readFileSync, realpathSync } from 'node:fs';
-import type { GateforgeConfig } from '@gateforge/core';
+import type { GateforgeConfig } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 /** Bundled detector id → the package that MUST provide it. Frozen trust base. */
 export const TRUSTED_DETECTOR_PACKAGES: Readonly<Record<string, string>> = Object.freeze({
-  'gateforge.pack-fastapi': '@gateforge/pack-fastapi',
-  'gateforge.pack-http': '@gateforge/pack-http',
-  'gateforge.pack-sqlalchemy': '@gateforge/pack-sqlalchemy',
-  'gateforge.pack-task': '@gateforge/pack-task',
-  'gateforge.pack-auth': '@gateforge/pack-auth',
-  'gateforge.pack-webhook': '@gateforge/pack-webhook',
-  'gateforge.pack-workflow': '@gateforge/pack-workflow',
-  'gateforge.pack-validation': '@gateforge/pack-validation',
+  'gateforge.pack-fastapi': '@gate-forge/pack-fastapi',
+  'gateforge.pack-http': '@gate-forge/pack-http',
+  'gateforge.pack-sqlalchemy': '@gate-forge/pack-sqlalchemy',
+  'gateforge.pack-task': '@gate-forge/pack-task',
+  'gateforge.pack-auth': '@gate-forge/pack-auth',
+  'gateforge.pack-webhook': '@gate-forge/pack-webhook',
+  'gateforge.pack-workflow': '@gate-forge/pack-workflow',
+  'gateforge.pack-validation': '@gate-forge/pack-validation',
 });
 
 const SHORT_NAMES: Readonly<Record<string, string>> = Object.freeze({
@@ -54,7 +54,7 @@ const SHORT_NAMES: Readonly<Record<string, string>> = Object.freeze({
  * test runners may not provide `import.meta.resolve`). Walks up from
  * this module to the CLI package root, then probes the monorepo layout
  * (`packages/<short>`) and the installed layouts
- * (`node_modules/@gateforge/<short>`). The candidate's package.json name
+ * (`node_modules/@gate-forge/<short>`). The candidate's package.json name
  * must match — a same-named directory is not enough.
  */
 function packageDir(nameOrDetectorId: string): string {
@@ -62,14 +62,14 @@ function packageDir(nameOrDetectorId: string): string {
     SHORT_NAMES[nameOrDetectorId] ?? nameOrDetectorId.replace(/^@gateforge\//, '');
   if (!short) throw new UsageError(`unknown bundled detector '${nameOrDetectorId}'`);
   // Walk up from this file to the CLI package root (holds package.json
-  // named @gateforge/cli).
+  // named @gate-forge/cli).
   let dir = dirname(dirname(fileURLToPath(import.meta.url))); // src/ -> package root
   let cliRoot: string | null = null;
   for (let depth = 0; depth < 8 && dir !== dirname(dir); depth++) {
     const manifest = join(dir, 'package.json');
     try {
       const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: string };
-      if (parsed.name === '@gateforge/cli') {
+      if (parsed.name === '@gate-forge/cli') {
         cliRoot = dir;
         break;
       }
@@ -79,13 +79,13 @@ function packageDir(nameOrDetectorId: string): string {
     dir = dirname(dir);
   }
   if (cliRoot === null) {
-    throw new UsageError(`cannot locate the @gateforge/cli package root for '${nameOrDetectorId}'`);
+    throw new UsageError(`cannot locate the @gate-forge/cli package root for '${nameOrDetectorId}'`);
   }
   const candidates = [
     join(dirname(cliRoot), short), // monorepo: packages/<short>
-    join(cliRoot, 'node_modules', '@gateforge', short),
-    join(cliRoot, '..', 'node_modules', '@gateforge', short),
-    join(cliRoot, '..', '..', 'node_modules', '@gateforge', short),
+    join(cliRoot, 'node_modules', '@gate-forge', short),
+    join(cliRoot, '..', 'node_modules', '@gate-forge', short),
+    join(cliRoot, '..', '..', 'node_modules', '@gate-forge', short),
   ];
   for (const candidate of candidates) {
     try {

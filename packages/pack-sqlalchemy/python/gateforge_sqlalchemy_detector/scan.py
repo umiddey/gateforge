@@ -913,7 +913,7 @@ def _signal(
             declaration.
 
     Returns:
-        dict: A @gateforge/core `ClassificationSignal` document.
+        dict: A @gate-forge/core `ClassificationSignal` document.
     """
     target: dict = {"resourceName": target_name}
     if target_symbol is not None:

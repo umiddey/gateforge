@@ -23,7 +23,7 @@ import {
   buildResourceGraph,
   runClassification,
   type ClassificationPolicy,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { createTaskDetector, PACK_PLUGIN_ID, PACK_VERSION } from '../src/index.js';
 
 function policy(_dir: string): ClassificationPolicy {

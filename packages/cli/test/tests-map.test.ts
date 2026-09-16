@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gateforge/core';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import {
   installFixture,
   OBLIGATION_ACCOUNTS,

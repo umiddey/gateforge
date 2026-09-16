@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { startWitness, WitnessStartupError, recordIdOf } from '../src/witness/server.js';
-import { RunManifestSchema, attestationMac, ledgerMac, verifyAttestationMac, ClassificationSchema, type Classification } from '@gateforge/core';
+import { RunManifestSchema, attestationMac, ledgerMac, verifyAttestationMac, ClassificationSchema, type Classification } from '@gate-forge/core';
 import { toClassificationView } from '../src/witness/classifications.js';
 import {
   beginJourneyInterval,

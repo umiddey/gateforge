@@ -1,4 +1,4 @@
-# @gateforge/pack-fastapi — FastAPI server-route detector
+# @gate-forge/pack-fastapi — FastAPI server-route detector
 
 Python-AST detector (stdlib only, no app import, no execution, no network)
 served over GPP/3 using the pack-sqlalchemy two-tier structure (ADR 0002):
@@ -129,7 +129,7 @@ One `http.contract` resource per (effective mounted path, concrete
 method). These are **evidence-only**: the engine-owned graph excludes
 them from business classification (no route/table collision) and the
 endpoint compiler joins them against frontend-call facts
-(`@gateforge/http-contract`). The TypeScript wrapper fills the canonical
+(`@gate-forge/http-contract`). The TypeScript wrapper fills the canonical
 `normalizedPath` (single canonicalization implementation across
 languages) and mints **no classification signals** (dogfood remediation
 phase 4): the earlier `exposure: route` / `lifecycle.*` signals were
@@ -153,7 +153,7 @@ plugins:
   - id: gateforge.pack-fastapi
     version: 0.1.0
     transport: in-process
-    module: '@gateforge/pack-fastapi'
+    module: '@gate-forge/pack-fastapi'
 ```
 
 Requires Node >= 20 and `python3` >= 3.11 on PATH; no network at any

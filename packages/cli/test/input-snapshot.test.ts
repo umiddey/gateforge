@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { symlinkSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { loadConfig, withTempRepo, type TempRepo } from '@gateforge/core';
+import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
 import {
   GATEFORGE_VERIFIER_FORMAT,
   INPUT_SNAPSHOT_VERSION,

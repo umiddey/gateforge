@@ -21,7 +21,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { startWitness } from '../src/witness/server.js';
-import { verifyAttestationMac, recordIdOf } from '@gateforge/core';
+import { verifyAttestationMac, recordIdOf } from '@gate-forge/core';
 import { makeTempProject, writeFixtureProject, writeHonestAdapter, writeProbeAdapter } from './helpers.js';
 import { startMarkerServer } from './marker-server.js';
 import { RUN_HEADER, VERIFIER_HEADER } from '../src/constants.js';

@@ -5,7 +5,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo } from '@gateforge/core';
+import { withTempRepo } from '@gate-forge/core';
 import { runCli } from './helpers.js';
 
 describe('gateforge enforce', () => {

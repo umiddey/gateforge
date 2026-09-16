@@ -56,7 +56,7 @@ fi
 if [ -n "$GATEFORGE_CLI" ]; then
   exec node "$GATEFORGE_CLI" check --changed
 fi
-echo "gateforge: CLI not found (npm install -D @gateforge/cli, or write the engine root into .gateforge/engine)" >&2
+echo "gateforge: CLI not found (npm install -D @gate-forge/cli, or write the engine root into .gateforge/engine)" >&2
 exit 1
 `;
 

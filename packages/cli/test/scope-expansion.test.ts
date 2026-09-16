@@ -23,7 +23,7 @@ import {
   type BlockingEntry,
   type Obligation,
   type ResourceGraph,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { evaluateRun } from '../src/evaluate.js';
 import {
   computeEvaluationScope,

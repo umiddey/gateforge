@@ -3,7 +3,7 @@
  * codes, and the in-process main() contract.
  */
 import { describe, expect, it } from 'vitest';
-import { withTempRepo } from '@gateforge/core';
+import { withTempRepo } from '@gate-forge/core';
 import { main, USAGE, CaptureStream, VERSION, type Io } from '../src/index.js';
 
 async function run(argv: readonly string[], cwd = process.cwd()): Promise<{ code: number; stdout: string; stderr: string }> {

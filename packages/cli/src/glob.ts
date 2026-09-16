@@ -17,7 +17,7 @@
  */
 import { lstatSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { compareStrings } from '@gateforge/core';
+import { compareStrings } from '@gate-forge/core';
 import picomatch from 'picomatch';
 import type { Matcher } from 'picomatch';
 

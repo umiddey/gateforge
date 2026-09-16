@@ -1,4 +1,4 @@
-# @gateforge/plugin-protocol — GPP/3
+# @gate-forge/plugin-protocol — GPP/3
 
 The hardened Gateforge Plugin Protocol (version 3): newline-delimited JSON
 framing over a plugin subprocess's stdin/stdout, with a pinned handshake,
@@ -30,7 +30,7 @@ Every frame is one line (`\n`-delimited, UTF-8, 8 MiB cap per line):
 ```
 
 `digest = sha256(canonical({type, seq, payload}))` over GF-canonical-JSON
-(`@gateforge/core`'s `sha256Canonical`): UTF-8, recursively key-sorted, no
+(`@gate-forge/core`'s `sha256Canonical`): UTF-8, recursively key-sorted, no
 whitespace, integers plain. The handshake (`hello`/`ready`) pins
 `protocolVersion`, `pluginId`, and `pluginVersion`; every later frame is
 checked against the pinned identity. `seq` is per-direction, 1-based,
@@ -50,10 +50,10 @@ strictly sequential.
 
 Session shape: one spawn, one handshake, many lock-step discovers (at most
 one outstanding request), one shutdown handshake. `result.resources`
-matches `@gateforge/core`'s `ResourceSchema`; `result.unresolved` matches
+matches `@gate-forge/core`'s `ResourceSchema`; `result.unresolved` matches
 `UnresolvedReasonSchema`; `findings` are `{code, detail, locations[]}`
 (e.g. `DUPLICATE_TABLE_NAME`); `result.classificationSignals` matches
-`@gateforge/core`'s `ClassificationSignalSchema` (ADR 0003 D1). The field is
+`@gate-forge/core`'s `ClassificationSignalSchema` (ADR 0003 D1). The field is
 mandatory since the version bump — a detector without signal support sends
 `[]`, and its resources fall back to conservative classification defaults. A
 result omitting the field fails `E_SCHEMA` (no unversioned optional-field
@@ -111,7 +111,7 @@ the expected-versus-received diagnostic names the exact version delta.
 ### TypeScript
 
 ```ts
-import { servePlugin } from '@gateforge/plugin-protocol';
+import { servePlugin } from '@gate-forge/plugin-protocol';
 
 await servePlugin(
   async (paths) => ({
@@ -148,7 +148,7 @@ ships the Python side as source (`python/`) — plugins add it to `sys.path`
 ## Driving plugins (engine side)
 
 ```ts
-import { PluginSession } from '@gateforge/plugin-protocol';
+import { PluginSession } from '@gate-forge/plugin-protocol';
 
 const session = new PluginSession({
   command: ['node', 'plugin.js', repoRoot],

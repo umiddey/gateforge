@@ -7,8 +7,8 @@
  * seal and can never be receipted.
  */
 import { describe, expect, it } from 'vitest';
-import type { ResolvedMappings, RunnerExecutionEnvelope, TestCatalog, TestCatalogEntry, TracedTestInput } from '@gateforge/core';
-import type { RunnerOutcomesDocument } from '@gateforge/pack-playwright';
+import type { ResolvedMappings, RunnerExecutionEnvelope, TestCatalog, TestCatalogEntry, TracedTestInput } from '@gate-forge/core';
+import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import {
   claimInjectionsFor,
   executedOutcomesOf,

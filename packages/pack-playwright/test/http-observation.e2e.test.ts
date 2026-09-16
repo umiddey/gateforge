@@ -19,7 +19,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { evaluateObligation, recordIdOf } from '@gateforge/core';
+import { evaluateObligation, recordIdOf } from '@gate-forge/core';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
 import { RUN_HEADER } from '../src/constants.js';
 import {

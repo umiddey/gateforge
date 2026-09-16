@@ -17,7 +17,7 @@ import {
   type TempRepo,
   type TestCatalog,
   type TestCatalogEntry,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import {
   trustedPolicyDigestForConfig,
   issueGateReceipt,

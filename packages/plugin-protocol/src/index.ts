@@ -1,5 +1,5 @@
 /**
- * @gateforge/plugin-protocol — GPP/3, the hardened subprocess plugin
+ * @gate-forge/plugin-protocol — GPP/3, the hardened subprocess plugin
  * protocol (ADR 0002 D3; GPP/3 signal transport per ADR 0003 D6).
  *
  * Surface:

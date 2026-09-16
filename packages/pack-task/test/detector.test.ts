@@ -18,7 +18,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { ALL_FIXTURE_PATHS, detectorOverFixtures } from './helpers.js';
-import type { DiscoveryOutcome, Finding } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome, Finding } from '@gate-forge/plugin-protocol';
 
 /** Returns the set of finding codes. */
 const codes = (findings: Finding[]): string[] => findings.map((f) => f.code);

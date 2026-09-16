@@ -10,8 +10,8 @@
  */
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadConfig, type DiagnosticSuite, type GateforgeConfig, type TempRepo } from '@gateforge/core';
-import type { DiagnosticRunResult } from '@gateforge/pack-playwright';
+import { loadConfig, type DiagnosticSuite, type GateforgeConfig, type TempRepo } from '@gate-forge/core';
+import type { DiagnosticRunResult } from '@gate-forge/pack-playwright';
 import { configYml, currentInputDigest, FIXED_AT, PLUGIN_SOURCE, runCli, withTempRepo } from './helpers.js';
 import {
   diagnosticsExitCode,

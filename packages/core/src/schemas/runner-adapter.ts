@@ -5,7 +5,7 @@
  *
  * This module is TYPES ONLY (no runtime code): adapters live in their
  * packs (the Playwright and bounded pytest adapters in
- * `@gateforge/pack-playwright/discovery`), while the contract belongs to
+ * `@gate-forge/pack-playwright/discovery`), while the contract belongs to
  * the engine so CLI/pipeline code can depend on the shape without
  * depending on a pack.
  *

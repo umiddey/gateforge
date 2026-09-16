@@ -1,7 +1,7 @@
 /**
  * Bounded static discovery of Playwright tests (plan 2026-09-13 phase 2
  * item 3): a TypeScript-compiler-API scan of the configured test-file
- * globs — the same AST-only pattern as `@gateforge/pack-http`'s
+ * globs — the same AST-only pattern as `@gate-forge/pack-http`'s
  * client-call scanner (pure analysis, no evaluation).
  *
  * The model is deliberately bounded and fail-closed:
@@ -10,7 +10,7 @@
  *   `test.each([...])(...)` — resolved through local aliases and the
  *   relative-import graph (`const t = test.extend({...})`,
  *   `t('title', ...)` in another file), plus this pack's own runner
- *   specifier `@gateforge/pack-playwright` (its exported `test` is a
+ *   specifier `@gate-forge/pack-playwright` (its exported `test` is a
  *   playwright test function — the documented consumer import). Every
  *   other module-external binding stays unproven.
  * - **Describes**: nested `test.describe('X', () => {...})` stacks build
@@ -32,7 +32,7 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import ts from 'typescript';
-import { pathInScope, type Location } from '@gateforge/core';
+import { pathInScope, type Location } from '@gate-forge/core';
 
 /** Default cap on files pulled in through import traversal. */
 export const DEFAULT_MAX_TRAVERSED_FILES = 200;
@@ -152,11 +152,11 @@ const TEST_STRUCTURE_NAMES = new Set(['test', 'it', 'describe']);
  * `playwright/test` — see `fixture/fixture.ts`, which documents this
  * import as the only sanctioned runner). Binding it lets the static scan
  * follow the documented consumer shape
- * (`import { test as gateforgeTest } from '@gateforge/pack-playwright'`)
+ * (`import { test as gateforgeTest } from '@gate-forge/pack-playwright'`)
  * instead of emitting unresolvable rows for it. Every OTHER
  * module-external import stays unresolved — fail-closed is unchanged.
  */
-export const GATEFORGE_PACK_SPECIFIER = '@gateforge/pack-playwright';
+export const GATEFORGE_PACK_SPECIFIER = '@gate-forge/pack-playwright';
 
 /** Whether the specifier is the gateforge pack's runner module. */
 function isPackSpecifier(specifier: string): boolean {
@@ -278,7 +278,7 @@ interface FileModel {
   /**
    * exportedName → what it maps to (local name, re-export, or the pack's
    * own test binding for bare `export { test } from
-   * '@gateforge/pack-playwright'` re-export modules).
+   * '@gate-forge/pack-playwright'` re-export modules).
    */
   exports: Map<string, { local: string } | { targetFile: string; importedName: string } | { packTest: true }>;
 }
@@ -463,7 +463,7 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
         ) {
           // Bare re-export of the pack's own surface (the sanctioned
           // local runner-module pattern, e.g. the consumer's
-          // `helpers.js`: `export { test } from '@gateforge/pack-playwright'`).
+          // `helpers.js`: `export { test } from '@gate-forge/pack-playwright'`).
           for (const element of node.exportClause.elements) {
             const imported = element.propertyName?.text ?? element.name.text;
             if (TEST_BINDING_NAMES.has(imported)) {

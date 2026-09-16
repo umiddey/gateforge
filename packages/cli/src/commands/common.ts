@@ -3,7 +3,7 @@
  * format vocabulary, and the tool version stamp.
  */
 import { join } from 'node:path';
-import { loadConfig, type GateforgeConfig } from '@gateforge/core';
+import { loadConfig, type GateforgeConfig } from '@gate-forge/core';
 import { UsageError } from '../errors.js';
 
 /** Tool version stamped into SARIF `tool.driver.version` (pin #10). */

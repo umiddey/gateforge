@@ -27,9 +27,9 @@
  */
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { readFileSync } from 'node:fs';
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
-import type { Resource } from '@gateforge/core';
-import { GATEFORGE_SCHEMA_VERSION } from '@gateforge/core';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
+import type { Resource } from '@gate-forge/core';
+import { GATEFORGE_SCHEMA_VERSION } from '@gate-forge/core';
 import { PACK_VERSION } from './version.js';
 
 /** Detector contract: `discover(paths)` is sync (pure over file bytes). */

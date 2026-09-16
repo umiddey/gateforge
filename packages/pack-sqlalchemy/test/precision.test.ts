@@ -33,8 +33,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runRedProbe } from '@gateforge/core';
-import { PluginSession, type DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import { runRedProbe } from '@gate-forge/core';
+import { PluginSession, type DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import { FIXTURE_ROOT, PACK_PYTHON, pythonEnv, runDiscover } from './helpers.js';
 import { PACK_PLUGIN_ID, PACK_VERSION } from '../src/version.js';
 

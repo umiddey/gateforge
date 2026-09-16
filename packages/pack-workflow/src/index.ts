@@ -1,5 +1,5 @@
 /**
- * @gateforge/pack-workflow — workflow / state-machine discovery pack.
+ * @gate-forge/pack-workflow — workflow / state-machine discovery pack.
  *
  * Detects state machines from TypeScript / JavaScript source via the
  * TypeScript compiler API (AST only — no execution, no module

@@ -22,8 +22,8 @@ import {
   compareStrings,
   type GateforgeConfig,
   type JsonValue,
-} from '@gateforge/core';
-import { PytestAdapter, type DiagnosticRunResult } from '@gateforge/pack-playwright';
+} from '@gate-forge/core';
+import { PytestAdapter, type DiagnosticRunResult } from '@gate-forge/pack-playwright';
 import type { Io } from './io.js';
 import { writeLine } from './io.js';
 import { UsageError } from './errors.js';

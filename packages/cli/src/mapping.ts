@@ -41,9 +41,9 @@ import {
   type ResourceGraph,
   type TestCatalog,
   type TestMap,
-} from '@gateforge/core';
-import type { MappedCoverage, CoverageOperation } from '@gateforge/core';
-import { discoverTestCatalog, TestDiscoveryError } from '@gateforge/pack-playwright';
+} from '@gate-forge/core';
+import type { MappedCoverage, CoverageOperation } from '@gate-forge/core';
+import { discoverTestCatalog, TestDiscoveryError } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 import { readJsonArray } from './state.js';
 

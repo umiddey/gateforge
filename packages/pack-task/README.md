@@ -1,4 +1,4 @@
-# @gateforge/pack-task
+# @gate-forge/pack-task
 
 Background-task discovery pack: a pure-TypeScript GPP/3 in-process detector that finds background-task signatures in `.ts`/`.js`/`.mjs` source — no Python subprocess, no execution, no external deps — plus an audit-trail entity-adapter schema and an example server that proves the five obligation contracts the pack claims.
 
@@ -83,7 +83,7 @@ plugins:
   - id: gateforge.pack-task
     version: 0.1.0
     transport: in-process
-    module: '@gateforge/pack-task'
+    module: '@gate-forge/pack-task'
 ```
 
 The pack's default export is the pinned `{ discover(paths) }` contract.

@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gateforge/core';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { installFixture, OBLIGATION_ACCOUNTS, runCli } from './helpers.js';
 
 /** The gateforge monorepo root (for playwright module resolution). */

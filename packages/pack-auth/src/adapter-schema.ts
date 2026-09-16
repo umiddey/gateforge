@@ -2,7 +2,7 @@
  * Entity-adapter schema for the auth pack.
  *
  * The auth pack follows the same adapter contract as
- * `@gateforge/pack-sqlalchemy` (interface pin #8): adapters are reviewed
+ * `@gate-forge/pack-sqlalchemy` (interface pin #8): adapters are reviewed
  * engine-side modules whose default export executes GET-only reads
  * against the target resource. The witness service loads
  * `.gateforge/adapters/<resourceId>.mjs` and calls `read(ctx, id)` when

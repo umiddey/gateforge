@@ -3,7 +3,7 @@
  * providers over real temp git repos, plus `auto` resolution.
  */
 import { describe, expect, it } from 'vitest';
-import { normalizeChangedFiles, withTempRepo } from '@gateforge/core';
+import { normalizeChangedFiles, withTempRepo } from '@gate-forge/core';
 import {
   githubPrProvider,
   gitlabMrProvider,

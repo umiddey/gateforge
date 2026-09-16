@@ -5,7 +5,7 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "@gateforge/core": ["../core/src/index.ts"]
+      "@gate-forge/core": ["../core/src/index.ts"]
     }
   },
   "include": ["src", "test", "vitest.config.ts"]

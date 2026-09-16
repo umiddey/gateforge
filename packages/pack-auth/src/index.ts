@@ -1,5 +1,5 @@
 /**
- * @gateforge/pack-auth — Authorization discovery pack.
+ * @gate-forge/pack-auth — Authorization discovery pack.
  *
  * Detects role-guard + tenant-isolation patterns in TypeScript / JavaScript
  * HTTP route definitions and emits one `auth.resource` per guarded

@@ -20,7 +20,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTaskDetector } from '../src/detector.js';
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 
 const dir = mkdtempSync(join(tmpdir(), 'gateforge-task-precision-'));
 

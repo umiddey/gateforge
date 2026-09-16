@@ -1,5 +1,5 @@
 /**
- * End-to-end suite for @gateforge/pack-auth.
+ * End-to-end suite for @gate-forge/pack-auth.
  *
  * Boots the example server on a free port (OS-assigned), exercises every
  * obligation contract the pack claims, and asserts the verdicts.

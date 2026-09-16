@@ -16,8 +16,8 @@ import { existsSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gateforge/core';
-import { startAttestationProxy } from '@gateforge/pack-playwright';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
+import { startAttestationProxy } from '@gate-forge/pack-playwright';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { loadConfigAt } from '../src/commands/common.js';
 import { runCli } from './helpers.js';
@@ -101,7 +101,7 @@ export default {
 };
 `;
 
-const SPEC = `import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+const SPEC = `import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -150,7 +150,7 @@ test('archives the account through the rendered UI', {
  * — only the agent's `.gateforge/test-map.yml` declaration (written by
  * the real `tests mark`) names what these existing tests cover.
  */
-const JOURNEYS_SPEC = `import { test as gateforgeTest } from '@gateforge/pack-playwright';
+const JOURNEYS_SPEC = `import { test as gateforgeTest } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 import { createJourney, updateJourney, archiveJourney } from './journey-helpers.js';
 
@@ -217,7 +217,7 @@ export async function archiveJourney(evidence, entityId) {
  * rendered form readback), confirms the visible result, observes the
  * real GET exchange, and verifies persistence on the same entity.
  */
-const SPEC_WITH_READ = `import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+const SPEC_WITH_READ = `import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });

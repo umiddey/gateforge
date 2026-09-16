@@ -5,7 +5,7 @@ SQLAlchemy declarative tables, abstract bases, and raw ``Table()``
 declarations WITHOUT importing or executing any application code
 (plan §4.1). Stdlib only (Python >= 3.11); the GPP/3 serve loop lives in
 ``__main__.py`` and uses the reference client from
-``@gateforge/plugin-protocol``.
+``@gate-forge/plugin-protocol``.
 
 Detector vocabulary (frozen with the pack):
 - Business resources: ``kind`` ``sqlalchemy.table``; the identity

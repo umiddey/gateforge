@@ -26,8 +26,8 @@ import {
   type CauseCode,
   type ChangedProvider,
   type Claim,
-} from '@gateforge/core';
-import { discoverTestCatalog, findPlaywrightConfig } from '@gateforge/pack-playwright';
+} from '@gate-forge/core';
+import { discoverTestCatalog, findPlaywrightConfig } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
@@ -36,7 +36,7 @@ import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { obligationFingerprint, evaluateRun } from '../evaluate.js';
 import { gradingClaimsFor, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
-import type { MappedCoverage } from '@gateforge/core';
+import type { MappedCoverage } from '@gate-forge/core';
 import {
   collectInputFiles,
   computeInputSnapshot,

@@ -122,7 +122,7 @@ import {
   type Classification,
   type RecordOrigin,
   type TracedSession,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { canonicalOf } from '../json.js';
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,

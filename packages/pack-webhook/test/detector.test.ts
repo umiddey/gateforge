@@ -7,8 +7,8 @@
  */
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { ClassificationSignalSchema, ResourceSchema } from '@gateforge/core';
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import { ClassificationSignalSchema, ResourceSchema } from '@gate-forge/core';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import { createWebhookDetector } from '../src/index.js';
 
 /** Absolute dir of this pack's test fixtures. */

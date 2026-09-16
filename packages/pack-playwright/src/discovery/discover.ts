@@ -38,7 +38,7 @@ import {
   type TestCatalog,
   type TestCatalogEntry,
   type WeakSignal,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { inferTestKind } from './inference.js';
 import {
   collectPytestSuite,

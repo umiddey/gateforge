@@ -37,7 +37,7 @@ import {
   type ObligationVerdict,
   type ResourceGraph,
   type WaiverCounts,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { UsageError } from './errors.js';

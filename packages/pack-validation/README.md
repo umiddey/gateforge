@@ -1,4 +1,4 @@
-# @gateforge/pack-validation
+# @gate-forge/pack-validation
 
 Request-schema validation discovery pack for Gateforge.
 
@@ -37,7 +37,7 @@ validation:envelope-shape-stable
 ## Quick start
 
 ```ts
-import { default as detector } from '@gateforge/pack-validation';
+import { default as detector } from '@gate-forge/pack-validation';
 const outcome = detector.discover(['src/']);
 for (const r of outcome.resources) console.log(r.id, r.attributes);
 ```

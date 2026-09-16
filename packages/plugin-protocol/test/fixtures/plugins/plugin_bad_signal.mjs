@@ -1,5 +1,5 @@
 // Fault: result payload carries a `classificationSignals` array whose
-// element violates the frozen @gateforge/core ClassificationSignal shape
+// element violates the frozen @gate-forge/core ClassificationSignal shape
 // (missing location + unknown field) → E_SCHEMA naming the offending
 // signal path. Proves malformed signal payloads fail closed with the
 // existing schema diagnostics instead of riding into the graph.

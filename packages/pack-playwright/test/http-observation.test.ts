@@ -15,7 +15,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createServer, request as httpRequest, type Server } from 'node:http';
-import { evaluateObligation, recordIdOf, type Obligation } from '@gateforge/core';
+import { evaluateObligation, recordIdOf, type Obligation } from '@gate-forge/core';
 import type { Page, TestInfo } from 'playwright/test';
 import {
   createEvidence,

@@ -47,9 +47,9 @@ import {
   HTTP_METHOD_DYNAMIC,
   HTTP_PATH_DYNAMIC,
   normalizeHttpPath,
-} from '@gateforge/http-contract';
-import type { HttpMethod } from '@gateforge/http-contract';
-import { pathInScope, type Location } from '@gateforge/core';
+} from '@gate-forge/http-contract';
+import type { HttpMethod } from '@gate-forge/http-contract';
+import { pathInScope, type Location } from '@gate-forge/core';
 
 /**
  * Optional per-entry file scoping (phase 3 scan-scoping). Globs are

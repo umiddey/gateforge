@@ -9,7 +9,7 @@
  */
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { blockingEntryFingerprint } from '@gateforge/core';
+import { blockingEntryFingerprint } from '@gate-forge/core';
 import {
   FIXED_AT,
   PLUGIN_SOURCE,

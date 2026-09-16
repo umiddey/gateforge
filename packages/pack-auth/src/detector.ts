@@ -37,9 +37,9 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
-import type { DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import type { z } from 'zod';
-import { LocationSchema, type Resource } from '@gateforge/core';
+import { LocationSchema, type Resource } from '@gate-forge/core';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
 /** Inferred location shape (file, 1-based line, 0-based col). */
