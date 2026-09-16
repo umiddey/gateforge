@@ -25,4 +25,4 @@ jobs:
       - run: npm run build --workspaces --if-present
       # Apache-2.0 requires the license text to ship with each package.
       - run: npm run license:sync
-      - run: npm publish --workspaces --provenance
+      - run: bash scripts/release-publish.sh
