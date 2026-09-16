@@ -9,10 +9,30 @@
  * authenticated channel. On stop, the drain performs a final sweep and
  * force-closes any session the runner left open (a crashed worker can
  * never leave the witness holding an open session past the run).
+ *
+ * SERVER-WITNESSED persistence channel: the drain also polls the
+ * persistence-intents spool (`persistence-intents.jsonl` — claim INTENTS
+ * the supervised suite may only WRITE) and forwards each one to the
+ * witness's verifier-key surface, where the adapter SERVER PROBE runs
+ * witness-side. When `serverE2eObligations` is supplied (the trusted
+ * mapping layer's `kind: server-e2e` declarations), the drain registers
+ * them BEFORE forwarding anything: the witness then stamps witnessed
+ * `channel: 'server'` persistence records for those obligations only.
+ * A refused/failed intent resolves to a typed failure recorded here and
+ * in the logs — never to satisfaction (fail closed; the claim simply
+ * stays blocking).
  */
+import { CAUSE_NEXT_ACTIONS, type CauseCode } from '@gateforge/core';
 import { WitnessRequestError } from '../fixture/witness-client.js';
 import { SupervisorClient } from './client.js';
-import { readSpoolEvents, spoolPathFor, type SpoolEvent } from './spool.js';
+import {
+  persistenceIntentsPathFor,
+  readPersistenceIntents,
+  readSpoolEvents,
+  spoolPathFor,
+  type PersistenceIntent,
+  type SpoolEvent,
+} from './spool.js';
 
 /** Default cadence between spool polls (the fixture's resolve waits 5s). */
 export const DEFAULT_DRAIN_POLL_MS = 50;
@@ -26,25 +46,30 @@ interface OpenSlot {
 /** Handle for a running drain (see {@link startSupervisorSpoolDrain}). */
 export interface SpoolDrainHandle {
   /**
-   * Stops the drain: performs one final sweep of the spool, then
-   * force-closes every session the runner left open (outcome unknown —
-   * the supervisor did not observe a completed test). Resolves with the
-   * lifecycle CONFLICTS observed (empty in a genuine run): a re-begin
-   * over an open worker slot, an end without a matching begin, or a
-   * second end for the same test. Genuine serial reporter events never
-   * conflict — any conflict is worker-side forgery or runner confusion
-   * and must fail the run closed downstream.
+   * Stops the drain: performs one final sweep of both spools (lifecycle
+   * events AND persistence intents), then force-closes every session the
+   * runner left open (outcome unknown — the supervisor did not observe a
+   * completed test). Resolves with the lifecycle CONFLICTS observed
+   * (empty in a genuine run): a re-begin over an open worker slot, an
+   * end without a matching begin, or a second end for the same test —
+   * plus the TYPED server-persistence intent failures (each names the
+   * intent, the witness cause, and the next action). Genuine serial
+   * reporter events never conflict — any conflict is worker-side forgery
+   * or runner confusion and must fail the run closed downstream.
    */
-  stop: () => Promise<{ conflicts: string[] }>;
+  stop: () => Promise<{ conflicts: string[]; intentFailures: string[] }>;
 }
 
 /**
  * Starts the spool drain loop for one supervised run.
  *
  * Args:
- *   options: stateDir + runId locate the spool; witnessUrl/runToken/
+ *   options: stateDir + runId locate the spools; witnessUrl/runToken/
  *     verifierKey authenticate the supervisor channel; pollMs tunes the
- *     poll cadence (tests only).
+ *     poll cadence (tests only); serverE2eObligations, when provided,
+ *     are registered BEFORE any intent forwarding (the trusted mapping
+ *     layer's `kind: server-e2e` declarations — the witness stamps
+ *     server-channel records for these obligations only).
  *
  * Returns:
  *   SpoolDrainHandle: awaitable stop (final drain + force-close).
@@ -56,14 +81,18 @@ export function startSupervisorSpoolDrain(options: {
   runToken: string;
   verifierKey: string;
   pollMs?: number;
+  serverE2eObligations?: readonly string[];
 }): SpoolDrainHandle {
   const client = new SupervisorClient(options.witnessUrl, options.runToken, options.verifierKey);
   const spoolFile = spoolPathFor(options.stateDir, options.runId);
+  const intentsFile = persistenceIntentsPathFor(options.stateDir, options.runId);
   const pollMs = options.pollMs ?? DEFAULT_DRAIN_POLL_MS;
   const openByWorker = new Map<number, OpenSlot>();
   const endedTests = new Set<string>();
   const conflicts: string[] = [];
+  const intentFailures: string[] = [];
   let offset = 0;
+  let intentsOffset = 0;
   let running = true;
   let settling: Promise<void> = Promise.resolve();
 
@@ -142,6 +171,48 @@ export function startSupervisorSpoolDrain(options: {
     }
   };
 
+  /**
+   * Resolves the typed witness cause of a refused intent into its §5.4
+   * next action (the witness returns the cause code on the error
+   * `detail`); unmapped causes still surface verbatim — never silently.
+   */
+  const nextActionFor = (cause: string | null): string | null => {
+    if (cause === null) return null;
+    return (cause as CauseCode) in CAUSE_NEXT_ACTIONS ? CAUSE_NEXT_ACTIONS[cause as CauseCode] : null;
+  };
+
+  /**
+   * Forwards one drained persistence intent to the witness. Every
+   * refusal is a TYPED failure recorded for the run report: the claim
+   * stays blocking (no witnessed record exists), and the failure text
+   * names the cause and next action — an intent never resolves to
+   * satisfaction on probe/adapter/declaration/replay trouble.
+   */
+  const handleIntent = async (intent: PersistenceIntent): Promise<void> => {
+    try {
+      await client.verifyServerPersistence({
+        resourceId: intent.entity,
+        claimId: intent.claimId,
+        operation: intent.operation,
+        phase: intent.phase,
+        intent: intent.intent,
+        key: intent.key,
+        sequence: intent.sequence,
+        testId: intent.testId,
+      });
+    } catch (error) {
+      const cause = error instanceof WitnessRequestError ? error.detail : null;
+      const nextAction = nextActionFor(cause);
+      const message =
+        `server persistence intent (${intent.phase}, sequence ${String(intent.sequence)}) for ` +
+        `'${intent.claimId}' failed${cause !== null ? ` [${cause}]` : ''}: ` +
+        `${error instanceof Error ? error.message : String(error)}` +
+        `${nextAction !== null ? ` — next: ${nextAction}` : ''}`;
+      intentFailures.push(message);
+      console.warn(`[gateforge] ${message}`);
+    }
+  };
+
   const drainOnce = async (): Promise<void> => {
     const { events, nextOffset } = readSpoolEvents(spoolFile, offset);
     offset = nextOffset;
@@ -159,7 +230,42 @@ export function startSupervisorSpoolDrain(options: {
           );
         });
     }
+    // Persistence claim intents (server-witnessed channel): forwarded in
+    // file order under the same serialization as the lifecycle events,
+    // so per-claim sequences are enforced in order.
+    const drainedIntents = readPersistenceIntents(intentsFile, intentsOffset);
+    intentsOffset = drainedIntents.nextOffset;
+    for (const intent of drainedIntents.intents) {
+      const previous = settling;
+      settling = previous
+        .then(() => handleIntent(intent))
+        .catch((error: unknown) => {
+          console.warn(
+            `[gateforge] supervisor drain could not forward a persistence intent for ` +
+              `'${intent.claimId}': ${(error as Error).message}`,
+          );
+        });
+    }
   };
+
+  // PRE-RUN fact: register the server-e2e declarations (the trusted
+  // mapping layer's kind resolution) before any intent can be forwarded.
+  // A refusal is a supervisor setup error and fails the run closed via
+  // the conflict channel.
+  if (options.serverE2eObligations !== undefined) {
+    const previous = settling;
+    settling = previous
+      .then(async () => {
+        await client.registerServerE2eDeclarations({
+          obligations: [...options.serverE2eObligations as readonly string[]],
+        });
+      })
+      .catch((error: unknown) => {
+        const message = `supervisor drain could not register the server-e2e declarations: ${(error as Error).message}`;
+        conflicts.push(message);
+        console.warn(`[gateforge] ${message}`);
+      });
+  }
 
   const loop = (async () => {
     while (running) {
@@ -169,7 +275,7 @@ export function startSupervisorSpoolDrain(options: {
   })();
 
   return {
-    stop: async (): Promise<{ conflicts: string[] }> => {
+    stop: async (): Promise<{ conflicts: string[]; intentFailures: string[] }> => {
       running = false;
       await loop.catch(() => undefined);
       await drainOnce();
@@ -179,7 +285,7 @@ export function startSupervisorSpoolDrain(options: {
       const leftover = [...openByWorker.values()];
       openByWorker.clear();
       await Promise.all(leftover.map((slot) => sealQuietly(slot, undefined)));
-      return { conflicts: [...conflicts] };
+      return { conflicts: [...conflicts], intentFailures: [...intentFailures] };
     },
   };
 }

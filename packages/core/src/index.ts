@@ -832,8 +832,8 @@ export {
 /** Receipt types. */
 export type { GateReceipt } from './schemas/gate-receipt.js';
 export type { GateReceiptBody } from './receipt/index.js';
-export { GateReceiptSchema, ReceiptVerdictSummarySchema } from './schemas/gate-receipt.js';
-export type { ReceiptVerdictSummary } from './schemas/gate-receipt.js';
+export { GateReceiptSchema, ReceiptVerdictSummarySchema, ReceiptScopeSchema } from './schemas/gate-receipt.js';
+export type { ReceiptVerdictSummary, ReceiptScope } from './schemas/gate-receipt.js';
 export type { ReceiptRejection, ReceiptVerification } from './receipt/index.js';
 
 /**
@@ -866,6 +866,15 @@ export type {
  * by `now` (GF-16), optional stale-owner hook (GF-17). Synchronous.
  */
 export { loadWaivers } from './waivers/index.js';
+
+/**
+ * Waiver writers (the `waive` CLI's storage path): `serializeWaiver`
+ * renders the reviewable 2-space-JSON + trailing-newline house style,
+ * `writeWaiver` writes it creating parent directories as needed.
+ * The only sanctioned programmatic waiver write — renewal/removal stays
+ * a hand-edit (there is deliberately no overwrite).
+ */
+export { serializeWaiver, writeWaiver } from './waivers/index.js';
 
 /** Fail-closed waiver-configuration error; carries every problem found. */
 export { GateforgeWaiverError } from './waivers/index.js';

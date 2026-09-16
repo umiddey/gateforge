@@ -236,7 +236,7 @@ async function suggestSubcommand(
   // join-aware source map powers the `--changed` obligation filter.
   const provider = diffScoped ? resolveProvider(config.changed.provider, io.cwd, io.env).provider : 'all-files';
   const pipeline = await runPipeline({ cwd: io.cwd, env: io.env, config, provider, stateDir });
-  const discovered = await runDiscovery(io.cwd, config, stateDir, false);
+  const discovered = await runDiscovery(io.cwd, config, stateDir, true);
   const mapped = await resolveRepositoryMappings({
     cwd: io.cwd,
     config,
@@ -374,7 +374,7 @@ async function markSubcommand(
         `(run gateforge obligations --json for the registry)`,
     );
   }
-  const discovered = await runDiscovery(io.cwd, config, stateDir, false);
+  const discovered = await runDiscovery(io.cwd, config, stateDir, true);
   const entry = discovered.catalog.entries.find((candidate) => candidate.logicalKey === testKey);
   if (entry === undefined) {
     throw new UsageError(
@@ -519,7 +519,7 @@ async function explainSubcommand(
     provider: 'all-files',
     stateDir,
   });
-  const discovered = await runDiscovery(io.cwd, config, stateDir, false);
+  const discovered = await runDiscovery(io.cwd, config, stateDir, true);
   const mapped = await resolveRepositoryMappings({
     cwd: io.cwd,
     config,

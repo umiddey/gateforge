@@ -50,6 +50,11 @@ describe('gateforge baseline update', () => {
       expect(code).toBe(2);
       expect(stderr).toContain('not a strict subset');
       expect(stderr).toContain('added 1 new fingerprint');
+      // The rejection names the legal exits for NEW obligations.
+      expect(stderr).toContain(
+        'prove them with witnessed test evidence (docs/guides/new-table-playbook.md) ' +
+          'or waive them (`gateforge waive`)',
+      );
       // The file is unchanged.
       const next = JSON.parse(readFileSync(repo.path(baselinePath), 'utf8')) as {
         fingerprints: string[];

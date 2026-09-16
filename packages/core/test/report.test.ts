@@ -327,7 +327,9 @@ describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR
   const caused = entry(accounts, 'missing', {
     reason: "no claim declares 'tenant.accounts:crud:update'",
     cause: 'TEST_MAPPING_MISSING',
-    nextAction: 'Inspect suggested existing tests first',
+    nextAction:
+      'Run `gateforge tests suggest`, mark the matching test (`gateforge tests mark` / .gateforge/test-map.yml), ' +
+      'map backend-only tables server-e2e, or waive it (`gateforge waive`) — docs/guides/new-table-playbook.md',
   });
 
   it('json verdicts carry cause and nextAction (null when unmapped)', () => {
@@ -337,7 +339,7 @@ describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR
     const mapped = report.verdicts.find((v) => v.obligationId === accounts.id);
     const clean = report.verdicts.find((v) => v.obligationId === orders.id);
     expect(mapped?.cause).toBe('TEST_MAPPING_MISSING');
-    expect(mapped?.nextAction).toBe('Inspect suggested existing tests first');
+    expect(mapped?.nextAction).toBe(caused.nextAction);
     expect(clean?.cause).toBeNull();
     expect(clean?.nextAction).toBeNull();
   });
@@ -348,13 +350,13 @@ describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR
     };
     const properties = sarif.runs[0]?.results[0]?.properties;
     expect(properties?.['cause']).toBe('TEST_MAPPING_MISSING');
-    expect(properties?.['nextAction']).toBe('Inspect suggested existing tests first');
+    expect(properties?.['nextAction']).toBe(caused.nextAction);
   });
 
   it('text trace prints the cause and next action lines', () => {
     const text = renderRun([caused], { format: 'text' });
     expect(text).toContain('cause: TEST_MAPPING_MISSING');
-    expect(text).toContain('next action: Inspect suggested existing tests first');
+    expect(text).toContain(`next action: ${caused.nextAction}`);
     const unmapped = renderRun([entry(orders, 'invalid')], { format: 'text' });
     expect(unmapped).not.toContain('cause:');
   });

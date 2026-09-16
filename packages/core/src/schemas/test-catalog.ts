@@ -32,9 +32,21 @@ export const TestRunnerSchema = z.string().min(1);
 /** Inferred test-runner type. */
 export type TestRunner = z.infer<typeof TestRunnerSchema>;
 
-/** What a test IS (plan §3.2). `unknown` is a kept, visible outcome. */
+/**
+ * What a test IS (plan §3.2). `unknown` is a kept, visible outcome.
+ *
+ * `server-e2e` (server-witnessed persistence channel) declares an
+ * existing test whose persistence evidence is witnessed SERVER-side:
+ * the engine's own adapter probe observes the app database directly,
+ * because the obligated state (e.g. a transactional outbox) can never
+ * honestly appear in a UI. Browser-kind tests never grade through it —
+ * the witness stamps the channel only for obligations registered
+ * `server-e2e` on the verifier-key supervisor surface, and the verdict
+ * engine admits `channel: 'server'` records only with that stamp.
+ */
 export const TestKindSchema = z.enum([
   'browser-e2e',
+  'server-e2e',
   'api-e2e',
   'unit',
   'integration',

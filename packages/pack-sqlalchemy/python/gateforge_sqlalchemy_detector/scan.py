@@ -895,8 +895,9 @@ def _signal(
     source: str,
     location: dict,
     target_name: str,
+    target_symbol: "str | None" = None,
 ) -> dict:
-    """One canonical classification signal targeting a bare resource name.
+    """One canonical classification signal targeting a resource.
 
     Args:
         dimension: The classification dimension.
@@ -905,13 +906,21 @@ def _signal(
         source: The issuing source (`PLUGIN_ID` or `gateforge.declaration:<key>`).
         location: Where the evidence lives.
         target_name: The bare resource name the signal speaks about.
+        target_symbol: The declaring class qname, when the evidence is
+            class-derived. Symbol-scoped targets bind ONLY to their own
+            class — a same-named table in another module/plane (the
+            two-Base consumer shape) must never inherit another tree's
+            declaration.
 
     Returns:
         dict: A @gateforge/core `ClassificationSignal` document.
     """
+    target: dict = {"resourceName": target_name}
+    if target_symbol is not None:
+        target["symbol"] = target_symbol
     return {
         "schemaVersion": 1,
-        "target": {"resourceName": target_name},
+        "target": target,
         "dimension": dimension,
         "assertion": assertion,
         "basis": basis,
@@ -944,6 +953,7 @@ def _identity_signal(rec_or_facts: "ClassRecord | ColumnFacts", relpath: str, ta
         PLUGIN_ID,
         loc(relpath, node),
         target_name,
+        rec_or_facts.qname if isinstance(rec_or_facts, ClassRecord) else None,
     )
 
 
@@ -970,6 +980,7 @@ def _declaration_signals(rec: ClassRecord, relpath: str, target_name: str) -> li
                 "gateforge.declaration:delete-semantics",
                 loc(relpath, rec.node),
                 target_name,
+                rec.qname,
             )
         )
     if rec.archive_state_literal is not None:
@@ -981,6 +992,7 @@ def _declaration_signals(rec: ClassRecord, relpath: str, target_name: str) -> li
                 "gateforge.declaration:archive-state",
                 loc(relpath, rec.node),
                 target_name,
+                rec.qname,
             )
         )
     if rec.read_only:
@@ -993,6 +1005,7 @@ def _declaration_signals(rec: ClassRecord, relpath: str, target_name: str) -> li
                     "gateforge.declaration:read-only",
                     loc(relpath, rec.node),
                     target_name,
+                    rec.qname,
                 )
             )
     return signals

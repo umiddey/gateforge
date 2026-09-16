@@ -255,7 +255,10 @@ describe('Phase 0 acceptance: three different blocking causes with useful action
       const byId = new Map(report.verdicts.map((v) => [v.obligationId, v]));
       // Unmapped: no claim is connected to the accounts persistence obligation.
       expect(byId.get(OBLIGATION_ACCOUNTS)?.cause).toBe('TEST_MAPPING_MISSING');
-      expect(byId.get(OBLIGATION_ACCOUNTS)?.nextAction).toBe('Inspect suggested existing tests first');
+      expect(byId.get(OBLIGATION_ACCOUNTS)?.nextAction).toBe(
+        'Run `gateforge tests suggest`, mark the matching test (`gateforge tests mark` / .gateforge/test-map.yml), ' +
+          'map backend-only tables server-e2e, or waive it (`gateforge waive`) — docs/guides/new-table-playbook.md',
+      );
       // Missing observation: the orders claim exists but collected nothing.
       expect(byId.get(OBLIGATION_ORDERS)?.cause).toBe('EVIDENCE_NOT_COLLECTED');
       expect(byId.get(OBLIGATION_ORDERS)?.nextAction).toBe('Add observation hooks to that test');

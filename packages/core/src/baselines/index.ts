@@ -146,7 +146,9 @@ export function updateBaseline(current: Baseline, fingerprints: readonly string[
     throw new GateforgeBaselineError(
       `baseline update rejected: not a strict subset of the current baseline ` +
         `(invariant 4) — added ${added.length} new fingerprint(s): ` +
-        `${added.join(', ') || '<none>'}`,
+        `${added.join(', ') || '<none>'}; new (never-adopted) obligations do not belong in the ` +
+        'baseline — prove them with witnessed test evidence (docs/guides/new-table-playbook.md) ' +
+        'or waive them (`gateforge waive`)',
     );
   }
   return next;

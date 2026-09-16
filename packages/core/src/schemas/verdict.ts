@@ -60,8 +60,10 @@ export const CauseCodeSchema = z.enum([
   'RUN_INCOMPLETE',
   'EVIDENCE_STALE',
   'CHANGE_UNMAPPED',
+  'EVIDENCE_SCOPE_INCOMPLETE',
   'ENFORCEMENT_UNTRUSTED',
   'EVIDENCE_VALUE_MISMATCH',
+  'SERVER_PROBE_UNAVAILABLE',
   'CRUD_COVERAGE_MISSING',
   'DIAGNOSTIC_TEST_FAILURE',
   'DIAGNOSTIC_RUN_INCOMPLETE',
@@ -79,7 +81,9 @@ export type CauseCode = z.infer<typeof CauseCodeSchema>;
 export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.freeze({
   TEST_INVENTORY_INCOMPLETE: 'Repair discovery or register a supported adapter',
   TEST_KIND_UNKNOWN: 'Inspect and declare its kind',
-  TEST_MAPPING_MISSING: 'Inspect suggested existing tests first',
+  TEST_MAPPING_MISSING:
+    'Run `gateforge tests suggest`, mark the matching test (`gateforge tests mark` / .gateforge/test-map.yml), ' +
+    'map backend-only tables server-e2e, or waive it (`gateforge waive`) — docs/guides/new-table-playbook.md',
   TEST_MAPPING_AMBIGUOUS: 'Correct the exact mapping',
   TEST_MAPPING_STALE: 'Correct the exact mapping',
   EVIDENCE_NOT_COLLECTED: 'Add observation hooks to that test',
@@ -89,8 +93,13 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   RUN_INCOMPLETE: 'Run or repair the selected suite',
   EVIDENCE_STALE: 'Rerun for the exact candidate',
   CHANGE_UNMAPPED: 'Map the behavior or repair detection',
+  EVIDENCE_SCOPE_INCOMPLETE:
+    'Map a test to the uncovered obligation (`gateforge tests mark`) or run full scope ' +
+    '(`test-gates --changed` without `--scope changed`)',
   ENFORCEMENT_UNTRUSTED: 'Repair enforcement setup',
   EVIDENCE_VALUE_MISMATCH: 'Fix the mutation path or correct the mapping',
+  SERVER_PROBE_UNAVAILABLE:
+    'Export/repair the adapter server probe (probeServer) so the witness can observe the database engine-side',
   CRUD_COVERAGE_MISSING:
     'Connect/mark existing journeys, add the missing journey, or record an owner disposition',
   DIAGNOSTIC_TEST_FAILURE: 'Inspect the named test, assertion, and relevant application code',
