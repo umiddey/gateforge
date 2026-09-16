@@ -39,6 +39,19 @@
  * Identical authenticated inputs may reuse a prior receipt (printed as
  * `reused receipt <id>`); any changed input forces a fresh run or a
  * precise block.
+ *
+ * **Scoped sealing (`--scope changed`, opt-in)** — the expected set is
+ * narrowed to the SLICE of tests whose files claim obligations affected
+ * by the resolved changed-file set (the same diff providers
+ * `check --changed` uses): affected resources join through the detector
+ * graph's source map, obligations through the policy, tests through the
+ * ONE mapping resolver. The slice is planned before the run, registered
+ * with the witness, enforced for planned-vs-executed completeness, and
+ * sealed as a `changed`-scope receipt naming the covered obligation
+ * fingerprints. Selection is FILE-grained and never guesses: an affected
+ * obligation with no testable declared claim is a typed
+ * EVIDENCE_SCOPE_INCOMPLETE block, and an empty slice seals nothing.
+ * Without the flag the mode stays `full` — byte-identical behavior.
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -72,12 +85,14 @@ import {
   TestDiscoveryError,
 } from '@gateforge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
+import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { runDiagnosticSuites } from '../diagnostics.js';
 import {
   claimInjectionsFor,
+  planScopedExpectedSet,
   trustedPolicyDigestForConfig,
   issueGateReceipt,
   parentSha,
@@ -96,9 +111,10 @@ import {
   UnsupportedSnapshotError,
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
-import { mappingBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
+import { mappingBlocking, mappedCoverageFrom, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline } from '../pipeline.js';
 import { tryReuseReceipt } from '../receipts.js';
+import { resolveProvider } from '../providers.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import {
   clearGateReceipt,
@@ -118,9 +134,13 @@ import {
 import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
 
 export const TEST_GATES_USAGE =
-  'usage: gateforge test-gates [--changed] [--suite <command>] [--out <dir>] ' +
+  'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
   '[--format text|json|sarif] [--witness-url <url>] [--run-token <token>] ' +
-  '(verifier key via GATEFORGE_WITNESS_VERIFIER_KEY env)';
+  '[--run-timeout-min <minutes>] ' +
+  '(verifier key via GATEFORGE_WITNESS_VERIFIER_KEY env)\n' +
+  '       --scope changed (supervised --changed only): plan, execute, and seal only the slice of tests\n' +
+  '       claiming obligations affected by the resolved changed-file set; an affected obligation with no\n' +
+  '       testable declared mapping blocks (EVIDENCE_SCOPE_INCOMPLETE) — narrower selection is never guessed';
 
 /**
  * Runs the test-gates subcommand.
@@ -142,7 +162,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
   }
   rejectUnknownFlags(
     options,
-    ['suite', 'out', 'format', 'witness-url', 'run-token', 'changed', 'help'],
+    ['suite', 'out', 'format', 'witness-url', 'run-token', 'run-timeout-min', 'changed', 'scope', 'help'],
     TEST_GATES_USAGE,
   );
   const suite = stringFlag(options, 'suite');
@@ -156,15 +176,61 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
         '--suite is the legacy escape hatch and cannot be combined',
     );
   }
+  // --scope (Goal 2, opt-in scoped sealing): `full` is the unchanged
+  // default; `changed` narrows the supervised run to the affected slice.
+  // Strictly supervised-only — the legacy --suite path has no receipt to
+  // scope and must never grow one silently.
+  let scope: 'full' | 'changed' = 'full';
+  const scopeFlag = stringFlag(options, 'scope');
+  if (scopeFlag !== undefined) {
+    if (!changed) {
+      throw new UsageError('test-gates: --scope is a supervised `--changed` option and cannot be used without it');
+    }
+    if (scopeFlag !== 'full' && scopeFlag !== 'changed') {
+      throw new UsageError(`test-gates: --scope must be 'full' or 'changed' (got '${scopeFlag}')`);
+    }
+    scope = scopeFlag;
+  }
   if (changed) {
     return supervisedTestGates(io, {
       out,
       format,
       witnessUrl,
       runToken: stringFlag(options, 'run-token'),
+      runTimeoutMs: parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')),
+      scope,
     });
   }
   return legacyTestGates(io, { suite, out, format, witnessUrl, runToken: stringFlag(options, 'run-token') });
+}
+
+/**
+ * Parses `--run-timeout-min` into a whole-run wall-clock bound.
+ * The 30-minute default stands when the flag is absent; an explicit
+ * bound never weakens verification (same expected set, same
+ * completeness rules — only the kill timer moves, under operator
+ * control for multi-hour suites). Bounded above so the value always
+ * fits the runner's timer range (larger values would overflow it and
+ * kill the run immediately — fail-open by accident is worse than a
+ * documented cap).
+ *
+ * Args:
+ *   raw: the flag value, or undefined when absent.
+ *
+ * Returns:
+ *   Milliseconds, or undefined for the default bound.
+ * @throws UsageError on non-integer, out-of-range, or repeated values.
+ */
+export function parseRunTimeoutMin(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw)) {
+    throw new UsageError(`test-gates: --run-timeout-min must be a positive integer number of minutes (got '${raw}')`);
+  }
+  const minutes = Number(raw);
+  if (minutes < 1 || minutes > 2880) {
+    throw new UsageError('test-gates: --run-timeout-min must be between 1 and 2880 minutes (48h)');
+  }
+  return minutes * 60_000;
 }
 
 /** Options of the legacy (`--suite`) orchestration path. */
@@ -462,6 +528,14 @@ interface SupervisedOptions {
   witnessUrl: string | undefined;
   /** External witness run token. */
   runToken: string | undefined;
+  /** Whole-run wall-clock bound ms (undefined = 30-minute default). */
+  runTimeoutMs: number | undefined;
+  /**
+   * Evaluation scope (Goal 2): `full` (default, unchanged behavior) runs
+   * the whole relevant suite and seals a whole-repo receipt; `changed`
+   * runs and seals only the affected slice.
+   */
+  scope: 'full' | 'changed';
 }
 
 /**
@@ -486,10 +560,19 @@ interface SupervisedOptions {
  * @throws fail-closed errors (exit 2) from config/plugin/pipeline layers.
  */
 async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<number> {
-  const { out, format, witnessUrl } = options;
+  const { out, format, witnessUrl, runTimeoutMs } = options;
   const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
   const config = loadConfigAt(io.cwd);
   const stateDir = resolveStateDir(io.cwd, out);
+  // Scoped sealing (Goal 2): resolve the changed-file basis through the
+  // SAME configured provider `check --changed` uses (auto → GHA/GitLab/
+  // staged), and stamp the resolved identity into the run manifest so a
+  // scoped run names the diff basis it sliced from. Full mode keeps
+  // `all-files` — byte-identical to the historical run.
+  const providerIdentity =
+    options.scope === 'changed'
+      ? resolveProvider(config.changed.provider, io.cwd, io.env).provider
+      : 'all-files';
 
   // 1. Inventory + stability + input digest (same discipline as check).
   let preFiles: SnapshotFileEntry[] | null = null;
@@ -505,9 +588,13 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     cwd: io.cwd,
     env: io.env,
     config,
-    provider: 'all-files',
+    provider: providerIdentity,
     stateDir,
   });
+  // The scoped slice's changed set: exactly what the resolved provider
+  // reported for THIS tree (the pipeline already ran it — one resolution,
+  // one diff basis stamped in the manifest).
+  const scopeChangedFiles = options.scope === 'changed' ? pipeline.changedFiles : null;
   const httpRoutes = httpRoutesView(pipeline.graph);
   let expectedDigest: string | null = null;
   if (!snapshotUnavailable) {
@@ -567,6 +654,21 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   let mappingBlockers: BlockingEntry[] = [];
   let plannedRows: PlannedRow[] = [];
   let injections: Record<string, string[]> = {};
+  // Scope planning (Goal 2): typed blockers for affected obligations no
+  // testable claim covers, and the covered-fingerprint set the sealed
+  // `changed`-scope receipt binds. Empty in `full` mode.
+  let scopeBlockers: BlockingEntry[] = [];
+  let coveredFingerprints: string[] = [];
+  // Coverage facts for the closed-world policy (E27 wiring: check feeds
+  // these; test-gates omitted them, so every required table/operation
+  // blocked as uncovered even when mapped — phantom findings over an
+  // honest gate).
+  let mappedCoverage: ReturnType<typeof mappedCoverageFrom> = [];
+  // Server-e2e obligations (server-witnessed persistence channel): the
+  // trusted mapping resolution decides which obligations may stamp
+  // `channel: 'server'` evidence — the drain registers exactly this set
+  // with the witness before any test runs.
+  let serverE2eObligations: string[] = [];
   if (catalog !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -578,6 +680,33 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
     plannedRows = planExpectedSet(catalog);
     injections = claimInjectionsFor(mapped.resolution, catalog);
+    mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
+    serverE2eObligations = serverE2eObligationIds(mapped.resolution);
+    if (options.scope === 'changed') {
+      // The affected slice (Goal 2): changed files → resources (the same
+      // join-aware source map the diff scoping grades by) → obligations →
+      // declared-claiming tests. Unclaimed affected obligations become
+      // typed EVIDENCE_SCOPE_INCOMPLETE blockers — the gate is never
+      // silently narrowed past an obligation nothing can test.
+      const scopedPlan = planScopedExpectedSet({
+        catalog,
+        resolution: mapped.resolution,
+        obligations: pipeline.policy.obligations,
+        graph: pipeline.graph,
+        changedFiles: scopeChangedFiles ?? [],
+      });
+      plannedRows = scopedPlan.plannedRows;
+      coveredFingerprints = scopedPlan.coveredFingerprints;
+      scopeBlockers = scopedPlan.unclaimed.map((entry): BlockingEntry => ({
+        kind: 'finding',
+        resourceId: null,
+        name: entry.obligationId,
+        detail: entry.detail,
+        location: null,
+        cause: 'EVIDENCE_SCOPE_INCOMPLETE',
+        nextAction: CAUSE_NEXT_ACTIONS.EVIDENCE_SCOPE_INCOMPLETE,
+      }));
+    }
   }
   const inventoryBlocking: BlockingEntry[] =
     discoveryError !== null
@@ -608,7 +737,11 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
         : [];
   const selection = {
     runner: 'playwright',
-    mode: 'full-relevant-suite' as const,
+    // The selection mode names the slice honestly: a scoped run seals
+    // `mapped-selection` so its execution result (and every receipt
+    // binding it) can never be mistaken for a whole-suite seal. The
+    // digest covers the mode, so full and scoped receipts never collide.
+    mode: options.scope === 'changed' ? ('mapped-selection' as const) : ('full-relevant-suite' as const),
     logicalKeys: plannedRows.map((row) => row.planned.logicalKey),
   };
   const selectionDigest = selectionDigestOf(selection);
@@ -616,11 +749,17 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
 
   // 3. Cache reuse (plan Phase 4 item 8): identical authenticated input
   // digests + complete result only. Never reuse across changed inputs.
+  // The scope axis is part of the identity: a full run demands a
+  // full-scope (or legacy unscoped) receipt, a scoped run demands a
+  // changed-scope receipt sealing the IDENTICAL covered set — a slice
+  // never reuses as a whole-suite seal or vice versa.
   const reuse = tryReuseReceipt(stateDir, witnessVerifierKey ?? null, {
     inputDigest: expectedDigest ?? NO_DIGEST,
     trustedPolicyDigest: trustedPolicy,
     selectionDigest,
     catalogDigest,
+    scope: options.scope === 'changed' ? 'changed' : 'full',
+    ...(options.scope === 'changed' ? { coveredObligationFingerprints: coveredFingerprints } : {}),
   });
   if (reuse.reuse) {
     // Under a provisioned pin the reused receipt must bind the CURRENT
@@ -640,11 +779,19 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       config,
       graph: pipeline.graph,
       obligations: pipeline.policy.obligations,
-      blocking: [...pipeline.policy.blocking, ...mappingBlockers, ...inventoryBlocking],
+      blocking: [...pipeline.policy.blocking, ...mappingBlockers, ...inventoryBlocking, ...scopeBlockers],
       stateDir,
       now: pipeline.now,
-      changedFiles: null,
+      // Scoped reuse re-grades exactly the sealed slice (the reuse
+      // contract above already pinned scope + covered set); full reuse
+      // stays unscoped. A scoped run without the flag never happens.
+      changedFiles: scopeChangedFiles,
       witnessVerifierKey,
+      // Goal 1: the reused gate grades through the SAME adopted-baseline
+      // seam as check — baselined obligations waive (loudly) instead of
+      // blocking the reused evaluation.
+      baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
+      mappedCoverage,
       evidenceContext: {
         expectedInputDigest: expectedDigest,
         snapshotUnavailable,
@@ -661,6 +808,74 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     });
     writeLine(io.stdout, report);
     return runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
+  }
+
+  // 3.5 Scoped empty-slice fast-fail (Goal 2): when the changed set maps
+  // to no testable slice there is nothing to run and nothing to seal —
+  // and launching the runner with an empty planned set would execute the
+  // WHOLE suite (the trusted config's file filter is omitted for empty
+  // selections). Fail closed here, before any witness/runner spawn: no
+  // slice receipt over nothing is ever minted, and the previous receipt
+  // is invalidated (E07 discipline).
+  if (options.scope === 'changed' && plannedRows.length === 0) {
+    clearGateReceipt(stateDir);
+    const emptySliceBlocking: BlockingEntry[] =
+      inventoryBlocking.length > 0
+        ? // A failed/incomplete discovery already explains the block.
+          []
+        : [
+            {
+              kind: 'finding',
+              resourceId: null,
+              name: null,
+              detail:
+                scopeBlockers.length > 0
+                  ? `changed-scope planning produced no testable slice: ${String(scopeBlockers.length)} affected obligation(s) ` +
+                    'have no declared mapping to a test the current catalog enumerates — narrower selection is never guessed'
+                  : 'changed-scope planning found no obligations affected by the changed files — a slice receipt over nothing is never sealed; run full scope',
+              location: null,
+              cause: 'EVIDENCE_SCOPE_INCOMPLETE',
+              nextAction: CAUSE_NEXT_ACTIONS.EVIDENCE_SCOPE_INCOMPLETE,
+            },
+          ];
+    const evaluated = evaluateRun({
+      cwd: io.cwd,
+      config,
+      graph: pipeline.graph,
+      obligations: pipeline.policy.obligations,
+      blocking: [
+        ...pipeline.policy.blocking,
+        ...mappingBlockers,
+        ...inventoryBlocking,
+        ...scopeBlockers,
+        ...emptySliceBlocking,
+      ],
+      stateDir,
+      now: pipeline.now,
+      changedFiles: scopeChangedFiles,
+      witnessVerifierKey,
+      baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
+      mappedCoverage,
+      evidenceContext: {
+        expectedInputDigest: expectedDigest,
+        snapshotUnavailable,
+        requireInvocationId: false,
+        changedInputs: false,
+      },
+    });
+    const report = renderRun(evaluated.verdicts, {
+      format,
+      blocking: evaluated.blocking,
+      waiverCounts: evaluated.waiverCounts,
+      run: { ...pipeline.manifest, invocationId, inputDigest: expectedDigest ?? undefined },
+      toolVersion: VERSION,
+    });
+    writeLine(io.stdout, report);
+    writeLine(
+      io.stderr,
+      'test-gates: --scope changed produced no runnable slice — nothing was executed and no receipt was sealed',
+    );
+    return 1;
   }
 
   // 4. Prepare the observer: spawn the loopback witness (unless the
@@ -765,8 +980,27 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   // the set to this run; from now on /sessions/open accepts only tests
   // in it, and the execution trace groups sessions by these identities.
   const enumeration = await listNativePlaywrightTests({ cwd: io.cwd });
+  // Scoped registration (Goal 2): in a `changed`-scope run the expected
+  // set IS the planned slice — the witness binds and the trace groups
+  // exactly the tests the seal will vouch for. Full mode registers the
+  // whole enumeration, byte-identical to before. (A planned instance the
+  // enumeration never lists stays out of the set and can never open a
+  // session — the same completeness machinery blocks it downstream.)
+  const plannedIdentities = new Set(
+    plannedRows.map(
+      (row) => `${row.planned.project ?? ''}\u0000${row.planned.file}\u0000${row.planned.titlePath.join('>')}`,
+    ),
+  );
+  const registeredInstances =
+    options.scope === 'changed'
+      ? enumeration.instances.filter((instance) =>
+          plannedIdentities.has(
+            `${instance.project ?? ''}\u0000${instance.file}\u0000${instance.titlePath.join('>')}`,
+          ),
+        )
+      : enumeration.instances;
   const registered = await supervisor.registerExpectedSet({
-    tests: enumeration.instances.map((instance) => ({
+    tests: registeredInstances.map((instance) => ({
       testId: instance.frameworkId,
       project: instance.project.length > 0 ? instance.project : null,
       file: instance.file,
@@ -801,6 +1035,10 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
           plannedRows.map((row) => row.planned.project).filter((project): project is string => project !== null),
         ),
       ],
+      // Operator-provided whole-run bound for multi-hour suites (default
+      // 30 minutes stands when absent — same expected set and
+      // completeness rules either way).
+      ...(runTimeoutMs !== undefined ? { timeoutMs: runTimeoutMs } : {}),
     },
   });
   const suiteEnv: Record<string, string> = {
@@ -826,13 +1064,18 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   // runner child holds no supervisor rights; on stop the drain
   // force-closes any session the runner left open (crash safety — it can
   // never grade as passed) and reports lifecycle CONFLICTS (duplicate
-  // begins, lone ends) that fail the run closed downstream.
+  // begins, lone ends) that fail the run closed downstream. The drain
+  // also serves the SERVER-WITNESSED persistence channel: it registers
+  // the server-e2e obligations with the witness and forwards the suite's
+  // persistence intents (an untrusted spool) so the witness — never the
+  // suite — probes the adapter and stamps the evidence.
   const drain = startSupervisorSpoolDrain({
     stateDir,
     runId: manifest.runId,
     witnessUrl: effectiveWitnessUrl,
     runToken,
     verifierKey: witnessVerifierKey,
+    serverE2eObligations,
   });
   let envelope: RunnerExecutionEnvelope;
   // The witness-side execution trace (review fix 2b) — THE execution
@@ -840,6 +1083,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   // witness is still up; `null` (unfetchable) blocks the run downstream.
   let sessionTrace: readonly TracedTestInput[] | null = null;
   let lifecycleConflicts: string[] = [];
+  let intentFailures: string[] = [];
   try {
     envelope = await adapter.execute({ logicalKeys: selection.logicalKeys }, {
       stateDir,
@@ -851,6 +1095,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     // BEFORE the witness stops (the close calls need it alive).
     const drained = await drain.stop();
     lifecycleConflicts = drained.conflicts;
+    intentFailures = drained.intentFailures;
     try {
       const trace = await supervisor.executionTrace();
       sessionTrace = trace === null ? null : trace.tests;
@@ -872,6 +1117,10 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     inputDigest: expectedDigest ?? NO_DIGEST,
     trustedPolicyDigest: trustedPolicy,
     runner: 'playwright',
+    // A scoped seal names its selection mode honestly (Goal 2): the
+    // execution result — and the receipt digest that binds it — record
+    // that a mapped slice ran, never a whole relevant suite.
+    ...(options.scope === 'changed' ? { mode: 'mapped-selection' as const } : {}),
     logicalKeys: selection.logicalKeys,
     catalog: catalog ?? EMPTY_CATALOG,
     plannedRows,
@@ -928,6 +1177,20 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     cause: 'RUN_INCOMPLETE' as const,
     nextAction: CAUSE_NEXT_ACTIONS['RUN_INCOMPLETE'],
   }));
+  // Server-persistence intent failures (server-witnessed channel): an
+  // intent the witness could not verify — missing probe, replay, auth —
+  // never silently vanishes. Projected as run-blocking findings here, not
+  // in the verdict engine: the claim simply stays unproven, and the
+  // operator sees exactly why.
+  const intentBlocking: BlockingEntry[] = intentFailures.map((detail) => ({
+    kind: 'finding' as const,
+    resourceId: null,
+    name: null,
+    detail,
+    location: null,
+    cause: 'RUN_INCOMPLETE' as const,
+    nextAction: CAUSE_NEXT_ACTIONS['RUN_INCOMPLETE'],
+  }));
   const evaluated = evaluateRun({
     cwd: io.cwd,
     config,
@@ -937,14 +1200,29 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       ...pipeline.policy.blocking,
       ...mappingBlockers,
       ...inventoryBlocking,
+      // Scoped planning gaps (Goal 2): affected obligations no declared,
+      // catalog-live claim covers. Fail closed — never diff-scoped away,
+      // never waived, and they alone prevent the receipt.
+      ...scopeBlockers,
       ...supervisionBlocking(supervisionFindings),
       ...lifecycleBlocking,
+      ...intentBlocking,
     ],
     stateDir,
     now: pipeline.now,
-    changedFiles: null,
+    // Scoped evaluation (Goal 2): the gate grades the affected slice —
+    // the same join `planScopedExpectedSet` planned from, so the graded
+    // obligations are exactly the covered set the receipt seals. Full
+    // mode stays unscoped (changedFiles: null), byte-identical.
+    changedFiles: scopeChangedFiles,
     witnessVerifierKey,
     witnessAttestation: liveAttestation,
+    // Goal 1: the supervised gate honors the adopted baseline through the
+    // SAME fail-closed seam as `check` (no adoption record → nothing is
+    // forgiven). Under strictE2E the evaluator still re-grades every
+    // waived verdict to blocking — a waiver is not proof.
+    baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
+    mappedCoverage,
     evidenceContext: {
       expectedInputDigest: expectedDigest,
       snapshotUnavailable,
@@ -1001,6 +1279,12 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     invocation: SUPERVISED_INVOCATION,
     selectionDigest,
     catalogDigest,
+    // Scoped seal (Goal 2): the receipt names its slice and binds the
+    // covered obligation fingerprints — MAC-covered like every other
+    // field, so the covered set cannot be widened after the fact.
+    ...(options.scope === 'changed'
+      ? { scope: 'changed' as const, coveredObligationFingerprints: coveredFingerprints }
+      : {}),
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: liveAttestation === null ? null : sha256Canonical(liveAttestation as unknown as Record<string, never>),
     verdictSummary: {

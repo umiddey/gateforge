@@ -92,8 +92,35 @@ export class EngineBrowserManager {
   private browser: Browser | null = null;
   private launching: Promise<Browser> | null = null;
   private readonly sessions = new Map<string, { context: BrowserContext; page: Page }>();
+  /**
+   * Pinned `--host-resolver-rules` value binding every attested hostname
+   * to its startup-approved loopback IPs. Set once at witness startup
+   * (before any launch); the browser is then incapable of resolving
+   * those names anywhere but loopback, regardless of later DNS changes.
+   */
+  private dnsPinRules: string | null = null;
 
   constructor(private readonly launcher: EngineBrowserLauncher = chromium) {}
+
+  /**
+   * Installs the DNS pin rules for the next (first) launch.
+   *
+   * Args:
+   *   rules: the `--host-resolver-rules` value, or null when nothing is
+   *     pinned (plain launch, previous behavior).
+   *
+   * Throws:
+   *   EngineBrowserError: when the browser already launched — pins must
+   *   precede every navigation (fail closed, never silently unbound).
+   */
+  setDnsPinRules(rules: string | null): void {
+    if (this.browser !== null || this.launching !== null) {
+      throw new EngineBrowserError(
+        'DNS pin rules arrive after browser launch: pins must precede every navigation',
+      );
+    }
+    this.dnsPinRules = rules;
+  }
 
   /**
    * Returns the engine page for one session, creating the isolated
@@ -150,7 +177,13 @@ export class EngineBrowserManager {
   private async ensureBrowser(): Promise<Browser> {
     if (this.browser !== null) return this.browser;
     this.launching ??= this.launcher
-      .launch({ headless: true })
+      .launch({
+        headless: true,
+        // DNS binding (loopback-pins): attested hostnames resolve ONLY
+        // to their startup-approved loopback IPs inside this browser —
+        // a mid-run DNS change cannot move its traffic off loopback.
+        ...(this.dnsPinRules !== null ? { args: [`--host-resolver-rules=${this.dnsPinRules}`] } : {}),
+      })
       .then((browser) => {
         this.browser = browser;
         return browser;

@@ -153,6 +153,11 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
       expect(again.code).toBe(0);
       expect(again.stdout).toContain('already adopted');
       expect(again.stdout).toContain('baseline update');
+      // The refusal names the legal exits for NEW (never-adopted) work.
+      expect(again.stdout).toContain(
+        'New (never-adopted) work is never baselined — prove it with witnessed test evidence ' +
+          '(docs/guides/new-table-playbook.md) or waive it (`gateforge waive`)',
+      );
       expect(readFileSync(repo.path(BASELINE_PATH), 'utf8')).toBe(before); // untouched
       expect(hookCount()).toBe(1); // wiring stays idempotent
     });

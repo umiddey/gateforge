@@ -1308,7 +1308,9 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
     expect(persistence?.observer).toContain('witness persistence adapter');
     expect(persistence?.observer).toContain('EVIDENCE_VALUE_MISMATCH');
     expect(persistence?.observer).toContain('same entity');
-    expect(persistence?.testKinds).toEqual(['browser-e2e', 'api-e2e']);
+    // server-e2e: the server-witnessed channel (the witness's own adapter
+    // probe) is a second honest proof channel for persistence contracts.
+    expect(persistence?.testKinds).toEqual(['browser-e2e', 'server-e2e', 'api-e2e']);
   });
 
   it('crud: AVAILABLE through the engine-owned browser channel (plan Phase 1 item 4)', () => {
@@ -1490,7 +1492,10 @@ describe('cause mapping (plan 2026-09-13 §5.4)', () => {
       reason: "no claim declares 'tenant.accounts:persistence:read'",
     });
     expect(mapped.cause).toBe('TEST_MAPPING_MISSING');
-    expect(mapped.nextAction).toBe('Inspect suggested existing tests first');
+    expect(mapped.nextAction).toBe(
+      'Run `gateforge tests suggest`, mark the matching test (`gateforge tests mark` / .gateforge/test-map.yml), ' +
+        'map backend-only tables server-e2e, or waive it (`gateforge waive`) — docs/guides/new-table-playbook.md',
+    );
   });
 
   it('supported-contract blocks with other reasons carry no Phase 0 cause (later phases populate)', () => {

@@ -2,7 +2,7 @@
  * Waiver-loader tests (GF-15/16/17): fail-closed five-field validation,
  * expiry via the injected clock, and the stale-owner hook.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -10,6 +10,8 @@ import {
   GateforgeWaiverError,
   loadWaivers,
   sha256Canonical,
+  WaiverSchema,
+  writeWaiver,
   type Waiver,
 } from '../src/index.js';
 
@@ -194,5 +196,27 @@ describe('loadWaivers — GF-17 stale-owner hook', () => {
     const result = loadWaivers(dir, { now: NOW });
     expect(result.waivers).toHaveLength(1);
     expect(result.staleOwner).toEqual([]);
+  });
+});
+
+describe('serializeWaiver/writeWaiver — the waive CLI storage path', () => {
+  it('writes reviewable 2-space JSON with a trailing newline that loadWaivers accepts', () => {
+    const dir = tempDir();
+    const path = join(dir, 'nested', 'w.json'); // parent dirs are created
+    const waiver = WaiverSchema.parse(waiverDocument('tenant.accounts'));
+    writeWaiver(path, waiver);
+    expect(readFileSync(path, 'utf8')).toBe(`${JSON.stringify(waiver, null, 2)}\n`);
+    // loadWaivers lists top-level *.json only, so load from the subdir we
+    // proved the writer creates.
+    const result = loadWaivers(join(dir, 'nested'), { now: NOW });
+    expect(result.waivers).toHaveLength(1);
+    expect(result.waivers[0]?.scope.resourceId).toBe('tenant.accounts');
+  });
+
+  it('fails closed on an unwritable target (directory in the way)', () => {
+    const dir = tempDir();
+    mkdirSync(join(dir, 'blocked.json'), { recursive: true }); // a DIR where the file must go
+    const waiver = WaiverSchema.parse(waiverDocument('tenant.orders'));
+    expect(() => writeWaiver(join(dir, 'blocked.json'), waiver)).toThrow(GateforgeWaiverError);
   });
 });

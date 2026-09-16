@@ -120,6 +120,77 @@ export interface PersistenceResponse {
   };
 }
 
+/**
+ * `POST /runs/server-e2e-declarations` body (SUPERVISOR ONLY): the
+ * obligation ids the trusted mapping layer declared kind `server-e2e`.
+ * Registration is a PRE-run fact (like the expected set): bound once,
+ * identical re-registration idempotent, any change or late registration
+ * refused — the witness never stamps `channel: 'server'` records for
+ * obligations outside this set, so the suite cannot steer an intent onto
+ * a browser-kind obligation and a bearer of an intent can never
+ * self-verify.
+ */
+export interface ServerE2eDeclarationsRequest {
+  obligations: readonly string[];
+}
+
+/** `POST /runs/server-e2e-declarations` response. */
+export interface ServerE2eDeclarationsResponse {
+  bound: true;
+  count: number;
+  obligations: string[];
+}
+
+/**
+ * `POST /witness/server-persistence` body (SUPERVISOR ONLY — the drain
+ * forwards it with the verifier key; the suite can only write intent
+ * spool lines, never call this): one persistence claim intent, already
+ * drained from the runner-side intents spool.
+ *
+ * - create: `pre` (expect-absent) BEFORE the mutation stores a witness
+ *   pre-observation; `post` (expect-present) probes, consumes it, and
+ *   stamps `before: {entityAbsent}` into the record — the same shape the
+ *   browser path grades.
+ * - update: `pre` (expect-present) snapshots the entity's fields;
+ *   `post` consumes it into `before: {found, fields}` (the update delta
+ *   grades against the classification's updateableFields in the engine).
+ * - read: `post` (expect-present) only. delete: `post` (expect-absent
+ *   for hard; expect-present for archive states) only.
+ *
+ * `sequence` is strictly increasing per claimId; a replayed or
+ * out-of-order line resolves to a typed failure (fail closed), so no
+ * bearer of an intent can re-drive a stale observation.
+ */
+export interface ServerPersistenceIntentRequest {
+  resourceId: string;
+  /** Obligation id `<resourceId>:persistence:<op>` the intent serves. */
+  claimId: string;
+  operation: 'create' | 'read' | 'update' | 'delete';
+  phase: 'pre' | 'post';
+  intent: 'expect-present' | 'expect-absent';
+  /** The entity key: scalar for single-column PKs, column-keyed object for composite. */
+  key: unknown;
+  /** Strictly increasing per claimId (replay → typed failure). */
+  sequence: number;
+  /** The claiming test's id (diagnostic attribution; the claim join key). */
+  testId: string;
+}
+
+/** `POST /witness/server-persistence` response for a `pre` intent. */
+export interface ServerPreObservationResponse {
+  resolved: 'pre';
+  found: boolean;
+}
+
+/** `POST /witness/server-persistence` response for a `post` intent. */
+export interface ServerPersistenceResponse {
+  recordId: string;
+  runId: string;
+  trust: TrustTier;
+  channel: 'server';
+  verdictRelevant: { found: boolean };
+}
+
 /** `POST /sessions/open` body (Phase 1; Phase 4 adds claim injection). */
 export interface SessionOpenRequest {
   /** The test's runner-assigned id (same id the reporter writes to claims.json). */
@@ -492,7 +563,34 @@ export interface WitnessOptions {
   engineBrowserLauncher?: import('./browser.js').EngineBrowserLauncher;
 }
 
-/** The normalized adapter module contract (pin #8). */
+/**
+ * The normalized adapter module contract (pin #8).
+ *
+ * `probeServer` (optional; the server-witnessed persistence channel) is
+ * the adapter's server-side probe: the witness executes it ONLY in the
+ * witness process (trusted side) against the app's own database/state —
+ * for backend-only tables (a transactional outbox) that can never
+ * honestly appear in a UI. Contract:
+ *
+ * ```js
+ * export default {
+ *   ...,
+ *   async probeServer(ctx, subject) {
+ *     const row = await db.query('select * from outbox where id = $1', [subject]);
+ *     return { found: row !== undefined, fields: row ?? null };
+ *   },
+ * };
+ * ```
+ *
+ * `subject` is the entity key EXACTLY as the persistence intent declared
+ * it (scalar for single-column primary keys, column-keyed object for
+ * composite keys); the return MUST be
+ * `{found: boolean, fields: Record<string, unknown> | null}`. A throw or
+ * a malformed shape resolves the intent as a typed
+ * SERVER_PROBE_UNAVAILABLE failure — never to satisfaction (fail
+ * closed). Adapters without the export simply cannot serve the server
+ * channel; the browser path is unaffected.
+ */
 export interface EvidenceAdapter {
   /** GET-only transport. Returns the raw entity body, or null when absent. */
   read: (ctx: AdapterContext, id: unknown) => Promise<unknown> | unknown;
@@ -510,6 +608,23 @@ export interface EvidenceAdapter {
   environmentFingerprint: string;
   /** Optional base override for THIS adapter's reads. */
   baseUrl?: string;
+  /**
+   * Optional SERVER PROBE, executed witness-side only (see the interface
+   * doc): observes the app database directly and reports the entity's
+   * presence + observed column state.
+   */
+  probeServer?: (
+    ctx: AdapterContext,
+    subject: unknown,
+  ) => Promise<ServerProbeResult> | ServerProbeResult;
+}
+
+/** The shape an adapter `probeServer` must return (validated witness-side). */
+export interface ServerProbeResult {
+  /** Whether the probed entity exists in the engine-observed state. */
+  found: boolean;
+  /** The observed column state when found (null when absent). */
+  fields: Record<string, unknown> | null;
 }
 
 /** The transport handed to `read` (GET-only, engine-mediated). */

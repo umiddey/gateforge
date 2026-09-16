@@ -18,12 +18,8 @@
  * `test-gates` suite contract writes.
  */
 import { cpSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import {
-  ADOPTION_RECORD_FILENAME,
   CAUSE_NEXT_ACTIONS,
-  loadAdoptionRecord,
-  loadBaseline,
   renderRun,
   runExitCode,
   type BlockingEntry,
@@ -33,11 +29,12 @@ import {
 } from '@gateforge/core';
 import { discoverTestCatalog, findPlaywrightConfig } from '@gateforge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
+import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
-import { evaluateRun } from '../evaluate.js';
+import { obligationFingerprint, evaluateRun } from '../evaluate.js';
 import { gradingClaimsFor, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gateforge/core';
 import {
@@ -49,7 +46,12 @@ import {
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
 import { runPipeline, resolveRepoPath, sourcesByResourceId } from '../pipeline.js';
-import { loadReceiptFor, receiptGateBlocking } from '../receipts.js';
+import {
+  loadReceiptFor,
+  receiptGateBlocking,
+  scopedReceiptCoverageBlocking,
+  type ScopedObligationRef,
+} from '../receipts.js';
 import { resolveProvider } from '../providers.js';
 import {
   computeEvaluationScope,
@@ -104,37 +106,6 @@ interface CheckGateOptions {
    * mismatch diagnostic is skipped (the checkout IS the staged bytes).
    */
   fixedChangedFiles?: readonly string[];
-}
-
-/**
- * Resolves the adopted-baseline forgiveness set for this repo (phase 8 C).
- *
- * Fail-closed semantics:
- * - NO adoption record (the normal pre-adoption state) → nothing is
- *   forgiven, even if a baseline file exists: an unrecorded bulk-add is
- *   unsanctioned and forgives nothing.
- * - Record present but baseline missing/corrupt → throws (exit 2): the
- *   receipt without the document it sanctions is a broken adoption.
- * - Record present and baseline valid → the recorded fingerprint set,
- *   plus the classification layer (two-layer adoption) when the receipt
- *   carries it. A pre-layer receipt (no `classificationBlocked` field) is
- *   simply NOT ADOPTED for that layer — nothing classification-shaped is
- *   waived without the recorded set (fail closed, backward compatible).
- */
-export function resolveAdoptedBaseline(
-  cwd: string,
-  baselinesPath: string,
-): { fingerprints: ReadonlySet<string>; classificationBlocked?: ReadonlySet<string> } | null {
-  const baselinePath = resolveRepoPath(cwd, baselinesPath);
-  const adoption = loadAdoptionRecord(join(dirname(baselinePath), ADOPTION_RECORD_FILENAME));
-  if (adoption === null) return null;
-  return {
-    fingerprints: new Set(loadBaseline(baselinePath).fingerprints),
-    classificationBlocked:
-      adoption.classificationBlocked !== undefined
-        ? new Set(adoption.classificationBlocked)
-        : undefined,
-  };
 }
 
 /**
@@ -558,6 +529,14 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
   // ENFORCEMENT_UNTRUSTED). Old record bundles without receipts are
   // rejected, never silently accepted.
   //
+  // Scope consumption (Goal 2): a FULL receipt (or a legacy one with no
+  // scope field) covers everything, as before. A CHANGED-scope receipt
+  // satisfies the gate only when EVERY obligation this evaluation demands
+  // — the changed-slice join for a narrowed run, every obligation for an
+  // unscoped/expanded one — is inside its sealed covered set; otherwise a
+  // typed EVIDENCE_SCOPE_INCOMPLETE blocker names the uncovered
+  // obligations (fail closed, never a silent partial pass).
+  //
   // Approved-policy ownership gate (review 2026-09-13 P1 #5): before any
   // receipt is consulted, the candidate's recomputed trusted policy
   // digest is compared against the OWNER-APPROVED digest provisioned
@@ -566,6 +545,26 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
   // missing pin under enforcement.strictE2E fails closed with the exact
   // provisioning step; a receipt sealed under a different approved
   // revision is rejected (policy revision changed after sealing).
+  // The obligations this evaluation demands receipt coverage for (Goal 2
+  // scope consumption): the changed-slice join for a narrowed run — the
+  // SAME join-aware sources map the diff scoping grades by — and EVERY
+  // obligation for an unscoped or expanded run (a slice receipt cannot
+  // silently certify a whole-repo evaluation). Carried as id +
+  // pin-#2 fingerprint, the exact identity a changed-scope receipt seals.
+  const coverageChangedFiles =
+    diffScoped && scopeDecision.mode === 'changed' ? scopeDecision.changedFiles : null;
+  const requiredCoverage = (): ScopedObligationRef[] => {
+    const sources = sourcesByResourceId(pipeline.graph);
+    return pipeline.policy.obligations
+      .filter((obligation) => {
+        if (coverageChangedFiles === null) return true;
+        const obligationSources = sources.get(obligation.resourceId);
+        if (obligationSources === undefined) return false;
+        return obligationSources.some((source) => coverageChangedFiles.includes(source));
+      })
+      .map((obligation) => ({ id: obligation.id, fingerprint: obligationFingerprint(obligation) }));
+  };
+
   let receiptBlocking: BlockingEntry[] = [];
   if (requireE2E) {
     if (snapshotUnavailable || expectedDigest === null) {
@@ -617,14 +616,15 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
             catalogDigest: undefined,
           },
         );
-        if (load.status === 'ok' && gate.status === 'enforced') {
+        if (load.status === 'ok') {
           // A provisioned pin binds the receipt too: a receipt sealed
           // under a since-revoked/different approved revision is a typed
-          // reject, and under a pin the binding must be present.
-          const binding = assertReceiptApprovedPolicy(load.receipt, gate.approved);
-          receiptBlocking = binding.ok
-            ? []
-            : [
+          // reject, and under a pin the binding must be present. When the
+          // binding decides, the coverage check below is skipped.
+          if (gate.status === 'enforced') {
+            const binding = assertReceiptApprovedPolicy(load.receipt, gate.approved);
+            if (!binding.ok) {
+              receiptBlocking = [
                 {
                   kind: 'finding',
                   resourceId: null,
@@ -635,6 +635,14 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
                   nextAction: binding.nextAction,
                 },
               ];
+            }
+          }
+          if (receiptBlocking.length === 0) {
+            // Scope consumption (Goal 2): full receipts pass unchanged; a
+            // changed-scope receipt must cover every obligation this
+            // evaluation demands or the typed blocker names the gap.
+            receiptBlocking = scopedReceiptCoverageBlocking(load.receipt, requiredCoverage());
+          }
         } else {
           receiptBlocking = receiptGateBlocking(load);
         }
