@@ -2,7 +2,6 @@
   "name": "@gateforge/pack-auth",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "private": true,
   "description": "Authorization discovery pack: AST/heuristic detection of role guards, tenant scoping, and authentication enforcement in TypeScript/JavaScript HTTP routes; emits auth resource per guarded endpoint with roleRequirement + tenancy attributes; ships the auth obligation vocabulary (role-allowed/role-denied/tenant-isolated/denied-no-side-effect/forged-token-rejected).",
   "type": "module",
   "engines": {
@@ -15,9 +14,9 @@
     }
   },
   "files": [
+    "README.md",
     "dist",
-    "examples",
-    "README.md"
+    "examples"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -25,8 +24,20 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gateforge/core": "*",
-    "@gateforge/plugin-protocol": "*",
+    "@gateforge/core": "^0.1.0",
+    "@gateforge/plugin-protocol": "^0.1.0",
     "zod": "^4.1.5"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/gateforge.git",
+    "directory": "packages/pack-auth"
+  },
+  "bugs": {
+    "url": "https://github.com/umiddey/gateforge/issues"
+  },
+  "homepage": "https://github.com/umiddey/gateforge#readme"
 }
