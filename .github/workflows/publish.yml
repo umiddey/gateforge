@@ -19,8 +19,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: 'https://registry.npmjs.org/'
+      # Trusted Publishing (OIDC-authenticated PUT) requires npm >= 11.5;
+      # node 24 may ship older — pin npm explicitly.
+      - run: npm install -g npm@latest
       - run: npm ci
       - run: npm run build --workspaces --if-present
       # Apache-2.0 requires the license text to ship with each package.
