@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gateforge/core';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { runCli, installFixture } from './helpers.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 import {

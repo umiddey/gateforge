@@ -17,8 +17,8 @@
  * `gateforge.receipt.v1` domain); no browser is launched.
  */
 import { describe, expect, it } from 'vitest';
-import { loadConfig, runExitCode, sha256Canonical, withTempRepo, type TempRepo, type TestCatalog } from '@gateforge/core';
-import type { RunnerOutcomesDocument } from '@gateforge/pack-playwright';
+import { loadConfig, runExitCode, sha256Canonical, withTempRepo, type TempRepo, type TestCatalog } from '@gate-forge/core';
+import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { currentInputDigest, fixtureFingerprint, installFixture, runCli, FIXED_AT } from './helpers.js';
 import { resolveAdoptedBaseline } from '../src/adopted-baseline.js';
 import { trustedPolicyDigestForConfig, issueGateReceipt, sealExecutionResult } from '../src/execution.js';

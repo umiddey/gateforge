@@ -1,5 +1,5 @@
 /**
- * @gateforge/pack-sqlalchemy — SQLAlchemy CRUD discovery pack.
+ * @gate-forge/pack-sqlalchemy — SQLAlchemy CRUD discovery pack.
  *
  * Detects SQLAlchemy tables from Python source (AST only, stdlib, no
  * imports/execution) and exposes the pinned GPP/3 discovery vocabulary

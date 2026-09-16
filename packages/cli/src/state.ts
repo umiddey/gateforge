@@ -40,7 +40,7 @@ import {
   type Obligation,
   type ResourceGraph,
   type RunManifest,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { UsageError } from './errors.js';
 
 /** Default run-state directory, repo-root-relative. */

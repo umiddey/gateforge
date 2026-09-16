@@ -1,5 +1,5 @@
 /**
- * End-to-end suite for @gateforge/pack-webhook.
+ * End-to-end suite for @gate-forge/pack-webhook.
  *
  * Boots the example server on a random free port, exercises every
  * obligation contract the pack claims, and asserts the verdicts.
@@ -28,7 +28,7 @@ const SERVER_PATH = fileURLToPath(
 /** Shared HMAC secret mirrored from the example server. */
 const WEBHOOK_SECRET = 'gateforge-webhook-loopback-secret-v1';
 
-/** Verdict union (mirror of @gateforge/core Verdict but local). */
+/** Verdict union (mirror of @gate-forge/core Verdict but local). */
 type Verdict = 'satisfied' | 'denied' | 'rejected' | 'no-side-effect';
 
 interface ContractOutcome {

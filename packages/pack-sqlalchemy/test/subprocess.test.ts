@@ -16,8 +16,8 @@ import {
   ClassificationSignalSchema,
   ResourceSchema,
   type Resource,
-} from '@gateforge/core';
-import { isProtocolFailure, PluginSession } from '@gateforge/plugin-protocol';
+} from '@gate-forge/core';
+import { isProtocolFailure, PluginSession } from '@gate-forge/plugin-protocol';
 import { ALL_FIXTURES, FIXTURE_ROOT, pythonEnv, runDiscover } from './helpers.js';
 import { PACK_VERSION } from '../src/version.js';
 

@@ -45,8 +45,8 @@
  */
 import { readFileSync, statSync, readdirSync } from 'node:fs';
 import { join, extname, relative, resolve } from 'node:path';
-import { GATEFORGE_SCHEMA_VERSION } from '@gateforge/core';
-import type { DiscoveryOutcome, Finding } from '@gateforge/plugin-protocol';
+import { GATEFORGE_SCHEMA_VERSION } from '@gate-forge/core';
+import type { DiscoveryOutcome, Finding } from '@gate-forge/plugin-protocol';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
 /** Detected framework of a webhook endpoint. */

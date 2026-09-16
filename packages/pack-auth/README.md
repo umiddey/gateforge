@@ -1,4 +1,4 @@
-# `@gateforge/pack-auth`
+# `@gate-forge/pack-auth`
 
 Authorization contract pack. Pure TypeScript detector (no subprocess) that discovers role-guard patterns across four frameworks and emits `auth.resource` entries with role + tenancy attributes.
 
@@ -54,7 +54,7 @@ Defined in `src/obligations.ts` and re-exported as `AUTH_OBLIGATION_CONTRACTS`. 
 
 ## Entity adapter schema
 
-The pack ships `src/adapter-schema.ts` (mirror of `@gateforge/pack-sqlalchemy`'s adapter contract) so billing resources can be witnessed GET-only. The example auth server emits `x-gateforge-env: example-auth-v1` on every response; the adapter's `environmentFingerprint` must equal that value.
+The pack ships `src/adapter-schema.ts` (mirror of `@gate-forge/pack-sqlalchemy`'s adapter contract) so billing resources can be witnessed GET-only. The example auth server emits `x-gateforge-env: example-auth-v1` on every response; the adapter's `environmentFingerprint` must equal that value.
 
 ```js
 // .gateforge/adapters/auth.billing.refund.mjs
@@ -103,7 +103,7 @@ plugins:
   - id: gateforge.pack-auth
     version: 0.1.0
     transport: in-process
-    module: '@gateforge/pack-auth'
+    module: '@gate-forge/pack-auth'
 ```
 
 ## Limitations

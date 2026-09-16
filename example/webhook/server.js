@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Example webhook receiver for @gateforge/pack-webhook.
+// Example webhook receiver for @gate-forge/pack-webhook.
 //
 // Listens on PORT 3003 by default (configurable via --port, accepts 0
 // for OS-assigned free port). Implements the five obligation contracts

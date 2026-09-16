@@ -35,19 +35,19 @@ artifacts automatically creates auditable testing responsibilities.
 
 | Package | Purpose |
 |---|---|
-| [`packages/core`](packages/core) | `@gateforge/core` — artifact schemas (zod), GF-canonical-JSON + fingerprints, witness provenance verification, resource graph, policy engine, verdict engine + capability registry, test-catalog/mapping/coverage/receipt schemas, baselines, waivers, reports |
-| [`packages/plugin-protocol`](packages/plugin-protocol) | `@gateforge/plugin-protocol` — GPP/3 host (TS) + reference client (py): newline JSON, 8 MiB line cap, digest-checked envelopes |
-| [`packages/cli`](packages/cli) | `@gateforge/cli` — bin `gateforge`: `init`, `discover`, `classify`, `explain`, `tests discover|suggest|mark|explain|diagnose`, `obligations`, `check [--changed] [--staged] [--require-e2e]`, `test-gates [--changed]`, `broker commit`, `enforcement doctor`, `baseline update` |
-| [`packages/http-contract`](packages/http-contract) | `@gateforge/http-contract` — canonical HTTP contract facts, typed block codes, deterministic frontend-call ↔ server-route join engine |
-| [`packages/pack-sqlalchemy`](packages/pack-sqlalchemy) | `@gateforge/pack-sqlalchemy` — Python SQLAlchemy detector plugin + TS registration + classification workflow |
-| [`packages/pack-fastapi`](packages/pack-fastapi) | `@gateforge/pack-fastapi` — FastAPI server-route detector (Python AST over GPP/3) |
-| [`packages/pack-http`](packages/pack-http) | `@gateforge/pack-http` — TS route-registration detector (Express/Fastify/Hono/NestJS) + bounded frontend API-client dataflow |
-| [`packages/pack-playwright`](packages/pack-playwright) | `@gateforge/pack-playwright` — witness service, attestation proxy, trusted evidence fixture, reporter, test discovery (static + native reconciliation + pytest adapter), supervised runner |
-| [`packages/pack-auth`](packages/pack-auth) | `@gateforge/pack-auth` — auth contract pack (role/tenant/forged-token obligations) + NestJS/Express/Fastify/Hono detector |
-| [`packages/pack-workflow`](packages/pack-workflow) | `@gateforge/pack-workflow` — workflow contract pack (transitions, terminal immutability, audit) + XState/FSM/enum-switch detector |
-| [`packages/pack-webhook`](packages/pack-webhook) | `@gateforge/pack-webhook` — webhook contract pack (HMAC signatures, replay, retry bounds) + detector |
-| [`packages/pack-task`](packages/pack-task) | `@gateforge/pack-task` — task/queue contract pack (idempotency, retries, terminal handling) + BullMQ/Bee-Queue detector |
-| [`packages/pack-validation`](packages/pack-validation) | `@gateforge/pack-validation` — validation contract pack (boundary reject, no side effect on reject) + zod/joi/yup/class-validator detector |
+| [`packages/core`](packages/core) | `@gate-forge/core` — artifact schemas (zod), GF-canonical-JSON + fingerprints, witness provenance verification, resource graph, policy engine, verdict engine + capability registry, test-catalog/mapping/coverage/receipt schemas, baselines, waivers, reports |
+| [`packages/plugin-protocol`](packages/plugin-protocol) | `@gate-forge/plugin-protocol` — GPP/3 host (TS) + reference client (py): newline JSON, 8 MiB line cap, digest-checked envelopes |
+| [`packages/cli`](packages/cli) | `@gate-forge/cli` — bin `gateforge`: `init`, `discover`, `classify`, `explain`, `tests discover|suggest|mark|explain|diagnose`, `obligations`, `check [--changed] [--staged] [--require-e2e]`, `test-gates [--changed]`, `broker commit`, `enforcement doctor`, `baseline update` |
+| [`packages/http-contract`](packages/http-contract) | `@gate-forge/http-contract` — canonical HTTP contract facts, typed block codes, deterministic frontend-call ↔ server-route join engine |
+| [`packages/pack-sqlalchemy`](packages/pack-sqlalchemy) | `@gate-forge/pack-sqlalchemy` — Python SQLAlchemy detector plugin + TS registration + classification workflow |
+| [`packages/pack-fastapi`](packages/pack-fastapi) | `@gate-forge/pack-fastapi` — FastAPI server-route detector (Python AST over GPP/3) |
+| [`packages/pack-http`](packages/pack-http) | `@gate-forge/pack-http` — TS route-registration detector (Express/Fastify/Hono/NestJS) + bounded frontend API-client dataflow |
+| [`packages/pack-playwright`](packages/pack-playwright) | `@gate-forge/pack-playwright` — witness service, attestation proxy, trusted evidence fixture, reporter, test discovery (static + native reconciliation + pytest adapter), supervised runner |
+| [`packages/pack-auth`](packages/pack-auth) | `@gate-forge/pack-auth` — auth contract pack (role/tenant/forged-token obligations) + NestJS/Express/Fastify/Hono detector |
+| [`packages/pack-workflow`](packages/pack-workflow) | `@gate-forge/pack-workflow` — workflow contract pack (transitions, terminal immutability, audit) + XState/FSM/enum-switch detector |
+| [`packages/pack-webhook`](packages/pack-webhook) | `@gate-forge/pack-webhook` — webhook contract pack (HMAC signatures, replay, retry bounds) + detector |
+| [`packages/pack-task`](packages/pack-task) | `@gate-forge/pack-task` — task/queue contract pack (idempotency, retries, terminal handling) + BullMQ/Bee-Queue detector |
+| [`packages/pack-validation`](packages/pack-validation) | `@gate-forge/pack-validation` — validation contract pack (boundary reject, no side effect on reject) + zod/joi/yup/class-validator detector |
 | `example/` | Isolated demo app (plain node http server, accounts CRUD + archive) used by the e2e gate |
 
 ## Status

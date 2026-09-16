@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { createWorkflowDetector, WORKFLOW_CONTRACT_KIND, type WorkflowContractAttributes } from '../src/index.js';
-import type { Resource } from '@gateforge/core';
+import type { Resource } from '@gate-forge/core';
 
 const FIXTURE_ROOT = fileURLToPath(new URL('./fixtures', import.meta.url));
 

@@ -8,7 +8,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo } from '@gateforge/core';
+import { withTempRepo } from '@gate-forge/core';
 import { installFixture, runCli } from './helpers.js';
 import { installCommitHook } from '../src/git-hooks.js';
 

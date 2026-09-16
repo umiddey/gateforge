@@ -16,7 +16,7 @@
 import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gateforge/core';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { fixtureFingerprint, runCli, installFixture, PLUGIN_SOURCE } from './helpers.js';
 import {
   freezeStagedCandidate,

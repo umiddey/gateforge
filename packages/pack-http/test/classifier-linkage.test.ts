@@ -29,7 +29,7 @@ import {
   lifecycleAllowsContract,
   type ClassificationPolicy,
   type ClassifierResourceRef,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { createHttpDetector } from '../src/index.js';
 
 /** The org policy every scenario uses: sources + trusted worker category

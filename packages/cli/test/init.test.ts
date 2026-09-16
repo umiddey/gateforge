@@ -6,7 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { withTempRepo, loadConfig } from '@gateforge/core';
+import { withTempRepo, loadConfig } from '@gate-forge/core';
 import { runCli } from './helpers.js';
 
 const TARGETS = [

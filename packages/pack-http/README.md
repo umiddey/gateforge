@@ -1,4 +1,4 @@
-# @gateforge/pack-http — Generic HTTP exposure pack
+# @gate-forge/pack-http — Generic HTTP exposure pack
 
 Pure-TypeScript in-process detector that finds **externally reachable HTTP
 artifacts** in `.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs` source — no execution,
@@ -101,7 +101,7 @@ gains the prefix — `rawPath` stays exactly as written, and
 normalization itself (query/fragment stripping, `${}`/`{}` slotting,
 slash collapsing) is unchanged. A joined path then meets the
 endpoint-compiler join's literal-precedence rules like any other path
-(that engine is owned by `@gateforge/http-contract`). Callsites that
+(that engine is owned by `@gate-forge/http-contract`). Callsites that
 join nothing behave byte-identically to before, and joining never
 turns a passing callsite into a blocker. Wrapper functions do not join
 their internal client's base (documented boundary — declare the
@@ -169,7 +169,7 @@ emitted one `http-route` resource per artifact, but a path-derived resource
 name collides with the converged SQLAlchemy table at the same
 plane-qualified id, so the resource channel was removed after a red-probe
 (`resources: []` always; see ADR 0004 D1 for the successor design —
-endpoint identities live in the `@gateforge/http-contract` join, never in
+endpoint identities live in the `@gate-forge/http-contract` join, never in
 the path-derived table name).
 
 ## Signals
@@ -214,7 +214,7 @@ plugins:
   - id: gateforge.pack-http
     version: 0.1.0
     transport: in-process
-    module: '@gateforge/pack-http'
+    module: '@gate-forge/pack-http'
 ```
 
 The pack also emits `http.contract` evidence facts (one per server

@@ -43,7 +43,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { loadConfig, verifyGateReceipt, type GateReceipt, type GateforgeConfig } from '@gateforge/core';
+import { loadConfig, verifyGateReceipt, type GateReceipt, type GateforgeConfig } from '@gate-forge/core';
 import { parseArgs } from './args.js';
 import { trustedPolicyDigestForConfig, SUPERVISED_INVOCATION } from './execution.js';
 import { UsageError } from './errors.js';

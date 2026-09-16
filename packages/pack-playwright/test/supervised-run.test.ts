@@ -13,7 +13,7 @@ import { startWitness } from '../src/witness/server.js';
 import { startSupervisorSpoolDrain } from '../src/supervisor/drain.js';
 import { spoolPathFor } from '../src/supervisor/spool.js';
 import { SupervisorClient } from '../src/supervisor/client.js';
-import { superviseExecution } from '@gateforge/core';
+import { superviseExecution } from '@gate-forge/core';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';

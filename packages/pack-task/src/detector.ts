@@ -71,8 +71,8 @@
  */
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, relative, sep, posix } from 'node:path';
-import { GATEFORGE_SCHEMA_VERSION, type Resource } from '@gateforge/core';
-import type { DiscoveryOutcome, Finding } from '@gateforge/plugin-protocol';
+import { GATEFORGE_SCHEMA_VERSION, type Resource } from '@gate-forge/core';
+import type { DiscoveryOutcome, Finding } from '@gate-forge/plugin-protocol';
 
 /** Attributes attached to every detected `task.resource`. */
 export interface TaskResourceAttributes {

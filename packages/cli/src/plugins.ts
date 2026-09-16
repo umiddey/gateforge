@@ -39,8 +39,8 @@ import {
   type ConfigPlugin,
   type DetectorOutput,
   type PluginRegistration,
-} from '@gateforge/core';
-import { PluginSession } from '@gateforge/plugin-protocol';
+} from '@gate-forge/core';
+import { PluginSession } from '@gate-forge/plugin-protocol';
 import { UsageError } from './errors.js';
 
 /** One plugin run: detector contributions + pinned registrations. */

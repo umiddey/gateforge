@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { join } from 'node:path';
-import { withTempRepo } from '@gateforge/core';
+import { withTempRepo } from '@gate-forge/core';
 import { runCli } from './helpers.js';
 
 /** Exercises the real CLI discovery-to-classification path from source only. */

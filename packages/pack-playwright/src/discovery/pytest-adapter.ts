@@ -23,7 +23,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
-import type { DiagnosticSuite } from '@gateforge/core';
+import type { DiagnosticSuite } from '@gate-forge/core';
 import { TestDiscoveryError, untrustedEnv } from './reconcile.js';
 
 /** One collected pytest case, identity preserved (§3.5). */

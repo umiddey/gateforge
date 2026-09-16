@@ -19,7 +19,7 @@
  * fixture tests control GIT_* variables exactly like anything else.
  */
 import { spawnSync } from 'node:child_process';
-import { normalizeChangedFiles, type ChangedFileProvider, type ChangedProvider } from '@gateforge/core';
+import { normalizeChangedFiles, type ChangedFileProvider, type ChangedProvider } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 
 /** git flags keeping invocations deterministic and config-independent. */

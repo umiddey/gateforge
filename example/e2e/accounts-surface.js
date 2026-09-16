@@ -5,13 +5,13 @@
 // templates, archive control, status values) and extends the gateforge
 // runner with it:
 //
-//   import { test as gateforgeTest, expect } from '@gateforge/pack-playwright';
+//   import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
 //   import { accountsSurface } from './accounts-surface.js';
 //   const test = gateforgeTest.extend({ surface: accountsSurface });
 //
 // `{id}` templates are substituted with the entity id the UI action
 // produced (observed from the rendered list, never suite-declared).
-import { SURFACE_DESCRIPTOR_VERSION } from '@gateforge/pack-playwright';
+import { SURFACE_DESCRIPTOR_VERSION } from '@gate-forge/pack-playwright';
 
 export const accountsSurface = Object.freeze({
   schemaVersion: SURFACE_DESCRIPTOR_VERSION,

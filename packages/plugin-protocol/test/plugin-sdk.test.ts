@@ -1,11 +1,11 @@
 /**
  * TS plugin SDK suite: drives servePlugin in-process with scripted host
  * frames and asserts the emitted envelopes byte-for-byte (digests computed
- * with @gateforge/core's sha256Canonical, the same primitive the host and
+ * with @gate-forge/core's sha256Canonical, the same primitive the host and
  * every real client use).
  */
 import { describe, expect, test } from 'vitest';
-import { sha256Canonical, type JsonValue } from '@gateforge/core';
+import { sha256Canonical, type JsonValue } from '@gate-forge/core';
 import {
   FrameJsonError,
   ProtocolVersionError,

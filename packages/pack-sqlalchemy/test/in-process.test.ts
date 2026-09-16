@@ -1,6 +1,6 @@
 /**
  * In-process transport suite: the pack's TS discover entry (the CLI
- * `transport: in-process, module: "@gateforge/pack-sqlalchemy"` contract)
+ * `transport: in-process, module: "@gate-forge/pack-sqlalchemy"` contract)
  * and the configurable tenant/master plane mapping.
  *
  * The in-process entry spawns the SAME python detector over a hardened
@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DetectorOutputSchema, type Resource } from '@gateforge/core';
+import { DetectorOutputSchema, type Resource } from '@gate-forge/core';
 import defaultPack, {
   byTableName,
   createSqlalchemyDetector,
@@ -34,7 +34,7 @@ plugins:
   - id: gateforge.pack-sqlalchemy
     version: 0.1.0
     transport: in-process
-    module: '@gateforge/pack-sqlalchemy'
+    module: '@gate-forge/pack-sqlalchemy'
 policies: policies.yml
 classifications: classifications.yml
 adapters: .gateforge/adapters

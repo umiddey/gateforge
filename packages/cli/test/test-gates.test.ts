@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { RunManifestSchema, withTempRepo, fingerprint } from '@gateforge/core';
+import { RunManifestSchema, withTempRepo, fingerprint } from '@gate-forge/core';
 import { fixtureFingerprint, installFixture, runCli } from './helpers.js';
 
 /** A stub suite: reports one claimed ui.action record for the target. */

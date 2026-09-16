@@ -41,7 +41,7 @@ import {
   type PolicyEvaluationResult,
   type ResourceGraph,
   type RunManifest,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.js';
 import { clockFromConfig } from './clock.js';

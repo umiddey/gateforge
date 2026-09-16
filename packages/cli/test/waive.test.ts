@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadWaivers, WaiverSchema, withTempRepo } from '@gateforge/core';
+import { loadWaivers, WaiverSchema, withTempRepo } from '@gate-forge/core';
 import { FIXED_AT, fixtureFingerprint, installFixture, runCli } from './helpers.js';
 
 const WAIVERS_DIR = '.gateforge/waivers';

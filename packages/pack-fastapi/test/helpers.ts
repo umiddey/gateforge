@@ -5,7 +5,7 @@
  */
 import { delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PluginSession, type DiscoveryOutcome } from '@gateforge/plugin-protocol';
+import { PluginSession, type DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import { createFastapiDetector } from '../src/detector.js';
 import { PACK_PLUGIN_ID, PACK_VERSION } from '../src/version.js';
 

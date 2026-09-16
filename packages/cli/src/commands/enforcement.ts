@@ -28,7 +28,7 @@ import {
   canonicalJson,
   policyWeakenedCandidate,
   type JsonValue,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { UsageError } from '../errors.js';

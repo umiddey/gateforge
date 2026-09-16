@@ -15,12 +15,12 @@ import {
   type ClassificationSignal,
   type ClassifierResourceRef,
   type PolicyFile,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import {
   HTTP_ENDPOINT_KIND,
   type HttpContractFact,
   type HttpMethod,
-} from '@gateforge/http-contract';
+} from '@gate-forge/http-contract';
 import {
   compileEndpointContribution,
   extractContractFacts,

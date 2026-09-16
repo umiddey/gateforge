@@ -12,8 +12,8 @@
 import { parse as parseYaml } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { withTempRepo } from '@gateforge/core';
-import { PolicyFileSchema } from '@gateforge/core';
+import { withTempRepo } from '@gate-forge/core';
+import { PolicyFileSchema } from '@gate-forge/core';
 import { POLICIES_TEMPLATE, TRANSPORT_ONLY_POLICY_EXAMPLE } from '../src/commands/init.js';
 import { installFixture, runCli, writeV2Manifest } from './helpers.js';
 import { startWitness } from '../../pack-playwright/src/witness/server.js';

@@ -24,7 +24,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Location } from '@gateforge/core';
+import type { Location } from '@gate-forge/core';
 
 /** Config file names checked at the repo root (first match wins). */
 const PLAYWRIGHT_CONFIG_NAMES = [

@@ -93,7 +93,7 @@ export function makeTempProject(label: string): string {
 	mkdirSync(join(dir, 'src'), { recursive: true });
 	mkdirSync(join(dir, 'specs'), { recursive: true });
 	// Link the monorepo's node_modules so specs resolve
-	// '@gateforge/pack-playwright' and 'playwright'.
+	// '@gate-forge/pack-playwright' and 'playwright'.
 	symlinkSync(join(ROOT, 'node_modules'), join(dir, 'node_modules'), 'dir');
 	writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ type: 'module' }, null, 2)}\n`);
 	writeFileSync(join(dir, 'src/accounts.js'), '// fixture source: the accounts resource lives here.\n');

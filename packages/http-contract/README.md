@@ -1,4 +1,4 @@
-# @gateforge/http-contract
+# @gate-forge/http-contract
 
 Framework-neutral canonical HTTP contract for Gateforge (ADR 0004): the
 strict `HttpContractFact` schema, typed outcome codes, canonical
@@ -6,7 +6,7 @@ path/method normalization, and the deterministic frontend-call ↔
 server-route join engine.
 
 This package owns **no framework parsing** (detector packs own that) and
-**no classification** (`@gateforge/core` owns that). Every export is a pure
+**no classification** (`@gate-forge/core` owns that). Every export is a pure
 function; identical inputs produce byte-identical outputs under any input
 permutation.
 

@@ -23,7 +23,7 @@ import type {
   SuppressionSignal,
   TestKind,
   WeakSignal,
-} from '@gateforge/core';
+} from '@gate-forge/core';
 import type { StaticTestFacts } from './static-discovery.js';
 import { BROWSER_FIXTURE_PARAMS } from './static-discovery.js';
 
