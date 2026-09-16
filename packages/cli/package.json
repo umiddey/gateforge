@@ -2,7 +2,6 @@
   "name": "@gateforge/cli",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "private": true,
   "description": "Gateforge CLI: init, discover, obligations, check, test-gates, baseline update.",
   "type": "module",
   "engines": {
@@ -18,8 +17,8 @@
     }
   },
   "files": [
-    "dist",
-    "bin"
+    "bin",
+    "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -28,15 +27,27 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gateforge/core": "*",
-    "@gateforge/plugin-protocol": "*",
-    "@gateforge/http-contract": "*",
-    "@gateforge/pack-fastapi": "*",
-    "@gateforge/pack-http": "*",
-    "@gateforge/pack-playwright": "*",
-    "@gateforge/pack-sqlalchemy": "*",
-    "@gateforge/pack-task": "*",
+    "@gateforge/core": "^0.1.0",
+    "@gateforge/plugin-protocol": "^0.1.0",
+    "@gateforge/http-contract": "^0.1.0",
+    "@gateforge/pack-fastapi": "^0.1.0",
+    "@gateforge/pack-http": "^0.1.0",
+    "@gateforge/pack-playwright": "^0.1.0",
+    "@gateforge/pack-sqlalchemy": "^0.1.0",
+    "@gateforge/pack-task": "^0.1.0",
     "picomatch": "^4.0.7",
     "yaml": "^2.8.1"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/gateforge.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/umiddey/gateforge/issues"
+  },
+  "homepage": "https://github.com/umiddey/gateforge#readme"
 }

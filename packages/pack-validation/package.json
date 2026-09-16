@@ -2,7 +2,6 @@
   "name": "@gateforge/pack-validation",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "private": true,
   "description": "Validation discovery pack: TS-only AST-light detector (GPP/3) for zod / joi / yup / class-validator request schemas; boundary + side-effect contracts.",
   "type": "module",
   "engines": {
@@ -15,8 +14,8 @@
     }
   },
   "files": [
-    "dist",
-    "README.md"
+    "README.md",
+    "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -24,11 +23,23 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gateforge/core": "*",
-    "@gateforge/plugin-protocol": "*"
+    "@gateforge/core": "^0.1.0",
+    "@gateforge/plugin-protocol": "^0.1.0"
   },
   "devDependencies": {
     "typescript": "*",
     "vitest": "*"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/gateforge.git",
+    "directory": "packages/pack-validation"
+  },
+  "bugs": {
+    "url": "https://github.com/umiddey/gateforge/issues"
+  },
+  "homepage": "https://github.com/umiddey/gateforge#readme"
 }

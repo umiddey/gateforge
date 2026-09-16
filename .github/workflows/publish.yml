@@ -1,0 +1,25 @@
+# Publishes every workspace package to the public npm registry on a semver
+# tag (v0.1.0 → 0.1.0). Requires the NPM_TOKEN repository secret with
+# automation-scoped publish rights for the @gateforge scope.
+name: publish
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org/'
+      - run: npm ci
+      - run: npm run build --workspaces --if-present
+      # Apache-2.0 requires the license text to ship with each package.
+      - run: npm run license:sync
+      - run: npm publish --workspaces
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

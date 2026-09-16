@@ -2,7 +2,6 @@
   "name": "@gateforge/pack-task",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "private": true,
   "description": "Background-task discovery pack: TS-only AST-light detector (GPP/3) for BullMQ / Bee-Queue / custom queues / message handlers / recurring jobs / @Task @Queue decorators, idempotency + retry-policy + terminal-on + observability contracts, audit-run entity-adapter schema.",
   "type": "module",
   "engines": {
@@ -18,8 +17,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
-    "README.md"
+    "README.md",
+    "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -27,7 +26,19 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gateforge/core": "*",
-    "@gateforge/plugin-protocol": "*"
-  }
+    "@gateforge/core": "^0.1.0",
+    "@gateforge/plugin-protocol": "^0.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/gateforge.git",
+    "directory": "packages/pack-task"
+  },
+  "bugs": {
+    "url": "https://github.com/umiddey/gateforge/issues"
+  },
+  "homepage": "https://github.com/umiddey/gateforge#readme"
 }

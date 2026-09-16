@@ -2,7 +2,6 @@
   "name": "@gateforge/pack-http",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "private": true,
   "description": "Generic HTTP exposure pack: TS detector for route registrations (Express, Fastify, Hono, NestJS), bounded static dataflow for frontend API-client calls (fetch, Axios, instances, wrappers, constants, URL builders), http.contract evidence facts plus exposure/lifecycle signals (ADR 0004, plan phases 3-4).",
   "type": "module",
   "engines": {
@@ -18,8 +17,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
-    "README.md"
+    "README.md",
+    "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -27,10 +26,22 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gateforge/core": "*",
-    "@gateforge/plugin-protocol": "*",
+    "@gateforge/core": "^0.1.0",
+    "@gateforge/plugin-protocol": "^0.1.0",
     "zod": "^4.1.5",
-    "@gateforge/http-contract": "*",
+    "@gateforge/http-contract": "^0.1.0",
     "typescript": "^5.9.2"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/gateforge.git",
+    "directory": "packages/pack-http"
+  },
+  "bugs": {
+    "url": "https://github.com/umiddey/gateforge/issues"
+  },
+  "homepage": "https://github.com/umiddey/gateforge#readme"
 }

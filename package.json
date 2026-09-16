@@ -14,7 +14,10 @@
   "scripts": {
     "test": "vitest run",
     "build": "npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "license:sync": "for p in packages/*/; do cp LICENSE \"$p\"; done",
+    "publish:all": "npm run build --workspaces --if-present && npm run license:sync && npm publish --workspaces",
+    "pack:check": "npm run build --workspaces --if-present && npm run license:sync && npm pack --dry-run --workspaces"
   },
   "devDependencies": {
     "@types/node": "^24.3.1",

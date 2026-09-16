@@ -2,7 +2,6 @@
   "name": "@gateforge/pack-playwright",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "private": true,
   "description": "Gateforge Playwright evidence pack: loopback witness service, engine-side adapter execution, trusted evidence fixture, verdict reporter.",
   "type": "module",
   "engines": {
@@ -35,8 +34,9 @@
     }
   },
   "files": [
+    "bin",
     "dist",
-    "bin"
+    "python"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -44,9 +44,21 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gateforge/core": "*",
+    "@gateforge/core": "^0.1.0",
     "playwright": "1.58.2",
     "typescript": "^5.9.2",
     "yaml": "^2.8.1"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/gateforge.git",
+    "directory": "packages/pack-playwright"
+  },
+  "bugs": {
+    "url": "https://github.com/umiddey/gateforge/issues"
+  },
+  "homepage": "https://github.com/umiddey/gateforge#readme"
 }

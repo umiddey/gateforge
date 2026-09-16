@@ -2,7 +2,6 @@
   "name": "@gateforge/pack-webhook",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "private": true,
   "description": "Webhook contract pack: TS-only detector for webhook endpoint patterns (Express router.post('/webhook'|'/hook'|'/callback'), Fastify/Hono equivalents, @webhook/@on decorator) emitting webhook.endpoint resources with signature/replay/retry attributes; loopback example server with HMAC-SHA256 verification, timestamp anti-replay, in-memory delivery dedup, bounded retries to prove five obligation contracts end-to-end.",
   "type": "module",
   "engines": {
@@ -15,8 +14,8 @@
     }
   },
   "files": [
-    "dist",
-    "README.md"
+    "README.md",
+    "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -24,8 +23,20 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gateforge/core": "*",
-    "@gateforge/plugin-protocol": "*",
+    "@gateforge/core": "^0.1.0",
+    "@gateforge/plugin-protocol": "^0.1.0",
     "zod": "^4.1.5"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/gateforge.git",
+    "directory": "packages/pack-webhook"
+  },
+  "bugs": {
+    "url": "https://github.com/umiddey/gateforge/issues"
+  },
+  "homepage": "https://github.com/umiddey/gateforge#readme"
 }
