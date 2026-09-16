@@ -1,12 +1,17 @@
 # Publishes every workspace package to the public npm registry on a semver
-# tag (v0.1.0 → 0.1.0). Requires the NPM_TOKEN repository secret with
-# automation-scoped publish rights for the @gateforge scope.
+# tag (v0.2.0 → 0.2.0) via npm TRUSTED PUBLISHING: the workflow's short-lived
+# OIDC token authenticates the push — no NPM_TOKEN secret exists or is needed.
+# One-time bootstrap: the packages' FIRST version is published manually
+# (npm run publish:all); then register this workflow as the trusted
+# publisher on each package: npmjs.com → package → Settings → Trusted
+# Publisher → umiddey/gateforge, workflow publish.yml.
 name: publish
 on:
   push:
     tags: ['v*']
 permissions:
   contents: read
+  id-token: write
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -20,6 +25,4 @@ jobs:
       - run: npm run build --workspaces --if-present
       # Apache-2.0 requires the license text to ship with each package.
       - run: npm run license:sync
-      - run: npm publish --workspaces
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --workspaces --provenance
