@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-auth",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "license": "Apache-2.0",
   "description": "Authorization discovery pack: AST/heuristic detection of role guards, tenant scoping, and authentication enforcement in TypeScript/JavaScript HTTP routes; emits auth resource per guarded endpoint with roleRequirement + tenancy attributes; ships the auth obligation vocabulary (role-allowed/role-denied/tenant-isolated/denied-no-side-effect/forged-token-rejected).",
   "type": "module",
