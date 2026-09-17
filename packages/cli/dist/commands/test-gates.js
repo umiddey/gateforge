@@ -805,6 +805,12 @@ async function supervisedTestGates(io, options) {
                     ? { GATEFORGE_TARGET_FINGERPRINT: io.env['GATEFORGE_TARGET_FINGERPRINT'] }
                     : {}),
                 ...(witnessVerifierKey !== undefined ? { [VERIFIER_KEY_ENV]: witnessVerifierKey } : {}),
+                // Adapter-configuration passthrough (non-secret): server-witnessed
+                // probes may target a disposable database container when the wired
+                // suite runs against one. Never carries gate authority.
+                ...(io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== undefined && io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== ''
+                    ? { GATEFORGE_PROBE_DB_CONTAINER: io.env['GATEFORGE_PROBE_DB_CONTAINER'] }
+                    : {}),
             });
         }
         catch (error) {
