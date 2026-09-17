@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-playwright",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "license": "Apache-2.0",
   "description": "Gateforge Playwright evidence pack: loopback witness service, engine-side adapter execution, trusted evidence fixture, verdict reporter.",
   "type": "module",
