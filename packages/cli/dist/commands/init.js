@@ -25,7 +25,7 @@ import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { installCommitHook, writeStandaloneGateScript } from '../git-hooks.js';
 import { appendPreCommitHook, ensureHookScript, engineRootFromInvocation } from './blocking.js';
-export const INIT_USAGE = 'usage: gateforge init [--languages <comma,list>] [--blocking] [--strict-e2e]';
+export const INIT_USAGE = 'usage: gateforge init [--languages <comma,list>] [--blocking] [--pre-commit] [--mode changed|staged] [--ci] [--no-ci] [--strict-e2e]';
 const BUNDLED_PLUGIN_MODULES = Object.freeze({
     'gateforge.pack-fastapi': '@gate-forge/pack-fastapi',
     'gateforge.pack-http': '@gate-forge/pack-http',
@@ -451,13 +451,25 @@ function writeGitlabCiTemplate(io) {
         writeLine(io.stdout, `exists, leaving untouched: ${path}`);
     }
     const gitlabCi = '.gitlab-ci.yml';
+    const local = "  - local: '.gateforge/ci/gitlab-gateforge.yml'";
     if (!existsSync(gitlabCi)) {
-        writeFileSync(gitlabCi, `include:\n  - local: '.gateforge/ci/gitlab-gateforge.yml'\n`);
+        writeFileSync(gitlabCi, `include:\n${local}\n`);
         writeLine(io.stdout, `created: ${gitlabCi} (includes the gateforge jobs)`);
+        return;
     }
-    else if (!readFileSync(gitlabCi, 'utf8').includes('gitlab-gateforge.yml')) {
-        writeLine(io.stdout, `action needed: add "include: - local: '.gateforge/ci/gitlab-gateforge.yml'" to ${gitlabCi} (file left untouched)`);
+    const current = readFileSync(gitlabCi, 'utf8');
+    if (current.includes('gitlab-gateforge.yml')) {
+        writeLine(io.stdout, `exists, leaving untouched: ${gitlabCi} (gateforge include present)`);
+        return;
     }
+    if (/^include:/m.test(current)) {
+        // Append the local entry under the existing include: key (block style).
+        writeFileSync(gitlabCi, current.replace(/^include:[^\n]*/m, (match) => `${match}\n${local}`));
+        writeLine(io.stdout, `updated: ${gitlabCi} (gateforge include added under existing include)`);
+        return;
+    }
+    writeFileSync(gitlabCi, `${current.endsWith('\n') ? current : current + '\n'}include:\n${local}\n`);
+    writeLine(io.stdout, `updated: ${gitlabCi} (include appended)`);
 }
 /**
  * Asks (TTY only) whether gateforge should be a blocking gate. Flags win:
@@ -567,19 +579,45 @@ export async function initCommand(io, argv) {
         target.write();
         writeLine(io.stdout, `created: ${target.path}`);
     }
+    // Enforcement wiring is granular (flags win; TTY prompts fill the gaps;
+    // non-interactive runs default to scaffold-only so tests and CI never
+    // hang on a prompt):
+    //   --pre-commit        wire the pre-commit gate hook
+    //   --mode changed|staged
+    //                       changed = debt-friendly `check --changed`;
+    //                       staged  = strict `check --staged --require-e2e`
+    //                       (+ the standalone staged-gate script)
+    //   --ci / --no-ci      wire the .gitlab-ci.yml include + job template
+    //   --blocking          legacy all-in: pre-commit (staged) + CI
+    const modeValue = options['mode'];
+    if (modeValue !== undefined) {
+        if (typeof modeValue !== 'string' || (modeValue !== 'changed' && modeValue !== 'staged')) {
+            throw new UsageError(`flag '--mode' must be 'changed' or 'staged'`);
+        }
+    }
     const blocking = await resolveBlocking(io, options);
-    if (blocking) {
+    const preCommit = options['pre-commit'] === true || blocking;
+    const ci = options['ci'] === true || blocking;
+    const mode = typeof modeValue === 'string'
+        ? modeValue
+        : blocking
+            ? 'staged'
+            : 'changed';
+    if (preCommit) {
         const hookDir = join(gateforgeDir, 'hooks');
         mkdirSync(hookDir, { recursive: true });
         // One generated hook across all wiring commands: the resolution order
-        // is shared; init alone chooses the strict staged-gate invocation.
-        ensureHookScript(io, engineRootFromInvocation(), ['check', '--staged', '--require-e2e']);
+        // is shared; only the gate invocation differs, recorded at generation
+        // time by the wiring command's mode.
+        const gateArgs = mode === 'staged' ? ['check', '--staged', '--require-e2e'] : ['check', '--changed'];
+        ensureHookScript(io, engineRootFromInvocation(), gateArgs);
         // The ACTIVE hook (plan Phase 5 item 1): install into the resolved
         // hooks directory AND verify activation — never merely write a
-        // config file. The standalone staged-gate script is the chaining
-        // target named by the conflict report.
-        const gateScript = writeStandaloneGateScript(cwd);
-        writeLine(io.stdout, `created: ${gateScript} (standalone staged gate: check --staged --require-e2e)`);
+        // config file.
+        if (mode === 'staged') {
+            const gateScript = writeStandaloneGateScript(cwd);
+            writeLine(io.stdout, `created: ${gateScript} (standalone staged gate: check --staged --require-e2e)`);
+        }
         const outcome = installCommitHook(cwd, io.env);
         // A pre-commit-FRAMEWORK-managed .git hook is not a conflict: the
         // framework regenerates that file from .pre-commit-config.yaml on every
@@ -606,9 +644,9 @@ export async function initCommand(io, argv) {
         appendPreCommitHook(io);
         writeGitlabCiTemplate(io);
         writeLine(io.stdout, frameworkManaged
-            ? 'blocking gate wired through the pre-commit framework (gateforge-check in .pre-commit-config.yaml) + .gitlab-ci.yml include. ' +
+            ? `blocking gate wired through the pre-commit framework (gateforge-check in .pre-commit-config.yaml, ${gateArgs.join(' ')}) + .gitlab-ci.yml include. ` +
                 'Honest limit: `git commit --no-verify` bypasses the local hook (ADR 0005 D1) — standard enforcement also requires the trusted server check.'
-            : 'blocking gate wired: active pre-commit hook (gateforge check --staged --require-e2e) + .gitlab-ci.yml include. ' +
+            : `blocking gate wired: active pre-commit hook (${gateArgs.join(' ')}) + .gitlab-ci.yml include. ` +
                 'Honest limit: `git commit --no-verify` bypasses the local hook (ADR 0005 D1) — standard enforcement also requires the trusted server check.');
     }
     writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');
