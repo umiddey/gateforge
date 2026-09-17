@@ -626,12 +626,21 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     const gateScript = writeStandaloneGateScript(cwd);
     writeLine(io.stdout, `created: ${gateScript} (standalone staged gate: check --staged --require-e2e)`);
     const outcome = installCommitHook(cwd, io.env);
+    // A pre-commit-FRAMEWORK-managed .git hook is not a conflict: the
+    // framework regenerates that file from .pre-commit-config.yaml on every
+    // install, so chaining into it would be silently wiped. Gateforge
+    // integrates through the framework config instead (appendPreCommitHook
+    // below) — the hook block runs on every commit like any other.
+    const frameworkManaged = outcome.status === 'framework';
     switch (outcome.status) {
       case 'installed':
         writeLine(io.stdout, `installed: ${outcome.detail}`);
         break;
       case 'verified':
         writeLine(io.stdout, `verified: ${outcome.detail}`);
+        break;
+      case 'framework':
+        writeLine(io.stdout, `framework-managed pre-commit hook detected: wiring through .pre-commit-config.yaml`);
         break;
       case 'conflict':
       case 'incomplete':
@@ -645,8 +654,11 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     writeGitlabCiTemplate(io);
     writeLine(
       io.stdout,
-      'blocking gate wired: active pre-commit hook (gateforge check --staged --require-e2e) + .gitlab-ci.yml include. ' +
-        'Honest limit: `git commit --no-verify` bypasses the local hook (ADR 0005 D1) — standard enforcement also requires the trusted server check.',
+      frameworkManaged
+        ? 'blocking gate wired through the pre-commit framework (gateforge-check in .pre-commit-config.yaml) + .gitlab-ci.yml include. ' +
+            'Honest limit: `git commit --no-verify` bypasses the local hook (ADR 0005 D1) — standard enforcement also requires the trusted server check.'
+        : 'blocking gate wired: active pre-commit hook (gateforge check --staged --require-e2e) + .gitlab-ci.yml include. ' +
+            'Honest limit: `git commit --no-verify` bypasses the local hook (ADR 0005 D1) — standard enforcement also requires the trusted server check.',
     );
   }
   writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');
