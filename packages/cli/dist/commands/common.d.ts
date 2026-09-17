@@ -1,6 +1,5 @@
 import { type GateforgeConfig } from '@gate-forge/core';
-/** Tool version stamped into SARIF `tool.driver.version` (pin #10). */
-export declare const VERSION = "0.1.0";
+export declare const VERSION: string;
 /**
  * Env var carrying the witness verifier key (pin #7, GF-23). The key is
  * read from the environment, NEVER from argv: `/proc/<pid>/cmdline` is

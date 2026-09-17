@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/cli",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "license": "Apache-2.0",
   "description": "Gateforge CLI: init, discover, obligations, check, test-gates, baseline update.",
   "type": "module",

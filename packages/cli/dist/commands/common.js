@@ -5,8 +5,15 @@
 import { join } from 'node:path';
 import { loadConfig } from '@gate-forge/core';
 import { UsageError } from '../errors.js';
-/** Tool version stamped into SARIF `tool.driver.version` (pin #10). */
-export const VERSION = '0.1.0';
+/**
+ * Tool version stamped into SARIF `tool.driver.version` (pin #10) and
+ * reported by `--version`. Read from the package manifest at runtime so
+ * the reported version always matches the published release — a
+ * hardcoded constant drifted silently across releases (0.1.0 lie).
+ */
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+export const VERSION = require('../../package.json').version;
 /**
  * Env var carrying the witness verifier key (pin #7, GF-23). The key is
  * read from the environment, NEVER from argv: `/proc/<pid>/cmdline` is
