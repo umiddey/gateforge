@@ -95,7 +95,7 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
       expect(stdout).toContain('entry:finding: 1');
       expect(stdout).toContain('shrink-only');
       // Wiring went through the shared init --blocking path.
-      expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.sh'))).toBe(true);
+      expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(true);
       expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(true);
       expect(readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8')).toContain('gateforge-check');
 
