@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-sqlalchemy",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "license": "Apache-2.0",
   "description": "SQLAlchemy CRUD discovery pack: AST-only python detector (GPP/3), in-process TS discover entry, configurable plane mapping, entity-adapter schema.",
   "type": "module",

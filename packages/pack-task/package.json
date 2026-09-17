@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-task",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "license": "Apache-2.0",
   "description": "Background-task discovery pack: TS-only AST-light detector (GPP/3) for BullMQ / Bee-Queue / custom queues / message handlers / recurring jobs / @Task @Queue decorators, idempotency + retry-policy + terminal-on + observability contracts, audit-run entity-adapter schema.",
   "type": "module",

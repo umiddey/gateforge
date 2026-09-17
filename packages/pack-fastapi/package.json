@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-fastapi",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "license": "Apache-2.0",
   "description": "FastAPI server-route detector: Python AST scanner served over GPP/3 (pack-sqlalchemy pattern), emitting http.contract evidence facts with canonical effective paths plus exposure/lifecycle signals (ADR 0004 D1, plan phase 2).",
   "type": "module",
