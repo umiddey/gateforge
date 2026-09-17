@@ -321,10 +321,14 @@ export function repoRelative(cwd, path) {
 }
 /**
  * Executes one configured diagnostic suite ONCE (plan Phase 4 item 9, §3.5):
- * an isolated process (every `GATEFORGE_*` variable stripped), the
- * configured argv + a junit-XML report into the EXCLUDED run-state dir,
- * and a finite timeout. The result is advisory diagnostic data — it is
- * never witness evidence and never satisfies an E2E obligation.
+ * an isolated process (default: every `GATEFORGE_*` variable stripped —
+ * {@link options.env} overrides this ONLY for the supervised WITNESSED
+ * participant, which receives the run-scoped env built by
+ * `buildWitnessedPytestChildEnv`), the configured argv + a junit-XML
+ * report into the EXCLUDED run-state dir, and a finite timeout. The
+ * result is diagnostic data — advisory-only for default suites; a
+ * `witnessed: true` suite's outcome additionally blocks the supervised
+ * gate (the mapped test's red is never graded green).
  *
  * Exit semantics (plan §3.5 / pytest exit codes):
  * - `completed`: run finished, ≥1 passed, no unexpected failures;
@@ -338,11 +342,16 @@ export function repoRelative(cwd, path) {
  *   repoRoot: absolute repo root (suite.cwd resolves against it).
  *   stateDir: absolute run-state directory (excluded from inputs); the
  *     junit report lands at `<stateDir>/diagnostics/<suite.name>.xml`.
+ *   options: optional `env` — the child environment override. The
+ *     advisory path never passes it (byte-identical `untrustedEnv`
+ *     stripping); the supervised witnessed participant passes the
+ *     run-scoped env so its persistence-intent writes can reach the
+ *     trusted drain's spool.
  *
  * Returns:
  *   Promise<DiagnosticRunResult>: the structured diagnostic result.
  */
-export async function executePytestSuite(suite, repoRoot, stateDir) {
+export async function executePytestSuite(suite, repoRoot, stateDir, options) {
     const reportPath = join(stateDir, 'diagnostics', `${suite.name}.xml`);
     const argv = pytestExecutionArgv(suite, stateDir);
     const base = {
@@ -365,7 +374,11 @@ export async function executePytestSuite(suite, repoRoot, stateDir) {
     };
     const child = spawn(argv[0] ?? '', argv.slice(1), {
         cwd: join(repoRoot, suite.cwd),
-        env: untrustedEnv(process.env),
+        // Advisory default: untrustedEnv strips every GATEFORGE_* name. The
+        // witnessed participant override (options.env) is built exclusively
+        // by the trusted CLI through buildWitnessedPytestChildEnv — the
+        // run-scoped allowlist that never carries the verifier key.
+        env: options?.env ?? untrustedEnv(process.env),
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     const outcome = await new Promise((settle) => {

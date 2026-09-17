@@ -6,7 +6,13 @@ export interface DiscoverOptions {
     cwd: string;
     /** The validated gateforge config. */
     config: GateforgeConfig;
-    /** Collect configured pytest suites (default: list them only). */
+    /**
+     * Collect configured pytest suites (default: list them only). The
+     * `tests discover` command keeps its explicit `--pytest` opt-in, but
+     * every MAPPING/GATE consumer passes true: staleness and sealing are
+     * judged against the catalog, so a pytest selector must resolve (GAP 1
+     * fix, server-witnessed channel).
+     */
     collectPytest?: boolean;
     /** Native playwright `--list` timeout (default 60s). */
     playwrightTimeoutMs?: number;

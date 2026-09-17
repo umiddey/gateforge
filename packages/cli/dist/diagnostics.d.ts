@@ -16,6 +16,15 @@
  *   DIAGNOSTIC_RESULT_STALE surface in the diagnostic report ONLY;
  * - stdout never prints an unqualified "all tests passed" that could
  *   hide a diagnostic failure.
+ *
+ * WITNESSED suites (server-witnessed persistence channel; `witnessed:
+ * true` in `.gateforge.yml`) are NOT advisory diagnostics and never run
+ * here: the advisory window strips every GATEFORGE_* variable, so the
+ * participant could not even address the intents spool, and its result
+ * must never hide behind the advisory banner. They run through
+ * {@link runWitnessedPytestSuites} — only from the supervised test-gates
+ * window, with the run-scoped env, where a failed/incomplete run BLOCKS
+ * the gate (the mapped server-e2e test's red is never graded green).
  */
 import { type GateforgeConfig } from '@gate-forge/core';
 import { type DiagnosticRunResult } from '@gate-forge/pack-playwright';
@@ -57,25 +66,93 @@ export interface DiagnosticsRun {
     previousReportStale: boolean;
     /** True when the previous saved report existed and matched inputs. */
     previousReportFresh: boolean;
+    /**
+     * WITNESSED suite names this advisory run EXCLUDED (they run only in
+     * the supervised test-gates window, where their result grades).
+     * Surfaced so an exclusion is always visible — never silent.
+     */
+    witnessedExcluded: string[];
 }
 /**
- * Runs the configured diagnostic suites (plan Phase 4 item 9) and saves
- * the report. Each suite runs ONCE via its adapter in an isolated
- * process. With no suites configured this is a no-op (exit 0, feature
- * off) — the alarm is opt-in and never invents suites.
+ * Runs the configured ADVISORY diagnostic suites (plan Phase 4 item 9)
+ * and saves the report. Each suite runs ONCE via its adapter in an
+ * isolated process. Suites marked `witnessed: true` are EXCLUDED here
+ * (surfaced on {@link DiagnosticsRun.witnessedExcluded}) — the advisory
+ * window strips every GATEFORGE_* variable, so a witnessed participant
+ * could never address the intents spool, and its result grades only in
+ * the supervised window. With no (non-witnessed) suites configured this
+ * is a no-op run (exit 0, feature off) — the alarm is opt-in and never
+ * invents suites.
  *
  * Args:
  *   input: config, cwd, state dir, current input digest, optional suite
  *     filter, and the injected instant.
  *
  * Returns:
- *   Promise<DiagnosticsRun>: results, aggregated exit code, and the
- *   staleness verdict on any previously saved report.
+ *   Promise<DiagnosticsRun>: results, aggregated exit code, the
+ *   staleness verdict on any previously saved report, and the witnessed
+ *   suites this advisory run excluded.
  *
  * Throws:
- *   UsageError: when `suiteName` matches no configured suite (exit 2).
+ *   UsageError: when `suiteName` matches no configured suite (exit 2) or
+ *     names a WITNESSED suite (running it advisory would run the mapped
+ *     test outside the only window where its evidence can grade — fail
+ *     closed with the exact command that does run it).
  */
 export declare function runDiagnosticSuites(input: RunDiagnosticsInput): Promise<DiagnosticsRun>;
+/** Everything {@link runWitnessedPytestSuites} needs. */
+export interface WitnessedPytestRunInput {
+    /** Validated `.gateforge.yml` (the `witnessed: true` suites). */
+    config: GateforgeConfig;
+    /** Absolute repo root (suite.cwd resolves against it). */
+    cwd: string;
+    /** Absolute run-state directory (junit XMLs land here, excluded). */
+    stateDir: string;
+    /**
+     * The supervised participant env built by
+     * `buildWitnessedPytestChildEnv` (run-scoped: STATE_DIR/RUN_ID locate
+     * the intents spool; WITNESS_URL/RUN_TOKEN wire the run; NEVER the
+     * verifier key).
+     */
+    childEnv: Record<string, string>;
+}
+/** The supervised witnessed pytest step's result. */
+export interface WitnessedPytestRun {
+    /** Per-suite results (sorted by suite name). */
+    results: DiagnosticRunResult[];
+    /**
+     * Typed blocking details: one per suite that did not COMPLETE cleanly
+     * (test failures, timeout, collection error, zero tests). The mapped
+     * server-e2e test's red is never graded green — the caller projects
+     * these into run-blocking entries.
+     */
+    blocking: string[];
+}
+/**
+ * Runs the WITNESSED pytest participants (diagnostics suites marked
+ * `witnessed: true`) INSIDE the supervised window — the caller invokes
+ * this only while the supervisor spool drain is live, so a pre intent is
+ * forwarded to the witness before the suite's mutation and every intent
+ * reaches the verifier-key drain. Each suite runs through the SAME
+ * bounded adapter as advisory diagnostics (configured argv verbatim,
+ * finite timeout, junit XML into the excluded run-state dir), but with
+ * the run-scoped child env, and its outcome GRADES: any suite that does
+ * not complete cleanly yields a blocking detail (never advisory).
+ *
+ * The suites stay UNTRUSTED: they can only WRITE intents — the witness
+ * stamps evidence from its own server probe, and the child env (by
+ * construction) never carries the verifier key or any parent-side state
+ * beyond the run identity.
+ *
+ * Args:
+ *   input: config, cwd, state dir, the witnessed child env, and the
+ *     injected instant.
+ *
+ * Returns:
+ *   Promise<WitnessedPytestRun>: per-suite results plus typed blocking
+ *   details (empty only when every witnessed suite completed).
+ */
+export declare function runWitnessedPytestSuites(input: WitnessedPytestRunInput): Promise<WitnessedPytestRun>;
 /**
  * Aggregates the per-suite exit code (plan §3.5 / `tests diagnose`
  * contract): 0 = completed run with ≥1 passing test and no unexpected

@@ -34,6 +34,31 @@
  *   outcomes document. The legacy `--suite` escape still wires its own
  *   env outside this allowlist — it is a dev loop, never the strict gate.
  * - Everything else: not allowlisted → excluded by default.
+ *
+ * WITNESSED PYTEST PARTICIPANT ({@link buildWitnessedPytestChildEnv}):
+ * the server-witnessed persistence channel needs a supervised pytest run
+ * whose intents can reach the spool (`$STATE_DIR/spool/$RUN_ID/
+ * persistence-intents.jsonl`), so the playwright runner-child rules
+ * above CANNOT apply verbatim — but the channel's own trust model makes
+ * the relaxation sound and SCOPED: the intents spool is UNTRUSTED (the
+ * witness verifies every claim with its own adapter server probe; a
+ * written intent can never stamp evidence), and the witnessed participant
+ * receives NOTHING beyond the run identity it needs to address the spool:
+ * - allowed GATEFORGE_* names: GATEFORGE_STATE_DIR, GATEFORGE_RUN_ID
+ *   (locate the run's intents spool), GATEFORGE_WITNESS_URL,
+ *   GATEFORGE_RUN_TOKEN (run-scoped submission wiring, both already
+ *   non-secret by design);
+ * - still forbidden, as everywhere: GATEFORGE_WITNESS_VERIFIER_KEY
+ *   (refused even when a caller explicitly stuffs it into `vars`) and
+ *   every OTHER parent-side name (obligations/adapters/classifications/
+ *   outcomes paths — the witnessed participant is a pytest process with
+ *   none of the engine reporter's trusted-config channels, so those
+ *   names have no honest business crossing);
+ * - the rest of the ambient environment crosses MINUS every GATEFORGE_*
+ *   name (same isolation discipline as the advisory pytest diagnostics
+ *   runner `untrustedEnv`): the consumer's own operational env (database
+ *   DSNs, interpreters, locale) is not gateforge wiring and must reach
+ *   the suite, while ambient gateforge state must never leak in.
  */
 /** Typed error for a forbidden runner-child environment. */
 export class RunnerEnvError extends Error {
@@ -132,6 +157,94 @@ export function buildRunnerChildEnv(vars, ambient = process.env) {
     // and parent-side checks above already ran over ALL of vars.
     for (const [name, value] of Object.entries(vars)) {
         if (child[name] === undefined && value !== '')
+            child[name] = value;
+    }
+    return child;
+}
+/**
+ * The `GATEFORGE_*` names a WITNESSED pytest participant (diagnostics
+ * suites marked `witnessed: true` in `.gateforge.yml`) may receive inside
+ * the supervised window: exactly the run identity needed to address the
+ * run's persistence-intents spool (STATE_DIR + RUN_ID) plus the
+ * already-non-secret run wiring (witness URL + run token). The verifier
+ * key and every other parent-side name are NEVER on this list — see the
+ * module doc for why the relaxation is sound and scoped.
+ */
+export const WITNESSED_PYTEST_RUN_ENV = [
+    'GATEFORGE_STATE_DIR',
+    'GATEFORGE_RUN_ID',
+    'GATEFORGE_WITNESS_URL',
+    'GATEFORGE_RUN_TOKEN',
+];
+/**
+ * Builds the WITNESSED pytest participant's environment (the supervised
+ * diagnostics suites marked `witnessed: true`): the ambient environment
+ * minus EVERY `GATEFORGE_*` name (the `untrustedEnv` discipline the
+ * advisory pytest runner already applies — the consumer's own operational
+ * env such as database DSNs crosses, gateforge wiring does not), plus the
+ * {@link WITNESSED_PYTEST_RUN_ENV} names from `vars` (run-scoped, so the
+ * suite can locate ONLY the intents spool it is allowed to write).
+ *
+ * Fail closed, same discipline as {@link buildRunnerChildEnv}: a caller
+ * that stuffs the verifier key — or any parent-side name OUTSIDE the
+ * witnessed allowlist — into `vars` is a wiring bug and throws instead of
+ * leaking. The playwright runner child NEVER goes through this builder:
+ * its env rules ({@link buildRunnerChildEnv}) are unchanged byte-for-byte.
+ *
+ * Args:
+ *   vars: supervisor-supplied run variables (run-scoped allowlist wins
+ *     over ambient; a forbidden name here throws).
+ *   ambient: the parent environment (default `process.env`).
+ *
+ * Returns:
+ *   Record<string, string>: the witnessed participant's environment.
+ *
+ * Throws:
+ *   RunnerEnvError: when `vars` carries the verifier key or a parent-side
+ *     name that is not on the witnessed allowlist.
+ */
+export function buildWitnessedPytestChildEnv(vars, ambient = process.env) {
+    for (const secret of RUNNER_SECRET_ENV) {
+        if (vars[secret] !== undefined) {
+            throw new RunnerEnvError(`refusing to pass '${secret}' to the witnessed pytest participant: signing material ` +
+                'never reaches untrusted test code through ANY channel (the intents spool is ' +
+                'untrusted by design — the witness verifies every claim with its own server probe)');
+        }
+    }
+    const witnessed = new Set(WITNESSED_PYTEST_RUN_ENV);
+    for (const parentSide of RUNNER_PARENT_SIDE_ENV) {
+        if (!witnessed.has(parentSide) && vars[parentSide] !== undefined) {
+            throw new RunnerEnvError(`refusing to pass '${parentSide}' to the witnessed pytest participant: only the ` +
+                `run-scoped names [${WITNESSED_PYTEST_RUN_ENV.join(', ')}] cross to the intents ` +
+                'writer — the participant can never address obligations, adapters, classifications, ' +
+                'or the outcomes document');
+        }
+    }
+    const child = {};
+    // Ambient minus every GATEFORGE_* name: the consumer's operational env
+    // (DSNs, interpreters) is not gateforge wiring and must reach the suite;
+    // ambient gateforge state (including the verifier key, if exported)
+    // never does.
+    for (const [name, value] of Object.entries(ambient)) {
+        if (value === undefined || value === '')
+            continue;
+        if (name.startsWith('GATEFORGE_'))
+            continue;
+        child[name] = value;
+    }
+    // Run-scoped allowlist from trusted supervision, wins over ambient.
+    for (const name of WITNESSED_PYTEST_RUN_ENV) {
+        const value = vars[name] ?? ambient[name];
+        if (value !== undefined && value !== '')
+            child[name] = value;
+    }
+    // Non-GATEFORGE supervisor vars (suite-specific wiring) pass through;
+    // every GATEFORGE_* name not on the witnessed allowlist was already
+    // refused above, so nothing privileged can ride this loop.
+    for (const [name, value] of Object.entries(vars)) {
+        if (name.startsWith('GATEFORGE_'))
+            continue;
+        if (value !== '')
             child[name] = value;
     }
     return child;

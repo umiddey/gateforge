@@ -157,6 +157,22 @@ export const DiagnosticSuiteSchema = z
     testPaths: z.array(z.string().min(1)).min(1),
     /** Finite wall-clock bound for one adapter invocation (seconds). */
     timeoutMs: z.number().int().min(1),
+    /**
+     * WITNESSED suite (server-witnessed persistence channel; default
+     * false = advisory §3.5 diagnostics). A suite marked `witnessed:
+     * true` is the SUPERVISED pytest participant: it does NOT run in the
+     * advisory pre-step (where every GATEFORGE_* variable is stripped and
+     * results never grade) — it runs INSIDE the supervised test-gates
+     * window with a run-scoped env (GATEFORGE_STATE_DIR, GATEFORGE_RUN_ID,
+     * GATEFORGE_WITNESS_URL, GATEFORGE_RUN_TOKEN — never the verifier
+     * key), so its persistence-intent writes reach the trusted drain and
+     * the witness can stamp `channel: 'server'` evidence for the
+     * server-e2e obligations its tests are mapped to. The suite itself
+     * stays untrusted: it can only WRITE intents; every observation is
+     * the witness's own server probe, and a failed/incomplete witnessed
+     * run blocks the gate (the mapped test's red is never graded green).
+     */
+    witnessed: z.boolean().optional(),
 })
     .strict();
 /**

@@ -42,7 +42,7 @@ export { gateforgeGlobalSetup, gateforgeGlobalTeardown, startWitnessProcess } fr
  * records for obligations registered `kind: server-e2e`.
  */
 export { appendSpoolEvent, readSpoolEvents, spoolPathFor, appendPersistenceIntent, readPersistenceIntents, persistenceIntentsPathFor, startSupervisorSpoolDrain, SupervisorClient, DEFAULT_DRAIN_POLL_MS, } from './supervisor/index.js';
-export { buildRunnerChildEnv, RunnerEnvError, RUNNER_SECRET_ENV, RUNNER_PARENT_SIDE_ENV, RUNNER_GATEFORGE_ALLOWLIST, RUNNER_SYSTEM_ALLOWLIST, } from './discovery/runner-env.js';
+export { buildRunnerChildEnv, buildWitnessedPytestChildEnv, RunnerEnvError, RUNNER_SECRET_ENV, RUNNER_PARENT_SIDE_ENV, RUNNER_GATEFORGE_ALLOWLIST, RUNNER_SYSTEM_ALLOWLIST, WITNESSED_PYTEST_RUN_ENV, } from './discovery/runner-env.js';
 export { synthesizeTrustedConfig, trustedReporterEntry, TRUSTED_CONFIG_FILE, TRUSTED_REPORTER_OPTIONS_FILE, } from './discovery/trusted-config.js';
 /**
  * Test discovery (plan 2026-09-13 phase 2): bounded static scanning,

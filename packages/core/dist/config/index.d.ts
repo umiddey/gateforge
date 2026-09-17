@@ -53,6 +53,7 @@ export declare const DiagnosticSuiteSchema: z.ZodObject<{
     argv: z.ZodArray<z.ZodString>;
     testPaths: z.ZodArray<z.ZodString>;
     timeoutMs: z.ZodNumber;
+    witnessed: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strict>;
 /** Inferred diagnostic-suite shape. */
 export type DiagnosticSuite = z.infer<typeof DiagnosticSuiteSchema>;
@@ -71,6 +72,7 @@ export declare const DiagnosticsConfigSchema: z.ZodObject<{
         argv: z.ZodArray<z.ZodString>;
         testPaths: z.ZodArray<z.ZodString>;
         timeoutMs: z.ZodNumber;
+        witnessed: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strict>>;
 }, z.core.$strict>;
 /** Inferred diagnostics-section shape. */
@@ -160,6 +162,7 @@ export declare const GateforgeConfigSchema: z.ZodObject<{
             argv: z.ZodArray<z.ZodString>;
             testPaths: z.ZodArray<z.ZodString>;
             timeoutMs: z.ZodNumber;
+            witnessed: z.ZodOptional<z.ZodBoolean>;
         }, z.core.$strict>>;
     }, z.core.$strict>>;
 }, z.core.$strict>;
