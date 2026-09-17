@@ -32,6 +32,22 @@ describe('gateforge init', () => {
     });
   });
 
+  it('init --pre-commit --mode changed --ci wires the debt-friendly gate and the CI include', async () => {
+    await withTempRepo({}, async (repo) => {
+      const first = await runCli(repo, ['init', '--pre-commit', '--mode', 'changed', '--ci']);
+      expect(first.code).toBe(0);
+      const hook = readFileSync(repo.path('.gateforge/hooks/gateforge-check.mjs'), 'utf8');
+      expect(hook).toContain('const args = ["check","--changed"]');
+      expect(hook).not.toContain('--staged');
+      // CI: template created AND the include wired into .gitlab-ci.yml
+      expect(readFileSync(repo.path('.gitlab-ci.yml'), 'utf8')).toContain('.gateforge/ci/gitlab-gateforge.yml');
+      expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(true);
+      // changed mode: no standalone strict staged script
+      expect(existsSync(repo.path('.gateforge/hooks/gateforge-staged.sh'))).toBe(false);
+      expect(existsSync(repo.path('.gateforge/baselines/obligations.json'))).toBe(true);
+    });
+  });
+
   it('--blocking integrates through a framework-managed pre-commit hook without manual chaining', async () => {
     await withTempRepo({}, async (repo) => {
       // A pre-commit-FRAMEWORK-generated .git hook: regenerated from
@@ -58,6 +74,9 @@ describe('gateforge init', () => {
       // the framework then runs it on every commit.
       const precommit = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8');
       expect(precommit).toContain('gateforge-check');
+      // The appended block must be VALID YAML — a text-only append that
+      // breaks indentation bricks every commit in the consumer repo.
+      expect(() => parseYaml(precommit)).not.toThrow();
       expect(precommit).toContain('existing-hook');
       expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(true);
       // Idempotent rerun stays green.
@@ -75,6 +94,9 @@ describe('gateforge init', () => {
       expect(existsSync(hook)).toBe(true);
       const precommit = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8');
       expect(precommit).toContain('gateforge-check');
+      // The appended block must be VALID YAML — a text-only append that
+      // breaks indentation bricks every commit in the consumer repo.
+      expect(() => parseYaml(precommit)).not.toThrow();
       expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(true);
       expect(readFileSync(repo.path('.gitlab-ci.yml'), 'utf8')).toContain('gitlab-gateforge.yml');
       // The CI template is the strict E2E gate (plan Phase 6): supervised
