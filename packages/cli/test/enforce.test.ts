@@ -14,7 +14,7 @@ describe('gateforge enforce', () => {
       expect((await runCli(repo, ['init'])).code).toBe(0);
       const first = await runCli(repo, ['enforce']);
       expect(first.code).toBe(0);
-      const hook = repo.path('.gateforge/hooks/gateforge-check.sh');
+      const hook = repo.path('.gateforge/hooks/gateforge-check.mjs');
       expect(existsSync(hook)).toBe(true);
       expect(readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8')).toContain('gateforge-check');
       expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(true);
