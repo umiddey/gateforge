@@ -50,13 +50,39 @@ export declare function localPlaywrightCliCandidates(cwd: string): string[];
  *   NodeJS.ProcessEnv: a copy without any `GATEFORGE_*` keys.
  */
 export declare function untrustedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
-/** Finds the consumer's playwright config at the repo root, if any. */
+/**
+ * Finds the consumer's playwright config: at the repo root first, then —
+ * only when no root-level config exists — ONE directory level deep
+ * (immediate subdirectories, dependency/build/VCS/runner directories
+ * pruned), alphabetically first match. Returns the repo-relative posix
+ * path (`'playwright.config.ts'`, or `'e2e/playwright.config.ts'` for a
+ * subdirectory project), or null when none exists.
+ *
+ * Root-level configs always win: an existing root project must keep its
+ * exact historical invocation. The nested search only extends discovery
+ * to the self-contained subdirectory layout (the config's OWN directory
+ * pins its playwright install — see {@link playwrightCliPath}).
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *
+ * Returns:
+ *   string | null: repo-relative posix config path, or null.
+ */
 export declare function findPlaywrightConfig(cwd: string): string | null;
 /**
  * Enumerates the consumer's playwright tests via official list mode.
- * See the module doc for the trust boundary. The engine's own pinned
- * playwright (pack dependency, 1.58.2) supplies the CLI — no network,
- * no npx resolution from the consumer.
+ * See the module doc for the trust boundary. The CLI is the consumer's
+ * own when present (the config directory's first — see
+ * {@link playwrightCliPath}); the engine's own pinned playwright (pack
+ * dependency, 1.58.2) is the fallback — no network, no npx resolution
+ * from the consumer.
+ *
+ * The child runs from the CONFIG'S directory (the way the owner runs
+ * it): a subdirectory project's config and specs load through THAT
+ * directory's node_modules, with `--config` naming the config as seen
+ * from that cwd. Root-level projects keep the exact historical
+ * invocation (repo-root cwd, auto-discovered config, no `--config`).
  *
  * Args:
  *   options: `cwd` (absolute repo root) and optional `timeoutMs`

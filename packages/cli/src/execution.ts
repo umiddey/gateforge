@@ -385,8 +385,28 @@ export function planScopedExpectedSet(input: {
   const changed = new Set(input.changedFiles);
   const sources = sourcesByResourceId(input.graph);
   const affected = input.obligations
-    .filter((obligation) => (sources.get(obligation.resourceId) ?? []).some((file) => changed.has(file)))
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    .filter((obligation) => (sources.get(obligation.resourceId) ?? []).some((file) => changed.has(file)));
+  // New-claim certification: a changed TEST file that declares claims for an
+  // obligation re-opens that obligation even when its sources are untouched —
+  // newly mapped evidence demands a fresh witnessed seal (the mapping-file
+  // workflow: "I added a test for X" must be certifiable as a slice).
+  const affectedIds = new Set(affected.map((obligation) => obligation.id));
+  for (const group of input.resolution.obligations) {
+    if (affectedIds.has(group.obligationId)) continue;
+    const declaresChangedClaim = group.bindings.some(
+      (binding) =>
+        (binding.origin === 'sidecar' || binding.origin === 'native') &&
+        binding.instances.some((instance) => changed.has(instance.file)),
+    );
+    if (declaresChangedClaim) {
+      const obligation = input.obligations.find((candidate) => candidate.id === group.obligationId);
+      if (obligation !== undefined) {
+        affected.push(obligation);
+        affectedIds.add(obligation.id);
+      }
+    }
+  }
+  affected.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   // Catalog joins, exactly as {@link claimInjectionsFor} builds them: a
   // binding counts only when the CURRENT catalog still enumerates its
   // instance (stale bindings are the resolver's typed problems).

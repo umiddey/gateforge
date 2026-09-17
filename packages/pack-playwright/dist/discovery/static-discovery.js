@@ -93,6 +93,15 @@ const NON_TEST_SEGMENTS = new Set([
     'once',
     'addEventListener',
     'route',
+    // Sanitizer hook registration (`DOMPurify.addHook('afterSanitizeAttributes',
+    // fn)`) — same string+callback shape as the interception calls above; a
+    // product-code call, never a test declaration (consumer migration).
+    'addHook',
+    // Sub-step registration (`test.step('title', fn)`): a step is scoped to
+    // its parent test and the native runner never enumerates it as an
+    // instance — treating it as an entry produced phantom static-only rows
+    // that blocked inventory completeness (consumer migration, E22).
+    'step',
     // Module-mocking shapes (`vi.mock('mod', factory)`,
     // `jest.mock('mod', factory)`): the vitest/jest module registry, never
     // a test-case registration. The mock itself is already recorded as a

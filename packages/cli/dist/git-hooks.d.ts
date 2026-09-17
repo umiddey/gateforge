@@ -22,6 +22,11 @@ export type HookInstallOutcome = {
     hooksDir: string;
     detail: string;
 } | {
+    status: 'framework';
+    hookPath: string;
+    hooksDir: string;
+    detail: string;
+} | {
     status: 'conflict';
     hookPath: string;
     hooksDir: string;
