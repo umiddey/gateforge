@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-webhook",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "license": "Apache-2.0",
   "description": "Webhook contract pack: TS-only detector for webhook endpoint patterns (Express router.post('/webhook'|'/hook'|'/callback'), Fastify/Hono equivalents, @webhook/@on decorator) emitting webhook.endpoint resources with signature/replay/retry attributes; loopback example server with HMAC-SHA256 verification, timestamp anti-replay, in-memory delivery dedup, bounded retries to prove five obligation contracts end-to-end.",
   "type": "module",
