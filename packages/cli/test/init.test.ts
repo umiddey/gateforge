@@ -36,7 +36,7 @@ describe('gateforge init', () => {
     await withTempRepo({}, async (repo) => {
       const first = await runCli(repo, ['init', '--blocking']);
       expect(first.code).toBe(0);
-      const hook = repo.path('.gateforge/hooks/gateforge-check.sh');
+      const hook = repo.path('.gateforge/hooks/gateforge-check.mjs');
       expect(existsSync(hook)).toBe(true);
       const precommit = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8');
       expect(precommit).toContain('gateforge-check');
@@ -81,7 +81,7 @@ describe('gateforge init', () => {
     await withTempRepo({}, async (repo) => {
       const { code, stdout } = await runCli(repo, ['init']);
       expect(code).toBe(0);
-      expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.sh'))).toBe(false);
+      expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(false);
       expect(existsSync(repo.path('.pre-commit-config.yaml'))).toBe(false);
       expect(stdout).toContain('--blocking');
     });

@@ -16,6 +16,15 @@
  *   DIAGNOSTIC_RESULT_STALE surface in the diagnostic report ONLY;
  * - stdout never prints an unqualified "all tests passed" that could
  *   hide a diagnostic failure.
+ *
+ * WITNESSED suites (server-witnessed persistence channel; `witnessed:
+ * true` in `.gateforge.yml`) are NOT advisory diagnostics and never run
+ * here: the advisory window strips every GATEFORGE_* variable, so the
+ * participant could not even address the intents spool, and its result
+ * must never hide behind the advisory banner. They run through
+ * {@link runWitnessedPytestSuites} — only from the supervised test-gates
+ * window, with the run-scoped env, where a failed/incomplete run BLOCKS
+ * the gate (the mapped server-e2e test's red is never graded green).
  */
 import {
   canonicalJson,
@@ -23,7 +32,7 @@ import {
   type GateforgeConfig,
   type JsonValue,
 } from '@gate-forge/core';
-import { PytestAdapter, type DiagnosticRunResult } from '@gate-forge/pack-playwright';
+import { PytestAdapter, executePytestSuite, type DiagnosticRunResult } from '@gate-forge/pack-playwright';
 import type { Io } from './io.js';
 import { writeLine } from './io.js';
 import { UsageError } from './errors.js';
@@ -69,35 +78,62 @@ export interface DiagnosticsRun {
   previousReportStale: boolean;
   /** True when the previous saved report existed and matched inputs. */
   previousReportFresh: boolean;
+  /**
+   * WITNESSED suite names this advisory run EXCLUDED (they run only in
+   * the supervised test-gates window, where their result grades).
+   * Surfaced so an exclusion is always visible — never silent.
+   */
+  witnessedExcluded: string[];
 }
 
 /**
- * Runs the configured diagnostic suites (plan Phase 4 item 9) and saves
- * the report. Each suite runs ONCE via its adapter in an isolated
- * process. With no suites configured this is a no-op (exit 0, feature
- * off) — the alarm is opt-in and never invents suites.
+ * Runs the configured ADVISORY diagnostic suites (plan Phase 4 item 9)
+ * and saves the report. Each suite runs ONCE via its adapter in an
+ * isolated process. Suites marked `witnessed: true` are EXCLUDED here
+ * (surfaced on {@link DiagnosticsRun.witnessedExcluded}) — the advisory
+ * window strips every GATEFORGE_* variable, so a witnessed participant
+ * could never address the intents spool, and its result grades only in
+ * the supervised window. With no (non-witnessed) suites configured this
+ * is a no-op run (exit 0, feature off) — the alarm is opt-in and never
+ * invents suites.
  *
  * Args:
  *   input: config, cwd, state dir, current input digest, optional suite
  *     filter, and the injected instant.
  *
  * Returns:
- *   Promise<DiagnosticsRun>: results, aggregated exit code, and the
- *   staleness verdict on any previously saved report.
+ *   Promise<DiagnosticsRun>: results, aggregated exit code, the
+ *   staleness verdict on any previously saved report, and the witnessed
+ *   suites this advisory run excluded.
  *
  * Throws:
- *   UsageError: when `suiteName` matches no configured suite (exit 2).
+ *   UsageError: when `suiteName` matches no configured suite (exit 2) or
+ *     names a WITNESSED suite (running it advisory would run the mapped
+ *     test outside the only window where its evidence can grade — fail
+ *     closed with the exact command that does run it).
  */
 export async function runDiagnosticSuites(input: RunDiagnosticsInput): Promise<DiagnosticsRun> {
-  const configured = [...(input.config.diagnostics?.suites ?? [])].sort((a, b) =>
+  const configuredAll = [...(input.config.diagnostics?.suites ?? [])].sort((a, b) =>
     compareStrings(a.name, b.name),
   );
-  if (input.suiteName !== undefined && !configured.some((suite) => suite.name === input.suiteName)) {
+  if (input.suiteName !== undefined && !configuredAll.some((suite) => suite.name === input.suiteName)) {
     throw new UsageError(
       `unknown diagnostic suite '${input.suiteName}' — configured: ` +
-        `${configured.map((suite) => suite.name).join(', ') || '(none)'}`,
+        `${configuredAll.map((suite) => suite.name).join(', ') || '(none)'}`,
     );
   }
+  if (input.suiteName !== undefined && configuredAll.find((suite) => suite.name === input.suiteName)?.witnessed === true) {
+    throw new UsageError(
+      `diagnostic suite '${input.suiteName}' is marked 'witnessed: true' and never runs as an ` +
+        'advisory diagnostic (its intents only reach the witness inside the supervised window) — ' +
+        'it executes during `gateforge test-gates --changed`',
+    );
+  }
+  const witnessedExcluded = configuredAll
+    .filter((suite) => suite.witnessed === true && (input.suiteName === undefined || suite.name === input.suiteName))
+    .map((suite) => suite.name);
+  // The advisory registry is the non-witnessed suites only.
+  const configured = configuredAll.filter((suite) => suite.witnessed !== true);
   const previous = readSavedDiagnostics(input.stateDir);
   const previousReportStale =
     previous !== null &&
@@ -117,7 +153,85 @@ export async function runDiagnosticSuites(input: RunDiagnosticsInput): Promise<D
     suites: results,
     generatedAt: input.now,
   } satisfies DiagnosticsReportDocument as unknown as JsonValue);
-  return { results, exitCode, previousReportStale, previousReportFresh };
+  return { results, exitCode, previousReportStale, previousReportFresh, witnessedExcluded };
+}
+
+/** Everything {@link runWitnessedPytestSuites} needs. */
+export interface WitnessedPytestRunInput {
+  /** Validated `.gateforge.yml` (the `witnessed: true` suites). */
+  config: GateforgeConfig;
+  /** Absolute repo root (suite.cwd resolves against it). */
+  cwd: string;
+  /** Absolute run-state directory (junit XMLs land here, excluded). */
+  stateDir: string;
+  /**
+   * The supervised participant env built by
+   * `buildWitnessedPytestChildEnv` (run-scoped: STATE_DIR/RUN_ID locate
+   * the intents spool; WITNESS_URL/RUN_TOKEN wire the run; NEVER the
+   * verifier key).
+   */
+  childEnv: Record<string, string>;
+}
+
+/** The supervised witnessed pytest step's result. */
+export interface WitnessedPytestRun {
+  /** Per-suite results (sorted by suite name). */
+  results: DiagnosticRunResult[];
+  /**
+   * Typed blocking details: one per suite that did not COMPLETE cleanly
+   * (test failures, timeout, collection error, zero tests). The mapped
+   * server-e2e test's red is never graded green — the caller projects
+   * these into run-blocking entries.
+   */
+  blocking: string[];
+}
+
+/**
+ * Runs the WITNESSED pytest participants (diagnostics suites marked
+ * `witnessed: true`) INSIDE the supervised window — the caller invokes
+ * this only while the supervisor spool drain is live, so a pre intent is
+ * forwarded to the witness before the suite's mutation and every intent
+ * reaches the verifier-key drain. Each suite runs through the SAME
+ * bounded adapter as advisory diagnostics (configured argv verbatim,
+ * finite timeout, junit XML into the excluded run-state dir), but with
+ * the run-scoped child env, and its outcome GRADES: any suite that does
+ * not complete cleanly yields a blocking detail (never advisory).
+ *
+ * The suites stay UNTRUSTED: they can only WRITE intents — the witness
+ * stamps evidence from its own server probe, and the child env (by
+ * construction) never carries the verifier key or any parent-side state
+ * beyond the run identity.
+ *
+ * Args:
+ *   input: config, cwd, state dir, the witnessed child env, and the
+ *     injected instant.
+ *
+ * Returns:
+ *   Promise<WitnessedPytestRun>: per-suite results plus typed blocking
+ *   details (empty only when every witnessed suite completed).
+ */
+export async function runWitnessedPytestSuites(input: WitnessedPytestRunInput): Promise<WitnessedPytestRun> {
+  const witnessed = [...(input.config.diagnostics?.suites ?? [])]
+    .filter((suite) => suite.witnessed === true)
+    .sort((a, b) => compareStrings(a.name, b.name));
+  const results: DiagnosticRunResult[] = [];
+  const blocking: string[] = [];
+  for (const suite of witnessed) {
+    // The ONLY call site that passes an env override: the run-scoped
+    // witnessed allowlist (never the verifier key) — the channel's whole
+    // point; the advisory path keeps byte-identical stripping.
+    const result = await executePytestSuite(suite, input.cwd, input.stateDir, { env: input.childEnv });
+    results.push(result);
+    if (result.status !== 'completed') {
+      blocking.push(
+        `witnessed pytest suite '${suite.name}' did not complete cleanly ` +
+          `(status ${result.status}${result.incompleteDetail !== null ? `: ${result.incompleteDetail}` : ''}) — ` +
+          'the mapped server-e2e test ran red or unfinished, so its intents cannot witness ' +
+          'anything and the gate blocks (never graded green)',
+      );
+    }
+  }
+  return { results, blocking };
 }
 
 /**
@@ -191,6 +305,11 @@ export function renderDiagnosticsText(
   if (run.previousReportStale) {
     writeLine(io.stdout, '[DIAGNOSTIC_RESULT_STALE] the previous diagnostic report was for different inputs — superseded by this run');
   }
+  // Witnessed-suite exclusions are always visible (never silent): these
+  // suites grade only inside the supervised window.
+  for (const name of run.witnessedExcluded) {
+    writeLine(io.stdout, `suite ${name}: EXCLUDED from the advisory run (witnessed: true — executes in the supervised test-gates window)`);
+  }
   for (const result of run.results) {
     writeLine(
       io.stdout,
@@ -239,6 +358,8 @@ export function diagnosticsJson(run: DiagnosticsRun, inputDigest: string | null)
     exitCode: diagnosticsExitCode(run.results),
     previousReportStale: run.previousReportStale,
     causes: staleCauseFor(run),
+    // Witnessed suites this advisory run excluded (visible, never silent).
+    witnessedExcluded: [...run.witnessedExcluded].sort(compareStrings),
     suites: run.results as unknown as JsonValue,
   } as unknown as JsonValue);
 }

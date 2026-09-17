@@ -75,7 +75,12 @@ def gateforge_intent(entity, operation, phase, intent, key, claim_id, test_id, s
     """Append one persistence claim intent (see module docstring).
 
     A failed append never crashes the test: the claim then simply stays
-    blocking without its witnessed record (fail closed).
+    blocking without its witnessed record (fail closed). This includes a
+    MISSING run identity (``GATEFORGE_STATE_DIR``/``GATEFORGE_RUN_ID``):
+    outside the supervised window those variables do not exist, the intent
+    goes nowhere, and the claim stays blocking — a ``KeyError`` must
+    degrade to the same advisory line as any other append failure, never
+    kill the participant.
     """
     line = json.dumps(
         {
@@ -96,5 +101,5 @@ def gateforge_intent(entity, operation, phase, intent, key, claim_id, test_id, s
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(line + "\n")
-    except OSError as error:  # pragma: no cover - env misconfiguration
+    except (OSError, KeyError) as error:  # pragma: no cover - env misconfiguration
         print(f"[gateforge] cannot append persistence intent: {error}")

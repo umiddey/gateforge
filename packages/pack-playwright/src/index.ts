@@ -109,11 +109,13 @@ export type {
 } from './supervisor/index.js';
 export {
   buildRunnerChildEnv,
+  buildWitnessedPytestChildEnv,
   RunnerEnvError,
   RUNNER_SECRET_ENV,
   RUNNER_PARENT_SIDE_ENV,
   RUNNER_GATEFORGE_ALLOWLIST,
   RUNNER_SYSTEM_ALLOWLIST,
+  WITNESSED_PYTEST_RUN_ENV,
 } from './discovery/runner-env.js';
 export {
   synthesizeTrustedConfig,

@@ -75,6 +75,7 @@ import {
   type TracedTestInput,
 } from '@gate-forge/core';
 import {
+  buildWitnessedPytestChildEnv,
   discoverTestCatalog,
   listNativePlaywrightTests,
   PlaywrightAdapter,
@@ -89,7 +90,7 @@ import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
-import { runDiagnosticSuites } from '../diagnostics.js';
+import { runDiagnosticSuites, runWitnessedPytestSuites } from '../diagnostics.js';
 import {
   claimInjectionsFor,
   planScopedExpectedSet,
@@ -624,7 +625,16 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   let discoveryError: string | null = null;
   let catalog: TestCatalog | null = null;
   try {
-    catalog = (await discoverTestCatalog({ cwd: io.cwd, config })).catalog;
+    // collectPytest is REQUIRED here (GAP 1 fix, server-witnessed
+    // channel): the supervised run's expected set, mapping resolution,
+    // and seal are all judged against this catalog, so a server-e2e
+    // mapping whose test lives in a configured pytest suite must resolve
+    // against the suite's collected rows (otherwise the declaration reads
+    // TEST_MAPPING_STALE and blocks a test that exists). Collection
+    // failure is honest data: the suite's runner summary turns
+    // `unavailable`, `inventoryComplete` goes false, and the gate blocks
+    // TEST_INVENTORY_INCOMPLETE — never a silently narrower inventory.
+    catalog = (await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true })).catalog;
   } catch (error) {
     discoveryError = error instanceof TestDiscoveryError ? error.message : (error as Error).message;
   }
@@ -773,6 +783,16 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       }
     }
     writeLine(io.stderr, `reused receipt ${reuse.receipt.receiptId} (identical authenticated inputs; complete result)`);
+    // Witnessed suites are part of the SEALED supervised run: a reused
+    // receipt means nothing re-executed (the identical-input contract
+    // already pins the pytest bytes), so they are never re-run here —
+    // said loudly, never silently skipped.
+    if ((config.diagnostics?.suites ?? []).some((suite) => suite.witnessed === true)) {
+      writeLine(
+        io.stderr,
+        'witnessed pytest suite(s) sealed in the reused run — identical authenticated inputs, not re-executed',
+      );
+    }
     await runDiagnosticsStep(io, config, io.cwd, stateDir, expectedDigest, pipeline.now);
     const evaluated = evaluateRun({
       cwd: io.cwd,
@@ -1084,7 +1104,54 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   let sessionTrace: readonly TracedTestInput[] | null = null;
   let lifecycleConflicts: string[] = [];
   let intentFailures: string[] = [];
+  // Witnessed pytest participants (server-witnessed persistence channel):
+  // typed blocking details for any witnessed suite that did not complete
+  // cleanly — collected inside the supervised window below.
+  let witnessedBlocking: BlockingEntry[] = [];
   try {
+    // 6.5 WITNESSED pytest participants run INSIDE the supervised window
+    // (server-witnessed persistence channel, GAP 2 fix): the drain is
+    // live, so a pre intent is forwarded to the witness at its next poll
+    // — before the suite's mutation — and every intent reaches the
+    // verifier-key drain. The participant env is run-scoped by
+    // construction (STATE_DIR/RUN_ID locate ONLY the intents spool;
+    // WITNESS_URL/RUN_TOKEN are the already-non-secret run wiring; the
+    // verifier key and every other parent-side name are refused by
+    // `buildWitnessedPytestChildEnv`). The intents stay untrusted — the
+    // witness probes the adapter itself — and a witnessed suite that runs
+    // red or unfinished BLOCKS the gate: the mapped server-e2e test's red
+    // is never graded green.
+    if ((config.diagnostics?.suites ?? []).some((suite) => suite.witnessed === true)) {
+      const witnessed = await runWitnessedPytestSuites({
+        config,
+        cwd: io.cwd,
+        stateDir,
+        childEnv: buildWitnessedPytestChildEnv({
+          GATEFORGE_STATE_DIR: stateDir,
+          GATEFORGE_RUN_ID: manifest.runId,
+          GATEFORGE_WITNESS_URL: effectiveWitnessUrl,
+          GATEFORGE_RUN_TOKEN: runToken,
+        }),
+      });
+      for (const result of witnessed.results) {
+        writeLine(
+          io.stderr,
+          `witnessed pytest ${result.suite}: ${result.status} (passed=${String(result.counts.passed)}` +
+            ` failed=${String(result.counts.failed)} errors=${String(result.counts.errors)}` +
+            ` skipped=${String(result.counts.skipped)} xfail=${String(result.counts.xfailed)}) — ` +
+            'supervised participant: its persistence intents were drained to the witness',
+        );
+      }
+      witnessedBlocking = witnessed.blocking.map((detail): BlockingEntry => ({
+        kind: 'finding',
+        resourceId: null,
+        name: null,
+        detail,
+        location: null,
+        cause: 'RUN_INCOMPLETE',
+        nextAction: CAUSE_NEXT_ACTIONS['RUN_INCOMPLETE'],
+      }));
+    }
     envelope = await adapter.execute({ logicalKeys: selection.logicalKeys }, {
       stateDir,
       runId: manifest.runId,
@@ -1207,6 +1274,11 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       ...supervisionBlocking(supervisionFindings),
       ...lifecycleBlocking,
       ...intentBlocking,
+      // Witnessed pytest participants (server-witnessed channel): a red
+      // or unfinished witnessed run blocks the gate — its mapping
+      // declares this test as the create's witness, and a red test is
+      // never evidence.
+      ...witnessedBlocking,
     ],
     stateDir,
     now: pipeline.now,
@@ -1300,7 +1372,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   return 0;
 }
 
-/** Runs the configured diagnostic suites as a separate advisory step. */
+/** Runs the configured ADVISORY diagnostic suites as a separate step. */
 async function runDiagnosticsStep(
   io: Io,
   config: GateforgeConfig,
@@ -1312,6 +1384,12 @@ async function runDiagnosticsStep(
   const suites = config.diagnostics?.suites ?? [];
   if (suites.length === 0) return;
   const run = await runDiagnosticSuites({ config, cwd, stateDir, inputDigest, now });
+  // Witnessed suites never run in the advisory window (their GATEFORGE_*
+  // env is stripped here, and their result must grade, not advise) — the
+  // exclusion is always printed, never silent.
+  for (const name of run.witnessedExcluded) {
+    writeLine(io.stderr, `diagnostic ${name}: witnessed — excluded from the advisory window (runs inside the supervised window)`);
+  }
   for (const result of run.results) {
     const line =
       `diagnostic ${result.suite}: ${result.status} (passed=${String(result.counts.passed)}` +

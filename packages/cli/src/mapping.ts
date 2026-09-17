@@ -185,7 +185,15 @@ export async function resolveRepositoryMappings(
     catalog = options.catalog;
   } else {
     try {
-      ({ catalog } = await discoverTestCatalog({ cwd: options.cwd, config: options.config }));
+      // collectPytest is REQUIRED here (GAP 1 fix, server-witnessed
+      // channel): the resolver judges staleness against the catalog, so a
+      // sidecar selector pointing at a configured pytest suite MUST find
+      // the suite's collected rows — without collection every pytest
+      // selector reads TEST_MAPPING_STALE and blocks the gate over a test
+      // that exists. Collection failure stays honest data (the pytest
+      // runner summary turns `unavailable`); `tests discover` alone keeps
+      // its explicit `--pytest` opt-in.
+      ({ catalog } = await discoverTestCatalog({ cwd: options.cwd, config: options.config, collectPytest: true }));
     } catch (error) {
       if (error instanceof TestDiscoveryError) throw new UsageError(error.message);
       throw error;
