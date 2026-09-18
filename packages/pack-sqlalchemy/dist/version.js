@@ -8,5 +8,5 @@
 /** Plugin id every SQLAlchemy pack contribution is pinned to. */
 export const PACK_PLUGIN_ID = 'gateforge.pack-sqlalchemy';
 /** Detector/pack version; must match `python/.../__init__.py::VERSION`. */
-export const PACK_VERSION = '0.1.0';
+export const PACK_VERSION = '0.2.0';
 //# sourceMappingURL=version.js.map

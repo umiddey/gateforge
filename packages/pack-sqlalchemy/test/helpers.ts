@@ -28,6 +28,7 @@ export const ALL_FIXTURES = [
 	'legacy_declarative.py',
 	'modern_declarative.py',
 	'collisions.py',
+	'shared_base_models.py',
 	'function_local.py',
 	'computed_names.py',
 	'malformed.py',

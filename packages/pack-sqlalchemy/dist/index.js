@@ -24,7 +24,7 @@
 import { createSqlalchemyDetector } from './detector.js';
 export { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 export { createSqlalchemyDetector, DEFAULT_COMMAND, pythonEnvironment, applyPlaneMapping, applyPlanesConfig, PLANE_RULE_CONTRADICTION, } from './detector.js';
-export { DEFAULT_PLANES_CONFIG, NO_PLANE_MAPPING, PLANES_CONFIG_PATH, byTableName, planeRuleMatches, readPlanesConfigOrNull, resolvePlaneByRules, } from './planes.js';
+export { DEFAULT_PLANES_CONFIG, NO_PLANE_MAPPING, PLANES_CONFIG_PATH, byTableName, planeRuleMatches, readPlanesConfigOrNull, parsePlanesConfigText, resolvePlaneByRules, } from './planes.js';
 export { EntityAdapterSchema, validateEntityAdapter, } from './adapter-schema.js';
 /** The default CLI in-process plugin module: `{ discover(paths) }`. */
 export default createSqlalchemyDetector();

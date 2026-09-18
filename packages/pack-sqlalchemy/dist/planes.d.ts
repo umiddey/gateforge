@@ -93,10 +93,11 @@ export interface PlanesConfig {
 /** The absent-config default: no rules, no mapping (byte-identical noop). */
 export declare const DEFAULT_PLANES_CONFIG: PlanesConfig;
 /**
- * Reads a declarative plane config document. Returns the default config
- * when the file is absent (normal; byte-identical to
- * {@link NO_PLANE_MAPPING}); malformed documents throw (fail closed —
- * the CLI surfaces the error instead of scanning with partial trust).
+ * Parses and validates one declarative plane config DOCUMENT TEXT
+ * (strict; every rule reviewed). Exported for generators that must
+ * self-check a proposed document BEFORE writing it (e.g. `gateforge
+ * init --planes`) — the exact validation the runtime reader applies,
+ * applied to the draft.
  *
  * Accepted shape: `{ rules: [{ match?, exclude?, tables?, plane, reason }] }` — a
  * rule carries EXACTLY ONE of `match` (repo-root-relative source-path
@@ -105,6 +106,13 @@ export declare const DEFAULT_PLANES_CONFIG: PlanesConfig;
  * `match` rule may additionally carry `exclude` (a non-empty list of
  * repo-root-relative globs pruning files from its surface — rejected
  * on a `tables` rule).
+ */
+export declare function parsePlanesConfigText(text: string, path: string): PlanesConfig;
+/**
+ * Reads a declarative plane config document. Returns the default config
+ * when the file is absent (normal; byte-identical to
+ * {@link NO_PLANE_MAPPING}); malformed documents throw (fail closed —
+ * the CLI surfaces the error instead of scanning with partial trust).
  */
 export declare function readPlanesConfigOrNull(path: string | null): PlanesConfig;
 /** The facts one `sqlalchemy.table` resource is matched against. */

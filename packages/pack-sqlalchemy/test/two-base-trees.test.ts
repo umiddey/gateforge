@@ -33,9 +33,11 @@ const ORIGINAL_CWD = process.cwd();
 const TWOBASE_FIXTURES: Readonly<Record<string, string>> = {
   'twobase/tenant/models_base.py': 'twobase/tenant/models_base.py',
   'twobase/tenant/account.py': 'twobase/tenant/account.py',
+  'twobase/tenant/audit_log.py': 'twobase/tenant/audit_log.py',
   'twobase/admin/base.py': 'twobase/admin/base.py',
   'twobase/admin/platform_user.py': 'twobase/admin/platform_user.py',
   'twobase/admin/client_instance.py': 'twobase/admin/client_instance.py',
+  'twobase/admin/audit_log.py': 'twobase/admin/audit_log.py',
 };
 
 /** Builds a temp project with the two-Base fixtures copied to `dir/`. */
@@ -59,9 +61,11 @@ async function discoverIn(project: string): Promise<DiscoveryOutcome> {
     return (await createSqlalchemyDetector({ planesConfig: { rules } }).discover([
       'twobase/tenant/models_base.py',
       'twobase/tenant/account.py',
+      'twobase/tenant/audit_log.py',
       'twobase/admin/base.py',
       'twobase/admin/platform_user.py',
       'twobase/admin/client_instance.py',
+      'twobase/admin/audit_log.py',
     ])) as DiscoveryOutcome;
   } finally {
     process.chdir(ORIGINAL_CWD);
@@ -105,6 +109,31 @@ describe('two declarative-base trees (consumer admin-platform shape)', () => {
     // Literal primary keys resolve as identity facts per table.
     expect(users?.attributes['primaryKeyColumns']).toEqual(['id']);
     expect(clients?.attributes['primaryKeyColumns']).toEqual(['id']);
+  });
+
+  it('keeps a SAME-tablename pair across trees provably distinct (base-qualified GF-20)', async () => {
+    // The exact consumer collision: `twobase_audit_log` declared once per
+    // tree. Both tables import their OWN tree's `Base` through a
+    // different module, so the base-qualified rule resolves two distinct
+    // MetaData roots — a real multi-plane split must never yield a
+    // DUPLICATE_TABLE_NAME finding, in either plane configuration.
+    const outcome = await discoverIn(project);
+    const auditLogs = tablesOf(outcome).filter(
+      (resource) => resource.attributes['resourceName'] === 'twobase_audit_log',
+    );
+    expect(auditLogs).toHaveLength(2);
+    expect(new Set(auditLogs.map((resource) => resource.attributes['classQname']))).toEqual(
+      new Set(['TwobaseTenantAuditLog', 'TwobaseAdminAuditLog']),
+    );
+    // Per-tree plane mapping still lands: same name, two planes.
+    const byPlane = new Map(
+      auditLogs.map((resource) => [resource.attributes['plane'], resource.attributes['classQname']]),
+    );
+    expect(byPlane.get('tenant')).toBe('TwobaseTenantAuditLog');
+    expect(byPlane.get('master')).toBe('TwobaseAdminAuditLog');
+    expect(
+      outcome.findings.filter((finding) => finding.code === 'DUPLICATE_TABLE_NAME'),
+    ).toEqual([]);
   });
 
   it('scopes delete declarations to the declaring table and attaches planes per path', async () => {
