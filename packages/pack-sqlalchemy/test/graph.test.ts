@@ -42,7 +42,7 @@ async function build(paths: readonly string[]): Promise<ResourceGraph> {
     detectors: [
       {
         detectorId: 'gateforge.pack-sqlalchemy',
-        detectorVersion: '0.1.0',
+        detectorVersion: '0.2.0',
         resources: outcome.resources,
         unresolved: outcome.unresolved,
         findings: outcome.findings,
@@ -146,7 +146,12 @@ describe('graph integration: classification cutover', () => {
 
 describe('graph integration: detector findings', () => {
   it('keeps detector duplicate findings without synthesizing classification duplicates', async () => {
-    const graph = await build(['collisions.py', 'modern_declarative.py']);
+    // collisions.py + shared_base_models.py share ONE MetaData root (the
+    // imported Base), so the detector flags shared_items alongside the
+    // in-file dupes group; the graph adds NO duplicate finding of its own
+    // while the resources are plane-less (id null — its check keys on
+    // plane-qualified ids only).
+    const graph = await build(['collisions.py', 'shared_base_models.py']);
     const graphDup = graph.findings.filter(
       (f) => f.code === 'DUPLICATE_TABLE_NAME' && f.detectorId === 'gateforge.graph',
     );
@@ -155,6 +160,17 @@ describe('graph integration: detector findings', () => {
       (f) => f.code === 'DUPLICATE_TABLE_NAME' && f.detectorId === 'gateforge.pack-sqlalchemy',
     );
     expect(detectorDup).toHaveLength(2);
+  }, 60_000);
+
+  it('suppresses distinct-Base duplicates at the detector: no finding anywhere', async () => {
+    // Two LOCAL `class Base(DeclarativeBase)` roots are separate MetaData:
+    // the shared_items group is provably distinct, so neither the detector
+    // nor the graph flags it — correct code must not block the gate.
+    const graph = await build(['collisions.py', 'modern_declarative.py']);
+    expect(
+      graph.findings.filter((f) => f.code === 'DUPLICATE_TABLE_NAME'),
+    ).toHaveLength(1); // the same-file 'dupes' group only
+    expect(graph.findings.some((f) => f.detail.includes("'shared_items'"))).toBe(false);
   }, 60_000);
 });
 
@@ -185,7 +201,7 @@ describe('graph integration: GF-20 bound-id non-collapse', () => {
       detectors: [
         {
           detectorId: 'gateforge.pack-sqlalchemy',
-          detectorVersion: '0.1.0',
+          detectorVersion: '0.2.0',
           resources: outcome.resources,
           unresolved: outcome.unresolved,
           findings: outcome.findings,

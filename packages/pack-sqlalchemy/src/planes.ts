@@ -256,10 +256,11 @@ function parsePlaneConfigRule(value: unknown, path: string, index: number): Plan
 }
 
 /**
- * Reads a declarative plane config document. Returns the default config
- * when the file is absent (normal; byte-identical to
- * {@link NO_PLANE_MAPPING}); malformed documents throw (fail closed —
- * the CLI surfaces the error instead of scanning with partial trust).
+ * Parses and validates one declarative plane config DOCUMENT TEXT
+ * (strict; every rule reviewed). Exported for generators that must
+ * self-check a proposed document BEFORE writing it (e.g. `gateforge
+ * init --planes`) — the exact validation the runtime reader applies,
+ * applied to the draft.
  *
  * Accepted shape: `{ rules: [{ match?, exclude?, tables?, plane, reason }] }` — a
  * rule carries EXACTLY ONE of `match` (repo-root-relative source-path
@@ -269,14 +270,7 @@ function parsePlaneConfigRule(value: unknown, path: string, index: number): Plan
  * repo-root-relative globs pruning files from its surface — rejected
  * on a `tables` rule).
  */
-export function readPlanesConfigOrNull(path: string | null): PlanesConfig {
-  if (path === null) return DEFAULT_PLANES_CONFIG;
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    return DEFAULT_PLANES_CONFIG; // absence is normal; malformed is not (below)
-  }
+export function parsePlanesConfigText(text: string, path: string): PlanesConfig {
   const parsed: unknown = JSON.parse(text);
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`invalid planes config: expected an object at ${path}`);
@@ -295,6 +289,23 @@ export function readPlanesConfigOrNull(path: string | null): PlanesConfig {
     );
   }
   return { rules: rules.map((rule, index) => parsePlaneConfigRule(rule, path, index)) };
+}
+
+/**
+ * Reads a declarative plane config document. Returns the default config
+ * when the file is absent (normal; byte-identical to
+ * {@link NO_PLANE_MAPPING}); malformed documents throw (fail closed —
+ * the CLI surfaces the error instead of scanning with partial trust).
+ */
+export function readPlanesConfigOrNull(path: string | null): PlanesConfig {
+  if (path === null) return DEFAULT_PLANES_CONFIG;
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return DEFAULT_PLANES_CONFIG; // absence is normal; malformed is not (below)
+  }
+  return parsePlanesConfigText(text, path);
 }
 
 /** The facts one `sqlalchemy.table` resource is matched against. */

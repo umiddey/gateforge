@@ -48,13 +48,17 @@ describe('GPP/3 subprocess transport x python detector', () => {
       const parsed = ClassSymbolAttributesSchema.safeParse(resource.attributes);
       expect(parsed.success, `class symbol ${resource.id} must validate`).toBe(true);
     }
-    expect(tableResources(outcome)).toHaveLength(34);
-    // 60 class symbols: one per declarative/base class across the 20
+    expect(tableResources(outcome)).toHaveLength(36);
+    // 61 class symbols: one per declarative/base class across the 21
     // fixtures — non-model fixtures (non_models.py, denylisted_base.py,
     // shadow_schemas.py) contribute ZERO symbols under the phase-2
     // candidate predicate.
-    expect(symbolResources(outcome)).toHaveLength(60);
+    expect(symbolResources(outcome)).toHaveLength(61);
     expect(outcome.unresolved).toHaveLength(17);
+    // Row (GF-01) + dupes + rows_worker_b + shared_items (GF-20,
+    // base-qualified: collisions + shared_base_models share the imported
+    // Base root; modern_declarative's distinct local Base is suppressed)
+    // + PARSE_ERROR (GF-19).
     expect(outcome.findings).toHaveLength(5);
   }, 60_000);
 
@@ -71,27 +75,47 @@ describe('GPP/3 subprocess transport x python detector', () => {
     expect(init).toContain(`VERSION = "${PACK_VERSION}"`);
   });
 
-  it('GF-20: emits DUPLICATE_TABLE_NAME findings for the 2-file and 1-file variants', async () => {
-    const outcome = await runDiscover([
-      'collisions.py',
-      'modern_declarative.py',
-    ]);
-    const duplicates = outcome.findings.filter(
+  it('GF-20 (base-qualified): flags same-Base duplicates, suppresses distinct-Base ones', async () => {
+    // Distinct LOCAL Bases (separate MetaData at runtime) never collide:
+    // collisions.py and modern_declarative.py each define their own
+    // `class Base(DeclarativeBase)`, so the shared_items group is
+    // provably distinct and only the same-file dupes group is flagged.
+    const distinctBases = await runDiscover(['collisions.py', 'modern_declarative.py']);
+    const distinctDups = distinctBases.findings.filter(
       (finding) => finding.code === 'DUPLICATE_TABLE_NAME',
     );
-    const shared = duplicates.find((f) => f.detail.includes("'shared_items'"));
-    const dupes = duplicates.find((f) => f.detail.includes("'dupes'"));
-    expect(duplicates).toHaveLength(2);
-    // 2-file variant: one location per file, distinct files counted.
+    expect(distinctDups).toHaveLength(1);
+    expect(distinctDups[0]?.detail).toContain("'dupes'");
+
+    // The SAME Base arriving through an import is one MetaData root: the
+    // shared_items group (collisions.py + shared_base_models.py) is a
+    // real collision and stays flagged, with per-file locations.
+    const sameBase = await runDiscover(['collisions.py', 'shared_base_models.py']);
+    const sameBaseDups = sameBase.findings.filter(
+      (finding) => finding.code === 'DUPLICATE_TABLE_NAME',
+    );
+    const shared = sameBaseDups.find((f) => f.detail.includes("'shared_items'"));
+    const dupes = sameBaseDups.find((f) => f.detail.includes("'dupes'"));
+    expect(sameBaseDups).toHaveLength(2);
     expect(shared?.detail).toContain('across 2 file(s)');
-    expect(shared?.locations).toHaveLength(2);
     expect(new Set(shared?.locations.map((l) => l.file))).toEqual(
-      new Set(['collisions.py', 'modern_declarative.py']),
+      new Set(['collisions.py', 'shared_base_models.py']),
     );
     // 1-file variant: both declarations in collisions.py.
     expect(dupes?.detail).toContain('across 1 file(s)');
     expect(dupes?.locations).toHaveLength(2);
     expect(new Set(dupes?.locations.map((l) => l.file))).toEqual(new Set(['collisions.py']));
+
+    // Fail closed: a plain Table() call carries no class evidence, so the
+    // group it joins can never be proven distinct — flagged even though
+    // the class declarations alone would be provably distinct.
+    const withTableCall = await runDiscover(['shared_base_models.py', 'modern_declarative.py']);
+    const tableCallDups = withTableCall.findings.filter(
+      (finding) => finding.code === 'DUPLICATE_TABLE_NAME',
+    );
+    expect(tableCallDups).toHaveLength(1);
+    expect(tableCallDups[0]?.detail).toContain("'shared_items'");
+    expect(tableCallDups[0]?.locations).toHaveLength(3);
   }, 60_000);
 
   it('GF-20: keeps THREE distinct resources for duplicated names, never merged', async () => {

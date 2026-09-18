@@ -46,8 +46,14 @@ with `ast.parse` and reports:
   (`table=True`), `no_tablename_source`. The graph retires an entry it
   resolves and synthesizes `inherited_tablename_unresolved` when it
   cannot.
-- **Findings** — `DUPLICATE_TABLE_NAME` (2-file and 1-file variants,
-  GF-20), `CLASS_NAME_REPEATED_IN_FILE` (GF-01 non-collapse proof),
+- **Findings** — `DUPLICATE_TABLE_NAME` (GF-20, **base-qualified**:
+  a same-name group is flagged unless every pair provably sits on a
+  different declarative Base root — separate `MetaData` at runtime — so
+  a test-file fixture Base or an intentional tenant/master model split
+  never blocks the gate; roots resolve through local alias chains and
+  imports into scanned files, and unprovable evidence — unresolved
+  bases, plain `Table()` calls — stays flagged, fail closed),
+  `CLASS_NAME_REPEATED_IN_FILE` (GF-01 non-collapse proof),
   `PARSE_ERROR` (GF-19).
 
 ## Setup
@@ -64,7 +70,7 @@ Both transports run the **same** detector; pick one per project:
 # .gateforge.yml
 plugins:
   - id: gateforge.pack-sqlalchemy
-    version: 0.1.0
+    version: 0.2.0
     transport: subprocess
     command: ['python3', '-m', 'gateforge_sqlalchemy_detector']
 ```
@@ -81,7 +87,7 @@ export PYTHONPATH="$PWD/packages/pack-sqlalchemy/python:$PWD/packages/plugin-pro
 bootstraps the sibling client from the monorepo layout automatically.)
 The CLI spawns the plugin with the repo root as its working directory
 and passes repo-root-relative paths; the `version` must match the pack
-(`0.1.0`) — it is pinned at the GPP/3 handshake.
+(`0.2.0`) — it is pinned at the GPP/3 handshake.
 
 ### In-process transport
 
@@ -89,7 +95,7 @@ and passes repo-root-relative paths; the `version` must match the pack
 # .gateforge.yml
 plugins:
   - id: gateforge.pack-sqlalchemy
-    version: 0.1.0
+    version: 0.2.0
     transport: in-process
     module: '@gate-forge/pack-sqlalchemy'
 ```
@@ -324,7 +330,7 @@ convention.)
 | GF-01 | Function-local `Row` × 4 → 4 distinct stable IDs, `CLASS_NAME_REPEATED_IN_FILE` finding, no collapse |
 | GF-02 | 3 stacked decorators + default-valued calls → full reason (`3 decorator(s)`, return-expression kind), no truncation |
 | GF-19 | Malformed file → `PARSE_ERROR` finding with line 6, no resources, no crash |
-| GF-20 | `dupes` × 2 in one file + `shared_items` across two files → both `DUPLICATE_TABLE_NAME` variants, 3 distinct resources |
+| GF-20 | `dupes` × 2 in one file (same Base → flagged) + `shared_items` across files with DISTINCT local Bases → suppressed + `shared_base_models.py` re-declaring it on the IMPORTED Base → flagged (base-qualified rule, `test/subprocess.test.ts`) |
 | GF-21 | declared_attr / f-string / call / name / `table=True` → typed unresolved entries, never absent |
 | — | Declarative `.gateforge/planes.json` (phase 5): path/tables rules apply with explicit-beats-general precedence (`tables` enumeration beats an overlapping glob; conflicts fail closed WITHIN a tier), `exclude` carves mixed-plane directory surfaces (excluded files never collide with per-file rules), no-match stays plane-unresolved, config absence is byte-identical (`test/planes.test.ts`) |
 | — | Cross-module inheritance resolved through the graph symbol table; genuinely computed chains stay typed-unresolved |
