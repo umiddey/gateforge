@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "license": "Apache-2.0",
   "description": "Gateforge CLI: init, discover, obligations, check, test-gates, baseline update.",
   "type": "module",
@@ -27,14 +27,14 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.2.0",
-    "@gate-forge/plugin-protocol": "^0.2.0",
-    "@gate-forge/http-contract": "^0.2.0",
-    "@gate-forge/pack-fastapi": "^0.2.0",
-    "@gate-forge/pack-http": "^0.2.0",
-    "@gate-forge/pack-playwright": "^0.2.0",
-    "@gate-forge/pack-sqlalchemy": "^0.2.0",
-    "@gate-forge/pack-task": "^0.2.0",
+    "@gate-forge/core": "^0.4.0",
+    "@gate-forge/plugin-protocol": "^0.4.0",
+    "@gate-forge/http-contract": "^0.4.0",
+    "@gate-forge/pack-fastapi": "^0.4.0",
+    "@gate-forge/pack-http": "^0.4.0",
+    "@gate-forge/pack-playwright": "^0.4.0",
+    "@gate-forge/pack-sqlalchemy": "^0.4.0",
+    "@gate-forge/pack-task": "^0.4.0",
     "picomatch": "^4.0.7",
     "yaml": "^2.8.1"
   },
