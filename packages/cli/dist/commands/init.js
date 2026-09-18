@@ -20,7 +20,10 @@ import { createInterface } from 'node:readline/promises';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { ClassificationPolicySchema, PolicyFileSchema, loadConfig, parseConfig, serializeBaseline, strictCapabilityGaps, } from '@gate-forge/core';
-import { DEFAULT_PLANES_CONFIG, PLANES_CONFIG_PATH, createSqlalchemyDetector, parsePlanesConfigText, } from '@gate-forge/pack-sqlalchemy';
+import { DEFAULT_PLANES_CONFIG, PLANES_CONFIG_PATH, createSqlalchemyDetector, parsePlanesConfigText, PACK_VERSION as PACK_SQLALCHEMY_VERSION, } from '@gate-forge/pack-sqlalchemy';
+import { PACK_VERSION as PACK_FASTAPI_VERSION } from '@gate-forge/pack-fastapi';
+import { PACK_VERSION as PACK_HTTP_VERSION } from '@gate-forge/pack-http';
+import { PACK_VERSION as PACK_TASK_VERSION } from '@gate-forge/pack-task';
 import { parseArgs } from '../args.js';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
@@ -34,6 +37,20 @@ const BUNDLED_PLUGIN_MODULES = Object.freeze({
     'gateforge.pack-http': '@gate-forge/pack-http',
     'gateforge.pack-sqlalchemy': '@gate-forge/pack-sqlalchemy',
     'gateforge.pack-task': '@gate-forge/pack-task',
+});
+/**
+ * The bundled plugins' detector-identity versions, imported from each
+ * pack's own constant — NEVER a hardcoded literal. The GPP/3 handshake
+ * pins the plugin entry's version and every classification signal is
+ * checked against that pin, so a stale literal in this template made
+ * every generated config fail closed the moment a pack's detector
+ * identity moved (pack-sqlalchemy 0.2.0 did exactly that).
+ */
+const BUNDLED_PLUGIN_VERSIONS = Object.freeze({
+    'gateforge.pack-fastapi': PACK_FASTAPI_VERSION,
+    'gateforge.pack-http': PACK_HTTP_VERSION,
+    'gateforge.pack-sqlalchemy': PACK_SQLALCHEMY_VERSION,
+    'gateforge.pack-task': PACK_TASK_VERSION,
 });
 /**
  * Selects the bundled detectors required by the generated coverage and
@@ -60,7 +77,7 @@ function bundledPluginIds(languages) {
 /** Renders the trusted bundled plugin entries for `.gateforge.yml`. */
 function pluginsTemplate(languages) {
     return bundledPluginIds(languages)
-        .map((id) => `  - id: ${id}\n    version: '0.1.0'\n    transport: in-process\n    module: '${BUNDLED_PLUGIN_MODULES[id]}'`)
+        .map((id) => `  - id: ${id}\n    version: '${BUNDLED_PLUGIN_VERSIONS[id]}'\n    transport: in-process\n    module: '${BUNDLED_PLUGIN_MODULES[id]}'`)
         .join('\n');
 }
 /**
