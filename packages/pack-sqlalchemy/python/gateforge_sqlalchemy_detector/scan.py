@@ -12,6 +12,15 @@ canonical detector vocabulary of the frozen resource graph:
   the class statement -- never absent, never guessed (ADR 0001 D1);
 - duplicate table names (GF-20) and repeated class names (GF-01) are
   findings; malformed files (GF-19) are ``PARSE_ERROR`` findings.
+  GF-20 is BASE-QUALIFIED (detector 0.2.0): a same ``__tablename__``
+  group is flagged unless every pair of declarations provably sits on
+  a DIFFERENT declarative Base root (distinct ``MetaData`` at
+  runtime). Base roots resolve through local alias chains and through
+  imports into scanned files; anything unprovable (unresolvable import,
+  ``Table("name", ...)`` calls, mixed evidence) stays flagged —
+  fail closed. Same name on different planes was never the detector's
+  call: plane qualification owns identity collapse (the graph's
+  ``detectDuplicateIds``).
 
 Classification signals (plan phase 3, ADR 0003 D1): the detector emits
 code-derived FACTS, never classifications and never exposure claims:
@@ -774,6 +783,26 @@ class FileIndex:
 
         visit(tree, [])
 
+    def class_by_qname(self, qname: str) -> ClassRecord | None:
+        """The class record with an exact dotted qname, if any."""
+        for rec in self.classes:
+            if rec.qname == qname:
+                return rec
+        return None
+
+    def class_by_simple_name(self, name: str) -> ClassRecord | None:
+        """The first class record with this simple name, if any.
+
+        Duplicate simple names inside one file (GF-01 territory) are a
+        real ambiguity: the first record wins deterministically, and any
+        collision finding built on the wrong record stays conservative
+        (unresolvable roots are never treated as distinct).
+        """
+        for rec in self.classes:
+            if rec.qname.rsplit(".", 1)[-1] == name:
+                return rec
+        return None
+
 
 def loc(relpath: str, node: ast.AST) -> dict:
     """Build the canonical location triple for an AST node.
@@ -1167,11 +1196,200 @@ def _unresolved_entry(relpath: str, rec: ClassRecord) -> dict:
     }
 
 
-def _duplicate_findings(resources: list[dict]) -> list[dict]:
-    """Duplicate table names (GF-20): same name in 2 files or twice in 1.
+def _module_to_relpath(indexes: dict[str, "FileIndex"], module: str) -> str | None:
+    """Maps a dotted module to the scanned file that defines it.
+
+    Args:
+        indexes: Parsed-file indexes of one discovery request, keyed by
+            repo-root-relative path.
+        module: The dotted module of an import (absolute portion).
+
+    Returns:
+        str | None: The scanned relpath whose dotted module path equals
+            ``module`` or ends with ``.<module>`` (package-rooted
+            layouts: ``backend`` on disk, ``app.backend`` in imports),
+            when exactly one file matches; ``None`` when nothing or more
+            than one matches (ambiguous provenance is never guessed).
+    """
+    matches: list[str] = []
+    for relpath in indexes:
+        parts = relpath.replace("\\", "/").split("/")
+        if parts and parts[-1].endswith(".py"):
+            parts[-1] = parts[-1][: -len(".py")]
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]
+        dotted = ".".join(parts)
+        if dotted == module or dotted.endswith("." + module):
+            matches.append(relpath)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_base_root(
+    indexes: dict[str, "FileIndex"],
+    relpath: str,
+    name: str,
+    visited: set[tuple[str, str]],
+) -> str | None:
+    """Resolves one base simple name to its declarative ROOT identity.
+
+    The identity of a SQLAlchemy ``MetaData`` is the declarative root a
+    model descends from, so two same-named tables collide only when
+    their roots coincide. Resolution follows the evidence a flat scan
+    can actually see, in order:
+
+    1. a locally registered declarative alias in the referencing file
+       (``X = declarative_base()``, ``class X(DeclarativeBase)``
+       chains) — identity is the alias itself, file-qualified;
+    2. a locally defined class — its own bases are chased (first base
+       that resolves wins, so mixins in front of the root are skipped);
+    3. the literal ``DeclarativeBase`` — every direct subclass creates
+       its OWN registry, so the identity is the referencing CLASS
+       (passed via ``visited`` seed), not a shared global name;
+    4. an import — the imported name is resolved inside the scanned
+       file that defines its module (exact or package-rooted suffix
+       match, unique only), recursively; when no scanned file matches,
+       the identity degrades to the module-qualified definition site,
+       which still distinguishes two different source modules.
+
+    Args:
+        indexes: Parsed-file indexes of one discovery request.
+        relpath: Repo-root-relative path of the file referencing ``name``.
+        name: The base simple name to resolve.
+        visited: (relpath, name) pairs already being resolved (cycle guard).
+
+    Returns:
+        str | None: The root identity id, or ``None`` when unprovable
+            (the caller must then treat the declaration as NOT provably
+            distinct — fail closed).
+    """
+    key = (relpath, name)
+    if key in visited:
+        return None
+    visited.add(key)
+    idx = indexes.get(relpath)
+    if idx is None:
+        return None
+    if name in idx.declarative_base_aliases:
+        return f"alias:{relpath}#{name}"
+    rec = idx.class_by_simple_name(name)
+    if rec is not None:
+        # Chase the class's own bases in order; a leading mixin with no
+        # declarative root of its own resolves to None here and the loop
+        # simply continues to the next base (``class Account(Mixin, Base)``
+        # must root at Base, not at the mixin). When NOTHING resolves the
+        # name is unprovable — None keeps every pair involving it flagged.
+        for base in rec.bases:
+            resolved = _resolve_base_root(indexes, relpath, base, visited)
+            if resolved is not None:
+                return resolved
+        return None
+    if name == "DeclarativeBase":
+        return None  # handled by the caller via its own class identity
+    ref = idx.imports.get(name)
+    if ref is None or not ref.name or module_denied(ref.module):
+        return None
+    module = ref.module
+    if ref.level > 0:
+        # Relative imports resolve against the referencing file's package:
+        # ``pkg/sub/mod.py`` is package ``pkg.sub``; level 1 is that
+        # package itself, each further level pops one segment.
+        package = relpath.replace("\\", "/").split("/")[:-1]
+        if ref.level > 1:
+            drop = ref.level - 1
+            if len(package) < drop:
+                return None
+            package = package[: len(package) - drop]
+        module = ".".join([*package, ref.module]) if ref.module else ".".join(package)
+        if not module:
+            return None
+    mapped = _module_to_relpath(indexes, module)
+    if mapped is not None:
+        return _resolve_base_root(indexes, mapped, ref.name or name, visited)
+    return f"module:{module}.{ref.name}"
+
+
+def _table_base_identities(
+    indexes: dict[str, "FileIndex"], resource: dict
+) -> set[str] | None:
+    """The set of declarative root ids one table resource sits on.
+
+    Args:
+        indexes: Parsed-file indexes of one discovery request.
+        resource: A ``sqlalchemy.table`` business resource.
+
+    Returns:
+        set[str] | None: The resolved root ids, or ``None`` when any
+            direct base is unprovable or the resource carries no class
+            evidence (``Table("name", ...)`` calls) — the caller must
+            treat ``None`` as NOT provably distinct from anything.
+    """
+    qname = resource["attributes"].get("classQname")
+    if not qname:
+        return None
+    idx = indexes.get(resource["source"])
+    if idx is None:
+        return None
+    rec = idx.class_by_qname(qname)
+    if rec is None or not rec.bases:
+        return None
+    # Identity-bearing bases only: a base that resolves to None is a
+    # mixin or an unproven name — it contributes no MetaData identity of
+    # its own, so it is skipped as long as at least one base resolves.
+    # If NOTHING resolves, the declaration is unprovable (None → never
+    # treated as distinct — fail closed).
+    sites: set[str] = set()
+    for base in rec.bases:
+        if base == "DeclarativeBase" and base not in idx.declarative_base_aliases:
+            # The class subclasses DeclarativeBase directly: it creates
+            # its own registry, so ITS identity is the root.
+            sites.add(f"root:{resource['source']}#{qname}")
+            continue
+        resolved = _resolve_base_root(indexes, resource["source"], base, set())
+        if resolved is not None:
+            sites.add(resolved)
+    return sites or None
+
+
+def _provably_distinct(
+    indexes: dict[str, "FileIndex"], group: list[dict]
+) -> bool:
+    """Whether every same-named declaration pair sits on a different root.
+
+    Args:
+        indexes: Parsed-file indexes of one discovery request.
+        group: The same-``__tablename__`` table resources (≥2).
+
+    Returns:
+        bool: True only when EVERY pair carries fully-resolved,
+            disjoint root-id sets — separate ``MetaData`` at runtime,
+            so no collision is possible. Any unresolved or intersecting
+            pair makes the group a finding candidate (fail closed).
+    """
+    identities = [_table_base_identities(indexes, resource) for resource in group]
+    for first in range(len(identities)):
+        for second in range(first + 1, len(identities)):
+            left = identities[first]
+            right = identities[second]
+            if left is None or right is None or not left.isdisjoint(right):
+                return False
+    return True
+
+
+def _duplicate_findings(resources: list[dict], indexes: dict[str, "FileIndex"]) -> list[dict]:
+    """Duplicate table names (GF-20), BASE-QUALIFIED since detector 0.2.0.
+
+    Same ``__tablename__`` in 2 files or twice in 1 is a finding unless
+    every pair of declarations provably sits on a different declarative
+    Base root (separate ``MetaData`` at runtime — the motivating real
+    dogfood collisions were a test-file fixture Base and an intentional
+    tenant/master model split, both correct code). Same name on
+    different PLANES is never the detector's call either: plane
+    qualification owns identity collapse (the graph's
+    ``detectDuplicateIds``).
 
     Args:
         resources: The business table resources of one discovery request.
+        indexes: Parsed-file indexes of one discovery request.
 
     Returns:
         list[dict]: One finding per duplicated table name, locations sorted.
@@ -1184,6 +1402,8 @@ def _duplicate_findings(resources: list[dict]) -> list[dict]:
     for table_name in sorted(by_table):
         group = by_table[table_name]
         if len(group) < 2:
+            continue
+        if _provably_distinct(indexes, group):
             continue
         sorted_group = sorted(
             group,
@@ -1423,7 +1643,7 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
             u["location"]["col"], u["code"], u["detail"],
         )
     )
-    findings.extend(_duplicate_findings(resources))
+    findings.extend(_duplicate_findings(resources, indexes))
     findings.extend(_class_name_findings(indexes, frozenset(model_names)))
     findings.sort(
         key=lambda f: (

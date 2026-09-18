@@ -41,6 +41,7 @@ export {
   byTableName,
   planeRuleMatches,
   readPlanesConfigOrNull,
+  parsePlanesConfigText,
   resolvePlaneByRules,
   type PlaneConfigRule,
   type PlaneContext,

@@ -50,8 +50,12 @@ Detector vocabulary (frozen with the pack):
 - additional unresolved entries: ``PRIMARY_KEY_UNRESOLVED`` (computed
   or invisible primary key — the key is never defaulted to ``id``) and
   ``ARCHIVE_STATE_UNRESOLVED`` (non-literal archive declaration).
-- ``findings``: ``DUPLICATE_TABLE_NAME`` (GF-20: 2-file and 1-file
-  variants), ``CLASS_NAME_REPEATED_IN_FILE`` (GF-01 non-collapse), and
+- ``findings``: ``DUPLICATE_TABLE_NAME`` (GF-20, BASE-QUALIFIED: a
+  same-name group is flagged unless every pair provably sits on a
+  different declarative Base root — distinct ``MetaData`` at runtime —
+  so a test-file fixture Base or an intentional tenant/master split no
+  longer blocks the gate; unprovable evidence stays flagged),
+  ``CLASS_NAME_REPEATED_IN_FILE`` (GF-01 non-collapse), and
   ``PARSE_ERROR`` (GF-19: malformed files never crash the scan and
   contribute no resources).
 
@@ -65,4 +69,4 @@ canonical serializer.
 from __future__ import annotations
 
 PLUGIN_ID = "gateforge.pack-sqlalchemy"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
