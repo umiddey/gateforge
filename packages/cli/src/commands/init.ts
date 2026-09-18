@@ -32,7 +32,11 @@ import {
   PLANES_CONFIG_PATH,
   createSqlalchemyDetector,
   parsePlanesConfigText,
+  PACK_VERSION as PACK_SQLALCHEMY_VERSION,
 } from '@gate-forge/pack-sqlalchemy';
+import { PACK_VERSION as PACK_FASTAPI_VERSION } from '@gate-forge/pack-fastapi';
+import { PACK_VERSION as PACK_HTTP_VERSION } from '@gate-forge/pack-http';
+import { PACK_VERSION as PACK_TASK_VERSION } from '@gate-forge/pack-task';
 import { parseArgs } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
@@ -50,6 +54,21 @@ const BUNDLED_PLUGIN_MODULES: Readonly<Record<string, string>> = Object.freeze({
   'gateforge.pack-http': '@gate-forge/pack-http',
   'gateforge.pack-sqlalchemy': '@gate-forge/pack-sqlalchemy',
   'gateforge.pack-task': '@gate-forge/pack-task',
+});
+
+/**
+ * The bundled plugins' detector-identity versions, imported from each
+ * pack's own constant — NEVER a hardcoded literal. The GPP/3 handshake
+ * pins the plugin entry's version and every classification signal is
+ * checked against that pin, so a stale literal in this template made
+ * every generated config fail closed the moment a pack's detector
+ * identity moved (pack-sqlalchemy 0.2.0 did exactly that).
+ */
+const BUNDLED_PLUGIN_VERSIONS: Readonly<Record<string, string>> = Object.freeze({
+  'gateforge.pack-fastapi': PACK_FASTAPI_VERSION,
+  'gateforge.pack-http': PACK_HTTP_VERSION,
+  'gateforge.pack-sqlalchemy': PACK_SQLALCHEMY_VERSION,
+  'gateforge.pack-task': PACK_TASK_VERSION,
 });
 
 /**
@@ -80,7 +99,7 @@ function pluginsTemplate(languages: readonly string[]): string {
   return bundledPluginIds(languages)
     .map(
       (id) =>
-        `  - id: ${id}\n    version: '0.1.0'\n    transport: in-process\n    module: '${BUNDLED_PLUGIN_MODULES[id]}'`,
+        `  - id: ${id}\n    version: '${BUNDLED_PLUGIN_VERSIONS[id]}'\n    transport: in-process\n    module: '${BUNDLED_PLUGIN_MODULES[id]}'`,
     )
     .join('\n');
 }
