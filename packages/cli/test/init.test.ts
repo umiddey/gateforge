@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { withTempRepo, loadConfig } from '@gate-forge/core';
+import { readPlanesConfigOrNull } from '@gate-forge/pack-sqlalchemy';
 import { runCli } from './helpers.js';
 
 const TARGETS = [
@@ -218,6 +219,92 @@ describe('gateforge init', () => {
       expect(readFileSync(repo.path('.gateforge/waivers/custom.json'), 'utf8')).toBe(
         '{"user": true}',
       );
+    });
+  });
+});
+describe('gateforge init --planes (proposed planes.json from discovered model trees)', () => {
+  /** A minimal declarative model the sqlalchemy detector recognizes. */
+  const MODEL = (table: string, cls: string): string => `\
+"""Fixture model."""
+
+from sqlalchemy import String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    """Local declarative base."""
+
+
+class ${cls}(Base):
+    __tablename__ = "${table}"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+`;
+
+  it('without --planes (non-TTY) it proposes nothing and prints the tip', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'backend/models/account.py': MODEL('accounts', 'Account'),
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code).toBe(0);
+      expect(existsSync(repo.path('.gateforge/planes.json'))).toBe(false);
+      expect(stdout).toContain('--planes proposes .gateforge/planes.json');
+    });
+  });
+
+  it('--planes proposes two-tree rules: admin tree -> master, models tree -> tenant', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'backend/models/account.py': MODEL('accounts', 'Account'),
+        'backend/admin_platform/models/user.py': MODEL('platform_users', 'PlatformUser'),
+      });
+      const { code, stdout } = await runCli(repo, ['init', '--planes']);
+      expect(code).toBe(0);
+      const planesPath = repo.path('.gateforge/planes.json');
+      expect(existsSync(planesPath)).toBe(true);
+      expect(stdout).toContain('created:');
+      expect(stdout).toContain('review the reasons');
+      // The document round-trips the runtime's own strict parser.
+      const config = readPlanesConfigOrNull(planesPath);
+      const byMatch = new Map(config.rules.map((rule) => [rule.match, rule]));
+      expect(byMatch.get('backend/admin_platform/**')?.plane).toBe('master');
+      expect(byMatch.get('backend/models/**')?.plane).toBe('tenant');
+      for (const rule of config.rules) {
+        expect(rule.reason).toContain("inferred from model directory");
+        expect(rule.reason).toContain('review');
+      }
+    });
+  });
+
+  it('a single model tree still proposes one rule (absence blocks every table)', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'backend/models/account.py': MODEL('accounts', 'Account'),
+      });
+      const { code } = await runCli(repo, ['init', '--planes']);
+      expect(code).toBe(0);
+      const config = readPlanesConfigOrNull(repo.path('.gateforge/planes.json'));
+      expect(config.rules).toHaveLength(1);
+      expect(config.rules[0]?.match).toBe('backend/models/*.py');
+      expect(config.rules[0]?.plane).toBe('tenant');
+    });
+  });
+
+  it('never overwrites an existing planes.json (idempotent, review artifact)', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'backend/models/account.py': MODEL('accounts', 'Account'),
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [{ match: 'backend/models/**', plane: 'global', reason: 'hand-reviewed' }],
+        }),
+      });
+      const { code, stdout } = await runCli(repo, ['init', '--planes']);
+      expect(code).toBe(0);
+      expect(stdout).toContain('exists, leaving untouched');
+      const config = readPlanesConfigOrNull(repo.path('.gateforge/planes.json'));
+      expect(config.rules[0]?.plane).toBe('global');
+      expect(config.rules[0]?.reason).toBe('hand-reviewed');
     });
   });
 });

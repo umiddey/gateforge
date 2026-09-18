@@ -300,6 +300,82 @@ having this channel; a malformed document (bad JSON, unknown keys, a rule
 without `plane`/`reason`, an absolute or `..`-escaping `match`) fails the
 run closed at startup (exit 2).
 
+## Endpoint capability rules (`.gateforge/endpoints.json`)
+
+Capability derivation uses detector FACTS only (method, canonical path,
+handler simple name, schema symbols, resource linkage). A handler whose
+logic lives behind a service call has no positive evidence and fail-closes
+with `ENDPOINT_SEMANTICS_UNRESOLVED` — the compiler cannot see through
+service-layer delegation, by design, and will not guess. This document is
+the escape hatch that the blocking message names: an explicit, human
+assertion of what an endpoint DOES.
+
+A rule carries at least one selector (AND semantics when several) plus a
+capability from the closed compiler vocabulary and a required non-empty
+`reason` (the review artifact):
+
+- `match` — repo-root-relative glob on the ROUTER SOURCE FILE path;
+- `handlers` — globs on the handler SIMPLE name (case-sensitive; a route
+  with no handler symbol never matches);
+- `paths` — globs on the canonical path (`/analytics/**`; must start
+  with `/`);
+- `method` — optional exact verb (`GET`…`DELETE`, never `ANY`).
+
+```json
+{
+  "rules": [
+    {
+      "handlers": ["get_analytics_*"],
+      "capability": "crud-read",
+      "reason": "delegates to analytics_service; declared by the service owner"
+    },
+    {
+      "match": "backend/api/v1/accounts.py",
+      "method": "DELETE",
+      "capability": "crud-archive",
+      "reason": "sets archived_at via the service; soft delete by design"
+    }
+  ]
+}
+```
+
+Evaluation per endpoint identity, deterministic and fail closed:
+
+- **All matching rules agree** → the capability is declared (composed
+  with detected ones; overlapping agreeing rules are one declaration).
+  A declared `crud-delete`/`crud-archive` on a DELETE endpoint resolves
+  the archive-vs-hard question the linked model could not prove.
+- **Matching rules disagree** → a blocking
+  `ENDPOINT_CAPABILITY_CONTRADICTION` entry names every matching rule,
+  its capability, and its reason; NOTHING is applied — never
+  first-rule-wins.
+- **No rule matches** → the endpoint stays on detector-fact evidence
+  only (and blocks if that is nothing).
+
+The vocabulary is the compiler's own: `health-operations`,
+`auth-session`, `webhook-callback`, `workflow-command`, `task-async`,
+`search-query`, `validation-preview`, `file-transfer`, `ai-automation`,
+`realtime`, `crud-create`, `crud-read`, `crud-update`, `crud-delete`,
+`crud-archive`. Absence of the file is normal and byte-identical to not
+having the channel; a malformed document fails the run closed at startup
+(exit 2).
+
+## Proposing planes at init (`gateforge init --planes`)
+
+`gateforge init --planes` runs discovery over the repo's own include and
+exclude configuration and PROPOSES `.gateforge/planes.json` from the
+directories the discovered tables live in: one non-overlapping `match`
+glob per model tree, `master` for trees whose path names a control-plane
+segment (`admin`, `master`, `control`, `root`, `operator`), `tenant`
+otherwise, and a reason on every rule naming the directory it was
+inferred from. The keyword mapping IS a heuristic — that is why the file
+is a review artifact: it is written only after explicit consent (flag,
+or the TTY prompt), only when absent, and must be reviewed before the
+next run reads it. Tables under test directories are excluded from the
+proposal (fixtures are not business surface); they stay plane-less and
+gate-visible. Non-interactive runs without `--planes` propose nothing
+and print the tip.
+
 ## test-gates protocol (G6 surface)
 
 `gateforge test-gates` writes a run state directory (default

@@ -22,19 +22,28 @@ import { parse as parseYaml } from 'yaml';
 import {
   ClassificationPolicySchema,
   PolicyFileSchema,
+  loadConfig,
   parseConfig,
   serializeBaseline,
   strictCapabilityGaps,
 } from '@gate-forge/core';
+import {
+  DEFAULT_PLANES_CONFIG,
+  PLANES_CONFIG_PATH,
+  createSqlalchemyDetector,
+  parsePlanesConfigText,
+} from '@gate-forge/pack-sqlalchemy';
 import { parseArgs } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
+import { expandIncludePaths, type ExpandError } from '../glob.js';
+import { inferPlanesConfig } from '../planes-inference.js';
 import { installCommitHook, writeStandaloneGateScript } from '../git-hooks.js';
 import { appendPreCommitHook, ensureHookScript, engineRootFromInvocation } from './blocking.js';
 
 export const INIT_USAGE =
-  'usage: gateforge init [--languages <comma,list>] [--blocking] [--pre-commit] [--mode changed|staged] [--ci] [--no-ci] [--strict-e2e]';
+  'usage: gateforge init [--languages <comma,list>] [--blocking] [--pre-commit] [--mode changed|staged] [--ci] [--no-ci] [--strict-e2e] [--planes]';
 
 const BUNDLED_PLUGIN_MODULES: Readonly<Record<string, string>> = Object.freeze({
   'gateforge.pack-fastapi': '@gate-forge/pack-fastapi',
@@ -528,6 +537,102 @@ async function resolveBlocking(io: Io, options: Readonly<Record<string, unknown>
 }
 
 /**
+ * Asks (TTY only) whether init should propose `.gateforge/planes.json`
+ * from the discovered model directories. Flags win: --planes forces
+ * yes, --no-planes forces no, non-interactive runs default to no (the
+ * same contract as {@link resolveBlocking}).
+ */
+async function resolvePlanes(io: Io, options: Readonly<Record<string, unknown>>): Promise<boolean> {
+  if (options['planes'] === true) return true;
+  if (options['no-planes'] === true) return false;
+  if (!process.stdin.isTTY) {
+    writeLine(
+      io.stdout,
+      'tip: gateforge init --planes proposes .gateforge/planes.json from discovered model directories (review before the next run)',
+    );
+    return false;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (
+      await rl.question(
+        'Propose .gateforge/planes.json from discovered model directories (review before the next run)? [y/N] ',
+      )
+    )
+      .trim()
+      .toLowerCase();
+    return answer === 'y' || answer === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * Runs discovery over the repo's own include/exclude config, infers a
+ * planes proposal from the discovered table directories, self-checks
+ * the draft against the runtime's strict parser, and writes
+ * `.gateforge/planes.json` — only when absent (never overwrites a
+ * reviewed document). Inference failure is surfaced as a visible
+ * warning, never silently skipped, but does not abort the scaffold.
+ */
+async function proposePlanesConfig(cwd: string, io: Io): Promise<void> {
+  const planesPath = join(cwd, PLANES_CONFIG_PATH);
+  if (existsSync(planesPath)) {
+    writeLine(io.stdout, `exists, leaving untouched: ${planesPath}`);
+    return;
+  }
+  let tableSources: string[];
+  try {
+    const config = loadConfig(join(cwd, '.gateforge.yml'));
+    const expandErrors: ExpandError[] = [];
+    const paths = expandIncludePaths(
+      config.project.paths.include,
+      config.project.paths.exclude,
+      cwd,
+      expandErrors,
+    );
+    // The planes config plays no role in inference (only table SOURCE
+    // paths matter), so the detector runs with the default no-mapping
+    // rule — immune to whatever a previous run wrote.
+    const outcome = await createSqlalchemyDetector({ planesConfig: DEFAULT_PLANES_CONFIG }).discover(paths);
+    tableSources = outcome.resources
+      .filter(
+        (resource): resource is { attributes: Record<string, unknown>; source: string } =>
+          (resource as { kind?: string }).kind === 'sqlalchemy.table' &&
+          typeof (resource as { source?: string }).source === 'string',
+      )
+      .map((resource) => resource.source);
+  } catch (cause) {
+    writeLine(
+      io.stdout,
+      `warning: plane inference failed (${cause instanceof Error ? cause.message : String(cause)}); ` +
+        'add .gateforge/planes.json manually — init continues',
+    );
+    return;
+  }
+  const inference = inferPlanesConfig(tableSources);
+  if (inference.skippedTestTables > 0) {
+    writeLine(
+      io.stdout,
+      `note: ${inference.skippedTestTables} table(s) under test directories were excluded from plane inference (fixtures are not business surface)`,
+    );
+  }
+  if (inference.config === null) {
+    writeLine(io.stdout, `tip: ${inference.note ?? 'nothing to propose'}`);
+    return;
+  }
+  const serialized = `${JSON.stringify(inference.config, null, 2)}\n`;
+  // Self-check the draft against the runtime's strict reader contract
+  // BEFORE writing (a broken proposal must fail here, not at the next run).
+  parsePlanesConfigText(serialized, planesPath);
+  writeFileSync(planesPath, serialized, 'utf8');
+  writeLine(
+    io.stdout,
+    `created: ${planesPath} (${inference.config.rules.length} rule(s) inferred from model directories — review the reasons before the next gateforge run)`,
+  );
+}
+
+/**
  * Runs `gateforge init` in the io cwd.
  *
  * Args:
@@ -624,6 +729,18 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     }
     target.write();
     writeLine(io.stdout, `created: ${target.path}`);
+  }
+  // Plane-config proposal (flags win; TTY prompt fills the gap;
+  // non-interactive defaults to scaffold-only, like every granular step):
+  //   --planes / --no-planes
+  //       propose .gateforge/planes.json from the model directories the
+  //       discovered tables live in — a review artifact with a reason on
+  //       every rule, written only when absent, never silently applied
+  //       (the next run reads it and the user reviews first).
+  if (languages.includes('python')) {
+    if (await resolvePlanes(io, options)) {
+      await proposePlanesConfig(cwd, io);
+    }
   }
   // Enforcement wiring is granular (flags win; TTY prompts fill the gaps;
   // non-interactive runs default to scaffold-only so tests and CI never
