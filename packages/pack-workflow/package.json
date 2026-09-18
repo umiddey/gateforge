@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-workflow",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "Apache-2.0",
   "description": "Workflow / state-machine discovery pack: TS-only AST detector (GPP/3), five workflow contracts (transition-allowed, transition-rejected, terminal-immutable, audit-emitted, persisted-final-state), entity-adapter schema for state-machine witnesses.",
   "type": "module",
