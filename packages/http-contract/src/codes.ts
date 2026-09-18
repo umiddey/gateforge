@@ -40,6 +40,14 @@ export const ENDPOINT_SEMANTICS_UNRESOLVED = 'ENDPOINT_SEMANTICS_UNRESOLVED';
 export const ENDPOINT_RESOURCE_LINK_UNRESOLVED = 'ENDPOINT_RESOURCE_LINK_UNRESOLVED';
 
 /**
+ * Two `.gateforge/endpoints.json` capability rules match one endpoint
+ * identity and assert DIFFERENT capabilities — the declarative channel
+ * fails closed (no capability is applied) until the rules agree, exactly
+ * like `PLANE_RULE_CONTRADICTION` on the plane channel.
+ */
+export const ENDPOINT_CAPABILITY_CONTRADICTION = 'ENDPOINT_CAPABILITY_CONTRADICTION';
+
+/**
  * A runtime HTTP observation that cannot be trusted (suite-submitted
  * network record, missing run binding, wrong provenance).
  */
@@ -55,6 +63,7 @@ export const HTTP_BLOCK_CODES = [
   FRONTEND_ROUTE_AMBIGUOUS,
   ENDPOINT_SEMANTICS_UNRESOLVED,
   ENDPOINT_RESOURCE_LINK_UNRESOLVED,
+  ENDPOINT_CAPABILITY_CONTRADICTION,
   HTTP_OBSERVATION_UNTRUSTED,
 ] as const;
 

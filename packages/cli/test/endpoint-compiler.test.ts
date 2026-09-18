@@ -1294,3 +1294,194 @@ describe('endpoint plane config channel (.gateforge/planes.json, plan phase 5)',
     });
   });
 });
+
+describe('endpoint capability config channel (.gateforge/endpoints.json)', () => {
+  /**
+   * The motivating service-delegation shape: a GET whose handler
+   * delegates to a service module — no schema symbols, no linkage
+   * evidence, path matches no capability rule. Detector facts alone can
+   * never prove what it does.
+   */
+  function analyticsRoute(): HttpContractFact {
+    return routeFact('GET', '/analytics/logs', {
+      handlerSymbol: 'app.api.analytics:get_analytics_logs',
+      source: { file: 'backend/api/v1/analytics.py', line: 44, col: 0 },
+    });
+  }
+
+  /** A DELETE route for declared delete-semantics coverage. */
+  function deleteRoute(): HttpContractFact {
+    return routeFact('DELETE', '/api/v1/accounts/{account_id}', {
+      handlerSymbol: 'app.api.accounts:remove_account',
+      source: { file: 'backend/api/v1/accounts.py', line: 60, col: 0 },
+    });
+  }
+
+  it('without the config file, service delegation stays ENDPOINT_SEMANTICS_UNRESOLVED', () => {
+    withTempRepo({}, (repo) => {
+      const compiled = compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root });
+      const unresolved = compiled.contribution.unresolved.filter(
+        (entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED',
+      );
+      expect(unresolved).toHaveLength(1);
+      expect(unresolved[0]?.detail).toContain('no positive capability evidence');
+      expect(compiled.inventory.endpoints[0]?.capabilities).toEqual([]);
+    });
+  });
+
+  it('a declared capability resolves service delegation and suppresses the unresolved block', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [
+            {
+              handlers: ['get_analytics_*'],
+              capability: 'crud-read',
+              reason: 'delegates to analytics_service.read; declared by the service owner',
+            },
+          ],
+        }),
+      });
+      const compiled = compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root });
+      expect(compiled.contribution.unresolved).toEqual([]);
+      const endpoint = compiled.inventory.endpoints[0];
+      expect(endpoint?.capabilities).toEqual(['crud-read']);
+      expect(endpoint?.capabilityTrace).toContainEqual({
+        capability: 'crud-read',
+        rule: 'endpoints.json',
+        evidence: 'declared: delegates to analytics_service.read; declared by the service owner',
+      });
+    });
+  });
+
+  it('a declared capability composes with detected capabilities without duplication', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [
+            { paths: ['/analytics/logs'], capability: 'crud-read', reason: 'read surface' },
+            { match: 'backend/api/v1/**', capability: 'crud-read', reason: 'api reads' },
+          ],
+        }),
+      });
+      const compiled = compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root });
+      const endpoint = compiled.inventory.endpoints[0];
+      expect(endpoint?.capabilities).toEqual(['crud-read']);
+      // Both agreeing rules ride the trace; one capability stands.
+      expect(endpoint?.capabilityTrace.filter((entry) => entry.rule === 'endpoints.json')).toHaveLength(2);
+    });
+  });
+
+  it('two rules asserting different capabilities block as ENDPOINT_CAPABILITY_CONTRADICTION', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [
+            { paths: ['/analytics/**'], capability: 'crud-read', reason: 'directory-level read rule' },
+            { handlers: ['get_analytics_*'], capability: 'search-query', reason: 'analytics logs are a query surface' },
+          ],
+        }),
+      });
+      const compiled = compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root });
+      const contradictions = compiled.contribution.unresolved.filter(
+        (entry) => entry.code === 'ENDPOINT_CAPABILITY_CONTRADICTION',
+      );
+      expect(contradictions).toHaveLength(1);
+      expect(contradictions[0]?.detail).toContain('crud-read vs search-query');
+      expect(contradictions[0]?.detail).toContain('directory-level read rule');
+      expect(contradictions[0]?.detail).toContain('analytics logs are a query surface');
+      // Fail closed: NO declared capability is applied on a conflict.
+      expect(compiled.inventory.endpoints[0]?.capabilities).toEqual([]);
+      // And the endpoint still fail-closes on semantics (no evidence).
+      expect(
+        compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED'),
+      ).toBe(true);
+    });
+  });
+
+  it('a declared crud-archive resolves DELETE semantics without model evidence', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [
+            {
+              match: 'backend/api/v1/accounts.py',
+              method: 'DELETE',
+              capability: 'crud-archive',
+              reason: 'removes set archived_at via the service; soft delete by design',
+            },
+          ],
+        }),
+      });
+      const compiled = compileEndpointContribution([contribution([deleteRoute()])], { cwd: repo.root });
+      const endpoint = compiled.inventory.endpoints[0];
+      expect(endpoint?.capabilities).toContain('crud-archive');
+      expect(endpoint?.deleteSemantics).toBe('archive');
+      expect(endpoint?.capabilityTrace).toContainEqual({
+        capability: 'crud-archive',
+        rule: 'DELETE_DECLARED',
+        evidence: 'declared delete semantics: removes set archived_at via the service; soft delete by design',
+      });
+      expect(
+        compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED'),
+      ).toBe(false);
+    });
+  });
+
+  it('method-scoped rules never leak across methods', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [
+            { paths: ['/api/v1/accounts/**'], method: 'DELETE', capability: 'crud-archive', reason: 'delete surface only' },
+          ],
+        }),
+      });
+      // A GET on the same item path: the DELETE-scoped rule does not apply.
+      const getRoute = routeFact('GET', '/api/v1/accounts/{account_id}', {
+        handlerSymbol: 'app.api.accounts:get_account',
+        source: { file: 'backend/api/v1/accounts.py', line: 70, col: 0 },
+      });
+      const compiled = compileEndpointContribution([contribution([getRoute])], { cwd: repo.root });
+      const endpoint = compiled.inventory.endpoints[0];
+      expect(endpoint?.capabilities).toEqual([]);
+      expect(endpoint?.deleteSemantics).toBeNull();
+      expect(
+        compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_CAPABILITY_CONTRADICTION'),
+      ).toBe(false);
+    });
+  });
+
+  it('a malformed document throws (fail closed), like the planes channel', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [{ paths: ['/x'], capability: 'nonsense-capability', reason: 'typo\'d vocabulary' }],
+        }),
+      });
+      expect(() =>
+        compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root }),
+      ).toThrow(/capability must be one of/);
+    });
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [{ capability: 'crud-read', reason: 'unconstrained: no selector' }],
+        }),
+      });
+      expect(() =>
+        compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root }),
+      ).toThrow(/at least one of/);
+    });
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [{ paths: ['analytics/logs'], capability: 'crud-read', reason: 'missing leading slash' }],
+        }),
+      });
+      expect(() =>
+        compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root }),
+      ).toThrow(/must start with '\//);
+    });
+  });
+});
