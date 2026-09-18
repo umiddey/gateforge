@@ -83,7 +83,7 @@ export function environmentIdentity(parts) {
     });
 }
 /** Known pack configuration files (absence is an explicit entry). */
-export const PACK_CONFIGS = ['.gateforge/planes.json', '.gateforge/http-clients.json', '.gateforge/fastapi.json'];
+export const PACK_CONFIGS = ['.gateforge/planes.json', '.gateforge/endpoints.json', '.gateforge/http-clients.json', '.gateforge/fastapi.json'];
 /**
  * Well-known dependency manifests/lockfiles: included explicitly when
  * present on disk (they can change detector/verifier behavior even when

@@ -81,7 +81,9 @@ export interface EndpointCompilerOptions {
     /**
      * Repo root. When provided, `.gateforge/planes.json` is read from it
      * (the same path convention the packs use) and its `match` rules
-     * become endpoint-plane evidence keyed on router source paths.
+     * become endpoint-plane evidence keyed on router source paths, and
+     * `.gateforge/endpoints.json` is read from it for declared endpoint
+     * capabilities (the service-delegation escape hatch).
      */
     readonly cwd?: string;
 }

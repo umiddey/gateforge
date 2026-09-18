@@ -196,7 +196,7 @@ describe('resource-kind separation', () => {
   });
 
   it('exposes the full typed code set', () => {
-    expect(HTTP_BLOCK_CODES).toHaveLength(9);
+    expect(HTTP_BLOCK_CODES).toHaveLength(10);
     expect(new Set(HTTP_BLOCK_CODES).size).toBe(HTTP_BLOCK_CODES.length);
   });
 });

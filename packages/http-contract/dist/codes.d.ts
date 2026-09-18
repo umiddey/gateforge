@@ -31,11 +31,18 @@ export declare const ENDPOINT_SEMANTICS_UNRESOLVED = "ENDPOINT_SEMANTICS_UNRESOL
 /** An endpoint that cannot be linked to exactly one business resource. */
 export declare const ENDPOINT_RESOURCE_LINK_UNRESOLVED = "ENDPOINT_RESOURCE_LINK_UNRESOLVED";
 /**
+ * Two `.gateforge/endpoints.json` capability rules match one endpoint
+ * identity and assert DIFFERENT capabilities — the declarative channel
+ * fails closed (no capability is applied) until the rules agree, exactly
+ * like `PLANE_RULE_CONTRADICTION` on the plane channel.
+ */
+export declare const ENDPOINT_CAPABILITY_CONTRADICTION = "ENDPOINT_CAPABILITY_CONTRADICTION";
+/**
  * A runtime HTTP observation that cannot be trusted (suite-submitted
  * network record, missing run binding, wrong provenance).
  */
 export declare const HTTP_OBSERVATION_UNTRUSTED = "HTTP_OBSERVATION_UNTRUSTED";
 /** Every typed outcome code defined by this package. */
-export declare const HTTP_BLOCK_CODES: readonly ["HTTP_PATH_DYNAMIC", "HTTP_METHOD_DYNAMIC", "FASTAPI_PREFIX_UNRESOLVED", "FRONTEND_CALL_TARGET_UNRESOLVED", "FRONTEND_ROUTE_UNWIRED", "FRONTEND_ROUTE_AMBIGUOUS", "ENDPOINT_SEMANTICS_UNRESOLVED", "ENDPOINT_RESOURCE_LINK_UNRESOLVED", "HTTP_OBSERVATION_UNTRUSTED"];
+export declare const HTTP_BLOCK_CODES: readonly ["HTTP_PATH_DYNAMIC", "HTTP_METHOD_DYNAMIC", "FASTAPI_PREFIX_UNRESOLVED", "FRONTEND_CALL_TARGET_UNRESOLVED", "FRONTEND_ROUTE_UNWIRED", "FRONTEND_ROUTE_AMBIGUOUS", "ENDPOINT_SEMANTICS_UNRESOLVED", "ENDPOINT_RESOURCE_LINK_UNRESOLVED", "ENDPOINT_CAPABILITY_CONTRADICTION", "HTTP_OBSERVATION_UNTRUSTED"];
 export type HttpBlockCode = (typeof HTTP_BLOCK_CODES)[number];
 //# sourceMappingURL=codes.d.ts.map

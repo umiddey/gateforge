@@ -36,11 +36,26 @@
  * as a blanket override: when the linked-resource/operational plane
  * derivable from the contributions contradicts it, both assertions are
  * emitted so the classifier blocks with `PLANE_CONTRADICTION`.
+ *
+ * Endpoint-capability config channel (`.gateforge/endpoints.json`, see
+ * `endpoint-config.ts`): the explicit escape hatch the
+ * `ENDPOINT_SEMANTICS_UNRESOLVED` message promises. A rule keyed on
+ * router source path / handler simple name / canonical path / exact
+ * method declares what an endpoint DOES (the closed compiler capability
+ * vocabulary) with a required human `reason` — the service-delegation
+ * shape detector facts cannot see through. Same fail-closed posture:
+ * absence is normal; malformed throws; ALL matching rules must agree
+ * (disagreement emits `ENDPOINT_CAPABILITY_CONTRADICTION` and applies
+ * nothing); a declared capability COMPOSES with detected ones (only the
+ * `crud-*` method fallbacks defer to it), and a declared
+ * `crud-delete`/`crud-archive` on a DELETE endpoint resolves the
+ * archive-vs-hard question the linked model could not prove.
  */
 import { join as joinPath } from 'node:path';
-import { ENDPOINT_RESOURCE_LINK_UNRESOLVED, ENDPOINT_SEMANTICS_UNRESOLVED, HTTP_CONTRACT_KIND, HTTP_ENDPOINT_KIND, HttpContractFactSchema, canonicalEndpointIdentity, derivePathResourceName, endpointResourceName, joinFrontendCalls, } from '@gate-forge/http-contract';
+import { ENDPOINT_CAPABILITY_CONTRADICTION, ENDPOINT_RESOURCE_LINK_UNRESOLVED, ENDPOINT_SEMANTICS_UNRESOLVED, HTTP_CONTRACT_KIND, HTTP_ENDPOINT_KIND, HttpContractFactSchema, canonicalEndpointIdentity, derivePathResourceName, endpointResourceName, joinFrontendCalls, } from '@gate-forge/http-contract';
 import { HTTP_ENDPOINT_RESOURCE_KIND } from '@gate-forge/core';
 import { PLANE_RULE_CONTRADICTION, PLANES_CONFIG_PATH, readPlanesConfigOrNull, resolvePlaneByRules, } from '@gate-forge/pack-sqlalchemy';
+import { ENDPOINTS_CONFIG_PATH, handlerSimpleName, readEndpointsConfigOrNull, resolveDeclaredCapabilities, } from './endpoint-config.js';
 import { UsageError } from './errors.js';
 /** Detector id of the synthetic compiler contribution (engine-issued). */
 export const ENDPOINT_COMPILER_DETECTOR_ID = 'gateforge.endpoint-compiler';
@@ -376,6 +391,17 @@ export function compileEndpointContribution(contributions, options = {}) {
             throw new UsageError(error.message);
         }
     }
+    // Declarative endpoint-capability config (.gateforge/endpoints.json):
+    // identical posture, read once per compile beside the plane document.
+    let endpointsConfig = null;
+    if (options.cwd !== undefined) {
+        try {
+            endpointsConfig = readEndpointsConfigOrNull(joinPath(options.cwd, ENDPOINTS_CONFIG_PATH));
+        }
+        catch (error) {
+            throw new UsageError(error.message);
+        }
+    }
     const businessNames = new Map();
     for (const contribution of contributions) {
         for (const resource of contribution.resources) {
@@ -628,8 +654,70 @@ export function compileEndpointContribution(contributions, options = {}) {
                 capabilityTrace.push({ capability: rule.capability, rule: rule.rule, evidence: 'detector facts (path/handler/schema/link)' });
             }
         }
+        // -- Declarative endpoint-capability config channel -------------------
+        // (.gateforge/endpoints.json): the explicit escape hatch for
+        // capabilities detector facts cannot see (service-layer delegation).
+        // ALL matching rules must agree: disagreement emits a typed
+        // contradiction and applies nothing (fail closed, never
+        // first-rule-wins); agreement applies the declared capability,
+        // composed with the detected ones — only the crud-* method
+        // fallbacks below defer to an existing crud-* capability.
+        let declaredHits = [];
+        if (endpointsConfig !== null) {
+            const resolution = resolveDeclaredCapabilities(endpointsConfig, {
+                matchSources: endpointRoutes.map((route) => route.source.file),
+                matchHandlers: endpointRoutes
+                    .map((route) => route.handlerSymbol)
+                    .filter((symbol) => typeof symbol === 'string')
+                    .map(handlerSimpleName),
+                canonicalPath,
+                method,
+            });
+            if (resolution.conflict) {
+                const key = `capability-config:${identity}`;
+                if (!seenEndpointUnresolved.has(key)) {
+                    seenEndpointUnresolved.add(key);
+                    const asserted = [...new Set(resolution.hits.map((hit) => hit.capability))].sort(compareText);
+                    unresolved.push({
+                        code: ENDPOINT_CAPABILITY_CONTRADICTION,
+                        detail: `endpoint '${identity}' matches ${resolution.hits.length} endpoint-capability rules ` +
+                            `asserting ${asserted.join(' vs ')}: ` +
+                            resolution.hits
+                                .map((hit) => `rules[${String(hit.index)}] -> '${hit.capability}' (${hit.reason})`)
+                                .join('; ') +
+                            '; endpoint-capability rules are explicit declarations for this endpoint — ' +
+                            'make the matching rules agree or remove the losing rule',
+                        location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+                    });
+                }
+            }
+            else {
+                declaredHits = [...resolution.hits];
+            }
+        }
+        for (const hit of declaredHits) {
+            // Overlapping agreeing rules are ONE declaration (review artifacts
+            // may overlap); never duplicate a capability an earlier hit or a
+            // detected rule already asserted.
+            if (!capabilities.includes(hit.capability))
+                capabilities.push(hit.capability);
+            capabilityTrace.push({ capability: hit.capability, rule: 'endpoints.json', evidence: `declared: ${hit.reason}` });
+        }
         let deleteSemantics = null;
-        if (method === 'DELETE' && linkedResourceName !== null) {
+        // A declared crud-delete/crud-archive is positive human evidence: it
+        // resolves archive-vs-hard without model declarations and without
+        // requiring linkage (the model-evidence channel below stays for the
+        // undeclared case).
+        const declaredDelete = declaredHits.find((hit) => hit.capability === 'crud-delete' || hit.capability === 'crud-archive');
+        if (declaredDelete !== undefined) {
+            deleteSemantics = declaredDelete.capability === 'crud-archive' ? 'archive' : 'hard';
+            capabilityTrace.push({
+                capability: declaredDelete.capability,
+                rule: 'DELETE_DECLARED',
+                evidence: `declared delete semantics: ${declaredDelete.reason}`,
+            });
+        }
+        else if (method === 'DELETE' && linkedResourceName !== null) {
             const fromModel = deleteSemanticsByName.get(linkedResourceName) ?? null;
             const classified = classifyDelete(endpointRoutes, fromModel);
             if (classified.capability !== null) {
@@ -670,7 +758,8 @@ export function compileEndpointContribution(contributions, options = {}) {
                 unresolved.push({
                     code: ENDPOINT_SEMANTICS_UNRESOLVED,
                     detail: `endpoint '${identity}' has no positive capability evidence (method alone never ` +
-                        'decides semantics); add handler/schema/model evidence or an explicit classification',
+                        'decides semantics); add handler/schema/model evidence, an explicit classification, ' +
+                        'or a .gateforge/endpoints.json capability declaration',
                     location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
                 });
             }
