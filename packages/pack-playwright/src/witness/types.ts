@@ -142,6 +142,63 @@ export interface ServerE2eDeclarationsResponse {
 }
 
 /**
+ * `POST /runs/observe-declarations` body (SUPERVISOR ONLY): the
+ * obligation ids the trusted mapping layer declared kind `observed-e2e`
+ * (Observe channel, Phase 2). Registration is a PRE-run fact like the
+ * server-e2e set: bound once, identical re-registration idempotent, any
+ * change or late registration refused — the witness never stamps
+ * `channel: 'observe'` records for obligations outside this set, so a
+ * suite-driven test can never steer observe evidence onto an
+ * engine-kind obligation.
+ */
+export interface ObserveDeclarationsRequest {
+  obligations: readonly string[];
+}
+
+/** `POST /runs/observe-declarations` response. */
+export interface ObserveDeclarationsResponse {
+  bound: true;
+  count: number;
+  obligations: string[];
+}
+
+/**
+ * `POST /observe/finalize` body (SUPERVISOR ONLY — the drain calls it
+ * after a passed test, before sealing the session): resolve one
+ * session's observe-eligible claims against the session's own proxied
+ * traffic plus independent adapter reads, and stamp witnessed
+ * `persistence.observed` records for whatever resolves.
+ *
+ * The session must still be OPEN (finalize runs before seal; a sealed
+ * session is refused) so no record is ever injected after the test
+ * ended. Ambiguity, missing traffic, unparsable bodies, and adapter
+ * trouble resolve to typed NOTES in the response — never to
+ * satisfaction, never to a run failure.
+ */
+export interface ObserveFinalizeRequest {
+  sessionId: string;
+}
+
+/** One obligation the finalize resolved into a witnessed record. */
+export interface ObserveFinalizedObligation {
+  /** Obligation id the record was issued under. */
+  obligationId: string;
+  /** The issued witnessed record id. */
+  recordId: string;
+  /** The CRUD operation the binding proved. */
+  operation: 'create' | 'read' | 'update' | 'delete';
+  /** The witness-resolved entity id (scalar or column-keyed object). */
+  entityId: unknown;
+}
+
+/** `POST /observe/finalize` response. */
+export interface ObserveFinalizeResponse {
+  finalized: ObserveFinalizedObligation[];
+  /** Typed non-satisfaction notes (missing traffic, ambiguity, …). */
+  notes: string[];
+}
+
+/**
  * `POST /witness/server-persistence` body (SUPERVISOR ONLY — the drain
  * forwards it with the verifier key; the suite can only write intent
  * spool lines, never call this): one persistence claim intent, already
@@ -617,6 +674,38 @@ export interface EvidenceAdapter {
     ctx: AdapterContext,
     subject: unknown,
   ) => Promise<ServerProbeResult> | ServerProbeResult;
+  /**
+   * Optional OBSERVE binding (Observe channel, Phase 2): declares which
+   * proxied HTTP exchanges count as mutations of this resource when a
+   * suite-driven browser test runs. Each declared operation names the
+   * method + backend-facing path template; `{id}` marks the single
+   * segment carrying the entity id (required on read/update/delete,
+   * forbidden on create — create ids come from the list-diff). Only
+   * declared operations are observe-eligible; anything else grades
+   * typed-missing. Observe additionally requires `list` (before-
+   * snapshots); an adapter without it can serve no observe obligation.
+   */
+  observe?: ObserveBinding;
+}
+
+/**
+ * One observe-eligible mutation shape: the HTTP method (uppercase) and
+ * the backend-facing path template. `{id}` matches exactly one non-
+ * empty path segment and binds the entity id for read/update/delete.
+ */
+export interface ObserveMutation {
+  /** Concrete uppercase HTTP method, e.g. `'POST'`. */
+  method: string;
+  /** Backend-facing absolute path, e.g. `'/api/v2/accounts/{id}'`. */
+  path: string;
+}
+
+/** Per-operation observe bindings for one resource adapter. */
+export interface ObserveBinding {
+  create?: ObserveMutation;
+  read?: ObserveMutation;
+  update?: ObserveMutation;
+  delete?: ObserveMutation;
 }
 
 /** The shape an adapter `probeServer` must return (validated witness-side). */

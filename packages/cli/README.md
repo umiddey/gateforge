@@ -5,15 +5,35 @@ resources and classification signals, inspect automatic decisions, reuse a
 repository's existing tests, evaluate obligations, run the supervised E2E
 gate, enforce the exact staged candidate, and maintain baselines.
 
-Just added a new table or endpoint and the gate is blocking? Start with the
-user manual: [`docs/guides/new-table-playbook.md`](../../docs/guides/new-table-playbook.md)
-— the three legal exits (prove / waive / reclassify), with worked examples.
+Just added a new table or endpoint and the gate is blocking? Run
+`gateforge next` (or `gateforge next --json`) — it prints the ONE blocking
+next action. New proof tests go in `tests/e2e/gateforge/` (overlay);
+never rewrite existing journeys, never `tests mark` as proof.
+
+## Proof paths
+
+- **Overlay (default).** New thin tests in `tests/e2e/gateforge/` using
+  the engine-driven fixture (`evidence.ui.*` + `persistence.verify`).
+  Strongest: the engine types the form itself. `gateforge init`
+  scaffolds the directory README. Multi-screen creates use surface v2
+  wizard steps (`create.steps[]`; see `example/e2e/vendor-wizard-surface.js`).
+- **Observe (`--proof observe`).** Existing suite-driven Playwright
+  tests keep driving `page`; the witness watches their session-proxy
+  traffic and reads state itself through the adapter. Map them
+  `--kind observed-e2e`. Weaker than overlay by design: proves
+  persistence ("the server stored what the proxied request sent"), not
+  "the engine typed the form". Requires the Playwright `baseURL` on
+  the session proxy plus per-adapter `observe` bindings and `list()`.
+  `crud:*` contracts stay engine-browser-only.
+- **`tests mark` is intent, never proof.** A mapped test with no
+  witnessed evidence grades `EVIDENCE_NOT_COLLECTED` — blocking.
 
 ## Commands
 
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
-| `gateforge init [--languages <comma,list>] [--blocking] [--strict-e2e]` | Create `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, and the `adapters/` + `waivers/` skeleton dirs. Idempotent — never overwrites existing files. Default language: `python`. Bundled detectors are preconfigured automatically for the selected Python, JavaScript, and TypeScript languages. `--strict-e2e` writes the `enforcement` block (standard mode, `strictE2E`) and runs the capability preflight FIRST: a strict setup whose policies require a contract with no available proof channel fails closed (exit 2, nothing written). `--blocking` additionally installs AND verifies an ACTIVE pre-commit hook (the staged gate), writes the standalone staged-gate script, the `.pre-commit-config.yaml` block, and the GitLab strict-gate CI template + include; a foreign existing hook is never clobbered (typed conflict naming the exact chaining action). | 0 (blocking-install failure → 2) |
+| `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence-only policy, overlay proof), and write `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, `GATEFORGE.md`, and (overlay proof only) `tests/e2e/gateforge/README.md`. Idempotent — never overwrites existing files. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block (standard mode, `strictE2E`) and runs the capability preflight FIRST. `--blocking` additionally installs AND verifies an ACTIVE pre-commit hook (the staged gate), writes the standalone staged-gate script, the `.pre-commit-config.yaml` block, and the GitLab strict-gate CI template + include; a foreign existing hook is never clobbered (typed conflict naming the exact chaining action). | 0 (blocking-install failure → 2) |
+| `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking`). Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. Snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
 | `gateforge explain <resourceId> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. | 0/1/2 |
@@ -68,15 +88,17 @@ tests:
     reason: Existing journey deletes the selected account.
 ```
 
-`--kind` is one of `browser-e2e`, `api-e2e`, `unit`, `integration`,
+`--kind` is one of `browser-e2e`, `observed-e2e`, `api-e2e`, `unit`, `integration`,
 `component`, `unknown`. A declaration is INTENT, never proof:
 
 - Native `{ type: 'gateforge', description: '<obligation id>' }` annotations
   keep working; sidecar entries and native claims normalize through ONE
   resolver. Exact duplicate claims deduplicate; contradictions block with
   both source locations (`TEST_MAPPING_AMBIGUOUS`).
-- An explicit kind may resolve `unknown`, but cannot override observed
-  mocking or a strong code-signal inference — `tests mark` refuses with
+- An explicit kind may resolve `unknown` — and `observed-e2e` may refine an
+  inferred `browser-e2e` (same journey, witness-watched instead of
+  engine-driven) — but cannot override observed mocking or any other
+  strong code-signal inference — `tests mark` refuses with
   both locations instead of writing the file.
 - Agents may edit the sidecar directly; both paths receive identical
   validation. `mark` is idempotent: re-running an exact declaration writes
@@ -204,7 +226,7 @@ else):
 | `http:request-observed`, `http:response-status-ok` | AVAILABLE — transport semantics only: a witness-observed exchange plus a provenance-verified claimed `ui.action` anchor from the declaring test |
 | `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; grades blocking `missing` before examining evidence |
 | `crud:*` (UI-semantic) | FAIL-CLOSED — the tested suite owns the browser; use `persistence:*` |
-| `auth:*`, `task:*`, `validation:*`, `webhook:*`, `workflow:*` | UNSUPPORTED — every contract fail-closed; surfaces as `VERIFIER_UNSUPPORTED` (implement/configure the observer; do not add duplicate tests) |
+| `auth:*`, `task:*`, `validation:*`, `webhook:*`, `workflow:*` | UNSUPPORTED — every contract fail-closed; surfaces as `VERIFIER_UNSUPPORTED` (remove the contract or drop the pack; do not add tests) |
 
 Unsupported proof stays blocking. Nothing silently replaces browser proof
 with HTTP status proof.

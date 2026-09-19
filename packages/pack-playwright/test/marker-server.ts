@@ -110,6 +110,27 @@ function handle(
     res.end(JSON.stringify(account));
     return;
   }
+  const updateMatch = /^\/api\/accounts\/([^/]+)$/.exec(url);
+  if ((req.method === 'PATCH' || req.method === 'PUT') && updateMatch !== null) {
+    const account = accounts.get(decodeURIComponent(updateMatch[1] as string));
+    if (account === undefined) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'not found' }));
+      return;
+    }
+    void readBody().then((raw) => {
+      let body: Record<string, unknown> = {};
+      try {
+        body = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        // leave the row unchanged on an unparsable body
+      }
+      if (typeof body['first_name'] === 'string') account.first_name = body['first_name'];
+      if (typeof body['last_name'] === 'string') account.last_name = body['last_name'];
+      res.end(JSON.stringify(account));
+    });
+    return;
+  }
   const entityMatch = /^\/api\/accounts\/([^/]+)$/.exec(url);
   if (req.method === 'GET' && entityMatch !== null) {
     const account = accounts.get(decodeURIComponent(entityMatch[1] as string));

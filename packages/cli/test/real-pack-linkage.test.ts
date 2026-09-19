@@ -40,7 +40,7 @@ plugins:
     transport: in-process
     module: ${httpPack}
   - id: gateforge.pack-sqlalchemy
-    version: '0.1.0'
+    version: '0.2.0'
     transport: in-process
     module: ${sqlalchemyPack}
 policies: .gateforge/policies.yml
@@ -211,7 +211,7 @@ plugins:
     transport: in-process
     module: ${taskPack}
   - id: gateforge.pack-sqlalchemy
-    version: '0.1.0'
+    version: '0.2.0'
     transport: in-process
     module: ${sqlalchemyPack}
 policies: .gateforge/policies.yml
@@ -342,7 +342,7 @@ plugins:
     transport: in-process
     module: ${httpPack}
   - id: gateforge.pack-sqlalchemy
-    version: '0.1.0'
+    version: '0.2.0'
     transport: in-process
     module: ${sqlalchemyPack}
 policies: .gateforge/policies.yml

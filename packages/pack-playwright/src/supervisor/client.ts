@@ -14,6 +14,10 @@ import type {
   ExpectedSetRequest,
   ExpectedSetResponse,
   ExecutionTraceResponse,
+  ObserveDeclarationsRequest,
+  ObserveDeclarationsResponse,
+  ObserveFinalizeRequest,
+  ObserveFinalizeResponse,
   ServerE2eDeclarationsRequest,
   ServerE2eDeclarationsResponse,
   ServerPersistenceIntentRequest,
@@ -97,6 +101,29 @@ export class SupervisorClient {
     request: ServerE2eDeclarationsRequest,
   ): Promise<ServerE2eDeclarationsResponse> {
     return this.request<ServerE2eDeclarationsResponse>('/runs/server-e2e-declarations', request);
+  }
+
+  /**
+   * POST /runs/observe-declarations (Observe channel, Phase 2):
+   * registers the obligations the trusted mapping layer declared kind
+   * `observed-e2e` — the witness then (and only then) stamps
+   * `channel: 'observe'` records for them.
+   */
+  async registerObserveDeclarations(
+    request: ObserveDeclarationsRequest,
+  ): Promise<ObserveDeclarationsResponse> {
+    return this.request<ObserveDeclarationsResponse>('/runs/observe-declarations', request);
+  }
+
+  /**
+   * POST /observe/finalize (Observe channel, Phase 2): resolves one
+   * OPEN session's observe-declared claims against its own proxied
+   * traffic plus independent adapter reads. Non-resolutions ride
+   * `notes` — never satisfaction, never a throw beyond transport/
+   * auth failures.
+   */
+  async finalizeObserve(request: ObserveFinalizeRequest): Promise<ObserveFinalizeResponse> {
+    return this.request<ObserveFinalizeResponse>('/observe/finalize', request);
   }
 
   /**

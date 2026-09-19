@@ -103,7 +103,7 @@ async function coverageFindings(repo: TempRepo): Promise<Array<{ operation: stri
   return report.blocking
     .filter((entry) => entry.cause === 'CRUD_COVERAGE_MISSING')
     .map((entry) => ({
-      operation: /browser-e2e '([a-z]+)' coverage/.exec(entry.detail)?.[1] ?? '',
+      operation: /mapped real-UI '([a-z]+)' coverage/.exec(entry.detail)?.[1] ?? '',
     }));
 }
 
@@ -119,6 +119,11 @@ describe('coverage policy consumes resolved test mappings', () => {
       // A browser-e2e declaration for the read obligation clears read;
       // update stays blocking (the same journey cannot fake it).
       writeSidecar(repo, 'browser-e2e');
+      expect(await coverageFindings(repo)).toEqual([{ operation: 'update' }]);
+
+      // An observed-e2e declaration clears exactly like browser-e2e
+      // (both are real-UI journeys).
+      writeSidecar(repo, 'observed-e2e');
       expect(await coverageFindings(repo)).toEqual([{ operation: 'update' }]);
 
       // A non-browser kind never satisfies closed-world coverage.

@@ -104,6 +104,38 @@ describe('static discovery', () => {
     expect(result.budgetExceeded).toBe(false);
   });
 
+  it('records the gateforge pack import on entries that use the evidence fixture', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/overlay.spec.ts': [
+        "import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';",
+        "import { accountsSurface } from './accounts-surface.js';",
+        'const test = gateforgeTest.extend({ surface: accountsSurface });',
+        "test('creates an account', async ({ evidence }) => {",
+        '  await evidence.finalize();',
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/plain.spec.ts': [
+        "import { test, expect } from 'playwright/test';",
+        "test('creates an account', async ({ page }) => {",
+        '  await page.goto("/accounts");',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    expect(result.parseErrors).toEqual([]);
+    expect(result.entries).toHaveLength(2);
+    const byFile = new Map(result.entries.map((entry) => [entry.file, entry]));
+    expect(byFile.get('e2e/overlay.spec.ts')?.facts.gateforgeFixtureImport).toEqual({
+      file: 'e2e/overlay.spec.ts',
+      line: 1,
+      col: 0,
+    });
+    expect(byFile.get('e2e/plain.spec.ts')?.facts.gateforgeFixtureImport).toBe(null);
+  });
+
   it('records an unresolvable wrapper call as an unresolved entry with its location', () => {
     const root = makeTempDir();
     writeTree(root, {
@@ -504,6 +536,7 @@ describe('kind/category inference rules', () => {
     httpClientCall: null,
     fileHttpClientCall: null,
     fileMockImport: null,
+    gateforgeFixtureImport: null,
   };
 
   it('browser fixture fires browser-e2e', () => {
@@ -600,6 +633,33 @@ describe('kind/category inference rules', () => {
       'persistence.create',
       'persistence.delete',
     ]);
+  });
+
+  it('gateforge fixture import + evidence param agrees with browser-e2e (no conflict)', () => {
+    const importAt = { file: 'e2e/overlay.spec.ts', line: 1, col: 0 };
+    const result = inferTestKind({
+      file: 'e2e/overlay.spec.ts',
+      title: 'creates an account',
+      titlePath: ['creates an account'],
+      facts: { ...baseFacts, signatureParams: ['evidence'], gateforgeFixtureImport: importAt },
+    });
+    expect(result.inferredKind).toBe('browser-e2e');
+    expect(result.kindSignals.map((signal) => signal.ruleId).sort()).toEqual([
+      'browser-fixture',
+      'gateforge-fixture',
+    ]);
+  });
+
+  it('gateforge pack import without the evidence param fires no fixture signal', () => {
+    const importAt = { file: 'e2e/plain.spec.ts', line: 1, col: 0 };
+    const result = inferTestKind({
+      file: 'e2e/plain.spec.ts',
+      title: 'creates an account',
+      titlePath: ['creates an account'],
+      facts: { ...baseFacts, signatureParams: ['page'], gateforgeFixtureImport: importAt },
+    });
+    expect(result.inferredKind).toBe('browser-e2e');
+    expect(result.kindSignals.map((signal) => signal.ruleId)).toEqual(['browser-fixture']);
   });
 });
 

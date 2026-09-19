@@ -459,21 +459,34 @@ function validateKind(kind: string): TestKind {
   const parsed = TestKindSchema.safeParse(kind);
   if (!parsed.success) {
     throw new UsageError(
-      `--kind must be one of: browser-e2e, api-e2e, unit, integration, component, unknown (got '${kind}')`,
+      `--kind must be one of: ${TestKindSchema.options.join(', ')} (got '${kind}')`,
     );
   }
   return parsed.data as TestKind;
 }
 
 /**
+ * Whether a kind declaration refines (rather than contradicts) the
+ * catalog inference (Observe channel): declaring `observed-e2e` over an
+ * inferred `browser-e2e` keeps the browser journey and only weakens the
+ * proof channel. Mirrors `isKindRefinement` in `@gate-forge/core`'s
+ * mapping resolver (kept in lockstep; this layer refuses BEFORE writing
+ * the sidecar).
+ */
+function isKindRefinement(declared: TestKind, inferred: TestKind): boolean {
+  return declared === 'observed-e2e' && inferred === 'browser-e2e';
+}
+
+/**
  * Refuses declarations that contradict the CURRENT catalog evidence
- * (plan §5.3): an explicit kind may resolve `unknown`, but cannot
+ * (plan §5.3): an explicit kind may resolve `unknown` (or refine
+ * `browser-e2e` into `observed-e2e` for the Observe channel), but cannot
  * override observed mocking or a strong code-signal classification.
  * Both locations land in the error (exit 2, nothing written).
  */
 function assertKindDeclarationAllowed(entry: TestCatalogEntry, kind: TestKind, key: string): void {
   const mock = entry.suppressionSignals.find((signal) => signal.kind === 'mock');
-  if (mock !== undefined && (kind === 'browser-e2e' || kind === 'api-e2e')) {
+  if (mock !== undefined && (kind === 'browser-e2e' || kind === 'api-e2e' || kind === 'observed-e2e')) {
     throw new UsageError(
       `cannot mark '${key}' as '${kind}': the catalog observed mocking (${mock.detail}) at ` +
         `${mock.location.file}:${String(mock.location.line)} — an explicit kind cannot override observed mocking (§5.3)`,
@@ -483,7 +496,8 @@ function assertKindDeclarationAllowed(entry: TestCatalogEntry, kind: TestKind, k
   if (
     entry.inferredKind !== 'unknown' &&
     entry.kindSignals.length > 0 &&
-    kind !== entry.inferredKind
+    kind !== entry.inferredKind &&
+    !isKindRefinement(kind, entry.inferredKind)
   ) {
     throw new UsageError(
       `cannot mark '${key}' as '${kind}': inference resolved '${entry.inferredKind}' from strong code ` +

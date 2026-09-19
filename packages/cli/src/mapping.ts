@@ -337,14 +337,16 @@ export function relativeToRepo(cwd: string, absolute: string): string {
 
 /**
  * Derives the coverage-policy `mappedCoverage` input (plan §3.6) from
- * the resolved test mappings: every browser-e2e-declared binding for an
- * obligation whose contract carries a CRUD operation contributes one
- * (table, operation) coverage fact for the obligation's inventory
- * table. Non-browser-e2e kinds contribute nothing (closed-world coverage
- * requires REAL-UI journeys), obligations whose contract has no CRUD
- * operation suffix and bindings for resources absent from the graph
- * contribute nothing. Pure and deterministic: the output is sorted and
- * the same inputs always produce the same facts.
+ * the resolved test mappings: every real-UI-declared binding
+ * (`browser-e2e` engine-driven, `observed-e2e` suite-driven over the
+ * session proxy) for an obligation whose contract carries a CRUD
+ * operation contributes one (table, operation) coverage fact for the
+ * obligation's inventory table. All other kinds contribute nothing
+ * (closed-world coverage requires REAL-UI journeys), obligations whose
+ * contract has no CRUD operation suffix and bindings for resources
+ * absent from the graph contribute nothing. Pure and deterministic:
+ * the output is sorted and the same inputs always produce the same
+ * facts.
  *
  * Args:
  *   resolution: the resolver output (per-obligation bindings).
@@ -373,11 +375,11 @@ export function mappedCoverageFrom(
     const operation = coverageOperationOfContract(obligation.contract);
     if (operation === null) continue;
     for (const binding of group.bindings) {
-      if (binding.declaredKind !== 'browser-e2e') continue;
+      if (binding.declaredKind !== 'browser-e2e' && binding.declaredKind !== 'observed-e2e') continue;
       const key = `${resource.name}\u0000${operation}`;
       if (key in seen) continue;
       seen[key] = true;
-      coverage.push({ table: resource.name, operation, testKind: 'browser-e2e' });
+      coverage.push({ table: resource.name, operation, testKind: binding.declaredKind });
     }
   }
   return coverage.sort(
@@ -405,6 +407,31 @@ export function serverE2eObligationIds(resolution: ResolvedMappings): string[] {
   const ids = new Set<string>();
   for (const group of resolution.obligations) {
     if (group.bindings.some((binding) => binding.declaredKind === 'server-e2e')) {
+      ids.add(group.obligationId);
+    }
+  }
+  return [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * Collects the obligation ids whose resolved bindings declare the
+ * Observe kind (`observed-e2e`). Same authority pattern as
+ * {@link serverE2eObligationIds}: mapping kinds resolve in this trusted
+ * CLI layer only, and the witness stamps `channel: 'observe'` records
+ * solely for obligations the supervisor registered from this set — a
+ * suite-driven test can never steer observe evidence onto an
+ * unregistered obligation. Sorted and deduplicated.
+ *
+ * Args:
+ *   resolution: the resolver output (per-obligation bindings).
+ *
+ * Returns:
+ *   string[]: sorted obligation ids with at least one observed-e2e binding.
+ */
+export function observeObligationIds(resolution: ResolvedMappings): string[] {
+  const ids = new Set<string>();
+  for (const group of resolution.obligations) {
+    if (group.bindings.some((binding) => binding.declaredKind === 'observed-e2e')) {
       ids.add(group.obligationId);
     }
   }

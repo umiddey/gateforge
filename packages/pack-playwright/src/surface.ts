@@ -13,12 +13,14 @@
  */
 
 /**
- * The surface-descriptor contract version this pack speaks. Consumers
- * must declare `schemaVersion: SURFACE_DESCRIPTOR_VERSION` in their
- * descriptor; a different version fails closed with a precise error
- * instead of silently misreading selectors.
+ * The surface-descriptor contract version this pack speaks. Version 2
+ * adds opt-in `create.steps[]` (wizard flows); version 1 descriptors
+ * keep working unchanged (steps forbidden under v1).
  */
-export const SURFACE_DESCRIPTOR_VERSION = 1;
+export const SURFACE_DESCRIPTOR_VERSION = 2;
+
+/** Legacy surface-descriptor version (single-form create only). */
+export const SURFACE_DESCRIPTOR_VERSION_1 = 1;
 
 /** How the rendered LIST page is observed (rows and their cells). */
 export interface SurfaceList {
@@ -34,7 +36,7 @@ export interface SurfaceList {
   fieldCellIndexes: Record<string, number>;
 }
 
-/** How the CREATE form is driven. */
+/** How the CREATE form is driven (legacy single form, v1 + v2). */
 export interface SurfaceCreate {
   /** Create-form page path relative to the app base. */
   formPath: string;
@@ -45,6 +47,51 @@ export interface SurfaceCreate {
   /** Submit control selector on the create form. */
   submitSelector: string;
 }
+
+/**
+ * One engine-driven wizard step (surface v2, Phase 3): the closed
+ * operation set the engine can perform while walking a multi-screen
+ * create flow (draft orb → type picker → radios → searchable lists →
+ * submit). Steps are LOCATORS plus field references — never proof: a
+ * lying step fails closed (elements never match) exactly like a lying
+ * legacy selector. Custom searchable dropdowns, drag-and-drop, file
+ * pickers, and hover menus are NOT expressible — those flows stay on
+ * the Observe channel (documented limitation, never silently widened).
+ */
+export type SurfaceStep =
+  /** Navigate to an app-relative path. */
+  | { goto: string }
+  /** Click a selector. */
+  | { click: string }
+  /**
+   * Fill an input: `field` references a test-input field name (the
+   * engine types the journey's value for it); `value` is a literal the
+   * map declares. Exactly one of the two.
+   */
+  | { fill: { selector: string; field?: string; value?: string } }
+  /** Check a radio/checkbox. */
+  | { check: string }
+  /** Press a dismiss/confirm key (dialogs that close on Escape/Enter). */
+  | { press: 'Escape' | 'Enter' }
+  /** Wait for a selector (async panels, search results). */
+  | { waitFor: string };
+
+/**
+ * Wizard-driven CREATE (surface v2): `steps` replace the legacy
+ * single-form trio (`formPath`/`formReadySelector`/`submitSelector`
+ * must be ABSENT — a mixed descriptor is refused fail-closed, never
+ * driven half-legacy). `fields` stays REQUIRED: it declares the input
+ * vocabulary the test provides and the echo grades.
+ */
+export interface SurfaceCreateSteps {
+  /** Declared input vocabulary (echo source; selectors live in steps). */
+  fields: Record<string, string>;
+  /** The wizard walk, in order. Non-empty. */
+  steps: SurfaceStep[];
+}
+
+/** How CREATE is driven: one legacy form (v1 + v2) or a wizard walk (v2 only). */
+export type SurfaceCreateFlow = SurfaceCreate | SurfaceCreateSteps;
 
 /**
  * How the EDIT form is reached and driven. `{id}` templates are
@@ -89,10 +136,10 @@ export interface SurfaceStatus {
  * entity id before use.
  */
 export interface SurfaceDescriptor {
-  /** Must equal {@link SURFACE_DESCRIPTOR_VERSION} (fail-closed otherwise). */
+  /** `SURFACE_DESCRIPTOR_VERSION_1` (legacy) or `SURFACE_DESCRIPTOR_VERSION` (steps allowed). */
   schemaVersion: number;
   list: SurfaceList;
-  create: SurfaceCreate;
+  create: SurfaceCreateFlow;
   edit: SurfaceEdit;
   archive: SurfaceArchive;
   status: SurfaceStatus;
@@ -140,34 +187,15 @@ export function renderSurfaceTemplate(template: string, entityId: string): strin
  *   Error: naming the first structural problem found.
  */
 export function validateSurface(surface: SurfaceDescriptor): SurfaceDescriptor {
-  const requireSelectorMap = (where: string, map: Record<string, string>): void => {
-    if (typeof map !== 'object' || map === null || Array.isArray(map)) {
-      throw new Error(`surface.${where} must be a record of field name → selector`);
-    }
-    for (const [field, selector] of Object.entries(map)) {
-      if (typeof selector !== 'string' || selector.length === 0) {
-        throw new Error(`surface.${where}.${field} must be a non-empty selector string`);
-      }
-    }
-  };
-  const requireIndexMap = (where: string, map: Record<string, number>): void => {
-    if (typeof map !== 'object' || map === null || Array.isArray(map)) {
-      throw new Error(`surface.${where} must be a record of field name → cell index`);
-    }
-    for (const [field, index] of Object.entries(map)) {
-      if (!Number.isInteger(index) || index < 0) {
-        throw new Error(`surface.${where}.${field} must be a non-negative integer cell index`);
-      }
-    }
-  };
   if (typeof surface !== 'object' || surface === null || Array.isArray(surface)) {
     throw new Error('surface must be a SurfaceDescriptor object declared by the consumer');
   }
-  if (surface.schemaVersion !== SURFACE_DESCRIPTOR_VERSION) {
+  if (surface.schemaVersion !== SURFACE_DESCRIPTOR_VERSION_1 && surface.schemaVersion !== SURFACE_DESCRIPTOR_VERSION) {
     throw new Error(
       `surface.schemaVersion ${String(surface.schemaVersion)} is not supported: this pack speaks ` +
-        `surface-descriptor version ${String(SURFACE_DESCRIPTOR_VERSION)} — redeclare the surface ` +
-        'against the current version',
+        `surface-descriptor versions ${String(SURFACE_DESCRIPTOR_VERSION_1)} (legacy single-form ` +
+        `create) and ${String(SURFACE_DESCRIPTOR_VERSION)} (wizard steps allowed) — redeclare ` +
+        'the surface against a current version',
     );
   }
   for (const section of ['list', 'create', 'edit', 'archive', 'status', 'afterAction'] as const) {
@@ -184,12 +212,7 @@ export function validateSurface(surface: SurfaceDescriptor): SurfaceDescriptor {
     throw new Error('surface.list.idCellIndex must be a non-negative integer');
   }
   requireIndexMap('list.fieldCellIndexes', surface.list.fieldCellIndexes);
-  for (const key of ['formPath', 'formReadySelector', 'submitSelector'] as const) {
-    if (typeof surface.create[key] !== 'string' || surface.create[key].length === 0) {
-      throw new Error(`surface.create.${key} must be a non-empty string`);
-    }
-  }
-  requireSelectorMap('create.fields', surface.create.fields);
+  validateCreateFlow(surface.schemaVersion, surface.create);
   for (const key of ['linkSelector', 'formReadySelectorTemplate', 'saveSelectorTemplate'] as const) {
     if (typeof surface.edit[key] !== 'string' || surface.edit[key].length === 0) {
       throw new Error(`surface.edit.${key} must be a non-empty string`);
@@ -210,6 +233,139 @@ export function validateSurface(surface: SurfaceDescriptor): SurfaceDescriptor {
   }
   requireSelectorMap('deleteFields', surface.deleteFields);
   return surface;
+}
+
+/**
+ * Requires a field name → selector record (module-level: shared by the
+ * descriptor validator and the create-flow validator).
+ */
+function requireSelectorMap(where: string, map: Record<string, string>): void {
+  if (typeof map !== 'object' || map === null || Array.isArray(map)) {
+    throw new Error(`surface.${where} must be a record of field name → selector`);
+  }
+  for (const [field, selector] of Object.entries(map)) {
+    if (typeof selector !== 'string' || selector.length === 0) {
+      throw new Error(`surface.${where}.${field} must be a non-empty selector string`);
+    }
+  }
+}
+
+/**
+ * Requires a field name → cell index record (module-level: shared by
+ * the descriptor validator and the create-flow validator).
+ */
+function requireIndexMap(where: string, map: Record<string, number>): void {
+  if (typeof map !== 'object' || map === null || Array.isArray(map)) {
+    throw new Error(`surface.${where} must be a record of field name → cell index`);
+  }
+  for (const [field, index] of Object.entries(map)) {
+    if (!Number.isInteger(index) || index < 0) {
+      throw new Error(`surface.${where}.${field} must be a non-negative integer cell index`);
+    }
+  }
+}
+
+/**
+ * Validates the create flow: legacy single-form trio, or (v2 only) a
+ * wizard step walk. Mixed shapes are refused fail-closed — the engine
+ * never drives half a form and half a wizard.
+ */
+function validateCreateFlow(schemaVersion: number, create: SurfaceCreateFlow): void {
+  if (typeof create !== 'object' || create === null || Array.isArray(create)) {
+    throw new Error('surface.create must be an object (legacy form or v2 steps)');
+  }
+  const record = create as unknown as Record<string, unknown>;
+  if ('steps' in record) {
+    if (schemaVersion !== SURFACE_DESCRIPTOR_VERSION) {
+      throw new Error(
+        'surface.create.steps requires surface-descriptor version ' +
+          `${String(SURFACE_DESCRIPTOR_VERSION)} (declared ${String(schemaVersion)})`,
+      );
+    }
+    for (const legacy of ['formPath', 'formReadySelector', 'submitSelector'] as const) {
+      if (record[legacy] !== undefined) {
+        throw new Error(
+          `surface.create mixes wizard steps with legacy '${legacy}' — declare steps or the ` +
+            'single form, never both',
+        );
+      }
+    }
+    requireSelectorMap('create.fields', (create as SurfaceCreateSteps).fields);
+    validateSteps((create as SurfaceCreateSteps).steps, (create as SurfaceCreateSteps).fields);
+    return;
+  }
+  for (const key of ['formPath', 'formReadySelector', 'submitSelector'] as const) {
+    if (typeof (create as SurfaceCreate)[key] !== 'string' || (create as SurfaceCreate)[key].length === 0) {
+      throw new Error(`surface.create.${key} must be a non-empty string`);
+    }
+  }
+  requireSelectorMap('create.fields', (create as SurfaceCreate).fields);
+}
+
+/**
+ * Validates one wizard step walk: non-empty, closed operation set,
+ * non-empty selectors/paths, fills carrying exactly one of
+ * field/value with the field in the declared vocabulary.
+ */
+function validateSteps(steps: SurfaceStep[], fields: Record<string, string>): void {
+  if (!Array.isArray(steps) || steps.length === 0) {
+    throw new Error('surface.create.steps must be a non-empty array of wizard steps');
+  }
+  steps.forEach((step, index) => {
+    const where = `surface.create.steps[${String(index)}]`;
+    if (typeof step !== 'object' || step === null || Array.isArray(step)) {
+      throw new Error(`${where} must be a single-operation step object`);
+    }
+    const keys = Object.keys(step);
+    if (keys.length !== 1) {
+      throw new Error(`${where} must carry exactly one operation (goto/click/fill/check/press/waitFor)`);
+    }
+    const operation = keys[0] as 'goto' | 'click' | 'fill' | 'check' | 'press' | 'waitFor';
+    const value = (step as Record<string, unknown>)[operation];
+    switch (operation) {
+      case 'goto':
+      case 'click':
+      case 'check':
+      case 'waitFor':
+        if (typeof value !== 'string' || value.length === 0) {
+          throw new Error(`${where}.${operation} must be a non-empty string`);
+        }
+        if (operation === 'goto' && !value.startsWith('/')) {
+          throw new Error(`${where}.goto must be an app-relative path starting with '/'`);
+        }
+        break;
+      case 'press':
+        if (value !== 'Escape' && value !== 'Enter') {
+          throw new Error(`${where}.press must be 'Escape' or 'Enter'`);
+        }
+        break;
+      case 'fill': {
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+          throw new Error(`${where}.fill must be {selector, field?/value?}`);
+        }
+        const fill = value as Record<string, unknown>;
+        if (typeof fill['selector'] !== 'string' || (fill['selector'] as string).length === 0) {
+          throw new Error(`${where}.fill.selector must be a non-empty string`);
+        }
+        const hasField = typeof fill['field'] === 'string' && (fill['field'] as string).length > 0;
+        const hasValue = typeof fill['value'] === 'string';
+        if (hasField === hasValue) {
+          throw new Error(`${where}.fill needs exactly one of field/value (a test-input reference or a map literal)`);
+        }
+        if (hasField && !Object.prototype.hasOwnProperty.call(fields, fill['field'] as string)) {
+          throw new Error(
+            `${where}.fill.field '${fill['field'] as string}' is not in the declared create.fields ` +
+              `vocabulary (${Object.keys(fields).sort().join(', ') || '<none>'})`,
+          );
+        }
+        break;
+      }
+      default:
+        throw new Error(
+          `${where} carries unknown operation '${String(operation)}' (allowed: goto/click/fill/check/press/waitFor)`,
+        );
+    }
+  });
 }
 
 /**

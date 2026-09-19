@@ -150,11 +150,11 @@ describe('gateforge init', () => {
       const initialized = await runCli(repo, ['init', '--languages', 'python,javascript,typescript']);
       expect(initialized.code).toBe(0);
       const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      // pack-task is opt-in only (no semantic verifier): never defaulted.
       expect(config.plugins.map((plugin) => plugin.id)).toEqual([
         'gateforge.pack-fastapi',
         'gateforge.pack-sqlalchemy',
         'gateforge.pack-http',
-        'gateforge.pack-task',
       ]);
       expect(config.plugins.every((plugin) => plugin.transport === 'in-process')).toBe(true);
       expect(config.project.paths.include).toEqual([
@@ -218,6 +218,165 @@ describe('gateforge init', () => {
       expect(second.code).toBe(0);
       expect(readFileSync(repo.path('.gateforge/waivers/custom.json'), 'utf8')).toBe(
         '{"user": true}',
+      );
+    });
+  });
+});
+
+describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', () => {
+  it('empty repo: prints the scan block, recommends fastapi+sqlalchemy, never pack-task', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code).toBe(0);
+      expect(stdout).toContain('scan:');
+      expect(stdout).toContain('languages: python');
+      expect(stdout).toContain('recommended:');
+      expect(stdout).toContain('gateforge.pack-fastapi, gateforge.pack-sqlalchemy');
+      expect(stdout).toContain('skipped:');
+      expect(stdout).toContain('gateforge.pack-task');
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.plugins.map((plugin) => plugin.id)).toEqual([
+        'gateforge.pack-fastapi',
+        'gateforge.pack-sqlalchemy',
+      ]);
+      // Persistence-only starter policy: no unavailable browser channel.
+      const policies = readFileSync(repo.path('.gateforge/policies.yml'), 'utf8');
+      expect(policies).toContain('user-facing-persistence');
+      expect(policies).not.toContain('- http:frontend-request-observed');
+    });
+  });
+
+  it('detects sqlalchemy+fastapi signals and recommends exactly those packs', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'backend/models/account.py': [
+          'from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column',
+          'from fastapi import FastAPI',
+          '',
+          '',
+          'class Base(DeclarativeBase):',
+          '    pass',
+          '',
+          '',
+          'class Account(Base):',
+          '    __tablename__ = "accounts"',
+          '    id: Mapped[str] = mapped_column(primary_key=True)',
+          '',
+        ].join('\n'),
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code).toBe(0);
+      expect(stdout).toContain('signals: sqlalchemy, fastapi');
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.plugins.map((plugin) => plugin.id)).toEqual([
+        'gateforge.pack-fastapi',
+        'gateforge.pack-sqlalchemy',
+      ]);
+    });
+  });
+
+  it('creates GATEFORGE.md and the overlay README, never overwriting user edits', async () => {
+    await withTempRepo({}, async (repo) => {
+      const first = await runCli(repo, ['init']);
+      expect(first.code).toBe(0);
+      const skill = readFileSync(repo.path('GATEFORGE.md'), 'utf8');
+      expect(skill).toContain('gateforge next');
+      expect(skill).toContain('gateforge next --json');
+      expect(skill).toContain('tests/e2e/gateforge/');
+      expect(skill).toContain('tests mark');
+      expect(skill).toContain('tests/e2e/**');
+      expect(skill).toContain('VERIFIER_UNSUPPORTED');
+      expect(skill).toContain('coveragePolicy');
+      const overlay = readFileSync(repo.path('tests/e2e/gateforge/README.md'), 'utf8');
+      expect(overlay).toContain('tests/e2e/gateforge/<resource>.<op>.spec.js');
+      // User edits survive a second run.
+      repo.writeFiles({ 'GATEFORGE.md': '# mine\n', 'tests/e2e/gateforge/README.md': '# mine\n' });
+      const second = await runCli(repo, ['init']);
+      expect(second.code).toBe(0);
+      expect(readFileSync(repo.path('GATEFORGE.md'), 'utf8')).toBe('# mine\n');
+      expect(readFileSync(repo.path('tests/e2e/gateforge/README.md'), 'utf8')).toBe('# mine\n');
+    });
+  });
+
+  it('--proof observe is accepted: no overlay scaffold, checklist printed', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stdout } = await runCli(repo, ['init', '--proof', 'observe']);
+      expect(code).toBe(0);
+      expect(stdout).toContain('proof: observe');
+      expect(stdout).toContain('observe proof checklist');
+      expect(stdout).toContain('observed-e2e');
+      expect(existsSync(repo.path('.gateforge.yml'))).toBe(true);
+      expect(existsSync(repo.path('GATEFORGE.md'))).toBe(true);
+      // The observe path reuses the existing suite: no overlay directory.
+      expect(existsSync(repo.path('tests/e2e/gateforge/README.md'))).toBe(false);
+    });
+  });
+
+  it('--proof bogus exits 2 before any writes', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stderr } = await runCli(repo, ['init', '--proof', 'bogus']);
+      expect(code).toBe(2);
+      expect(stderr).toContain(`flag '--proof' must be 'overlay' or 'observe'`);
+      expect(existsSync(repo.path('.gateforge.yml'))).toBe(false);
+      expect(existsSync(repo.path('GATEFORGE.md'))).toBe(false);
+      expect(existsSync(repo.path('.gateforge'))).toBe(false);
+    });
+  });
+
+  it('unknown --plugins id exits 2 with nothing written', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stderr } = await runCli(repo, ['init', '--plugins', 'gateforge.pack-nope']);
+      expect(code).toBe(2);
+      expect(stderr).toContain('unknown plugin');
+      expect(existsSync(repo.path('.gateforge.yml'))).toBe(false);
+    });
+  });
+
+  it('--plugins gateforge.pack-task is the only way task gets installed', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code } = await runCli(repo, ['init', '--plugins', 'gateforge.pack-task']);
+      expect(code).toBe(0);
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.plugins.map((plugin) => plugin.id)).toEqual(['gateforge.pack-task']);
+    });
+  });
+
+  it('--no-scan skips heuristics and uses language defaults without pack-task', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'backend/models/account.py': 'from sqlalchemy.orm import DeclarativeBase\n',
+      });
+      const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
+      expect(code).toBe(0);
+      expect(stdout).toContain('signals: (none)');
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.plugins.map((plugin) => plugin.id)).toEqual([
+        'gateforge.pack-fastapi',
+        'gateforge.pack-sqlalchemy',
+      ]);
+    });
+  });
+  it('never emits coverage rules for unselected detectors (no dangling references)', async () => {
+    // JS/TS in languages but pack-http NOT selected: the generated
+    // classification policy must not name it (fail-closed at runtime).
+    await withTempRepo({}, async (repo) => {
+      const { code } = await runCli(repo, [
+        'init', '--languages', 'python,typescript', '--plugins', 'gateforge.pack-sqlalchemy,gateforge.pack-fastapi',
+      ]);
+      expect(code).toBe(0);
+      const policy = readFileSync(repo.path('.gateforge/classification-policy.yml'), 'utf8');
+      expect(policy).not.toContain('gateforge.pack-http');
+      expect(policy).toContain('gateforge.pack-sqlalchemy');
+    });
+    // Opting into pack-http restores its rule.
+    await withTempRepo({}, async (repo) => {
+      const { code } = await runCli(repo, [
+        'init', '--languages', 'python,typescript',
+        '--plugins', 'gateforge.pack-sqlalchemy,gateforge.pack-fastapi,gateforge.pack-http',
+      ]);
+      expect(code).toBe(0);
+      expect(readFileSync(repo.path('.gateforge/classification-policy.yml'), 'utf8')).toContain(
+        'gateforge.pack-http',
       );
     });
   });

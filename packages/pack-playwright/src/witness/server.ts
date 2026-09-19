@@ -28,6 +28,8 @@
  * | `GET /ledger-attestation`         | run token + verifier key (supervisor)   |
  * | `POST /runs/expected-set`         | run token + verifier key (supervisor)   |
  * | `POST /runs/server-e2e-declarations` | run token + verifier key (supervisor)|
+  * | `POST /runs/observe-declarations` | run token + verifier key (supervisor)   |
+  * | `POST /observe/finalize`      | run token + verifier key (supervisor)   |
  * | `POST /witness/server-persistence` | run token + verifier key (supervisor;  |
  * |                                   | the drain forwards intents — the suite |
  * |                                   | can only WRITE spool lines)            |
@@ -88,6 +90,15 @@
  *   outbox) that can never honestly appear in a UI. Probes run ONLY in
  *   this trusted process; missing adapter/probe/declaration and replayed
  *   sequences resolve to typed failures, never to satisfaction.
+  * - `POST /runs/observe-declarations` — SUPERVISOR ONLY: registers the
+  *   `observed-e2e` obligations BEFORE the run (same bind-once contract
+  *   as the server-e2e set).
+  * - `POST /observe/finalize` — SUPERVISOR ONLY: resolves one OPEN
+  *   session's observe-declared claims against its own proxied traffic
+  *   plus independent adapter reads; stamps witnessed
+  *   `persistence.observed` records (`channel: 'observe'`) for whatever
+  *   resolves. Non-resolutions are typed notes — never satisfaction,
+  *   never a run failure.
  * - `POST /witness/http-observation` — consumes one engine-observed
  *   proxied exchange for an http:* claim. Phase 1: the caller must hold
  *   a valid OPEN session and the exchange must have been observed
@@ -118,6 +129,7 @@ import {
   ATTESTATION_VERSION,
   attestationMac,
   enumerationDigestOf,
+  pathMatchesShape,
   recordIdOf,
   type Classification,
   type RecordOrigin,
@@ -128,6 +140,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   KNOWN_RECORD_KINDS,
   LOOPBACK_HOSTNAME,
+  OBSERVED_KIND,
   PERSISTENCE_KIND,
   RUN_HEADER,
   VERIFIER_HEADER,
@@ -154,6 +167,7 @@ import {
   type SurfaceDescriptor,
 } from '../surface.js';
 import type {
+  AdapterContext,
   BrowserActionRequest,
   BrowserActionResponse,
   BrowserSurfaceRequest,
@@ -164,6 +178,10 @@ import type {
   ExpectedSetResponse,
   ExecutionTraceResponse,
   IssuedRecord,
+  ObserveDeclarationsRequest,
+  ObserveFinalizeRequest,
+  ObserveFinalizeResponse,
+  ObserveFinalizedObligation,
   PersistenceRequest,
   PersistenceResponse,
   PreObservationRequest,
@@ -182,7 +200,7 @@ import type {
   WitnessHandle,
   WitnessOptions,
 } from './types.js';
-import { SERVER_CHANNEL, SERVER_E2E_TEST_KIND } from '../constants.js';
+import { OBSERVE_CHANNEL, OBSERVED_E2E_TEST_KIND, SERVER_CHANNEL, SERVER_E2E_TEST_KIND } from '../constants.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const OBLIGATION_ID_PATTERN = /^[^:]+:.+$/;
@@ -193,6 +211,16 @@ const OBLIGATION_ID_PATTERN = /^[^:]+:.+$/;
  * streams to the browser unbuffered — the snapshot is a tap, not a gate.
  */
 const OBSERVED_BODY_SNAPSHOT_BYTES = 16384;
+/**
+ * Bounded request-body snapshot the observation proxy keeps per
+ * forwarded exchange (Observe channel, Phase 2): the request body is
+ * already buffered for forwarding, so retaining a capped copy costs one
+ * slice. Bodies beyond the cap are flagged truncated — an observe
+ * finalize can never echo what it cannot see, so oversized intents
+ * grade typed-missing instead of satisfying on a prefix. Binary-safe:
+ * stored raw; the finalize path parses JSON/form text from it.
+ */
+const OBSERVED_REQUEST_BODY_BYTES = 65536;
 /** One engine-observed proxied exchange (arrival order via `seq`). */
 interface ObservedExchange {
   method: string;
@@ -203,6 +231,18 @@ interface ObservedExchange {
   bodySha256: string;
   /** TOTAL response body bytes observed (may exceed the snapshot). */
   bodyBytes: number;
+  /**
+   * Capped copy of the request body (Observe channel): the first
+   * OBSERVED_REQUEST_BODY_BYTES bytes the client sent, retained from
+   * the forward buffer. Null when the request carried no body.
+   */
+  requestBody: Buffer | null;
+  /** True when the request body exceeded the snapshot cap. */
+  requestTruncated: boolean;
+  /** TOTAL request body bytes received. */
+  requestBytes: number;
+  /** Lowercased request content-type without parameters, or null. */
+  requestContentType: string | null;
   /**
    * The OPEN-or-later session whose proxy prefix the exchange arrived
    * through (Phase 1 attribution); null when the exchange bypassed every
@@ -219,6 +259,20 @@ export class WitnessStartupError extends Error {
     super(message);
     this.name = 'WitnessStartupError';
   }
+}
+
+/**
+ * One resource's Observe before-snapshot: the witness's own adapter-list
+ * observation at session open (canonical-entity-key → normalized id +
+ * fields), or the error that made the resource unobservable. Snapshots
+ * are taken with the SAME attested adapter transport as every read, so
+ * the finalize path grades before/after from witness-held state only.
+ */
+interface ObserveResourceSnapshot {
+  resourceId: string;
+  adapterName: string;
+  before: Map<string, { entityId: unknown; fields: unknown }>;
+  error: string | null;
 }
 
 /** An HTTP JSON error the witness answers (status + {error, detail?}). */
@@ -277,6 +331,21 @@ interface WitnessState {
     { resourceId: string; kind: 'absence' | 'entity'; found: boolean; fields?: unknown }
   >;
   serverIntentSequences: Map<string, number>;
+  /**
+   * OBSERVE channel state (Phase 2). `observeDeclarations` holds the
+   * obligation ids the TRUSTED supervisor registered as mapping kind
+   * 'observed-e2e' BEFORE the run (verifier-key surface, same authority
+   * as the server-e2e set) — null until bound; the finalize path
+   * stamps `channel: 'observe'` records only for these obligations.
+   * `observeSnapshots` holds the witness's own adapter-list snapshots
+   * taken at session open, keyed by session then resource: the
+   * before-state every observe postcondition grades against. A snapshot
+   * error (no adapter, no list, probe/read trouble) is DATA the
+   * finalize reports as a typed note — sessions still open and tests
+   * still run; the claim simply stays blocking.
+   */
+  observeDeclarations: Set<string> | null;
+  observeSnapshots: Map<string, Map<string, ObserveResourceSnapshot>>;
   server: Server;
   /**
    * ADR 0004 D7: requests the witness-owned loopback observation proxy
@@ -365,6 +434,19 @@ function normalizeMountPath(raw: string | null | undefined): string | null {
     );
   }
   return path;
+}
+
+/**
+ * Lowercases a request content-type header to its media type without
+ * parameters (`'Application/JSON; charset=utf-8'` → `'application/json'`),
+ * or null when absent/unparseable. The Observe finalize path uses it to
+ * decide body parsing (JSON vs form); anything else is ineligible.
+ */
+function contentTypeOf(raw: string | string[] | undefined): string | null {
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof first !== 'string') return null;
+  const media = first.split(';')[0]?.trim().toLowerCase() ?? '';
+  return media.length > 0 ? media : null;
 }
 
 /**
@@ -473,6 +555,10 @@ async function startObservedProxy(state: WitnessState, sessionId: string | null)
               seq: (state.observedSeq += 1),
               bodySha256: createHash('sha256').update(Buffer.concat(snapshot)).digest('hex'),
               bodyBytes: totalBytes,
+              requestBody: body.length === 0 ? null : Buffer.from(body.subarray(0, OBSERVED_REQUEST_BODY_BYTES)),
+              requestTruncated: body.length > OBSERVED_REQUEST_BODY_BYTES,
+              requestBytes: body.length,
+              requestContentType: contentTypeOf(req.headers['content-type']),
               sessionId,
               tick: (state.tick += 1),
             });
@@ -678,6 +764,8 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     serverE2eDeclarations: null,
     serverPreObservations: new Map(),
     serverIntentSequences: new Map(),
+    observeDeclarations: null,
+    observeSnapshots: new Map(),
     observed: [],
     observedSeq: 0,
     runContext: null,
@@ -1168,6 +1256,14 @@ async function handleBrowserAction(
         seq: (state.observedSeq += 1),
         bodySha256: createHash('sha256').update(exchange.body).digest('hex'),
         bodyBytes: exchange.body.length,
+        // Engine-captured exchanges carry no request body (the engine
+        // typed the input; entered fields ride the ui.action record) —
+        // they can never serve an observe finalize, which requires the
+        // proxied request bytes.
+        requestBody: null,
+        requestTruncated: false,
+        requestBytes: 0,
+        requestContentType: null,
         sessionId: session.sessionId,
         tick: (state.tick += 1),
       });
@@ -1357,6 +1453,24 @@ async function handleRequest(
         res,
         req.headers[VERIFIER_HEADER],
         (await readBody(req)) as ServerE2eDeclarationsRequest,
+      );
+      return;
+    }
+    if (req.method === 'POST' && path === '/runs/observe-declarations') {
+      await handleObserveDeclarations(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ObserveDeclarationsRequest,
+      );
+      return;
+    }
+    if (req.method === 'POST' && path === '/observe/finalize') {
+      await handleObserveFinalize(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ObserveFinalizeRequest,
       );
       return;
     }
@@ -1772,6 +1886,14 @@ async function handleSessionOpen(
   await startSessionProxy(state, session);
   state.sessions.set(sessionId, session);
   state.workerSessions.set(workerIndex, sessionId);
+  // Observe before-snapshots (Phase 2): the witness lists the
+  // observe-declared resources ITSELF at open. Total by construction —
+  // a snapshot failure is finalize data, never an open failure.
+  try {
+    await takeObserveSnapshots(state, session);
+  } catch {
+    state.observeSnapshots.delete(sessionId);
+  }
   sendJson(res, 200, sessionView(state, session));
 }
 
@@ -1831,6 +1953,11 @@ async function handleSessionClose(
     session.sealedTick = (state.tick += 1);
     session.outcome = typeof outcome === 'string' ? outcome : null;
     state.workerSessions.delete(session.workerIndex);
+    // Observe snapshots die with the session: finalize runs BEFORE seal
+    // (the drain finalizes a passed test, then seals), so anything left
+    // here belongs to a test that never finalized — unsealed evidence
+    // must not linger for a later call to consume.
+    state.observeSnapshots.delete(sessionId);
     // The dedicated channel dies with the session: nothing can observe
     // (or submit) through it afterwards. The engine browser context dies
     // too — a sealed session's pages are never driven again.
@@ -2473,6 +2600,537 @@ async function handleServerE2eDeclarations(
     count: obligations.size,
     obligations: [...obligations].sort(compareStrings),
   });
+}
+
+/**
+ * `POST /runs/observe-declarations` — SUPERVISOR ONLY: registers the
+ * obligation ids the trusted mapping layer declared kind `observed-e2e`
+ * (Observe channel, Phase 2) BEFORE the run. Same binding contract as
+ * the server-e2e set: bound once, identical re-registration idempotent,
+ * any change or late registration refused — the witness stamps
+ * `channel: 'observe'` records for these obligations only.
+ */
+async function handleObserveDeclarations(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ObserveDeclarationsRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || !Array.isArray(body['obligations'])) {
+    throw new HttpError(400, 'observe declarations body must be {obligations: [...]}');
+  }
+  const obligations = new Set<string>();
+  for (const entry of body['obligations']) {
+    if (typeof entry !== 'string' || !OBLIGATION_ID_PATTERN.test(entry)) {
+      throw new HttpError(
+        400,
+        `observe declarations must be obligation ids '<resourceId>:<contract>' (got '${String(entry)}')`,
+      );
+    }
+    obligations.add(entry);
+  }
+  if (state.observeDeclarations !== null) {
+    const identical =
+      state.observeDeclarations.size === obligations.size &&
+      [...obligations].every((id) => state.observeDeclarations?.has(id));
+    if (identical) {
+      sendJson(res, 200, {
+        bound: true as const,
+        count: state.observeDeclarations.size,
+        obligations: [...state.observeDeclarations].sort(compareStrings),
+      });
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'observe declarations are already bound to this run and differ; the declaration set ' +
+        'is a PRE-run fact and is never relabeled — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (state.ledger.size > 0 || state.sessions.size > 0) {
+    sendJson(res, 409, {
+      error:
+        'witness already issued evidence or holds open sessions; observe declarations must be ' +
+        'registered BEFORE the run — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  state.observeDeclarations = obligations;
+  sendJson(res, 200, {
+    bound: true as const,
+    count: obligations.size,
+    obligations: [...obligations].sort(compareStrings),
+  });
+}
+
+/** Splits `<resourceId>:<contract>` at the first colon (obligation id grammar). */
+function resourceIdOfObligation(obligationId: string): string {
+  const colon = obligationId.indexOf(':');
+  return colon === -1 ? obligationId : obligationId.slice(0, colon);
+}
+
+/** The CRUD operation a `persistence:<op>` contract requires; null otherwise. */
+function observeOperation(contract: string): 'create' | 'read' | 'update' | 'delete' | null {
+  if (!contract.startsWith('persistence:')) return null;
+  const operation = contract.slice('persistence:'.length);
+  if (operation === 'create' || operation === 'read' || operation === 'update' || operation === 'delete') {
+    return operation;
+  }
+  return null;
+}
+
+/**
+ * Takes Observe before-snapshots for one freshly opened session: for
+ * every resource its observe-declared claims name, the witness runs the
+ * resource's adapter `list()` ITSELF and normalizes each body. The
+ * snapshot is the before-state every observe postcondition grades
+ * against — expectations never come from the suite. Per-resource
+ * trouble (no adapter, no list, probe/read/normalize failure) is
+ * stored as an error snapshot: the session still opens and the test
+ * still runs; finalize reports the resource as unobservable instead of
+ * satisfying anything. Total: never throws out of session open.
+ */
+async function takeObserveSnapshots(state: WitnessState, session: TestSession): Promise<void> {
+  if (state.observeDeclarations === null || state.observeDeclarations.size === 0) return;
+  const resources = new Set<string>();
+  for (const claim of session.claims) {
+    if (state.observeDeclarations.has(claim)) resources.add(resourceIdOfObligation(claim));
+  }
+  if (resources.size === 0) return;
+  const perSession = new Map<string, ObserveResourceSnapshot>();
+  state.observeSnapshots.set(session.sessionId, perSession);
+  for (const resourceId of [...resources].sort(compareStrings)) {
+    perSession.set(resourceId, await snapshotObserveResource(state, resourceId));
+  }
+  session.activity += 1;
+}
+
+/** Snapshots one resource's adapter-listed entities (never throws). */
+async function snapshotObserveResource(
+  state: WitnessState,
+  resourceId: string,
+): Promise<ObserveResourceSnapshot> {
+  const failure = (adapterName: string, error: string): ObserveResourceSnapshot => ({
+    resourceId,
+    adapterName,
+    before: new Map(),
+    error,
+  });
+  let adapterName = resourceId;
+  try {
+    const context = await adapterReadContext(state, resourceId);
+    adapterName = context.adapterName;
+    const adapter = context.adapter;
+    if (typeof adapter.list !== 'function') {
+      return failure(
+        adapterName,
+        `adapter '${adapterName}' exports no list() — Observe needs a before-snapshot, so ` +
+          `resource '${resourceId}' is unobservable until the adapter lists its entities`,
+      );
+    }
+    const ctx = observeAdapterContext(state, context.baseUrl, resourceId);
+    return { resourceId, adapterName, before: await observeListEntities(adapterName, adapter, ctx), error: null };
+  } catch (error) {
+    const detail = error instanceof HttpError ? error.message : (error as Error).message;
+    return failure(adapterName, detail);
+  }
+}
+
+/** Builds the GET-only adapter transport for observe snapshots/reads. */
+function observeAdapterContext(state: WitnessState, baseUrl: string, resourceId: string): AdapterContext {
+  const headers = state.options.adapterReadAuthorization
+    ? { authorization: state.options.adapterReadAuthorization }
+    : undefined;
+  return makeAdapterContext(
+    baseUrl,
+    resourceId,
+    (path: string) => adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+    headers,
+  );
+}
+
+/**
+ * Lists + normalizes a resource's entities through its adapter (the
+ * witness's own observation). Throws HttpError (409) on list/normalize
+ * trouble — callers turn it into a typed observe note, never
+ * satisfaction.
+ */
+async function observeListEntities(
+  adapterName: string,
+  adapter: EvidenceAdapter,
+  ctx: AdapterContext,
+): Promise<Map<string, { entityId: unknown; fields: unknown }>> {
+  if (typeof adapter.list !== 'function') {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' exports no list() — Observe needs entity snapshots`,
+    );
+  }
+  let listed: unknown;
+  try {
+    listed = await adapter.list(ctx);
+  } catch (error) {
+    throw new HttpError(409, `adapter '${adapterName}' list failed: ${(error as Error).message}`);
+  }
+  if (!Array.isArray(listed)) {
+    throw new HttpError(409, `adapter '${adapterName}' list must return an array of entities`);
+  }
+  const out = new Map<string, { entityId: unknown; fields: unknown }>();
+  for (const raw of listed) {
+    let normalized: { entityId: unknown; fields: unknown };
+    try {
+      const candidate = adapter.normalize(raw);
+      if (!isPlainObject(candidate) || !('entityId' in candidate) || !('fields' in candidate)) {
+        throw new Error('normalize must return {entityId, fields}');
+      }
+      normalized = { entityId: candidate['entityId'], fields: candidate['fields'] };
+    } catch (error) {
+      throw new HttpError(409, `adapter '${adapterName}' normalize failed: ${(error as Error).message}`);
+    }
+    let key: string;
+    try {
+      key = canonicalOf(normalized.entityId);
+    } catch {
+      throw new HttpError(409, `adapter '${adapterName}' normalized an entity id with no canonical form`);
+    }
+    out.set(key, normalized);
+  }
+  return out;
+}
+
+/**
+ * Matches a recorded observed path against an adapter observe path
+ * template. `{id}` binds exactly one non-empty segment; every other
+ * segment must be literally equal (case-sensitive). Matching reuses
+ * core's canonical shape semantics (`{id}` → `{}`).
+ *
+ * Returns `{id}` (null for id-less create templates) on match, null
+ * otherwise.
+ */
+function matchObserveTemplate(observedPath: string, template: string): { id: string | null } | null {
+  const segments = template.split('/').filter((segment) => segment.length > 0);
+  const idIndex = segments.indexOf('{id}');
+  const canonical = segments.map((segment) => (segment === '{id}' ? '{}' : segment)).join('/');
+  if (!pathMatchesShape(observedPath, canonical.startsWith('/') ? canonical : `/${canonical}`)) {
+    return null;
+  }
+  if (idIndex === -1) return { id: null };
+  const observedSegments = observedPath.split('/').filter((segment) => segment.length > 0);
+  const id = observedSegments[idIndex];
+  if (id === undefined || id.length === 0) return null;
+  return { id };
+}
+
+/** Finds a snapshot key for a path id segment (canonical or numeric-string form). */
+function beforeKeyForSegment(
+  before: Map<string, { entityId: unknown; fields: unknown }>,
+  segment: string,
+): string | null {
+  try {
+    const canonical = canonicalOf(segment);
+    if (before.has(canonical)) return canonical;
+  } catch {
+    return null;
+  }
+  for (const [key, entry] of before) {
+    if (typeof entry.entityId === 'number' && String(entry.entityId) === segment) return key;
+  }
+  return null;
+}
+
+/**
+ * Parses a proxied request body into echoable fields (Observe channel):
+ * JSON objects and form bodies project their top-level scalar
+ * (string/number/boolean) fields — the witness-observed statement of
+ * what the test sent, graded by echo against the adapter read. Nested
+ * envelopes are not entity fields and are skipped (documented); empty,
+ * truncated, oversized, unparsable, or otherwise-typed bodies are
+ * INELIGIBLE (typed error), never echoed from a prefix or a guess.
+ */
+function parseObserveBody(exchange: ObservedExchange): { fields: Record<string, unknown> } | { error: string } {
+  if (exchange.requestBody === null || exchange.requestBytes === 0) {
+    return { error: 'the proxied exchange carried no request body — there is nothing to echo' };
+  }
+  if (exchange.requestTruncated) {
+    return {
+      error:
+        `the request body exceeds the ${String(OBSERVED_REQUEST_BODY_BYTES)}-byte witness snapshot ` +
+        'cap — oversized intents are never echoed from a prefix',
+    };
+  }
+  const contentType = exchange.requestContentType;
+  if (contentType === 'application/json') {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(exchange.requestBody.toString('utf8'));
+    } catch {
+      return { error: 'the request body is not parseable JSON' };
+    }
+    if (!isPlainObject(parsed)) {
+      return { error: 'the JSON request body is not an object' };
+    }
+    const fields: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        fields[key] = value;
+      }
+    }
+    if (Object.keys(fields).length === 0) {
+      return { error: 'the JSON request body carries no echoable scalar fields' };
+    }
+    return { fields };
+  }
+  if (contentType === 'application/x-www-form-urlencoded') {
+    const fields: Record<string, unknown> = {};
+    for (const [key, value] of new URLSearchParams(exchange.requestBody.toString('utf8'))) {
+      fields[key] = value;
+    }
+    if (Object.keys(fields).length === 0) {
+      return { error: 'the form request body carries no fields' };
+    }
+    return { fields };
+  }
+  return {
+    error:
+      `unsupported request content-type '${contentType ?? '<none>'}' — observe echoes JSON and ` +
+      'form bodies only',
+  };
+}
+
+/**
+ * Reads one entity through its adapter at finalize time (the
+ * witness's own after-observation). Throws HttpError (409) on
+ * adapter/normalize trouble — callers note it, never satisfy on it.
+ */
+async function readObserveEntity(
+  state: WitnessState,
+  resourceId: string,
+  id: unknown,
+): Promise<{ adapterName: string; found: boolean; fields: unknown; entityId: unknown }> {
+  const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
+  const ctx = observeAdapterContext(state, baseUrl, resourceId);
+  let bodyRaw: unknown;
+  try {
+    bodyRaw = await adapter.read(ctx, id);
+  } catch (error) {
+    throw new HttpError(409, `adapter '${adapterName}' read failed: ${(error as Error).message}`);
+  }
+  const found = bodyRaw !== null && bodyRaw !== undefined;
+  if (!found) return { adapterName, found: false, fields: null, entityId: id };
+  try {
+    const candidate = adapter.normalize(bodyRaw);
+    if (!isPlainObject(candidate) || !('entityId' in candidate) || !('fields' in candidate)) {
+      throw new Error('normalize must return {entityId, fields}');
+    }
+    return { adapterName, found: true, fields: candidate['fields'], entityId: candidate['entityId'] };
+  } catch (error) {
+    throw new HttpError(409, `adapter '${adapterName}' normalize failed: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * `POST /observe/finalize` — SUPERVISOR ONLY: resolves one OPEN
+ * session's observe-declared claims against the session's own proxied
+ * traffic plus independent adapter reads, stamping witnessed
+ * `persistence.observed` records for whatever resolves. The session
+ * must be OPEN (the drain finalizes after a passed test, before seal);
+ * sealed/unknown sessions are refused, so records are never injected
+ * after the test ended. Every non-resolution is a typed NOTE in the
+ * response — never satisfaction, never a run failure (the obligation
+ * stays blocking through verdicts, which is the honest outcome).
+ *
+ * Per obligation (`<resourceId>:persistence:<op>`):
+ * - adapter binding + before-snapshot must exist (else typed note);
+ * - exactly one 2xx session exchange must match the binding (zero →
+ *   missing-traffic note; several → ambiguity note);
+ * - create resolves its id from the list-diff (exactly one new entity);
+ *   read/update/delete bind `{id}` from the path against the snapshot;
+ * - create/update echo the parsed request-body scalars against the
+ *   adapter read (the record carries both; the ENGINE grades the echo);
+ * - the matched exchange is consumed single-use.
+ */
+async function handleObserveFinalize(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ObserveFinalizeRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || typeof body['sessionId'] !== 'string' || body['sessionId'].length === 0) {
+    throw new HttpError(400, 'observe finalize body must be {sessionId}');
+  }
+  const sessionId = body['sessionId'];
+  const session = state.sessions.get(sessionId);
+  if (session === undefined) {
+    throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
+  }
+  if (session.status !== 'open') {
+    throw new HttpError(
+      409,
+      `session '${sessionId}' is sealed — observe finalizes before seal, never after (records cannot be injected after the test ended)`,
+    );
+  }
+  if (state.observeDeclarations === null) {
+    throw new HttpError(409, 'observe declarations are not bound on this witness — register them before the run');
+  }
+  const finalized: ObserveFinalizedObligation[] = [];
+  const notes: string[] = [];
+  const claims = session.claims.filter((claim) => state.observeDeclarations?.has(claim));
+  for (const claimId of claims) {
+    const outcome = await finalizeObserveClaim(state, session, claimId);
+    if ('record' in outcome) finalized.push(outcome.record);
+    else notes.push(outcome.note);
+  }
+  const response: ObserveFinalizeResponse = { finalized, notes };
+  sendJson(res, 200, response);
+}
+
+/** Resolves one observe-declared claim (record or typed note, never throws). */
+async function finalizeObserveClaim(
+  state: WitnessState,
+  session: TestSession,
+  claimId: string,
+): Promise<{ record: ObserveFinalizedObligation } | { note: string }> {
+  const note = (detail: string): { note: string } => ({ note: `observe '${claimId}': ${detail}` });
+  const resourceId = resourceIdOfObligation(claimId);
+  const operation = observeOperation(claimId.slice(resourceId.length + 1));
+  if (operation === null) {
+    return note('the Observe channel proves persistence:* contracts only — this claim stays blocking');
+  }
+  let adapterName: string;
+  let adapter: EvidenceAdapter;
+  let adapterBaseUrl: string;
+  try {
+    const context = await adapterReadContext(state, resourceId);
+    adapterName = context.adapterName;
+    adapter = context.adapter;
+    adapterBaseUrl = context.baseUrl;
+  } catch (error) {
+    return note(error instanceof HttpError ? error.message : (error as Error).message);
+  }
+  const binding = adapter.observe?.[operation];
+  if (binding === undefined) {
+    return note(
+      `adapter '${adapterName}' declares no observe binding for '${operation}' — declare it in ` +
+        `'.gateforge/adapters/${adapterName}.mjs' to make this obligation observable`,
+    );
+  }
+  const snapshot = state.observeSnapshots.get(session.sessionId)?.get(resourceId);
+  if (snapshot === undefined || snapshot.error !== null) {
+    return note(
+      snapshot?.error !== null && snapshot?.error !== undefined
+        ? `no usable before-snapshot: ${snapshot.error as string}`
+        : 'no before-snapshot for this session — the session opened before observe declarations bound, or the snapshot failed',
+    );
+  }
+  // Bind watermark (plan §11.4, same as http-observation): exchanges
+  // that completed before the trusted context bound predate it.
+  const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
+  const matches: Array<{ exchange: ObservedExchange; id: string | null }> = [];
+  for (const exchange of state.observed) {
+    if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
+    if (exchange.method !== binding.method) continue;
+    if (exchange.status < 200 || exchange.status > 299) continue;
+    const matched = matchObserveTemplate(exchange.path, binding.path);
+    if (matched === null) continue;
+    matches.push({ exchange, id: matched.id });
+  }
+  if (matches.length === 0) {
+    return note(
+      `no ${binding.method} ${binding.path} exchange (2xx) for this session through the observation ` +
+        'proxy — drive traffic through the session proxy prefix before claiming the obligation',
+    );
+  }
+  if (matches.length > 1) {
+    return note(
+      `${String(matches.length)} matching ${binding.method} ${binding.path} exchanges — ambiguous, ` +
+        'refusing to pick one (seed through untracked channels so the mutation stands alone)',
+    );
+  }
+  const matched = matches[0] as { exchange: ObservedExchange; id: string | null };
+  // Resolve the entity id: create diffs the witness-held lists (the new
+  // id is observed, never declared); read/update/delete bind `{id}`
+  // against the session-open snapshot.
+  let entityIdForRead: unknown;
+  let before: { entityAbsent: boolean } | { found: boolean; fields?: unknown } | undefined;
+  if (operation === 'create') {
+    let after: Map<string, { entityId: unknown; fields: unknown }>;
+    try {
+      const ctx = observeAdapterContext(state, adapterBaseUrl, resourceId);
+      after = await observeListEntities(adapterName, adapter, ctx);
+    } catch (error) {
+      return note(error instanceof HttpError ? error.message : (error as Error).message);
+    }
+    const fresh = [...after.keys()].filter((key) => !snapshot.before.has(key));
+    if (fresh.length !== 1) {
+      return note(
+        `expected exactly one new entity after the observed create, found ${String(fresh.length)} — ` +
+          'the creation is ambiguous, so no record is issued',
+      );
+    }
+    const created = after.get(fresh[0] as string) as { entityId: unknown; fields: unknown };
+    entityIdForRead = created.entityId;
+    before = { entityAbsent: true };
+  } else {
+    if (matched.id === null) {
+      return note('the observe binding carries no {id} segment for a non-create operation');
+    }
+    const beforeKey = beforeKeyForSegment(snapshot.before, matched.id);
+    if (beforeKey === null) {
+      return note(
+        `entity '${matched.id}' was not in the session-open snapshot — observe binds {id} ` +
+          'against witness-held before-state, never against suite-declared ids',
+      );
+    }
+    const beforeEntry = snapshot.before.get(beforeKey) as { entityId: unknown; fields: unknown };
+    entityIdForRead = beforeEntry.entityId;
+    if (operation === 'update') before = { found: true, fields: beforeEntry.fields };
+  }
+  // Echo source (create/update only): the witness-observed request
+  // fields. Read/delete carry no echo — presence/absence grades them.
+  let observedFields: Record<string, unknown> = {};
+  if (operation === 'create' || operation === 'update') {
+    const parsed = parseObserveBody(matched.exchange);
+    if ('error' in parsed) return note(parsed.error);
+    observedFields = parsed.fields;
+  }
+  let read: { adapterName: string; found: boolean; fields: unknown; entityId: unknown };
+  try {
+    read = await readObserveEntity(state, resourceId, entityIdForRead);
+  } catch (error) {
+    return note(error instanceof HttpError ? error.message : (error as Error).message);
+  }
+  const payload: Record<string, unknown> = {
+    resourceId,
+    entityId: read.entityId,
+    found: read.found,
+    ...(read.found ? { fields: read.fields ?? {} } : {}),
+    ...(before !== undefined ? { before } : {}),
+    observedFields,
+    exchange: {
+      method: matched.exchange.method,
+      path: matched.exchange.path,
+      status: matched.exchange.status,
+      seq: matched.exchange.seq,
+    },
+    sessionId: session.sessionId,
+    channel: OBSERVE_CHANNEL,
+  };
+  // The record binds runId/claimId/testId and rides the same ledger
+  // attestation MAC as every witnessed record. Contents are
+  // witness-produced (proxy capture + adapter read) — `engine-observed`
+  // origin, witnessed trust; the suite-driven-browser distinction rides
+  // `channel: 'observe'`, which the grader keys off explicitly.
+  const issued = issueRecord(state, claimId, OBSERVED_KIND, session.testId, payload, 'engine-observed');
+  // Single-use: the matched exchange can never credit another claim.
+  const consumed = state.observed.indexOf(matched.exchange);
+  if (consumed !== -1) state.observed.splice(consumed, 1);
+  session.activity += 1;
+  return {
+    record: { obligationId: claimId, recordId: issued.recordId, operation, entityId: read.entityId },
+  };
 }
 
 /**

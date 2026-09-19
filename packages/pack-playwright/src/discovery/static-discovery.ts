@@ -72,6 +72,13 @@ export interface StaticTestFacts {
   fileHttpClientCall: Location | null;
   /** `vi.mock(...)` / `jest.mock(...)` anywhere in the file. */
   fileMockImport: Location | null;
+  /**
+   * Import of the gateforge evidence pack (`@gate-forge/pack-playwright`)
+   * anywhere in the file. Lets inference tell fixture tests (which take
+   * the `evidence` param and never drive the browser themselves) apart
+   * from suite-driven browser tests for Observe-channel suggestions.
+   */
+  gateforgeFixtureImport: Location | null;
 }
 
 /** One statically discovered test call. */
@@ -842,6 +849,37 @@ function findHttpClientCall(node: ts.Node, source: ts.SourceFile, file: string):
   return found;
 }
 
+/** Whether the file imports the gateforge evidence pack (fixture tests). */
+function findGateforgeFixtureImport(source: ts.SourceFile, file: string): Location | null {
+  let found: Location | null = null;
+  const visit = (node: ts.Node): void => {
+    if (found !== null) return;
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      isPackSpecifier(node.moduleSpecifier.text)
+    ) {
+      found = locationOf(file, source, node);
+      return;
+    }
+    if (
+      ts.isCallExpression(node) &&
+      node.arguments.length === 1 &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'require'
+    ) {
+      const specifier = node.arguments[0];
+      if (specifier !== undefined && ts.isStringLiteral(specifier) && isPackSpecifier(specifier.text)) {
+        found = locationOf(file, source, node);
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
 /** Whether the file contains a `vi.mock(...)` / `jest.mock(...)` call. */
 function findModuleMock(source: ts.SourceFile, file: string): Location | null {
   let found: Location | null = null;
@@ -895,7 +933,8 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     if (model === null) continue;
     const fileHttpClient = findHttpClientCall(model.source, model.source, file);
     const fileMock = findModuleMock(model.source, file);
-    scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock);
+    const gateforgeImport = findGateforgeFixtureImport(model.source, file);
+    scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, gateforgeImport);
   }
 
   state.result.entries.sort((a, b) => compareEntry(a, b));
@@ -928,6 +967,7 @@ function scanFileForTests(
   model: FileModel,
   fileHttpClient: Location | null,
   fileMock: Location | null,
+  gateforgeImport: Location | null,
 ): void {
   const { file, source } = model;
 
@@ -1084,6 +1124,7 @@ function scanFileForTests(
         location,
         fileHttpClient,
         fileMock,
+        gateforgeImport,
       });
       state.result.entries.push(entry);
       // Walk the body so inner zero-arg `test.skip()` / `test.fixme()`
@@ -1126,6 +1167,7 @@ function scanFileForTests(
           location: outerLocation,
           fileHttpClient,
           fileMock,
+          gateforgeImport,
         });
         state.result.entries.push(entry);
         if (outerCallback !== undefined) {
@@ -1192,6 +1234,7 @@ function buildEntry(input: {
   location: Location;
   fileHttpClient: Location | null;
   fileMock: Location | null;
+  gateforgeImport: Location | null;
 }): StaticTestEntry {
   const { file, source, node, callback, titlePath, location } = input;
   const params = callback === undefined ? [] : signatureParamsOf(callback);
@@ -1218,6 +1261,7 @@ function buildEntry(input: {
       httpClientCall,
       fileHttpClientCall: input.fileHttpClient,
       fileMockImport: input.fileMock,
+      gateforgeFixtureImport: input.gateforgeImport,
     },
   };
 }

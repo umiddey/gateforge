@@ -264,6 +264,78 @@ describe('resolveTestMappings — ambiguity (both locations)', () => {
     expect(ambiguous[0]?.locations).toContainEqual({ file: 'e2e/accounts.spec.js', line: 7, col: 2 });
   });
 
+  it('allows observed-e2e over an inferred browser-e2e (Observe refinement, not a contradiction)', () => {
+    const browserDriven = catalog([
+      row({
+        logicalKey: KEY,
+        inferredKind: 'browser-e2e',
+        kindSignals: [
+          {
+            ruleId: 'browser-fixture',
+            kind: 'browser-e2e',
+            evidence: 'test signature declares browser fixture(s): page',
+            location: { file: 'e2e/accounts.spec.js', line: 1, col: 0 },
+          },
+        ],
+      }),
+    ]);
+    const resolution = resolveTestMappings(
+      resolveInput({ catalog: browserDriven, sidecar: sidecar([sidecarEntry({ kind: 'observed-e2e' })]) }),
+    );
+    const ambiguous = resolution.problems.filter((problem) => problem.cause === 'TEST_MAPPING_AMBIGUOUS');
+    expect(ambiguous).toEqual([]);
+    expect(declaredBindingsFor(resolution, OBLIGATION)).toHaveLength(1);
+    expect(declaredBindingsFor(resolution, OBLIGATION)[0]?.declaredKind).toBe('observed-e2e');
+  });
+
+  it('still refuses observed-e2e over an inferred api-e2e (Node traffic never transits the proxy)', () => {
+    const apiDriven = catalog([
+      row({
+        logicalKey: KEY,
+        inferredKind: 'api-e2e',
+        kindSignals: [
+          {
+            ruleId: 'api-request-fixture',
+            kind: 'api-e2e',
+            evidence: 'test signature declares API fixture(s): request',
+            location: { file: 'e2e/accounts.spec.js', line: 1, col: 0 },
+          },
+        ],
+      }),
+    ]);
+    const resolution = resolveTestMappings(
+      resolveInput({ catalog: apiDriven, sidecar: sidecar([sidecarEntry({ kind: 'observed-e2e' })]) }),
+    );
+    const ambiguous = resolution.problems.filter((problem) => problem.cause === 'TEST_MAPPING_AMBIGUOUS');
+    expect(ambiguous).toHaveLength(1);
+    expect(ambiguous[0]?.detail).toContain("declares kind 'observed-e2e'");
+    expect(ambiguous[0]?.detail).toContain("resolved 'api-e2e'");
+  });
+
+  it('refuses observed-e2e when the catalog observed mocking (mocking disqualifies E2E proof)', () => {
+    const mocked = catalog([
+      row({
+        logicalKey: KEY,
+        inferredKind: 'browser-e2e',
+        kindSignals: [
+          {
+            ruleId: 'browser-fixture',
+            kind: 'browser-e2e',
+            evidence: 'test signature declares browser fixture(s): page',
+            location: { file: 'e2e/accounts.spec.js', line: 1, col: 0 },
+          },
+        ],
+        suppressionSignals: [{ kind: 'mock', detail: 'page.route interception inside the test body', location: { file: 'e2e/accounts.spec.js', line: 4, col: 2 } }],
+      }),
+    ]);
+    const resolution = resolveTestMappings(
+      resolveInput({ catalog: mocked, sidecar: sidecar([sidecarEntry({ kind: 'observed-e2e' })]) }),
+    );
+    const ambiguous = resolution.problems.filter((problem) => problem.cause === 'TEST_MAPPING_AMBIGUOUS');
+    expect(ambiguous).toHaveLength(1);
+    expect(ambiguous[0]?.detail).toContain('cannot override observed mocking');
+  });
+
   it('rejects a file-level selector as the prohibited wildcard (binds nothing)', () => {
     const resolution = resolveTestMappings(
       resolveInput({
@@ -446,6 +518,40 @@ describe('mappingSuggestions — reuse ordering', () => {
     const orders = suggestions.find((suggestion) => suggestion.obligationId === OTHER_OBLIGATION);
     expect(orders?.candidates).toEqual([]);
     expect(orders?.newTestNeeded).toBe(true);
+  });
+
+  it('guides suite-driven browser candidates to observed-e2e and fixture tests to the overlay path', () => {
+    const driven = catalog([
+      row({
+        logicalKey: KEY,
+        inferredKind: 'browser-e2e',
+        kindSignals: [
+          { ruleId: 'browser-fixture', kind: 'browser-e2e', evidence: 'test signature declares browser fixture(s): page', location: { file: 'e2e/accounts.spec.js', line: 1, col: 0 } },
+        ],
+      }),
+      row({
+        logicalKey: CREATE_KEY,
+        file: 'e2e/accounts-overlay.spec.js',
+        titlePath: ['creates an account'],
+        title: 'creates an account',
+        sourceLocation: { file: 'e2e/accounts-overlay.spec.js', line: 3, col: 0 },
+        inferredKind: 'browser-e2e',
+        kindSignals: [
+          { ruleId: 'browser-fixture', kind: 'browser-e2e', evidence: 'test signature declares browser fixture(s): evidence', location: { file: 'e2e/accounts-overlay.spec.js', line: 1, col: 0 } },
+          { ruleId: 'gateforge-fixture', kind: 'browser-e2e', evidence: 'test takes the gateforge evidence fixture', location: { file: 'e2e/accounts-overlay.spec.js', line: 1, col: 0 } },
+        ],
+      }),
+    ]);
+    const resolution = resolveTestMappings(resolveInput({ catalog: driven }));
+    const suggestions = mappingSuggestions({
+      catalog: driven,
+      obligationIds: [OBLIGATION],
+      resolution,
+    });
+    expect(suggestions).toHaveLength(1);
+    const byKey = new Map((suggestions[0]?.candidates ?? []).map((candidate) => [candidate.logicalKey, candidate]));
+    expect(byKey.get(KEY)?.why.join(' ')).toContain('declare kind observed-e2e');
+    expect(byKey.get(CREATE_KEY)?.why.join(' ')).toContain('overlay path');
   });
 
   it('reports TEST_MAPPING_STALE for a stale declaration (never a silent transfer)', () => {

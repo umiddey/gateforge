@@ -10,7 +10,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { fingerprint, withTempRepo, type TempRepo } from '@gate-forge/core';
+import { fingerprint, withTempRepo, CAUSE_NEXT_ACTIONS, type TempRepo } from '@gate-forge/core';
 import {
   installFixture,
   LIFECYCLE,
@@ -60,18 +60,17 @@ policies:
 `;
 
 describe('init strict-setup preflight (plan Phase 0 item 4)', () => {
-  it('init --strict-e2e fails closed: the starter policy needs a browser observer no pack provides', async () => {
+  it('init --strict-e2e succeeds: the persistence-only starter policy has an available proof channel', async () => {
     await withTempRepo({}, async (repo) => {
-      const { code, stderr } = await runCli(repo, ['init', '--strict-e2e']);
-      expect(code).toBe(2);
-      expect(stderr).toContain('strict E2E setup is incomplete');
-      expect(stderr).toContain("'http:frontend-request-observed'");
-      expect(stderr).toContain('no independent browser/test observation channel');
-      expect(stderr).toContain('Required observer:');
-      expect(stderr).toContain('do not add duplicate tests');
-      // Fail closed BEFORE writing: no half setup must exist.
-      expect(existsSync(join(repo.root, '.gateforge.yml'))).toBe(false);
-      expect(existsSync(join(repo.root, '.gateforge', 'policies.yml'))).toBe(false);
+      const { code } = await runCli(repo, ['init', '--strict-e2e']);
+      expect(code).toBe(0);
+      expect(existsSync(join(repo.root, '.gateforge.yml'))).toBe(true);
+      expect(existsSync(join(repo.root, '.gateforge', 'policies.yml'))).toBe(true);
+      expect(readFileSync(join(repo.root, '.gateforge.yml'), 'utf8')).toContain('strictE2E: true');
+      // The starter policy never requires the unavailable browser channel.
+      expect(readFileSync(join(repo.root, '.gateforge', 'policies.yml'), 'utf8')).not.toContain(
+        '- http:frontend-request-observed',
+      );
     });
   });
 
@@ -144,7 +143,7 @@ describe('strict E2E mode via check (plan §3.3, ADR 0005 D4)', () => {
       expect(capability.every((entry) => entry.detail.includes('Required observer:'))).toBe(true);
       expect(
         capability.every(
-          (entry) => entry.nextAction === 'Implement/configure the observer; do not add duplicate tests',
+          (entry) => entry.nextAction === CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED'],
         ),
       ).toBe(true);
     });
@@ -186,9 +185,7 @@ describe('coverage policy via check (plan §3.6, ADR 0005 D5)', () => {
       expect(coverage.some((entry) => entry.detail.includes("'delete'"))).toBe(true);
       expect(
         coverage.every(
-          (entry) =>
-            entry.nextAction ===
-            'Connect/mark existing journeys, add the missing journey, or record an owner disposition',
+          (entry) => entry.nextAction === CAUSE_NEXT_ACTIONS['CRUD_COVERAGE_MISSING'],
         ),
       ).toBe(true);
     });
@@ -256,17 +253,16 @@ describe('Phase 0 acceptance: three different blocking causes with useful action
       // Unmapped: no claim is connected to the accounts persistence obligation.
       expect(byId.get(OBLIGATION_ACCOUNTS)?.cause).toBe('TEST_MAPPING_MISSING');
       expect(byId.get(OBLIGATION_ACCOUNTS)?.nextAction).toBe(
-        'Run `gateforge tests suggest`, mark the matching test (`gateforge tests mark` / .gateforge/test-map.yml), ' +
-          'map backend-only tables server-e2e, or waive it (`gateforge waive`) — docs/guides/new-table-playbook.md',
+        CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING'],
       );
       // Missing observation: the orders claim exists but collected nothing.
       expect(byId.get(OBLIGATION_ORDERS)?.cause).toBe('EVIDENCE_NOT_COLLECTED');
-      expect(byId.get(OBLIGATION_ORDERS)?.nextAction).toBe('Add observation hooks to that test');
+      expect(byId.get(OBLIGATION_ORDERS)?.nextAction).toBe(CAUSE_NEXT_ACTIONS['EVIDENCE_NOT_COLLECTED']);
       // Unsupported verifier: the auth contracts have no honest proof channel.
       const auth = report.verdicts.filter((v) => v.cause === 'VERIFIER_UNSUPPORTED');
       expect(auth).toHaveLength(2);
       expect(
-        auth.every((v) => v.nextAction === 'Implement/configure the observer; do not add duplicate tests'),
+        auth.every((v) => v.nextAction === CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED']),
       ).toBe(true);
       // Everything stays blocking (exit 1 asserted above).
       expect(report.verdicts.every((v) => v.verdict !== 'satisfied' && v.verdict !== 'waived')).toBe(true);

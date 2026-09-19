@@ -13,7 +13,8 @@
  *   silently dropped table is a violation, never coverage.
  * - Inventory tables the policy does NOT enumerate are violations too
  *   (the policy is closed-world over the inventory).
- * - Only `browser-e2e` mappings satisfy (plan §3.2: api-e2e cannot
+ * - Only real-UI mappings satisfy (`browser-e2e` engine-driven and
+ *   `observed-e2e` suite-driven-over-proxy; plan §3.2: api-e2e cannot
  *   substitute for browser behavior); the mapping subsystem may pass an
  *   empty list for now — the honest result is that enabled, undispositioned
  *   tables block until mappings or dispositions exist.
@@ -40,7 +41,7 @@ export interface MappedCoverage {
   table: string;
   /** The covered operation. */
   operation: CoverageOperation;
-  /** Declared test kind; ONLY `browser-e2e` satisfies closed-world coverage. */
+  /** Declared test kind; only real-UI kinds (`browser-e2e`, `observed-e2e`) satisfy closed-world coverage. */
   testKind: string;
 }
 
@@ -93,8 +94,9 @@ const CRUD_COVERAGE_MISSING_CAUSE = CAUSE_NEXT_ACTIONS['CRUD_COVERAGE_MISSING'];
  *   silently dropped table is a violation);
  * - dispositioned table → excused (the disposition is a trusted owner
  *   act recorded in config, never an agent self-approval);
- * - otherwise each required operation without a `browser-e2e` mapping →
- *   blocking `CRUD_COVERAGE_MISSING`.
+ * - otherwise each required operation without a real-UI
+ *   (`browser-e2e`/`observed-e2e`) mapping → blocking
+ *   `CRUD_COVERAGE_MISSING`.
  *
  * Args:
  *   tables: the policy's table entries (validated `CoveragePolicySchema`).
@@ -139,11 +141,15 @@ export function evaluateCoveragePolicy(
     // operations (trusted-policy act, ADR 0005 D5).
     if (table.disposition !== undefined) continue;
     for (const operation of table.requiredOperations) {
+      // Real-UI coverage (plan §3.2 + Observe channel): `browser-e2e`
+      // (engine-driven) and `observed-e2e` (suite-driven over the session
+      // proxy with independent adapter reads) are both genuine browser
+      // journeys — either covers. Every other kind contributes nothing.
       const covered = mappedCoverage.some(
         (mapping) =>
           mapping.table === table.name &&
           mapping.operation === operation &&
-          mapping.testKind === 'browser-e2e',
+          (mapping.testKind === 'browser-e2e' || mapping.testKind === 'observed-e2e'),
       );
       if (covered) continue;
       blocking.push({
@@ -152,8 +158,8 @@ export function evaluateCoveragePolicy(
         table: table.name,
         operation,
         detail:
-          `coverage policy: table '${table.name}' has no mapped browser-e2e '${operation}' ` +
-          'coverage and no owner disposition',
+          `coverage policy: table '${table.name}' has no mapped real-UI ` +
+          `'${operation}' coverage (browser-e2e or observed-e2e) and no owner disposition`,
         nextAction: CRUD_COVERAGE_MISSING_CAUSE,
       });
     }

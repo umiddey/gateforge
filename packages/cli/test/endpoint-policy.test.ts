@@ -25,21 +25,18 @@ const byId = new Map(parsed.policies.map((policy) => [policy.id, policy]));
 /** Contract namespaces with no honest evidence channel today. */
 const UNPRODUCIBLE_NAMESPACES = ['auth:', 'workflow:', 'webhook:', 'task:', 'validation:'];
 
-describe('init policies template: endpoint policies (ADR 0004 D8)', () => {
-  it('parses and lists exactly the two honest policies', () => {
+describe('init policies template: persistence-only starter (Phase 1)', () => {
+  it('parses and lists exactly the persistence starter policy', () => {
     expect(parsed.policies.map((policy) => policy.id)).toEqual([
-      'frontend-consumed-endpoints',
       'user-facing-persistence',
     ]);
   });
 
-  it('scopes frontend-consumed-endpoints to consumed endpoints with no capability clause', () => {
-    const policy = byId.get('frontend-consumed-endpoints');
-    expect(policy?.when).toEqual({ kind: 'http.endpoint', consumed: true });
-    expect(policy?.require).toEqual([
-      'http:frontend-request-observed',
-      'http:response-status-ok',
-    ]);
+  it('the starter never requires the unavailable browser channel', () => {
+    for (const policy of parsed.policies) {
+      expect(policy.require).not.toContain('http:frontend-request-observed');
+    }
+    expect(byId.get('frontend-consumed-endpoints')).toBeUndefined();
   });
 
   it('no policy requires an auth:/workflow:/webhook:/task:/validation: contract', () => {
@@ -77,9 +74,9 @@ describe('init policies template: endpoint policies (ADR 0004 D8)', () => {
     ]);
   });
 
-  it('keeps the default frontend requirement (blocking with the current observer)', () => {
-    const policy = byId.get('frontend-consumed-endpoints');
-    expect(policy?.require).toContain('http:frontend-request-observed');
+  it('transport-only endpoint proof stays an explicit opt-in, never the starter', () => {
+    expect(TRANSPORT_ONLY_POLICY_EXAMPLE).toContain('http:request-observed');
+    expect(byId.get('frontend-consumed-endpoints-transport-only')).toBeUndefined();
   });
 });
 

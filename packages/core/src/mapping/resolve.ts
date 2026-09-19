@@ -153,7 +153,20 @@ const PROBLEM_RANK: Readonly<Record<MappingProblemCause, number>> = Object.freez
 });
 
 /** Test kinds that claim end-to-end proof (mocking disqualifies them, §3.2). */
-const E2E_KINDS: ReadonlySet<string> = new Set(['browser-e2e', 'api-e2e']);
+const E2E_KINDS: ReadonlySet<string> = new Set(['browser-e2e', 'observed-e2e', 'api-e2e']);
+
+/**
+ * Whether a sidecar kind declaration is a refinement of the inferred
+ * kind rather than a contradiction (§5.3, Observe channel): declaring
+ * `observed-e2e` over an inferred `browser-e2e` keeps the browser
+ * journey and only weakens the proof channel (suite-driven instead of
+ * engine-driven) — allowed. Every other kind mismatch (including
+ * `observed-e2e` over `api-e2e`, whose Node-side traffic never transits
+ * the session proxy) stays contradictory.
+ */
+function isKindRefinement(declared: string, inferred: string): boolean {
+  return declared === 'observed-e2e' && inferred === 'browser-e2e';
+}
 
 /**
  * Whether a catalog row matches a sidecar selector exactly (§5.2: line
@@ -323,7 +336,12 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
         continue;
       }
       const strong = row.kindSignals[0];
-      if (row.inferredKind !== 'unknown' && row.kindSignals.length > 0 && entry.kind !== row.inferredKind) {
+      if (
+        row.inferredKind !== 'unknown' &&
+        row.kindSignals.length > 0 &&
+        entry.kind !== row.inferredKind &&
+        !isKindRefinement(entry.kind, row.inferredKind)
+      ) {
         for (const obligationId of claims) {
           pushProblem({
             cause: 'TEST_MAPPING_AMBIGUOUS',
@@ -568,6 +586,29 @@ export interface MappingSuggestionsInput {
   resolution: ResolvedMappings;
 }
 
+/**
+ * Observe-channel guidance for one candidate row (Phase 2): tells the
+ * agent WHICH proof path fits the candidate's code shape. A
+ * suite-driven browser test (browser-fixture signal, no gateforge
+ * fixture, no mocking) proves via `observed-e2e` — the witness watches
+ * its proxy traffic and reads state itself, so no rewrite is needed. A
+ * gateforge-fixture test proves via the overlay path (engine-driven).
+ * Returns null when no channel guidance applies (non-browser rows).
+ */
+function observeHintForRow(row: TestCatalogEntry | undefined): string | null {
+  if (row === undefined || row.inferredKind !== 'browser-e2e') return null;
+  if (row.suppressionSignals.some((signal) => signal.kind === 'mock')) return null;
+  const usesFixture = row.kindSignals.some((signal) => signal.ruleId === 'gateforge-fixture');
+  if (usesFixture) {
+    return 'uses the gateforge evidence fixture — overlay path: the engine drives proof, no rewrite needed';
+  }
+  if (row.kindSignals.some((signal) => signal.ruleId === 'browser-fixture')) {
+    return 'suite-driven browser test — declare kind observed-e2e to prove it via the Observe channel ' +
+      '(the witness watches its proxy traffic and reads state itself; do not rewrite it onto the fixture)';
+  }
+  return null;
+}
+
 /** Suggestion order = reuse order (connect → declare kind → repair stale → repair conflict). */
 const SUGGESTION_RANK: Readonly<Record<MappingSuggestionCause, number>> = Object.freeze({
   TEST_MAPPING_MISSING: 0,
@@ -590,6 +631,7 @@ const SUGGESTION_RANK: Readonly<Record<MappingSuggestionCause, number>> = Object
  */
 export function mappingSuggestions(input: MappingSuggestionsInput): MappingSuggestion[] {
   const byId = new Map(input.resolution.obligations.map((entry) => [entry.obligationId, entry.bindings]));
+  const rowsByKey = new Map(input.catalog.entries.map((row) => [row.logicalKey, row]));
   const suggestions: MappingSuggestion[] = [];
   for (const obligationId of [...input.obligationIds].sort(compareStrings)) {
     const bindings = byId.get(obligationId) ?? [];
@@ -608,11 +650,14 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
     }
     const stale = problems.find((problem) => problem.cause === 'TEST_MAPPING_STALE');
     if (stale !== undefined) {
-      const candidates = inferredCandidates(obligationId, input.catalog).map((candidate) => ({
-        logicalKey: candidate.row.logicalKey,
-        file: candidate.row.file,
-        why: candidate.why,
-      }));
+      const candidates = inferredCandidates(obligationId, input.catalog).map((candidate) => {
+        const hint = observeHintForRow(candidate.row);
+        return {
+          logicalKey: candidate.row.logicalKey,
+          file: candidate.row.file,
+          why: [...candidate.why, ...(hint !== null ? [hint] : [])],
+        };
+      });
       suggestions.push({
         obligationId,
         cause: 'TEST_MAPPING_STALE',
@@ -644,14 +689,18 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
     }
     if (declared.length > 0) continue; // declared + clean: the gap is execution, not mapping
     const candidates = bindings
-      .map((binding) => ({
-        logicalKey: binding.logicalKey,
-        file: binding.instances[0]?.file ?? '',
-        why:
+      .map((binding) => {
+        const hint = observeHintForRow(rowsByKey.get(binding.logicalKey));
+        const base =
           binding.origin === 'inferred' || binding.origin === 'prior-run'
-            ? [binding.reason ?? binding.origin]
-            : [`bound by native annotation (${binding.logicalKey})`],
-      }))
+            ? (binding.reason ?? binding.origin)
+            : `bound by native annotation (${binding.logicalKey})`;
+        return {
+          logicalKey: binding.logicalKey,
+          file: binding.instances[0]?.file ?? '',
+          why: hint !== null ? [base, hint] : [base],
+        };
+      })
       .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey));
     suggestions.push({
       obligationId,

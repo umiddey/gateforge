@@ -76,6 +76,25 @@ const KIND_RULES: ReadonlyArray<{
     },
   },
   {
+    // Gateforge evidence fixture: the test takes the `evidence` param
+    // from a file importing the gateforge pack, so it never drives the
+    // browser itself — the engine does. Proposes the SAME kind as
+    // browser-fixture (agreeing proposals decide, never conflict), and
+    // the ruleId on the signal lets suggestions tell fixture tests
+    // (overlay path) apart from suite-driven browser tests (Observe
+    // path). A pack import WITHOUT the evidence param (e.g. `expect`
+    // only) is not a fixture test and fires nothing here.
+    ruleId: 'gateforge-fixture',
+    kind: 'browser-e2e',
+    applies: (input) => {
+      if (input.facts.gateforgeFixtureImport === null) return null;
+      if (!input.facts.signatureParams.includes('evidence')) return null;
+      return {
+        evidence: 'test takes the gateforge evidence fixture from a file importing @gate-forge/pack-playwright',
+      };
+    },
+  },
+  {
     ruleId: 'api-request-fixture',
     kind: 'api-e2e',
     applies: (input) => {
@@ -226,6 +245,9 @@ function evidenceLocation(ruleId: string, input: InferenceFacts): Location {
     return input.facts.httpClientCall ?? input.facts.fileHttpClientCall ?? { file: input.file, line: 1, col: 0 };
   }
   if (ruleId === 'mock-page-route') return input.facts.pageRoute ?? { file: input.file, line: 1, col: 0 };
+  if (ruleId === 'gateforge-fixture') {
+    return input.facts.gateforgeFixtureImport ?? { file: input.file, line: 1, col: 0 };
+  }
   // Fixture/unit rules have no sharper location than the file itself at
   // line 1 — the catalog row carries the exact call location separately.
   return { file: input.file, line: 1, col: 0 };

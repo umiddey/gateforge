@@ -80,6 +80,20 @@ const UI_ACTION_KIND = 'ui.action';
 const UI_VISIBLE_KIND = 'ui.visible-result';
 const PERSISTENCE_KIND_PREFIX = 'persistence.';
 /**
+ * The exact record kind the witness stamps browser/server-channel
+ * persistence on. Channel qualifiers below key off exact kinds (never
+ * prefixes): a channel stamp on any other kind is admissible NOWHERE.
+ */
+const PERSISTENCE_ENTITY_KIND = 'persistence.entity';
+/**
+ * Observe-channel record kind + payload discriminant (Phase 2). String
+ * literals (not pack imports — core never depends on packs); kept in
+ * lockstep with `@gate-forge/pack-playwright`'s OBSERVED_KIND /
+ * OBSERVE_CHANNEL.
+ */
+const OBSERVED_RECORD_KIND = 'persistence.observed';
+const OBSERVE_CHANNEL = 'observe';
+/**
  * The server-witnessed persistence channel (product-gap fix: backend-only
  * tables — e.g. a transactional outbox — can never honestly appear in a
  * UI, so their `persistence:*` obligations were unprovable by design).
@@ -526,6 +540,57 @@ function exactValueEchoFailure(
 }
 
 /**
+ * Observe-channel echo (Phase 2): the witness-observed request fields
+ * a suite-driven test sent must be echoed exactly by the independently
+ * fetched persisted fields on the SAME entity. Same EVIDENCE_VALUE_MISMATCH
+ * semantics as the browser channel, but both sides ride ONE witness
+ * record (`payload.observedFields` = proxied request scalars,
+ * `payload.fields` = adapter read) — there is no ui.action anchor on
+ * this channel.
+ *
+ * Returns:
+ *   string | null: the first echo-violation description, or null when
+ *   every observed input value is echoed exactly.
+ */
+function observedEchoFailure(
+  operation: 'create' | 'update',
+  record: RecordLike,
+): string | null {
+  const observed = payloadOf(record)?.['observedFields'];
+  if (!isPlainObject(observed) || Object.keys(observed).length === 0) {
+    return (
+      `exact-value echo violation (EVIDENCE_VALUE_MISMATCH): the observe record ` +
+      `'${labelOf(record)}' carries no witness-observed request fields, so the persisted ` +
+      `state cannot be echo-checked for the '${operation}' obligation (the proxy must see ` +
+      'a JSON or form body to echo against)'
+    );
+  }
+  const persisted = payloadOf(record)?.['fields'];
+  if (!isPlainObject(persisted)) {
+    return (
+      `exact-value echo violation (EVIDENCE_VALUE_MISMATCH): the observe record ` +
+      `'${labelOf(record)}' observed no persisted fields to echo the ` +
+      `'${operation}' request against`
+    );
+  }
+  for (const key of Object.keys(observed).sort()) {
+    const observedValue = observed[key];
+    if (!isJsonValue(observedValue)) continue;
+    const persistedValue = persisted[key];
+    if (!isJsonValue(persistedValue) || canonicalJson(persistedValue) !== canonicalJson(observedValue)) {
+      return (
+        `exact-value echo violation (EVIDENCE_VALUE_MISMATCH): the test sent ` +
+        `${key}=${canonicalJson(observedValue)} (witness-observed request) but the independently ` +
+        `read persisted fields on the same entity carry ` +
+        `${isJsonValue(persistedValue) ? canonicalJson(persistedValue) : '<none>'} — a 2xx status ` +
+        'or row presence alone is insufficient'
+      );
+    }
+  }
+  return null;
+}
+
+/**
  * The operation-specific postcondition a witnessed persistence record
  * must meet for the claim to be satisfiable. Every EXPECTATION is
  * owner-owned (classification) or engine-observed (pre-observation
@@ -720,8 +785,14 @@ const PERSISTENCE_CAPABILITY: ContractCapability = {
     'Backend-only state additionally admits the server-witnessed channel: the witness runs the ' +
     "resource's adapter server probe (probeServer) ITSELF and stamps `channel: 'server'` " +
     "records carrying `declaredKind: 'server-e2e'` — admissible without the ui.action browser " +
-    'anchor only for obligations the supervisor registered server-e2e',
-  testKinds: ['browser-e2e', 'server-e2e', 'api-e2e'],
+    'anchor only for obligations the supervisor registered server-e2e. ' +
+    'Suite-driven browser tests additionally admit the Observe channel: the witness matches ' +
+    "the test's own proxied mutation exchange against the adapter's trusted observe binding, " +
+    "reads the entity itself, and stamps `channel: 'observe'` records carrying the observed " +
+    'request fields — admissible without the ui.action anchor only for obligations the ' +
+    'supervisor registered observed-e2e; the request echo is graded exactly like the ' +
+    'engine-entered echo (EVIDENCE_VALUE_MISMATCH on mismatch)',
+  testKinds: ['browser-e2e', 'observed-e2e', 'server-e2e', 'api-e2e'],
   availability: { status: 'available' },
 };
 
@@ -755,7 +826,7 @@ registerContractCapabilities(PERSISTENCE_CAPABILITY);
 registerContractCapabilities(CRUD_CAPABILITY);
 
 /**
- * The built-in persistence grader: dispatches between the two evidence
+ * The built-in persistence grader: dispatches between the three evidence
  * channels an obligation's claim may be proven through.
  *
  * - SERVER-WITNESSED channel (`payload.channel: 'server'` + `payload.
@@ -773,18 +844,28 @@ registerContractCapabilities(CRUD_CAPABILITY);
  *   `server-e2e`. Records carrying the channel WITHOUT the kind stamp
  *   (impossible from an honest witness) are admissible NOWHERE — never
  *   server-satisfying and excluded from the browser path (fail closed).
+ * - OBSERVE channel (`payload.channel: 'observe'` on a
+ *   `persistence.observed` record, witness-stamped): satisfies WITHOUT
+ *   the ui.action anchor when the witness-observed proxied mutation
+ *   plus the independent adapter read meet the SAME postcondition, and
+ *   (create/update) the observed request fields echo exactly
+ *   (EVIDENCE_VALUE_MISMATCH on mismatch — same rule as the
+ *   engine-entered echo). Admissible only for obligations the supervisor
+ *   registered `observed-e2e`. Weaker than the browser channel by
+ *   design: the suite drove the browser, so "UI was used" is NOT proven
+ *   — only "the server stored what the proxied request sent".
  * - BROWSER channel: the historical ui.action + witnessed persistence
  *   rule, byte-identical to its pre-server-channel behavior for any
- *   evidence set that could exist without this channel (server-channel
- *   records are excluded from its persistence set — they are not browser
- *   evidence and must neither satisfy nor invalidate a UI-anchored
- *   claim).
+ *   evidence set that could exist without the newer channels (server-
+ *   and observe-channel records are excluded from its persistence set —
+ *   they are not browser evidence and must neither satisfy nor
+ *   invalidate a UI-anchored claim).
  *
  * Aggregation: browser satisfaction wins (it is the stricter channel),
- * then server satisfaction, then the browser outcome verbatim — except
- * that a typed server-channel postcondition failure upgrades a browser
- * `missing` to `invalid` (the witness DID observe the state; the claim
- * declared the operation and lied).
+ * then server, then observe, then the browser outcome verbatim — except
+ * that a typed server/observe-channel postcondition failure upgrades a
+ * browser `missing` to `invalid` (the witness DID observe the state;
+ * the claim declared the operation and lied).
  */
 function persistenceClaimVerifier(
   claim: Claim,
@@ -819,12 +900,14 @@ function persistenceClaimVerifier(
   // post-intent record is self-contained (the witness consumed the paired
   // pre-intent observation INTO `payload.before` at stamping time), so
   // records are graded independently against their OWN entityId — there
-  // is no ui.action anchor to agree with.
+  // is no ui.action anchor to agree with. The kind must be EXACTLY
+  // `persistence.entity`: the witness stamps the server channel only on
+  // that kind, so any other kind carrying the stamp is admissible
+  // NOWHERE (fail closed — never server-satisfying).
   const serverQualified = evidence.filter(
     (entry) =>
       entry.trust === 'witnessed' &&
-      typeof entry.record.kind === 'string' &&
-      entry.record.kind.startsWith(PERSISTENCE_KIND_PREFIX) &&
+      entry.record.kind === PERSISTENCE_ENTITY_KIND &&
       payloadOf(entry.record)?.['channel'] === SERVER_CHANNEL &&
       payloadOf(entry.record)?.['declaredKind'] === SERVER_E2E_KIND,
   );
@@ -862,11 +945,75 @@ function persistenceClaimVerifier(
       }
       if (serverFailure === null) serverFailure = failure;
     }
-    // No qualifying server record met the postcondition: if the browser
-    // channel merely lacks evidence, the witnessed server observation is
-    // the sharper diagnosis — return it typed-invalid instead.
-    if (browser.status === 'missing' && serverFailure !== null) {
-      return { status: 'invalid', reason: `${serverFailure} (obligation '${obligation.id}')` };
+    // No qualifying server record met the postcondition: remember the
+    // sharpest diagnosis (non-empty qualified sets always leave one —
+    // every candidate either satisfies or records its failure), but let
+    // the Observe channel grade first — the combined upgrade below
+    // prefers the server failure, then the observe one, over a bare
+    // browser missing.
+  }
+  // OBSERVE channel (Phase 2): grade every qualifying observe record.
+  // Each record is self-contained (the witness consumed the proxied
+  // request, the open snapshot, and the adapter read INTO the payload
+  // at finalize time), so records grade independently against their OWN
+  // entityId — there is no ui.action anchor to agree with. Non-create/
+  // update operations carry no echo (presence/absence grades them).
+  const observeQualified = evidence.filter(
+    (entry) =>
+      entry.trust === 'witnessed' &&
+      typeof entry.record.kind === 'string' &&
+      entry.record.kind === OBSERVED_RECORD_KIND &&
+      payloadOf(entry.record)?.['channel'] === OBSERVE_CHANNEL,
+  );
+  let observeFailure: string | null = null;
+  if (observeQualified.length > 0) {
+    const graded = observeQualified
+      .map((entry) => ({
+        entry,
+        entity: normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey),
+      }))
+      .sort((a, b) => compareStrings(labelOf(a.entry.record), labelOf(b.entry.record)));
+    for (const candidate of graded) {
+      if (!candidate.entity.ok) {
+        if (observeFailure === null) {
+          observeFailure =
+            `observe persistence record '${labelOf(candidate.entry.record)}': ${candidate.entity.detail}`;
+        }
+        continue;
+      }
+      const failure = persistencePostconditionFailure(
+        obligation,
+        requiredOp,
+        candidate.entry.record,
+        candidate.entity.key,
+      );
+      if (failure !== null) {
+        if (observeFailure === null) observeFailure = failure;
+        continue;
+      }
+      if (requiredOp === 'create' || requiredOp === 'update') {
+        const echoFailure = observedEchoFailure(requiredOp, candidate.entry.record);
+        if (echoFailure !== null) {
+          if (observeFailure === null) observeFailure = echoFailure;
+          continue;
+        }
+      }
+      return {
+        status: 'satisfied',
+        recordIds: sortedUnique(
+          [candidate.entry.record.recordId].map((id) => (typeof id === 'string' ? id : '')),
+        ),
+      };
+    }
+  }
+  // No channel satisfied: a witnessed channel postcondition failure
+  // upgrades a bare browser missing to invalid (the witness DID observe
+  // state; the claim declared the operation and lied) — server first,
+  // then observe. Otherwise the browser outcome stands verbatim.
+  if (browser.status === 'missing') {
+    const sharp = serverFailure ?? observeFailure;
+    if (sharp !== null) {
+      return { status: 'invalid', reason: `${sharp} (obligation '${obligation.id}')` };
     }
   }
   return browser;

@@ -21,6 +21,17 @@
  * A refused/failed intent resolves to a typed failure recorded here and
  * in the logs — never to satisfaction (fail closed; the claim simply
  * stays blocking).
+ *
+ * OBSERVE channel (Phase 2): when `observeObligations` is supplied (the
+ * trusted mapping layer's `kind: observed-e2e` declarations), the drain
+ * registers them pre-run, then finalizes each PASSED test's session
+ * before sealing it — the witness resolves the session's own proxied
+ * traffic plus independent adapter reads into witnessed
+ * `channel: 'observe'` records. Finalize notes (missing traffic,
+ * ambiguity, adapter trouble) are collected for the run report — they
+ * are diagnostics, never run-fatal: the obligation stays blocking
+ * through verdicts, which is the honest outcome. Failed/crashed tests
+ * never finalize (no evidence for unfinished work).
  */
 import { CAUSE_NEXT_ACTIONS, type CauseCode } from '@gate-forge/core';
 import { WitnessRequestError } from '../fixture/witness-client.js';
@@ -53,11 +64,13 @@ export interface SpoolDrainHandle {
    * (empty in a genuine run): a re-begin over an open worker slot, an
    * end without a matching begin, or a second end for the same test —
    * plus the TYPED server-persistence intent failures (each names the
-   * intent, the witness cause, and the next action). Genuine serial
-   * reporter events never conflict — any conflict is worker-side forgery
-   * or runner confusion and must fail the run closed downstream.
+   * intent, the witness cause, and the next action), plus the OBSERVE
+   * finalize notes (per-session non-resolutions — diagnostics, never
+   * run-fatal). Genuine serial reporter events never conflict — any
+   * conflict is worker-side forgery or runner confusion and must fail
+   * the run closed downstream.
    */
-  stop: () => Promise<{ conflicts: string[]; intentFailures: string[] }>;
+  stop: () => Promise<{ conflicts: string[]; intentFailures: string[]; observeNotes: string[] }>;
 }
 
 /**
@@ -82,6 +95,7 @@ export function startSupervisorSpoolDrain(options: {
   verifierKey: string;
   pollMs?: number;
   serverE2eObligations?: readonly string[];
+  observeObligations?: readonly string[];
 }): SpoolDrainHandle {
   const client = new SupervisorClient(options.witnessUrl, options.runToken, options.verifierKey);
   const spoolFile = spoolPathFor(options.stateDir, options.runId);
@@ -91,6 +105,7 @@ export function startSupervisorSpoolDrain(options: {
   const endedTests = new Set<string>();
   const conflicts: string[] = [];
   const intentFailures: string[] = [];
+  const observeNotes: string[] = [];
   let offset = 0;
   let intentsOffset = 0;
   let running = true;
@@ -146,6 +161,38 @@ export function startSupervisorSpoolDrain(options: {
     }
   };
 
+  /**
+   * Finalizes one passed test's session for the Observe channel BEFORE
+   * sealing it: the witness resolves the session's own proxied traffic
+   * plus independent adapter reads into witnessed records. Only passed
+   * tests finalize — failed/crashed work gets no evidence. Notes are
+   * diagnostics collected for the run report, never run-fatal (the
+   * obligation stays blocking through verdicts).
+   */
+  const finalizeObserveQuietly = async (slot: OpenSlot): Promise<void> => {
+    if (options.observeObligations === undefined || options.observeObligations.length === 0) return;
+    try {
+      const result = await client.finalizeObserve({ sessionId: slot.sessionId });
+      for (const done of result.finalized) {
+        console.warn(
+          `[gateforge] observe finalized '${done.obligationId}' (${done.operation}, entity ` +
+            `${JSON.stringify(done.entityId) ?? '?'}) for test '${slot.testId}'`,
+        );
+      }
+      for (const note of result.notes) {
+        const message = `observe finalize for test '${slot.testId}': ${note}`;
+        observeNotes.push(message);
+        console.warn(`[gateforge] ${message}`);
+      }
+    } catch (error) {
+      const message =
+        `observe finalize for test '${slot.testId}' failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`;
+      observeNotes.push(message);
+      console.warn(`[gateforge] ${message}`);
+    }
+  };
+
   const handleEvent = async (event: SpoolEvent): Promise<void> => {
     if (event.kind === 'testBegin') {
       await openSessionFor(event);
@@ -156,6 +203,12 @@ export function startSupervisorSpoolDrain(options: {
       if (slot !== undefined && slot.testId === event.testId) {
         openByWorker.delete(event.workerIndex);
         endedTests.add(slotKey(event.workerIndex, event.testId));
+        // Observe finalize BEFORE seal (finalize requires an open
+        // session), and only for passed tests — failed/crashed work
+        // gets no evidence, and its claim stays blocking.
+        if (event.outcome === 'passed') {
+          await finalizeObserveQuietly(slot);
+        }
         await sealQuietly(slot, event.outcome);
         return;
       }
@@ -267,6 +320,26 @@ export function startSupervisorSpoolDrain(options: {
       });
   }
 
+  // PRE-RUN fact: register the observe declarations (the trusted mapping
+  // layer's `observed-e2e` resolution) before any session opens — the
+  // witness snapshots observe resources at session open, so late
+  // registration would silently miss before-state. Same refusal
+  // contract as the server-e2e set.
+  if (options.observeObligations !== undefined) {
+    const previous = settling;
+    settling = previous
+      .then(async () => {
+        await client.registerObserveDeclarations({
+          obligations: [...options.observeObligations as readonly string[]],
+        });
+      })
+      .catch((error: unknown) => {
+        const message = `supervisor drain could not register the observe declarations: ${(error as Error).message}`;
+        conflicts.push(message);
+        console.warn(`[gateforge] ${message}`);
+      });
+  }
+
   const loop = (async () => {
     while (running) {
       await drainOnce();
@@ -275,17 +348,18 @@ export function startSupervisorSpoolDrain(options: {
   })();
 
   return {
-    stop: async (): Promise<{ conflicts: string[]; intentFailures: string[] }> => {
+    stop: async (): Promise<{ conflicts: string[]; intentFailures: string[]; observeNotes: string[] }> => {
       running = false;
       await loop.catch(() => undefined);
       await drainOnce();
       await settling;
       // Force-close anything the runner left open (crash, lost contact):
-      // sealed with NO outcome — the trace grades it not-passed.
+      // sealed with NO outcome — the trace grades it not-passed. No
+      // observe finalize here: unfinished work gets no evidence.
       const leftover = [...openByWorker.values()];
       openByWorker.clear();
       await Promise.all(leftover.map((slot) => sealQuietly(slot, undefined)));
-      return { conflicts: [...conflicts], intentFailures: [...intentFailures] };
+      return { conflicts: [...conflicts], intentFailures: [...intentFailures], observeNotes: [...observeNotes] };
     },
   };
 }

@@ -619,3 +619,58 @@ export async function startMutatingExampleApp(
 }
 
 export { resolve };
+/**
+ * Writes an OBSERVE-capable adapter for `tenant.accounts`: the honest
+ * read/list/normalize surface plus the trusted `observe` mutation
+ * bindings the witness matches session traffic against. Flags let
+ * tests remove `list` (snapshot-unavailable) or `observe` (undeclared
+ * bindings) to prove the typed-miss paths.
+ */
+export function writeObserveAdapter(
+	dir: string,
+	options: { list?: boolean; observe?: boolean; fingerprint?: string } = {},
+): void {
+	const fingerprint = options.fingerprint ?? FINGERPRINT;
+	const lines = [
+		'// Reviewed evidence adapter for tenant.accounts with Observe bindings.',
+		'export default {',
+		'  async read(ctx, id) {',
+		'    const res = await ctx.get(`/api/accounts/${encodeURIComponent(String(id))}`);',
+		'    if (res.status === 404) return null;',
+		'    if (res.status !== 200) throw new Error(`adapter read failed: HTTP ${res.status}`);',
+		'    return res.json();',
+		'  },',
+	];
+	if (options.list !== false) {
+		lines.push(
+			'  async list(ctx) {',
+			"    const res = await ctx.get('/api/accounts');",
+			'    if (res.status !== 200) throw new Error(`adapter list failed: HTTP ${res.status}`);',
+			'    const body = await res.json();',
+			'    return body.accounts;',
+			'  },',
+		);
+	}
+	lines.push(
+		'  normalize(body) {',
+		'    return {',
+		'      entityId: body.id,',
+		'      fields: { first_name: body.first_name, last_name: body.last_name, status: body.status },',
+		'    };',
+		'  },',
+		"  deletion: 'archive',",
+		`  environmentFingerprint: '${fingerprint}',`,
+	);
+	if (options.observe !== false) {
+		lines.push(
+			'  observe: {',
+			"    create: { method: 'POST', path: '/api/accounts' },",
+			"    read: { method: 'GET', path: '/api/accounts/{id}' },",
+			"    update: { method: 'PATCH', path: '/api/accounts/{id}' },",
+			"    delete: { method: 'POST', path: '/api/accounts/{id}/archive' },",
+			'  },',
+		);
+	}
+	lines.push('};', '');
+	writeFileSync(join(dir, '.gateforge/adapters/tenant.accounts.mjs'), lines.join('\n'));
+}
