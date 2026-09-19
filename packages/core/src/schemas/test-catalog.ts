@@ -43,9 +43,22 @@ export type TestRunner = z.infer<typeof TestRunnerSchema>;
  * the witness stamps the channel only for obligations registered
  * `server-e2e` on the verifier-key supervisor surface, and the verdict
  * engine admits `channel: 'server'` records only with that stamp.
+ *
+ * `observed-e2e` (Observe channel, Phase 2) declares an existing
+ * SUITE-DRIVEN browser test whose persistence evidence is the witness's
+ * own observation of the test's proxied traffic plus an independent
+ * adapter read: the test keeps driving `page`, the witness watches the
+ * session proxy and reads state itself. Weaker than `browser-e2e`
+ * (the engine never typed the form — `page.evaluate(fetch)` still fools
+ * "UI was used"), stronger than a bare assertion (a faked 2xx or a
+ * seeded row cannot satisfy: the mutation exchange must be proxied and
+ * the adapter read must echo it). Declaring it over an inferred
+ * `browser-e2e` is a refinement, never a contradiction; over any other
+ * inferred kind it stays contradictory.
  */
 export const TestKindSchema = z.enum([
   'browser-e2e',
+  'observed-e2e',
   'server-e2e',
   'api-e2e',
   'unit',

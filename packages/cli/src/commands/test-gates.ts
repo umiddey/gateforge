@@ -112,7 +112,7 @@ import {
   UnsupportedSnapshotError,
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
-import { mappingBlocking, mappedCoverageFrom, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
+import { mappingBlocking, mappedCoverageFrom, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline } from '../pipeline.js';
 import { tryReuseReceipt } from '../receipts.js';
 import { resolveProvider } from '../providers.js';
@@ -679,6 +679,11 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   // `channel: 'server'` evidence — the drain registers exactly this set
   // with the witness before any test runs.
   let serverE2eObligations: string[] = [];
+  // Observe obligations (Observe channel, Phase 2): the trusted mapping
+  // resolution decides which obligations may stamp `channel: 'observe'`
+  // evidence — the drain registers exactly this set pre-run and
+  // finalizes passed sessions against it.
+  let observeObligations: string[] = [];
   if (catalog !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -692,6 +697,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     injections = claimInjectionsFor(mapped.resolution, catalog);
     mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
     serverE2eObligations = serverE2eObligationIds(mapped.resolution);
+    observeObligations = observeObligationIds(mapped.resolution);
     if (options.scope === 'changed') {
       // The affected slice (Goal 2): changed files → resources (the same
       // join-aware source map the diff scoping grades by) → obligations →
@@ -1102,6 +1108,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     runToken,
     verifierKey: witnessVerifierKey,
     serverE2eObligations,
+    observeObligations,
   });
   let envelope: RunnerExecutionEnvelope;
   // The witness-side execution trace (review fix 2b) — THE execution
@@ -1169,6 +1176,14 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     const drained = await drain.stop();
     lifecycleConflicts = drained.conflicts;
     intentFailures = drained.intentFailures;
+    // Observe finalize notes are diagnostics (missing traffic,
+    // ambiguity, adapter trouble) — the obligations stay blocking
+    // through verdicts, which is the honest outcome. Surfaced on
+    // stderr so the operator sees exactly why an observed claim did
+    // not resolve; never run-fatal here.
+    for (const note of drained.observeNotes) {
+      writeLine(io.stderr, `test-gates: ${note}`);
+    }
     try {
       const trace = await supervisor.executionTrace();
       sessionTrace = trace === null ? null : trace.tests;

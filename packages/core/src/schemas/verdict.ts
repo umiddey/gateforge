@@ -82,17 +82,22 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   TEST_INVENTORY_INCOMPLETE: 'Repair discovery or register a supported adapter',
   TEST_KIND_UNKNOWN: 'Inspect and declare its kind',
   TEST_MAPPING_MISSING:
-    'Run `gateforge tests suggest`, mark the matching test (`gateforge tests mark` / .gateforge/test-map.yml), ' +
-    'map backend-only tables server-e2e, or waive it (`gateforge waive`) — docs/guides/new-table-playbook.md',
+    'Overlay: write `tests/e2e/gateforge/<resource>.<op>.spec.js`. Do not `tests mark` as a fix ' +
+    '— that cannot satisfy the obligation.',
   TEST_MAPPING_AMBIGUOUS: 'Correct the exact mapping',
   TEST_MAPPING_STALE: 'Correct the exact mapping',
-  EVIDENCE_NOT_COLLECTED: 'Add observation hooks to that test',
-  VERIFIER_UNSUPPORTED: 'Implement/configure the observer; do not add duplicate tests',
+  EVIDENCE_NOT_COLLECTED:
+    'Write an overlay test in `tests/e2e/gateforge/` using the Gateforge Playwright fixture ' +
+    '(`evidence.ui.*` + `persistence.verify`). Do not rewrite existing journeys. Mappings ' +
+    '(`tests mark`) are intent, not proof.',
+  VERIFIER_UNSUPPORTED:
+    'Remove this contract from `.gateforge/policies.yml` or drop the pack. Do not add tests.',
   TEST_NOT_EXECUTED: 'Run or repair the selected suite',
   TEST_FAILED: 'Run or repair the selected suite',
   RUN_INCOMPLETE: 'Run or repair the selected suite',
   EVIDENCE_STALE: 'Rerun for the exact candidate',
-  CHANGE_UNMAPPED: 'Map the behavior or repair detection',
+  CHANGE_UNMAPPED:
+    'Map detection or add an overlay test for the changed resource. Do not weaken policy.',
   EVIDENCE_SCOPE_INCOMPLETE:
     'Map a test to the uncovered obligation (`gateforge tests mark`) or run full scope ' +
     '(`test-gates --changed` without `--scope changed`)',
@@ -101,7 +106,8 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   SERVER_PROBE_UNAVAILABLE:
     'Export/repair the adapter server probe (probeServer) so the witness can observe the database engine-side',
   CRUD_COVERAGE_MISSING:
-    'Connect/mark existing journeys, add the missing journey, or record an owner disposition',
+    'Owner: add an overlay test, or record a disposition in trusted `coveragePolicy` ' +
+    '(agents must not edit coveragePolicy).',
   DIAGNOSTIC_TEST_FAILURE: 'Inspect the named test, assertion, and relevant application code',
   DIAGNOSTIC_RUN_INCOMPLETE:
     'Repair the run; an incomplete diagnostic run never displays as passing',

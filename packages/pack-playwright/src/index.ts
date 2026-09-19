@@ -37,7 +37,7 @@ export { GateforgeReporter, gateSummaryLine } from './reporter/reporter.js';
 export type { GateforgeReporterOptions, LedgerRow, ReporterTest } from './reporter/reporter.js';
 
 export { startWitness, WitnessStartupError, recordIdOf } from './witness/server.js';
-export { loadAdapters, validateAdapter, AdapterRegistryError } from './witness/adapter-registry.js';
+export { loadAdapters, validateAdapter, validateObserveBinding, AdapterRegistryError } from './witness/adapter-registry.js';
 export {
   isLoopbackUrl,
   isLoopbackUrlResolving,
@@ -52,6 +52,8 @@ export type {
   WitnessOptions,
   WitnessHandle,
   EvidenceAdapter,
+  ObserveBinding,
+  ObserveMutation,
   AdapterContext,
   RecordsRequest,
   RecordsResponse,
@@ -62,11 +64,18 @@ export type {
   SessionOpenResponse,
   SessionCloseRequest,
   SessionCloseResponse,
+  ObserveDeclarationsRequest,
+  ObserveDeclarationsResponse,
+  ObserveFinalizeRequest,
+  ObserveFinalizeResponse,
+  ObserveFinalizedObligation,
   ExpectedSetRequest,
   ExpectedSetResponse,
   ExpectedTestRegistration,
   ExecutionTraceResponse,
 } from './witness/types.js';
+
+export { OBSERVE_CHANNEL, OBSERVED_E2E_TEST_KIND, OBSERVED_KIND } from './constants.js';
 
 export { startAttestationProxy } from './attestation/proxy.js';
 export type { AttestationProxyHandle } from './attestation/proxy.js';

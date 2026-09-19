@@ -18,6 +18,7 @@ import { adoptCommand } from './commands/adopt.js';
 import { discoverCommand } from './commands/discover.js';
 import { obligationsCommand } from './commands/obligations.js';
 import { checkCommand } from './commands/check.js';
+import { nextCommand } from './commands/next.js';
 import { testGatesCommand } from './commands/test-gates.js';
 import { baselineCommand } from './commands/baseline.js';
 import { waiveCommand } from './commands/waive.js';
@@ -32,8 +33,12 @@ export const USAGE = `\
 usage: gateforge <command> [options]
 
 commands:
-  init [--languages <comma,list>] [--blocking]  create .gateforge.yml + skeleton; --blocking installs AND verifies an
-        [--strict-e2e]                           active pre-commit hook (staged gate) + CI wiring (idempotent)
+  init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan]
+        [--proof overlay|observe] [--blocking] [--strict-e2e]
+                                         scan the repo, print the recommended install, and write
+                                         .gateforge.yml + skeleton + GATEFORGE.md + overlay README
+                                         (idempotent; --blocking installs AND verifies an active
+                                         pre-commit hook + CI wiring)
   enforce                                 wire the blocking pre-commit + CI gate into an initialized repo (idempotent)
   adopt                                   adopt enforcement: seed the baseline from current debt (the one bulk-add) + wire the gate
   discover [--json]                      run detectors and dump the resource graph
@@ -49,6 +54,7 @@ commands:
   check [--changed] [--staged]           run the full gate and report (F: text|json|sarif). --staged gates the
         [--require-e2e] [--format F]     EXACT staged candidate (frozen index checkout, never the worktree);
                                          --require-e2e blocks without a valid, non-stale gate receipt
+  next [--changed] [--json]              print the ONE blocking next action (navigation, not the gate)
   test-gates [--changed] [--suite CMD]   supervised E2E run over the obligations (--changed) or the
         [--out DIR] [--format F]         legacy suite escape hatch; seals a gate receipt on complete success
         [--witness-url URL]
@@ -114,6 +120,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return runWithExitCodes(io, () => obligationsCommand(io, rest));
     case 'check':
       return runWithExitCodes(io, () => checkCommand(io, rest));
+    case 'next':
+      return runWithExitCodes(io, () => nextCommand(io, rest));
     case 'test-gates':
       return runWithExitCodes(io, () => testGatesCommand(io, rest));
     case 'enforcement':

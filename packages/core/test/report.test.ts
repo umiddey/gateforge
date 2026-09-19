@@ -10,6 +10,7 @@ import {
   fingerprint,
   renderRun,
   runExitCode,
+  CAUSE_NEXT_ACTIONS,
   type BlockingEntry,
   type Obligation,
   type ObligationVerdict,
@@ -327,9 +328,7 @@ describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR
   const caused = entry(accounts, 'missing', {
     reason: "no claim declares 'tenant.accounts:crud:update'",
     cause: 'TEST_MAPPING_MISSING',
-    nextAction:
-      'Run `gateforge tests suggest`, mark the matching test (`gateforge tests mark` / .gateforge/test-map.yml), ' +
-      'map backend-only tables server-e2e, or waive it (`gateforge waive`) — docs/guides/new-table-playbook.md',
+    nextAction: CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING'],
   });
 
   it('json verdicts carry cause and nextAction (null when unmapped)', () => {

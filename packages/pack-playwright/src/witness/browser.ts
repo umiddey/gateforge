@@ -32,6 +32,7 @@ import {
   declaredSurfaceFields,
   renderSurfaceTemplate,
   type SurfaceDescriptor,
+  type SurfaceStep,
 } from '../surface.js';
 
 /** The UI operations the engine can perform (constrained subset). */
@@ -78,6 +79,71 @@ export interface EngineBrowserLauncher {
 
 /** Bounded wait for a rendered selector (fail closed, never indefinite). */
 const ENGINE_STEP_TIMEOUT_MS = 15_000;
+
+/**
+ * The minimal page surface the wizard step driver needs. A real
+ * Playwright Page satisfies it structurally, and stub pages in tests
+ * implement exactly this — no browser required to prove the walk.
+ */
+export interface StepPage {
+  goto(url: string, options?: { timeout?: number }): Promise<unknown>;
+  waitForSelector(selector: string, options?: { timeout?: number }): Promise<unknown>;
+  locator(selector: string): {
+    click(options?: { timeout?: number }): Promise<void>;
+    fill(value: string, options?: { timeout?: number }): Promise<void>;
+    check(options?: { timeout?: number }): Promise<void>;
+  };
+  keyboard: { press(key: string): Promise<void> };
+}
+
+/**
+ * Walks one validated wizard step list on the engine-owned page
+ * (surface v2 create). Every interaction runs here, engine-side: the
+ * test supplies intent (field values) only. A step referencing an
+ * input field the journey did not provide fails closed — the engine
+ * never invents values. Unknown shapes are unreachable post-
+ * validation, but still refused defensively (never silently skipped).
+ *
+ * Args:
+ *   page: the engine-owned page (real or structural stub).
+ *   appBase: the trusted attested subject origin (never suite input).
+ *   steps: the validated wizard walk, in order.
+ *   fields: the journey's declared input values, keyed by field name.
+ */
+export async function driveCreateSteps(
+  page: StepPage,
+  appBase: string,
+  steps: readonly SurfaceStep[],
+  fields: Record<string, string>,
+): Promise<void> {
+  for (const step of steps) {
+    if ('goto' in step) {
+      await page.goto(`${appBase}${step.goto}`, { timeout: ENGINE_STEP_TIMEOUT_MS });
+    } else if ('click' in step) {
+      await page.locator(step.click).click({ timeout: ENGINE_STEP_TIMEOUT_MS });
+    } else if ('fill' in step) {
+      const value =
+        step.fill.field !== undefined ? fields[step.fill.field] : (step.fill.value as string | undefined);
+      if (typeof value !== 'string') {
+        throw new EngineBrowserError(
+          `browser.create steps: fill of '${step.fill.selector}' references field ` +
+            `'${String(step.fill.field)}' the journey did not provide — the engine never invents input values`,
+        );
+      }
+      await page.locator(step.fill.selector).fill(value, { timeout: ENGINE_STEP_TIMEOUT_MS });
+    } else if ('check' in step) {
+      await page.locator(step.check).check({ timeout: ENGINE_STEP_TIMEOUT_MS });
+    } else if ('press' in step) {
+      await page.keyboard.press(step.press);
+    } else if ('waitFor' in step) {
+      await page.waitForSelector(step.waitFor, { timeout: ENGINE_STEP_TIMEOUT_MS });
+    } else {
+      throw new EngineBrowserError(
+        `browser.create steps: unknown wizard step ${JSON.stringify(step)} — refusing to drive`,
+      );
+    }
+  }
+}
 
 /**
  * Owns the engine Chromium instance and its per-session contexts.
@@ -461,10 +527,16 @@ async function driveEngineActionInner(
       const exchanges = await captureExchanges(page, appOrigin, async () => {
         await gotoList(page, appBase, surface);
         const before = await collectIds(page, surface);
-        await page.goto(`${appBase}${surface.create.formPath}`, { timeout: ENGINE_STEP_TIMEOUT_MS });
-        await page.waitForSelector(surface.create.formReadySelector, { timeout: ENGINE_STEP_TIMEOUT_MS });
-        await fillFormFields(page, surface.create.fields, fields);
-        await page.locator(surface.create.submitSelector).click({ timeout: ENGINE_STEP_TIMEOUT_MS });
+        if ('steps' in surface.create) {
+          // Wizard walk (surface v2): the engine performs the declared
+          // steps itself — every click/type is engine-observed.
+          await driveCreateSteps(page, appBase, surface.create.steps, fields);
+        } else {
+          await page.goto(`${appBase}${surface.create.formPath}`, { timeout: ENGINE_STEP_TIMEOUT_MS });
+          await page.waitForSelector(surface.create.formReadySelector, { timeout: ENGINE_STEP_TIMEOUT_MS });
+          await fillFormFields(page, surface.create.fields, fields);
+          await page.locator(surface.create.submitSelector).click({ timeout: ENGINE_STEP_TIMEOUT_MS });
+        }
         await waitAfterAction(page, surface);
         const created = [...(await collectIds(page, surface))].filter((id) => !before.has(id));
         if (created.length !== 1) {

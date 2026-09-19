@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gate-forge/core';
+import { withTempRepo, CAUSE_NEXT_ACTIONS, type TempRepo } from '@gate-forge/core';
 import {
   installFixture,
   OBLIGATION_ACCOUNTS,
@@ -194,6 +194,81 @@ describe('gateforge tests mark', () => {
       expect(contradictory.stderr).toContain("cannot mark");
       expect(contradictory.stderr).toContain("'browser-e2e' from strong code signals");
       expect(contradictory.stderr).toContain('e2e/accounts.spec.js:');
+      expect(existsSync(join(repo.root, '.gateforge/test-map.yml'))).toBe(false);
+    });
+  }, 120_000);
+
+  it('accepts an observed-e2e mark on a suite-driven browser journey (Observe refinement)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      // The page-fixture journey is strongly inferred browser-e2e;
+      // declaring it observed-e2e REFINES (suite-driven, witness-watched)
+      // rather than contradicting — the mark succeeds.
+      const marked = await runCli(repo, [
+        'tests', 'mark', '--test', DELETE_KEY, '--kind', 'observed-e2e',
+        '--category', 'persistence.delete',
+        '--obligation', OBLIGATION_ACCOUNTS,
+        '--reason', 'The existing journey deletes an account; the witness observes it.',
+      ]);
+      expect(marked.code).toBe(0);
+      const sidecarPath = join(repo.root, '.gateforge/test-map.yml');
+      expect(existsSync(sidecarPath)).toBe(true);
+      expect(readFileSync(sidecarPath, 'utf8')).toContain('observed-e2e');
+    });
+  }, 120_000);
+
+  it('refuses an observed-e2e mark over a non-browser inference (api-e2e stays contradictory)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      // A pure unit test resolves the strong 'unit' kind; observed-e2e
+      // (a browser-channel kind) contradicts it like any other mismatch.
+      repo.writeFiles({
+        'e2e/math.spec.js': [
+          "import { test } from 'playwright/test';",
+          "test('adds two numbers', () => {",
+          '  const sum = 1 + 1;',
+          '  if (sum !== 2) throw new Error("wrong");',
+          '});',
+          '',
+        ].join('\n'),
+      });
+      const unitKey = 'playwright:chromium:e2e/math.spec.js:adds two numbers';
+      const mislabeled = await runCli(repo, [
+        'tests', 'mark', '--test', unitKey, '--kind', 'observed-e2e',
+        '--category', 'persistence.delete',
+        '--obligation', OBLIGATION_ACCOUNTS,
+        '--reason', 'Deliberately mislabeled unit test for the observe probe.',
+      ]);
+      expect(mislabeled.code).toBe(2);
+      expect(mislabeled.stderr).toContain(`cannot mark '${unitKey}'`);
+      expect(mislabeled.stderr).toContain("inference resolved 'unit' from strong code signals");
+      expect(existsSync(join(repo.root, '.gateforge/test-map.yml'))).toBe(false);
+    });
+  }, 120_000);
+
+  it('refuses an observed-e2e mark on a test with observed mocking', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      repo.writeFiles({
+        'e2e/mocked.spec.js': [
+          "import { test } from 'playwright/test';",
+          "test('renders accounts through a mocked boundary', async ({ page }) => {",
+          "  await page.route('**/api/accounts', (route) => route.fulfill({ body: '[]' }));",
+          "  await page.goto('/accounts');",
+          '});',
+          '',
+        ].join('\n'),
+      });
+      const mockedKey = 'playwright:chromium:e2e/mocked.spec.js:renders accounts through a mocked boundary';
+      const mislabeled = await runCli(repo, [
+        'tests', 'mark', '--test', mockedKey, '--kind', 'observed-e2e',
+        '--category', 'persistence.read',
+        '--obligation', OBLIGATION_ACCOUNTS,
+        '--reason', 'Deliberately mislabeled mocked test for the observe probe.',
+      ]);
+      expect(mislabeled.code).toBe(2);
+      expect(mislabeled.stderr).toContain(`cannot mark '${mockedKey}'`);
+      expect(mislabeled.stderr).toContain('cannot override observed mocking');
       expect(existsSync(join(repo.root, '.gateforge/test-map.yml'))).toBe(false);
     });
   }, 120_000);
@@ -431,7 +506,7 @@ describe('grading seam (plan §5.3: a mapping declares intent, supplies no resul
       const accounts = mappedVerdicts.verdicts.find((v) => v.obligationId === OBLIGATION_ACCOUNTS);
       expect(accounts?.verdict).toBe('missing');
       expect(accounts?.cause).toBe('EVIDENCE_NOT_COLLECTED');
-      expect(accounts?.nextAction).toBe('Add observation hooks to that test');
+      expect(accounts?.nextAction).toBe(CAUSE_NEXT_ACTIONS['EVIDENCE_NOT_COLLECTED']);
       // The unmarked obligation keeps its honest missing-mapping cause.
       const orders = mappedVerdicts.verdicts.find((v) => v.obligationId === OBLIGATION_ORDERS);
       expect(orders?.cause).toBe('TEST_MAPPING_MISSING');

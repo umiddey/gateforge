@@ -52,7 +52,7 @@ describe('gateforge baseline update', () => {
       expect(stderr).toContain('added 1 new fingerprint');
       // The rejection names the legal exits for NEW obligations.
       expect(stderr).toContain(
-        'prove them with witnessed test evidence (docs/guides/new-table-playbook.md) ' +
+        'prove them with an overlay test in tests/e2e/gateforge/ ' +
           'or waive them (`gateforge waive`)',
       );
       // The file is unchanged.

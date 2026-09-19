@@ -12,6 +12,11 @@
  *   deletion: 'hard' | 'archive',
  *   environmentFingerprint: '…',            // must match the target's marker header
  *   baseUrl: 'http://…',                    // optional override of the witness adapter base
+ *   list: async (ctx) => bodies,            // optional: powers create pre-observations + Observe snapshots
+ *   observe: {                              // optional: Observe-channel mutation bindings (Phase 2)
+ *     create: { method: 'POST', path: '/api/v2/accounts' },
+ *     update: { method: 'PATCH', path: '/api/v2/accounts/{id}' },
+ *   },
  *   probeServer: async (ctx, subject) => ({ found, fields }), // optional: the
  *                          // SERVER-WITNESSED persistence channel probe — executed
  *                          // ONLY in this trusted witness process
@@ -142,6 +147,14 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
   if (adapter['probeServer'] !== undefined && typeof adapter['probeServer'] !== 'function') {
     problems.push('probeServer must be an async function (ctx, subject) => {found, fields} when present');
   }
+  // Observe binding (Observe channel, Phase 2): OPTIONAL — an adapter
+  // without it serves no observe obligation. Present-but-malformed is a
+  // load-time contract violation (fail closed), validated by
+  // validateObserveBinding below.
+  if (adapter['observe'] !== undefined) {
+    const observeProblem = validateObserveBinding(adapter['observe']);
+    if (observeProblem !== null) problems.push(observeProblem);
+  }
   if (problems.length > 0) {
     throw new AdapterRegistryError(`adapter '${name}' violates the adapter contract: ${problems.join('; ')}`);
   }
@@ -157,6 +170,9 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
     ...(adapter['probeServer'] !== undefined
       ? { probeServer: adapter['probeServer'] as EvidenceAdapter['probeServer'] }
       : {}),
+    ...(adapter['observe'] !== undefined
+      ? { observe: adapter['observe'] as EvidenceAdapter['observe'] }
+      : {}),
   };
 }
 
@@ -166,6 +182,80 @@ export class AdapterRegistryError extends Error {
     super(message);
     this.name = 'AdapterRegistryError';
   }
+}
+
+/** Concrete HTTP methods an observe binding may name (uppercase). */
+const OBSERVE_METHODS: ReadonlySet<string> = new Set([
+  'GET',
+  'HEAD',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+  'OPTIONS',
+]);
+
+/** Observe-eligible operations (the CRUD verbs the grader knows). */
+const OBSERVE_OPERATIONS: readonly string[] = ['create', 'read', 'update', 'delete'];
+
+/**
+ * Validates one adapter's optional `observe` binding (Observe channel,
+ * Phase 2): a plain object with per-operation `{method, path}`
+ * entries. Method must be a concrete uppercase verb; path must be an
+ * absolute backend-facing path whose only template segment is `{id}` —
+ * required on read/update/delete (the entity-id carrier), forbidden on
+ * create (create ids come from the adapter list-diff, never from a
+ * path guess).
+ *
+ * Args:
+ *   value: the adapter's `observe` export.
+ *
+ * Returns:
+ *   string | null: the contract-violation description, or null when valid.
+ */
+export function validateObserveBinding(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return 'observe must be an object {create?/read?/update?/delete?: {method, path}} when present';
+  }
+  const binding = value as Record<string, unknown>;
+  for (const key of Object.keys(binding)) {
+    if (!OBSERVE_OPERATIONS.includes(key)) {
+      return `observe carries unknown operation '${key}' (allowed: ${OBSERVE_OPERATIONS.join(', ')})`;
+    }
+  }
+  for (const operation of OBSERVE_OPERATIONS) {
+    const entry = binding[operation];
+    if (entry === undefined) continue;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return `observe.${operation} must be {method, path}`;
+    }
+    const { method, path } = entry as Record<string, unknown>;
+    if (typeof method !== 'string' || !OBSERVE_METHODS.has(method)) {
+      return (
+        `observe.${operation}.method must be a concrete uppercase HTTP verb ` +
+        `(${[...OBSERVE_METHODS].sort().join(', ')})`
+      );
+    }
+    if (typeof path !== 'string' || !path.startsWith('/')) {
+      return `observe.${operation}.path must be an absolute backend-facing path starting with '/'`;
+    }
+    if (path.includes('//') || /[\s?#]/.test(path)) {
+      return `observe.${operation}.path must be a plain path template (no duplicate slashes, query, fragment, or whitespace)`;
+    }
+    const segments = path.split('/').filter((segment) => segment.length > 0);
+    const idSegments = segments.filter((segment) => segment === '{id}').length;
+    const braced = segments.filter((segment) => segment.startsWith('{') || segment.endsWith('}'));
+    if (braced.length !== idSegments) {
+      return `observe.${operation}.path may template only the '{id}' segment (got '${path}')`;
+    }
+    if (operation === 'create' && idSegments > 0) {
+      return `observe.create.path must not template '{id}' (create ids come from the adapter list-diff, got '${path}')`;
+    }
+    if (operation !== 'create' && idSegments !== 1) {
+      return `observe.${operation}.path must carry exactly one '{id}' segment binding the entity id (got '${path}')`;
+    }
+  }
+  return null;
 }
 
 /** The transport the witness hands to adapter `read` calls (GET-only). */

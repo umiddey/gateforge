@@ -31,13 +31,25 @@ CRUD coverage is the first proof case, not the final architecture. The broader
 product is a user-extensible test-policy compiler: creating or modifying code
 artifacts automatically creates auditable testing responsibilities.
 
+## Agent loop
+
+Blocked agents run `gateforge next` (or `gateforge next --json`): exactly
+one blocking next action (`next`/`cause`/`why`/`do`), never a dump. Do the
+single `do:` line and stop. New proof tests go in `tests/e2e/gateforge/`
+(overlay, engine-driven fixture — wizard creates via surface v2 steps);
+existing suite-driven browser tests prove persistence via the Observe
+channel once mapped `--kind observed-e2e`. Never rewrite existing
+`tests/e2e/**` journeys, never `tests mark` as proof, never edit policies
+or waivers to self-approve. `GATEFORGE.md` (written by `gateforge init`)
+carries the full loop contract.
+
 ## Package map
 
 | Package | Purpose |
 |---|---|
 | [`packages/core`](packages/core) | `@gate-forge/core` — artifact schemas (zod), GF-canonical-JSON + fingerprints, witness provenance verification, resource graph, policy engine, verdict engine + capability registry, test-catalog/mapping/coverage/receipt schemas, baselines, waivers, reports |
 | [`packages/plugin-protocol`](packages/plugin-protocol) | `@gate-forge/plugin-protocol` — GPP/3 host (TS) + reference client (py): newline JSON, 8 MiB line cap, digest-checked envelopes |
-| [`packages/cli`](packages/cli) | `@gate-forge/cli` — bin `gateforge`: `init`, `discover`, `classify`, `explain`, `tests discover|suggest|mark|explain|diagnose`, `obligations`, `check [--changed] [--staged] [--require-e2e]`, `test-gates [--changed]`, `broker commit`, `enforcement doctor`, `baseline update` |
+| [`packages/cli`](packages/cli) | `@gate-forge/cli` — bin `gateforge`: `init`, `next`, `discover`, `classify`, `explain`, `tests discover|suggest|mark|explain|diagnose`, `obligations`, `check [--changed] [--staged] [--require-e2e]`, `test-gates [--changed]`, `broker commit`, `enforcement doctor`, `baseline update` |
 | [`packages/http-contract`](packages/http-contract) | `@gate-forge/http-contract` — canonical HTTP contract facts, typed block codes, deterministic frontend-call ↔ server-route join engine |
 | [`packages/pack-sqlalchemy`](packages/pack-sqlalchemy) | `@gate-forge/pack-sqlalchemy` — Python SQLAlchemy detector plugin + TS registration + classification workflow |
 | [`packages/pack-fastapi`](packages/pack-fastapi) | `@gate-forge/pack-fastapi` — FastAPI server-route detector (Python AST over GPP/3) |

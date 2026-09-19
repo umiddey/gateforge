@@ -78,8 +78,29 @@ describe('evaluateCoveragePolicy', () => {
     expect(accountFindings.every((finding) => finding.code === 'CRUD_COVERAGE_MISSING')).toBe(true);
     expect(accountFindings.every((finding) => finding.cause === 'CRUD_COVERAGE_MISSING')).toBe(true);
     const del = accountFindings.find((finding) => finding.operation === 'delete');
-    expect(del?.detail).toContain("table 'accounts' has no mapped browser-e2e 'delete' coverage");
-    expect(del?.nextAction).toContain('record an owner disposition');
+    expect(del?.detail).toContain("table 'accounts' has no mapped real-UI 'delete' coverage");
+    expect(del?.nextAction).toContain('record a disposition in trusted `coveragePolicy`');
+  });
+
+  it('an observed-e2e mapping covers like a browser-e2e one (both are real-UI journeys)', () => {
+    const mapped: readonly MappedCoverage[] = [
+      { table: 'accounts', operation: 'delete', testKind: 'observed-e2e' },
+    ];
+    const result = evaluateCoveragePolicy([table('accounts')], INVENTORY, mapped);
+    const accountFindings = result.blocking.filter((finding) => finding.table === 'accounts');
+    // delete covered by the observed-e2e mapping; create/read/update still block.
+    expect(accountFindings.map((finding) => finding.operation).sort()).toEqual(['create', 'read', 'update']);
+  });
+
+  it('a non-real-UI mapping kind covers nothing', () => {
+    const mapped: readonly MappedCoverage[] = [
+      { table: 'accounts', operation: 'delete', testKind: 'api-e2e' },
+    ];
+    const result = evaluateCoveragePolicy([table('accounts')], INVENTORY, mapped);
+    const accountFindings = result.blocking.filter((finding) => finding.table === 'accounts');
+    expect(accountFindings.map((finding) => finding.operation).sort()).toEqual(
+      ['create', 'delete', 'read', 'update'],
+    );
   });
 
   it('a table with a recorded owner disposition does not block', () => {

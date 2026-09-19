@@ -22,6 +22,7 @@ import {
   registerContractVerifier,
   registeredNamespaces,
   strictCapabilityGaps,
+  CAUSE_NEXT_ACTIONS,
   type Classification,
   type ContractCapability,
   type HttpRouteCandidate,
@@ -1310,7 +1311,10 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
     expect(persistence?.observer).toContain('same entity');
     // server-e2e: the server-witnessed channel (the witness's own adapter
     // probe) is a second honest proof channel for persistence contracts.
-    expect(persistence?.testKinds).toEqual(['browser-e2e', 'server-e2e', 'api-e2e']);
+    // observed-e2e: the Observe channel (session-proxy traffic + witness
+    // adapter reads) is the third — suite-driven, weaker by design.
+    expect(persistence?.testKinds).toEqual(['browser-e2e', 'observed-e2e', 'server-e2e', 'api-e2e']);
+    expect(persistence?.observer).toContain("channel: 'observe'");
   });
 
   it('crud: AVAILABLE through the engine-owned browser channel (plan Phase 1 item 4)', () => {
@@ -1386,7 +1390,7 @@ describe('cause mapping (plan 2026-09-13 §5.4)', () => {
       reason: "no semantic verifier is registered for contract 'notapack:thing'; 'x' stays blocking",
     });
     expect(mapped.cause).toBe('VERIFIER_UNSUPPORTED');
-    expect(mapped.nextAction).toBe('Implement/configure the observer; do not add duplicate tests');
+    expect(mapped.nextAction).toBe(CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED']);
   });
 
   it('fail-closed namespaces → VERIFIER_UNSUPPORTED (crud is available, so it is not among them)', () => {
@@ -1470,7 +1474,7 @@ describe('cause mapping (plan 2026-09-13 §5.4)', () => {
       reason: 'no independent browser/test observation channel',
     });
     expect(mapped.cause).toBe('VERIFIER_UNSUPPORTED');
-    expect(mapped.nextAction).toContain('do not add duplicate tests');
+    expect(mapped.nextAction).toContain('Do not add tests');
   });
 
   it('evidence absence for a connected test → EVIDENCE_NOT_COLLECTED', () => {
@@ -1481,7 +1485,7 @@ describe('cause mapping (plan 2026-09-13 §5.4)', () => {
       reason: "claim 'suite-test' declares 'tenant.accounts:persistence:read' but produced no evidence records",
     });
     expect(mapped.cause).toBe('EVIDENCE_NOT_COLLECTED');
-    expect(mapped.nextAction).toBe('Add observation hooks to that test');
+    expect(mapped.nextAction).toBe(CAUSE_NEXT_ACTIONS['EVIDENCE_NOT_COLLECTED']);
   });
 
   it('no claim connected → TEST_MAPPING_MISSING (placeholder refined by Phase 2-3)', () => {
@@ -1492,10 +1496,7 @@ describe('cause mapping (plan 2026-09-13 §5.4)', () => {
       reason: "no claim declares 'tenant.accounts:persistence:read'",
     });
     expect(mapped.cause).toBe('TEST_MAPPING_MISSING');
-    expect(mapped.nextAction).toBe(
-      'Run `gateforge tests suggest`, mark the matching test (`gateforge tests mark` / .gateforge/test-map.yml), ' +
-        'map backend-only tables server-e2e, or waive it (`gateforge waive`) — docs/guides/new-table-playbook.md',
-    );
+    expect(mapped.nextAction).toBe(CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING']);
   });
 
   it('supported-contract blocks with other reasons carry no Phase 0 cause (later phases populate)', () => {
@@ -1535,7 +1536,7 @@ describe('strict preflight capability gaps (plan 2026-09-13 Phase 0 item 4)', ()
     expect(gap?.detail).toContain('no independent browser/test observation channel');
     expect(gap?.detail).toContain('by ORIGIN, not by browser');
     expect(gap?.observer).toContain('witness HTTP proxy channel');
-    expect(gap?.nextAction).toBe('Implement/configure the observer; do not add duplicate tests');
+    expect(gap?.nextAction).toBe(CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED']);
     // The UI-semantic crud contracts are AVAILABLE through the
     // engine-owned browser channel (plan Phase 1 item 4) — no capability
     // gap names them; per-rule evidence reasons decide each claim.

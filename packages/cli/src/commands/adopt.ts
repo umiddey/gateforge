@@ -111,8 +111,8 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
           ? ` + ${adoptedClassifications} classification-blocked resource(s) in the receipt`
           : ' (receipt predates the classification layer: not adopted for it)') +
         '; a second bulk-add is refused (GF-07/08). Shrink as debt resolves: `gateforge baseline update`. ' +
-        'New (never-adopted) work is never baselined — prove it with witnessed test evidence ' +
-        '(docs/guides/new-table-playbook.md) or waive it (`gateforge waive`).',
+        'New (never-adopted) work is never baselined — prove it with an overlay test in ' +
+        'tests/e2e/gateforge/ or waive it (`gateforge waive`).',
     );
     return 0;
   }

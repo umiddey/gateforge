@@ -36,12 +36,19 @@ export const ATTESTATION_SCOPE_HEADER = 'x-gateforge-attestation-scope';
 export const UI_ACTION_KIND = 'ui.action';
 export const UI_VISIBLE_RESULT_KIND = 'ui.visible-result';
 export const PERSISTENCE_KIND = 'persistence.entity';
+/**
+ * Observe-channel persistence kind (Phase 2): issued ONLY by the
+ * witness's observe finalize (engine-side proxy capture + adapter
+ * read) — never suite-submittable (`/records` rejects it like every
+ * persistence kind) and never engine-driven.
+ */
+export const OBSERVED_KIND = 'persistence.observed';
 export const KNOWN_RECORD_KINDS: readonly string[] = [
   UI_ACTION_KIND,
   UI_VISIBLE_RESULT_KIND,
 ];
 /** Persistence kinds are ONLY issued by the witness (engine-side adapter reads). */
-export const KNOWN_PERSISTENCE_KINDS: readonly string[] = [PERSISTENCE_KIND];
+export const KNOWN_PERSISTENCE_KINDS: readonly string[] = [PERSISTENCE_KIND, OBSERVED_KIND];
 
 /** Env the CLI test-gates suite already receives (documented contract). */
 export const ENV_RUN_ID = 'GATEFORGE_RUN_ID';
@@ -135,6 +142,17 @@ export const SERVER_CHANNEL = 'server';
 
 /** The mapping kind that unlocks the server-witnessed channel. */
 export const SERVER_E2E_TEST_KIND = 'server-e2e';
+
+/**
+ * Payload discriminant the witness stamps on observe-finalized
+ * persistence records (Observe channel, Phase 2: core's verdict engine
+ * keys the observe branch off this channel on `persistence.observed`
+ * records).
+ */
+export const OBSERVE_CHANNEL = 'observe';
+
+/** The mapping kind that unlocks the Observe channel. */
+export const OBSERVED_E2E_TEST_KIND = 'observed-e2e';
 
 /** Run-state file carrying the authenticated gate receipt. */
 export const GATE_RECEIPT_FILE = 'receipt.json';
