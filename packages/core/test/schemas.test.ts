@@ -98,6 +98,43 @@ policies:
       },
     });
     expect(obligation.id).toBe(`${obligation.resourceId}:${obligation.contract}`);
+    expect(obligation.requirementsDigest).toBeUndefined();
+  });
+
+  it('Obligation: requirementsDigest is optional 64-hex', () => {
+    const obligation = ObligationSchema.parse({
+      schemaVersion: 1,
+      id: 'tenant.accounts:http:effect-verified',
+      resourceId: 'tenant.accounts',
+      contract: 'http:effect-verified',
+      policyId: 'behavior-policy',
+      lifecycle: {
+        create: true,
+        read: true,
+        update: true,
+        delete: true,
+        deleteSemantics: 'hard',
+      },
+      requirementsDigest: 'ab'.repeat(32),
+    });
+    expect(obligation.requirementsDigest).toBe('ab'.repeat(32));
+    expect(() =>
+      ObligationSchema.parse({
+        schemaVersion: 1,
+        id: 'tenant.accounts:http:effect-verified',
+        resourceId: 'tenant.accounts',
+        contract: 'http:effect-verified',
+        policyId: 'behavior-policy',
+        lifecycle: {
+          create: true,
+          read: true,
+          update: true,
+          delete: true,
+          deleteSemantics: 'hard',
+        },
+        requirementsDigest: 'not-a-digest',
+      }),
+    ).toThrow();
   });
 
   it('Claim and EvidenceRecord round-trip with bulk scope (pin #11)', () => {

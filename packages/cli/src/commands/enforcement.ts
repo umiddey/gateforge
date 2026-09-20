@@ -19,10 +19,12 @@
  *   external broker is reported `warn`/`not configured` unless an
  *   operator-provided probe says otherwise.
  */
-import { accessSync, constants as fsConstants, existsSync, readdirSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { BehaviorPolicySchema } from '@gate-forge/core';
+import { parse as parseYaml } from 'yaml';
 import {
   allCapabilities,
   canonicalJson,
@@ -193,6 +195,62 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     observerDetail += '; no external witness configured (the supervised run spawns a loopback witness)';
   }
   checks.push({ id: 'observer', status: 'ok', detail: observerDetail });
+
+  // 3b. Complete-behavior readiness (plan 2026-09-19 Phase 9 item 3):
+  // when `behaviorPolicy` is configured the doctor reports the profile's
+  // actual state — document presence, parseability, and whether endpoint
+  // declarations exist (a scaffold is 'warn', never 'ok'; readiness
+  // comes only from owner-declared cases proven through the witness).
+  if (configOk) {
+    try {
+      const config = loadConfigAt(io.cwd);
+      if (config.behaviorPolicy === undefined) {
+        checks.push({
+          id: 'behavior-profile',
+          status: 'ok',
+          detail: 'not configured (basic table/transport behavior only)',
+        });
+      } else {
+        const behaviorPath = resolve(io.cwd, config.behaviorPolicy);
+        if (!existsSync(behaviorPath)) {
+          checks.push({
+            id: 'behavior-profile',
+            status: 'fail',
+            detail: `behaviorPolicy '${config.behaviorPolicy}' points at a missing file — the complete-behavior profile fails closed`,
+          });
+        } else {
+          const parsed = BehaviorPolicySchema.safeParse(
+            JSON.parse(JSON.stringify(parseYaml(readFileSync(behaviorPath, 'utf8')))),
+          );
+          if (!parsed.success) {
+            checks.push({
+              id: 'behavior-profile',
+              status: 'fail',
+              detail: `behaviorPolicy '${config.behaviorPolicy}' is invalid: ${(parsed.error.issues[0]?.message ?? 'unknown').slice(0, 160)}`,
+            });
+          } else if (parsed.data.endpoints.length === 0 && parsed.data.resources.length === 0) {
+            checks.push({
+              id: 'behavior-profile',
+              status: 'warn',
+              detail: 'behavior document is a scaffold (no endpoint/resource declarations) — every endpoint blocks with ENDPOINT_BEHAVIOR_MISSING until the owner declares cases',
+            });
+          } else {
+            checks.push({
+              id: 'behavior-profile',
+              status: 'ok',
+              detail: `behavior document declares ${String(parsed.data.endpoints.length)} endpoint(s), ${String(parsed.data.resources.length)} resource(s) — readiness requires those cases proven through the witness`,
+            });
+          }
+        }
+      }
+    } catch (error) {
+      checks.push({
+        id: 'behavior-profile',
+        status: 'warn',
+        detail: `behavior-profile readiness could not be evaluated: ${(error as Error).message.split('\n')[0] ?? 'unknown'}`,
+      });
+    }
+  }
 
   // 4. Trusted binary/policy ownership.
   const binaryPath = process.argv[1] ?? '(unknown)';

@@ -1,0 +1,15 @@
+# Declarative contract consumed by the owner-provisioned fixture bundle.
+# The repository intentionally contains no provider or credentials: strong
+# cases fail closed until the managed engine supplies this recipe.
+schemaVersion: 1
+recipes:
+  - id: two-tenants-two-accounts
+    subjects:
+      - accountA.id
+      - accountA.identity
+      - accountB.id
+      - accountB.identity
+    actors:
+      - owner-a
+      - admin-a
+    provisioning: external-authority

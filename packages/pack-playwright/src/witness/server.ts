@@ -128,10 +128,17 @@ import { join, resolve } from 'node:path';
 import {
   ATTESTATION_VERSION,
   attestationMac,
+  behaviorActionDigestOf,
+  BehaviorCatalogSchema,
+  BEHAVIOR_CASE_KIND,
   enumerationDigestOf,
+  interpretObservedPath,
   pathMatchesShape,
   recordIdOf,
+  resolveHttpRoute,
+  type BehaviorCatalog,
   type Classification,
+  type HttpRouteCandidate,
   type RecordOrigin,
   type TracedSession,
 } from '@gate-forge/core';
@@ -168,11 +175,18 @@ import {
 } from '../surface.js';
 import type {
   AdapterContext,
+  BehaviorCatalogRequest,
+  BehaviorCatalogResponse,
+  BehaviorExecuteRequest,
+  BehaviorExecuteResponse,
+  BehaviorPrincipalRequest,
+  BehaviorPrincipalResponse,
   BrowserActionRequest,
   BrowserActionResponse,
   BrowserSurfaceRequest,
   BrowserVisibleRequest,
   BrowserVisibleResponse,
+  CaseExecutionState,
   EvidenceAdapter,
   ExpectedSetRequest,
   ExpectedSetResponse,
@@ -188,6 +202,7 @@ import type {
   PreObservationResponse,
   RecordsRequest,
   RecordsResponse,
+  ScopeSnapshot,
   ServerE2eDeclarationsRequest,
   ServerE2eDeclarationsResponse,
   ServerPersistenceIntentRequest,
@@ -200,6 +215,9 @@ import type {
   WitnessHandle,
   WitnessOptions,
 } from './types.js';
+import type { FixtureLease } from './fixture-provider.js';
+import { validateScopeSnapshot } from './behavior.js';
+import { BEHAVIOR_BODY_LIMIT_BYTES, BehaviorDriverError, driveBehaviorRequest } from './behavior-request.js';
 import { OBSERVE_CHANNEL, OBSERVED_E2E_TEST_KIND, SERVER_CHANNEL, SERVER_E2E_TEST_KIND } from '../constants.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -285,6 +303,34 @@ class HttpError extends Error {
     this.status = status;
     this.detail = detail;
   }
+}
+
+/**
+ * Witness-side required-case execution (plan 2026-09-19 §4.6, Phase 4):
+ * one execution per required case per run. Transitions run
+ * `fixture-prepared -> before-snapshot-complete -> … -> sealed`, each
+ * requiring the previous; `failed` is terminal (the failure fact is
+ * diagnostic — it never becomes a satisfying observation).
+ */
+interface CaseExecution {
+  /** Witness-issued execution id (UUID). */
+  executionId: string;
+  /** Canonical case id (catalog digest, not the readable slug). */
+  caseId: string;
+  /** Supervisor-registered testId this execution belongs to. */
+  testId: string;
+  /** Session that drove the execution. */
+  sessionId: string;
+  /** Current lifecycle state. */
+  state: CaseExecutionState;
+  /** Isolated fixture lease (released on failure/shutdown). */
+  lease: FixtureLease;
+  /** Validated authoritative before snapshots (sealed with the record). */
+  beforeSnapshots: ScopeSnapshot[];
+  /** Authoritative before checkpoints per scope (scope → checkpoint). */
+  beforeCheckpoints: Record<string, string>;
+  /** Terminal failure detail (null unless failed). */
+  detail: string | null;
 }
 
 /** Running witness state. */
@@ -397,6 +443,34 @@ interface WitnessState {
   expectedTests: Map<string, { testId: string | null; project: string | null; file: string; titlePath: string[] }>;
   /** Domain-separated digest over the registered expected set. */
   enumerationDigest: string | null;
+  /**
+   * Complete-behavior catalog (plan 2026-09-19 §4.7, Phase 4): the
+   * compiled catalog plus allowed case/test assignments the TRUSTED
+   * supervisor registered BEFORE the run (verifier-key surface,
+   * one-time bind). Null until bound; `/behavior/execute` resolves
+   * every case from this binding — never from worker input.
+   */
+  behaviorCatalog: {
+    catalog: BehaviorCatalog;
+    catalogDigest: string;
+    assignments: Map<string, Set<string>>;
+    /** Complete route inventory for principal attribution (supervisor-supplied). */
+    routes: HttpRouteCandidate[];
+    /** Authority profile digest sealed into every case record. */
+    authorityProfileDigest: string;
+    /**
+     * Approved surface descriptors for surface-driven cases, keyed by
+     * surface key (supervisor-supplied, validated). The driver resolves
+     * descriptors here — never from worker-supplied objects.
+     */
+    surfaces: Map<string, SurfaceDescriptor>;
+  } | null;
+  /**
+   * Required-case executions keyed by canonical caseId — one execution
+   * per required case per run. Declared idempotency/retry attempts are
+   * steps WITHIN a case, never second executions of it.
+   */
+  caseExecutions: Map<string, CaseExecution>;
   /**
    * The engine-owned browser (plan Phase 1 item 4): Chromium contexts
    * the witness drives itself, one per session. Test code holds no
@@ -773,6 +847,8 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     proxyInFlight: 0,
     expectedTests: new Map(),
     enumerationDigest: null,
+    behaviorCatalog: null,
+    caseExecutions: new Map(),
     tick: 0,
     sessions: new Map(),
     workerSessions: new Map(),
@@ -1447,6 +1523,23 @@ async function handleRequest(
       );
       return;
     }
+    if (req.method === 'POST' && path === '/runs/behavior-catalog') {
+      await handleBehaviorCatalog(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as BehaviorCatalogRequest,
+      );
+      return;
+    }
+    if (req.method === 'POST' && path === '/behavior/execute') {
+      await handleBehaviorExecute(state, res, (await readBody(req)) as BehaviorExecuteRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/behavior/principal') {
+      await handleBehaviorPrincipal(state, res, (await readBody(req)) as BehaviorPrincipalRequest);
+      return;
+    }
     if (req.method === 'POST' && path === '/runs/server-e2e-declarations') {
       await handleServerE2eDeclarations(
         state,
@@ -1693,6 +1786,800 @@ async function handleExpectedSet(
   }
   state.enumerationDigest = digest;
   sendJson(res, 200, { bound: true as const, enumerationDigest: digest, count: state.expectedTests.size });
+}
+
+/**
+ * Binds the compiled behavior catalog plus allowed case/test assignments
+ * (plan 2026-09-19 §4.7, Phase 4): supervisor-only, one-time, before any
+ * session opens. The worker can never register a catalog or assign
+ * itself cases — `/behavior/execute` resolves everything from this
+ * binding.
+ */
+async function handleBehaviorCatalog(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: BehaviorCatalogRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || !('catalog' in body) || !isPlainObject(body['assignments'])) {
+    throw new HttpError(
+      400,
+      'behavior-catalog body must be {catalog, assignments: {testId: [caseId, ...]}, routes: [...], authorityProfileDigest}',
+    );
+  }
+  const parsed = BehaviorCatalogSchema.safeParse(body['catalog']);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue === undefined ? '' : ` at '${issue.path.map(String).join('.')}':`;
+    throw new HttpError(400, `behavior catalog is invalid${path} ${issue?.message ?? 'unknown schema error'}`);
+  }
+  const catalog = parsed.data as BehaviorCatalog;
+  const rawRoutes = (body as Record<string, unknown>)['routes'];
+  if (!Array.isArray(rawRoutes) || rawRoutes.length === 0) {
+    throw new HttpError(
+      400,
+      'behavior-catalog routes must be the non-empty complete route inventory — principal attribution needs every applicable route (no any-endpoint fallback)',
+    );
+  }
+  const routes: HttpRouteCandidate[] = [];
+  for (let index = 0; index < rawRoutes.length; index += 1) {
+    const row = rawRoutes[index] as Record<string, unknown> | null;
+    if (
+      typeof row !== 'object' ||
+      row === null ||
+      typeof row['resourceId'] !== 'string' ||
+      (row['resourceId'] as string).length === 0 ||
+      typeof row['method'] !== 'string' ||
+      (row['method'] as string).length === 0 ||
+      typeof row['canonicalPath'] !== 'string' ||
+      (row['canonicalPath'] as string).length === 0
+    ) {
+      throw new HttpError(400, `behavior-catalog routes[${String(index)}] must be {resourceId, method, canonicalPath}`);
+    }
+    routes.push({
+      resourceId: row['resourceId'] as string,
+      method: (row['method'] as string).toUpperCase(),
+      canonicalPath: row['canonicalPath'] as string,
+    });
+  }
+  routes.sort((a, b) => (a.resourceId < b.resourceId ? -1 : a.resourceId > b.resourceId ? 1 : 0));
+  const authorityProfileDigest = (body as Record<string, unknown>)['authorityProfileDigest'];
+  if (typeof authorityProfileDigest !== 'string' || !/^[0-9a-f]{64}$/.test(authorityProfileDigest)) {
+    throw new HttpError(400, 'behavior-catalog authorityProfileDigest must be 64-char lowercase hex');
+  }
+  // Approved surface descriptors (Phase 6): optional map of surface key
+  // to descriptor. Each descriptor is structurally validated NOW —
+  // worker-supplied surfaces are never resolved at drive time.
+  const surfaces = new Map<string, SurfaceDescriptor>();
+  const rawSurfaces = (body as Record<string, unknown>)['surfaces'];
+  if (rawSurfaces !== undefined) {
+    if (!isPlainObject(rawSurfaces)) {
+      throw new HttpError(400, 'behavior-catalog surfaces must be a map of surface key to descriptor');
+    }
+    for (const [surfaceKey, descriptor] of Object.entries(rawSurfaces)) {
+      if (surfaceKey.length === 0) {
+        throw new HttpError(400, 'behavior-catalog surface keys must be non-empty');
+      }
+      try {
+        surfaces.set(surfaceKey, validateSurface(descriptor as SurfaceDescriptor));
+      } catch (error) {
+        throw new HttpError(400, `behavior-catalog surface '${surfaceKey}' is invalid: ${(error as Error).message}`);
+      }
+    }
+  }
+  const assignments = new Map<string, Set<string>>();
+  for (const [testId, ids] of Object.entries(body['assignments'] as Record<string, unknown>)) {
+    if (testId.length === 0 || !Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === 'string')) {
+      throw new HttpError(
+        400,
+        `behavior-catalog assignment for test '${testId}' must be a non-empty array of case ids`,
+      );
+    }
+    const resolved = new Set<string>();
+    for (const id of ids as string[]) {
+      const found = catalog.cases.find((item) => item.caseId === id);
+      if (found === undefined) {
+        throw new HttpError(
+          400,
+          `behavior-catalog assignment for test '${testId}' names unknown case '${id}' — cases resolve by canonical case id only`,
+        );
+      }
+      resolved.add(found.caseId);
+    }
+    assignments.set(testId, resolved);
+  }
+  if (state.behaviorCatalog !== null) {
+    if (state.behaviorCatalog.catalogDigest === catalog.catalogDigest) {
+      const response: BehaviorCatalogResponse = {
+        bound: true,
+        caseCount: catalog.cases.length,
+        assignmentCount: assignments.size,
+        routeCount: routes.length,
+      };
+      sendJson(res, 200, response);
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'a behavior catalog is already bound to this run and differs; the catalog is a PRE-run ' +
+        'fact and is never relabeled — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (state.sessions.size > 0) {
+    sendJson(res, 409, {
+      error:
+        'sessions were already opened on this witness; the behavior catalog must be registered ' +
+        'BEFORE the run — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  state.behaviorCatalog = { catalog, catalogDigest: catalog.catalogDigest, assignments, routes, authorityProfileDigest, surfaces };
+  const response: BehaviorCatalogResponse = {
+    bound: true,
+    caseCount: catalog.cases.length,
+    assignmentCount: assignments.size,
+    routeCount: routes.length,
+  };
+  sendJson(res, 200, response);
+}
+
+/**
+ * Executes one required behavior case through the witness-owned lifecycle
+ * (plan 2026-09-19 §4.6, Phase 4): the worker names an allowed caseId and
+ * nothing else. Actor credentials, expectations, before-state, and origin
+ * resolve from the supervisor-bound catalog and the trusted fixture
+ * provider — input/actor overrides are request errors, never proof.
+ *
+ * Phase 4 executes fixture preparation plus the authoritative before
+ * snapshot; the principal operation driver lands in Phase 5, so a
+ * successful call leaves the execution at `before-snapshot-complete`
+ * with a redacted reference (no credentials, no subjects).
+ */
+async function handleBehaviorExecute(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BehaviorExecuteRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'behavior/execute body must be {sessionId, sessionToken, caseId}');
+  }
+  const keys = Object.keys(body).sort();
+  if (keys.length !== 3 || keys[0] !== 'caseId' || keys[1] !== 'sessionId' || keys[2] !== 'sessionToken') {
+    throw new HttpError(
+      400,
+      'behavior/execute accepts exactly {sessionId, sessionToken, caseId} — unknown keys are errors; ' +
+        'a worker can name an allowed case but cannot post actor credentials, expectations, or origin',
+    );
+  }
+  const caseId = body['caseId'];
+  if (typeof caseId !== 'string' || caseId.length === 0) {
+    throw new HttpError(400, 'behavior/execute requires a non-empty string caseId');
+  }
+  const binding = state.behaviorCatalog;
+  if (binding === null) {
+    throw new HttpError(
+      409,
+      'no behavior catalog is bound to this run — register POST /runs/behavior-catalog before the run',
+    );
+  }
+  const session = requireOpenSession(state, body);
+  const compiled = binding.catalog.cases.find((item) => item.caseId === caseId);
+  if (compiled === undefined) {
+    throw new HttpError(400, `behavior/execute names unknown case '${caseId}' — cases resolve by canonical case id only`);
+  }
+  const allowed = binding.assignments.get(session.testId);
+  if (allowed === undefined || !allowed.has(compiled.caseId)) {
+    throw new HttpError(
+      403,
+      `case '${compiled.definition.id}' is not assigned to test '${session.testId}' — a test executes only its own allowed cases`,
+    );
+  }
+  if (state.caseExecutions.has(compiled.caseId)) {
+    throw new HttpError(
+      409,
+      `case '${compiled.definition.id}' was already executed in this run — one execution per required case per run`,
+    );
+  }
+  const provider = state.options.fixtureProvider ?? null;
+  if (provider === null) {
+    throw new HttpError(
+      409,
+      'no trusted fixture provider is configured — strong behavior cases block (suite-supplied fixtures are never a fallback)',
+    );
+  }
+  let lease;
+  try {
+    lease = await provider.prepare({
+      recipe: compiled.definition.fixture,
+      runId: state.options.runId,
+      caseId: compiled.caseId,
+    });
+  } catch (error) {
+    throw new HttpError(500, `fixture preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (
+    lease === null ||
+    typeof lease !== 'object' ||
+    typeof (lease as { namespace?: unknown }).namespace !== 'string' ||
+    ((lease as { namespace?: unknown }).namespace as string).length === 0
+  ) {
+    try {
+      await provider.release((lease as { leaseId?: string } | null)?.leaseId ?? 'unknown');
+    } catch {
+      // Release is best-effort; the preparation failure below is the verdict.
+    }
+    throw new HttpError(500, 'fixture preparation returned a malformed lease (fail closed)');
+  }
+  const executionId = randomUUID();
+  const execution: CaseExecution = {
+    executionId,
+    caseId: compiled.caseId,
+    testId: session.testId,
+    sessionId: session.sessionId,
+    state: 'fixture-prepared' as CaseExecutionState,
+    lease: lease as FixtureLease,
+    beforeSnapshots: [],
+    beforeCheckpoints: {},
+    detail: null,
+  };
+  state.caseExecutions.set(compiled.caseId, execution);
+  const failExecution = (detail: string): HttpError => {
+    execution.state = 'failed';
+    execution.detail = detail;
+    // Namespace cleanup runs on errors without changing the verdict.
+    // Fire-and-forget with a floor: the thrown error carries the failure.
+    void Promise.resolve(provider.release(execution.lease.leaseId)).catch(() => {});
+    return new HttpError(409, detail);
+  };
+  // Authoritative before snapshots over every declared effect scope. Any
+  // incomplete collection fails the execution with a diagnostic fact —
+  // never a satisfying observation.
+  const checkpoints: Record<string, string> = {};
+  for (const effect of compiled.effects) {
+    const adapter = state.adapters.get(effect.adapter);
+    if (adapter === undefined) {
+      throw failExecution(
+        `observation incomplete: no reviewed adapter '${effect.adapter}' for scope '${effect.scope}' (OBSERVATION_SCOPE_INCOMPLETE)`,
+      );
+    }
+    if (typeof adapter.snapshotScope !== 'function') {
+      throw failExecution(
+        `observation incomplete: adapter '${effect.adapter}' cannot observe scope '${effect.scope}' — snapshotScope is unavailable (OBSERVATION_SCOPE_INCOMPLETE)`,
+      );
+    }
+    const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl ?? '';
+    const ctx = makeAdapterContext(
+      baseUrl,
+      effect.resourceId,
+      () => {
+        throw new Error('snapshot observations must not use the candidate GET transport');
+      },
+      state.options.adapterReadAuthorization
+        ? { authorization: state.options.adapterReadAuthorization }
+        : undefined,
+    );
+    let snapshot;
+    try {
+      snapshot = await adapter.snapshotScope(ctx, { scope: effect.scope, fixtureNamespace: execution.lease.namespace });
+    } catch (error) {
+      throw failExecution(
+        `observation incomplete: scope '${effect.scope}' collection failed: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+      );
+    }
+    const validated = validateScopeSnapshot(snapshot, {
+      scope: effect.scope,
+      fixtureNamespace: execution.lease.namespace,
+      identityFields: effect.identityFields,
+      fields: effect.fields,
+    });
+    if (!validated.ok) {
+      throw failExecution(`observation incomplete: ${validated.detail} (OBSERVATION_SCOPE_INCOMPLETE)`);
+    }
+    checkpoints[effect.scope] = validated.snapshot.checkpoint;
+    execution.beforeSnapshots.push(snapshot as ScopeSnapshot);
+  }
+  execution.beforeCheckpoints = checkpoints;
+  execution.state = 'before-snapshot-complete';
+  const firstCheckpoint = Object.values(checkpoints).sort()[0] ?? null;
+  const response: BehaviorExecuteResponse = {
+    caseId: compiled.caseId,
+    executionId,
+    namespace: execution.lease.namespace,
+    beforeCheckpoint: firstCheckpoint,
+    state: execution.state,
+  };
+  sendJson(res, 200, response);
+}
+
+/** Request action shape for the principal driver. */
+interface BehaviorRequestActionShape {
+  kind: 'request';
+  method: string;
+  pathTemplate: string;
+  path: Record<string, { from: string; value?: unknown; key?: string }>;
+  query: Record<string, { from: string; value?: unknown; key?: string }>;
+  body: { encoding: string; fields?: Record<string, { from: string; value?: unknown; key?: string }>; fixture?: string };
+  credentialVariant: 'valid' | 'missing' | 'corrupted';
+  signatureProfile?: string;
+}
+
+/** Surface action shape for the principal driver. */
+interface BehaviorSurfaceActionShape {
+  kind: 'surface';
+  surface: string;
+  operation: 'create' | 'read' | 'update' | 'delete';
+  subject?: { from: string; value?: unknown; key?: string };
+  fields: Record<string, { from: string; value?: unknown; key?: string }>;
+  files?: Record<string, string>;
+}
+
+/** Principal action shapes the witness drives (deliver/sequence land in Phase 8). */
+type BehaviorPrincipalAction = BehaviorRequestActionShape | BehaviorSurfaceActionShape | { kind: string };
+
+/**
+ * Drives one surface action through the engine-owned browser (plan
+ * 2026-09-19 Phase 6): resolves the surface descriptor from the
+ * supervisor-bound bundle (never a worker object), resolves
+ * subject/fields from the trusted lease, drives with the existing
+ * engine browser drivers, and reads the rendered result back itself.
+ * Error banners, navigation, and state checks are engine observations —
+ * never inferred from test source.
+ */
+async function driveSurfacePrincipal(
+  state: WitnessState,
+  binding: NonNullable<WitnessState['behaviorCatalog']>,
+  execution: CaseExecution,
+  compiled: { caseId: string; definition: { id: string; actor: string } },
+  action: {
+    surface: string;
+    operation: 'create' | 'read' | 'update' | 'delete';
+    subject?: { from: string; value?: unknown; key?: string };
+    fields: Record<string, { from: string; value?: unknown; key?: string }>;
+    files?: Record<string, string>;
+  },
+  failExecution: (detail: string) => HttpError,
+  session: TestSession,
+): Promise<{
+  operationId: string;
+  browserObservation: { url: string; entityId: string; visibleFields: Record<string, unknown> };
+  submittedValues: unknown;
+}> {
+  const descriptor = binding.surfaces.get(action.surface);
+  if (descriptor === undefined) {
+    throw failExecution(
+      `surface '${action.surface}' has no approved descriptor in the bound bundle — strong cases resolve surfaces from the approved bundle, not worker objects (BEHAVIOR_BINDING_MISMATCH)`,
+    );
+  }
+  if (action.files !== undefined && Object.keys(action.files).length > 0) {
+    throw failExecution(
+      'surface file inputs need fixture file materialization, unsupported in this profile — declare the upload as an explicit engine-http multipart case or omit files (OBSERVATION_SCOPE_INCOMPLETE)',
+    );
+  }
+  const resolveField = (raw: { from: string; value?: unknown; key?: string }, what: string): string => {
+    if (raw.from === 'literal') {
+      if (typeof raw.value !== 'string') {
+        throw failExecution(`surface ${what} literal must be a string (BEHAVIOR_BINDING_MISMATCH)`);
+      }
+      return raw.value;
+    }
+    if (raw.from === 'fixture' && typeof raw.key === 'string') {
+      const segments = raw.key.split('.');
+      let current: unknown = execution.lease.subjects;
+      for (const segment of segments) {
+        if (typeof current !== 'object' || current === null || Array.isArray(current)) {
+          throw failExecution(`surface ${what} fixture key '${raw.key}' does not resolve (BEHAVIOR_BINDING_MISMATCH)`);
+        }
+        if (!Object.prototype.hasOwnProperty.call(current, segment)) {
+          throw failExecution(`surface ${what} fixture key '${raw.key}' does not resolve (BEHAVIOR_BINDING_MISMATCH)`);
+        }
+        current = (current as Record<string, unknown>)[segment];
+      }
+      if (typeof current !== 'string') {
+        throw failExecution(`surface ${what} fixture key '${raw.key}' is not a string (BEHAVIOR_BINDING_MISMATCH)`);
+      }
+      return current;
+    }
+    throw failExecution(`surface ${what} uses an unsupported value source (BEHAVIOR_BINDING_MISMATCH)`);
+  };
+  let subject: string | undefined;
+  if (action.subject !== undefined) {
+    subject = resolveField(action.subject, 'subject');
+  }
+  const fields: Record<string, string> = {};
+  for (const [name, raw] of Object.entries(action.fields)) {
+    fields[name] = resolveField(raw, `field '${name}'`);
+  }
+  let appBase: string;
+  try {
+    appBase = requireTrustedUiBase(state);
+  } catch (error) {
+    throw failExecution(error instanceof Error ? error.message : String(error));
+  }
+  let page;
+  try {
+    page = await state.engineBrowser.pageFor(session.sessionId);
+  } catch (error) {
+    throw failExecution(
+      `engine browser unavailable: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+    );
+  }
+  let observation;
+  try {
+    observation = await driveEngineAction(page, appBase, descriptor, action.operation, {
+      ...(Object.keys(fields).length > 0 ? { fields } : {}),
+      ...(subject !== undefined ? { entityId: subject } : {}),
+    });
+  } catch (error) {
+    throw failExecution(
+      `engine surface ${action.operation} failed: ${error instanceof Error ? error.message : String(error)} (BEHAVIOR_EFFECT_MISMATCH)`,
+    );
+  }
+  let visible: Record<string, string>;
+  try {
+    visible = await readEngineVisible(page, appBase, descriptor, action.operation, observation.entityId);
+  } catch (error) {
+    throw failExecution(
+      `engine visible read failed: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+    );
+  }
+  let url: string;
+  try {
+    url = page.url();
+  } catch (error) {
+    throw failExecution(`engine page url unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return {
+    operationId: randomUUID(),
+    browserObservation: { url, entityId: observation.entityId, visibleFields: { ...visible } },
+    submittedValues: {
+      surface: action.surface,
+      operation: action.operation,
+      ...(subject !== undefined ? { subject } : {}),
+      fields: { ...fields },
+    },
+  };
+}
+
+/**
+ * Drives the principal operation of a prepared case (plan 2026-09-19
+ * §4.6, Phase 5): resolves the execution, runs the witness-owned
+ * engine-http request driver for `request` actions, attributes the
+ * captured attempt against the bound route inventory, resolves the
+ * completion barrier, observes after-state, and issues the sealed
+ * `behavior.case` record(s) — one per compiled obligation. Grading
+ * happens core-side, never here.
+ *
+ * `surface` actions need the Phase 6 browser driver; `deliver` and
+ * `sequence` need Phase 8 — all block with an explicit cause.
+ */
+async function handleBehaviorPrincipal(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BehaviorPrincipalRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'behavior/principal body must be {sessionId, sessionToken, executionId}');
+  }
+  const keys = Object.keys(body).sort();
+  if (keys.length !== 3 || keys[0] !== 'executionId' || keys[1] !== 'sessionId' || keys[2] !== 'sessionToken') {
+    throw new HttpError(400, 'behavior/principal accepts exactly {sessionId, sessionToken, executionId}');
+  }
+  const executionId = body['executionId'];
+  if (typeof executionId !== 'string' || executionId.length === 0) {
+    throw new HttpError(400, 'behavior/principal requires a non-empty string executionId');
+  }
+  const binding = state.behaviorCatalog;
+  if (binding === null) {
+    throw new HttpError(409, 'no behavior catalog is bound to this run');
+  }
+  const session = requireOpenSession(state, body);
+  const execution = [...state.caseExecutions.values()].find((item) => item.executionId === executionId);
+  if (execution === undefined) {
+    throw new HttpError(400, `behavior/principal names unknown execution '${executionId}'`);
+  }
+  if (execution.sessionId !== session.sessionId) {
+    throw new HttpError(
+      403,
+      'behavior/principal session does not own this execution — executions belong to the session that prepared them',
+    );
+  }
+  if (execution.state === 'sealed') {
+    throw new HttpError(409, 'behavior/principal execution is already sealed — one execution per required case per run');
+  }
+  if (execution.state === 'failed') {
+    throw new HttpError(409, `behavior/principal execution failed: ${execution.detail ?? 'unknown failure'}`);
+  }
+  if (execution.state !== 'before-snapshot-complete') {
+    throw new HttpError(409, `behavior/principal execution is in state '${execution.state}', not ready for the principal`);
+  }
+  const compiled = binding.catalog.cases.find((item) => item.caseId === execution.caseId);
+  if (compiled === undefined) {
+    throw new HttpError(409, 'behavior/principal case vanished from the bound catalog (fail closed)');
+  }
+  const failExecution = (detail: string): HttpError => {
+    execution.state = 'failed';
+    execution.detail = detail;
+    const provider = state.options.fixtureProvider ?? null;
+    if (provider !== null) {
+      void Promise.resolve(provider.release(execution.lease.leaseId)).catch(() => {});
+    }
+    return new HttpError(409, detail);
+  };
+  const action = compiled.definition.action as BehaviorPrincipalAction;
+  const actorProfile = compiled.definition.actor;
+  const provider = state.options.fixtureProvider ?? null;
+  // The sealed principal evidence: exactly one of the two drivers fills
+  // its half. Request cases seal attempts + request observations;
+  // surface cases seal the browser observation.
+  let attempts: Array<{
+    engineRequestId: string;
+    method: string;
+    path: string;
+    endpointResourceId: string | null;
+    actorRef: string;
+    requestDigest: string;
+    status: number | null;
+    responseDigest: string | null;
+  }> = [];
+  let requestObservations: Array<{
+    engineRequestId: string;
+    method: string;
+    path: string;
+    query: Record<string, unknown>;
+    body: unknown;
+    status: number | null;
+    responseBody: unknown;
+  }> = [];
+  let browserObservation:
+    | { url: string; entityId: string; visibleFields: Record<string, unknown> }
+    | undefined = undefined;
+  let submittedValues: unknown;
+  let operationId: string;
+  execution.state = 'principal-executing';
+  if (action.kind === 'request') {
+    const requestAction = action as BehaviorRequestActionShape;
+    if (compiled.definition.channel !== 'engine-http') {
+      throw failExecution(
+        `case '${compiled.definition.id}' requires the '${compiled.definition.channel}' channel — the Phase 8 task driver produces that evidence`,
+      );
+    }
+    if (provider === null || typeof provider.resolveCredential !== 'function') {
+      throw failExecution('no trusted credential resolver is configured — the principal cannot authenticate engine-side');
+    }
+    const origin = state.options.targetBaseUrl ?? null;
+    if (origin === null || origin === '') {
+      throw failExecution('no approved subject origin is configured for the principal driver');
+    }
+    let driven;
+    try {
+      driven = await driveBehaviorRequest({
+        action: {
+          kind: 'request',
+          method: requestAction.method,
+          pathTemplate: requestAction.pathTemplate,
+          path: requestAction.path,
+          query: requestAction.query,
+          body: requestAction.body,
+          credentialVariant: requestAction.credentialVariant,
+          ...(requestAction.signatureProfile !== undefined ? { signatureProfile: requestAction.signatureProfile } : {}),
+        },
+        lease: execution.lease,
+        actorProfile,
+        origin,
+        resolveCredential: (credentialRef: string) => provider.resolveCredential!(credentialRef),
+        timeoutMs: state.options.requestTimeoutMs,
+      });
+    } catch (error) {
+      if (error instanceof BehaviorDriverError) {
+        throw failExecution(`principal driver: ${error.message} (OBSERVATION_SCOPE_INCOMPLETE)`);
+      }
+      throw failExecution(`principal driver failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    execution.state = 'principal-captured';
+    // Attribute the captured attempt against the bound inventory with the
+    // compiled endpoint as expected — the grader re-resolves
+    // independently; a misdirected principal fails here with a diagnostic
+    // instead of sealing evidence for the wrong endpoint.
+    const interpreted = interpretObservedPath(driven.path);
+    if (!interpreted.ok) {
+      throw failExecution(`principal captured a noncanonical path: ${interpreted.reason} (BEHAVIOR_BINDING_MISMATCH)`);
+    }
+    const expectedEndpoint = compiled.endpointResourceId ?? compiled.resourceId;
+    const resolution = resolveHttpRoute(driven.method, interpreted.path, binding.routes, expectedEndpoint);
+    if (resolution.status !== 'match') {
+      const reason =
+        resolution.status === 'ambiguous'
+          ? `ambiguous route attribution for ${driven.method} ${interpreted.path} (BEHAVIOR_BINDING_MISMATCH)`
+          : resolution.status === 'mismatch'
+            ? `principal reached '${resolution.matched.resourceId}', not the required endpoint '${expectedEndpoint}' (BEHAVIOR_BINDING_MISMATCH)`
+            : resolution.status === 'nomatch'
+              ? `principal ${driven.method} ${interpreted.path} matches no inventoried route (BEHAVIOR_BINDING_MISMATCH)`
+              : resolution.reason;
+      throw failExecution(reason);
+    }
+    operationId = driven.engineRequestId;
+    attempts = [
+      {
+        engineRequestId: driven.engineRequestId,
+        method: driven.method,
+        path: driven.path,
+        endpointResourceId: resolution.matched.resourceId,
+        actorRef: actorProfile,
+        requestDigest: driven.requestDigest,
+        status: driven.status,
+        responseDigest: driven.responseDigest,
+      },
+    ];
+    requestObservations = [
+      {
+        engineRequestId: driven.engineRequestId,
+        method: driven.method,
+        path: driven.path,
+        query: { ...driven.query },
+        body: driven.body,
+        status: driven.status,
+        responseBody: driven.responseBody,
+      },
+    ];
+    submittedValues = { path: driven.path, query: { ...driven.query }, body: driven.body };
+  } else if (action.kind === 'surface') {
+    const surfaceAction = action as BehaviorSurfaceActionShape;
+    const surfaceChannel: string = compiled.definition.channel;
+    if (surfaceChannel !== 'engine-browser') {
+      throw failExecution(
+        `surface case '${compiled.definition.id}' requires the engine-browser channel — blocked, never satisfied`,
+      );
+    }
+    const driven = await driveSurfacePrincipal(state, binding, execution, compiled, surfaceAction, failExecution, session);
+    operationId = driven.operationId;
+    browserObservation = driven.browserObservation;
+    submittedValues = driven.submittedValues;
+    execution.state = 'principal-captured';
+  } else {
+    throw failExecution(
+      `case '${compiled.definition.id}' uses a '${action.kind}' action — the Phase 8 task driver produces that evidence`,
+    );
+  }
+  // Completion barrier: immediate effects resolve at once; barrier
+  // effects need a real checkpoint from an adapter observer.
+  const barrierEffects = compiled.effects.filter((effect) => effect.completion === 'barrier');
+  if (barrierEffects.length > 0) {
+    for (const effect of barrierEffects) {
+      const adapter = state.adapters.get(effect.adapter);
+      if (adapter === undefined || typeof adapter.awaitBarrier !== 'function') {
+        throw failExecution(
+          `observation incomplete: no barrier observer for scope '${effect.scope}' (OBSERVATION_SCOPE_INCOMPLETE)`,
+        );
+      }
+      const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl ?? '';
+      const ctx = makeAdapterContext(
+        baseUrl,
+        effect.resourceId,
+        () => {
+          throw new Error('barrier observations must not use the candidate GET transport');
+        },
+        state.options.adapterReadAuthorization
+          ? { authorization: state.options.adapterReadAuthorization }
+          : undefined,
+      );
+      let barrier;
+      try {
+        barrier = await adapter.awaitBarrier(ctx, {
+          scope: effect.scope,
+          fixtureNamespace: execution.lease.namespace,
+          operationId,
+          deadlineMs: state.options.barrierTimeoutMs ?? 30_000,
+        });
+      } catch (error) {
+        throw failExecution(
+          `observation incomplete: barrier for scope '${effect.scope}' failed: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+        );
+      }
+      if (barrier === null || typeof barrier !== 'object' || barrier.complete !== true) {
+        throw failExecution(
+          `async effect did not complete before the barrier deadline — premature success is blocked (OBSERVATION_SCOPE_INCOMPLETE)`,
+        );
+      }
+    }
+  }
+  execution.state = 'barrier-reached';
+  // Authoritative after snapshots over every declared effect scope.
+  const afterSnapshots: ScopeSnapshot[] = [];
+  const afterCheckpoints: Record<string, string> = {};
+  for (const effect of compiled.effects) {
+    const adapter = state.adapters.get(effect.adapter);
+    if (adapter === undefined || typeof adapter.snapshotScope !== 'function') {
+      throw failExecution(`observation incomplete: scope '${effect.scope}' lost its observer (OBSERVATION_SCOPE_INCOMPLETE)`);
+    }
+    const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl ?? '';
+    const ctx = makeAdapterContext(
+      baseUrl,
+      effect.resourceId,
+      () => {
+        throw new Error('snapshot observations must not use the candidate GET transport');
+      },
+      state.options.adapterReadAuthorization
+        ? { authorization: state.options.adapterReadAuthorization }
+        : undefined,
+    );
+    let snapshot;
+    try {
+      snapshot = await adapter.snapshotScope(ctx, { scope: effect.scope, fixtureNamespace: execution.lease.namespace });
+    } catch (error) {
+      throw failExecution(
+        `observation incomplete: after-scope '${effect.scope}' collection failed: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+      );
+    }
+    const validated = validateScopeSnapshot(snapshot, {
+      scope: effect.scope,
+      fixtureNamespace: execution.lease.namespace,
+      identityFields: effect.identityFields,
+      fields: effect.fields,
+    });
+    if (!validated.ok) {
+      throw failExecution(`observation incomplete: ${validated.detail} (OBSERVATION_SCOPE_INCOMPLETE)`);
+    }
+    afterCheckpoints[effect.scope] = validated.snapshot.checkpoint;
+    afterSnapshots.push(snapshot as ScopeSnapshot);
+  }
+  execution.state = 'after-snapshot-complete';
+  // Seal: strip snapshots to the core strict shape (no witness-local
+  // validation extras), then issue one record per compiled obligation.
+  const stripSnapshot = (snapshot: ScopeSnapshot) => ({
+    scope: snapshot.scope,
+    fixtureNamespace: snapshot.fixtureNamespace,
+    complete: snapshot.complete,
+    checkpoint: snapshot.checkpoint,
+    entities: snapshot.entities.map((entity) => ({ entityId: entity.entityId, fields: { ...entity.fields } })),
+  });
+  const actorLease = execution.lease.actors[actorProfile];
+  const payload = {
+    payloadVersion: 1 as const,
+    caseId: compiled.caseId,
+    caseSpecDigest: compiled.specDigest,
+    obligationIds: [...compiled.obligationIds],
+    endpointResourceId: compiled.endpointResourceId,
+    operationId,
+    sessionId: session.sessionId,
+    executionId: execution.executionId,
+    fixtureNamespace: execution.lease.namespace,
+    actor: {
+      principalId: typeof actorLease?.principalId === 'string' ? actorLease.principalId : actorProfile,
+      tenantId: typeof actorLease?.tenantId === 'string' || actorLease?.tenantId === null ? (actorLease?.tenantId ?? null) : null,
+      roles: Array.isArray(actorLease?.roles) ? [...(actorLease?.roles as string[])] : [],
+    },
+    actionDigest: behaviorActionDigestOf(compiled.definition.action),
+    submittedValues: submittedValues as Record<string, never>,
+    attempts,
+    requestObservations,
+    ...(browserObservation === undefined ? {} : { browserObservation }),
+    fixtureValues: { ...(execution.lease.subjects as Record<string, unknown>) },
+    before: execution.beforeSnapshots.map(stripSnapshot),
+    after: afterSnapshots.map(stripSnapshot),
+    completion: {
+      complete: true,
+      checkpoint: Object.values(afterCheckpoints).sort().join('+') || Object.values(execution.beforeCheckpoints).sort().join('+'),
+    },
+    channel: compiled.definition.channel,
+    authorityProfileDigest: binding.authorityProfileDigest,
+    state: 'sealed' as const,
+  };
+  const recordIds: string[] = [];
+  for (const obligationId of compiled.obligationIds) {
+    const issued = issueRecord(state, obligationId, BEHAVIOR_CASE_KIND, session.testId, payload, 'engine-observed');
+    recordIds.push(issued.recordId);
+  }
+  recordIds.sort();
+  execution.state = 'sealed';
+  const response: BehaviorPrincipalResponse = {
+    caseId: compiled.caseId,
+    executionId: execution.executionId,
+    recordIds,
+    state: execution.state,
+  };
+  sendJson(res, 200, response);
 }
 
 /**
@@ -3759,6 +4646,21 @@ async function stopWitness(state: WitnessState): Promise<void> {
   }
   for (const session of state.sessions.values()) {
     await stopSessionProxy(session);
+  }
+  // Phase 4 lifecycle shutdown: release every live fixture lease namespace.
+  // Timeouts/failures release only their own namespace and never flip a
+  // verdict — releases here are best-effort shutdown hygiene.
+  {
+    const provider = state.options.fixtureProvider ?? null;
+    if (provider !== null) {
+      for (const execution of state.caseExecutions.values()) {
+        try {
+          await provider.release(execution.lease.leaseId);
+        } catch {
+          // Best-effort: shutdown must complete.
+        }
+      }
+    }
   }
   await state.engineBrowser.closeAll();
   await new Promise<void>((resolveClose) => {

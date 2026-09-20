@@ -1,0 +1,125 @@
+# Complete behavior coverage for the three separate user-facing surfaces.
+# All mutations use the supported engine-http driver. The browser overlay
+# remains a separate consumer fixture and does not claim spreadsheet proof.
+schemaVersion: 1
+endpoints:
+  - resourceId: tenant.http-post-profile-accounts-id-d27ca586
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: profile-update
+        contract: http:effect-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: owner-a
+        action:
+          kind: request
+          method: POST
+          pathTemplate: /profile/accounts/{id}
+          path:
+            id: {from: fixture, key: accountA.id}
+          query: {}
+          body:
+            encoding: json
+            fields:
+              first_name: {from: literal, value: Ada}
+              last_name: {from: literal, value: Lovelace}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response: []
+          state:
+            - kind: updated
+              scope: accounts
+              subject: {from: fixture, key: accountA.identity}
+              fields:
+                first_name: {from: request, attempt: 0, pointer: /body/first_name, transform: identity}
+                last_name: {from: request, attempt: 0, pointer: /body/last_name, transform: identity}
+  - resourceId: tenant.http-post-admin-accounts-id-d2cbd1c4
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: admin-update
+        contract: http:effect-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: admin-a
+        action:
+          kind: request
+          method: POST
+          pathTemplate: /admin/accounts/{id}
+          path:
+            id: {from: fixture, key: accountA.id}
+          query: {}
+          body:
+            encoding: json
+            fields:
+              first_name: {from: literal, value: Grace}
+              last_name: {from: literal, value: Hopper}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response: []
+          state:
+            - kind: updated
+              scope: accounts
+              subject: {from: fixture, key: accountA.identity}
+              fields:
+                first_name: {from: request, attempt: 0, pointer: /body/first_name, transform: identity}
+                last_name: {from: request, attempt: 0, pointer: /body/last_name, transform: identity}
+  - resourceId: tenant.http-post-imports-accounts-a4eac965
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: import-two-accounts
+        contract: http:effect-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: admin-a
+        action:
+          kind: request
+          method: POST
+          pathTemplate: /imports/accounts
+          path: {}
+          query: {}
+          body:
+            encoding: json
+            fields:
+              rows:
+                from: literal
+                value:
+                  - {first_name: Katherine, last_name: Johnson}
+                  - {first_name: Dorothy, last_name: Vaughan}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response: []
+          state:
+            - kind: created
+              scope: accounts
+              rows:
+                - fields:
+                    first_name: {from: request, attempt: 0, pointer: /body/rows/0/first_name, transform: identity}
+                    last_name: {from: request, attempt: 0, pointer: /body/rows/0/last_name, transform: identity}
+                - fields:
+                    first_name: {from: request, attempt: 0, pointer: /body/rows/1/first_name, transform: identity}
+                    last_name: {from: request, attempt: 0, pointer: /body/rows/1/last_name, transform: identity}
+resources: []

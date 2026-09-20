@@ -3,6 +3,8 @@
  * navigation, not the gate. Exit 0 clean, 1 next action, 2 config/usage.
  */
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fingerprint, withTempRepo } from '@gate-forge/core';
 import {
   installFixture,
@@ -125,6 +127,55 @@ describe('gateforge next', () => {
       const parsed = JSON.parse(json.stdout) as { next: null; remainingBlocking: number };
       expect(parsed.next).toBeNull();
       expect(parsed.remainingBlocking).toBe(0);
+    });
+  });
+});
+
+describe('gateforge next: behavior ranking (plan §5)', () => {
+  it('ranks ENDPOINT_BEHAVIOR_MISSING (rank 2) above test-mapping advice (rank 8)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      // A discovered HTTP endpoint: the fixture plugin gains one
+      // http.contract fact so the endpoint compiler inventories a route.
+      const pluginPath = join(repo.root, 'plugin.mjs');
+      const plugin = readFileSync(pluginPath, 'utf8');
+      const endpointFact = `
+      const httpResource = {
+        schemaVersion: 1,
+        kind: 'http.contract',
+        source: 'src/http.ts',
+        location: { file: 'src/http.ts', line: 1, col: 0 },
+        detectorVersion: '1.0.0',
+        attributes: { role: 'server-route', method: 'POST', normalizedPath: '/accounts', rawPath: '/accounts', framework: 'express', handlerSymbol: 'accountsHandler' },
+        id: 'http.contract:test',
+      };
+`;
+      const patched = plugin.replace(
+        'return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };',
+        `${endpointFact}
+        resources.push(httpResource);
+        return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };`,
+      );
+      repo.writeFiles({ 'plugin.mjs': patched });
+      // Enable the complete-behavior profile with an empty owner document:
+      // every discovered endpoint blocks with ENDPOINT_BEHAVIOR_MISSING.
+      repo.writeFiles({
+        '.gateforge/behavior.yml': 'schemaVersion: 1\nendpoints: []\nresources: []\n',
+      });
+      const config = readFileSync(join(repo.root, '.gateforge.yml'), 'utf8');
+      repo.writeFiles({
+        '.gateforge.yml': config.replace(
+          'policies:',
+          'behaviorPolicy: .gateforge/behavior.yml\npolicies:',
+        ),
+      });
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      expect(stdout).toContain('ENDPOINT_BEHAVIOR_MISSING');
+      // The behavior declaration gap outranks mapping/test advice: the
+      // printed action is the owner declaration, not overlay generation.
+      expect(stdout).toContain('Owner defines endpoint behavior');
+      expect(stdout).not.toContain('tests/e2e/gateforge');
     });
   });
 });

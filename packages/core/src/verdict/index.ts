@@ -53,3 +53,23 @@ export {
   resolveHttpRoute,
   pathMatchesShape,
 } from './pack-verifiers.js';
+/**
+ * Required-case aggregation (plan 2026-09-19 §4.7, Phase 5): pure
+ * semantic grading across an obligation's required behavior cases —
+ * never the legacy any-claim-satisfied shortcut.
+ */
+export {
+  STRONG_HTTP_CONTRACTS,
+  AUTH_CONTRACTS,
+  VALIDATION_CONTRACTS,
+  WORKFLOW_CONTRACTS,
+  TASK_CONTRACTS,
+  WEBHOOK_CONTRACTS,
+  BEHAVIOR_CASE_CONTRACTS,
+  behaviorActionDigestOf,
+  evaluateRequiredCases,
+  type BehaviorGradeContext,
+  type BehaviorObligationContext,
+  type BehaviorRecordLike,
+  type RequiredCaseOutcome,
+} from './behavior.js';

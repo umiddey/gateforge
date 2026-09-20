@@ -63,8 +63,13 @@ import {
 } from './registry.js';
 import { registerPackVerifiers, interpretObservedPath, resolveHttpRoute } from './pack-verifiers.js';
 import { causeForVerdict } from './cause.js';
+import {
+  BEHAVIOR_CASE_CONTRACTS,
+  evaluateRequiredCases,
+  type BehaviorObligationContext,
+} from './behavior.js';
 import { canonicalJson, type JsonValue } from '../canonical-json.js';
-import { fingerprint } from '../fingerprints.js';
+import { fingerprintObligation } from '../fingerprints.js';
 import { compareStrings } from '../graph/util.js';
 import { isProvenancedRecord } from '../provenance.js';
 import { ClassificationSchema } from '../schemas/classification.js';
@@ -201,6 +206,15 @@ export interface VerdictContext {
    * satisfaction (no any-endpoint fallback).
    */
   httpRoutes?: readonly HttpRouteCandidate[] | null;
+  /**
+   * Trusted behavior context (plan 2026-09-19 §4.7, Phase 5): the
+   * compiled catalog plus obligation→case requirements from the
+   * controller-bound compilation — never CLI configuration, never
+   * record payloads. When an obligation has required cases AND names a
+   * strong behavior contract, aggregation runs across the required
+   * cases instead of the legacy any-claim-satisfied shortcut.
+   */
+  behavior?: BehaviorObligationContext | null;
   /** Injected clock instant (invariant 7) — the only time source. */
   now: Date | string;
 }
@@ -1828,12 +1842,7 @@ export function evaluateObligation(
   // 3. Waivers: exact (resourceId, fingerprint) scope only (D4).
   //    Precedence: unexpired non-stale → waived; expired → invalid (D4);
   //    stale owner → stale (GF-17). Sorted for determinism.
-  const fp = fingerprint({
-    resourceId: verified.resourceId,
-    contract: verified.contract,
-    policyId: verified.policyId,
-    lifecycle: verified.lifecycle,
-  });
+  const fp = fingerprintObligation(verified);
   const matching = context.waivers
     .map((entry) => {
       // Strip the engine-only flag before strict validation; a waiver
@@ -1918,7 +1927,43 @@ export function evaluateObligation(
     considered.map((record) => (typeof record.recordId === 'string' ? record.recordId : '')),
   );
 
-  // 6. Per-claim evidence evaluation with deterministic aggregation:
+  // 6. Required-case aggregation (plan 2026-09-19 §4.7): obligations
+  //    compiled from the behavior catalog with a strong behavior
+  //    contract grade across ALL required cases — never the legacy
+  //    any-claim-satisfied shortcut. A legacy record never contributes
+  //    to the new case set.
+  const behaviorRequirements = context.behavior?.requirements?.[verified.id];
+  if (behaviorRequirements !== undefined && BEHAVIOR_CASE_CONTRACTS.has(verified.contract)) {
+    const behavior = context.behavior as BehaviorObligationContext;
+    const outcome = evaluateRequiredCases({
+      obligation: verified,
+      requiredCaseIds: behaviorRequirements,
+      records: considered.map((record) => ({
+        recordId: record.recordId,
+        testId: record.testId,
+        kind: record.kind,
+        origin: record.origin,
+        trust: trustOf(record),
+        payload: record.payload,
+      })),
+      context: {
+        catalog: behavior.catalog,
+        requirements: behavior.requirements,
+        authorityProfileDigest: behavior.authorityProfileDigest,
+        plannedTestIds: claims.map((claim) => claim.testId),
+      },
+      httpRoutes: context.httpRoutes ?? null,
+    });
+    if (outcome.status === 'satisfied') {
+      return { verdict: 'satisfied', reason: null, recordIds: outcome.recordIds };
+    }
+    if (outcome.status === 'invalid') {
+      return { verdict: 'invalid', reason: outcome.reason, recordIds: outcome.recordIds };
+    }
+    return { verdict: 'missing', reason: outcome.reason, recordIds: outcome.recordIds };
+  }
+
+  // 7. Per-claim evidence evaluation with deterministic aggregation:
   //    satisfied beats invalid beats missing.
   let firstInvalid: string | null = null;
   let firstMissing: string | null = null;

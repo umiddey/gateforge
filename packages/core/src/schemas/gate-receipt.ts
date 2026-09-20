@@ -76,8 +76,8 @@ export type ReceiptVerdictSummary = z.infer<typeof ReceiptVerdictSummarySchema>;
 export const GateReceiptSchema = z
   .object({
     schemaVersion: SchemaVersionField,
-    /** Envelope version; only `1` is produced or honored. */
-    receiptVersion: z.literal(1),
+    /** Envelope version; only `2` is produced or honored (v1 rejected). */
+    receiptVersion: z.literal(2),
     /** Receipt identity (UUID) — the `reused receipt <id>` surface value. */
     receiptId: z.string().uuid(),
     /** Run manifest identity of the sealed run. */
@@ -141,6 +141,49 @@ export const GateReceiptSchema = z
     /** 64-hex digest of the supervision execution result (ADR 0005 D2). */
     executionResultDigest: z.string().regex(HEX64, 'executionResultDigest must be 64-char lowercase hex'),
     /**
+     * Immutable Git tree actually tested (40-char sha1, or null when the
+     * workspace is not a Git checkout). The broker recomputes this from
+     * raw candidate bytes and demands equality — a receipt for tree A
+     * never authorizes tree B.
+     */
+    candidateTreeId: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/, 'candidateTreeId must be a 40-char lowercase sha1 hex')
+      .nullable(),
+    /**
+     * 64-hex digest of the compiled behavior catalog (the complete
+     * endpoint/case set). Empty catalogs use the canonical empty digest,
+     * never an omitted field.
+     */
+    behaviorCatalogDigest: z.string().regex(HEX64, 'behaviorCatalogDigest must be 64-char lowercase hex'),
+    /**
+     * 64-hex digest over the sorted full required case specifications
+     * (not just stable case ids). Always signed, including full runs.
+     */
+    requiredCaseSetDigest: z.string().regex(HEX64, 'requiredCaseSetDigest must be 64-char lowercase hex'),
+    /**
+     * 64-hex digest over the executed case set (empty digest when no
+     * behavior cases were executed in the sealed run).
+     */
+    caseExecutionDigest: z.string().regex(HEX64, 'caseExecutionDigest must be 64-char lowercase hex'),
+    /**
+     * 64-hex digest binding the approved engine/policy bundle version
+     * (engine version + trusted policy digest).
+     */
+    engineBundleDigest: z.string().regex(HEX64, 'engineBundleDigest must be 64-char lowercase hex'),
+    /**
+     * 64-hex digest binding the controller-issued record of the active
+     * execution profile. Local runs seal `local-unisolated`, which a
+     * protected authority never accepts for managed acceptance.
+     */
+    executionBoundaryDigest: z.string().regex(HEX64, 'executionBoundaryDigest must be 64-char lowercase hex'),
+    /**
+     * 64-hex digest identifying the controlled app build derived from the
+     * candidate tree (local runs bind the source tree itself; managed
+     * builds bind the real build artifact).
+     */
+    targetArtifactDigest: z.string().regex(HEX64, 'targetArtifactDigest must be 64-char lowercase hex'),
+    /**
      * 64-hex digest of the v2 evidence attestation envelope sealed into
      * the receipt, or null when the run carried none (such a run can only
      * be clean when no evidence was required).
@@ -150,7 +193,7 @@ export const GateReceiptSchema = z
     verdictSummary: ReceiptVerdictSummarySchema,
     /** Issuance instant (ISO-8601). */
     issuedAt: z.string().datetime(),
-    /** HMAC-SHA256 over the receipt body, domain `gateforge.receipt.v1`. */
+    /** HMAC-SHA256 over the receipt body, domain `gateforge.receipt.v2`. */
     mac: z.string().regex(HEX64, 'mac must be a 64-char lowercase hex HMAC'),
   })
   .strict()

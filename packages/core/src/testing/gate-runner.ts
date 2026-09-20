@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { DetectorOutput, GraphFinding, ResourceGraph } from '../graph/index.js';
 import { buildResourceGraph, compareStrings } from '../graph/index.js';
-import { fingerprint } from '../fingerprints.js';
+import { fingerprintObligation } from '../fingerprints.js';
 import type { PolicyEvaluationResult } from '../policy/index.js';
 import { evaluatePolicies } from '../policy/index.js';
 import { runClassification } from '../classifier/bind.js';
@@ -269,12 +269,7 @@ export function runGates(input: RunGatesInput): GateRunResult {
         resourceId: obligation.resourceId,
         contract: obligation.contract,
         policyId: obligation.policyId,
-        fingerprint: fingerprint({
-          resourceId: obligation.resourceId,
-          contract: obligation.contract,
-          policyId: obligation.policyId,
-          lifecycle: obligation.lifecycle,
-        }),
+        fingerprint: fingerprintObligation(obligation),
         verdict: outcome.verdict,
         reason: outcome.reason,
         recordIds: [...outcome.recordIds].sort(compareStrings),

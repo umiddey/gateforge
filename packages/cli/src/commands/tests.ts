@@ -218,6 +218,8 @@ interface SuggestionJson {
   missingEvidence: string;
   nextAction: string;
   newTestNeeded: boolean;
+  /** Required behavior case slugs with no declared test mapping (empty without a behavior catalog). */
+  unmappedCases: string[];
 }
 
 /** Implements `tests suggest [--changed]`. */
@@ -243,6 +245,7 @@ async function suggestSubcommand(
     stateDir,
     obligations: pipeline.policy.obligations,
     catalog: discovered.catalog,
+    behaviorCatalog: pipeline.behaviorCatalog,
   });
 
   // `--changed` narrows the SUGGESTED obligations to the changed scope
@@ -254,7 +257,7 @@ async function suggestSubcommand(
   if (diffScoped) {
     scopeMode = 'changed';
     const changedSet = new Set(pipeline.changedFiles);
-    const sources = sourcesByResourceId(pipeline.graph);
+    const sources = sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog);
     scoped = pipeline.policy.obligations.filter((obligation) =>
       (sources.get(obligation.resourceId) ?? []).some((source) => changedSet.has(source)),
     );
@@ -265,6 +268,30 @@ async function suggestSubcommand(
     obligationIds: scoped.map((obligation) => obligation.id),
     resolution: mapped.resolution,
   });
+  // Required-case hints (plan 2026-09-19 Phase 6 item 6): candidates
+  // come from the current inventory (resolver suggestions above); the
+  // unmapped required cases name what final approval still needs —
+  // witnessed case execution, never the suggestion itself.
+  const behaviorRequirements = pipeline.behaviorCatalog?.requirements ?? {};
+  const mappedCasesByObligation = new Map<string, Set<string>>();
+  for (const group of mapped.resolution.obligations) {
+    const mapped = new Set<string>();
+    for (const binding of group.bindings) {
+      if (binding.origin !== 'sidecar') continue;
+      for (const caseId of binding.caseIds ?? []) mapped.add(caseId);
+    }
+    mappedCasesByObligation.set(group.obligationId, mapped);
+  }
+  const unmappedCaseSlugs = (obligationId: string): string[] => {
+    const required = behaviorRequirements[obligationId] ?? [];
+    const mapped = mappedCasesByObligation.get(obligationId) ?? new Set<string>();
+    return required
+      .filter((caseId) => !mapped.has(caseId))
+      .map(
+        (caseId) =>
+          pipeline.behaviorCatalog?.cases.find((item) => item.caseId === caseId)?.definition.id ?? caseId,
+      );
+  };
   const suggestionJson: SuggestionJson[] = suggestions.map((suggestion) => ({
     obligationId: suggestion.obligationId,
     cause: suggestion.cause,
@@ -276,6 +303,7 @@ async function suggestSubcommand(
     missingEvidence: suggestion.missingEvidence,
     nextAction: suggestion.nextAction,
     newTestNeeded: suggestion.newTestNeeded,
+    unmappedCases: unmappedCaseSlugs(suggestion.obligationId),
   }));
 
   if (asJson) {
@@ -311,6 +339,10 @@ async function suggestSubcommand(
     writeLine(io.stdout, `  missing evidence: ${suggestion.missingEvidence}`);
     writeLine(io.stdout, `  next action: ${suggestion.nextAction}`);
     writeLine(io.stdout, `  new test needed: ${suggestion.newTestNeeded ? 'yes' : 'no'}`);
+    const unmapped = unmappedCaseSlugs(suggestion.obligationId);
+    if (unmapped.length > 0) {
+      writeLine(io.stdout, `  unmapped cases: ${unmapped.join(', ')} (map with tests mark --case, then prove with witnessed execution)`);
+    }
     if (suggestion.candidates.length > 0) {
       writeLine(io.stdout, '  candidates:');
       for (const candidate of suggestion.candidates) {
@@ -333,13 +365,14 @@ async function markSubcommand(
   io: Io,
   options: Record<string, string | boolean | string[]>,
 ): Promise<number> {
-  rejectUnknownFlags(options, ['test', 'kind', 'category', 'obligation', 'reason', 'json', 'help'], TESTS_USAGE);
+  rejectUnknownFlags(options, ['test', 'kind', 'category', 'obligation', 'reason', 'case', 'json', 'help'], TESTS_USAGE);
   const asJson = options['json'] === true;
   const testKey = stringFlag(options, 'test');
   const kind = stringFlag(options, 'kind');
   const reason = stringFlag(options, 'reason');
   const categories = flagArray(options, 'category');
   const obligationIds = flagArray(options, 'obligation');
+  const caseFlags = flagArray(options, 'case');
   if (
     testKey === undefined ||
     kind === undefined ||
@@ -384,6 +417,39 @@ async function markSubcommand(
   }
   assertKindDeclarationAllowed(entry, validatedKind, testKey);
 
+  const resolvedCaseIds: string[] = [];
+  if (caseFlags.length > 0) {
+    const catalog = pipeline.behaviorCatalog;
+    if (catalog === null) {
+      throw new UsageError('tests mark --case requires a compiled behavior catalog (set behaviorPolicy)');
+    }
+    const seenCases = new Set<string>();
+    for (const rawId of caseFlags) {
+      const compiled = catalog.cases.find((item) => item.caseId === rawId || item.definition.id === rawId);
+      if (compiled === undefined) {
+        throw new UsageError(
+          `unknown case id '${rawId}' — not in the current behavior catalog`,
+        );
+      }
+      if (seenCases.has(compiled.caseId)) {
+        throw new UsageError(
+          `duplicate case id '${rawId}' — each required case is declared once`,
+        );
+      }
+      seenCases.add(compiled.caseId);
+      if (!compiled.obligationIds.some((id) => obligationIds.includes(id))) {
+        throw new UsageError(
+          `case '${rawId}' does not belong to any of the claimed obligations`,
+        );
+      }
+      resolvedCaseIds.push(compiled.caseId);
+    }
+    if (entry.titlePath.length === 0) {
+      throw new UsageError(
+        `cannot attach --case to whole-file test '${testKey}': case mapping requires a titlePath-scoped test, not a file wildcard`,
+      );
+    }
+  }
   const newEntry: TestMapEntry = {
     key: testKey,
     selector: {
@@ -395,6 +461,7 @@ async function markSubcommand(
     kind: validatedKind,
     ...(categories.length > 0 ? { categories: [...new Set(categories)].sort(compareStrings) } : {}),
     claims: [...new Set(obligationIds)].sort(compareStrings),
+    ...(resolvedCaseIds.length > 0 ? { caseIds: [...new Set(resolvedCaseIds)].sort(compareStrings) } : {}),
     reason,
   };
   const previousMap = loadOptionalTestMap(io.cwd) ?? { schemaVersion: 1 as const, tests: [] };
@@ -443,7 +510,7 @@ async function markSubcommand(
   return 0;
 }
 
-const MARK_USAGE_LINE = 'usage: gateforge tests mark --test <key> --kind <kind> [--category <c>]... --obligation <id>... --reason "<text>"';
+const MARK_USAGE_LINE = 'usage: gateforge tests mark --test <key> --kind <kind> [--category <c>]... --obligation <id>... [--case <caseId>]... --reason "<text>"';
 
 /** Reads a repeated flag as a string array (single value → one element). */
 function flagArray(options: Record<string, string | boolean | string[]>, name: string): string[] {
@@ -540,6 +607,7 @@ async function explainSubcommand(
     stateDir,
     obligations: pipeline.policy.obligations,
     catalog: discovered.catalog,
+    behaviorCatalog: pipeline.behaviorCatalog,
   });
   const entry = discovered.catalog.entries.find((candidate) => candidate.logicalKey === testKey);
   if (entry === undefined) {
@@ -550,7 +618,8 @@ async function explainSubcommand(
     );
   }
 
-  const report = explainReport(testKey, entry, mapped, pipeline.policy.obligations);  if (asJson) {
+  const report = explainReport(testKey, entry, mapped, pipeline.policy.obligations, pipeline.behaviorCatalog);
+  if (asJson) {
     writeLine(io.stdout, canonicalJson(report as unknown as JsonValue));
     return 0;
   }
@@ -601,6 +670,7 @@ function explainReport(
     nativeClaims: Claim[];
   },
   obligations: readonly Obligation[],
+  behaviorCatalog?: import('@gate-forge/core').BehaviorCatalog | null,
 ): ExplainReport {
   const registry = new Set(obligations.map((obligation) => obligation.id));
   const sidecarEntry = mapped.sidecar?.tests.find((candidate) => candidate.key === testKey) ?? null;
@@ -633,16 +703,45 @@ function explainReport(
     const nativeDeclares = nativeClaims.some((claim) => claim.obligationId === obligationId);
     const binding = bindings.find((candidate) => candidate.obligationId === obligationId)?.binding ?? null;
     const inRegistry = registry.has(obligationId);
+    const requiredCases = behaviorCatalog?.requirements[obligationId] ?? [];
+    const mappedCases = new Set<string>();
+    for (const group of mapped.resolution.obligations) {
+      if (group.obligationId !== obligationId) continue;
+      for (const candidate of group.bindings) {
+        if (candidate.origin !== 'sidecar') continue;
+        for (const caseId of candidate.caseIds ?? []) mappedCases.add(caseId);
+      }
+    }
+    const missingCases = requiredCases.filter((caseId) => !mappedCases.has(caseId));
+    const caseSuffix =
+      requiredCases.length === 0
+        ? ''
+        : missingCases.length === 0
+          ? `; cases ${requiredCases.length}/${requiredCases.length} mapped`
+          : `; cases ${String(requiredCases.length - missingCases.length)}/${String(requiredCases.length)} mapped, missing: ${missingCases
+              .map((caseId) => {
+                const compiled = behaviorCatalog?.cases.find((item) => item.caseId === caseId);
+                return compiled?.definition.id ?? caseId;
+              })
+              .join(', ')}`;
     let mapping: string;
     let nextAction: string;
     if (sidecarDeclares) {
-      mapping = 'declared by agent (test-map.yml)';
+      mapping = `declared by agent (test-map.yml)${caseSuffix}`;
       nextAction =
-        'run the existing test with the browser observer; its witnessed evidence must cover this change (execution and sealing land in Phase 4)';
+        missingCases.length > 0
+          ? `map the missing cases (${missingCases
+              .map((caseId) => behaviorCatalog?.cases.find((item) => item.caseId === caseId)?.definition.id ?? caseId)
+              .join(', ')}) with tests mark --case; then run the test with the required channel`
+          : 'run the existing test with the browser observer; its witnessed evidence must cover this change (execution and sealing land in Phase 4)';
     } else if (nativeDeclares) {
-      mapping = 'declared by native annotation';
+      mapping = `declared by native annotation${caseSuffix}`;
       nextAction =
-        'run the existing test with the browser observer; its witnessed evidence must cover this change (execution and sealing land in Phase 4)';
+        missingCases.length > 0
+          ? `native annotations never implicitly claim behavior cases — add an explicit sidecar entry with tests mark --case for: ${missingCases
+              .map((caseId) => behaviorCatalog?.cases.find((item) => item.caseId === caseId)?.definition.id ?? caseId)
+              .join(', ')}`
+          : 'run the existing test with the browser observer; its witnessed evidence must cover this change (execution and sealing land in Phase 4)';
     } else if (binding?.origin === 'prior-run') {
       mapping = 'prior run (suggestion only — never satisfies a new run)';
       nextAction = 'confirm the link with tests mark if correct; then run the test with the browser observer';

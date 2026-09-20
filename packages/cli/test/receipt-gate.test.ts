@@ -7,10 +7,19 @@
  * integrity check, failure-after-evidence blocking a later check, and
  * exact cache reuse on identical authenticated inputs only.
  */
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadConfig, sha256Canonical, type TempRepo, type TestCatalog } from '@gate-forge/core';
+import {
+  caseExecutionDigestOf,
+  loadConfig,
+  recordIdOf,
+  sha256Canonical,
+  type BehaviorCatalog,
+  type ObligationVerdict,
+  type TempRepo,
+  type TestCatalog,
+} from '@gate-forge/core';
 import { currentInputDigest, FIXED_AT, PLUGIN_SOURCE, runCli, withTempRepo } from './helpers.js';
 import {
   trustedPolicyDigestForConfig,
@@ -19,6 +28,8 @@ import {
   type PlannedRow,
 } from '../src/execution.js';
 import { loadReceiptFor, receiptGateBlocking, tryReuseReceipt } from '../src/receipts.js';
+import { testReceiptV2Bindings } from './gate-receipts.js';
+import { executedBehaviorCaseDigest } from '../src/commands/test-gates.js';
 import {
   clearGateReceipt,
   readStateDocument,
@@ -174,12 +185,87 @@ async function sealGreenRun(
     catalogDigest: sha256Canonical(EMPTY_CATALOG as unknown as Record<string, never>),
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: null,
+    ...testReceiptV2Bindings(trustedPolicyDigest),
     verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
     issuedAt: FIXED_AT,
   });
   writeGateReceipt(stateDir, receipt);
   return receipt.receiptId;
 }
+
+describe('executed behavior-case receipt binding', () => {
+  it('binds a non-empty executed-case digest only from a satisfied witness case', async () => {
+    await withTempRepo({}, async (repo) => {
+      const stateDir = resolveStateDir(repo.root);
+      mkdirSync(stateDir, { recursive: true });
+      const caseId = 'a'.repeat(64);
+      const specDigest = 'b'.repeat(64);
+      const behaviorCatalog = {
+        cases: [{ caseId, specDigest }],
+        requirements: { 'tenant.profile:http:effect-verified': [caseId] },
+      } as unknown as BehaviorCatalog;
+      const payload = {
+        payloadVersion: 1,
+        caseId,
+        caseSpecDigest: specDigest,
+        obligationIds: ['tenant.profile:http:effect-verified'],
+        endpointResourceId: null,
+        operationId: 'update-profile',
+        sessionId: 'session-1',
+        executionId: 'execution-1',
+        fixtureNamespace: 'fixture',
+        actor: { principalId: 'principal', tenantId: 'tenant', roles: ['user'] },
+        actionDigest: 'c'.repeat(64),
+        submittedValues: {},
+        attempts: [],
+        requestObservations: [],
+        fixtureValues: {},
+        before: [],
+        after: [],
+        completion: { complete: true, checkpoint: 'sealed' },
+        channel: 'engine-http',
+        authorityProfileDigest: 'd'.repeat(64),
+        state: 'sealed',
+      };
+      const identity = {
+        runId: RUN_ID,
+        obligationId: 'tenant.profile:http:effect-verified',
+        kind: 'behavior.case',
+        testId: 'test-1',
+        origin: 'engine-observed' as const,
+        payload,
+      };
+      const record = {
+        schemaVersion: 1,
+        recordId: recordIdOf(identity),
+        runId: RUN_ID,
+        trust: 'witnessed',
+        obligationId: identity.obligationId,
+        kind: identity.kind,
+        testId: identity.testId,
+        origin: identity.origin,
+        payload,
+      };
+      writeFileSync(join(stateDir, 'records.json'), `${JSON.stringify([record])}\n`, 'utf8');
+      const verdict = {
+        obligation: {
+          id: identity.obligationId,
+          resourceId: 'tenant.profile',
+          contract: 'http:effect-verified',
+        },
+        verdict: 'satisfied',
+        reason: null,
+        recordIds: [record.recordId],
+      } as unknown as ObligationVerdict;
+      expect(executedBehaviorCaseDigest(stateDir, RUN_ID, behaviorCatalog, [verdict])).toBe(
+        caseExecutionDigestOf([caseId]),
+      );
+      expect(executedBehaviorCaseDigest(stateDir, RUN_ID, behaviorCatalog, [])).toBe(
+        caseExecutionDigestOf([]),
+      );
+    });
+  });
+});
 
 describe('check --require-e2e: the receipt gate (E07/E13)', () => {
   it('a missing receipt blocks with RUN_INCOMPLETE even when an old v2 record bundle exists', async () => {
@@ -382,6 +468,7 @@ describe('receipt load + reuse decisions (Phase 4 item 8: exact cache reuse)', (
           catalogDigest: 'd'.repeat(64),
           executionResultDigest: 'e'.repeat(64),
           evidenceAttestationDigest: null,
+          ...testReceiptV2Bindings('b'.repeat(64)),
           verdictSummary: { total: 3, satisfied: 2, waived: 0, blocking: 1 },
           issuedAt: FIXED_AT,
         }),
@@ -449,6 +536,7 @@ describe('receipt load + reuse decisions (Phase 4 item 8: exact cache reuse)', (
         catalogDigest: sha256Canonical(EMPTY_CATALOG as unknown as Record<string, never>),
         executionResultDigest: sealed.digest,
         evidenceAttestationDigest: null,
+        ...testReceiptV2Bindings(trustedPolicyDigest),
         // Forged clean summary over an incomplete run: content check below
         // must still reject (defense in depth beyond the MAC).
         verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },

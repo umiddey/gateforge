@@ -94,6 +94,7 @@ export function computeTrustedPolicyDigest(
     config: string;
     policies: string;
     classificationPolicy: string;
+    behaviorPolicy?: string | null;
     sidecar: string;
     adaptersDir: string;
     waiverFiles: readonly string[];
@@ -147,10 +148,15 @@ export function computeTrustedPolicyDigest(
     .map((path) => entry(path, path, true))
     .sort((a, b) => a.name.localeCompare(b.name));
   const pluginEntries = configPaths.pluginModules.map((module) => entry(module, module, true));
+  const behaviorEntry =
+    configPaths.behaviorPolicy === undefined || configPaths.behaviorPolicy === null
+      ? { name: '.gateforge/behavior.yml (absent)', bytes: '' }
+      : entry(configPaths.behaviorPolicy, configPaths.behaviorPolicy, true);
   return trustedPolicyDigest([
     entry('.gateforge.yml', configPaths.config, true),
     entry(configPaths.policies, configPaths.policies, true),
     entry(configPaths.classificationPolicy, configPaths.classificationPolicy, true),
+    behaviorEntry,
     entry('.gateforge/test-map.yml', configPaths.sidecar, false),
     ...adapterEntries,
     ...waiverEntries,
@@ -201,6 +207,7 @@ export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfi
     config: '.gateforge.yml',
     policies: config.policies,
     classificationPolicy: config.classificationPolicy,
+    behaviorPolicy: config.behaviorPolicy ?? null,
     sidecar: TEST_MAP_RELATIVE,
     adaptersDir: config.adapters,
     waiverFiles: [...new Set(waiverFiles)].sort(),
@@ -376,6 +383,7 @@ export function planScopedExpectedSet(input: {
   obligations: readonly Obligation[];
   graph: ResourceGraph;
   changedFiles: readonly string[];
+  behaviorCatalog?: import('@gate-forge/core').BehaviorCatalog | null;
 }): {
   plannedRows: PlannedRow[];
   affected: Obligation[];
@@ -383,7 +391,7 @@ export function planScopedExpectedSet(input: {
   unclaimed: Array<{ obligationId: string; detail: string }>;
 } {
   const changed = new Set(input.changedFiles);
-  const sources = sourcesByResourceId(input.graph);
+  const sources = sourcesByResourceId(input.graph, input.behaviorCatalog);
   const affected = input.obligations
     .filter((obligation) => (sources.get(obligation.resourceId) ?? []).some((file) => changed.has(file)));
   // New-claim certification: a changed TEST file that declares claims for an
@@ -696,6 +704,24 @@ export interface IssueGateReceiptInput {
   executionResultDigest: string;
   /** Evidence attestation digest, or null when the run carried none. */
   evidenceAttestationDigest: string | null;
+  /**
+   * Immutable Git tree actually tested (or null outside a Git checkout).
+   * The broker recomputes this from raw candidate bytes and demands
+   * equality with the sealed value.
+   */
+  candidateTreeId: string | null;
+  /** Compiled behavior catalog digest (canonical empty digest when absent). */
+  behaviorCatalogDigest: string;
+  /** Digest over the sorted full required case specifications. */
+  requiredCaseSetDigest: string;
+  /** Digest over the executed case set (empty digest when none executed). */
+  caseExecutionDigest: string;
+  /** Digest binding the approved engine/policy bundle version. */
+  engineBundleDigest: string;
+  /** Digest binding the controller-issued execution-profile record. */
+  executionBoundaryDigest: string;
+  /** Digest identifying the controlled app build derived from the tree. */
+  targetArtifactDigest: string;
   /** Final verdict summary (blocking must be 0). */
   verdictSummary: { total: number; satisfied: number; waived: number; blocking: number };
   /** Issuance instant (ISO-8601). */
@@ -747,7 +773,7 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
   // body so the signed bytes are exactly the schema-checked bytes).
   const parsed = GateReceiptSchema.parse({
     schemaVersion: 1,
-    receiptVersion: 1,
+    receiptVersion: 2,
     receiptId: randomUUID(),
     runId: input.runId,
     invocationId: input.invocationId,
@@ -768,6 +794,13 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
     catalogDigest: input.catalogDigest,
     executionResultDigest: input.executionResultDigest,
     evidenceAttestationDigest: input.evidenceAttestationDigest,
+    candidateTreeId: input.candidateTreeId,
+    behaviorCatalogDigest: input.behaviorCatalogDigest,
+    requiredCaseSetDigest: input.requiredCaseSetDigest,
+    caseExecutionDigest: input.caseExecutionDigest,
+    engineBundleDigest: input.engineBundleDigest,
+    executionBoundaryDigest: input.executionBoundaryDigest,
+    targetArtifactDigest: input.targetArtifactDigest,
     verdictSummary: input.verdictSummary,
     issuedAt: input.issuedAt,
     mac: RECEIPT_MAC_PLACEHOLDER,

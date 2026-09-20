@@ -29,18 +29,14 @@
  * test attribution is suite-claimed, never independently verified.
  *
  * Domain namespaces (`auth:*`, `task:*`, `validation:*`, `webhook:*`,
- * `workflow:*`): FAIL-CLOSED, unconditionally, for EVERY contract of the
- * namespace. Proving these behaviors requires an engine-owned observer
- * over application state — audit logs, FSM/state observation,
- * identity/role material (plan §6) — and no such producer exists yet.
- * Grading them from a witnessed check record whose witness-derived
- * outcome is merely the observed HTTP status class (2xx → accepted, 4xx
- * → rejected) is forged green: any 2xx would "prove" `audit-emitted` or
- * `persisted-final-state`, any 4xx would "prove" `tenant-isolated` or
- * `denied-no-side-effect`, and a response hash proves nothing about
- * `error-message-explicit`. Every contract of these namespaces therefore
- * grades `missing` with a reason naming the missing channel — never
- * `satisfied`, never `invalid`, whatever evidence arrives.
+ * `workflow:*`): their approved contract vocabularies are available only
+ * through the required-case aggregation. A genuine engine-issued,
+ * witnessed `behavior.case` record can satisfy a compiled case; the
+ * per-claim fallback remains fail-closed when the obligation has no
+ * compiled requirement set. Transport-shaped records never substitute.
+ * Proving these behaviors requires an engine-owned observer over application
+ * state — audit logs, FSM/state observation, identity/role material
+ * (plan §6) — and legacy status-only records cannot carry that meaning.
  */
 import { isProvenancedRecord } from '../provenance.js';
 import { compareStrings } from '../graph/util.js';
@@ -75,6 +71,8 @@ const SUPPORTED_HTTP_CONTRACTS: readonly string[] = [
   'http:frontend-request-observed',
   'http:request-observed',
   'http:response-status-ok',
+  'http:effect-verified',
+  'http:read-result-verified',
 ];
 
 function payloadOf(record: ClaimEvidenceInput['evidence'][number]['record']): Record<string, unknown> | null {
@@ -117,6 +115,32 @@ function frontendProofUnavailable(input: ClaimEvidenceInput): ClaimOutcome {
       'Use the UI-semantic crud contracts for browser proof over the session channel, or the ' +
       "narrower transport contract 'http:request-observed' when a witness-observed " +
       'HTTP exchange suffices',
+    recordIds: [],
+  };
+}
+
+/**
+ * Blocking reason for strong HTTP contracts when no trusted behavior
+ * context reaches the per-claim path (plan 2026-09-19 Phase 5). The
+ * genuine producer exists (witness principal driver + required-case
+ * aggregation in `evaluateObligation`); this fallback fires only when
+ * an obligation names a strong contract outside a compiled requirement
+ * set — transport evidence must not silently satisfy effect/read-result
+ * verification.
+ *
+ * Args:
+ *   input (ClaimEvidenceInput): claim plus obligation.
+ *
+ * Returns:
+ *   ClaimOutcome: missing, naming the absent case set.
+ */
+function strongHttpProofUnavailable(input: ClaimEvidenceInput): ClaimOutcome {
+  return {
+    status: 'missing',
+    reason:
+      `'${input.obligation.id}': contract '${input.obligation.contract}' has no trusted ` +
+      'behavior.case observer: strong HTTP contracts require engine-issued case records with ' +
+      'independent state-scope snapshots; existing transport evidence cannot satisfy them',
     recordIds: [],
   };
 }
@@ -690,6 +714,12 @@ function httpVerifier(input: ClaimEvidenceInput): ClaimOutcome {
   if (input.obligation.contract === 'http:frontend-request-observed') {
     return frontendProofUnavailable(input);
   }
+  if (
+    input.obligation.contract === 'http:effect-verified' ||
+    input.obligation.contract === 'http:read-result-verified'
+  ) {
+    return strongHttpProofUnavailable(input);
+  }
   return gradeTransportObservation(input);
 }
 
@@ -698,26 +728,61 @@ function httpVerifier(input: ClaimEvidenceInput): ClaimOutcome {
  * is per-namespace on purpose: the fail-closed reason must name WHAT is
  * missing, not a generic unsupported hole.
  */
-const DOMAIN_NAMESPACES: readonly { namespace: string; channel: string }[] = [
+const DOMAIN_NAMESPACES: readonly { namespace: string; channel: string; contracts: readonly string[] }[] = [
   {
     namespace: 'auth',
     channel: 'identity/role material and tenant-scoped application state',
+    contracts: [
+      'auth:role-allowed',
+      'auth:role-denied',
+      'auth:tenant-isolated',
+      'auth:denied-no-side-effect',
+      'auth:forged-token-rejected',
+    ],
   },
   {
     namespace: 'task',
     channel: 'queue/job delivery state',
+    contracts: [
+      'task:retry-policy-enforced',
+      'task:idempotent',
+      'task:terminal-handled',
+      'task:observability-recorded',
+      'task:duplicate-delivery-handled',
+    ],
   },
   {
     namespace: 'validation',
     channel: 'boundary semantics over application state and the response envelope',
+    contracts: [
+      'validation:boundary-accepted',
+      'validation:boundary-rejected',
+      'validation:no-side-effect-on-reject',
+      'validation:error-message-explicit',
+      'validation:envelope-shape-stable',
+    ],
   },
   {
     namespace: 'webhook',
     channel: 'signature/replay verification over application-received deliveries',
+    contracts: [
+      'webhook:signature-accepted',
+      'webhook:signature-rejected',
+      'webhook:malformed-rejected',
+      'webhook:replay-idempotent',
+      'webhook:retry-bounded',
+    ],
   },
   {
     namespace: 'workflow',
     channel: 'the workflow state machine and its audit log',
+    contracts: [
+      'workflow:transition-allowed',
+      'workflow:transition-rejected',
+      'workflow:terminal-immutable',
+      'workflow:audit-emitted',
+      'workflow:persisted-final-state',
+    ],
   },
 ];
 
@@ -746,12 +811,27 @@ function failClosedReason(namespace: string, channel: string, input: ClaimEviden
  * semantics, and hostile evidence deserves no sharper verdict than the
  * honest-channel reason.
  */
-function failClosedVerifier(namespace: string, channel: string): ContractVerifier {
+function failClosedVerifier(namespace: string, channel: string, contracts: readonly string[] = []): ContractVerifier {
   return (input: ClaimEvidenceInput): ClaimOutcome => {
     // A contract string that does not parse into this namespace is
     // genuinely unknown, not merely unproducible.
     if (!input.obligation.contract.startsWith(`${namespace}:`)) {
       return unknownContract(input);
+    }
+    if (contracts.includes(input.obligation.contract)) {
+      // Implemented contracts grade through required-case aggregation
+      // (evaluateObligation) once a compiled requirement set exists.
+      // Reaching the per-claim fallback means no approved case set
+      // covers this obligation — transport evidence must not substitute.
+      return {
+        status: 'missing',
+        reason:
+          `'${input.obligation.id}': contract '${input.obligation.contract}' has no compiled ` +
+          'required-case set covering this obligation: strong behavior contracts grade only ' +
+          'across approved required cases with engine-issued case records (a missing behavior ' +
+          'declaration blocks; transport evidence cannot satisfy them)',
+        recordIds: [],
+      };
     }
     return {
       status: 'missing',
@@ -776,9 +856,13 @@ function unknownContract(input: ClaimEvidenceInput): ClaimOutcome {
 let registered = false;
 
 /**
- * The http namespace's capability record (plan Phase 0 item 3): the two
- * transport contracts are implemented over the witness HTTP proxy
- * channel; `http:frontend-request-observed` stays registered but
+ * The http namespace's capability record (plan Phase 0 item 3, Phase 5
+ * item 9): transport contracts prove over the witness HTTP proxy
+ * channel; `http:effect-verified` and `http:read-result-verified` are
+ * available once genuine witness-produced case evidence exercises the
+ * required-case grader (behavior-catalog obligations aggregate across
+ * their required cases — transport evidence alone still cannot satisfy
+ * them). `http:frontend-request-observed` stays registered but
  * unavailable — the supervised session channel (plan Phase 1) binds
  * exchanges to a session's proxy ORIGIN, not to a browser, so the
  * independent browser/test observation the contract names still does not
@@ -786,7 +870,7 @@ let registered = false;
  */
 const HTTP_CAPABILITY: ContractCapability = {
   namespace: 'http',
-  contracts: ['http:request-observed', 'http:response-status-ok'],
+  contracts: ['http:request-observed', 'http:response-status-ok', 'http:effect-verified', 'http:read-result-verified'],
   unavailableContracts: [
     {
       contract: 'http:frontend-request-observed',
@@ -801,28 +885,45 @@ const HTTP_CAPABILITY: ContractCapability = {
     },
   ],
   observer:
-    'witness HTTP proxy channel: a witness-observed http.request exchange bound to the run ' +
-    '(origin engine-observed) plus a provenanced claimed ui.action anchor from the declaring test',
+    'engine-owned behavior driver plus independent state-scope snapshots: a witness-issued behavior.case ' +
+    'record binding the exact endpoint, request, actor, and before/after effects, graded across every required case',
   testKinds: ['browser-e2e', 'api-e2e'],
   availability: { status: 'available' },
 };
 
 /** Builds the fail-closed capability record for one domain namespace. */
-function domainCapability(namespace: string, channel: string): ContractCapability {
+function domainCapability(
+  namespace: string,
+  channel: string,
+  contracts: readonly string[] = [],
+): ContractCapability {
+  if (contracts.length === 0) {
+    return {
+      namespace,
+      // none — fail-closed: every contract of the namespace blocks.
+      contracts: [],
+      unavailableContracts: [],
+      observer: `engine-owned observer over application state (${channel})`,
+      testKinds: [],
+      availability: {
+        status: 'unavailable',
+        reason:
+          `no engine-owned state-observing producer exists for ${channel}; every contract of ` +
+          "the namespace fails closed (transport exchanges cannot prove these semantics), so " +
+          "the namespace advertises none — fail-closed",
+      },
+    };
+  }
   return {
     namespace,
-    // none — fail-closed: every contract of the namespace blocks.
-    contracts: [],
+    contracts: [...contracts],
     unavailableContracts: [],
-    observer: `engine-owned observer over application state (${channel})`,
-    testKinds: [],
-    availability: {
-      status: 'unavailable',
-      reason:
-        `no engine-owned state-observing producer exists for ${channel}; every contract of ` +
-        "the namespace fails closed (transport exchanges cannot prove these semantics), so " +
-        "the namespace advertises none — fail-closed",
-    },
+    observer:
+      `engine-owned behavior driver plus independent state-scope snapshots over ${channel}: ` +
+      'a witness-issued behavior.case record binding the exact endpoint, request, actor, and ' +
+      'before/after effects, graded across every required case',
+    testKinds: ['browser-e2e', 'api-e2e'],
+    availability: { status: 'available' },
   };
 }
 
@@ -832,8 +933,8 @@ export function registerPackVerifiers(): void {
   registered = true;
   registerContractVerifier('http', httpVerifier);
   registerContractCapabilities(HTTP_CAPABILITY);
-  for (const { namespace, channel } of DOMAIN_NAMESPACES) {
-    registerContractVerifier(namespace, failClosedVerifier(namespace, channel));
-    registerContractCapabilities(domainCapability(namespace, channel));
+  for (const { namespace, channel, contracts } of DOMAIN_NAMESPACES) {
+    registerContractVerifier(namespace, failClosedVerifier(namespace, channel, contracts));
+    registerContractCapabilities(domainCapability(namespace, channel, contracts));
   }
 }

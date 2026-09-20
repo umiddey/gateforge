@@ -313,6 +313,13 @@ export const GateforgeConfigSchema = z
      */
     coveragePolicy: CoveragePolicySchema.optional(),
     /**
+     * Path to the complete-behavior document (plan 2026-09-19 §4.1).
+     * ABSENT preserves basic table/transport behavior. Presence enables
+     * the approved case catalog; there is no warnOnly or silent fallback.
+     * Convention: `.gateforge/behavior.yml`.
+     */
+    behaviorPolicy: z.string().min(1).optional(),
+    /**
      * Registered diagnostic suites (plan 2026-09-13 §3.5). ABSENT = no
      * suites; the advisory alarm is opt-in via explicit, tracked
      * configuration — gateforge never scans for or launches anything the

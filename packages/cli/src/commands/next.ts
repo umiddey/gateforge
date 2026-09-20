@@ -75,6 +75,19 @@ function rankCause(cause: CauseCode | null | undefined, kind: string): number {
   switch (cause) {
     case 'VERIFIER_UNSUPPORTED':
       return 1;
+    // Complete-behavior setup/declaration problems block before any
+    // test-generation advice: an owner document gap is not something a
+    // test can fix (plan §5 — rank configuration first).
+    case 'ENDPOINT_BEHAVIOR_MISSING':
+    case 'BEHAVIOR_REFERENCE_STALE':
+    case 'BEHAVIOR_CASE_UNMAPPED':
+    case 'BEHAVIOR_CASE_MISSING':
+    case 'BEHAVIOR_BINDING_MISMATCH':
+    case 'BEHAVIOR_EFFECT_MISMATCH':
+    case 'OBSERVATION_SCOPE_INCOMPLETE':
+    case 'BEHAVIOR_UNEXPECTED_EFFECT':
+    case 'ENFORCEMENT_BOUNDARY_UNVERIFIED':
+      return 2;
     case 'CRUD_COVERAGE_MISSING':
       return 3;
     case 'CHANGE_UNMAPPED':
@@ -252,7 +265,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     const knownSourceFiles = [
       ...new Set(
         pipeline.graph.resources.flatMap((resource) =>
-          resource.id === null ? [] : sourcesByResourceId(pipeline.graph).get(resource.id) ?? [],
+          resource.id === null ? [] : sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog).get(resource.id) ?? [],
         ),
       ),
     ];
@@ -315,6 +328,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       config,
       stateDir,
       obligations: pipeline.policy.obligations,
+      behaviorCatalog: pipeline.behaviorCatalog,
     });
     mappingClaims = gradingClaimsFor(mapped.resolution, mapped.nativeClaims);
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
@@ -325,6 +339,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     cwd: io.cwd,
     config,
     graph: pipeline.graph,
+    behaviorCatalog: pipeline.behaviorCatalog,
     obligations: pipeline.policy.obligations,
     blocking: [...pipeline.policy.blocking, ...mismatchBlocking, ...mappingBlockers],
     stateDir,

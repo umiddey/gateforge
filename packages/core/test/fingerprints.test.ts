@@ -113,4 +113,17 @@ describe('fingerprint (pin #2)', () => {
       }),
     ).toMatch(/^[0-9a-f]{64}$/);
   });
+
+  it('omits undefined requirementsDigest from the hashed identity', () => {
+    const base = {
+      resourceId: 'tenant.accounts',
+      contract: 'crud:update',
+      policyId: 'p',
+      lifecycle,
+    };
+    expect(fingerprint(base)).toBe(fingerprint({ ...base }));
+    expect(
+      fingerprint({ ...base, requirementsDigest: 'ab'.repeat(32) }),
+    ).not.toBe(fingerprint(base));
+  });
 });

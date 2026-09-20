@@ -22,6 +22,7 @@ import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { currentInputDigest, fixtureFingerprint, installFixture, runCli, FIXED_AT } from './helpers.js';
 import { resolveAdoptedBaseline } from '../src/adopted-baseline.js';
 import { trustedPolicyDigestForConfig, issueGateReceipt, sealExecutionResult } from '../src/execution.js';
+import { testReceiptV2Bindings } from './gate-receipts.js';
 import { evaluateRun, obligationFingerprint } from '../src/evaluate.js';
 import { runPipeline } from '../src/pipeline.js';
 import { resolveStateDir, writeExecutionResult, writeGateReceipt } from '../src/state.js';
@@ -148,6 +149,7 @@ function sealGreenRun(
       : {}),
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: null,
+    ...testReceiptV2Bindings(trustedPolicyDigest),
     verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
     issuedAt: FIXED_AT,
   });

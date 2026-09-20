@@ -1,0 +1,8 @@
+schemaVersion: 1
+scanRoots: ['server.js', 'e2e/**/*.js', 'fixtures/**/*.mjs']
+trustedInternalEntryPoints: []
+internalRules: []
+declarations:
+  internality: gateforge:internal
+  archiveState: gateforge:archive-state
+volatileFields: []

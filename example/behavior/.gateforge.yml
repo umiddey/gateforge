@@ -1,0 +1,31 @@
+# Committed consumer fixture configuration. The policy and adapter bytes are
+# owner-reviewed inputs; an approved policy pin is still required for strict
+# managed enforcement and is never supplied by this repository.
+schemaVersion: 1
+project:
+  languages: [javascript]
+  paths:
+    include: ['server.js', 'e2e/**/*.js', 'fixtures/**/*.mjs']
+    exclude: ['node_modules/**']
+plugins:
+  - id: gateforge.pack-http
+    version: '0.4.1'
+    transport: in-process
+    module: '@gate-forge/pack-http'
+  - id: gateforge.behavior-fixture
+    version: '1.0.0'
+    transport: in-process
+    module: './fixtures/fixture-detector.mjs'
+policies: .gateforge/policies.yml
+classificationPolicy: .gateforge/classification-policy.yml
+adapters: .gateforge/adapters
+waivers: .gateforge/waivers
+baselines: .gateforge/baselines/obligations.json
+behaviorPolicy: .gateforge/behavior.yml
+changed:
+  provider: auto
+witness:
+  maxDurationSeconds: 30
+clock:
+  mode: fixed
+  fixedAt: '2026-01-01T00:00:00.000Z'

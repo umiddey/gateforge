@@ -448,6 +448,7 @@ function collectDeclaredInputs(cwd: string, config: GateforgeConfig): string[] {
     '.gateforge.yml',
     toPosix(config.policies),
     toPosix(config.classificationPolicy),
+    ...(config.behaviorPolicy === undefined ? [] : [toPosix(config.behaviorPolicy)]),
     ...PACK_CONFIGS,
   ];
   for (const candidate of explicitFiles) {
@@ -776,6 +777,9 @@ export function buildGateContext(
         contract: obligation.contract,
         policyId: obligation.policyId,
         lifecycle: obligation.lifecycle,
+        ...(obligation.requirementsDigest === undefined
+          ? {}
+          : { requirementsDigest: obligation.requirementsDigest }),
       }))
       .sort((a, b) => compareStrings(a.id, b.id)),
     httpRoutes: [...httpRoutes].sort((a, b) => compareStrings(a.resourceId, b.resourceId)),

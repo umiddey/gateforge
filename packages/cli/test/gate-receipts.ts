@@ -2,7 +2,7 @@
  * Phase 5 test fixture: mints REAL authenticated gate receipts for a
  * fixture repository — the same trusted machinery `test-gates --changed`
  * uses (execution.ts `sealExecutionResult` + `issueGateReceipt`, core
- * HMAC over the `gateforge.receipt.v1` domain) — so hook/broker/doctor
+ * HMAC over the `gateforge.receipt.v2` domain) — so hook/broker/doctor
  * tests exercise the genuine receipt path end to end. The planned
  * executed run is a data-level complete supervised run (no browser is
  * launched); git, digests, and signatures are all real.
@@ -24,6 +24,17 @@ import {
   sealExecutionResult,
   SUPERVISED_INVOCATION,
 } from '../src/execution.js';
+import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
+import {
+  caseExecutionDigestOf,
+  EMPTY_BEHAVIOR_CATALOG_DIGEST,
+  engineBundleDigestOf,
+  executionBoundaryDigestOf,
+  LOCAL_UNISOLATED_BOUNDARY,
+  requiredCaseSetDigestOf,
+  targetArtifactDigestOf,
+} from '@gate-forge/core';
+import { VERSION } from '../src/commands/common.js';
 import { TEST_MAP_RELATIVE } from '../src/mapping.js';
 import { resolveStateDir, writeExecutionResult, writeGateReceipt } from '../src/state.js';
 import { currentInputDigest, FIXED_AT } from './helpers.js';
@@ -79,8 +90,7 @@ const COMPLETE_ENVELOPE: RunnerExecutionEnvelope = {
 };
 
 /** Everything minted for one candidate (also returned to the caller). */
-export interface MintedReceipt {
-  /** The workspace/candidate input digest the receipt binds. */
+export interface MintedReceipt {  /** The workspace/candidate input digest the receipt binds. */
   inputDigest: string;
   /** The trusted policy revision digest the receipt binds. */
   trustedPolicyDigest: string;
@@ -119,6 +129,7 @@ export async function mintCompleteRunReceipt(
     parentSha?: string | null;
     digestOverride?: string;
     approvedPolicyDigest?: string;
+    executionBoundaryProfile?: string;
   },
 ): Promise<MintedReceipt> {
   const actualDigest = await currentInputDigest(repo);
@@ -184,6 +195,13 @@ export async function mintCompleteRunReceipt(
     finishedAt: FIXED_AT,
   });
   const parentSha = options.parentSha !== undefined ? options.parentSha : repo.headSha();
+  // v2 bindings mirror production sealing: the raw candidate tree, the
+  // (empty here) behavior catalog + required case set, no executed cases,
+  // the engine bundle, the local boundary, and the source-tree artifact.
+  const mintGitDir = resolveGitDir(repo.root, process.env);
+  const stateDir = resolveStateDir(repo.root);
+  const candidateTreeId =
+    mintGitDir === null ? null : computeCandidateTreeId(mintGitDir, repo.root, process.env, stateDir, 'record');
   const receipt = issueGateReceipt({
     verifierKey: options.verifierKey,
     runId,
@@ -198,10 +216,16 @@ export async function mintCompleteRunReceipt(
     catalogDigest: sha256Canonical(catalog as unknown as Record<string, never>),
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: null,
+    candidateTreeId,
+    behaviorCatalogDigest: EMPTY_BEHAVIOR_CATALOG_DIGEST,
+    requiredCaseSetDigest: requiredCaseSetDigestOf([]),
+    caseExecutionDigest: caseExecutionDigestOf([]),
+    executionBoundaryDigest: executionBoundaryDigestOf(options.executionBoundaryProfile ?? LOCAL_UNISOLATED_BOUNDARY),
+    engineBundleDigest: engineBundleDigestOf(VERSION, trustedPolicyDigest),
+    targetArtifactDigest: targetArtifactDigestOf(candidateTreeId),
     verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
     issuedAt: FIXED_AT,
   });
-  const stateDir = resolveStateDir(repo.root);
   writeExecutionResult(stateDir, sealed.result);
   writeGateReceipt(stateDir, receipt);
   return {
@@ -211,5 +235,22 @@ export async function mintCompleteRunReceipt(
     receiptPath: join(stateDir, 'receipt.json'),
     receiptId: receipt.receiptId,
     parentSha,
+  };
+}
+
+/**
+ * Standard v2 receipt bindings for unit-style tests that seal receipts
+ * directly (no behavior catalog, no executed cases, null tree, local
+ * boundary, source-tree artifact). Spread into `issueGateReceipt` input.
+ */
+export function testReceiptV2Bindings(trustedPolicyDigest: string, engineVersion = 'test-engine/0') {
+  return {
+    candidateTreeId: null as string | null,
+    behaviorCatalogDigest: EMPTY_BEHAVIOR_CATALOG_DIGEST,
+    requiredCaseSetDigest: requiredCaseSetDigestOf([]),
+    caseExecutionDigest: caseExecutionDigestOf([]),
+    engineBundleDigest: engineBundleDigestOf(engineVersion, trustedPolicyDigest),
+    executionBoundaryDigest: executionBoundaryDigestOf(LOCAL_UNISOLATED_BOUNDARY),
+    targetArtifactDigest: targetArtifactDigestOf(null),
   };
 }

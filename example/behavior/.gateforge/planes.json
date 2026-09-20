@@ -1,0 +1,9 @@
+{
+  "rules": [
+    {
+      "match": "server.js",
+      "plane": "tenant",
+      "reason": "All three profile, admin, and import surfaces in this reference app operate on tenant-scoped accounts."
+    }
+  ]
+}

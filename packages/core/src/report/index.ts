@@ -19,7 +19,7 @@
  * byte-for-byte identically.
  */
 import { canonicalJson, type JsonValue } from '../canonical-json.js';
-import { fingerprint } from '../fingerprints.js';
+import { fingerprintObligation } from '../fingerprints.js';
 import { compareStrings } from '../graph/util.js';
 import type { ClassificationDecisionTrace } from '../classifier/schema.js';
 import type { BlockingEntry } from '../policy/index.js';
@@ -226,12 +226,7 @@ function jsonReport(
         cause: entry.cause ?? null,
         nextAction: entry.nextAction ?? null,
         recordIds: entry.recordIds,
-        fingerprint: fingerprint({
-          resourceId: entry.obligation.resourceId,
-          contract: entry.obligation.contract,
-          policyId: entry.obligation.policyId,
-          lifecycle: entry.obligation.lifecycle,
-        }),
+        fingerprint: fingerprintObligation(entry.obligation),
         trustTier: entry.trustTier,
       };
       if (entry.detector !== undefined && entry.detector !== null) {
@@ -295,12 +290,7 @@ function sarifReport(
           : {}),
       },
       partialFingerprints: {
-        gateforgeFingerprint: fingerprint({
-          resourceId: entry.obligation.resourceId,
-          contract: entry.obligation.contract,
-          policyId: entry.obligation.policyId,
-          lifecycle: entry.obligation.lifecycle,
-        }),
+        gateforgeFingerprint: fingerprintObligation(entry.obligation),
       },
     };
     if (entry.verdict === 'waived') {
@@ -412,14 +402,7 @@ function textReport(
     }
     lines.push(`  policy: ${entry.obligation.policyId}`);
     lines.push(`  obligation: ${entry.obligation.id}`);
-    lines.push(
-      `  fingerprint: ${fingerprint({
-        resourceId: entry.obligation.resourceId,
-        contract: entry.obligation.contract,
-        policyId: entry.obligation.policyId,
-        lifecycle: entry.obligation.lifecycle,
-      })}`,
-    );
+    lines.push(`  fingerprint: ${fingerprintObligation(entry.obligation)}`);
     lines.push(`  evidence gap: ${entry.reason ?? '<none>'}`);
     if (entry.cause !== undefined && entry.cause !== null) {
       lines.push(`  cause: ${entry.cause}`);

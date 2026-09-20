@@ -606,6 +606,12 @@ export interface WitnessOptions {
   adapterBaseUrl?: string | null;
   /** Per-witness-call timeout (pin #7 default 5s). */
   requestTimeoutMs?: number;
+  /**
+   * Completion-barrier deadline for async behavior effects (Phase 5):
+   * `awaitBarrier` observers get this long to report a real checkpoint.
+   * Default 30s. A timeout is failure, never success.
+   */
+  barrierTimeoutMs?: number;
   /** Injected clock for `issuedAt` (ISO-8601); default = system now. */
   now?: () => string;
   /** Host to bind; default `127.0.0.1` (loopback). */
@@ -618,6 +624,14 @@ export interface WitnessOptions {
    * unset for the pinned Chromium.
    */
   engineBrowserLauncher?: import('./browser.js').EngineBrowserLauncher;
+  /**
+   * Trusted fixture/actor provider (plan 2026-09-19 §4.5, Phase 4):
+   * injected by the trusted controller harness (engine-owned bundle),
+   * never by suite code. Null (default) means strong behavior cases
+   * block with a missing-provider cause — suite-supplied fixtures are
+   * never a fallback.
+   */
+  fixtureProvider?: import('./fixture-provider.js').FixtureProvider | null;
 }
 
 /**
@@ -686,6 +700,30 @@ export interface EvidenceAdapter {
    * snapshots); an adapter without it can serve no observe obligation.
    */
   observe?: ObserveBinding;
+  /**
+   * Optional TRUSTED scope observation (plan 2026-09-19 §4.4, Phase 4):
+   * observes an independently controlled state source (read-only
+   * database credentials, a trusted state sidecar, or equivalent
+   * owner-provisioned observer outside candidate code) for one approved
+   * scope key within one fixture namespace. Reading only the
+   * candidate's own GET handler is insufficient for the protected
+   * profile. Adapters lacking this method still serve legacy proofs;
+   * they cannot satisfy strong contracts requiring scoped observation.
+   */
+  snapshotScope?: (
+    ctx: AdapterContext,
+    input: SnapshotScopeInput,
+  ) => Promise<ScopeSnapshot> | ScopeSnapshot;
+  /**
+   * Optional completion-barrier observer (plan 2026-09-19 §4.4): waits
+   * for a real completion/queue checkpoint for an engine-issued
+   * operation. An observer, not a state maker: it must not sleep-then-
+   * true, mutate state, or return true on timeout.
+   */
+  awaitBarrier?: (
+    ctx: AdapterContext,
+    input: BarrierInput,
+  ) => Promise<{ complete: boolean; checkpoint: string }> | { complete: boolean; checkpoint: string };
 }
 
 /**
@@ -714,6 +752,148 @@ export interface ServerProbeResult {
   found: boolean;
   /** The observed column state when found (null when absent). */
   fields: Record<string, unknown> | null;
+}
+
+/** `POST /runs/behavior-catalog` request (supervisor only, one-time bind). */
+export interface BehaviorCatalogRequest {
+  /** Compiled behavior catalog (validated against the core schema). */
+  catalog: unknown;
+  /**
+   * Allowed case/test assignments: testId → required case ids the
+   * supervisor permits that test to execute. Every case id must exist
+   * in the catalog; every id must belong to an obligation the mapping
+   * already claims (checked by the supervisor before sending).
+   */
+  assignments: Record<string, string[]>;
+  /**
+   * Complete route inventory for principal attribution (resourceId,
+   * method, canonicalPath per route, sorted). The grader re-resolves
+   * every attempt against this exact set — never a claim or payload.
+   */
+  routes: unknown;
+  /**
+   * Authority profile digest the witness seals into every case record
+   * (engine bundle binding, provisioned by the trusted controller).
+   */
+  authorityProfileDigest: string;
+}
+
+/** `POST /runs/behavior-catalog` response. */
+export interface BehaviorCatalogResponse {
+  bound: true;
+  caseCount: number;
+  assignmentCount: number;
+  routeCount: number;
+}
+
+/** `POST /behavior/execute` request: exactly these keys, nothing else. */
+export interface BehaviorExecuteRequest {
+  sessionId: string;
+  sessionToken: string;
+  caseId: string;
+}
+
+/**
+ * `POST /behavior/execute` response: a REDACTED result reference. Actor
+ * credential material, fixture subjects, and expectations never appear
+ * here — the worker may name an allowed case but can never read or
+ * override actor credentials, expectations, before-state, or origin.
+ */
+export interface BehaviorExecuteResponse {
+  caseId: string;
+  executionId: string;
+  /** Isolated fixture namespace for this execution. */
+  namespace: string;
+  /** Authoritative before checkpoint (empty until the principal runs). */
+  beforeCheckpoint: string | null;
+  /** Lifecycle state after this call. */
+  state: string;
+}
+
+/** `POST /behavior/principal` request: drive the principal operation. */
+export interface BehaviorPrincipalRequest {
+  sessionId: string;
+  sessionToken: string;
+  executionId: string;
+}
+
+/**
+ * `POST /behavior/principal` response: redacted seal reference. The
+ * witness-owned driver executed, the barrier resolved, after-state was
+ * observed, and the `behavior.case` record(s) were issued — grading
+ * happens core-side, never here.
+ */
+export interface BehaviorPrincipalResponse {
+  caseId: string;
+  executionId: string;
+  recordIds: string[];
+  state: string;
+}
+
+/** Witness-side lifecycle state of one required-case execution. */
+export type CaseExecutionState =
+  | 'fixture-prepared'
+  | 'before-snapshot-complete'
+  | 'principal-executing'
+  | 'principal-captured'
+  | 'barrier-reached'
+  | 'after-snapshot-complete'
+  | 'sealed'
+  | 'failed';
+
+/** One entity inside a trusted scope snapshot. */
+export interface SnapshotEntity {
+  /**
+   * Entity identity: scalar for single-column keys, complete
+   * column-keyed object for composite keys (matching core identity
+   * behavior). Unknown identity blocks the case.
+   */
+  entityId: unknown;
+  /** Projected field map (exactly the declared scope fields). */
+  fields: Record<string, unknown>;
+}
+
+/**
+ * Strict trusted scope snapshot (plan 2026-09-19 §4.4): data, never a
+ * verdict. `complete:false`, pagination not exhausted, omitted declared
+ * fields, unknown identity, inconsistent checkpoints, or size-limit
+ * truncation blocks the case — the harness never silently samples.
+ */
+export interface ScopeSnapshot {
+  /** Approved snapshot scope key. */
+  scope: string;
+  /** Fixture namespace actually observed (must equal the case lease). */
+  fixtureNamespace: string;
+  /** False when collection is partial for any reason. */
+  complete: boolean;
+  /** Authoritative checkpoint (before/after comparison + barriers). */
+  checkpoint: string;
+  /** Entities in canonical order (duplicate identity rejected). */
+  entities: SnapshotEntity[];
+  /** True when pagination was exhausted (absent = unknown = incomplete). */
+  exhausted?: boolean;
+  /** Total size when the scope enforces a limit (truncation blocks). */
+  totalSize?: number;
+}
+
+/** Input to an adapter `snapshotScope` observation. */
+export interface SnapshotScopeInput {
+  /** Approved snapshot scope key. */
+  scope: string;
+  /** Fixture namespace to observe (never the whole database). */
+  fixtureNamespace: string;
+}
+
+/** Input to an adapter `awaitBarrier` observation. */
+export interface BarrierInput {
+  /** Approved snapshot scope key. */
+  scope: string;
+  /** Fixture namespace to observe. */
+  fixtureNamespace: string;
+  /** Engine-issued operation id awaiting completion. */
+  operationId: string;
+  /** Hard deadline in milliseconds (timeout is failure, not success). */
+  deadlineMs: number;
 }
 
 /** The transport handed to `read` (GET-only, engine-mediated). */

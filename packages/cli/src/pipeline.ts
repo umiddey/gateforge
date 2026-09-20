@@ -11,7 +11,7 @@
  * caller's choice — `all-files` for full runs, a resolved diff provider
  * for `check --changed` — and is stamped into the manifest.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -21,15 +21,19 @@ import {
   ClassificationPolicySchema,
   ClassificationSignalSchema,
   PolicyFileSchema,
+  PolicyEvaluationError,
   RunManifestSchema,
   buildResourceGraph,
   compareStrings,
+  compileBehaviorPolicy,
   evaluatePolicies,
   jsonPathFor,
   loadWaivers,
   normalizeChangedFiles,
+  parseBehaviorPolicy,
   runClassification,
-    type ChangedProvider,
+    type BehaviorCatalog,
+  type ChangedProvider,
   type Claim,
   type ClassificationFile,
   type ClassificationPolicy,
@@ -99,6 +103,8 @@ export interface PipelineResult {
    * never reads it back as input.
    */
   classificationsView: ClassificationFile;
+  /** Compiled complete-behavior catalog, or null when the document is absent. */
+  behaviorCatalog: BehaviorCatalog | null;
 }
 
 /** Source-file map resourceId → repo-relative source (for diff scoping). */
@@ -113,10 +119,21 @@ export function sourceByResourceId(graph: ResourceGraph): Map<string, string> {
 /**
  * Join-aware change sources (plan phase 7.4): an endpoint obligation is
  * in scope when the backend route source OR any joined frontend-call
- * source changed — a change on either end of the join pulls the joined
- * endpoint's obligations into scope.
+ * source changed. When a behavior catalog is present, effect-resource
+ * sources (and compiled case sourceFiles) are included so a table/model
+ * change selects every endpoint that declares an effect on it.
+ *
+ * Args:
+ *   graph (ResourceGraph): classified resources.
+ *   catalog (BehaviorCatalog | null | undefined): compiled behavior index.
+ *
+ * Returns:
+ *   Map<string, string[]>: resourceId → sorted source files.
  */
-export function sourcesByResourceId(graph: ResourceGraph): Map<string, string[]> {
+export function sourcesByResourceId(
+  graph: ResourceGraph,
+  catalog?: BehaviorCatalog | null,
+): Map<string, string[]> {
   const map = new Map<string, string[]>();
   for (const resource of graph.resources) {
     if (resource.id === null) continue;
@@ -125,13 +142,25 @@ export function sourcesByResourceId(graph: ResourceGraph): Map<string, string[]>
     if (Array.isArray(callSources)) {
       for (const entry of callSources) {
         if (typeof entry === 'string') {
-          // `file:line:col` — the change scope is file-grained.
           const file = entry.split(':').slice(0, -2).join(':');
           if (file.length > 0) sources.add(file);
         }
       }
     }
     map.set(resource.id, [...sources].sort(compareStrings));
+  }
+  if (catalog === undefined || catalog === null) return map;
+  for (const compiled of catalog.cases) {
+    const current = new Set(map.get(compiled.resourceId) ?? []);
+    for (const file of compiled.sourceFiles) current.add(file);
+    map.set(compiled.resourceId, [...current].sort(compareStrings));
+  }
+  for (const [subject, effects] of Object.entries(catalog.dependencies)) {
+    const combined = new Set(map.get(subject) ?? []);
+    for (const effectId of effects) {
+      for (const file of map.get(effectId) ?? []) combined.add(file);
+    }
+    map.set(subject, [...combined].sort(compareStrings));
   }
   return map;
 }
@@ -334,12 +363,43 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       successfulDetectors: contributions.length,
     },
   });
-  const policy = evaluatePolicies({
+  let policy = evaluatePolicies({
     graph,
     policies: policiesParsed.data,
     claims,
     extraBlocking: blocking,
   });
+  let behaviorCatalog: BehaviorCatalog | null = null;
+  if (config.behaviorPolicy !== undefined) {
+    const behaviorPath = resolveRepoPath(cwd, config.behaviorPolicy);
+    let compiled;
+    try {
+      compiled = compileBehaviorPolicy({
+        graph,
+        policy: parseBehaviorPolicy(loadYaml(behaviorPath, 'behavior policy')),
+      });
+    } catch (error) {
+      if (error instanceof PolicyEvaluationError) throw new UsageError(error.message);
+      throw error;
+    }
+    behaviorCatalog = compiled.catalog;
+    const obligationIds = new Set(policy.obligations.map((item) => item.id));
+    const mergedObligations = [...policy.obligations];
+    for (const obligation of compiled.obligations) {
+      if (obligationIds.has(obligation.id)) continue;
+      obligationIds.add(obligation.id);
+      mergedObligations.push(obligation);
+    }
+    policy = {
+      ...policy,
+      obligations: mergedObligations.sort((a, b) => compareStrings(a.id, b.id)),
+      blocking: [...policy.blocking, ...compiled.blocking].sort(
+        (a, b) => compareStrings(a.kind, b.kind) || compareStrings(a.resourceId ?? '', b.resourceId ?? ''),
+      ),
+    };
+    if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'behavior-catalog.json'), `${JSON.stringify(behaviorCatalog, null, 2)}\n`);
+  }
 
   const now = clock.now();
   const changedFiles =
@@ -366,6 +426,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     changedFiles,
     classification,
     classificationsView: effectiveClassifications(graph, classification),
+    behaviorCatalog,
   };
 }
 

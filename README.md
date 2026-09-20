@@ -150,16 +150,20 @@ engine now serves, end to end:
 
 **Contract capabilities (fail-closed honesty).** Gradable today:
 `persistence:create|read|update|delete` (engine-observed same-entity reads +
-exact-value echo) and the transport-only `http:request-observed` /
+exact-value echo), the transport-only `http:request-observed` /
 `http:response-status-ok` (witness-observed exchange + provenance-verified
-claimed UI anchor). Unavailable and BLOCKING before evidence is examined:
-`http:frontend-request-observed` (no independent browser/test attribution
-channel — attribution stays suite-claimed). Fail-closed namespaces:
-UI-semantic `crud:*` (use `persistence:*`) and all of
-`auth:*`/`task:*`/`validation:*`/`webhook:*`/`workflow:*` — an unsupported
-contract surfaces as `VERIFIER_UNSUPPORTED` (a setup task for the observer),
-never as a request to generate more tests. `init --strict-e2e` preflight
-rejects setups whose policies require unavailable proof channels.
+claimed UI anchor), and the complete-behavior channel —
+`http:effect-verified`, `http:read-result-verified`, `auth:*`, and
+`validation:*` grade across the approved required cases with witness-issued
+`behavior.case` records (configure `behaviorPolicy` and declare cases; a
+missing declaration blocks). Unavailable and BLOCKING before evidence is
+examined: `http:frontend-request-observed` (no independent browser/test
+attribution channel — attribution stays suite-claimed). Fail-closed
+namespaces: UI-semantic `crud:*` (use `persistence:*`), `task:*`,
+`webhook:*`, and `workflow:*` — an unsupported contract surfaces as
+`VERIFIER_UNSUPPORTED` (a setup task for the observer), never as a request
+to generate more tests. `init --strict-e2e` preflight rejects setups whose
+policies require unavailable proof channels.
 
 HTTP endpoint obligations (plan §8 / D1) are honest about transport:
 reports say "witness observed an HTTP exchange" and "suite-claimed", never

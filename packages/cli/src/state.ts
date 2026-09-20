@@ -34,7 +34,7 @@ import { randomUUID } from 'node:crypto';
 import {
   canonicalJson,
   compareStrings,
-  fingerprint,
+  fingerprintObligation,
   type HttpRouteCandidate,
   type JsonValue,
   type Obligation,
@@ -124,12 +124,7 @@ export function stateObligations(
       contract: obligation.contract,
       policyId: obligation.policyId,
       lifecycle: obligation.lifecycle,
-      fingerprint: fingerprint({
-        resourceId: obligation.resourceId,
-        contract: obligation.contract,
-        policyId: obligation.policyId,
-        lifecycle: obligation.lifecycle,
-      }),
+      fingerprint: fingerprintObligation(obligation),
       source: entry?.source ?? '',
       location: entry?.location ?? null,
     };

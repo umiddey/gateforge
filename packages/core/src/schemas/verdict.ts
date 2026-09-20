@@ -68,6 +68,15 @@ export const CauseCodeSchema = z.enum([
   'DIAGNOSTIC_TEST_FAILURE',
   'DIAGNOSTIC_RUN_INCOMPLETE',
   'DIAGNOSTIC_RESULT_STALE',
+  'ENDPOINT_BEHAVIOR_MISSING',
+  'BEHAVIOR_REFERENCE_STALE',
+  'BEHAVIOR_CASE_UNMAPPED',
+  'BEHAVIOR_CASE_MISSING',
+  'BEHAVIOR_BINDING_MISMATCH',
+  'BEHAVIOR_EFFECT_MISMATCH',
+  'OBSERVATION_SCOPE_INCOMPLETE',
+  'BEHAVIOR_UNEXPECTED_EFFECT',
+  'ENFORCEMENT_BOUNDARY_UNVERIFIED',
 ]);
 
 /** Inferred cause-code union. */
@@ -112,4 +121,13 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   DIAGNOSTIC_RUN_INCOMPLETE:
     'Repair the run; an incomplete diagnostic run never displays as passing',
   DIAGNOSTIC_RESULT_STALE: 'Rerun the diagnostic suite for the exact candidate',
+  ENDPOINT_BEHAVIOR_MISSING: 'Owner defines endpoint behavior; agent cannot exclude it',
+  BEHAVIOR_REFERENCE_STALE: 'Repair reviewed references and rerun',
+  BEHAVIOR_CASE_UNMAPPED: 'Reuse/map a suitable test, or add thin overlay proof',
+  BEHAVIOR_CASE_MISSING: 'Execute the case through its required channel',
+  BEHAVIOR_BINDING_MISMATCH: 'Repair wrong path/record binding; no label changes as proof',
+  BEHAVIOR_EFFECT_MISMATCH: 'Fix the application or owner-reviewed expectation',
+  OBSERVATION_SCOPE_INCOMPLETE: 'Supply a working trusted observer or fix collection',
+  BEHAVIOR_UNEXPECTED_EFFECT: 'Fix application side effect',
+  ENFORCEMENT_BOUNDARY_UNVERIFIED: 'Owner provisions/verifies runtime',
 });

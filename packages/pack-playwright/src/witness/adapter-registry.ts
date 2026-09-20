@@ -155,6 +155,16 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
     const observeProblem = validateObserveBinding(adapter['observe']);
     if (observeProblem !== null) problems.push(observeProblem);
   }
+  // Trusted scope/barrier observation (plan 2026-09-19 §4.4, Phase 4):
+  // OPTIONAL — adapters lacking these methods still serve legacy proofs
+  // but cannot satisfy strong contracts requiring scoped observation.
+  // Present-but-not-a-function is a load-time violation (fail closed).
+  if (adapter['snapshotScope'] !== undefined && typeof adapter['snapshotScope'] !== 'function') {
+    problems.push('snapshotScope must be an async function (ctx, {scope, fixtureNamespace}) => ScopeSnapshot when present');
+  }
+  if (adapter['awaitBarrier'] !== undefined && typeof adapter['awaitBarrier'] !== 'function') {
+    problems.push('awaitBarrier must be an async function (ctx, {scope, fixtureNamespace, operationId, deadlineMs}) when present');
+  }
   if (problems.length > 0) {
     throw new AdapterRegistryError(`adapter '${name}' violates the adapter contract: ${problems.join('; ')}`);
   }
@@ -172,6 +182,12 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
       : {}),
     ...(adapter['observe'] !== undefined
       ? { observe: adapter['observe'] as EvidenceAdapter['observe'] }
+      : {}),
+    ...(adapter['snapshotScope'] !== undefined
+      ? { snapshotScope: adapter['snapshotScope'] as EvidenceAdapter['snapshotScope'] }
+      : {}),
+    ...(adapter['awaitBarrier'] !== undefined
+      ? { awaitBarrier: adapter['awaitBarrier'] as EvidenceAdapter['awaitBarrier'] }
       : {}),
   };
 }

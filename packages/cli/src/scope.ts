@@ -107,6 +107,7 @@ function matchGateDefiningInput(
     policies: string;
     classificationPolicy: string;
     baselines: string;
+    behaviorPolicy: string | null;
     adapters: string;
     waivers: string;
     pluginModules: readonly string[];
@@ -116,6 +117,7 @@ function matchGateDefiningInput(
   if (file === gate.policies) return gate.policies;
   if (file === gate.classificationPolicy) return gate.classificationPolicy;
   if (file === gate.baselines) return gate.baselines;
+  if (gate.behaviorPolicy !== null && file === gate.behaviorPolicy) return gate.behaviorPolicy;
   if (PACK_CONFIGS.includes(file)) return file;
   if (underDir(file, gate.adapters)) return gate.adapters;
   if (underDir(file, gate.waivers)) return gate.waivers;
@@ -167,6 +169,7 @@ export function computeEvaluationScope(input: {
     policies: normalizeRepoPath(input.config.policies),
     classificationPolicy: normalizeRepoPath(input.config.classificationPolicy),
     baselines: normalizeRepoPath(input.config.baselines),
+    behaviorPolicy: input.config.behaviorPolicy === undefined ? null : normalizeRepoPath(input.config.behaviorPolicy),
     adapters: normalizeRepoPath(input.config.adapters),
     waivers: normalizeRepoPath(input.config.waivers),
     pluginModules,

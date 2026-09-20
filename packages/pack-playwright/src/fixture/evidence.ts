@@ -125,6 +125,20 @@ export interface EvidenceApi {
     }>;
   }>;
   finalize(): Promise<{ claims: string[]; records: WitnessRecord[] }>;
+  /**
+   * Proves one required behavior case through the ENGINE (plan
+   * 2026-09-19 Phase 6): executes the approved case and drives its
+   * principal operation, returning the redacted seal reference. The
+   * call sends ONLY the allowed case id — the witness resolves actor
+   * material, subjects, and expectations from the supervisor-bound
+   * catalog, and the engine performs every state-changing step.
+   */
+  prove(caseId: string): Promise<{
+    executionId: string;
+    namespace: string;
+    recordIds: string[];
+    state: string;
+  }>;
 }
 
 /** One witness-issued record as the finalize ledger reports it. */
@@ -536,6 +550,35 @@ export async function createEvidence({
     };
   }
 
+  // ---------- behavior proof (plan 2026-09-19 Phase 6) ----------
+  // The test names ONE allowed case id; the engine executes the
+  // approved case (fixture lease + before-state), drives the principal
+  // operation (request/browser per channel), and seals the case
+  // record(s). Proof strength comes from engine observation, never
+  // from clicks or assertions in the test body.
+
+  async function prove(caseId: string): Promise<{
+    executionId: string;
+    namespace: string;
+    recordIds: string[];
+    state: string;
+  }> {
+    if (typeof caseId !== 'string' || caseId.length === 0) {
+      throw new Error('evidence.prove requires a non-empty case id');
+    }
+    const executed = await witness().proveCase({ ...sessionChannel, caseId });
+    const sealed = await witness().drivePrincipal({
+      ...sessionChannel,
+      executionId: executed.executionId,
+    });
+    return {
+      executionId: sealed.executionId,
+      namespace: executed.namespace,
+      recordIds: [...sealed.recordIds],
+      state: sealed.state,
+    };
+  }
+
   // ---------- finalize (fail-fast + ledger cross-check) ----------
 
   async function finalize(): Promise<{ claims: string[]; records: WitnessRecord[] }> {
@@ -573,6 +616,7 @@ export async function createEvidence({
     visible: Object.freeze(visible),
     persistence: Object.freeze(persistence),
     http: Object.freeze({ observe: observeHttp }),
+    prove,
     finalize,
   });
 }

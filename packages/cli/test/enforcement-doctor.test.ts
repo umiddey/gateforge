@@ -45,6 +45,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(report.mode).toBe('standard');
       expect(report.strictE2E).toBe(false);
       expect(report.checks.map((entry) => entry.id)).toEqual([
+        'behavior-profile',
         'config',
         'enforcement-mode',
         'hook',
@@ -55,6 +56,10 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'trusted-binary-policy',
       ]);
       expect(checkById(report, 'config').status).toBe('ok');
+      // Behavior profile not configured: ok (basic behavior only).
+      const behavior = checkById(report, 'behavior-profile');
+      expect(behavior.status).toBe('ok');
+      expect(behavior.detail).toContain('not configured');
       // No hook installed: a warning, precisely.
       const hook = checkById(report, 'hook');
       expect(hook.status).toBe('warn');

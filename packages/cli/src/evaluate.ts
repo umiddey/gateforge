@@ -23,7 +23,7 @@ import {
   evaluateCoveragePolicy,
   type MappedCoverage,
   evaluateObligations,
-  fingerprint,
+  fingerprintObligation,
   loadWaivers,
   strictCapabilityGaps,
   verifyAttestationMac,
@@ -50,12 +50,7 @@ import { httpRoutesView, readJsonArray } from './state.js';
  * capture) so both sides hash exactly the same way.
  */
 export function obligationFingerprint(obligation: Obligation): string {
-  return fingerprint({
-    resourceId: obligation.resourceId,
-    contract: obligation.contract,
-    policyId: obligation.policyId,
-    lifecycle: obligation.lifecycle,
-  });
+  return fingerprintObligation(obligation);
 }
 
 
@@ -84,6 +79,14 @@ export interface EvaluateInput {
    * these changed files are evaluated/reported (check --changed).
    */
   changedFiles?: readonly string[] | null;
+  /** Compiled behavior catalog used to expand changed-file selection. */
+  behaviorCatalog?: import('@gate-forge/core').BehaviorCatalog | null;
+  /**
+   * Expected authority profile digest bound into behavior grading (the
+   * engine bundle binding). Provisioned by callers that know the
+   * trusted policy digest; absent skips the check (documented).
+   */
+  behaviorAuthorityProfileDigest?: string | null;
   /**
    * Declared claims derived from resolved test mappings (plan
    * 2026-09-13 §5.3, Phase 3): sidecar/native mapping bindings join the
@@ -426,6 +429,21 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   const httpRoutes = httpRoutesView(graph);
 
   const scoped = scopeObligations(input);
+  // Trusted behavior context (plan 2026-09-19 §4.7): the compiled
+  // catalog + requirements travel from the controller-bound pipeline
+  // output — never CLI configuration, never record payloads. Absent
+  // without a behavior document (legacy semantics unchanged).
+  const behaviorContext =
+    input.behaviorCatalog === undefined || input.behaviorCatalog === null
+      ? undefined
+      : {
+          catalog: input.behaviorCatalog,
+          requirements: input.behaviorCatalog.requirements,
+          ...(input.behaviorAuthorityProfileDigest === undefined ||
+          input.behaviorAuthorityProfileDigest === null
+            ? {}
+            : { authorityProfileDigest: input.behaviorAuthorityProfileDigest }),
+        };
   const verdicts: ObligationVerdict[] = [];
   for (const obligation of scoped) {
     const entries = evaluateObligations([obligation], {
@@ -435,6 +453,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
       classification: classifications.get(obligation.resourceId) ?? null,
       resource: resourceById.get(obligation.resourceId) ?? null,
       httpRoutes,
+      ...(behaviorContext === undefined ? {} : { behavior: behaviorContext }),
       now,
     });
     const entry = entries[0];
@@ -444,9 +463,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
       detector: detectors.get(obligation.resourceId) ?? null,
     });
   }
-  verdicts.sort((a, b) => (a.obligation.id < b.obligation.id ? -1 : a.obligation.id > b.obligation.id ? 1 : 0));
-
-  const sources = sourcesByResourceId(graph);
+  const sources = sourcesByResourceId(graph, input.behaviorCatalog);
   const scopedBlocking =
     input.changedFiles === null || input.changedFiles === undefined
       ? [...input.blocking]
@@ -583,7 +600,7 @@ function scopeObligations(input: EvaluateInput): Obligation[] {
     return [...input.obligations];
   }
   const changed = new Set(input.changedFiles);
-  const sources = sourcesByResourceId(input.graph);
+  const sources = sourcesByResourceId(input.graph, input.behaviorCatalog);
   return input.obligations.filter((obligation) => {
     const resourceSources = sources.get(obligation.resourceId);
     if (resourceSources === undefined) return false;

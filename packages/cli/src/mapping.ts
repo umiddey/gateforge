@@ -33,6 +33,7 @@ import {
   resolveTestMappings,
   TestMapSchema,
   type BlockingEntry,
+  type BehaviorCatalog,
   type Claim,
   type GateforgeConfig,
   type Location,
@@ -147,6 +148,8 @@ export interface MappingResolutionOptions {
   catalog?: TestCatalog;
   /** Optional prior-run hints (suggestions only, never grading). */
   priorRunHints?: readonly { logicalKey: string; obligationId: string }[];
+  /** Compiled behavior catalog when complete-behavior is enabled. */
+  behaviorCatalog?: BehaviorCatalog | null;
 }
 
 /** One resolution over a real repository. */
@@ -210,6 +213,7 @@ export async function resolveRepositoryMappings(
     sidecar: sidecar ?? { schemaVersion: 1, tests: [] },
     obligationIds: options.obligations.map((obligation) => obligation.id),
     ...(options.priorRunHints !== undefined ? { priorRunHints: options.priorRunHints } : {}),
+    ...(options.behaviorCatalog !== undefined ? { behaviorCatalog: options.behaviorCatalog } : {}),
   });
   return { catalog, sidecar, resolution, nativeClaims };
 }

@@ -5,7 +5,7 @@
  * reusing the exact provenance primitives (`createHmac`, `canonicalJson`,
  * constant-time compare). No second, weaker evidence system exists here:
  * a receipt without a verifying MAC is rejected, and the MAC domain
- * (`gateforge.receipt.v1`) is distinct from the ledger attestation domain,
+ * (`gateforge.receipt.v2`) is distinct from the ledger attestation domain,
  * so neither envelope can ever verify as the other.
  *
  * Issuance rule (plan Phase 4 item 5): a receipt is minted ONLY after
@@ -14,14 +14,15 @@
  * rejection, never a partial pass.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { canonicalJson } from '../canonical-json.js';
+import { canonicalJson, sha256Canonical, type JsonValue } from '../canonical-json.js';
 import { GateReceiptSchema, type GateReceipt } from '../schemas/gate-receipt.js';
+import { EMPTY_BEHAVIOR_CATALOG_DIGEST } from '../policy/behavior.js';
 
 /** Domain tag binding receipt MACs to the gate-receipt envelope format. */
-export const RECEIPT_DOMAIN = 'gateforge.receipt.v1';
+export const RECEIPT_DOMAIN = 'gateforge.receipt.v2';
 
 /** The only receipt envelope version this code produces or honors. */
-export const RECEIPT_VERSION = 1;
+export const RECEIPT_VERSION = 2;
 
 /** Shape a 64-char lowercase hex MAC must have. */
 const MAC_PATTERN = /^[0-9a-f]{64}$/;
@@ -29,9 +30,91 @@ const MAC_PATTERN = /^[0-9a-f]{64}$/;
 /** The unsigned receipt body (everything the MAC covers). */
 export type GateReceiptBody = Omit<GateReceipt, 'mac'>;
 
+/** Canonical digest for an empty required-case set (never an omitted field). */
+export const EMPTY_REQUIRED_CASE_SET_DIGEST = sha256Canonical({
+  domain: 'gateforge.required-cases.v1',
+  specifications: [],
+});
+
+/** Canonical digest when the sealed run executed no behavior cases. */
+export const EMPTY_CASE_EXECUTION_DIGEST = sha256Canonical({
+  domain: 'gateforge.case-execution.v1',
+  executions: [],
+});
+
+/** Execution profile identifying a local, unisolated run (never managed acceptance). */
+export const LOCAL_UNISOLATED_BOUNDARY = 'local-unisolated';
+
+/**
+ * Hashes the sorted full required case specifications (not just stable
+ * case ids) into the receipt-bound required-case-set digest.
+ */
+export function requiredCaseSetDigestOf(specifications: readonly JsonValue[]): string {
+  if (specifications.length === 0) return EMPTY_REQUIRED_CASE_SET_DIGEST;
+  return sha256Canonical({
+    domain: 'gateforge.required-cases.v1',
+    specifications: [...specifications].sort((a, b) => {
+      const left = JSON.stringify(a);
+      const right = JSON.stringify(b);
+      return left < right ? -1 : left > right ? 1 : 0;
+    }),
+  });
+}
+
+/**
+ * Hashes the sorted executed case ids into the receipt-bound
+ * case-execution digest.
+ */
+export function caseExecutionDigestOf(caseIds: readonly string[]): string {
+  if (caseIds.length === 0) return EMPTY_CASE_EXECUTION_DIGEST;
+  return sha256Canonical({
+    domain: 'gateforge.case-execution.v1',
+    executions: [...new Set(caseIds)].sort(),
+  });
+}
+
+/**
+ * Binds the approved engine bundle: engine version plus the trusted
+ * policy digest of the bundle it ran with.
+ */
+export function engineBundleDigestOf(engineVersion: string, trustedPolicyDigest: string): string {
+  return sha256Canonical({
+    domain: 'gateforge.engine-bundle.v1',
+    engineVersion,
+    trustedPolicyDigest,
+  });
+}
+
+/**
+ * Binds the controller-issued record of the active execution profile.
+ * Local runs seal `local-unisolated`; that record cannot authorize a
+ * managed/complete protected acceptance.
+ */
+export function executionBoundaryDigestOf(profile: string): string {
+  return sha256Canonical({ domain: 'gateforge.execution-boundary.v1', profile });
+}
+
+/** Digest of the local-unisolated execution boundary (the only local value). */
+export const LOCAL_UNISOLATED_BOUNDARY_DIGEST = executionBoundaryDigestOf(LOCAL_UNISOLATED_BOUNDARY);
+
+/**
+ * Binds the controlled app artifact derived from the candidate tree.
+ * Local runs build nothing separate: the artifact IS the source tree
+ * (explicit kind, never a self-reported app header).
+ */
+export function targetArtifactDigestOf(candidateTreeId: string | null): string {
+  return sha256Canonical({
+    domain: 'gateforge.target-artifact.v1',
+    kind: 'source-tree',
+    tree: candidateTreeId,
+  });
+}
+
+export { EMPTY_BEHAVIOR_CATALOG_DIGEST };
+
 /**
  * Computes the receipt MAC (ADR 0005 D3): HMAC-SHA256 over the GF-canonical
- * JSON of `{domain: 'gateforge.receipt.v1', receiptVersion: 1, ...body}`
+ * JSON of `{domain: 'gateforge.receipt.v2', receiptVersion: 2, ...body}`
  * keyed by the witness verifier key — the same secret the tested suite
  * never receives for ledger attestations. The fixed domain tag prevents
  * cross-format signature acceptance in BOTH directions: a v2 ledger MAC
@@ -73,6 +156,13 @@ export type ReceiptRejection =
   | 'catalog-digest-mismatch'
   | 'execution-digest-mismatch'
   | 'attestation-digest-mismatch'
+  | 'tree-mismatch'
+  | 'behavior-digest-mismatch'
+  | 'case-set-mismatch'
+  | 'case-execution-mismatch'
+  | 'engine-bundle-mismatch'
+  | 'boundary-mismatch'
+  | 'artifact-mismatch'
   | 'not-clean';
 
 /** The verification outcome: a validated receipt or a typed rejection. */
@@ -108,10 +198,30 @@ export function verifyGateReceipt(
     catalogDigest?: string;
     executionResultDigest?: string;
     evidenceAttestationDigest?: string | null;
+    candidateTreeId?: string | null;
+    behaviorCatalogDigest?: string;
+    requiredCaseSetDigest?: string;
+    caseExecutionDigest?: string;
+    engineBundleDigest?: string;
+    executionBoundaryDigest?: string;
+    targetArtifactDigest?: string;
   } = {},
 ): ReceiptVerification {
   if (candidate === undefined || candidate === null) {
     return { ok: false, rejection: 'missing', detail: 'gate receipt is missing' };
+  }
+  if (
+    typeof candidate === 'object' &&
+    candidate !== null &&
+    (candidate as Record<string, unknown>)['receiptVersion'] === 1
+  ) {
+    return {
+      ok: false,
+      rejection: 'malformed',
+      detail:
+        'gate receipt is receiptVersion 1, which is no longer accepted — rerun the gate to seal a ' +
+        'fresh receiptVersion 2 receipt (old receipts are never re-signed or auto-upgraded)',
+    };
   }
   const parsed = GateReceiptSchema.safeParse(candidate);
   if (!parsed.success) {
@@ -172,6 +282,55 @@ export function verifyGateReceipt(
       rejection: 'attestation-digest-mismatch',
       label: 'evidence attestation digest',
     },
+    {
+      field: 'candidateTreeId',
+      receiptValue: receipt.candidateTreeId,
+      expectedValue: expected.candidateTreeId,
+      rejection: 'tree-mismatch',
+      label: 'candidate tree id',
+    },
+    {
+      field: 'behaviorCatalogDigest',
+      receiptValue: receipt.behaviorCatalogDigest,
+      expectedValue: expected.behaviorCatalogDigest,
+      rejection: 'behavior-digest-mismatch',
+      label: 'behavior catalog digest',
+    },
+    {
+      field: 'requiredCaseSetDigest',
+      receiptValue: receipt.requiredCaseSetDigest,
+      expectedValue: expected.requiredCaseSetDigest,
+      rejection: 'case-set-mismatch',
+      label: 'required case set digest',
+    },
+    {
+      field: 'caseExecutionDigest',
+      receiptValue: receipt.caseExecutionDigest,
+      expectedValue: expected.caseExecutionDigest,
+      rejection: 'case-execution-mismatch',
+      label: 'case execution digest',
+    },
+    {
+      field: 'engineBundleDigest',
+      receiptValue: receipt.engineBundleDigest,
+      expectedValue: expected.engineBundleDigest,
+      rejection: 'engine-bundle-mismatch',
+      label: 'engine bundle digest',
+    },
+    {
+      field: 'executionBoundaryDigest',
+      receiptValue: receipt.executionBoundaryDigest,
+      expectedValue: expected.executionBoundaryDigest,
+      rejection: 'boundary-mismatch',
+      label: 'execution boundary digest',
+    },
+    {
+      field: 'targetArtifactDigest',
+      receiptValue: receipt.targetArtifactDigest,
+      expectedValue: expected.targetArtifactDigest,
+      rejection: 'artifact-mismatch',
+      label: 'target artifact digest',
+    },
   ];
   for (const check of digestChecks) {
     if (check.expectedValue === undefined) continue;
@@ -206,4 +365,11 @@ export interface ReceiptVerificationExpectations {
   catalogDigest?: string;
   executionResultDigest?: string;
   evidenceAttestationDigest?: string | null;
+  candidateTreeId?: string | null;
+  behaviorCatalogDigest?: string;
+  requiredCaseSetDigest?: string;
+  caseExecutionDigest?: string;
+  engineBundleDigest?: string;
+  executionBoundaryDigest?: string;
+  targetArtifactDigest?: string;
 }
