@@ -2173,3 +2173,17 @@ existing `gateforge init` command with an explicit `--managed` mode. Plain
 - Annotated tag `v0.5.0` was created and pushed.
 - `.github/workflows/publish.yml` publishes workspace packages on `v*` tags
   through npm trusted publishing (OIDC); no local `npm publish` was run.
+
+## 28. NPM publication result — 2026-09-20
+
+- The `v0.5.0` workflow completed successfully at the GitHub job level, but
+  npm published only `@gate-forge/cli@0.5.0`; the other workspace packages
+  were rejected because their npm Trusted Publisher settings are not configured.
+- `npm view @gate-forge/cli@0.5.0 version` returns `0.5.0`.
+- `npm view @gate-forge/core@0.5.0 version` returns 404, so a fresh install of
+  the CLI cannot yet resolve the matching 0.5.0 dependency graph.
+- `scripts/release-publish.sh` now exits nonzero when any package fails,
+  preventing future partial releases from reporting false success.
+- External blocker: configure npm Trusted Publisher for the remaining
+  `@gate-forge/*` packages, then publish a new coordinated version. No
+  credentials are available in this session for manual publication.

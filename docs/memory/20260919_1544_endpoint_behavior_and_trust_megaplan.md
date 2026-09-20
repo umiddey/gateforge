@@ -115,4 +115,15 @@
 - Annotated tag `v0.5.0` was created and pushed.
 - `.github/workflows/publish.yml` publishes workspace packages from `v*`
   tags through npm trusted publishing (OIDC); no local publish was run.
+
+## NPM PUBLICATION RESULT
+- The `v0.5.0` GitHub workflow job was green, but npm published only
+  `@gate-forge/cli@0.5.0`; the other workspaces failed because their Trusted
+  Publisher settings are missing.
+- CLI version lookup returns `0.5.0`; core `0.5.0` returns 404, so the
+  dependency graph is not yet installable from npm.
+- `scripts/release-publish.sh` now exits nonzero on any package failure.
+- External blocker: configure npm Trusted Publisher for every remaining
+  `@gate-forge/*` package and publish a new coordinated version. This session
+  has no npm credentials for manual publication.
 - Dry-run artifact: `gate-forge-cli-0.5.0.tgz`.
