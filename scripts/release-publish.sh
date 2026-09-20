@@ -3,10 +3,11 @@
 #
 # For each workspace package: if its exact version is already on the
 # registry, skip (safe re-runs, partial rollouts); otherwise publish with
-# provenance. A package whose Trusted Publisher is not configured yet (or
-# any other per-package failure) is a loud WARNING, not a run failure —
-# while the 13 packages are being configured incrementally. Flip the
-# `warn` branch to a hard failure once every package automates cleanly.
+# A partial publish is a broken release: a fresh install of the CLI can
+# resolve one workspace while its same-version dependencies are absent.
+# Fail the workflow so release automation cannot report a false green.
+#
+# Every package must have its npm Trusted Publisher configured before tagging.
 set -euo pipefail
 published=0; skipped=0; failed=0
 for dir in packages/*/; do
@@ -26,3 +27,7 @@ for dir in packages/*/; do
   fi
 done
 echo "publish summary: $published published, $skipped skipped, $failed failed"
+if (( failed > 0 )); then
+  echo "::error::$failed workspace package(s) failed to publish; release is incomplete"
+  exit 1
+fi
