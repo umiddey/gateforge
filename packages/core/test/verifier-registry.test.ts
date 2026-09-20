@@ -189,17 +189,18 @@ describe('pack contract grading (fail-closed by default)', () => {
 });
 
 describe('domain namespaces fail closed (no honest evidence channel)', () => {
-  it('auth: a perfectly-formed witnessed check record grades missing', () => {
+  it('auth: a perfectly-formed witnessed check record grades missing without a compiled case set', () => {
     const anchor = anchorRecord(OBLIGATION.id, 'read');
     const check = record(OBLIGATION.id);
     const outcome = grade([anchor, check]);
     expect(outcome.verdict).toBe('missing');
+    // Implemented contracts grade only across approved required cases;
+    // the per-claim fallback names the missing case set, and transport
+    // evidence still cannot satisfy them.
     expect(outcome.reason).toContain(
-      "contract 'auth:role-denied' has no honest evidence channel: proving 'role-denied'",
+      "contract 'auth:role-denied' has no compiled required-case set",
     );
-    expect(outcome.reason).toContain('identity/role material and tenant-scoped application state');
-    expect(outcome.reason).toContain("'tenant.accounts:auth:role-denied' stays blocking");
-    expect(outcome.reason).toContain('state-observing producer');
+    expect(outcome.reason).toContain('transport evidence cannot satisfy them');
   });
 
   it('workflow: a perfectly-formed witnessed check record grades missing', () => {
@@ -220,11 +221,11 @@ describe('domain namespaces fail closed (no honest evidence channel)', () => {
     const outcome = gradeFor(workflow, [anchor, check]);
     expect(outcome.verdict).toBe('missing');
     expect(outcome.reason).toContain(
-      "contract 'workflow:persisted-final-state' has no honest evidence channel: " +
-        "proving 'persisted-final-state'",
+      "contract 'workflow:persisted-final-state' has no compiled required-case set",
     );
-    expect(outcome.reason).toContain('the workflow state machine and its audit log');
-    expect(outcome.reason).toContain('state-observing producer');
+    expect(outcome.reason).toContain('transport evidence cannot satisfy them');
+    expect(outcome.reason).not.toContain('has no honest evidence channel');
+    expect(outcome.reason).not.toContain('state-observing producer');
   });
 
   it('webhook: a perfectly-formed dual-observation check record grades missing', () => {
@@ -246,13 +247,11 @@ describe('domain namespaces fail closed (no honest evidence channel)', () => {
     const outcome = gradeFor(webhook, [anchor, check]);
     expect(outcome.verdict).toBe('missing');
     expect(outcome.reason).toContain(
-      "contract 'webhook:replay-idempotent' has no honest evidence channel: " +
-        "proving 'replay-idempotent'",
+      "contract 'webhook:replay-idempotent' has no compiled required-case set",
     );
-    expect(outcome.reason).toContain(
-      'signature/replay verification over application-received deliveries',
-    );
-    expect(outcome.reason).toContain('state-observing producer');
+    expect(outcome.reason).toContain('transport evidence cannot satisfy them');
+    expect(outcome.reason).not.toContain('has no honest evidence channel');
+    expect(outcome.reason).not.toContain('state-observing producer');
   });
 
   it('task: a perfectly-formed dual-observation check record grades missing', () => {
@@ -274,13 +273,14 @@ describe('domain namespaces fail closed (no honest evidence channel)', () => {
     const outcome = gradeFor(task, [anchor, check]);
     expect(outcome.verdict).toBe('missing');
     expect(outcome.reason).toContain(
-      "contract 'task:idempotent' has no honest evidence channel: proving 'idempotent'",
+      "contract 'task:idempotent' has no compiled required-case set",
     );
-    expect(outcome.reason).toContain('queue/job delivery state');
-    expect(outcome.reason).toContain('state-observing producer');
+    expect(outcome.reason).toContain('transport evidence cannot satisfy them');
+    expect(outcome.reason).not.toContain('has no honest evidence channel');
+    expect(outcome.reason).not.toContain('state-observing producer');
   });
 
-  it('validation: a perfectly-formed witnessed check record grades missing', () => {
+  it('validation: a perfectly-formed witnessed check record grades missing without a compiled case set', () => {
     const validation: Obligation = {
       ...OBLIGATION,
       id: 'tenant.accounts:validation:error-message-explicit',
@@ -298,19 +298,15 @@ describe('domain namespaces fail closed (no honest evidence channel)', () => {
     const outcome = gradeFor(validation, [anchor, check]);
     expect(outcome.verdict).toBe('missing');
     expect(outcome.reason).toContain(
-      "contract 'validation:error-message-explicit' has no honest evidence channel: " +
-        "proving 'error-message-explicit'",
+      "contract 'validation:error-message-explicit' has no compiled required-case set",
     );
-    expect(outcome.reason).toContain(
-      'boundary semantics over application state and the response envelope',
-    );
-    expect(outcome.reason).toContain('state-observing producer');
+    expect(outcome.reason).toContain('transport evidence cannot satisfy them');
   });
 
   it('a forged-looking witnessed check can never satisfy: missing, never satisfied or invalid', () => {
     // The strongest possible transport evidence — a provenanced witnessed
     // check record, a provenanced anchor, and the bound endpoint resource
-    // — still yields only the honest-channel missing verdict.
+    // — still yields only the honest missing verdict (no compiled case set).
     const anchor = anchorRecord(OBLIGATION.id, 'read');
     const check = record(OBLIGATION.id);
     const outcome = grade([anchor, check], [claim()], {
@@ -320,7 +316,7 @@ describe('domain namespaces fail closed (no honest evidence channel)', () => {
     expect(outcome.verdict).not.toBe('satisfied');
     expect(outcome.verdict).not.toBe('invalid');
     expect(outcome.verdict).toBe('missing');
-    expect(outcome.reason).toContain('has no honest evidence channel');
+    expect(outcome.reason).toContain('has no compiled required-case set');
   });
 
   it('ui anchors do not change the fail-closed outcome', () => {
@@ -331,15 +327,14 @@ describe('domain namespaces fail closed (no honest evidence channel)', () => {
     expect(withoutAnchor.verdict).toBe('missing');
     expect(anchorOnly.verdict).toBe('missing');
     expect(withAnchor.reason).toBe(withoutAnchor.reason);
-    expect(withAnchor.reason).toContain('has no honest evidence channel');
+    expect(withAnchor.reason).toContain('has no compiled required-case set');
   });
 
   it('claimed-tier check records get the same honest-channel reason', () => {
     const claimed = record(OBLIGATION.id, { origin: 'suite-submitted', trust: 'claimed' });
     const outcome = grade([claimed]);
     expect(outcome.verdict).toBe('missing');
-    expect(outcome.reason).toContain('has no honest evidence channel');
-    expect(outcome.reason).toContain('state-observing producer');
+    expect(outcome.reason).toContain('has no compiled required-case set');
   });
 
   it('a witnessed check with a contradicting scenario still grades missing (never invalid)', () => {
@@ -354,7 +349,7 @@ describe('domain namespaces fail closed (no honest evidence channel)', () => {
     const outcome = grade([anchorRecord(OBLIGATION.id, 'read'), wrong]);
     expect(outcome.verdict).toBe('missing');
     expect(outcome.verdict).not.toBe('invalid');
-    expect(outcome.reason).toContain('has no honest evidence channel');
+    expect(outcome.reason).toContain('has no compiled required-case set');
   });
 });
 
@@ -1290,9 +1285,14 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
     const http = capabilityFor('http:request-observed');
     expect(http).not.toBeNull();
     expect(http?.availability.status).toBe('available');
-    expect(http?.contracts).toEqual(['http:request-observed', 'http:response-status-ok']);
+    expect(http?.contracts).toEqual([
+      'http:request-observed',
+      'http:response-status-ok',
+      'http:effect-verified',
+      'http:read-result-verified',
+    ]);
     expect(http?.testKinds).toEqual(['browser-e2e', 'api-e2e']);
-    expect(http?.observer).toContain('witness HTTP proxy channel');
+    expect(http?.observer).toContain('behavior.case');
     const frontend = http?.unavailableContracts.find(
       (entry) => entry.contract === 'http:frontend-request-observed',
     );
@@ -1301,6 +1301,11 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
     // browser, so the contract stays fail-closed rather than silently
     // change meaning.
     expect(frontend?.reason).toContain('by ORIGIN, not by browser');
+    // Phase 5: strong HTTP contracts are available — genuine
+    // witness-produced case evidence exercises the required-case grader.
+    expect(
+      http?.unavailableContracts.find((entry) => entry.contract === 'http:effect-verified'),
+    ).toBe(undefined);
   });
 
   it('persistence: available via the witness persistence adapter with the exact-value echo requirement', () => {
@@ -1329,20 +1334,72 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
     expect(crud?.testKinds).toEqual(['browser-e2e']);
     expect(crud?.observer).toContain('ENGINE-OWNED browser');
     expect(crud?.observer).toContain('suite-submitted UI records');
-    for (const [namespace, channel] of [
-      ['auth', 'identity/role material'],
-      ['task', 'queue/job delivery state'],
-      ['validation', 'boundary semantics'],
-      ['webhook', 'signature/replay verification'],
-      ['workflow', 'workflow state machine'],
+    for (const [namespace, channel, available, contracts] of [
+      [
+        'auth',
+        'identity/role material',
+        true,
+        [
+          'auth:role-allowed',
+          'auth:role-denied',
+          'auth:tenant-isolated',
+          'auth:denied-no-side-effect',
+          'auth:forged-token-rejected',
+        ],
+      ],
+      [
+        'task',
+        'queue/job delivery state',
+        true,
+        [
+          'task:retry-policy-enforced',
+          'task:idempotent',
+          'task:terminal-handled',
+          'task:observability-recorded',
+          'task:duplicate-delivery-handled',
+        ],
+      ],
+      [
+        'validation',
+        'boundary semantics',
+        true,
+        [
+          'validation:boundary-accepted',
+          'validation:boundary-rejected',
+          'validation:no-side-effect-on-reject',
+          'validation:error-message-explicit',
+          'validation:envelope-shape-stable',
+        ],
+      ],
+      [
+        'webhook',
+        'signature/replay verification',
+        true,
+        [
+          'webhook:signature-accepted',
+          'webhook:signature-rejected',
+          'webhook:malformed-rejected',
+          'webhook:replay-idempotent',
+          'webhook:retry-bounded',
+        ],
+      ],
+      [
+        'workflow',
+        'workflow state machine',
+        true,
+        [
+          'workflow:transition-allowed',
+          'workflow:transition-rejected',
+          'workflow:terminal-immutable',
+          'workflow:audit-emitted',
+          'workflow:persisted-final-state',
+        ],
+      ],
     ] as const) {
-      const capability = capabilityFor(`${namespace}:anything`);
-      expect(capability?.availability.status).toBe('unavailable');
-      expect(capability?.contracts).toEqual([]);
-      expect(capability?.observer).toContain(channel);
-      if (capability?.availability.status === 'unavailable') {
-        expect(capability.availability.reason).toContain('fail');
-      }
+      const capability = capabilityFor(`${namespace}:${contracts[0]!.split(':')[1]}`);
+      expect(capability?.availability.status, namespace).toBe('available');
+      expect(capability?.contracts, namespace).toEqual(contracts);
+      expect(capability?.observer, namespace).toContain(channel);
     }
   });
 
@@ -1366,6 +1423,8 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
     expect(capabilityFor('http:request-observed')?.contracts).toEqual([
       'http:request-observed',
       'http:response-status-ok',
+      'http:effect-verified',
+      'http:read-result-verified',
     ]);
     // A NEW namespace can register; clean it up by registering a unique one.
     expect(() =>
@@ -1393,22 +1452,23 @@ describe('cause mapping (plan 2026-09-13 §5.4)', () => {
     expect(mapped.nextAction).toBe(CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED']);
   });
 
-  it('fail-closed namespaces → VERIFIER_UNSUPPORTED (crud is available, so it is not among them)', () => {
+  it('Phase 8 namespaces are available through behavior.case, so missing case sets do not map to unsupported', () => {
     for (const contract of [
-      'auth:role-denied',
       'workflow:persisted-final-state',
+      'webhook:replay-idempotent',
+      'task:idempotent',
     ]) {
       const mapped = causeForVerdict({
         obligationId: `tenant.accounts:${contract}`,
         contract,
         verdict: 'missing',
-        reason: 'has no honest evidence channel',
+        reason: 'has no compiled required-case set',
       });
-      expect(mapped.cause).toBe('VERIFIER_UNSUPPORTED');
+      expect(mapped.cause).toBeNull();
+      expect(mapped.nextAction).toBeNull();
     }
-    // crud:update is AVAILABLE through the engine-owned browser channel
-    // (plan Phase 1 item 4), so a crud block maps by its per-rule reason
-    // — an unmapped precise reason carries no guessed cause.
+  });
+  it('crud precise reasons remain unmapped while the browser channel is available', () => {
     const crud = causeForVerdict({
       obligationId: 'tenant.accounts:crud:update',
       contract: 'crud:update',
@@ -1535,7 +1595,7 @@ describe('strict preflight capability gaps (plan 2026-09-13 Phase 0 item 4)', ()
     expect(gap?.contract).toBe('http:frontend-request-observed');
     expect(gap?.detail).toContain('no independent browser/test observation channel');
     expect(gap?.detail).toContain('by ORIGIN, not by browser');
-    expect(gap?.observer).toContain('witness HTTP proxy channel');
+    expect(gap?.observer).toContain('behavior.case');
     expect(gap?.nextAction).toBe(CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED']);
     // The UI-semantic crud contracts are AVAILABLE through the
     // engine-owned browser channel (plan Phase 1 item 4) — no capability
@@ -1548,15 +1608,16 @@ describe('strict preflight capability gaps (plan 2026-09-13 Phase 0 item 4)', ()
     expect(unknownCrud?.cause).toBe('VERIFIER_UNSUPPORTED');
   });
 
-  it('strictCapabilityGaps maps unsupported obligations precisely and sorts by id', () => {
+  it('strictCapabilityGaps maps only genuinely unsupported obligations and sorts by id', () => {
     const gaps = strictCapabilityGaps([
       { id: 'tenant.accounts:http:frontend-request-observed', contract: 'http:frontend-request-observed' },
       { id: 'tenant.accounts:persistence:read', contract: 'persistence:read' },
-      { id: 'tenant.orders:auth:role-denied', contract: 'auth:role-denied' },
+      // Phase 8 domain contracts are available through behavior.case; a
+      // missing required-case declaration blocks at verdict time instead.
+      { id: 'tenant.orders:workflow:persisted-final-state', contract: 'workflow:persisted-final-state' },
     ]);
     expect(gaps.map((gap) => gap.obligationId)).toEqual([
       'tenant.accounts:http:frontend-request-observed',
-      'tenant.orders:auth:role-denied',
     ]);
     expect(gaps.every((gap) => gap.cause === 'VERIFIER_UNSUPPORTED')).toBe(true);
     expect(gaps[0]?.detail).toContain("obligation 'tenant.accounts:http:frontend-request-observed'");

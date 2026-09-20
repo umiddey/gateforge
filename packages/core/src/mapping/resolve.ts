@@ -34,13 +34,15 @@ import type { Location } from '../schemas/common.js';
 import { ClaimSchema, type Claim } from '../schemas/claim.js';
 import type { TestCatalog, TestCatalogEntry, TestKind } from '../schemas/test-catalog.js';
 import type { TestMap } from '../schemas/test-map.js';
+import type { BehaviorCatalog } from '../schemas/behavior-catalog.js';
 import { CAUSE_NEXT_ACTIONS } from '../schemas/verdict.js';
 
 /** Why a mapping problem exists (plan §5.4 rows TEST_MAPPING_* + TEST_KIND_UNKNOWN). */
 export type MappingProblemCause =
   | 'TEST_MAPPING_AMBIGUOUS'
   | 'TEST_MAPPING_STALE'
-  | 'TEST_KIND_UNKNOWN';
+  | 'TEST_KIND_UNKNOWN'
+  | 'BEHAVIOR_CASE_UNMAPPED';
 
 /** Where a resolved binding's declaration came from. `inferred` bindings never grade (§5.3). */
 export type MappingOrigin = 'native' | 'sidecar' | 'inferred' | 'prior-run';
@@ -71,7 +73,6 @@ export interface TestInstanceRef {
   parameterIdentity: string | null;
 }
 
-/** One resolved declaration binding an existing test to an obligation. */
 export interface ResolvedClaimBinding {
   /** The logical test key the declaration resolves to. */
   logicalKey: string;
@@ -89,6 +90,8 @@ export interface ResolvedClaimBinding {
   reason: string | null;
   /** Best known source location of the test (native claim or catalog row). */
   sourceLocation: Location | null;
+  /** Compiled behavior case ids this binding intends to execute. */
+  caseIds?: string[];
 }
 
 /** Every resolved binding for one obligation (sorted by origin, then key). */
@@ -135,6 +138,8 @@ export interface ResolveMappingsInput {
   obligationIds: readonly string[];
   /** Optional prior-run observations (suggestions only, never grading). */
   priorRunHints?: readonly PriorRunHint[];
+  /** Compiled behavior catalog when the complete-behavior profile is on. */
+  behaviorCatalog?: BehaviorCatalog | null;
 }
 
 /** Sort rank of binding origins (declared first, hints last). */
@@ -150,6 +155,7 @@ const PROBLEM_RANK: Readonly<Record<MappingProblemCause, number>> = Object.freez
   TEST_MAPPING_AMBIGUOUS: 0,
   TEST_MAPPING_STALE: 1,
   TEST_KIND_UNKNOWN: 2,
+  BEHAVIOR_CASE_UNMAPPED: 3,
 });
 
 /** Test kinds that claim end-to-end proof (mocking disqualifies them, §3.2). */
@@ -357,6 +363,36 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
       }
     }
 
+    const resolvedCaseIds: string[] = [];
+    for (const rawId of entry.caseIds ?? []) {
+      const compiled = (input.behaviorCatalog?.cases ?? []).find(
+        (item) => item.caseId === rawId || item.definition.id === rawId,
+      );
+      if (compiled === undefined) {
+        pushProblem({
+          cause: 'TEST_MAPPING_STALE',
+          obligationId: claims[0] ?? null,
+          detail:
+            `sidecar entry '${entry.key}' names case '${rawId}', which is not in the current ` +
+            'behavior catalog (stale or foreign); correct the mapping',
+          locations: [matched[0]?.sourceLocation ?? { file: entry.selector.file, line: 1, col: 0 }],
+        });
+        continue;
+      }
+      if (!compiled.obligationIds.some((id) => claims.includes(id))) {
+        pushProblem({
+          cause: 'TEST_MAPPING_STALE',
+          obligationId: compiled.obligationIds[0] ?? null,
+          detail:
+            `sidecar entry '${entry.key}' names case '${rawId}' which does not belong to any of ` +
+            "this entry's claimed obligations",
+          locations: [matched[0]?.sourceLocation ?? { file: entry.selector.file, line: 1, col: 0 }],
+        });
+        continue;
+      }
+      resolvedCaseIds.push(compiled.caseId);
+    }
+
     // Bind the declaration (many-to-many allowed). Ambiguity problems
     // above stay visible; the binding itself is data for suggestions.
     for (const obligationId of claims) {
@@ -370,6 +406,10 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
         categories: [...new Set(entry.categories ?? [])].sort(compareStrings),
         reason: entry.reason,
         sourceLocation: matched[0]?.sourceLocation ?? null,
+        caseIds: resolvedCaseIds.filter((caseId) => {
+          const compiled = (input.behaviorCatalog?.cases ?? []).find((item) => item.caseId === caseId);
+          return compiled?.obligationIds.includes(obligationId) ?? false;
+        }),
       });
     }
   }
@@ -419,9 +459,6 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
       });
       continue;
     }
-    // Exact duplicate of a sidecar declaration (same obligation, same
-    // test file) → dedupe idempotently: the sidecar binding (a superset:
-    // reason/kind/categories) stands, the native row adds nothing.
     const instances = input.catalog.entries
       .filter((row) => row.file === claim.testFile)
       .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey));
@@ -442,6 +479,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
       categories: [],
       reason: null,
       sourceLocation: claim.location ?? null,
+      caseIds: [],
     });
   }
 
@@ -463,6 +501,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
       categories: [],
       reason: 'a prior run bound this test to the obligation (a hint only — it never satisfies a new run)',
       sourceLocation: row.sourceLocation,
+      caseIds: [],
     });
   }
 
@@ -484,7 +523,35 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
         categories: candidate.row.categorySignals.map((signal) => signal.label).sort(compareStrings),
         reason: `inferred, never auto-declared: ${candidate.why.join('; ')}`,
         sourceLocation: candidate.row.sourceLocation,
+        caseIds: [],
       });
+    }
+  }
+
+  if (input.behaviorCatalog !== undefined && input.behaviorCatalog !== null) {
+    const mappedCases = new Map<string, Set<string>>();
+    for (const obligationId of obligationIdsSorted) {
+      const ids = new Set<string>();
+      for (const binding of byObligation.get(obligationId)?.values() ?? []) {
+        if (binding.origin !== 'sidecar') continue;
+        for (const caseId of binding.caseIds ?? []) ids.add(caseId);
+      }
+      mappedCases.set(obligationId, ids);
+    }
+    for (const [obligationId, required] of Object.entries(input.behaviorCatalog.requirements)) {
+      const mapped = mappedCases.get(obligationId) ?? new Set<string>();
+      for (const caseId of required) {
+        if (mapped.has(caseId)) continue;
+        const compiled = input.behaviorCatalog.cases.find((item) => item.caseId === caseId);
+        pushProblem({
+          cause: 'BEHAVIOR_CASE_UNMAPPED',
+          obligationId,
+          detail:
+            `required case '${compiled?.definition.id ?? caseId}' for '${obligationId}' has no current ` +
+            'declared test mapping',
+          locations: [],
+        });
+      }
     }
   }
 

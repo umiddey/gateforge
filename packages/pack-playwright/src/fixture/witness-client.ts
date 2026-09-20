@@ -8,6 +8,10 @@ import {
   WITNESS_URL_FILE,
 } from '../constants.js';
 import type {
+  BehaviorExecuteRequest,
+  BehaviorExecuteResponse,
+  BehaviorPrincipalRequest,
+  BehaviorPrincipalResponse,
   BrowserActionRequest,
   BrowserActionResponse,
   BrowserSurfaceRequest,
@@ -254,6 +258,26 @@ export class WitnessClient {
    */
   async browserVisible(request: BrowserVisibleRequest): Promise<BrowserVisibleResponse> {
     return this.request<BrowserVisibleResponse>('/browser/visible', request);
+  }
+
+  /**
+   * POST /behavior/execute (plan 2026-09-19 Phase 6): asks the ENGINE to
+   * execute one approved behavior case. The call carries ONLY the
+   * allowed case id plus the session credential — actor material,
+   * expectations, and subjects resolve engine-side and are never
+   * readable or overridable here.
+   */
+  async proveCase(request: BehaviorExecuteRequest): Promise<BehaviorExecuteResponse> {
+    return this.request<BehaviorExecuteResponse>('/behavior/execute', request);
+  }
+
+  /**
+   * POST /behavior/principal (plan 2026-09-19 Phase 6): asks the ENGINE
+   * to drive the prepared execution's principal operation and seal the
+   * case record. Same credential-only boundary as `proveCase`.
+   */
+  async drivePrincipal(request: BehaviorPrincipalRequest): Promise<BehaviorPrincipalResponse> {
+    return this.request<BehaviorPrincipalResponse>('/behavior/principal', request);
   }
 
   	/** GET /records — the issued ledger for this run. */

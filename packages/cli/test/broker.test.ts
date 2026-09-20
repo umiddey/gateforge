@@ -113,7 +113,7 @@ describe('broker commit (typed rejections never touch the authoritative ref)', (
           receipt: minted.receiptPath,
         });
         expect(result.code).toBe(2);
-        expect(result.stderr).toContain('input digest does not match');
+        expect(result.stderr).toContain('candidate tree id does not match');
         expect(result.stderr).toContain('rerun the gate for the exact candidate');
         expect(authority.headSha()).toBe(headBefore);
       });

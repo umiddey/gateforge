@@ -40,3 +40,11 @@ export {
   type TrustedPolicyInput,
   type PolicyWeakeningCheck,
 } from './trusted.js';
+export {
+  BEHAVIOR_POLICY_ID,
+  EMPTY_BEHAVIOR_CATALOG_DIGEST,
+  compileBehaviorPolicy,
+  parseBehaviorPolicy,
+  type CompileBehaviorPolicyInput,
+  type CompileBehaviorPolicyResult,
+} from './behavior.js';

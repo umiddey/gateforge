@@ -1,0 +1,28 @@
+# Explicit case mappings for the three overlay tests. Mapping declares intent;
+# only engine-issued behavior.case evidence can satisfy these claims.
+schemaVersion: 1
+tests:
+  - key: 'playwright:chromium:e2e/behavior-proof.spec.js:profile editor updates an account'
+    selector: {runner: playwright, project: chromium, file: e2e/behavior-proof.spec.js, titlePath: ['profile editor updates an account']}
+    kind: browser-e2e
+    claims:
+      - tenant.http-post-profile-accounts-id-d27ca586:http:effect-verified
+    caseIds:
+      - 7ae75369e31d652665f85b6ab5d55edf43a48202a57dbe4caa7a0641d5ff9821
+    reason: profile endpoint engine-http behavior case
+  - key: 'playwright:chromium:e2e/behavior-proof.spec.js:admin editor updates an account'
+    selector: {runner: playwright, project: chromium, file: e2e/behavior-proof.spec.js, titlePath: ['admin editor updates an account']}
+    kind: browser-e2e
+    claims:
+      - tenant.http-post-admin-accounts-id-d2cbd1c4:http:effect-verified
+    caseIds:
+      - d7e39ec43a5685909d68b3c88ab821548166d36ac03ddb8260b878b52be95e4b
+    reason: admin endpoint engine-http behavior case
+  - key: 'playwright:chromium:e2e/behavior-proof.spec.js:bulk import creates two accounts'
+    selector: {runner: playwright, project: chromium, file: e2e/behavior-proof.spec.js, titlePath: ['bulk import creates two accounts']}
+    kind: browser-e2e
+    claims:
+      - tenant.http-post-imports-accounts-a4eac965:http:effect-verified
+    caseIds:
+      - 5717b7412032248a671d4b83a3e594c3558a426e2eabfabb9027a3f82f389c63
+    reason: supported engine-http bulk import; multipart remains explicitly unsupported

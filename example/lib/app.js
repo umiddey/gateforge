@@ -57,55 +57,128 @@ function canonicalJson(value) {
  *   options (object): optional.
  *     clock (function): injectable clock; called for every timestamp and may
  *       return anything `new Date()` accepts. Defaults to the system clock.
+ *     backend (object|null): optional injected async backing store
+ *       `{ load(): Promise<rows[]>, save(rows): Promise<void> }` for
+ *       strong behavior runs (namespaced writer capability to the trusted
+ *       state service). Null (default) keeps the plain in-memory store
+ *       with synchronous returns. When a backend is present every method
+ *       returns a promise — callsites MUST await consistently (never mix
+ *       awaited and unawaited reads).
  *
  * Returns:
  *   object: { create, get, list, update, archive }. Ids are server-issued
  *   `acc-<n>`; timestamps are ISO-8601 strings from the injected clock;
  *   archive only flips `status` to "archived" (no hard delete).
  */
-export function createAccountStore({ clock = () => new Date() } = {}) {
+export function createAccountStore({ clock = () => new Date(), backend = null } = {}) {
   const accounts = new Map();
   let nextId = 1;
+  let loaded = backend === null;
   const nowIso = () => new Date(clock()).toISOString();
 
+  async function ensureLoaded() {
+    if (loaded || backend === null) return;
+    const rows = await backend.load();
+    accounts.clear();
+    let maxSeen = 0;
+    for (const row of rows) {
+      accounts.set(row.id, { ...row });
+      const match = /^acc-([0-9]+)$/.exec(row.id ?? '');
+      if (match) maxSeen = Math.max(maxSeen, Number(match[1]));
+    }
+    nextId = maxSeen + 1;
+    loaded = true;
+  }
+
+  function persist() {
+    if (backend === null) return null;
+    return backend.save([...accounts.values()]);
+  }
+
+  function insert({ firstName, lastName }) {
+    const id = `acc-${nextId++}`;
+    const timestamp = nowIso();
+    const account = {
+      id,
+      first_name: firstName,
+      last_name: lastName,
+      status: 'active',
+      created_at: timestamp,
+      updated_at: timestamp,
+    };
+    accounts.set(id, account);
+    return account;
+  }
+
+  if (backend === null) {
+    return {
+      create({ firstName, lastName }) {
+        return insert({ firstName, lastName });
+      },
+
+      get(id) {
+        return accounts.get(id) ?? null;
+      },
+
+      list() {
+        return [...accounts.values()];
+      },
+
+      update(id, { firstName, lastName }) {
+        const account = accounts.get(id);
+        if (!account) return null;
+        account.first_name = firstName;
+        account.last_name = lastName;
+        account.updated_at = nowIso();
+        return account;
+      },
+
+      archive(id) {
+        const account = accounts.get(id);
+        if (!account) return null;
+        account.status = 'archived';
+        account.updated_at = nowIso();
+        return account;
+      },
+    };
+  }
+
   return {
-    create({ firstName, lastName }) {
-      const id = `acc-${nextId++}`;
-      const timestamp = nowIso();
-      const account = {
-        id,
-        first_name: firstName,
-        last_name: lastName,
-        status: 'active',
-        created_at: timestamp,
-        updated_at: timestamp,
-      };
-      accounts.set(id, account);
+    async create({ firstName, lastName }) {
+      await ensureLoaded();
+      const account = insert({ firstName, lastName });
+      await persist();
       return account;
     },
 
-    get(id) {
+    async get(id) {
+      await ensureLoaded();
       return accounts.get(id) ?? null;
     },
 
-    list() {
+    async list() {
+      await ensureLoaded();
       return [...accounts.values()];
     },
 
-    update(id, { firstName, lastName }) {
+    async update(id, { firstName, lastName }) {
+      await ensureLoaded();
       const account = accounts.get(id);
       if (!account) return null;
       account.first_name = firstName;
       account.last_name = lastName;
       account.updated_at = nowIso();
+      await persist();
       return account;
     },
 
-    archive(id) {
+    async archive(id) {
+      await ensureLoaded();
       const account = accounts.get(id);
       if (!account) return null;
       account.status = 'archived';
       account.updated_at = nowIso();
+      await persist();
       return account;
     },
   };
@@ -297,12 +370,19 @@ function validateNames(fields) {
  *   options (object): optional.
  *     clock (function): injectable clock passed through to the store;
  *       defaults to the system clock.
+ *     store (object): optional prebuilt account store (same
+ *       create/get/list/update/archive shape — sync or async). A test
+ *       harness injects a service-backed store here; the app writes
+ *       through it and never sees the backing service.
+ *     backend (object|null): optional injected async backing store,
+ *       forwarded to an internally created store. Ignored when `store`
+ *       is given.
  *
  * Returns:
  *   http.Server: bound later by the caller (always to 127.0.0.1).
  */
-export function createApp({ clock } = {}) {
-  const store = createAccountStore({ clock });
+export function createApp({ clock, store = null, backend = null } = {}) {
+  const accounts = store ?? createAccountStore({ clock, backend });
 
   async function handle(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -310,12 +390,12 @@ export function createApp({ clock } = {}) {
 
     // --- JSON read API (trusted-adapter surface) -------------------------
     if (req.method === 'GET' && path === '/api/accounts') {
-      sendJson(res, 200, { accounts: store.list() });
+      sendJson(res, 200, { accounts: await accounts.list() });
       return;
     }
     const apiMatch = /^\/api\/accounts\/(acc-[0-9]+)$/.exec(path);
     if (apiMatch && req.method === 'GET') {
-      const account = store.get(apiMatch[1]);
+      const account = await accounts.get(apiMatch[1]);
       if (account) sendJson(res, 200, account);
       else sendJson(res, 404, { error: 'not found' });
       return;
@@ -323,7 +403,7 @@ export function createApp({ clock } = {}) {
 
     // --- Server-rendered UI ----------------------------------------------
     if (req.method === 'GET' && path === '/') {
-      sendHtml(res, 200, renderListPage(store.list()));
+      sendHtml(res, 200, renderListPage(await accounts.list()));
       return;
     }
     if (req.method === 'GET' && path === '/accounts/new') {
@@ -333,7 +413,7 @@ export function createApp({ clock } = {}) {
 
     const editPageMatch = /^\/accounts\/(acc-[0-9]+)\/edit$/.exec(path);
     if (editPageMatch && req.method === 'GET') {
-      const account = store.get(editPageMatch[1]);
+      const account = await accounts.get(editPageMatch[1]);
       if (account) sendHtml(res, 200, renderEditFormPage(account));
       else sendHtml(res, 404, renderNotFoundPage(path));
       return;
@@ -346,14 +426,14 @@ export function createApp({ clock } = {}) {
         sendHtml(res, 422, renderCreateFormPage({ error: names.error, values: fields }));
         return;
       }
-      store.create(names);
+      await accounts.create(names);
       redirectToList(res);
       return;
     }
 
     const updateMatch = /^\/accounts\/(acc-[0-9]+)$/.exec(path);
     if (updateMatch && req.method === 'POST') {
-      const account = store.get(updateMatch[1]);
+      const account = await accounts.get(updateMatch[1]);
       if (!account) {
         sendHtml(res, 404, renderNotFoundPage(path));
         return;
@@ -364,19 +444,19 @@ export function createApp({ clock } = {}) {
         sendHtml(res, 422, renderEditFormPage(account, { error: names.error, values: fields }));
         return;
       }
-      store.update(account.id, names);
+      await accounts.update(account.id, names);
       redirectToList(res);
       return;
     }
 
     const archiveMatch = /^\/accounts\/(acc-[0-9]+)\/archive$/.exec(path);
     if (archiveMatch && req.method === 'POST') {
-      const account = store.get(archiveMatch[1]);
+      const account = await accounts.get(archiveMatch[1]);
       if (!account) {
         sendHtml(res, 404, renderNotFoundPage(path));
         return;
       }
-      store.archive(account.id);
+      await accounts.archive(account.id);
       redirectToList(res);
       return;
     }

@@ -284,6 +284,44 @@ export type {
 } from './schemas/coverage-policy.js';
 
 /**
+ * Behavior policy / catalog / evidence (plan 2026-09-19): owner-approved
+ * complete-behavior cases. Absence of the document preserves basic
+ * behavior. Strong contracts stay unavailable until a real case producer
+ * exists.
+ */
+export {
+  BehaviorPolicySchema,
+  BehaviorCaseSchema,
+  EffectScopeSchema,
+  EndpointBehaviorSchema,
+  ResourceBehaviorSchema,
+  BehaviorCatalogSchema,
+  CompiledBehaviorCaseSchema,
+  BehaviorCatalogRegistrationSchema,
+  BehaviorCasePayloadSchema,
+  ScopeSnapshotSchema,
+  BEHAVIOR_CONTRACTS,
+  BEHAVIOR_CASE_KIND,
+  BEHAVIOR_CASE_PAYLOAD_VERSION,
+  BEHAVIOR_CASE_DOMAIN,
+  BEHAVIOR_CATALOG_DOMAIN,
+  HTTP_EFFECT_VERIFIED,
+  HTTP_READ_RESULT_VERIFIED,
+} from './schemas/index.js';
+export type {
+  BehaviorPolicy,
+  BehaviorCase,
+  EffectScope,
+  EndpointBehavior,
+  ResourceBehavior,
+  BehaviorCatalog,
+  CompiledBehaviorCase,
+  BehaviorCatalogRegistration,
+  BehaviorCasePayload,
+  ScopeSnapshot,
+} from './schemas/index.js';
+
+/**
  * UnresolvedReason (pin #5): `{code, detail, location{file,line,col}}` —
  * single-cause, machine-readable, no stack dumps.
  */
@@ -365,15 +403,22 @@ export type { PluginRegistration } from './schemas/plugin.js';
 
 /**
  * Obligation fingerprint (pin #2):
- * `sha256(canonical({resourceId, contract, policyId, lifecycle}))`.
- * Key-order independent; this is the identity baselines store.
+ * `sha256(canonical({resourceId, contract, policyId, lifecycle}` plus
+ * optional `requirementsDigest`)). Key-order independent; this is the
+ * identity baselines store. Use {@link fingerprintObligation} for a
+ * full obligation so digest presence is projected consistently.
  */
-export { fingerprint, FingerprintInputSchema } from './fingerprints.js';
+export {
+  fingerprint,
+  fingerprintObligation,
+  obligationFingerprintInput,
+  FingerprintInputSchema,
+} from './fingerprints.js';
 /** Blocking-entry fingerprint (phase 8 C): baseline identity for gate red
  * that is not an obligation (findings, unclassified, stale references). */
 export { blockingEntryFingerprint } from './fingerprints.js';
 /** Inferred fingerprint-input type. */
-export type { FingerprintInput } from './fingerprints.js';
+export type { FingerprintInput, ObligationFingerprintSource } from './fingerprints.js';
 
 // ---------------------------------------------------------------------------
 // Config (pin #6) — fail-closed `.gateforge.yml` handling
@@ -643,6 +688,22 @@ export type {
 } from './policy/index.js';
 
 /**
+ * Complete-behavior compiler (plan 2026-09-19): enumerates every
+ * discovered endpoint against the approved document and emits catalog
+ * obligations plus missing/stale blockers.
+ */
+export {
+  BEHAVIOR_POLICY_ID,
+  EMPTY_BEHAVIOR_CATALOG_DIGEST,
+  compileBehaviorPolicy,
+  parseBehaviorPolicy,
+} from './policy/index.js';
+export type {
+  CompileBehaviorPolicyInput,
+  CompileBehaviorPolicyResult,
+} from './policy/index.js';
+
+/**
  * Protected policy ownership foundation (plan 2026-09-13 Phase 0 item 5,
  * ADR 0005 D6): the domain-separated trusted policy/config digest for
  * later receipt binding, plus the pure weakening check — a candidate
@@ -723,6 +784,26 @@ export {
  * ambiguity blocks.
  */
 export { interpretObservedPath, resolveHttpRoute, pathMatchesShape } from './verdict/index.js';
+
+/**
+ * Required-case aggregation (plan 2026-09-19 §4.7, Phase 5): pure
+ * semantic grading across an obligation's required behavior cases.
+ */
+export {
+  STRONG_HTTP_CONTRACTS,
+  AUTH_CONTRACTS,
+  VALIDATION_CONTRACTS,
+  WORKFLOW_CONTRACTS,
+  TASK_CONTRACTS,
+  WEBHOOK_CONTRACTS,
+  BEHAVIOR_CASE_CONTRACTS,
+  behaviorActionDigestOf,
+  evaluateRequiredCases,
+  type BehaviorGradeContext,
+  type BehaviorObligationContext,
+  type BehaviorRecordLike,
+  type RequiredCaseOutcome,
+} from './verdict/index.js';
 
 /** Fail-closed verdict-engine error (malformed obligation / clock). */
 export { GateforgeVerdictError } from './verdict/index.js';
@@ -817,17 +898,26 @@ export type {
 } from './schemas/execution-result.js';
 
 /**
- * Gate receipt (plan 2026-09-13 §5.1, ADR 0005 D3, Phase 4): the NEW
- * versioned, domain-separated envelope issued only after complete run
- * success and evidence grading. Signed by the same authority as witness
- * records (the verifier key, HMAC over GF-canonical JSON, domain
- * `gateforge.receipt.v1`) — never a repurposed v2 attestation.
+ * Gate receipt (plan 2026-09-13 §5.1, ADR 0005 D3, Phase 4; v2 cutover plan
+ * 2026-09-19 Phase 3): the NEW versioned, domain-separated envelope issued
+ * only after complete run success and evidence grading. Signed by the same
+ * authority as witness records (the verifier key, HMAC over GF-canonical
+ * JSON, domain `gateforge.receipt.v2`) — never a repurposed v2 attestation.
  */
 export {
   RECEIPT_DOMAIN,
   RECEIPT_VERSION,
   gateReceiptMac,
   verifyGateReceipt,
+  EMPTY_REQUIRED_CASE_SET_DIGEST,
+  EMPTY_CASE_EXECUTION_DIGEST,
+  LOCAL_UNISOLATED_BOUNDARY,
+  LOCAL_UNISOLATED_BOUNDARY_DIGEST,
+  requiredCaseSetDigestOf,
+  caseExecutionDigestOf,
+  engineBundleDigestOf,
+  executionBoundaryDigestOf,
+  targetArtifactDigestOf,
 } from './receipt/index.js';
 /** Receipt types. */
 export type { GateReceipt } from './schemas/gate-receipt.js';

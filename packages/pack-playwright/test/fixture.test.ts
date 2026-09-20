@@ -145,7 +145,7 @@ async function buildEvidence(
 }
 
 describe('frozen surface, no escape hatch (invariant 6, GF-11)', () => {
-  it('exposes exactly ui/visible/persistence/finalize and is frozen', async () => {
+  it('exposes exactly ui/visible/persistence/http/prove/finalize and is frozen', async () => {
     const fixture = await startFixtureWitness();
     try {
       const evidence = await buildEvidence(fixture.witness.url);
@@ -154,10 +154,14 @@ describe('frozen surface, no escape hatch (invariant 6, GF-11)', () => {
       // domain-check channel was RETIRED: scenario labels derived from a
       // status class cannot prove domain semantics, so check contracts
       // stay fail-closed until real state-observing producers exist.
+      // Plan 2026-09-19 Phase 6 adds the fifth: `prove`, the
+      // worker-facing required-case proof primitive (case id in,
+      // engine-sealed reference out — never credentials or subjects).
       expect(Object.keys(evidence).sort()).toEqual([
         'finalize',
         'http',
         'persistence',
+        'prove',
         'ui',
         'visible',
       ]);
@@ -168,7 +172,7 @@ describe('frozen surface, no escape hatch (invariant 6, GF-11)', () => {
       expect(Object.isFrozen(evidence.persistence)).toBe(true);
       // No boolean escape hatch exists (GF-11: registration path absent).
       const asRecord = evidence as unknown as Record<string, unknown>;
-      expect(typeof asRecord['prove']).toBe('undefined');
+      expect(typeof asRecord['prove']).toBe('function');
       expect(typeof (evidence.ui as unknown as Record<string, unknown>)['prove']).toBe('undefined');
       expect(Object.keys(evidence.ui).sort()).toEqual(['archive', 'create', 'read', 'update']);
     } finally {

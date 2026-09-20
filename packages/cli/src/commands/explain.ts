@@ -8,7 +8,7 @@
  * its in-code resolution path. Deterministic: re-running the command on
  * an unchanged repository prints byte-identical output.
  */
-import { canonicalJson, fingerprint, type JsonValue } from '@gate-forge/core';
+import { canonicalJson, fingerprintObligation, type JsonValue } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
@@ -173,12 +173,7 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
   for (const obligation of obligations) {
     writeLine(
       io.stdout,
-      `  ${obligation.id} (policy ${obligation.policyId}, fingerprint ${fingerprint({
-        resourceId: obligation.resourceId,
-        contract: obligation.contract,
-        policyId: obligation.policyId,
-        lifecycle: obligation.lifecycle,
-      })})`,
+      `  ${obligation.id} (policy ${obligation.policyId}, fingerprint ${fingerprintObligation(obligation)})`,
     );
   }
   const blocked = (decision?.blocks.length ?? 0) > 0 || resource.classification === null;

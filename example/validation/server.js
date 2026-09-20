@@ -47,7 +47,30 @@ function makeAccountSchema() {
 }
 
 const schema = makeAccountSchema();
-const store = [];
+
+/**
+ * Default process-local ledger (standalone runs). Test harnesses inject
+ * their own ledger to observe state independently of the app's HTTP API.
+ */
+function createMemoryLedger() {
+  const rows = [];
+  let seq = 0;
+  return {
+    list: () => rows.map((row) => ({ ...row })),
+    push: (fields) => {
+      seq += 1;
+      const record = { id: `acc-${seq}`, ...fields };
+      rows.push(record);
+      return { ...record };
+    },
+  };
+}
+
+const defaultLedger = createMemoryLedger();
+const store = {
+  list: () => defaultLedger.list(),
+  push: (fields) => defaultLedger.push(fields),
+};
 let seq = 0;
 
 function json(res, status, body) {
@@ -66,27 +89,48 @@ async function readJsonBody(req) {
   });
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url ?? '/', `http://${LOOPBACK_HOST}`);
-  try {
-    if (req.method === 'GET' && url.pathname === '/accounts') {
-      return json(res, 200, { accounts: store.map((a) => ({ id: a.id, first_name: a.first_name, last_name: a.last_name, email: a.email })) });
-    }
-    if (req.method === 'POST' && url.pathname === '/accounts') {
-      const body = await readJsonBody(req);
-      const result = schema.validate(body);
-      if (!result.ok) return json(res, 400, { errors: result.errors });
-      seq += 1;
-      const id = `acc-${seq}`;
-      store.push({ id, first_name: body.first_name, last_name: body.last_name, email: body.email });
-      return json(res, 201, { id, first_name: body.first_name, last_name: body.last_name, email: body.email });
-    }
-    return json(res, 404, { error: 'not found' });
-  } catch (err) {
-    return json(res, 400, { error: err instanceof Error ? err.message : 'bad request' });
-  }
-});
+function projectRow(a) {
+  return { id: a.id, first_name: a.first_name, last_name: a.last_name, email: a.email };
+}
 
-server.listen(PORT, LOOPBACK_HOST, () => {
-  console.log(`gateforge validation example listening on http://${LOOPBACK_HOST}:${PORT}`);
-});
+/**
+ * Creates the validation example application (factory for harnesses).
+ *
+ * Args:
+ *   options (object): optional `ledger` ({list(), push(fields)}) — the
+ *   app writes through it and the trusted observer reads through it.
+ *
+ * Returns:
+ *   http.Server (unbound; the caller listens on loopback).
+ */
+export function createValidationApp({ ledger = defaultLedger } = {}) {
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', `http://${LOOPBACK_HOST}`);
+    try {
+      if (req.method === 'GET' && url.pathname === '/accounts') {
+        return json(res, 200, { accounts: ledger.list().map(projectRow) });
+      }
+      if (req.method === 'POST' && url.pathname === '/accounts') {
+        const body = await readJsonBody(req);
+        const result = schema.validate(body);
+        if (!result.ok) return json(res, 400, { errors: result.errors });
+        const created = ledger.push({ first_name: body.first_name, last_name: body.last_name, email: body.email });
+        return json(res, 201, projectRow(created));
+      }
+      return json(res, 404, { error: 'not found' });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : 'bad request' });
+    }
+  });
+  return server;
+}
+
+export { createMemoryLedger };
+
+const invokedDirectly = process.argv[1] !== undefined && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '');
+if (invokedDirectly) {
+  const server = createValidationApp();
+  server.listen(PORT, LOOPBACK_HOST, () => {
+    console.log(`gateforge validation example listening on http://${LOOPBACK_HOST}:${PORT}`);
+  });
+}

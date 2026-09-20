@@ -47,6 +47,14 @@ export interface ReceiptExpectations {
   selectionDigest?: string;
   /** Current catalog digest; optional for the same reason. */
   catalogDigest?: string;
+  /** Frozen candidate tree; optional for consumers without tree context. */
+  candidateTreeId?: string | null;
+  /** Controller-inspected execution boundary digest. */
+  executionBoundaryDigest?: string;
+  /** Compiled behavior catalog digest; optional for the same reason. */
+  behaviorCatalogDigest?: string;
+  /** Required case set digest; optional for the same reason. */
+  requiredCaseSetDigest?: string;
   /**
    * The evaluation scope this consumption demands (opt-in scoped runs).
    * OPTIONAL and matched against the receipt's EFFECTIVE scope (an
@@ -119,6 +127,10 @@ export function loadReceiptFor(
     trustedPolicyDigest: expected.trustedPolicyDigest,
     selectionDigest: expected.selectionDigest,
     catalogDigest: expected.catalogDigest,
+    candidateTreeId: expected.candidateTreeId,
+    behaviorCatalogDigest: expected.behaviorCatalogDigest,
+    requiredCaseSetDigest: expected.requiredCaseSetDigest,
+    executionBoundaryDigest: expected.executionBoundaryDigest,
   });
   if (!verified.ok) {
     if (verified.rejection === 'missing' || verified.rejection === 'malformed') {

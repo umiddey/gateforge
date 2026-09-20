@@ -9,6 +9,7 @@ import { parse as parseYaml } from 'yaml';
 import { withTempRepo, loadConfig } from '@gate-forge/core';
 import { readPlanesConfigOrNull } from '@gate-forge/pack-sqlalchemy';
 import { runCli } from './helpers.js';
+import type { HostCommandRunner } from '../src/podman-bootstrap.js';
 
 const TARGETS = [
   '.gateforge.yml',
@@ -30,6 +31,43 @@ describe('gateforge init', () => {
       expect(existsSync(repo.path('.gateforge/waivers'))).toBe(true);
       // The generated config must be loadable by the pinned schema.
       expect(() => loadConfig(join(repo.root, '.gateforge.yml'))).not.toThrow();
+    });
+  });
+
+  it('managed init installs no new command: it verifies rootless Podman and writes managed config', async () => {
+    await withTempRepo({}, async (repo) => {
+      const runner: HostCommandRunner = (command, args) => {
+        if (command === 'podman' && args[0] === '--version') return { status: 0, stdout: 'podman version 5.0.0', stderr: '' };
+        if (command === 'podman' && args[0] === 'info') return { status: 0, stdout: 'true', stderr: '' };
+        throw new Error(`unexpected host command: ${command} ${args.join(' ')}`);
+      };
+      const { code, stdout } = await runCli(repo, ['init', '--managed'], {}, runner);
+      expect(code).toBe(0);
+      expect(stdout).toContain('managed runtime ready: podman version 5.0.0; rootless=true');
+      expect(loadConfig(join(repo.root, '.gateforge.yml')).enforcement).toMatchObject({
+        mode: 'managed',
+        strictE2E: true,
+      });
+      expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(true);
+    });
+  });
+
+  it('managed init upgrades an existing config only for the explicit managed request', async () => {
+    await withTempRepo({}, async (repo) => {
+      const first = await runCli(repo, ['init']);
+      expect(first.code).toBe(0);
+      const runner: HostCommandRunner = (command, args) => {
+        if (command === 'podman' && args[0] === '--version') return { status: 0, stdout: 'podman version 5.0.0', stderr: '' };
+        if (command === 'podman' && args[0] === 'info') return { status: 0, stdout: 'true', stderr: '' };
+        throw new Error(`unexpected host command: ${command} ${args.join(' ')}`);
+      };
+      const second = await runCli(repo, ['init', '--managed'], {}, runner);
+      expect(second.code).toBe(0);
+      expect(second.stdout).toContain('updated: ');
+      expect(loadConfig(join(repo.root, '.gateforge.yml')).enforcement).toMatchObject({
+        mode: 'managed',
+        strictE2E: true,
+      });
     });
   });
 

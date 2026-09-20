@@ -32,7 +32,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
-| `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence-only policy, overlay proof), and write `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, `GATEFORGE.md`, and (overlay proof only) `tests/e2e/gateforge/README.md`. Idempotent — never overwrites existing files. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block (standard mode, `strictE2E`) and runs the capability preflight FIRST. `--blocking` additionally installs AND verifies an ACTIVE pre-commit hook (the staged gate), writes the standalone staged-gate script, the `.pre-commit-config.yaml` block, and the GitLab strict-gate CI template + include; a foreign existing hook is never clobbered (typed conflict naming the exact chaining action). | 0 (blocking-install failure → 2) |
+| `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e] [--managed]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence-only policy, overlay proof), and write `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, `GATEFORGE.md`, and (overlay proof only) `tests/e2e/gateforge/README.md`. Idempotent — never overwrites existing files. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block and runs capability preflight. `--managed` tries the targeted native Podman package install first; if Arch requires a full `pacman -Syu` fallback, Gateforge asks the owner before running it. It then verifies rootless `podman info`, writes `enforcement.mode: managed`, and implies strict/blocking wiring. No npm lifecycle install or silent privilege escalation. | 0 (blocking/install failure → 2) |
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking`). Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. Snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
@@ -226,7 +226,9 @@ else):
 | `http:request-observed`, `http:response-status-ok` | AVAILABLE — transport semantics only: a witness-observed exchange plus a provenance-verified claimed `ui.action` anchor from the declaring test |
 | `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; grades blocking `missing` before examining evidence |
 | `crud:*` (UI-semantic) | FAIL-CLOSED — the tested suite owns the browser; use `persistence:*` |
-| `auth:*`, `task:*`, `validation:*`, `webhook:*`, `workflow:*` | UNSUPPORTED — every contract fail-closed; surfaces as `VERIFIER_UNSUPPORTED` (remove the contract or drop the pack; do not add tests) |
+| `http:effect-verified`, `http:read-result-verified` | AVAILABLE (behavior-case channel) — graded across the approved required cases with witness-issued `behavior.case` records; needs a compiled `behaviorPolicy` requirement set |
+| `auth:*`, `validation:*` | AVAILABLE (behavior-case channel) — same required-case aggregation over engine-controlled requests with independent state scopes |
+| `task:*`, `webhook:*`, `workflow:*` | UNSUPPORTED — every contract fail-closed; surfaces as `VERIFIER_UNSUPPORTED` (remove the contract or drop the pack; do not add tests) |
 
 Unsupported proof stays blocking. Nothing silently replaces browser proof
 with HTTP status proof.
@@ -596,9 +598,11 @@ expected context, every witnessed record demotes to claimed-tier
   owner actions — the complete template and settings list ship from
   `init --blocking`, but a local simulation does not complete a server
   rollout (`docs/plans/immediate/20260913_consumer_migration_record.md`).
-- Managed mode ships the broker MECHANISM only (`gateforge broker commit`);
-  no hardened deployment (authoritative Git dir + signing material outside
-  the agent's write/process boundary) is included in this repository.
+- Managed mode ships the broker mechanism plus rootless-Podman reference
+  deployment assets under `deploy/managed/`; those assets do not provision
+  the authoritative Git directory, credentials, protected refs, or external
+  app/worker services. The current managed backend supports Linux rootless
+  Podman only and rejects other platforms rather than guessing.
 
 ## Development
 

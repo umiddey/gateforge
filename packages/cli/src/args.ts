@@ -15,7 +15,7 @@ export interface ParsedArgs {
 }
 
 /** Flags that carry no value (bare presence). */
-const BOOLEAN_FLAGS = new Set(['json', 'changed', 'staged', 'help', 'version', 'blocking', 'no-blocking', 'strict-e2e', 'pytest', 'require-e2e', 'pre-commit', 'no-pre-commit', 'ci', 'no-ci', 'planes', 'no-planes', 'accept-recommended', 'no-scan']);
+const BOOLEAN_FLAGS = new Set(['json', 'changed', 'staged', 'help', 'version', 'blocking', 'no-blocking', 'strict-e2e', 'managed', 'pytest', 'require-e2e', 'pre-commit', 'no-pre-commit', 'ci', 'no-ci', 'planes', 'no-planes', 'accept-recommended', 'no-scan']);
 
 /**
  * Parses argv (without node/script) into options + positionals.

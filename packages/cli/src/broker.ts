@@ -14,22 +14,25 @@
  * doctor` reports that honestly.
  *
  * Flow (fail closed at every step):
- * 1. the workspace candidate's bytes are snapshotted into a throwaway
- *    index (`GIT_INDEX_FILE` + `GIT_WORK_TREE` plumbing — the workspace
- *    is never modified), yielding the immutable tree id;
- * 2. the current input digest + trusted policy digest are RECOMPUTED
- *    from the workspace bytes with the Phase 4 machinery;
+ * 1. the workspace candidate's bytes are ingested RAW into the
+ *    authoritative object store (`hash-object -w` per regular file +
+ *    `mktree` — never `git add`, so candidate clean filters, hooks, and
+ *    ambient `GIT_*` redirectors cannot execute or rewrite bytes),
+ *    yielding the immutable tree id;
+ * 2. the trusted policy digest is recomputed from RAW workspace file
+ *    bytes only (no plugin/adapter import, no pipeline execution in the
+ *    authority process);
  * 3. the recomputed policy revision is compared against the OWNER-APPROVED
  *    policy digest provisioned in the BROKER environment
  *    (`GATEFORGE_APPROVED_POLICY_DIGEST` / `GATEFORGE_TRUSTED_CONFIG`
  *    outside the candidate — never the workspace): a mismatch is a typed
  *    ENFORCEMENT_UNTRUSTED rejection; a workspace declaring
  *    `enforcement.strictE2E` demands the pin outright;
- * 4. a valid, non-stale gate receipt must verify (MAC with the broker's
- *    verifier key, input digest, trusted policy digest, clean verdict
- *    summary, supervised invocation) for EXACTLY those bytes — missing
- *    receipts, stale/different-bytes receipts, and forged receipts are
- *    typed rejections; under a provisioned pin the receipt must ALSO
+ * 4. a valid v2 gate receipt must verify (MAC with the broker's
+ *    verifier key, candidate tree id, trusted policy digest, execution
+ *    boundary, clean verdict summary, supervised invocation) for EXACTLY
+ *    that tree — missing receipts, stale/different-bytes receipts, v1
+ *    receipts, and forged receipts are typed rejections; under a provisioned pin the receipt must ALSO
  *    bind the currently approved revision (a receipt sealed under a
  *    since-revoked policy is rejected: policy revision changed after
  *    sealing);
@@ -39,20 +42,18 @@
  *    lockfile-guarded old-value check — a concurrent update fails the
  *    CAS and no commit is accepted.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { loadConfig, verifyGateReceipt, type GateReceipt, type GateforgeConfig } from '@gate-forge/core';
+import { loadConfig, verifyGateReceipt, executionBoundaryDigestOf, type GateReceipt, type GateforgeConfig } from '@gate-forge/core';
+import { isolationProfileForEnvironment } from './isolation.js';
 import { parseArgs } from './args.js';
 import { trustedPolicyDigestForConfig, SUPERVISED_INVOCATION } from './execution.js';
 import { UsageError } from './errors.js';
 import type { Io } from './io.js';
 import { writeLine } from './io.js';
-import { TEST_MAP_RELATIVE } from './mapping.js';
-import { computeInputSnapshot } from './input-snapshot.js';
-import { runPipeline } from './pipeline.js';
-import { httpRoutesView, resolveStateDir } from './state.js';
+import { computeCandidateTreeId, resolveGitDir } from './candidate-tree.js';
+import { resolveStateDir } from './state.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from './trusted-policy.js';
 import { rejectUnknownFlags } from './commands/common.js';
 
@@ -113,119 +114,47 @@ function authorityGit(
     stderr: (result.stderr ?? Buffer.alloc(0)).toString('utf8'),
   };
 }
-
 /**
- * Computes the immutable tree id of a workspace candidate: the bytes are
- * snapshotted into a throwaway index (the workspace itself is never
- * modified) and `git write-tree` pins the tree into the authoritative
- * object store. Symlink/submodule candidates are typed rejections.
- *
- * Args:
- *   authorityCwd: the authoritative repository cwd.
- *   env: process environment.
- *   workspace: absolute workspace path (the candidate bytes).
- *   scratchDir: scratch directory for the throwaway index.
- *
- * Returns:
- *   string: 40-char hex tree id.
- *
- * Throws:
- *   UsageError: when the workspace is missing or plumbing fails.
- *   BrokerRejection: unsupported symlink/submodule entries.
+ * Raw owner-controlled boundary label, retained for operator-facing
+ * diagnostics. Receipt digests use the normalized isolation profile below.
  */
-function workspaceTreeId(
-  authorityCwd: string,
-  env: NodeJS.ProcessEnv,
-  workspace: string,
-  scratchDir: string,
-): string {
-  if (!existsSync(workspace)) {
-    throw new UsageError(`broker: workspace '${workspace}' does not exist`);
-  }
-  const index = join(scratchDir, 'workspace-index');
-  const emptied = authorityGit(authorityCwd, env, ['read-tree', '--empty'], { GIT_INDEX_FILE: index });
-  if (emptied.status !== 0) {
-    throw new UsageError(`broker: could not initialize the candidate index: ${emptied.stderr.trim()}`);
-  }
-  const added = spawnSync('git', ['add', '-A', '--'], {
-    cwd: authorityCwd,
-    env: { ...env, GIT_INDEX_FILE: index, GIT_WORK_TREE: workspace },
-    encoding: 'buffer',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  if (added.error !== undefined || added.status !== 0) {
-    throw new UsageError(
-      `broker: could not snapshot the workspace candidate (git add, exit ${added.status ?? -1}): ` +
-        `${(added.stderr ?? Buffer.alloc(0)).toString('utf8').trim()}`,
-    );
-  }
-  const staged = authorityGit(authorityCwd, env, ['ls-files', '-s', '-z'], { GIT_INDEX_FILE: index });
-  for (const entry of staged.stdout.split('\0')) {
-    const tab = entry.indexOf('\t');
-    if (tab < 0) continue;
-    const mode = entry.slice(0, tab).split(' ')[0] ?? '';
-    const path = entry.slice(tab + 1);
-    if (mode === '120000' || mode === '160000') {
-      throw new BrokerRejection(
-        'ENFORCEMENT_UNTRUSTED',
-        `the workspace candidate contains an unsupported entry ('${path}', mode ${mode}); ` +
-          'symlink/submodule candidates cannot be verified (fail closed)',
-      );
-    }
-  }
-  const written = authorityGit(authorityCwd, env, ['write-tree'], { GIT_INDEX_FILE: index });
-  if (written.status !== 0) {
-    throw new UsageError(`broker: git write-tree failed: ${written.stderr.trim()}`);
-  }
-  const treeId = written.stdout.trim();
-  if (!/^[0-9a-f]{40}$/.test(treeId)) {
-    throw new UsageError('broker: git write-tree returned an unusable tree id');
-  }
-  return treeId;
+function authorityBoundaryLabel(env: NodeJS.ProcessEnv): string {
+  const raw = env['GATEFORGE_AUTHORITY_BOUNDARY'];
+  return typeof raw === 'string' && raw.length > 0 ? raw : 'local-unisolated';
 }
 
 /**
- * Recomputes the workspace candidate's trusted digests with the Phase 4
- * machinery (the exact binding a supervised gate run seals): the
- * pipeline-derived input snapshot digest and the trusted policy/config
- * revision digest, both from the WORKSPACE bytes.
+ * Normalized execution-boundary profile accepted by this authority.
+ * Managed-authoritative is an authority label, not a receipt profile.
+ */
+function authorityBoundaryProfile(env: NodeJS.ProcessEnv): string {
+  return isolationProfileForEnvironment(env);
+}
+
+/**
+ * Recomputes the workspace candidate's trusted digests from RAW file
+ * bytes only: the resolved config (pure YAML parse — no plugin import,
+ * no detector execution) plus the trusted policy/config revision digest
+ * (file bytes hashed, never imported). No pipeline runs in the authority
+ * process, so candidate-selected executable input can never execute here.
  *
  * Args:
  *   workspace: absolute workspace path.
- *   env: process environment.
  *
  * Returns:
- *   {inputDigest, trustedPolicyDigest, config}: the recomputed binding
- *   digests plus the workspace-loaded config (the approved-policy gate
- *   reads enforcement.strictE2E / candidate-declared pins from it).
+ *   {trustedPolicyDigest, config}: the recomputed policy revision plus
+ *   the workspace-loaded config (the approved-policy gate reads
+ *   enforcement.strictE2E from it).
  *
  * Throws:
  *   UsageError: when the workspace has no valid gateforge config.
  */
-async function recomputeWorkspaceDigests(
+function recomputeWorkspaceDigests(
   workspace: string,
-  env: NodeJS.ProcessEnv,
-): Promise<{ inputDigest: string; trustedPolicyDigest: string; config: GateforgeConfig }> {
+): { trustedPolicyDigest: string; config: GateforgeConfig } {
   const config = loadConfig(join(workspace, '.gateforge.yml'));
-  const stateDir = resolveStateDir(workspace);
-  const pipeline = await runPipeline({
-    cwd: workspace,
-    env,
-    config,
-    provider: 'all-files',
-    stateDir,
-  });
-  const inputDigest = computeInputSnapshot({
-    cwd: workspace,
-    config,
-    stateDir,
-    classifications: pipeline.classificationsView.resources,
-    obligations: pipeline.policy.obligations,
-    httpRoutes: httpRoutesView(pipeline.graph),
-    plugins: pipeline.manifest.plugins.map((plugin) => ({ id: plugin.id, version: plugin.version })),
-  }).inputDigest;
   const trustedPolicyDigest = trustedPolicyDigestForConfig(workspace, config);
-  return { inputDigest, trustedPolicyDigest, config };
+  return { trustedPolicyDigest, config };
 }
 
 /**
@@ -278,23 +207,20 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
   }
 
   // 1. Freeze the candidate bytes (immutable tree id) + recompute the
-  //    Phase 4 binding digests from those bytes. The workspace IS the
-  //    evaluated repository for this step: the process cwd follows it so
-  //    repo-relative readers (in-process plugin modules read repo-relative
-  //    paths against the process cwd) resolve the workspace bytes — never
-  //    the authoritative repo's. Restored on every path.
-  const scratchDir = mkdtempSync(join(tmpdir(), 'gateforge-broker-'));
-  let treeId: string;
-  let digests: { inputDigest: string; trustedPolicyDigest: string; config: GateforgeConfig };
-  const previousCwd = process.cwd();
-  process.chdir(workspace);
-  try {
-    treeId = workspaceTreeId(io.cwd, io.env, workspace, scratchDir);
-    digests = await recomputeWorkspaceDigests(workspace, io.env);
-  } finally {
-    if (process.cwd() !== previousCwd) process.chdir(previousCwd);
-    rmSync(scratchDir, { recursive: true, force: true });
+  //    trusted policy digest from RAW workspace bytes. No `process.chdir`
+  //    into the candidate, no pipeline execution, no plugin/adapter
+  //    import in the authority process: candidate-selected executable
+  //    input can never execute here. The workspace itself is never
+  //    modified.
+  if (!existsSync(workspace)) {
+    throw new UsageError(`broker: workspace '${workspace}' does not exist`);
   }
+  const authorityGitDir = resolveGitDir(io.cwd, io.env);
+  if (authorityGitDir === null) {
+    throw new UsageError('broker: the authoritative directory is not a Git checkout (fail closed)');
+  }
+  const treeId = computeCandidateTreeId(authorityGitDir, workspace, io.env, resolveStateDir(workspace));
+  const digests = recomputeWorkspaceDigests(workspace);
 
   // 1b. Approved-policy ownership gate (review 2026-09-13 P1 #5): the
   //     workspace's recomputed policy revision must match the
@@ -327,8 +253,15 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
     );
   }
 
-  // 2. Require a valid receipt for EXACTLY these bytes (Phase 4
-  //    verification incl. trustedPolicyDigest + staleness binding).
+  // 2. Require a valid v2 receipt for EXACTLY this tree (Phase 3
+  //    authority cutover). The MAC authenticates the sealed binding set;
+  //    the broker additionally demands: the sealed candidate tree equals
+  //    the freshly ingested tree, the sealed policy revision equals the
+  //    raw recomputed revision, and the sealed execution boundary equals
+  //    THIS authority's expectation. The sealed input digest rides inside
+  //    the authenticated envelope (the trusted controller bound it at
+  //    seal time); the broker never re-runs a candidate-configured
+  //    pipeline to second-guess it.
   if (!existsSync(receiptPath)) {
     throw new BrokerRejection(
       'RUN_INCOMPLETE',
@@ -352,15 +285,29 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
       'no witness verifier key in the broker environment; the receipt cannot be authenticated (fail closed)',
     );
   }
+  const expectedBoundary = executionBoundaryDigestOf(authorityBoundaryProfile(io.env));
   const verified = verifyGateReceipt(verifierKey, receiptRaw, {
-    inputDigest: digests.inputDigest,
+    candidateTreeId: treeId,
     trustedPolicyDigest: digests.trustedPolicyDigest,
+    executionBoundaryDigest: expectedBoundary,
   });
   if (!verified.ok) {
-    if (verified.rejection === 'input-digest-mismatch' || verified.rejection === 'policy-digest-mismatch') {
+    if (
+      verified.rejection === 'input-digest-mismatch' ||
+      verified.rejection === 'policy-digest-mismatch' ||
+      verified.rejection === 'tree-mismatch'
+    ) {
       // Binding mismatches are STALENESS: the receipt is for other bytes
       // or a different trusted policy revision (E13).
       throw new BrokerRejection('EVIDENCE_STALE', `broker: ${verified.detail} (rerun the gate for the exact candidate)`);
+    }
+    if (verified.rejection === 'boundary-mismatch') {
+      throw new BrokerRejection(
+        'ENFORCEMENT_UNTRUSTED',
+        `broker: ${verified.detail} — this authority requires execution-boundary ` +
+          `'${authorityBoundaryProfile(io.env)}' (authority label '${authorityBoundaryLabel(io.env)}'); a '${'local-unisolated'}' receipt cannot authorize ` +
+          'managed acceptance (fail closed)',
+      );
     }
     throw new BrokerRejection('ENFORCEMENT_UNTRUSTED', `broker: ${verified.detail}`);
   }
@@ -424,7 +371,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
   }
   writeLine(
     io.stdout,
-    `broker: committed ${newSha} on ${ref} (tree ${treeId}, receipt ${receipt.receiptId}, input ${digests.inputDigest.slice(0, 12)})`,
+    `broker: committed ${newSha} on ${ref} (tree ${treeId}, receipt ${receipt.receiptId}, boundary ${authorityBoundaryLabel(io.env)} / profile ${authorityBoundaryProfile(io.env)})`,
   );
   writeLine(
     io.stdout,

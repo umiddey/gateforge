@@ -59,16 +59,28 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   AttestationSchema,
+  BEHAVIOR_CASE_KIND,
+  BehaviorCasePayloadSchema,
   CAUSE_NEXT_ACTIONS,
   canonicalJson,
+  caseExecutionDigestOf,
+  EMPTY_BEHAVIOR_CATALOG_DIGEST,
+  engineBundleDigestOf,
+  EvidenceRecordSchema,
+  isWitnessedRecord,
   renderRun,
+  requiredCaseSetDigestOf,
   runExitCode,
   sha256Canonical,
   selectionDigestOf,
+  targetArtifactDigestOf,
   verifyAttestationMac,
   type Attestation,
+  type BehaviorCatalog,
   type BlockingEntry,
   type GateforgeConfig,
+  type JsonValue,
+  type ObligationVerdict,
   type RunManifest,
   type RunnerExecutionEnvelope,
   type TestCatalog,
@@ -115,11 +127,14 @@ import {
 import { mappingBlocking, mappedCoverageFrom, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline } from '../pipeline.js';
 import { tryReuseReceipt } from '../receipts.js';
+import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
 import { resolveProvider } from '../providers.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
+import { isolationProfileForEnvironment, resolveIsolation } from '../isolation.js';
 import {
   clearGateReceipt,
   httpRoutesView,
+  readJsonArray,
   resolveStateDir,
   stateObligations,
   writeClaimInjections,
@@ -479,6 +494,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
     cwd: io.cwd,
     config,
     graph: pipeline.graph,
+    behaviorCatalog: pipeline.behaviorCatalog,
     obligations: pipeline.policy.obligations,
     blocking: pipeline.policy.blocking,
     stateDir,
@@ -565,6 +581,18 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
   const config = loadConfigAt(io.cwd);
   const stateDir = resolveStateDir(io.cwd, out);
+  // The authority owns the requested profile. Candidate configuration never
+  // selects managed mode, and a managed request never falls back to local.
+  const isolationProfile = isolationProfileForEnvironment(io.env);
+  const isolation = resolveIsolation(
+    {
+      profile: isolationProfile,
+      candidateDir: io.cwd,
+      engineBundleDir: io.env['GATEFORGE_ENGINE_BUNDLE_DIR'] ?? (isolationProfile === 'podman-rootless' ? '/engine' : ''),
+      appStateDir: stateDir,
+    },
+    io.env,
+  );
   // Scoped sealing (Goal 2): resolve the changed-file basis through the
   // SAME configured provider `check --changed` uses (auto → GHA/GitLab/
   // staged), and stamp the resolved identity into the run manifest so a
@@ -618,6 +646,15 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     }).inputDigest;
   }
   const invocationId = randomUUID();
+
+  // Phase 3 freeze (immutable candidate): the tree and parent the run
+  // EVALUATED are pinned before any suite execution. At seal time the
+  // same values are recomputed — a live-workspace edit mid-run is an
+  // explicit drift block, never a mixed-bytes seal.
+  const freezeGitDir = resolveGitDir(io.cwd, io.env);
+  const frozenTreeId =
+    freezeGitDir === null ? null : computeCandidateTreeId(freezeGitDir, io.cwd, io.env, stateDir, 'record');
+  const frozenParentSha = parentSha(io.cwd);
 
   // 2. Catalog + mappings (Phase 3 resolver) → expected set + claim
   // injections + typed mapping blockers. A failed discovery blocks the
@@ -691,6 +728,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       stateDir,
       obligations: pipeline.policy.obligations,
       catalog,
+      behaviorCatalog: pipeline.behaviorCatalog,
     });
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
     plannedRows = planExpectedSet(catalog);
@@ -710,6 +748,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
         obligations: pipeline.policy.obligations,
         graph: pipeline.graph,
         changedFiles: scopeChangedFiles ?? [],
+        behaviorCatalog: pipeline.behaviorCatalog,
       });
       plannedRows = scopedPlan.plannedRows;
       coveredFingerprints = scopedPlan.coveredFingerprints;
@@ -773,7 +812,9 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     inputDigest: expectedDigest ?? NO_DIGEST,
     trustedPolicyDigest: trustedPolicy,
     selectionDigest,
-    catalogDigest,
+    candidateTreeId: frozenTreeId,
+    executionBoundaryDigest: isolation.boundaryDigest,
+    ...behaviorReceiptBindings(pipeline.behaviorCatalog),
     scope: options.scope === 'changed' ? 'changed' : 'full',
     ...(options.scope === 'changed' ? { coveredObligationFingerprints: coveredFingerprints } : {}),
   });
@@ -804,6 +845,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       cwd: io.cwd,
       config,
       graph: pipeline.graph,
+      behaviorCatalog: pipeline.behaviorCatalog,
       obligations: pipeline.policy.obligations,
       blocking: [...pipeline.policy.blocking, ...mappingBlockers, ...inventoryBlocking, ...scopeBlockers],
       stateDir,
@@ -868,6 +910,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       cwd: io.cwd,
       config,
       graph: pipeline.graph,
+      behaviorCatalog: pipeline.behaviorCatalog,
       obligations: pipeline.policy.obligations,
       blocking: [
         ...pipeline.policy.blocking,
@@ -1283,6 +1326,9 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     cwd: io.cwd,
     config,
     graph: pipeline.graph,
+    behaviorCatalog: pipeline.behaviorCatalog,
+    behaviorAuthorityProfileDigest:
+      pipeline.behaviorCatalog === null ? null : engineBundleDigestOf(VERSION, trustedPolicy),
     obligations: pipeline.policy.obligations,
     blocking: [
       ...pipeline.policy.blocking,
@@ -1360,13 +1406,36 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   }
   const satisfied = evaluated.verdicts.filter((entry) => entry.verdict === 'satisfied').length;
   const waived = evaluated.verdicts.filter((entry) => entry.verdict === 'waived').length;
+  // Phase 3 drift gate: the tree at seal time must equal the frozen
+  // evaluation tree — a live-workspace edit mid-run blocks explicitly
+  // instead of sealing mixed bytes.
+  const sealGitDir = resolveGitDir(io.cwd, io.env);
+  const sealTreeId =
+    sealGitDir === null ? null : computeCandidateTreeId(sealGitDir, io.cwd, io.env, stateDir, 'record');
+  if (sealTreeId !== frozenTreeId) {
+    clearGateReceipt(stateDir);
+    writeLine(
+      io.stderr,
+      'test-gates: the workspace changed during the run ' +
+        `(${frozenTreeId ?? 'unborn'} → ${sealTreeId ?? 'unborn'}); ` +
+        'no receipt is sealed over mixed bytes — rerun the gate for the exact candidate (fail closed)',
+    );
+    return 1;
+  }
+  // Phase 3 v2 bindings: the immutable candidate tree actually tested
+  // (the drift-checked seal-time value, equal to the frozen evaluation tree),
+  // the behavior catalog + required case set, authenticated executed
+  // behavior cases that contributed to satisfied verdicts, the engine
+  // bundle, the controller-inspected execution boundary, and target artifact.
+  const candidateTreeId = sealTreeId;
+  const behaviorBindings = behaviorReceiptBindings(pipeline.behaviorCatalog);
   const receipt = issueGateReceipt({
     verifierKey: witnessVerifierKey,
     runId: manifest.runId,
     invocationId,
     inputDigest: expectedDigest,
     gitSha: manifest.gitSha,
-    parentSha: parentSha(io.cwd),
+    parentSha: frozenParentSha,
     trustedPolicyDigest: trustedPolicy,
     approvedPolicyDigest,
     invocation: SUPERVISED_INVOCATION,
@@ -1380,6 +1449,18 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       : {}),
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: liveAttestation === null ? null : sha256Canonical(liveAttestation as unknown as Record<string, never>),
+    candidateTreeId,
+    behaviorCatalogDigest: behaviorBindings.behaviorCatalogDigest,
+    requiredCaseSetDigest: behaviorBindings.requiredCaseSetDigest,
+    caseExecutionDigest: executedBehaviorCaseDigest(
+      stateDir,
+      manifest.runId,
+      pipeline.behaviorCatalog,
+      evaluated.verdicts,
+    ),
+    engineBundleDigest: engineBundleDigestOf(VERSION, trustedPolicy),
+    executionBoundaryDigest: isolation.boundaryDigest,
+    targetArtifactDigest: targetArtifactDigestOf(candidateTreeId),
     verdictSummary: {
       total: evaluated.verdicts.length,
       satisfied,
@@ -1430,6 +1511,102 @@ async function runDiagnosticsStep(
 /** Constants used only where a real digest cannot exist (fail-closed holes). */
 const NO_DIGEST = '0'.repeat(64);
 const NO_CATALOG_DIGEST = '0'.repeat(64);
+
+/**
+ * The behavior bindings a v2 receipt seals or must match on reuse: the
+ * compiled catalog digest plus the digest over the sorted full required
+ * case specifications. Both derive from the compiled catalog fixed
+ * pre-run, so reuse and seal compute identical values.
+ */
+function behaviorReceiptBindings(behaviorCatalog: BehaviorCatalog | null): {
+  behaviorCatalogDigest: string;
+  requiredCaseSetDigest: string;
+} {
+  if (behaviorCatalog === null) {
+    return {
+      behaviorCatalogDigest: EMPTY_BEHAVIOR_CATALOG_DIGEST,
+      requiredCaseSetDigest: requiredCaseSetDigestOf([]),
+    };
+  }
+  const specs = behaviorCatalog.cases
+    .map((item) => ({ caseId: item.caseId, specDigest: item.specDigest }))
+    .sort((a, b) => (a.caseId < b.caseId ? -1 : a.caseId > b.caseId ? 1 : 0));
+  return {
+    behaviorCatalogDigest: behaviorCatalog.catalogDigest,
+    requiredCaseSetDigest: requiredCaseSetDigestOf(specs as unknown as JsonValue[]),
+  };
+}
+
+/**
+ * Computes the receipt's executed-case digest from only authenticated,
+ * schema-valid behavior.case records that the evaluator used for a
+ * satisfied obligation verdict. Unreferenced, malformed, claimed, or
+ * mismatched records are ignored.
+ *
+ * Args:
+ *   stateDir: run-state directory containing records.json.
+ *   runId: authenticated run identity.
+ *   behaviorCatalog: trusted compiled behavior catalog, or null.
+ *   verdicts: final evaluated obligation verdicts.
+ *
+ * Returns:
+ *   string: canonical executed-case digest, empty when no catalog cases
+ *   contributed.
+ */
+export function executedBehaviorCaseDigest(
+  stateDir: string,
+  runId: string,
+  behaviorCatalog: BehaviorCatalog | null,
+  verdicts: readonly ObligationVerdict[],
+): string {
+  if (behaviorCatalog === null || behaviorCatalog.cases.length === 0) return caseExecutionDigestOf([]);
+  const requiredBySatisfiedObligation = new Map<string, Set<string>>();
+  for (const verdict of verdicts) {
+    if (verdict.verdict !== 'satisfied') continue;
+    const obligationId = verdict.obligation.id;
+    requiredBySatisfiedObligation.set(
+      obligationId,
+      new Set(behaviorCatalog.requirements[obligationId] ?? []),
+    );
+  }
+  if (requiredBySatisfiedObligation.size === 0) return caseExecutionDigestOf([]);
+  const satisfiedRecordIds = new Set(
+    verdicts
+      .filter((verdict) => verdict.verdict === 'satisfied')
+      .flatMap((verdict) => verdict.recordIds),
+  );
+  const executedCaseIds: string[] = [];
+  for (const raw of readJsonArray(stateDir, 'records.json')) {
+    if (!isWitnessedRecord(raw)) continue;
+    const record = EvidenceRecordSchema.safeParse(raw);
+    if (!record.success) continue;
+    const evidence = record.data;
+    if (
+      evidence.recordId === undefined ||
+      !satisfiedRecordIds.has(evidence.recordId) ||
+      evidence.runId !== runId ||
+      evidence.kind !== BEHAVIOR_CASE_KIND ||
+      evidence.trust !== 'witnessed' ||
+      evidence.origin !== 'engine-observed'
+    ) {
+      continue;
+    }
+    const payload = BehaviorCasePayloadSchema.safeParse(evidence.payload);
+    if (!payload.success || payload.data.state !== 'sealed' || !payload.data.completion.complete) continue;
+    const requiredCaseIds = requiredBySatisfiedObligation.get(evidence.obligationId);
+    if (
+      requiredCaseIds === undefined ||
+      !requiredCaseIds.has(payload.data.caseId) ||
+      !payload.data.obligationIds.includes(evidence.obligationId)
+    ) {
+      continue;
+    }
+    const compiled = behaviorCatalog.cases.find((candidate) => candidate.caseId === payload.data.caseId);
+    if (compiled === undefined || compiled.specDigest !== payload.data.caseSpecDigest) continue;
+    executedCaseIds.push(payload.data.caseId);
+  }
+  return caseExecutionDigestOf(executedCaseIds);
+}
 
 /** A schema-valid empty catalog (used only when discovery itself failed). */
 const EMPTY_CATALOG: TestCatalog = {

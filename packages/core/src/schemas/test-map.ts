@@ -66,13 +66,34 @@ export const TestMapEntrySchema = z
     categories: z.array(z.string().min(1)).optional(),
     /** Claimed obligation ids — at least one; `'*'` never parses. */
     claims: z.array(ObligationIdSchema).min(1, 'every mapping entry must claim at least one obligation'),
+    /**
+     * Compiled behavior case ids this declaration intends to execute.
+     * Optional: absence is not proof. Duplicate ids fail closed.
+     */
+    caseIds: z.array(z.string().min(1)).optional(),
     /** Required free-text why (a declaration must be reviewable). */
     reason: z
       .string()
       .trim()
       .min(8, 'reason is required free text (at least 8 characters) explaining the declaration'),
   })
-  .strict();
+  .strict()
+  .superRefine((entry, ctx) => {
+    if (entry.caseIds === undefined) return;
+    const seen = new Set<string>();
+    for (let index = 0; index < entry.caseIds.length; index += 1) {
+      const id = entry.caseIds[index];
+      if (id === undefined) continue;
+      if (seen.has(id)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['caseIds', index],
+          message: `duplicate case id '${id}'`,
+        });
+      }
+      seen.add(id);
+    }
+  });
 
 /** Inferred test-map-entry type. */
 export type TestMapEntry = z.infer<typeof TestMapEntrySchema>;

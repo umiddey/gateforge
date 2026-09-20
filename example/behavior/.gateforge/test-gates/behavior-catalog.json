@@ -1,0 +1,320 @@
+{
+  "schemaVersion": 1,
+  "catalogDigest": "4a2825d1572a2a4f3c17cbf1bfa21bb18297ce17f303f95f3763e92bda2db7d2",
+  "cases": [
+    {
+      "caseId": "5717b7412032248a671d4b83a3e594c3558a426e2eabfabb9027a3f82f389c63",
+      "specDigest": "02e9c33e1fc29bc1172add33ff4a8b22c11dd3010e57d448933476e155bd0b09",
+      "resourceId": "tenant.http-post-imports-accounts-a4eac965",
+      "endpointResourceId": "tenant.http-post-imports-accounts-a4eac965",
+      "obligationIds": [
+        "tenant.http-post-imports-accounts-a4eac965:http:effect-verified"
+      ],
+      "definition": {
+        "id": "import-two-accounts",
+        "contract": "http:effect-verified",
+        "channel": "engine-http",
+        "fixture": "two-tenants-two-accounts",
+        "actor": "admin-a",
+        "action": {
+          "kind": "request",
+          "method": "POST",
+          "pathTemplate": "/imports/accounts",
+          "path": {},
+          "query": {},
+          "body": {
+            "encoding": "json",
+            "fields": {
+              "rows": {
+                "from": "literal",
+                "value": [
+                  {
+                    "first_name": "Katherine",
+                    "last_name": "Johnson"
+                  },
+                  {
+                    "first_name": "Dorothy",
+                    "last_name": "Vaughan"
+                  }
+                ]
+              }
+            }
+          },
+          "credentialVariant": "valid"
+        },
+        "expect": {
+          "statuses": [
+            200
+          ],
+          "response": [],
+          "state": [
+            {
+              "kind": "created",
+              "scope": "accounts",
+              "rows": [
+                {
+                  "fields": {
+                    "first_name": {
+                      "from": "request",
+                      "attempt": 0,
+                      "pointer": "/body/rows/0/first_name",
+                      "transform": "identity"
+                    },
+                    "last_name": {
+                      "from": "request",
+                      "attempt": 0,
+                      "pointer": "/body/rows/0/last_name",
+                      "transform": "identity"
+                    }
+                  }
+                },
+                {
+                  "fields": {
+                    "first_name": {
+                      "from": "request",
+                      "attempt": 0,
+                      "pointer": "/body/rows/1/first_name",
+                      "transform": "identity"
+                    },
+                    "last_name": {
+                      "from": "request",
+                      "attempt": 0,
+                      "pointer": "/body/rows/1/last_name",
+                      "transform": "identity"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "effects": [
+        {
+          "id": "accounts",
+          "resourceId": "tenant.accounts",
+          "adapter": "accounts",
+          "scope": "fixture-accounts",
+          "identityFields": [
+            "id"
+          ],
+          "fields": [
+            "first_name",
+            "last_name",
+            "status"
+          ],
+          "completion": "immediate"
+        }
+      ],
+      "sourceFiles": [
+        "server.js"
+      ]
+    },
+    {
+      "caseId": "7ae75369e31d652665f85b6ab5d55edf43a48202a57dbe4caa7a0641d5ff9821",
+      "specDigest": "a6bbdf7d376a2c83b7b12452e44e9e4f2382daafc514fc86271abd93e02bf43a",
+      "resourceId": "tenant.http-post-profile-accounts-id-d27ca586",
+      "endpointResourceId": "tenant.http-post-profile-accounts-id-d27ca586",
+      "obligationIds": [
+        "tenant.http-post-profile-accounts-id-d27ca586:http:effect-verified"
+      ],
+      "definition": {
+        "id": "profile-update",
+        "contract": "http:effect-verified",
+        "channel": "engine-http",
+        "fixture": "two-tenants-two-accounts",
+        "actor": "owner-a",
+        "action": {
+          "kind": "request",
+          "method": "POST",
+          "pathTemplate": "/profile/accounts/{id}",
+          "path": {
+            "id": {
+              "from": "fixture",
+              "key": "accountA.id"
+            }
+          },
+          "query": {},
+          "body": {
+            "encoding": "json",
+            "fields": {
+              "first_name": {
+                "from": "literal",
+                "value": "Ada"
+              },
+              "last_name": {
+                "from": "literal",
+                "value": "Lovelace"
+              }
+            }
+          },
+          "credentialVariant": "valid"
+        },
+        "expect": {
+          "statuses": [
+            200
+          ],
+          "response": [],
+          "state": [
+            {
+              "kind": "updated",
+              "scope": "accounts",
+              "subject": {
+                "from": "fixture",
+                "key": "accountA.identity"
+              },
+              "fields": {
+                "first_name": {
+                  "from": "request",
+                  "attempt": 0,
+                  "pointer": "/body/first_name",
+                  "transform": "identity"
+                },
+                "last_name": {
+                  "from": "request",
+                  "attempt": 0,
+                  "pointer": "/body/last_name",
+                  "transform": "identity"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "effects": [
+        {
+          "id": "accounts",
+          "resourceId": "tenant.accounts",
+          "adapter": "accounts",
+          "scope": "fixture-accounts",
+          "identityFields": [
+            "id"
+          ],
+          "fields": [
+            "first_name",
+            "last_name",
+            "status"
+          ],
+          "completion": "immediate"
+        }
+      ],
+      "sourceFiles": [
+        "server.js"
+      ]
+    },
+    {
+      "caseId": "d7e39ec43a5685909d68b3c88ab821548166d36ac03ddb8260b878b52be95e4b",
+      "specDigest": "2b6cf5b217a5f09650a81c8124e60ae209e2fedcccd7d498a596eb1b3f920dab",
+      "resourceId": "tenant.http-post-admin-accounts-id-d2cbd1c4",
+      "endpointResourceId": "tenant.http-post-admin-accounts-id-d2cbd1c4",
+      "obligationIds": [
+        "tenant.http-post-admin-accounts-id-d2cbd1c4:http:effect-verified"
+      ],
+      "definition": {
+        "id": "admin-update",
+        "contract": "http:effect-verified",
+        "channel": "engine-http",
+        "fixture": "two-tenants-two-accounts",
+        "actor": "admin-a",
+        "action": {
+          "kind": "request",
+          "method": "POST",
+          "pathTemplate": "/admin/accounts/{id}",
+          "path": {
+            "id": {
+              "from": "fixture",
+              "key": "accountA.id"
+            }
+          },
+          "query": {},
+          "body": {
+            "encoding": "json",
+            "fields": {
+              "first_name": {
+                "from": "literal",
+                "value": "Grace"
+              },
+              "last_name": {
+                "from": "literal",
+                "value": "Hopper"
+              }
+            }
+          },
+          "credentialVariant": "valid"
+        },
+        "expect": {
+          "statuses": [
+            200
+          ],
+          "response": [],
+          "state": [
+            {
+              "kind": "updated",
+              "scope": "accounts",
+              "subject": {
+                "from": "fixture",
+                "key": "accountA.identity"
+              },
+              "fields": {
+                "first_name": {
+                  "from": "request",
+                  "attempt": 0,
+                  "pointer": "/body/first_name",
+                  "transform": "identity"
+                },
+                "last_name": {
+                  "from": "request",
+                  "attempt": 0,
+                  "pointer": "/body/last_name",
+                  "transform": "identity"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "effects": [
+        {
+          "id": "accounts",
+          "resourceId": "tenant.accounts",
+          "adapter": "accounts",
+          "scope": "fixture-accounts",
+          "identityFields": [
+            "id"
+          ],
+          "fields": [
+            "first_name",
+            "last_name",
+            "status"
+          ],
+          "completion": "immediate"
+        }
+      ],
+      "sourceFiles": [
+        "server.js"
+      ]
+    }
+  ],
+  "requirements": {
+    "tenant.http-post-admin-accounts-id-d2cbd1c4:http:effect-verified": [
+      "d7e39ec43a5685909d68b3c88ab821548166d36ac03ddb8260b878b52be95e4b"
+    ],
+    "tenant.http-post-imports-accounts-a4eac965:http:effect-verified": [
+      "5717b7412032248a671d4b83a3e594c3558a426e2eabfabb9027a3f82f389c63"
+    ],
+    "tenant.http-post-profile-accounts-id-d27ca586:http:effect-verified": [
+      "7ae75369e31d652665f85b6ab5d55edf43a48202a57dbe4caa7a0641d5ff9821"
+    ]
+  },
+  "dependencies": {
+    "tenant.http-post-imports-accounts-a4eac965": [
+      "tenant.accounts"
+    ],
+    "tenant.http-post-profile-accounts-id-d27ca586": [
+      "tenant.accounts"
+    ],
+    "tenant.http-post-admin-accounts-id-d2cbd1c4": [
+      "tenant.accounts"
+    ]
+  }
+}

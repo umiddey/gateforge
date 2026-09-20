@@ -27,7 +27,7 @@ const OTHER = HEX(2);
 function body(overrides: Partial<Omit<GateReceipt, 'mac'>> = {}): Omit<GateReceipt, 'mac'> {
   return {
     schemaVersion: 1,
-    receiptVersion: 1,
+    receiptVersion: 2,
     receiptId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
     runId: '11111111-2222-4333-8444-555555555555',
     invocationId: '66666666-7777-4888-8999-000000000000',
@@ -40,6 +40,13 @@ function body(overrides: Partial<Omit<GateReceipt, 'mac'>> = {}): Omit<GateRecei
     catalogDigest: HEX(5),
     executionResultDigest: HEX(6),
     evidenceAttestationDigest: null,
+    candidateTreeId: null,
+    behaviorCatalogDigest: 'b'.repeat(64),
+    requiredCaseSetDigest: 'c'.repeat(64),
+    caseExecutionDigest: 'd'.repeat(64),
+    engineBundleDigest: 'e'.repeat(64),
+    executionBoundaryDigest: 'f'.repeat(64),
+    targetArtifactDigest: 'a'.repeat(64),
     verdictSummary: { total: 2, satisfied: 2, waived: 0, blocking: 0 },
     issuedAt: '2026-09-13T00:00:00.000Z',
     ...overrides,
@@ -73,7 +80,7 @@ describe('gate receipt issuance round-trip', () => {
     expect(outcome.ok).toBe(true);
   });
 
-  it('the produced document parses against the strict v1 schema', () => {
+  it('the produced document parses against the strict v2 schema', () => {
     expect(GateReceiptSchema.safeParse(signed()).success).toBe(true);
   });
 });
@@ -125,6 +132,13 @@ describe('gate receipt fail-closed rejections', () => {
       [{ catalogDigest: OTHER }, 'catalog-digest-mismatch'],
       [{ executionResultDigest: OTHER }, 'execution-digest-mismatch'],
       [{ evidenceAttestationDigest: OTHER }, 'attestation-digest-mismatch'],
+      [{ candidateTreeId: 'a'.repeat(40) }, 'tree-mismatch'],
+      [{ behaviorCatalogDigest: OTHER }, 'behavior-digest-mismatch'],
+      [{ requiredCaseSetDigest: OTHER }, 'case-set-mismatch'],
+      [{ caseExecutionDigest: OTHER }, 'case-execution-mismatch'],
+      [{ engineBundleDigest: OTHER }, 'engine-bundle-mismatch'],
+      [{ executionBoundaryDigest: OTHER }, 'boundary-mismatch'],
+      [{ targetArtifactDigest: OTHER }, 'artifact-mismatch'],
     ];
     for (const [expected, rejection] of cases) {
       expect(verifyGateReceipt(KEY, receipt, expected), rejection).toMatchObject({ ok: false, rejection });
@@ -158,14 +172,19 @@ describe('gate receipt fail-closed rejections', () => {
 });
 
 describe('gate receipt schema pinning', () => {
-  it('only receiptVersion 1 is honored', () => {
-    const v2 = body({ receiptVersion: 2 as never });
-    expect(GateReceiptSchema.safeParse({ ...v2, mac: '0'.repeat(64) }).success).toBe(false);
+  it('only receiptVersion 2 is honored', () => {
+    const v1 = body({ receiptVersion: 1 as never });
+    expect(GateReceiptSchema.safeParse({ ...v1, mac: '0'.repeat(64) }).success).toBe(false);
   });
 
-  it('RECEIPT_DOMAIN and RECEIPT_VERSION are the v1 pin', () => {
-    expect(RECEIPT_DOMAIN).toBe('gateforge.receipt.v1');
-    expect(RECEIPT_VERSION).toBe(1);
+  it('a v1 receipt is rejected with a fresh-run instruction, never re-signed', () => {
+    const v1receipt = { ...body({ receiptVersion: 1 as never }), mac: '0'.repeat(64) };
+    expect(verifyGateReceipt(KEY, v1receipt)).toMatchObject({ ok: false, rejection: 'malformed' });
+  });
+
+  it('RECEIPT_DOMAIN and RECEIPT_VERSION are the v2 pin', () => {
+    expect(RECEIPT_DOMAIN).toBe('gateforge.receipt.v2');
+    expect(RECEIPT_VERSION).toBe(2);
   });
 
   it('a verdict summary whose satisfied + waived exceed total is rejected', () => {

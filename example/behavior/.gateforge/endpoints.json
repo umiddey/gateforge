@@ -1,0 +1,28 @@
+{
+  "rules": [
+    {
+      "paths": ["/profile/accounts/:id"],
+      "method": "POST",
+      "capability": "crud-update",
+      "reason": "The profile POST edits an existing account selected by id."
+    },
+    {
+      "paths": ["/admin/accounts/:id"],
+      "method": "POST",
+      "capability": "crud-update",
+      "reason": "The admin POST edits an existing account selected by id."
+    },
+    {
+      "paths": ["/imports/accounts"],
+      "method": "POST",
+      "capability": "file-transfer",
+      "reason": "The import endpoint owns the explicit bulk account ingest channel; multipart remains typed unsupported."
+    },
+    {
+      "paths": ["/profile/accounts", "/admin/accounts", "/imports/accounts", "/api/accounts", "/api/accounts/:id", "/profile/accounts/:id/edit", "/admin/accounts/:id/edit"],
+      "method": "GET",
+      "capability": "crud-read",
+      "reason": "These routes are read-only list/detail/editor surfaces for the fixture inventory."
+    }
+  ]
+}

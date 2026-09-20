@@ -43,7 +43,7 @@ function withConfigSection(repo: TempRepo, section: string): void {
   writeFileSync(path, `${readFileSync(path, 'utf8')}${section}`, 'utf8');
 }
 
-/** Policies document adding an unsupported auth contract on top of persistence:read. */
+/** Policies document adding the Phase 7 auth contract over persistence:read. */
 const AUTH_POLICY_YML = `\
 schemaVersion: 1
 policies:
@@ -57,6 +57,14 @@ policies:
       exposure: user-facing
     require:
       - auth:role-denied
+`;
+
+/** Adds a still-unavailable domain contract for capability-gap coverage. */
+const UNSUPPORTED_POLICY_YML = `${AUTH_POLICY_YML}  - id: user-facing-task
+    when:
+      exposure: user-facing
+    require:
+      - task:delivery
 `;
 
 describe('init strict-setup preflight (plan Phase 0 item 4)', () => {
@@ -84,10 +92,11 @@ describe('init strict-setup preflight (plan Phase 0 item 4)', () => {
 });
 
 describe('strict E2E mode via check (plan §3.3, ADR 0005 D4)', () => {
-  it('a waived E2E obligation is NOT proof: blocking missing with ENFORCEMENT_UNTRUSTED', async () => {
+  it('Phase 7 auth is available, but no declared behavior cases still block as unmapped', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       repo.writeFiles({
+        '.gateforge/policies.yml': AUTH_POLICY_YML,
         '.gateforge/waivers/accounts.json': waiverJson('tenant.accounts'),
         '.gateforge/waivers/orders.json': waiverJson('tenant.orders'),
       });
@@ -96,15 +105,27 @@ describe('strict E2E mode via check (plan §3.3, ADR 0005 D4)', () => {
       expect(code).toBe(1);
       const report = JSON.parse(stdout) as {
         summary: { blocking: number; waived: number };
-        verdicts: Array<{ obligationId: string; verdict: string; cause: string | null; nextAction: string | null; reason: string | null }>;
+        blocking: Array<{ cause?: string | null }>;
+        verdicts: Array<{
+          obligationId: string;
+          verdict: string;
+          cause: string | null;
+          nextAction: string | null;
+          reason: string | null;
+        }>;
       };
       expect(report.summary.waived).toBe(0);
-      expect(report.summary.blocking).toBe(2);
-      expect(report.verdicts.every((v) => v.verdict === 'missing' && v.cause === 'ENFORCEMENT_UNTRUSTED')).toBe(true);
-      expect(report.verdicts.every((v) => v.nextAction === 'Repair enforcement setup')).toBe(true);
-      // The declined waiver stays explicit in the reason (legacy/reporting use).
-      expect(report.verdicts.every((v) => (v.reason ?? '').includes("waived by 'team-"))).toBe(true);
-      expect(report.verdicts.every((v) => (v.reason ?? '').includes('not proof'))).toBe(true);
+      expect(report.summary.blocking).toBe(4);
+      expect(report.blocking.some((entry) => entry.cause === 'VERIFIER_UNSUPPORTED')).toBe(false);
+      const persistence = report.verdicts.filter((v) => v.obligationId.endsWith(':persistence:read'));
+      expect(persistence).toHaveLength(2);
+      expect(persistence.every((v) => v.verdict === 'missing' && v.cause === 'ENFORCEMENT_UNTRUSTED')).toBe(true);
+      expect(persistence.every((v) => v.nextAction === 'Repair enforcement setup')).toBe(true);
+      expect(persistence.every((v) => (v.reason ?? '').includes("waived by 'team-"))).toBe(true);
+      expect(persistence.every((v) => (v.reason ?? '').includes('not proof'))).toBe(true);
+      const auth = report.verdicts.filter((v) => v.obligationId.endsWith(':auth:role-denied'));
+      expect(auth).toHaveLength(2);
+      expect(auth.every((v) => v.verdict === 'missing' && v.cause === 'TEST_MAPPING_MISSING')).toBe(true);
     });
   });
 
@@ -126,7 +147,7 @@ describe('strict E2E mode via check (plan §3.3, ADR 0005 D4)', () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       repo.writeFiles({
-        '.gateforge/policies.yml': AUTH_POLICY_YML,
+        '.gateforge/policies.yml': UNSUPPORTED_POLICY_YML,
         '.gateforge/waivers/accounts.json': waiverJson('tenant.accounts'),
         '.gateforge/waivers/orders.json': waiverJson('tenant.orders'),
       });
@@ -137,9 +158,9 @@ describe('strict E2E mode via check (plan §3.3, ADR 0005 D4)', () => {
         blocking: Array<{ kind: string; cause?: string | null; nextAction?: string | null; detail: string }>;
       };
       const capability = report.blocking.filter((entry) => entry.cause === 'VERIFIER_UNSUPPORTED');
-      expect(capability).toHaveLength(2); // one per auth obligation (accounts + orders)
-      expect(capability.every((entry) => entry.detail.includes('auth:role-denied'))).toBe(true);
-      expect(capability.every((entry) => entry.detail.includes('identity/role material'))).toBe(true);
+      expect(capability).toHaveLength(2); // one per task obligation (accounts + orders)
+      expect(capability.every((entry) => entry.detail.includes('task:delivery'))).toBe(true);
+      expect(capability.every((entry) => entry.detail.includes('queue/job delivery state'))).toBe(true);
       expect(capability.every((entry) => entry.detail.includes('Required observer:'))).toBe(true);
       expect(
         capability.every(
@@ -229,7 +250,7 @@ describe('Phase 0 acceptance: three different blocking causes with useful action
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       repo.writeFiles({
-        '.gateforge/policies.yml': AUTH_POLICY_YML,
+        '.gateforge/policies.yml': UNSUPPORTED_POLICY_YML,
         '.gateforge/test-gates/claims.json': JSON.stringify([
           {
             schemaVersion: 1,
@@ -258,11 +279,11 @@ describe('Phase 0 acceptance: three different blocking causes with useful action
       // Missing observation: the orders claim exists but collected nothing.
       expect(byId.get(OBLIGATION_ORDERS)?.cause).toBe('EVIDENCE_NOT_COLLECTED');
       expect(byId.get(OBLIGATION_ORDERS)?.nextAction).toBe(CAUSE_NEXT_ACTIONS['EVIDENCE_NOT_COLLECTED']);
-      // Unsupported verifier: the auth contracts have no honest proof channel.
-      const auth = report.verdicts.filter((v) => v.cause === 'VERIFIER_UNSUPPORTED');
-      expect(auth).toHaveLength(2);
+      // Unsupported verifier: the task contracts still have no honest proof channel.
+      const task = report.verdicts.filter((v) => v.cause === 'VERIFIER_UNSUPPORTED');
+      expect(task).toHaveLength(2);
       expect(
-        auth.every((v) => v.nextAction === CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED']),
+        task.every((v) => v.nextAction === CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED']),
       ).toBe(true);
       // Everything stays blocking (exit 1 asserted above).
       expect(report.verdicts.every((v) => v.verdict !== 'satisfied' && v.verdict !== 'waived')).toBe(true);

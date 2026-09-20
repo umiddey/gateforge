@@ -20,6 +20,8 @@
 import { cpSync, existsSync, mkdirSync } from 'node:fs';
 import {
   CAUSE_NEXT_ACTIONS,
+  engineBundleDigestOf,
+  executionBoundaryDigestOf,
   renderRun,
   runExitCode,
   type BlockingEntry,
@@ -72,6 +74,7 @@ import {
   evaluateApprovedPolicy,
   resolveApprovedPolicyDigest,
 } from '../trusted-policy.js';
+import { isolationProfileForEnvironment } from '../isolation.js';
 import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
 import { renderEndpointInventory } from '../endpoint-report.js';
 
@@ -405,7 +408,7 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
     const knownSourceFiles = [
       ...new Set(
         pipeline.graph.resources.flatMap((resource) =>
-          resource.id === null ? [] : sourcesByResourceId(pipeline.graph).get(resource.id) ?? [],
+          resource.id === null ? [] : sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog).get(resource.id) ?? [],
         ),
       ),
     ];
@@ -492,6 +495,7 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
       config,
       stateDir,
       obligations: pipeline.policy.obligations,
+      behaviorCatalog: pipeline.behaviorCatalog,
     });
     mappingClaims = gradingClaimsFor(mapped.resolution, mapped.nativeClaims);
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
@@ -502,6 +506,11 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
     cwd: io.cwd,
     config,
     graph: pipeline.graph,
+    behaviorCatalog: pipeline.behaviorCatalog,
+    behaviorAuthorityProfileDigest:
+      pipeline.behaviorCatalog === null
+        ? null
+        : engineBundleDigestOf(VERSION, trustedPolicyDigestForConfig(io.cwd, config)),
     obligations: pipeline.policy.obligations,
     blocking: [...pipeline.policy.blocking, ...mismatchBlocking, ...mappingBlockers],
     stateDir,
@@ -554,7 +563,7 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
   const coverageChangedFiles =
     diffScoped && scopeDecision.mode === 'changed' ? scopeDecision.changedFiles : null;
   const requiredCoverage = (): ScopedObligationRef[] => {
-    const sources = sourcesByResourceId(pipeline.graph);
+    const sources = sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog);
     return pipeline.policy.obligations
       .filter((obligation) => {
         if (coverageChangedFiles === null) return true;
@@ -614,6 +623,7 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
             // staleness contract (E13).
             selectionDigest: undefined,
             catalogDigest: undefined,
+            executionBoundaryDigest: executionBoundaryDigestOf(isolationProfileForEnvironment(io.env)),
           },
         );
         if (load.status === 'ok') {

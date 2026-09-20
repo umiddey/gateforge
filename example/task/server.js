@@ -133,14 +133,14 @@ function sideEffectCount(name) {
  * Returns:
  *   { outcome, attempts, terminal, sideEffectCount, runId, key }
  */
-async function runTask(task, profile, payload, key, runId) {
+async function runTask(task, profile, payload, key, runId, state = defaultTaskState()) {
   // 1. Idempotency check (contract: task:idempotent / task:duplicate-delivery-handled)
   if (key !== undefined && key !== null) {
-    const prior = lookupIdempotent(key);
+    const prior = state.lookupIdempotent(key);
     if (prior !== null) {
       // Already ran — record a DEDUPED audit row but DO NOT re-execute the side effect.
       if (task.observability) {
-        appendRun({
+        state.appendRun({
           runId,
           taskName: Object.keys(TASKS).find((n) => TASKS[n] === task),
           profile,
@@ -181,13 +181,13 @@ async function runTask(task, profile, payload, key, runId) {
       }
 
       // 2. Side effect (contract: task:duplicate-delivery-handled)
-      const sideEffect = incrementSideEffect(
+      const sideEffect = state.incrementSideEffect(
         Object.keys(TASKS).find((n) => TASKS[n] === task),
       );
 
       // 3. Observability (contract: task:observability-recorded)
       if (task.observability) {
-        appendRun({
+        state.appendRun({
           runId,
           taskName: Object.keys(TASKS).find((n) => TASKS[n] === task),
           profile,
@@ -201,7 +201,7 @@ async function runTask(task, profile, payload, key, runId) {
       }
 
       const outcome = { outcome: 'success', attempts: attempt, terminal: false, sideEffectCount: sideEffect, runId, key };
-      if (key !== undefined && key !== null) recordIdempotent(key, outcome);
+      if (key !== undefined && key !== null) state.recordIdempotent(key, outcome);
       return outcome;
     } catch (error) {
       lastError = error;
@@ -209,7 +209,7 @@ async function runTask(task, profile, payload, key, runId) {
 
       // Observability: record the failure even when retrying.
       if (task.observability) {
-        appendRun({
+        state.appendRun({
           runId,
           taskName: Object.keys(TASKS).find((n) => TASKS[n] === task),
           profile,
@@ -217,7 +217,7 @@ async function runTask(task, profile, payload, key, runId) {
           attempt,
           terminal: isTerminal,
           outcome: isTerminal ? 'terminal' : 'retry',
-          sideEffectCount: sideEffectCount(
+          sideEffectCount: state.sideEffectCount(
             Object.keys(TASKS).find((n) => TASKS[n] === task),
           ),
           deduped: false,
@@ -227,8 +227,8 @@ async function runTask(task, profile, payload, key, runId) {
 
       // Contract: task:terminal-handled — no more retries on terminal errors.
       if (isTerminal) {
-        const outcome = { outcome: 'terminal', attempts: attempt, terminal: true, sideEffectCount: sideEffectCount(Object.keys(TASKS).find((n) => TASKS[n] === task)), runId, key };
-        if (key !== undefined && key !== null) recordIdempotent(key, outcome);
+        const outcome = { outcome: 'terminal', attempts: attempt, terminal: true, sideEffectCount: state.sideEffectCount(Object.keys(TASKS).find((n) => TASKS[n] === task)), runId, key };
+        if (key !== undefined && key !== null) state.recordIdempotent(key, outcome);
         return outcome;
       }
 
@@ -237,8 +237,8 @@ async function runTask(task, profile, payload, key, runId) {
   }
 
   // Exhausted retries
-  const exhausted = { outcome: 'exhausted', attempts: attempt, terminal: false, sideEffectCount: sideEffectCount(Object.keys(TASKS).find((n) => TASKS[n] === task)), runId, key, errorType: lastError?.type };
-  if (key !== undefined && key !== null) recordIdempotent(key, exhausted);
+  const exhausted = { outcome: 'exhausted', attempts: attempt, terminal: false, sideEffectCount: state.sideEffectCount(Object.keys(TASKS).find((n) => TASKS[n] === task)), runId, key, errorType: lastError?.type };
+  if (key !== undefined && key !== null) state.recordIdempotent(key, exhausted);
   return exhausted;
 }
 
@@ -253,7 +253,7 @@ async function runTask(task, profile, payload, key, runId) {
  *   POST /enqueue
  *   GET  /runs
  */
-async function handle(req, res) {
+async function handle(req, res, state = defaultTaskState()) {
   const url = new URL(req.url, 'http://localhost');
   const path = url.pathname;
 
@@ -271,7 +271,7 @@ async function handle(req, res) {
 
   if (req.method === 'GET' && path === '/runs') {
     res.writeHead(200, { 'content-type': 'application/json', 'x-gateforge-env': 'task-loopback-v1' });
-    res.end(JSON.stringify({ runs: readRuns() }));
+    res.end(JSON.stringify({ runs: state.readRuns() }));
     return;
   }
 
@@ -294,7 +294,7 @@ async function handle(req, res) {
       return;
     }
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const outcome = await runTask(task, profile, payload ?? {}, key, runId);
+    const outcome = await runTask(task, profile, payload ?? {}, key, runId, state);
     res.writeHead(202, { 'content-type': 'application/json', 'x-gateforge-env': 'task-loopback-v1' });
     res.end(JSON.stringify(outcome));
     return;
@@ -308,9 +308,47 @@ async function handle(req, res) {
  * Creates the example application server. Binds to `localhost` only,
  * runs tasks in-process, persists audit rows to runs.json under OS tmpdir.
  */
-export function createApp() {
+export function createTaskState() {
+  const idempotency = new Map();
+  const counters = new Map();
+  const runs = [];
+  return {
+    lookupIdempotent: (key) => idempotency.get(key) ?? null,
+    recordIdempotent: (key, outcome) => {
+      idempotency.set(key, outcome);
+    },
+    appendRun: (row) => {
+      runs.push(row);
+    },
+    incrementSideEffect: (name) => {
+      const next = (counters.get(name) ?? 0) + 1;
+      counters.set(name, next);
+      return next;
+    },
+    sideEffectCount: (name) => counters.get(name) ?? 0,
+    readRuns: () => [...runs],
+  };
+}
+
+/**
+ * Default process-global task state (standalone runs): file-backed audit
+ * trail + process-global idempotency/counters, exactly the historical
+ * behavior.
+ */
+function defaultTaskState() {
+  return {
+    lookupIdempotent,
+    recordIdempotent,
+    appendRun,
+    incrementSideEffect,
+    sideEffectCount,
+    readRuns,
+  };
+}
+
+export function createApp(state = defaultTaskState()) {
   return http.createServer((req, res) => {
-    handle(req, res).catch((error) => {
+    handle(req, res, state).catch((error) => {
       res.writeHead(500, { 'content-type': 'application/json', 'x-gateforge-env': 'task-loopback-v1' });
       res.end(JSON.stringify({ error: error.message }));
     });

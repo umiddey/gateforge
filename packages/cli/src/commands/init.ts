@@ -18,7 +18,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { join } from 'node:path';
-import { parse as parseYaml } from 'yaml';
+import { parse as parseYaml, parseDocument } from 'yaml';
 import {
   ClassificationPolicySchema,
   PolicyFileSchema,
@@ -38,6 +38,7 @@ import { PACK_VERSION as PACK_FASTAPI_VERSION } from '@gate-forge/pack-fastapi';
 import { PACK_VERSION as PACK_HTTP_VERSION } from '@gate-forge/pack-http';
 import { PACK_VERSION as PACK_TASK_VERSION } from '@gate-forge/pack-task';
 import { parseArgs, stringFlag } from '../args.js';
+import { ensurePodman } from '../podman-bootstrap.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
@@ -47,11 +48,34 @@ import { expandIncludePaths, type ExpandError } from '../glob.js';
 import { inferPlanesConfig } from '../planes-inference.js';
 import { installCommitHook, writeStandaloneGateScript } from '../git-hooks.js';
 import { appendPreCommitHook, ensureHookScript, engineRootFromInvocation } from './blocking.js';
-
 export const INIT_USAGE =
   'usage: gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] ' +
   '[--no-scan] [--proof overlay|observe] [--blocking] [--pre-commit] [--mode changed|staged] [--ci] [--no-ci] ' +
-  '[--strict-e2e] [--planes]';
+  '[--strict-e2e] [--managed] [--planes] [--behavior]';
+
+/** Template for the complete-behavior owner document (plan §4.1). */
+export const BEHAVIOR_TEMPLATE = `\
+# Complete-behavior owner document (plan §4.1).
+# Presence of this file enables the complete-behavior profile: every
+# discovered endpoint must have an approved declaration (cases or an
+# owner disposition). There is no warnOnly or silent fallback.
+#
+# This scaffold is NOT approval: fill in real cases per endpoint, then
+# run 'gateforge check' — missing declarations block with
+# ENDPOINT_BEHAVIOR_MISSING until you define them.
+schemaVersion: 1
+endpoints: []
+resources: []
+`;
+
+/** The behavior-setup checklist: the work no scaffold can do. */
+export const BEHAVIOR_CHECKLIST = [
+  'behavior setup is NOT complete: this scaffold only enables the profile',
+  'next: run `gateforge check` — every discovered endpoint is listed as ENDPOINT_BEHAVIOR_MISSING',
+  'next: for each endpoint, declare cases (or an owner disposition) in .gateforge/behavior.yml',
+  'next: map each case to a test with `tests mark --case`, then prove it through the witness',
+  'note: strong HTTP contracts stay blocking until witness-produced case evidence exists',
+].map((line) => `  ${line}`).join('\n');
 
 const BUNDLED_PLUGIN_MODULES: Readonly<Record<string, string>> = Object.freeze({
   'gateforge.pack-fastapi': '@gate-forge/pack-fastapi',
@@ -294,17 +318,17 @@ volatileFields:
 function configTemplate(
   languages: readonly string[],
   pluginIds: readonly string[],
-  options: { strictE2E?: boolean } = {},
+  options: { strictE2E?: boolean; managed?: boolean } = {},
 ): string {
   const enforcementBlock =
-    options.strictE2E === true
+    options.strictE2E === true || options.managed === true
       ? `# Enforcement modes (plan §3.4/§3.3, ADR 0005): 'standard' = local hook +
 # mandatory trusted server check (honest about --no-verify); 'managed' =
 # additionally puts the authoritative commit service outside the agent's
 # write/process boundary. strictE2E makes waived/baselined in-scope E2E
 # obligations NOT proof (they block with ENFORCEMENT_UNTRUSTED).
 enforcement:
-  mode: standard
+  mode: ${options.managed === true ? 'managed' : 'standard'}
   strictE2E: true
 `
       : '';
@@ -345,6 +369,42 @@ clock:
   mode: system
 ${enforcementBlock}\
 `;
+}
+
+/**
+ * Upgrades an existing config only when the owner explicitly selects
+ * `init --managed`; ordinary init remains strictly non-destructive.
+ *
+ * Args:
+ *   configPath (string): absolute path to the existing config.
+ *
+ * Returns:
+ *   boolean: whether the file changed.
+ *
+ * Throws:
+ *   UsageError: when the existing YAML or resulting config is invalid.
+ */
+function upgradeManagedConfig(configPath: string): boolean {
+  const document = parseDocument(readFileSync(configPath, 'utf8'));
+  if (document.errors.length > 0) {
+    throw new UsageError(
+      `managed initialization cannot update '${configPath}': ${document.errors.map((error) => error.message).join('; ')}`,
+    );
+  }
+  const currentMode = document.getIn(['enforcement', 'mode']);
+  const currentStrictE2E = document.getIn(['enforcement', 'strictE2E']);
+  if (currentMode === 'managed' && currentStrictE2E === true) return false;
+  document.setIn(['enforcement', 'mode'], 'managed');
+  document.setIn(['enforcement', 'strictE2E'], true);
+  try {
+    parseConfig(document.toJS(), { file: configPath });
+  } catch (cause) {
+    throw new UsageError(
+      `managed initialization cannot update '${configPath}': ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+  writeFileSync(configPath, document.toString(), 'utf8');
+  return true;
 }
 
 /**
@@ -799,8 +859,10 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       'ci',
       'no-ci',
       'strict-e2e',
+      'managed',
       'planes',
       'no-planes',
+      'behavior',
       'help',
     ],
     INIT_USAGE,
@@ -854,9 +916,42 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   if (explicitLanguages !== null && explicitLanguages.length === 0) {
     throw new UsageError(`flag '--languages' requires at least one language`);
   }
-  const strictE2E = options['strict-e2e'] === true;
+  const managed = options['managed'] === true;
+  if (typeof options['managed'] !== 'boolean' && options['managed'] !== undefined) {
+    throw new UsageError(`flag '--managed' must be a boolean flag`);
+  }
+  if (managed && options['no-blocking'] === true) {
+    throw new UsageError(`flag '--managed' requires the existing blocking initialization wiring`);
+  }
+  const strictE2E = options['strict-e2e'] === true || managed;
   if (typeof options['strict-e2e'] !== 'boolean' && options['strict-e2e'] !== undefined) {
     throw new UsageError(`flag '--strict-e2e' must be a boolean flag`);
+  }
+
+  // Managed bootstrap happens before any project file is written. The
+  // existing init command remains local unless the owner explicitly selects
+  // --managed.
+  const podman = managed
+    ? await ensurePodman({
+        env: io.env,
+        runner: io.hostCommandRunner,
+        confirmSystemUpgrade: async (question) => {
+          if (!process.stdin.isTTY) return false;
+          const rl = createInterface({ input: process.stdin, output: process.stdout });
+          try {
+            const answer = (await rl.question(question)).trim().toLowerCase();
+            return answer === 'y' || answer === 'yes';
+          } finally {
+            rl.close();
+          }
+        },
+      })
+    : null;
+  if (podman !== null) {
+    writeLine(
+      io.stdout,
+      `managed runtime ready: ${podman.version}${podman.installedNow ? ` (installed with ${podman.packageManager})` : ''}; rootless=true`,
+    );
   }
 
   // Strict-setup preflight (plan Phase 0 item 4): BEFORE anything is
@@ -900,8 +995,8 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         // Self-check the template against the pinned schema before
         // writing anything (a broken template must fail here, not in
         // every later command).
-        parseConfig(parseYaml(configTemplate(languages, pluginIds, { strictE2E })), { file: '.gateforge.yml' });
-        writeFileSync(join(cwd, '.gateforge.yml'), configTemplate(languages, pluginIds, { strictE2E }), 'utf8');
+        parseConfig(parseYaml(configTemplate(languages, pluginIds, { strictE2E, managed })), { file: '.gateforge.yml' });
+        writeFileSync(join(cwd, '.gateforge.yml'), configTemplate(languages, pluginIds, { strictE2E, managed }), 'utf8');
       },
     },
     {
@@ -959,9 +1054,60 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   mkdirSync(join(gateforgeDir, 'waivers'), { recursive: true });
   mkdirSync(join(gateforgeDir, 'baselines'), { recursive: true });
 
+  // Behavior-profile setup (plan 2026-09-19 §4.11): `--behavior` scaffolds
+  // .gateforge/behavior.yml (scaffold only — never real approval) and
+  // wires `behaviorPolicy` into a NEW .gateforge.yml; an existing config
+  // is left untouched with an instruction to add the key manually.
+  // `--no-behavior` skips; default (flag absent) skips.
+  const behaviorFlag = options['behavior'] === true;
+  const noBehavior = options['no-behavior'] === true;
+  const wantBehavior = behaviorFlag && !noBehavior;
+  if (wantBehavior) {
+    const behaviorPath = join(gateforgeDir, 'behavior.yml');
+    if (existsSync(behaviorPath)) {
+      writeLine(io.stdout, `exists, leaving untouched: ${behaviorPath}`);
+    } else {
+      targets.push({
+        path: behaviorPath,
+        label: 'complete-behavior document (SCAFFOLD — not approval)',
+        write: () => writeFileSync(behaviorPath, BEHAVIOR_TEMPLATE, 'utf8'),
+      });
+    }
+    if (!existsSync(join(cwd, '.gateforge.yml'))) {
+      targets.push({
+        path: join(cwd, '.gateforge.yml'),
+        label: 'config (with behaviorPolicy)',
+        write: () => {
+          const text = configTemplate(languages, pluginIds, { strictE2E, managed });
+          const withBehavior = text.replace(
+            /^policies:/m,
+            'behaviorPolicy: .gateforge/behavior.yml\npolicies:',
+          );
+          parseConfig(parseYaml(withBehavior), { file: '.gateforge.yml' });
+          writeFileSync(join(cwd, '.gateforge.yml'), withBehavior, 'utf8');
+        },
+      });
+    } else {
+      writeLine(
+        io.stdout,
+        'note: existing .gateforge.yml left untouched — add `behaviorPolicy: .gateforge/behavior.yml` to enable the profile',
+      );
+    }
+  }
+
   for (const target of targets) {
     if (existsSync(target.path)) {
-      writeLine(io.stdout, `exists, leaving untouched: ${target.path}`);
+      if (managed && target.path === join(cwd, '.gateforge.yml')) {
+        const updated = upgradeManagedConfig(target.path);
+        writeLine(
+          io.stdout,
+          updated
+            ? `updated: ${target.path} (managed enforcement)`
+            : `exists, leaving untouched: ${target.path}`,
+        );
+      } else {
+        writeLine(io.stdout, `exists, leaving untouched: ${target.path}`);
+      }
       continue;
     }
     target.write();
@@ -971,6 +1117,12 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   // can do — proxy wiring, adapter bindings, and kind declarations.
   if (proofMode === 'observe') {
     writeLine(io.stdout, OBSERVE_CHECKLIST);
+  }
+  // Behavior checklist (behavior setup only): honest "not ready" — the
+  // scaffold enables the profile but every endpoint blocks until the
+  // owner declares cases and they are proven through the witness.
+  if (wantBehavior) {
+    writeLine(io.stdout, BEHAVIOR_CHECKLIST);
   }
   // Plane-config proposal (flags win; TTY prompt fills the gap;
   // non-interactive defaults to scaffold-only, like every granular step):
@@ -984,6 +1136,11 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       await proposePlanesConfig(cwd, io);
     }
   }
+  // Behavior-profile setup (plan 2026-09-19 §4.11): `--behavior` scaffolds
+  // .gateforge/behavior.yml (scaffold only — never real approval) and
+  // wires `behaviorPolicy` into a NEW .gateforge.yml; an existing config
+  // is left untouched with an instruction to add the key manually.
+  // `--no-behavior` skips; default (flag absent) skips.
   // Enforcement wiring is granular (flags win; TTY prompts fill the gaps;
   // non-interactive runs default to scaffold-only so tests and CI never
   // hang on a prompt):
@@ -1000,7 +1157,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       throw new UsageError(`flag '--mode' must be 'changed' or 'staged'`);
     }
   }
-  const blocking = await resolveBlocking(io, options);
+  const blocking = managed || (await resolveBlocking(io, options));
   const preCommit = options['pre-commit'] === true || blocking;
   const ci = options['ci'] === true || blocking;
   const mode: 'changed' | 'staged' =

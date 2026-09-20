@@ -44,9 +44,9 @@ const TIMESTAMP_SKEW_MS = REPLAY_WINDOW_MS;
 const deliveryLog = new Map();
 
 /** Apply the side effect for a freshly-accepted event. */
-function applySideEffect(event) {
-  const prior = deliveryLog.get(event.event_id);
-  deliveryLog.set(event.event_id, {
+function applySideEffect(event, state = defaultWebhookState()) {
+  const prior = state.deliveryLog.get(event.event_id);
+  state.deliveryLog.set(event.event_id, {
     eventId: event.event_id,
     attempt: 1,
     firstSeenAt: Date.now(),
@@ -99,7 +99,7 @@ function send(res, status, body) {
 }
 
 /** The webhook route handler. */
-async function handleWebhook(req, res) {
+async function handleWebhook(req, res, state = defaultWebhookState()) {
   // 1. raw body read + size guard
   let rawBody;
   try {
@@ -155,7 +155,7 @@ async function handleWebhook(req, res) {
   }
 
   // 6. replay dedup (only the FIRST delivery produces a side effect)
-  const prior = deliveryLog.get(event.event_id);
+  const prior = state.deliveryLog.get(event.event_id);
   if (prior !== undefined) {
     send(res, 200, { ok: true, deduplicated: true, eventId: event.event_id });
     return;
@@ -167,10 +167,10 @@ async function handleWebhook(req, res) {
 }
 
 /** GET /delivery-log/:eventId — witness endpoint for the e2e. */
-function handleLogGet(req, res) {
+function handleLogGet(req, res, state = defaultWebhookState()) {
   const url = (req.url ?? '').split('?')[0];
   const eventId = decodeURIComponent(url.replace(/^\/delivery-log\//, ''));
-  const record = deliveryLog.get(eventId);
+  const record = state.deliveryLog.get(eventId);
   if (record === undefined) {
     send(res, 404, { error: 'not-found', eventId });
     return;
@@ -178,16 +178,26 @@ function handleLogGet(req, res) {
   send(res, 200, record);
 }
 
+/** Per-instance webhook state (test harnesses inject to observe independently). */
+export function createWebhookState() {
+  return { deliveryLog: new Map() };
+}
+
+/** Default process-global state (standalone runs). */
+function defaultWebhookState() {
+  return { deliveryLog };
+}
+
 /** Start the server on `port` (0 = OS-assigned). */
-function start(port) {
+function start(port, state = defaultWebhookState()) {
   const server = createServer((req, res) => {
     const url = (req.url ?? '').split('?')[0];
     if (req.method === 'POST' && (url === '/webhook/stripe' || url === '/webhook' || url === '/webhook/')) {
-      handleWebhook(req, res);
+      handleWebhook(req, res, state);
       return;
     }
     if (req.method === 'GET' && url.startsWith('/delivery-log/')) {
-      handleLogGet(req, res);
+      handleLogGet(req, res, state);
       return;
     }
     send(res, 404, { error: 'not-found', method: req.method, url });
@@ -218,11 +228,14 @@ function parseCli() {
   return { port };
 }
 
-const { port } = parseCli();
-const { server } = await start(port);
+const invokedDirectly = process.argv[1] !== undefined && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '');
+if (invokedDirectly) {
+  const { port } = parseCli();
+  const { server } = await start(port);
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    server.close(() => process.exit(0));
-  });
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      server.close(() => process.exit(0));
+    });
+  }
 }

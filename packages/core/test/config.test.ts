@@ -96,6 +96,12 @@ clock:
     ).toThrow(GateforgeConfigError);
   });
 
+  it('accepts an optional behaviorPolicy path and still rejects unknown keys', () => {
+    const config = parseConfig({ ...validConfig, behaviorPolicy: '.gateforge/behavior.yml' });
+    expect(config.behaviorPolicy).toBe('.gateforge/behavior.yml');
+    expect(() => parseConfig({ ...validConfig, behaviorPolicy: '' })).toThrow(GateforgeConfigError);
+  });
+
   it('rejects schemaVersion drift with the never-migrated message', () => {
     try {
       parseConfig({ ...validConfig, schemaVersion: 2 });

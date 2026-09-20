@@ -277,6 +277,7 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   forbidOnly: true,
+  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
   use: { headless: true, trace: 'off' },
   timeout: 60_000,
 });

@@ -32,6 +32,15 @@ export const ObligationSchema = z
     policyId: z.string().min(1),
     /** Classification lifecycle attributes relevant to this contract. */
     lifecycle: LifecycleSchema,
+    /**
+     * sha256 of the sorted full required case specifications. REQUIRED
+     * for obligations compiled from a behavior catalog; omitted on
+     * existing weaker obligations so their fingerprints stay unchanged.
+     */
+    requirementsDigest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/, 'requirementsDigest must be a 64-char lowercase sha256 hex')
+      .optional(),
   })
   .strict()
   .superRefine((obligation, ctx) => {

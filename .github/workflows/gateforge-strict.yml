@@ -1,0 +1,76 @@
+# Gateforge strict-gate JOB MECHANISM (not server enforcement by itself).
+#
+# This workflow deliberately mirrors the GitLab template: it checks out the
+# exact pull-request candidate SHA, runs the supervised gate, then checks the
+# sealed receipt against that same candidate. Editing this file is candidate
+# controlled, so this YAML alone cannot be the authority that protects a
+# branch or publishes artifacts.
+#
+# OWNER-PROVISIONED GITHUB ENFORCEMENT (required outside this file):
+#   1. Protect the target branch and require the exact check
+#      "gateforge-strict / gateforge"; require branches to be up to date.
+#   2. Prevent direct pushes and administrator bypass where policy requires it.
+#   3. Enforce this job through an owner-controlled reusable workflow or
+#      ruleset/policy that a candidate cannot delete by editing this repository.
+#   4. Keep GATEFORGE_WITNESS_VERIFIER_KEY and
+#      GATEFORGE_APPROVED_POLICY_DIGEST in protected, environment-scoped
+#      secrets available only to the trusted gate runner. A pull request from
+#      an untrusted fork must fail closed or use an owner-controlled runner;
+#      never expose these secrets to fork-controlled code.
+#   5. Publisher enforcement is separate: configure npm trusted publishing (or
+#      the release service) to accept only the owner-controlled workflow/ref,
+#      and require this protected check before the publisher can run.
+# See the GitHub branch-protection/rulesets and Actions environment settings;
+# a green job in an editable workflow is not proof of those server settings.
+name: gateforge-strict
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  gateforge:
+    name: gateforge
+    runs-on: ubuntu-24.04
+    # The job is a mechanism. Branch protection and an owner-controlled
+    # reusable workflow/ruleset are the enforcement boundary.
+    environment: gateforge-protected
+    steps:
+      - name: Check out exact candidate SHA
+        uses: actions/checkout@v4
+        with:
+          # Do not test the mutable merge ref or a stale checkout: the receipt
+          # and the required check both bind to this exact PR head candidate.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Assert exact Gateforge engine pin
+        env:
+          GATEFORGE_VERSION: '0.4.1'
+        run: |
+          actual="$(node_modules/.bin/gateforge --version)"
+          echo "gateforge engine ${actual} (pinned ${GATEFORGE_VERSION})"
+          test "${actual}" = "${GATEFORGE_VERSION}"
+
+      - name: Run supervised strict gate
+        env:
+          GATEFORGE_WITNESS_VERIFIER_KEY: ${{ secrets.GATEFORGE_WITNESS_VERIFIER_KEY }}
+          GATEFORGE_APPROVED_POLICY_DIGEST: ${{ secrets.GATEFORGE_APPROVED_POLICY_DIGEST }}
+        run: node_modules/.bin/gateforge test-gates --changed
+
+      - name: Check exact candidate receipt
+        env:
+          GATEFORGE_APPROVED_POLICY_DIGEST: ${{ secrets.GATEFORGE_APPROVED_POLICY_DIGEST }}
+        run: node_modules/.bin/gateforge check --changed --require-e2e --format json

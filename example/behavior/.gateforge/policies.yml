@@ -1,0 +1,9 @@
+schemaVersion: 1
+policies:
+  # Behavior obligations come from behavior.yml. This non-matching rule keeps
+  # the generic policy document explicit without duplicating transport claims.
+  - id: no-generic-policy
+    when:
+      kind: fixture.behavior.policy-only
+    require:
+      - http:response-status-ok

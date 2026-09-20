@@ -23,6 +23,7 @@ import {
   type TestCatalogEntry,
 } from '@gate-forge/core';
 import { planScopedExpectedSet, issueGateReceipt } from '../src/execution.js';
+import { testReceiptV2Bindings } from './gate-receipts.js';
 import { loadReceiptFor, receiptScope, tryReuseReceipt } from '../src/receipts.js';
 import { writeExecutionResult, writeGateReceipt } from '../src/state.js';
 import { FIXED_AT, POLICY_ID } from './helpers.js';
@@ -109,6 +110,7 @@ function sidecarBinding(instances: TestCatalogEntry[]): ResolvedMappings['obliga
     categories: [],
     reason: null,
     sourceLocation: null,
+    caseIds: [],
   };
 }
 
@@ -129,6 +131,7 @@ function nativeBinding(testId: string, instances: TestCatalogEntry[]): ResolvedM
     categories: [],
     reason: null,
     sourceLocation: null,
+    caseIds: [],
   };
 }
 
@@ -303,6 +306,7 @@ describe('scoped gate receipts (schema coherence + MAC over the new fields)', ()
       catalogDigest: HEX(4),
       executionResultDigest: HEX(5),
       evidenceAttestationDigest: null,
+      ...testReceiptV2Bindings(HEX(2)),
       verdictSummary: { total: 1, satisfied: 1, waived: 0, blocking: 0 },
       issuedAt: FIXED_AT,
       ...overrides,
@@ -421,6 +425,7 @@ describe('scope-aware receipt load/reuse (identical-digest + identical-scope onl
         : {}),
       executionResultDigest: executionResultDigestOf(result),
       evidenceAttestationDigest: null,
+      ...testReceiptV2Bindings(POLICY),
       verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
       issuedAt: FIXED_AT,
     });
