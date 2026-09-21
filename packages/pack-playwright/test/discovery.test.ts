@@ -701,6 +701,19 @@ describe('native playwright reconciliation', () => {
     expect(skipped?.annotations).toContain('skip');
   });
 
+  it('waits for the complete reporter stream before parsing large inventories', async () => {
+    const root = makePlaywrightProject({
+      'e2e/large.spec.js': [
+        "import { test } from 'playwright/test';",
+        ...Array.from({ length: 500 }, (_, index) => `test('case ${index}', async () => {});`),
+        '',
+      ].join('\n'),
+    });
+    const result = await listNativePlaywrightTests({ cwd: root });
+    expect(result.status).toBe('discovered');
+    expect(result.instances).toHaveLength(500);
+  });
+
   it('is unavailable without a playwright config (not an error)', async () => {
     const root = makeTempDir('gateforge-no-pw-');
     writeTree(root, { 'src/app.ts': 'export const app = 1;\n' });

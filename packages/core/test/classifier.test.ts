@@ -595,6 +595,10 @@ describe('lifecycle lattice', () => {
     const result = classify({
       ...cleanInput(),
       policy: policy({
+        coverage: [
+          ...(policy().coverage ?? []),
+          { capability: 'linkage.task', detector: 'unrelated.detector', appliesTo: ['backend/**'] },
+        ],
         lifecycleRules: [
           {
             match: { resourceId: 'tenant.accounts' },
@@ -929,7 +933,12 @@ describe('determinism and monotonicity', () => {
         ...structuralSignals(),
         signal({ dimension: 'internality', assertion: true, basis: 'declaration' }),
         signal({ dimension: 'internality', assertion: { category: 'worker' }, basis: 'code-positive' }),
-        signal({ dimension: 'lifecycle.delete', assertion: false, basis: 'code-negative-closed-world' }),
+        signal({
+          dimension: 'lifecycle.delete',
+          assertion: false,
+          basis: 'code-negative-closed-world',
+          source: 'gateforge.policy:lifecycleRules',
+        }),
         signal({ dimension: 'delete-semantics', assertion: 'hard' }),
       ],
       policy: policy(),
@@ -948,6 +957,69 @@ describe('determinism and monotonicity', () => {
       'INCOMPLETE_PROOF_SCOPE',
       'INCOMPLETE_PROOF_SCOPE',
     ]);
+  });
+
+  it('owner lifecycle proof ignores unrelated findings outside the resource source', () => {
+    const result = classify({
+      resources: [resource()],
+      signals: [
+        ...structuralSignals(),
+        signal({
+          dimension: 'lifecycle.delete',
+          assertion: false,
+          basis: 'code-negative-closed-world',
+          source: 'gateforge.policy:lifecycleRules',
+        }),
+        signal({ dimension: 'delete-semantics', assertion: 'hard' }),
+      ],
+      policy: policy({
+        lifecycleRules: [
+          {
+            match: { resourceId: 'tenant.accounts' },
+            disable: ['delete'],
+            reason: 'append-only accounting record',
+          },
+        ],
+      }),
+      adapters: ['accounts'],
+      scan: {
+        ...EMPTY_SCAN,
+        findings: [
+          { code: 'PARSE_ERROR', locations: [{ file: 'backend/unrelated.py', line: 3, col: 0 }] },
+        ],
+      },
+    });
+    const entry = decision(result);
+    expect(entry.classification?.lifecycle.delete).toBe(false);
+    expect(entry.blocks).toEqual([]);
+  });
+
+  it('owner lifecycle proof blocks when the resource source has a finding', () => {
+    const result = classify({
+      resources: [resource()],
+      signals: [
+        ...structuralSignals(),
+        signal({ dimension: 'lifecycle.delete', assertion: false, basis: 'code-negative-closed-world' }),
+        signal({ dimension: 'delete-semantics', assertion: 'hard' }),
+      ],
+      policy: policy({
+        lifecycleRules: [
+          {
+            match: { resourceId: 'tenant.accounts' },
+            disable: ['delete'],
+            reason: 'append-only accounting record',
+          },
+        ],
+      }),
+      adapters: ['accounts'],
+      scan: {
+        ...EMPTY_SCAN,
+        findings: [{ code: 'PARSE_ERROR', locations: [LOC] }],
+      },
+    });
+    const entry = decision(result);
+    expect(entry.classification?.lifecycle.delete).toBe(true);
+    expect(entry.blocks.map((block) => block.code)).toContain('INCOMPLETE_PROOF_SCOPE');
   });
 
   it('removing all evidence never yields internal (the certificate is never persisted)', () => {

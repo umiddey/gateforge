@@ -251,7 +251,7 @@ clock:
 `,
         '.gateforge/classification-policy.yml': lifecyclePolicy(
           'included uncovered model must block',
-        ).replace("appliesTo: ['models/**/*.py']", "appliesTo: ['models/accounts.py']"),
+        ).replace("appliesTo: ['models/**/*.py']", "appliesTo: ['models/orders.py']"),
       });
 
       const uncovered = await runFixture(repo.root);

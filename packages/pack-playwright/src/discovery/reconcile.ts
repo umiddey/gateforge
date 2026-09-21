@@ -305,6 +305,13 @@ export async function listNativePlaywrightTests(options: {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let settled = false;
+      const finish = (result: { code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null }): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        settle(result);
+      };
       const timer = setTimeout(() => {
         timedOut = true;
         child.kill('SIGKILL');
@@ -316,12 +323,12 @@ export async function listNativePlaywrightTests(options: {
         stderr += chunk.toString('utf8');
       });
       child.once('error', (error) => {
-        clearTimeout(timer);
-        settle({ code: null, stdout, stderr, timedOut: false, error });
+        finish({ code: null, stdout, stderr, timedOut: false, error });
       });
-      child.once('exit', (code) => {
-        clearTimeout(timer);
-        settle({ code, stdout, stderr, timedOut, error: null });
+      // `exit` only means the process ended. The piped stdout/stderr streams
+      // can still contain reporter bytes, so parse only after `close`.
+      child.once('close', (code) => {
+        finish({ code, stdout, stderr, timedOut, error: null });
       });
     },
   );
