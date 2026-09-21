@@ -590,6 +590,122 @@ describe('lifecycle lattice', () => {
     expect(entry.classification?.lifecycle.update).toBe(true);
     expect(entry.blocks.map((block) => block.code)).toEqual(['INCOMPLETE_PROOF_SCOPE']);
   });
+
+  it('owner lifecycle policy disables only the exact resource operation and records its reason', () => {
+    const result = classify({
+      ...cleanInput(),
+      policy: policy({
+        lifecycleRules: [
+          {
+            match: { resourceId: 'tenant.accounts' },
+            disable: ['update', 'delete'],
+            reason: 'accounting history is append-only',
+          },
+        ],
+      }),
+      signals: [
+        ...structuralSignals(),
+        signal({ dimension: 'delete-semantics', assertion: 'hard' }),
+        signal({
+          target: { resourceId: 'tenant.accounts' },
+          dimension: 'lifecycle.update',
+          assertion: false,
+          basis: 'code-negative-closed-world',
+          source: 'gateforge.policy:lifecycleRules',
+        }),
+        signal({
+          target: { resourceId: 'tenant.accounts' },
+          dimension: 'lifecycle.delete',
+          assertion: false,
+          basis: 'code-negative-closed-world',
+          source: 'gateforge.policy:lifecycleRules',
+        }),
+      ],
+    });
+    const entry = decision(result);
+    expect(entry.blocks).toEqual([]);
+    expect(entry.classification?.lifecycle).toMatchObject({
+      create: true,
+      read: true,
+      update: false,
+      delete: false,
+    });
+    expect(entry.classification?.rules).toEqual(
+      expect.arrayContaining([
+        'LIFECYCLE_POLICY_DISABLED(update:accounting history is append-only)',
+        'LIFECYCLE_POLICY_DISABLED(delete:accounting history is append-only)',
+      ]),
+    );
+  });
+
+  it('positive detector evidence keeps a policy-disabled operation enabled and blocks', () => {
+    const result = classify({
+      ...cleanInput(),
+      policy: policy({
+        lifecycleRules: [
+          {
+            match: { resourceId: 'tenant.accounts' },
+            disable: ['update'],
+            reason: 'revisions are append-only',
+          },
+        ],
+      }),
+      signals: [
+        ...structuralSignals(),
+        signal({ dimension: 'delete-semantics', assertion: 'hard' }),
+        signal({
+          target: { resourceId: 'tenant.accounts' },
+          dimension: 'lifecycle.update',
+          assertion: false,
+          basis: 'code-negative-closed-world',
+          source: 'gateforge.policy:lifecycleRules',
+        }),
+        signal({
+          dimension: 'lifecycle.update',
+          assertion: true,
+          location: ROUTE_LOC,
+        }),
+      ],
+    });
+    const entry = decision(result);
+    expect(entry.classification?.lifecycle.update).toBe(true);
+    expect(entry.blocks.map((block) => block.code)).toEqual(['LIFECYCLE_CONTRADICTION']);
+    expect(entry.blocks[0]?.detail).toContain('revisions are append-only');
+  });
+
+  it('an owner lifecycle disable stays enabled and blocks when the scan proof is incomplete', () => {
+    const result = classify({
+      ...cleanInput(),
+      policy: policy({
+        lifecycleRules: [
+          {
+            match: { resourceId: 'tenant.accounts' },
+            disable: ['update'],
+            reason: 'append-only accounting record',
+          },
+        ],
+      }),
+      signals: [
+        ...structuralSignals(),
+        signal({ dimension: 'delete-semantics', assertion: 'hard' }),
+        signal({
+          target: { resourceId: 'tenant.accounts' },
+          dimension: 'lifecycle.update',
+          assertion: false,
+          basis: 'code-negative-closed-world',
+          source: 'gateforge.policy:lifecycleRules',
+        }),
+      ],
+      scan: {
+        findings: [{ code: 'PARSE_ERROR', locations: [LOC] }],
+        unresolved: [],
+      },
+    });
+    const entry = decision(result);
+    expect(entry.classification?.lifecycle.update).toBe(true);
+    expect(entry.blocks.map((block) => block.code)).toEqual(['INCOMPLETE_PROOF_SCOPE']);
+    expect(entry.blocks[0]?.detail).toContain('append-only accounting record');
+  });
 });
 
 // ---------------------------------------------------------------------------

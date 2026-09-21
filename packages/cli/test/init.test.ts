@@ -9,7 +9,6 @@ import { parse as parseYaml } from 'yaml';
 import { withTempRepo, loadConfig } from '@gate-forge/core';
 import { readPlanesConfigOrNull } from '@gate-forge/pack-sqlalchemy';
 import { runCli } from './helpers.js';
-import type { HostCommandRunner } from '../src/podman-bootstrap.js';
 
 const TARGETS = [
   '.gateforge.yml',
@@ -34,42 +33,6 @@ describe('gateforge init', () => {
     });
   });
 
-  it('managed init installs no new command: it verifies rootless Podman and writes managed config', async () => {
-    await withTempRepo({}, async (repo) => {
-      const runner: HostCommandRunner = (command, args) => {
-        if (command === 'podman' && args[0] === '--version') return { status: 0, stdout: 'podman version 5.0.0', stderr: '' };
-        if (command === 'podman' && args[0] === 'info') return { status: 0, stdout: 'true', stderr: '' };
-        throw new Error(`unexpected host command: ${command} ${args.join(' ')}`);
-      };
-      const { code, stdout } = await runCli(repo, ['init', '--managed'], {}, runner);
-      expect(code).toBe(0);
-      expect(stdout).toContain('managed runtime ready: podman version 5.0.0; rootless=true');
-      expect(loadConfig(join(repo.root, '.gateforge.yml')).enforcement).toMatchObject({
-        mode: 'managed',
-        strictE2E: true,
-      });
-      expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(true);
-    });
-  });
-
-  it('managed init upgrades an existing config only for the explicit managed request', async () => {
-    await withTempRepo({}, async (repo) => {
-      const first = await runCli(repo, ['init']);
-      expect(first.code).toBe(0);
-      const runner: HostCommandRunner = (command, args) => {
-        if (command === 'podman' && args[0] === '--version') return { status: 0, stdout: 'podman version 5.0.0', stderr: '' };
-        if (command === 'podman' && args[0] === 'info') return { status: 0, stdout: 'true', stderr: '' };
-        throw new Error(`unexpected host command: ${command} ${args.join(' ')}`);
-      };
-      const second = await runCli(repo, ['init', '--managed'], {}, runner);
-      expect(second.code).toBe(0);
-      expect(second.stdout).toContain('updated: ');
-      expect(loadConfig(join(repo.root, '.gateforge.yml')).enforcement).toMatchObject({
-        mode: 'managed',
-        strictE2E: true,
-      });
-    });
-  });
 
   it('init --pre-commit --mode changed --ci wires the debt-friendly gate and the CI include', async () => {
     await withTempRepo({}, async (repo) => {
@@ -84,6 +47,50 @@ describe('gateforge init', () => {
       // changed mode: no standalone strict staged script
       expect(existsSync(repo.path('.gateforge/hooks/gateforge-staged.sh'))).toBe(false);
       expect(existsSync(repo.path('.gateforge/baselines/obligations.json'))).toBe(true);
+    });
+  });
+
+  it.each([
+    ['staged', 'pre-commit --scope staged'],
+    ['full', 'pre-commit --scope full'],
+  ] as const)('init --witnessed %s wires fresh evidence collection into both hook paths', async (scope, command) => {
+    await withTempRepo({}, async (repo) => {
+      const result = await runCli(repo, ['init', '--witnessed', scope]);
+      expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
+      expect(readFileSync(repo.path('.gateforge/hooks/gateforge-check.mjs'), 'utf8')).toContain(
+        `const args = ["pre-commit","--scope","${scope}"]`,
+      );
+      expect(readFileSync(repo.path('.gateforge/hooks/gateforge-staged.sh'), 'utf8')).toContain(command);
+      expect(readFileSync(repo.path('.git/hooks/pre-commit'), 'utf8')).toContain(command);
+    });
+  });
+
+  it('upgrades an existing receipt-only Gateforge hook to witnessed mode', async () => {
+    await withTempRepo({}, async (repo) => {
+      const receiptOnly = await runCli(repo, ['init', '--pre-commit', '--mode', 'changed']);
+      expect(receiptOnly.code).toBe(0);
+      expect(readFileSync(repo.path('.gateforge/hooks/gateforge-check.mjs'), 'utf8')).toContain(
+        'const args = ["check","--changed"]',
+      );
+
+      const witnessed = await runCli(repo, ['init', '--witnessed', 'staged']);
+      expect(witnessed.code).toBe(0);
+      expect(witnessed.stdout).toContain('updated:');
+      expect(readFileSync(repo.path('.gateforge/hooks/gateforge-check.mjs'), 'utf8')).toContain(
+        'const args = ["pre-commit","--scope","staged"]',
+      );
+      expect(readFileSync(repo.path('.gateforge/hooks/gateforge-staged.sh'), 'utf8')).toContain(
+        'pre-commit --scope staged',
+      );
+      expect(readFileSync(repo.path('.git/hooks/pre-commit'), 'utf8')).toContain('pre-commit --scope staged');
+    });
+  });
+
+  it('rejects conflicting receipt-only and witnessed pre-commit modes', async () => {
+    await withTempRepo({}, async (repo) => {
+      const result = await runCli(repo, ['init', '--mode', 'staged', '--witnessed', 'full']);
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('cannot be combined');
     });
   });
 
@@ -118,6 +125,13 @@ describe('gateforge init', () => {
       expect(() => parseYaml(precommit)).not.toThrow();
       expect(precommit).toContain('existing-hook');
       expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(true);
+      const witnessed = await runCli(repo, ['init', '--witnessed', 'full']);
+      expect(witnessed.code).toBe(0);
+      expect(readFileSync(repo.path('.gateforge/hooks/gateforge-check.mjs'), 'utf8')).toContain(
+        'const args = ["pre-commit","--scope","full"]',
+      );
+      expect(readFileSync(repo.path('.git/hooks/pre-commit'), 'utf8')).not.toContain('gateforge pre-commit v1');
+      expect(readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8').split('id: gateforge-check').length - 1).toBe(1);
       // Idempotent rerun stays green.
       const second = await runCli(repo, ['init', '--blocking']);
       expect(second.code).toBe(0);

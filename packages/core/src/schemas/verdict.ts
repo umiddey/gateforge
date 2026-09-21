@@ -77,6 +77,8 @@ export const CauseCodeSchema = z.enum([
   'OBSERVATION_SCOPE_INCOMPLETE',
   'BEHAVIOR_UNEXPECTED_EFFECT',
   'ENFORCEMENT_BOUNDARY_UNVERIFIED',
+  'RUNTIME_PREPARATION_FAILED',
+  'RUNTIME_READINESS_FAILED',
 ]);
 
 /** Inferred cause-code union. */
@@ -130,4 +132,10 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   OBSERVATION_SCOPE_INCOMPLETE: 'Supply a working trusted observer or fix collection',
   BEHAVIOR_UNEXPECTED_EFFECT: 'Fix application side effect',
   ENFORCEMENT_BOUNDARY_UNVERIFIED: 'Owner provisions/verifies runtime',
+  RUNTIME_PREPARATION_FAILED:
+    'Repair the tracked `runtime.prepare` command (its failure log is under run state `runtime/`) — ' +
+    'the candidate runtime must build or install before the gate can execute',
+  RUNTIME_READINESS_FAILED:
+    'Repair the tracked `runtime.services` command or readiness probe — the candidate ' +
+    'runtime must become ready before evidence is trusted',
 });

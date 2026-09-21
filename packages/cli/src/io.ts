@@ -4,7 +4,6 @@
  * commands in-process against temp repositories with captured output.
  */
 import { Writable } from 'node:stream';
-import type { HostCommandRunner } from './podman-bootstrap.js';
 /** Captured-output stream used by tests: collects everything written. */
 export class CaptureStream extends Writable {
   chunks: Buffer[] = [];
@@ -26,8 +25,6 @@ export interface Io {
   cwd: string;
   /** Process environment (CI provider variables, injected clock etc.). */
   env: NodeJS.ProcessEnv;
-  /** Optional host-command seam for owner-runtime bootstrap tests. */
-  hostCommandRunner?: HostCommandRunner;
   /** Standard output sink (default: process.stdout). */
   stdout: Writable;
   /** Standard error sink (default: process.stderr). */

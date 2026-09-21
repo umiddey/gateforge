@@ -326,6 +326,15 @@ export const GateforgeConfigSchema = z
      * owner did not register here.
      */
     diagnostics: DiagnosticsConfigSchema.optional(),
+    /**
+     * Path to the staged-runtime document (plan 2026-09-21 witnessed
+     * pre-commit). Convention: `.gateforge/runtime.yml`. ABSENT = the
+     * owner has not declared a staged runtime; candidate execution then
+     * runs with no dependency bridge and no services (fail closed).
+     * Security-sensitive: hashed into the trusted policy digest and the
+     * authenticated input snapshot.
+     */
+    runtime: z.string().min(1).optional(),
   })
   .strict();
 

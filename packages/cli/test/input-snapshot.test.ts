@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { symlinkSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
+import { loadConfig, withTempRepo, type RuntimeConfig, type TempRepo } from '@gate-forge/core';
 import {
   GATEFORGE_VERIFIER_FORMAT,
   INPUT_SNAPSHOT_VERSION,
@@ -22,6 +22,7 @@ import {
   diffInputFiles,
 } from '../src/input-snapshot.js';
 import { resolveStateDir } from '../src/state.js';
+import { runtimeReuseDigest } from '../src/runtime.js';
 import { FIXED_AT, installFixture } from './helpers.js';
 
 /** Loads the fixture config from an absolute path. */
@@ -116,6 +117,30 @@ describe('input snapshot (§11.2)', () => {
       // Policy / classification / adapter / plugin edits all move the digest.
       repo.writeFiles({ '.gateforge/policies.yml': '# touched\n' });
       expect(filesDigest(repo)).not.toBe(withConfigs);
+    });
+  });
+
+  it('moves the authenticated input identity when ignored reused dependency bytes change', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ '.gitignore': 'reused/\n' });
+      mkdirSync(join(repo.root, 'reused'), { recursive: true });
+      writeFileSync(join(repo.root, 'reused', 'dependency.js'), 'export const value = 1;\n', 'utf8');
+      const runtime: RuntimeConfig = { schemaVersion: 1, prepare: { reuse: ['reused'] } };
+      const first = computeInputSnapshot({
+        cwd: repo.root,
+        config: fixtureConfig(repo),
+        stateDir: resolveStateDir(repo.root),
+        runtimeReuseDigest: runtimeReuseDigest(repo.root, runtime),
+      }).inputDigest;
+      writeFileSync(join(repo.root, 'reused', 'dependency.js'), 'export const value = 2;\n', 'utf8');
+      const second = computeInputSnapshot({
+        cwd: repo.root,
+        config: fixtureConfig(repo),
+        stateDir: resolveStateDir(repo.root),
+        runtimeReuseDigest: runtimeReuseDigest(repo.root, runtime),
+      }).inputDigest;
+      expect(second).not.toBe(first);
     });
   });
 

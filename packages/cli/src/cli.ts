@@ -20,32 +20,26 @@ import { obligationsCommand } from './commands/obligations.js';
 import { checkCommand } from './commands/check.js';
 import { nextCommand } from './commands/next.js';
 import { testGatesCommand } from './commands/test-gates.js';
+import { preCommitCommand } from './commands/pre-commit.js';
 import { baselineCommand } from './commands/baseline.js';
 import { waiveCommand } from './commands/waive.js';
 import { classifyCommand } from './commands/classify.js';
 import { explainCommand } from './commands/explain.js';
 import { testsCommand } from './commands/tests.js';
+
 import { enforcementCommand } from './commands/enforcement.js';
-import { controllerCommand, type ControllerRuntime } from './commands/controller.js';
 import { brokerCommand } from './broker.js';
-
-/** Optional runtime seams used by the controller lifecycle tests. */
-export interface MainDependencies {
-  controller?: ControllerRuntime;
-}
-
 /** The top-level usage text (also printed for `--help`). */
 export const USAGE = `\
 usage: gateforge <command> [options]
 
 commands:
   init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan]
-        [--proof overlay|observe] [--blocking] [--strict-e2e] [--managed]
+        [--proof overlay|observe] [--blocking] [--strict-e2e] [--witnessed staged|full]
                                          scan the repo, print the recommended install, and write
                                          .gateforge.yml + skeleton + GATEFORGE.md + overlay README
                                          (idempotent; --blocking installs AND verifies an active
-                                         pre-commit hook + CI wiring; --managed bootstraps and
-                                         verifies rootless Podman before writing managed config)
+                                         pre-commit hook + CI wiring)
   enforce                                 wire the blocking pre-commit + CI gate into an initialized repo (idempotent)
   adopt                                   adopt enforcement: seed the baseline from current debt (the one bulk-add) + wire the gate
   discover [--json]                      run detectors and dump the resource graph
@@ -65,14 +59,15 @@ commands:
   test-gates [--changed] [--suite CMD]   supervised E2E run over the obligations (--changed) or the
         [--out DIR] [--format F]         legacy suite escape hatch; seals a gate receipt on complete success
         [--witness-url URL]
-  broker commit --workspace DIR          managed-mode commit broker (MECHANISM, not deployment): verifies a gate
+  pre-commit --scope staged|full         freeze the Git index, run the witnessed gate against those exact
+                                         bytes, validate the new receipt, and recheck the index before success
+  broker commit --workspace DIR          commit broker (MECHANISM, not deployment): verifies a gate
         --message MSG [--receipt P]      receipt for the exact workspace bytes, then commits via compare-and-swap
         [--ref REF]                      ref update. Guaranteed only when the broker runs outside the agent's
                                          write/process boundary (ADR 0005 D1)
   enforcement doctor [--json]            honest enforcement diagnostics: hook activation, runner/observer readiness,
                                          trusted binary/policy ownership, snapshot mode, standard/managed boundary
   baseline update <fp...>                shrink the baseline to a strict subset (invariant 4)
-  controller                                run the managed controller lifecycle
   waive <resourceId:contract>            write an expiring, owner-approved waiver for one obligation
         --owner N --approver N           (GF-15: all fields mandatory; justification URL required;
         --justification-url U --expires D  no --force — renewal is a hand-edit of the written file)
@@ -87,7 +82,6 @@ exit codes: 0 clean/waived, 1 unresolved obligations, 2 config/usage error`;
  * Args:
  *   argv: arguments after `gateforge` (node/script already stripped).
  *   io: process context (defaults to the live process).
- *   dependencies: optional lifecycle seams for controller tests.
  *
  * Returns:
  *   Promise<number>: the process exit code.
@@ -95,7 +89,6 @@ exit codes: 0 clean/waived, 1 unresolved obligations, 2 config/usage error`;
 export async function main(
   argv: readonly string[],
   io: Io = processIo(),
-  dependencies: MainDependencies = {},
 ): Promise<number> {
   const first = argv[0];
   if (first === undefined || first === '--help' || first === '-h' || first === 'help') {
@@ -137,12 +130,12 @@ export async function main(
       return runWithExitCodes(io, () => nextCommand(io, rest));
     case 'test-gates':
       return runWithExitCodes(io, () => testGatesCommand(io, rest));
+    case 'pre-commit':
+      return runWithExitCodes(io, () => preCommitCommand(io, rest));
     case 'enforcement':
       return runWithExitCodes(io, () => enforcementCommand(io, rest));
     case 'broker':
       return runWithExitCodes(io, () => brokerCommand(io, rest));
-    case 'controller':
-      return runWithExitCodes(io, () => controllerCommand(io, rest, dependencies.controller));
     case 'baseline':
       return runWithExitCodes(io, () => Promise.resolve(baselineCommand(io, rest)));
     case 'waive':

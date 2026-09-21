@@ -214,15 +214,10 @@ export interface CliResult {
   stderr: string;
 }
 
-export async function runCli(
-  repo: TempRepo,
-  argv: readonly string[],
-  env: Record<string, string | undefined> = {},
-  hostCommandRunner?: Io['hostCommandRunner'],
-): Promise<CliResult> {
+export async function runCli(repo: TempRepo, argv: readonly string[], env: Record<string, string | undefined> = {}): Promise<CliResult> {
   const stdout = new CaptureStream();
   const stderr = new CaptureStream();
-  const io: Io = { cwd: repo.root, env: { ...process.env, ...env }, stdout, stderr, hostCommandRunner };
+  const io: Io = { cwd: repo.root, env: { ...process.env, ...env }, stdout, stderr };
   // In-process plugins resolve repo-relative paths against the process
   // cwd (production cwd IS the repo root); mirror that for the call.
   const previousCwd = process.cwd();

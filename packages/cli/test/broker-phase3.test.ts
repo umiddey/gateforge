@@ -187,13 +187,13 @@ describe('broker receipt v2 enforcement', () => {
     });
   });
 
-  it('a managed receipt matches the normalized protected authority profile', async () => {
+  it('a protected-authority receipt matches the configured boundary profile', async () => {
     await inAuthorityRepo(async (authority) => {
       await inFixtureWorkspace(async (workspace) => {
         const minted = await mintCompleteRunReceipt(workspace, {
           verifierKey: VERIFIER_KEY,
           parentSha: authority.headSha(),
-          executionBoundaryProfile: 'podman-rootless',
+          executionBoundaryProfile: 'managed-authoritative',
         });
         const result = await brokerCommit(
           authority,
@@ -205,7 +205,6 @@ describe('broker receipt v2 enforcement', () => {
         );
         expect(result.code).toBe(0);
         expect(result.stdout).toContain('managed-authoritative');
-        expect(result.stdout).toContain('podman-rootless');
       });
     });
   });

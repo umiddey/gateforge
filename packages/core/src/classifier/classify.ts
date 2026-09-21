@@ -20,7 +20,11 @@ import { sha256Canonical, type JsonValue } from '../canonical-json.js';
 import { compareLocations, compareStrings } from '../graph/util.js';
 import type { Location } from '../schemas/common.js';
 import { ClassificationSchema, type Classification, type Lifecycle } from '../schemas/classification.js';
-import type { ClassificationPolicy } from '../schemas/classification-policy.js';
+import type {
+  ClassificationPolicy,
+  LifecycleOperation,
+  LifecycleRule,
+} from '../schemas/classification-policy.js';
 import { signalId, type ClassificationSignal, type SignalAssertion } from '../schemas/classification-signal.js';
 import {
   BLOCK_DIMENSIONS,
@@ -153,6 +157,7 @@ export const RULES = {
   exposureOperationalProbe: 'EXPOSURE_OPERATIONAL_PROBE',
   lifecyclePositive: 'LIFECYCLE_POSITIVE_SIGNAL',
   lifecycleDeclaredSupported: 'LIFECYCLE_DECLARED_SUPPORTED',
+  lifecyclePolicyDisabled: 'LIFECYCLE_POLICY_DISABLED',
   lifecycleClosedWorldDisabled: 'LIFECYCLE_CLOSED_WORLD_DISABLED',
   lifecycleDefault: 'LIFECYCLE_DEFAULT_ENABLED',
   deleteProvenHard: 'DELETE_SEMANTICS_PROVEN_HARD',
@@ -166,6 +171,9 @@ export const RULES = {
 
 /** The four lifecycle-gated operations, in canonical order. */
 const OPERATIONS = ['create', 'read', 'update', 'delete'] as const;
+
+/** Stable source name for owner lifecycle authority minted by the host. */
+const LIFECYCLE_POLICY_SOURCE = 'gateforge.policy:lifecycleRules';
 
 /** Location sorter (codepoint, then line, then col). */
 /** Locations sorted deterministically and DEDUPLICATED: a location is a
@@ -217,10 +225,15 @@ function locationText(location: Location): string {
 function signalMatchesResource(
   signal: ClassificationSignal,
   resource: ClassifierResourceRef,
+  candidateIds?: ReadonlySet<string>,
 ): boolean {
   const target = signal.target;
-  if (target.resourceId !== undefined && resource.id !== null && target.resourceId === resource.id) {
-    return true;
+  if (target.resourceId !== undefined) {
+    if (resource.id !== null && target.resourceId === resource.id) return true;
+    // A resource can be id-less before classification resolves its plane.
+    // Exact policy targets may still bind when a detector supplied the same
+    // plane evidence that will produce the final plane-qualified id.
+    if (candidateIds?.has(target.resourceId) === true) return true;
   }
   // Symbol-scoped targets bind ONLY to their own class: a same-named
   // table in another module/plane (the two-declarative-base consumer
@@ -237,6 +250,32 @@ function signalMatchesResource(
     if (target.resourceName === undefined) return false;
   }
   return target.resourceName !== undefined && target.resourceName === resource.name;
+}
+
+/**
+ * Computes exact plane-qualified identities available before binding. The
+ * graph may have no id when plane evidence is a signal, so policy authority
+ * uses these detector-provided plane candidates without falling back to a
+ * bare name.
+ */
+function candidateResourceIds(
+  resource: ClassifierResourceRef,
+  signals: readonly ClassificationSignal[],
+): Set<string> {
+  const ids = new Set<string>();
+  if (resource.id !== null) ids.add(resource.id);
+  const attributePlane = resource.attributes['plane'];
+  if (attributePlane === 'tenant' || attributePlane === 'master' || attributePlane === 'global') {
+    ids.add(`${attributePlane}.${resource.name}`);
+  }
+  for (const signal of signals) {
+    if (signal.dimension !== 'plane') continue;
+    if (signal.target.resourceName !== resource.name) continue;
+    if (signal.assertion === 'tenant' || signal.assertion === 'master' || signal.assertion === 'global') {
+      ids.add(`${signal.assertion}.${resource.name}`);
+    }
+  }
+  return ids;
 }
 
 /** Narrows a signal assertion to a boolean, when it is one. */
@@ -504,6 +543,24 @@ function isConfiguredDeclarationSource(
   return false;
 }
 
+/** Returns owner lifecycle rules for one exact, resolved resource identity. */
+function lifecycleRulesFor(
+  policy: ClassificationPolicy,
+  resource: ClassifierResourceRef,
+  plane: 'tenant' | 'master' | 'global',
+  operation: LifecycleOperation,
+): LifecycleRule[] {
+  const resourceId = `${plane}.${resource.name}`;
+  return (policy.lifecycleRules ?? []).filter(
+    (rule) => rule.match.resourceId === resourceId && rule.disable.includes(operation),
+  );
+}
+
+/** Human-readable owner reasons for one lifecycle policy decision. */
+function lifecycleRuleReasons(rules: readonly LifecycleRule[]): string[] {
+  return [...new Set(rules.map((rule) => rule.reason))].sort(compareStrings);
+}
+
 /**
  * Classifies every resource through the deterministic lattice (ADR 0003 D2).
  *
@@ -531,6 +588,9 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
   // never silent drops.
   const byResource: ClassificationSignal[][] = input.resources.map(() => []);
   const authorityByResource: ClassificationSignal[][] = input.resources.map(() => []);
+  const candidateIds = input.resources.map((resource) =>
+    candidateResourceIds(resource, [...pluginSignals, ...authoritySignals]),
+  );
   const route = (
     signal: ClassificationSignal,
     channel: 'detector' | 'authority',
@@ -606,7 +666,7 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     for (let i = 0; i < input.resources.length; i++) {
       const resource = input.resources[i];
       if (resource === undefined) continue;
-      if (signalMatchesResource(signal, resource)) matched.push(i);
+      if (signalMatchesResource(signal, resource, candidateIds[i])) matched.push(i);
     }
     route(signal, 'detector', matched.length > 0, matched);
   }
@@ -615,7 +675,7 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     for (let i = 0; i < input.resources.length; i++) {
       const resource = input.resources[i];
       if (resource === undefined) continue;
-      if (signalMatchesResource(signal, resource)) matched.push(i);
+      if (signalMatchesResource(signal, resource, candidateIds[i])) matched.push(i);
     }
     route(signal, 'authority', matched.length > 0, matched);
   }
@@ -1113,6 +1173,7 @@ function classifyOne(
     rules.push(RULES.lifecycleEndpointHttp);
   } else for (const operation of OPERATIONS) {
     const dimension = `lifecycle.${operation}` as const;
+    const policyRules = lifecycleRulesFor(ctx.policy, resource, plane, operation);
     const positives = signals.filter(
       (s) =>
         s.dimension === dimension &&
@@ -1125,6 +1186,9 @@ function classifyOne(
         s.basis === 'code-negative-closed-world' &&
         assertionBoolean(s.assertion) === false,
     );
+    const policySignals = closedWorld.filter((signal) => signal.source === LIFECYCLE_POLICY_SOURCE);
+    const policyReasons =
+      policySignals.length > 0 ? lifecycleRuleReasons(policyRules) : [];
     const declaredSupported = signals.filter(
       (s) =>
         s.dimension === dimension &&
@@ -1141,11 +1205,14 @@ function classifyOne(
       contribute(...positives);
       lifecycle[operation] = true;
       rules.push(`${RULES.lifecyclePositive}(${operation})`);
-      if (declaredUnsupported.length > 0) {
+      if (closedWorld.length > 0 || declaredUnsupported.length > 0) {
         const detail =
-          `lifecycle.${operation} has both positive evidence and unsupported declarations; ` +
+          `lifecycle.${operation} has positive detector evidence and a disable assertion` +
+          `${policyReasons.length > 0 ? ` (${policyReasons.join('; ')})` : ''}; ` +
           'the operation stays enabled (conservative) and the conflict blocks';
-        const locations = sortLocations([...positives, ...declaredUnsupported].map((s) => s.location));
+        const locations = sortLocations(
+          [...positives, ...closedWorld, ...declaredUnsupported].map((s) => s.location),
+        );
         blocks.push({
           code: 'LIFECYCLE_CONTRADICTION',
           resourceId: `${plane}.${resource.name}`,
@@ -1158,7 +1225,13 @@ function classifyOne(
     } else if (closedWorld.length > 0 && ctx.scanComplete && declaredSupported.length === 0) {
       contribute(...closedWorld);
       lifecycle[operation] = false;
-      rules.push(`${RULES.lifecycleClosedWorldDisabled}(${operation})`);
+      if (policyReasons.length > 0) {
+        for (const reason of policyReasons) {
+          rules.push(`${RULES.lifecyclePolicyDisabled}(${operation}:${reason})`);
+        }
+      } else {
+        rules.push(`${RULES.lifecycleClosedWorldDisabled}(${operation})`);
+      }
     } else if (closedWorld.length > 0) {
       // A closed-world assertion whose proof does not hold: the intent to
       // suppress is unproven, so the conservative default applies AND the
@@ -1169,13 +1242,15 @@ function classifyOne(
         !ctx.scanComplete
           ? 'the complete-scan attestation fails'
           : 'contradicting supported declarations exist';
+      const ownerReason =
+        policyReasons.length > 0 ? `; owner rule reason: ${policyReasons.join('; ')}` : '';
       blocks.push({
         code: 'INCOMPLETE_PROOF_SCOPE',
         resourceId: `${plane}.${resource.name}`,
         name: resource.name,
         detail:
           `closed-world proof that lifecycle.${operation} is structurally unavailable fails: ` +
-          `${reason}; the operation stays enabled (conservative)`,
+          `${reason}${ownerReason}; the operation stays enabled (conservative)`,
         locations: sortLocations(closedWorld.map((s) => s.location)),
       });
     } else if (declaredSupported.length > 0) {

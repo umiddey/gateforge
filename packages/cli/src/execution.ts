@@ -95,6 +95,7 @@ export function computeTrustedPolicyDigest(
     policies: string;
     classificationPolicy: string;
     behaviorPolicy?: string | null;
+    runtimePolicy?: string | null;
     sidecar: string;
     adaptersDir: string;
     waiverFiles: readonly string[];
@@ -152,11 +153,20 @@ export function computeTrustedPolicyDigest(
     configPaths.behaviorPolicy === undefined || configPaths.behaviorPolicy === null
       ? { name: '.gateforge/behavior.yml (absent)', bytes: '' }
       : entry(configPaths.behaviorPolicy, configPaths.behaviorPolicy, true);
+  // The staged-runtime document is security-sensitive (plan 2026-09-21):
+  // its commands start processes and its reuse list sanctions the only
+  // dependency bridge into the candidate — a candidate that edits its
+  // own runtime commands is a policy-revision change.
+  const runtimeEntry =
+    configPaths.runtimePolicy === undefined || configPaths.runtimePolicy === null
+      ? { name: '.gateforge/runtime.yml (absent)', bytes: '' }
+      : entry(configPaths.runtimePolicy, configPaths.runtimePolicy, true);
   return trustedPolicyDigest([
     entry('.gateforge.yml', configPaths.config, true),
     entry(configPaths.policies, configPaths.policies, true),
     entry(configPaths.classificationPolicy, configPaths.classificationPolicy, true),
     behaviorEntry,
+    runtimeEntry,
     entry('.gateforge/test-map.yml', configPaths.sidecar, false),
     ...adapterEntries,
     ...waiverEntries,
@@ -208,6 +218,7 @@ export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfi
     policies: config.policies,
     classificationPolicy: config.classificationPolicy,
     behaviorPolicy: config.behaviorPolicy ?? null,
+    runtimePolicy: config.runtime ?? null,
     sidecar: TEST_MAP_RELATIVE,
     adaptersDir: config.adapters,
     waiverFiles: [...new Set(waiverFiles)].sort(),

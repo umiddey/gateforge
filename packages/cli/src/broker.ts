@@ -46,7 +46,6 @@ import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { loadConfig, verifyGateReceipt, executionBoundaryDigestOf, type GateReceipt, type GateforgeConfig } from '@gate-forge/core';
-import { isolationProfileForEnvironment } from './isolation.js';
 import { parseArgs } from './args.js';
 import { trustedPolicyDigestForConfig, SUPERVISED_INVOCATION } from './execution.js';
 import { UsageError } from './errors.js';
@@ -115,21 +114,19 @@ function authorityGit(
   };
 }
 /**
- * Raw owner-controlled boundary label, retained for operator-facing
- * diagnostics. Receipt digests use the normalized isolation profile below.
+ * Returns the owner-controlled boundary label used to bind broker receipts.
+ *
+ * Args:
+ *   env: owner-controlled broker environment.
+ *
+ * Returns:
+ *   string: configured boundary label or the honest local default.
  */
 function authorityBoundaryLabel(env: NodeJS.ProcessEnv): string {
   const raw = env['GATEFORGE_AUTHORITY_BOUNDARY'];
   return typeof raw === 'string' && raw.length > 0 ? raw : 'local-unisolated';
 }
 
-/**
- * Normalized execution-boundary profile accepted by this authority.
- * Managed-authoritative is an authority label, not a receipt profile.
- */
-function authorityBoundaryProfile(env: NodeJS.ProcessEnv): string {
-  return isolationProfileForEnvironment(env);
-}
 
 /**
  * Recomputes the workspace candidate's trusted digests from RAW file
@@ -285,7 +282,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
       'no witness verifier key in the broker environment; the receipt cannot be authenticated (fail closed)',
     );
   }
-  const expectedBoundary = executionBoundaryDigestOf(authorityBoundaryProfile(io.env));
+  const expectedBoundary = executionBoundaryDigestOf(authorityBoundaryLabel(io.env));
   const verified = verifyGateReceipt(verifierKey, receiptRaw, {
     candidateTreeId: treeId,
     trustedPolicyDigest: digests.trustedPolicyDigest,
@@ -305,8 +302,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
       throw new BrokerRejection(
         'ENFORCEMENT_UNTRUSTED',
         `broker: ${verified.detail} — this authority requires execution-boundary ` +
-          `'${authorityBoundaryProfile(io.env)}' (authority label '${authorityBoundaryLabel(io.env)}'); a '${'local-unisolated'}' receipt cannot authorize ` +
-          'managed acceptance (fail closed)',
+          `'${authorityBoundaryLabel(io.env)}'; a '${'local-unisolated'}' receipt cannot authorize managed acceptance (fail closed)`,
       );
     }
     throw new BrokerRejection('ENFORCEMENT_UNTRUSTED', `broker: ${verified.detail}`);
@@ -371,7 +367,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
   }
   writeLine(
     io.stdout,
-    `broker: committed ${newSha} on ${ref} (tree ${treeId}, receipt ${receipt.receiptId}, boundary ${authorityBoundaryLabel(io.env)} / profile ${authorityBoundaryProfile(io.env)})`,
+    `broker: committed ${newSha} on ${ref} (tree ${treeId}, receipt ${receipt.receiptId}, boundary ${authorityBoundaryLabel(io.env)})`,
   );
   writeLine(
     io.stdout,

@@ -284,6 +284,25 @@ export type {
 } from './schemas/coverage-policy.js';
 
 /**
+ * Staged-runtime configuration (plan 2026-09-21 witnessed pre-commit):
+ * the owner-reviewed `.gateforge/runtime.yml` — dependency preparation,
+ * sanctioned dependency reuse, and candidate-owned services with
+ * readiness probes. Security-sensitive: trusted-policy digest input.
+ */
+export {
+  RuntimeConfigSchema,
+  RuntimeServiceSchema,
+  RuntimeReadinessSchema,
+  isNormalizedRepoRelativePath,
+  SERVICE_PORT_PLACEHOLDER,
+  SERVICE_URL_PLACEHOLDER,
+  DEFAULT_PREPARE_TIMEOUT_SECONDS,
+  DEFAULT_READY_TIMEOUT_SECONDS,
+} from './schemas/runtime-config.js';
+/** Inferred staged-runtime types. */
+export type { RuntimeConfig, RuntimeService, RuntimeReadiness } from './schemas/runtime-config.js';
+
+/**
  * Behavior policy / catalog / evidence (plan 2026-09-19): owner-approved
  * complete-behavior cases. Absence of the document preserves basic
  * behavior. Strong contracts stay unavailable until a real case producer
@@ -581,17 +600,31 @@ export type { ClassificationSignal, SignalTarget, SignalDimension, SignalBasis, 
 /**
  * ClassificationPolicy: the `classification-policy.yml` document —
  * scan roots, trusted internal entry-point categories, organization
- * internal rules (certificate inputs, never overrides), supported
- * declaration syntax, and volatile fields.
+ * internal rules (certificate inputs, never overrides), exact owner
+ * lifecycle rules (closed-world disables), supported declaration syntax,
+ * and volatile fields.
  */
 export {
   ClassificationPolicySchema,
   InternalEntryPointCategorySchema,
   InternalRuleSchema,
   InternalRuleMatchSchema,
+  LifecycleRuleMatchSchema,
+  LifecycleRuleSchema,
+  LifecycleRulesSchema,
+  LIFECYCLE_OPERATIONS,
+  sortLifecycleRules,
 } from './schemas/classification-policy.js';
 /** Inferred classification-policy type. */
-export type { ClassificationPolicy, InternalEntryPointCategory, InternalRule, InternalRuleMatch } from './schemas/classification-policy.js';
+export type {
+  ClassificationPolicy,
+  InternalEntryPointCategory,
+  InternalRule,
+  InternalRuleMatch,
+  LifecycleOperation,
+  LifecycleRule,
+  LifecycleRuleMatch,
+} from './schemas/classification-policy.js';
 
 /**
  * The deterministic conservative classifier (ADR 0003 D2):

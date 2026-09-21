@@ -7,6 +7,7 @@
  * NEVER proves internality, ADR 0003 D2 exposure rule 3).
  */
 import { z } from 'zod';
+import { compareStrings } from '../graph/util.js';
 import { SchemaVersionField } from './common.js';
 
 /** One trusted internal entry-point category (worker, migration, …). */
@@ -62,6 +63,112 @@ export const InternalRuleSchema = z
 
 /** Inferred internal-rule shape. */
 export type InternalRule = z.infer<typeof InternalRuleSchema>;
+
+/** Lifecycle operations an owner may explicitly disable for one resource. */
+export const LIFECYCLE_OPERATIONS = ['create', 'read', 'update', 'delete'] as const;
+
+/** Union of owner lifecycle operation names. */
+export type LifecycleOperation = (typeof LIFECYCLE_OPERATIONS)[number];
+
+/** Exact plane-qualified resource identity used by lifecycle policy rules. */
+const ExactResourceIdSchema = z
+  .string()
+  .min(1, 'resourceId must not be empty')
+  .refine((value) => value === value.trim(), {
+    message: 'resourceId must not have leading or trailing whitespace',
+  })
+  .regex(
+    /^(?:tenant|master|global)\.[^.:/\\\s]+$/,
+    "resourceId must be an exact '<plane>.<resource>' identity without wildcards, paths, or delimiters",
+  )
+  .refine((value) => !/[?*\[\]{}]/.test(value), {
+    message: 'resourceId must not contain wildcard or pattern characters',
+  });
+
+/** Exact resource match for an owner lifecycle rule. */
+export const LifecycleRuleMatchSchema = z
+  .object({
+    /** Plane-qualified resource id; globs and bare names are unsafe here. */
+    resourceId: ExactResourceIdSchema,
+  })
+  .strict();
+
+/** Inferred lifecycle-rule match shape. */
+export type LifecycleRuleMatch = z.infer<typeof LifecycleRuleMatchSchema>;
+
+/** One owner policy rule disabling selected operations for one exact resource. */
+export const LifecycleRuleSchema = z
+  .object({
+    /** Exact resource identity this rule applies to. */
+    match: LifecycleRuleMatchSchema,
+    /** Operations that are structurally unavailable for the matched resource. */
+    disable: z
+      .array(z.enum(LIFECYCLE_OPERATIONS))
+      .min(1, 'disable must list at least one lifecycle operation')
+      .superRefine((operations, ctx) => {
+        const seen = new Set<string>();
+        for (let index = 0; index < operations.length; index += 1) {
+          const operation = operations[index];
+          if (operation === undefined) continue;
+          if (seen.has(operation)) {
+            ctx.addIssue({
+              code: 'custom',
+              path: [index],
+              message: `duplicate disabled lifecycle operation '${operation}'`,
+            });
+          }
+          seen.add(operation);
+        }
+      }),
+    /** Owner explanation rendered in classifier traces and diagnostics. */
+    reason: z
+      .string()
+      .min(1, 'reason must not be empty')
+      .refine((value) => value === value.trim(), {
+        message: 'reason must not have leading or trailing whitespace',
+      })
+      .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+        message: 'reason must not contain control characters',
+      }),
+  })
+  .strict();
+
+/** Inferred lifecycle-rule shape. */
+export type LifecycleRule = z.infer<typeof LifecycleRuleSchema>;
+
+/** Lifecycle rules with duplicate exact identities rejected as ambiguous. */
+export const LifecycleRulesSchema = z
+  .array(LifecycleRuleSchema)
+  .superRefine((rules, ctx) => {
+    const seen = new Map<string, number>();
+    for (let index = 0; index < rules.length; index += 1) {
+      const resourceId = rules[index]?.match.resourceId;
+      if (resourceId === undefined) continue;
+      const first = seen.get(resourceId);
+      if (first !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [index, 'match', 'resourceId'],
+          message:
+            `duplicate lifecycle rule for '${resourceId}' (already declared at index ${first}); ` +
+            'one exact identity must have one unambiguous rule',
+        });
+      } else {
+        seen.set(resourceId, index);
+      }
+    }
+  });
+
+/** Deterministic rule ordering for authority minting and explanations. */
+export function sortLifecycleRules(rules: readonly LifecycleRule[]): LifecycleRule[] {
+  const order = new Map<string, number>(LIFECYCLE_OPERATIONS.map((operation, index) => [operation, index]));
+  return [...rules]
+    .map((rule) => ({
+      ...rule,
+      disable: [...rule.disable].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0)),
+    }))
+    .sort((a, b) => compareStrings(a.match.resourceId, b.match.resourceId));
+}
 
 /**
  * One coverage requirement (red-team round 3): the named detector must
@@ -122,6 +229,8 @@ export const ClassificationPolicySchema = z
     trustedInternalEntryPoints: z.array(InternalEntryPointCategorySchema),
     /** Organization internal rules — certificate inputs, never overrides. */
     internalRules: z.array(InternalRuleSchema),
+    /** Exact owner lifecycle disables; suppressive effects require scan proof. */
+    lifecycleRules: LifecycleRulesSchema.optional(),
     /**
      * Coverage requirements for COMPLETE-scan proofs (ADR 0003 D4). A
      * closed-world attestation holds only when every rule's detector is

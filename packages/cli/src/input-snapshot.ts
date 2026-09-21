@@ -181,6 +181,8 @@ export interface SnapshotGateContext {
   }>;
   /** Complete HTTP route inventory, sorted by resourceId. */
   httpRoutes: HttpRouteCandidate[];
+  /** Digest of bytes reused from outside the candidate checkout, when any. */
+  runtimeReuseDigest?: string;
 }
 
 /** The complete snapshot: inventory + context + digest. */
@@ -209,6 +211,8 @@ export interface ComputeSnapshotInput {
   httpRoutes?: readonly HttpRouteCandidate[];
   /** Pinned plugin registrations (post-discovery). */
   plugins?: Array<{ id: string; version: string }>;
+  /** Deterministic digest of staged-runtime reuse bytes, when configured. */
+  runtimeReuseDigest?: string | null;
 }
 
 /**
@@ -443,12 +447,14 @@ function collectDeclaredInputs(cwd: string, config: GateforgeConfig): string[] {
   }
 
   // Explicit configuration inputs: .gateforge.yml itself, resolved
-  // policy/classification files, and known pack configs.
+  // policy/classification files, the staged-runtime document, and known
+  // pack configs.
   const explicitFiles = [
     '.gateforge.yml',
     toPosix(config.policies),
     toPosix(config.classificationPolicy),
     ...(config.behaviorPolicy === undefined ? [] : [toPosix(config.behaviorPolicy)]),
+    ...(config.runtime === undefined ? [] : [toPosix(config.runtime)]),
     ...PACK_CONFIGS,
   ];
   for (const candidate of explicitFiles) {
@@ -750,6 +756,7 @@ export function buildGateContext(
   classifications: Record<string, unknown> = {},
   obligations: readonly Obligation[] = [],
   httpRoutes: readonly HttpRouteCandidate[] = [],
+  runtimeReuseDigest?: string | null,
 ): SnapshotGateContext {
   const sortedClassifications: Record<string, unknown> = {};
   for (const key of Object.keys(classifications).sort(compareStrings)) {
@@ -783,6 +790,7 @@ export function buildGateContext(
       }))
       .sort((a, b) => compareStrings(a.id, b.id)),
     httpRoutes: [...httpRoutes].sort((a, b) => compareStrings(a.resourceId, b.resourceId)),
+    ...(runtimeReuseDigest === undefined || runtimeReuseDigest === null ? {} : { runtimeReuseDigest }),
   };
 }
 
@@ -839,6 +847,7 @@ export function computeInputSnapshot(input: ComputeSnapshotInput): InputSnapshot
     input.classifications ?? {},
     input.obligations ?? [],
     input.httpRoutes ?? [],
+    input.runtimeReuseDigest,
   );
   return {
     snapshotVersion: 1,
