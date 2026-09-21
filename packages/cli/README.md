@@ -32,7 +32,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
-| `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e] [--managed]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence-only policy, overlay proof), and write `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, `GATEFORGE.md`, and (overlay proof only) `tests/e2e/gateforge/README.md`. Idempotent — never overwrites existing files. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block and runs capability preflight. `--managed` tries the targeted native Podman package install first; if Arch requires a full `pacman -Syu` fallback, Gateforge asks the owner before running it. It then verifies rootless `podman info`, writes `enforcement.mode: managed`, and implies strict/blocking wiring. No npm lifecycle install or silent privilege escalation. | 0 (blocking/install failure → 2) |
+| `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence-only policy, overlay proof), and write `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, `GATEFORGE.md`, and (overlay proof only) `tests/e2e/gateforge/README.md`. Idempotent — never overwrites existing files. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block and refuses unavailable required proof channels. | 0/1/2 |
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking`). Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. Snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
@@ -46,6 +46,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge check [--changed] [--staged] [--require-e2e] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` evaluates one effective scope: only obligations/blockers tied to files the resolved diff provider reports — unless the diff touches a gate-defining input (`.gateforge.yml`, configured policy/classification paths, planes/http-clients/fastapi configs, adapters, waivers, repo-local plugin modules, dependency manifests/lockfiles, ignore controls), a test file or helper, the runner configuration, or the mapping sidecar, which expands the run to all obligations (reported as `scope` metadata with `expandedBecause` reasons). `--staged` gates the EXACT staged candidate (frozen index checkout, never the worktree; mutually exclusive with `--changed`). `--require-e2e` blocks without a valid, non-stale gate receipt (see Enforcement). `--format` default `text`. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env (see trust model). | 0 clean/waived, 1 unresolved, 2 config/usage |
 | `gateforge test-gates [--changed] [--scope full\|changed] [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | Two modes. Supervised `--changed`: trusted runner supervision over the obligations — resolves catalog + mappings, fixes the expected test set, executes the configured Playwright suite through the adapter, enforces planned-vs-executed completeness, and seals an authenticated gate receipt ONLY after complete success. `--scope changed` (supervised only, opt-in): plan, execute, and seal only the slice of tests whose files claim obligations affected by the resolved changed-file set — an affected obligation with no testable declared mapping blocks (`EVIDENCE_SCOPE_INCOMPLETE`), an empty slice seals nothing, and `check --require-e2e` accepts a slice receipt only when it covers every obligation arising from the currently-changed files. Without the flag behavior is unchanged (full suite, whole-repo receipt). Legacy `--suite`: the orchestration escape hatch (cannot be combined with `--changed`, and can never redefine the strict gate's expected cases). A nonzero suite exit fails the run. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env. | 0/1/2 (suite failure forces 1) |
 | `gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]` | Managed-mode commit broker (MECHANISM, not deployment): snapshots the workspace bytes into a throwaway index, recomputes the input + trusted-policy digests, verifies a valid non-stale gate receipt for EXACTLY those bytes, then creates the commit via compare-and-swap `git update-ref`. Typed rejections (`ENFORCEMENT_UNTRUSTED` / `EVIDENCE_STALE` / `RUN_INCOMPLETE` / `BROKER_CAS_MISMATCH` / `BROKER_UNSAFE_MESSAGE`); symlinks/submodules are typed rejections. Verifier key via env; runs with cwd = the AUTHORITATIVE repository. | 0/2 |
+| `gateforge pre-commit --scope staged\|full` | The witnessed commit gate: freezes the Git index, materializes it into a scratch checkout, prepares the candidate's staged runtime (`.gateforge/runtime.yml` — below), runs the supervised witness gate INSIDE that checkout (`staged`: only tests mapped to obligations affected by the staged paths, `EVIDENCE_SCOPE_INCOMPLETE` blocks an unmapped affected obligation; `full`: the complete relevant mapped suite), validates the fresh receipt against the same checkout, rechecks the original index/HEAD/MERGE_HEAD, and copies only Gateforge audit artifacts (run state incl. runtime logs) back. Runtime preparation/readiness failures are typed (`RUNTIME_PREPARATION_FAILED` / `RUNTIME_READINESS_FAILED`); child process groups are cleaned up on every exit path. Install via `gateforge init --blocking --witnessed staged\|full`. | 0/1/2 |
 | `gateforge enforcement doctor [--json]` | Honest enforcement diagnostics: config, hook presence + ACTIVATION, runner readiness, observer capability, trusted binary/policy ownership, snapshot mode, and the standard/managed boundary. Detecting a hook NEVER counts as managed protection. Diagnostic only: exit 0 whenever it runs. | 0/2 |
 | `gateforge baseline update <fp...>` | Shrink the baseline to a strict subset (invariant 4). | 0/2 |
 
@@ -53,6 +54,55 @@ Global flags: `--help`, `--version`. Exit codes per architecture contract 4:
 `0` clean/waived, `1` unresolved obligations (or a failed/supervision-blocked
 run), `2` config/usage error. `tests diagnose` has its own advisory contract
 (0/1/2 above).
+
+## Staged runtime (`.gateforge/runtime.yml`)
+
+`gateforge pre-commit` executes the candidate inside a materialized checkout
+that contains TRACKED bytes only — no installed dependencies, no built
+assets, no application processes. The owner-reviewed staged-runtime document
+declares how that checkout becomes a runnable candidate. It is
+security-sensitive: its bytes are hashed into the trusted policy digest and
+the authenticated input snapshot, so a candidate that edits its own runtime
+commands cannot approve the edit in the same commit.
+
+```yaml
+schemaVersion: 1
+prepare:
+  command: npm ci --offline     # or pnpm/bun/uv — frozen install, build steps
+  reuse: [node_modules]         # dependency dirs EXPLICITLY allowed to link from the user repo
+  timeoutSeconds: 600
+services:                       # candidate-owned app/database/worker processes
+  - id: app
+    command: node server.js --port ${service:app:port}
+    attested: true              # fronted by the gate's attestation proxy
+    fingerprint: prod-v1        # GF-13 marker (reviewed adapters must declare the same)
+    target: true                # this proxy URL becomes the run's attested target
+    ready: { log: 'listening on', timeoutSeconds: 60 }   # or http: <url>
+envAllowlist: [DATABASE_URL]    # operator env names allowed through to children
+executionTimeoutSeconds: 1800   # whole-run budget handed to the supervised gate
+```
+
+Contract highlights:
+
+- Services start from the CHECKOUT bytes (never the worktree) in their own
+  process groups; readiness (`log` regex or `http` 2xx), startup, and
+  execution timeouts are bounded; stdout/stderr are captured to
+  `<run-state>/runtime/<id>.log`; teardown happens on success, failure,
+  timeout, and interruption (SIGINT/SIGTERM kill the whole groups).
+- Every `prepare.reuse` tree is constrained to a normalized repository-relative
+  path. Its reachable dependency bytes are hashed into the authenticated
+  input identity, so changing an ignored reused dependency invalidates the
+  receipt even though the checkout uses a link.
+- `${service:<id>:port}` / `${service:<id>:url}` placeholders are
+  substituted by the supervisor and injected into every service's
+  environment (`GATEFORGE_SERVICE_PORT_<ID>` / `GATEFORGE_SERVICE_URL_<ID>`).
+- The attested target is the process THE GATE started from the frozen
+  candidate — a bare target URL proves nothing. The receipt binds the raw-
+  ingested tree of the prepared checkout (`targetArtifactDigest`), and the
+  user's index is rechecked before authorization.
+- ABSENT document = no bridge, no services (fail closed): discovery that
+  needs installed dependencies blocks honestly instead of silently reusing
+  the worktree's environment.
 
 ## Existing-test reuse (`gateforge tests`)
 
@@ -598,11 +648,6 @@ expected context, every witnessed record demotes to claimed-tier
   owner actions — the complete template and settings list ship from
   `init --blocking`, but a local simulation does not complete a server
   rollout (`docs/plans/immediate/20260913_consumer_migration_record.md`).
-- Managed mode ships the broker mechanism plus rootless-Podman reference
-  deployment assets under `deploy/managed/`; those assets do not provision
-  the authoritative Git directory, credentials, protected refs, or external
-  app/worker services. The current managed backend supports Linux rootless
-  Podman only and rejects other platforms rather than guessing.
 
 ## Development
 

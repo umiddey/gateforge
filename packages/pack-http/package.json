@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-http",
-  "version": "0.5.0",
+  "version": "0.6.1",
   "license": "Apache-2.0",
   "description": "Generic HTTP exposure pack: TS detector for route registrations (Express, Fastify, Hono, NestJS), bounded static dataflow for frontend API-client calls (fetch, Axios, instances, wrappers, constants, URL builders), http.contract evidence facts plus exposure/lifecycle signals (ADR 0004, plan phases 3-4).",
   "type": "module",
@@ -26,11 +26,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.5.0",
-    "@gate-forge/plugin-protocol": "^0.5.0",
-    "zod": "^4.1.5",
-    "@gate-forge/http-contract": "^0.5.0",
-    "typescript": "^5.9.2"
+    "@gate-forge/core": "^0.6.1",
+    "@gate-forge/http-contract": "^0.6.1",
+    "@gate-forge/plugin-protocol": "^0.6.1",
+    "typescript": "^5.9.2",
+    "zod": "^4.1.5"
   },
   "publishConfig": {
     "access": "public"

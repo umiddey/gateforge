@@ -22,6 +22,7 @@ import {
   CAUSE_NEXT_ACTIONS,
   engineBundleDigestOf,
   executionBoundaryDigestOf,
+  LOCAL_UNISOLATED_BOUNDARY,
   renderRun,
   runExitCode,
   type BlockingEntry,
@@ -48,6 +49,7 @@ import {
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
 import { runPipeline, resolveRepoPath, sourcesByResourceId } from '../pipeline.js';
+import { RuntimeBlockError, loadRuntimeConfigAt, prepareRuntime } from '../runtime.js';
 import {
   loadReceiptFor,
   receiptGateBlocking,
@@ -74,7 +76,6 @@ import {
   evaluateApprovedPolicy,
   resolveApprovedPolicyDigest,
 } from '../trusted-policy.js';
-import { isolationProfileForEnvironment } from '../isolation.js';
 import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
 import { renderEndpointInventory } from '../endpoint-report.js';
 
@@ -86,7 +87,7 @@ export const CHECK_USAGE =
   '       GATEFORGE_APPROVED_POLICY_DIGEST variable, this flag, or GATEFORGE_TRUSTED_CONFIG outside the candidate.';
 
 /** Options of one gate run (the check body, shared by --changed/--staged). */
-interface CheckGateOptions {
+export interface CheckGateOptions {
   /** Restrict evaluation to the changed-file scope. */
   diffScoped: boolean;
   /** Require a valid, non-stale gate receipt (strict saved-state gate). */
@@ -109,6 +110,8 @@ interface CheckGateOptions {
    * mismatch diagnostic is skipped (the checkout IS the staged bytes).
    */
   fixedChangedFiles?: readonly string[];
+  /** Digest of dependency bytes reused by the staged candidate runtime. */
+  runtimeReuseDigest?: string | null;
 }
 
 /**
@@ -184,6 +187,7 @@ async function stagedCheckCommand(
     throw error;
   }
   let checkoutDir: string;
+  let runtimeReuseDigest: string | null = null;
   try {
     checkoutDir = materializeStagedCandidate(io.cwd, io.env, frozen);
     // Empty directories are invisible to Git trees — checkout-index cannot
@@ -201,8 +205,43 @@ async function stagedCheckCommand(
         mkdirSync(checkoutPath, { recursive: true });
       }
     }
+    // The candidate's own staged-runtime document prepares ITS checkout
+    // (dependency reuse + tracked preparation command) — discovery reads
+    // installed tooling from the candidate, never the worktree. The
+    // document is trusted-revision input (hashed into the approved
+    // digest), so a candidate cannot edit its runtime commands and
+    // approve the edit in the same commit. Services do NOT start here:
+    // check validates recorded evidence and runs no tests.
+    // Evaluate the canonical owner-approved policy gate BEFORE any staged
+    // prepare command can execute. `check --staged` is also a runtime
+    // execution surface, so it must not rely on the later receipt check
+    // to discover an unapproved runtime revision.
+    const candidatePolicyDigest = trustedPolicyDigestForConfig(checkoutDir, checkoutConfig);
+    const policyGate = evaluateApprovedPolicy(
+      resolveApprovedPolicyDigest({
+        flag: options.approvedPolicyDigest,
+        env: io.env,
+        candidateCwd: checkoutDir,
+        candidateConfig: checkoutConfig,
+      }),
+      candidatePolicyDigest,
+      checkoutConfig.enforcement?.strictE2E === true,
+    );
+    if (policyGate.status === 'blocked') {
+      releaseStagedCandidate(frozen);
+      return renderStagedBlock(io, policyGate.cause, policyGate.detail, policyGate.nextAction);
+    }
+    const runtimeDoc = loadRuntimeConfigAt(checkoutDir, checkoutConfig.runtime);
+    if (runtimeDoc !== null) {
+      runtimeReuseDigest = (
+        await prepareRuntime(io.cwd, checkoutDir, runtimeDoc, io, resolveStateDir(checkoutDir))
+      ).reuseDigest;
+    }
   } catch (error) {
     releaseStagedCandidate(frozen);
+    if (error instanceof RuntimeBlockError) {
+      return renderStagedBlock(io, error.causeCode, error.message, CAUSE_NEXT_ACTIONS[error.causeCode]);
+    }
     if (error instanceof StagedCandidateBlockError) {
       return renderStagedBlock(io, error.causeCode, error.message, error.nextAction);
     }
@@ -230,6 +269,7 @@ async function stagedCheckCommand(
       format: options.format,
       approvedPolicyDigest: options.approvedPolicyDigest,
       fixedChangedFiles: frozen.changedPaths,
+      runtimeReuseDigest,
     });
     // Re-check BEFORE authorizing: different bytes never pass.
     const recheck = recheckStagedCandidate(io.cwd, io.env, frozen);
@@ -286,9 +326,10 @@ function renderStagedBlock(io: Io, cause: CauseCode, detail: string, nextAction:
  *   number: exit code — 0 clean/waived, 1 unresolved, 2 config/usage.
  * @throws fail-closed errors (exit 2) from config/plugin/pipeline layers.
  */
-async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> {
+export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> {
   const { diffScoped, requireE2E, format } = options;
   const fixedChangedFiles = options.fixedChangedFiles;
+  const runtimeReuseDigest = options.runtimeReuseDigest;
   // Witness verifier key (GF-23, plan §11): read from the
   // environment — never argv, whose cmdline is world-readable. With the
   // key, the manifest's v2 `attestation` envelope can be authenticated
@@ -360,6 +401,7 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
             id: plugin.id,
             version: plugin.version,
           })),
+          runtimeReuseDigest,
         }).inputDigest;
       }
     } catch (error) {
@@ -623,7 +665,9 @@ async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> 
             // staleness contract (E13).
             selectionDigest: undefined,
             catalogDigest: undefined,
-            executionBoundaryDigest: executionBoundaryDigestOf(isolationProfileForEnvironment(io.env)),
+            executionBoundaryDigest: executionBoundaryDigestOf(
+              io.env['GATEFORGE_AUTHORITY_BOUNDARY']?.trim() || LOCAL_UNISOLATED_BOUNDARY,
+            ),
           },
         );
         if (load.status === 'ok') {

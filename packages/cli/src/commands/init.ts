@@ -18,7 +18,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { join } from 'node:path';
-import { parse as parseYaml, parseDocument } from 'yaml';
+import { parse as parseYaml } from 'yaml';
 import {
   ClassificationPolicySchema,
   PolicyFileSchema,
@@ -38,7 +38,6 @@ import { PACK_VERSION as PACK_FASTAPI_VERSION } from '@gate-forge/pack-fastapi';
 import { PACK_VERSION as PACK_HTTP_VERSION } from '@gate-forge/pack-http';
 import { PACK_VERSION as PACK_TASK_VERSION } from '@gate-forge/pack-task';
 import { parseArgs, stringFlag } from '../args.js';
-import { ensurePodman } from '../podman-bootstrap.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
@@ -46,12 +45,12 @@ import { languageDefaultPlugins, recommendPlugins, renderScanBlock, scanRepo } f
 import { rejectUnknownFlags } from './common.js';
 import { expandIncludePaths, type ExpandError } from '../glob.js';
 import { inferPlanesConfig } from '../planes-inference.js';
-import { installCommitHook, writeStandaloneGateScript } from '../git-hooks.js';
+import { hasGateforgeMarker, installCommitHook, writeStandaloneGateScript } from '../git-hooks.js';
 import { appendPreCommitHook, ensureHookScript, engineRootFromInvocation } from './blocking.js';
 export const INIT_USAGE =
-  'usage: gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] ' +
-  '[--no-scan] [--proof overlay|observe] [--blocking] [--pre-commit] [--mode changed|staged] [--ci] [--no-ci] ' +
-  '[--strict-e2e] [--managed] [--planes] [--behavior]';
+  '[--no-scan] [--proof overlay|observe] [--blocking] [--pre-commit] [--mode changed|staged] ' +
+  '[--witnessed staged|full] [--ci] [--no-ci] ' +
+  '[--strict-e2e] [--planes] [--behavior]';
 
 /** Template for the complete-behavior owner document (plan §4.1). */
 export const BEHAVIOR_TEMPLATE = `\
@@ -315,20 +314,14 @@ volatileFields:
 `;
 }
 /** Builds the `.gateforge.yml` document for the requested languages. */
-function configTemplate(
-  languages: readonly string[],
-  pluginIds: readonly string[],
-  options: { strictE2E?: boolean; managed?: boolean } = {},
-): string {
+function configTemplate(languages: readonly string[], pluginIds: readonly string[], options: { strictE2E?: boolean } = {}): string {
   const enforcementBlock =
-    options.strictE2E === true || options.managed === true
-      ? `# Enforcement modes (plan §3.4/§3.3, ADR 0005): 'standard' = local hook +
-# mandatory trusted server check (honest about --no-verify); 'managed' =
-# additionally puts the authoritative commit service outside the agent's
-# write/process boundary. strictE2E makes waived/baselined in-scope E2E
+    options.strictE2E === true
+      ? `# Enforcement: standard mode combines the local hook with a mandatory
+# trusted server check. strictE2E makes waived/baselined in-scope E2E
 # obligations NOT proof (they block with ENFORCEMENT_UNTRUSTED).
 enforcement:
-  mode: ${options.managed === true ? 'managed' : 'standard'}
+  mode: standard
   strictE2E: true
 `
       : '';
@@ -371,41 +364,6 @@ ${enforcementBlock}\
 `;
 }
 
-/**
- * Upgrades an existing config only when the owner explicitly selects
- * `init --managed`; ordinary init remains strictly non-destructive.
- *
- * Args:
- *   configPath (string): absolute path to the existing config.
- *
- * Returns:
- *   boolean: whether the file changed.
- *
- * Throws:
- *   UsageError: when the existing YAML or resulting config is invalid.
- */
-function upgradeManagedConfig(configPath: string): boolean {
-  const document = parseDocument(readFileSync(configPath, 'utf8'));
-  if (document.errors.length > 0) {
-    throw new UsageError(
-      `managed initialization cannot update '${configPath}': ${document.errors.map((error) => error.message).join('; ')}`,
-    );
-  }
-  const currentMode = document.getIn(['enforcement', 'mode']);
-  const currentStrictE2E = document.getIn(['enforcement', 'strictE2E']);
-  if (currentMode === 'managed' && currentStrictE2E === true) return false;
-  document.setIn(['enforcement', 'mode'], 'managed');
-  document.setIn(['enforcement', 'strictE2E'], true);
-  try {
-    parseConfig(document.toJS(), { file: configPath });
-  } catch (cause) {
-    throw new UsageError(
-      `managed initialization cannot update '${configPath}': ${cause instanceof Error ? cause.message : String(cause)}`,
-    );
-  }
-  writeFileSync(configPath, document.toString(), 'utf8');
-  return true;
-}
 
 /**
  * Strict-setup preflight (plan Phase 0 item 4, ADR 0005 D1): when the
@@ -856,10 +814,10 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       'pre-commit',
       'no-pre-commit',
       'mode',
+      'witnessed',
       'ci',
       'no-ci',
       'strict-e2e',
-      'managed',
       'planes',
       'no-planes',
       'behavior',
@@ -916,42 +874,9 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   if (explicitLanguages !== null && explicitLanguages.length === 0) {
     throw new UsageError(`flag '--languages' requires at least one language`);
   }
-  const managed = options['managed'] === true;
-  if (typeof options['managed'] !== 'boolean' && options['managed'] !== undefined) {
-    throw new UsageError(`flag '--managed' must be a boolean flag`);
-  }
-  if (managed && options['no-blocking'] === true) {
-    throw new UsageError(`flag '--managed' requires the existing blocking initialization wiring`);
-  }
-  const strictE2E = options['strict-e2e'] === true || managed;
+  const strictE2E = options['strict-e2e'] === true;
   if (typeof options['strict-e2e'] !== 'boolean' && options['strict-e2e'] !== undefined) {
     throw new UsageError(`flag '--strict-e2e' must be a boolean flag`);
-  }
-
-  // Managed bootstrap happens before any project file is written. The
-  // existing init command remains local unless the owner explicitly selects
-  // --managed.
-  const podman = managed
-    ? await ensurePodman({
-        env: io.env,
-        runner: io.hostCommandRunner,
-        confirmSystemUpgrade: async (question) => {
-          if (!process.stdin.isTTY) return false;
-          const rl = createInterface({ input: process.stdin, output: process.stdout });
-          try {
-            const answer = (await rl.question(question)).trim().toLowerCase();
-            return answer === 'y' || answer === 'yes';
-          } finally {
-            rl.close();
-          }
-        },
-      })
-    : null;
-  if (podman !== null) {
-    writeLine(
-      io.stdout,
-      `managed runtime ready: ${podman.version}${podman.installedNow ? ` (installed with ${podman.packageManager})` : ''}; rootless=true`,
-    );
   }
 
   // Strict-setup preflight (plan Phase 0 item 4): BEFORE anything is
@@ -995,8 +920,8 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         // Self-check the template against the pinned schema before
         // writing anything (a broken template must fail here, not in
         // every later command).
-        parseConfig(parseYaml(configTemplate(languages, pluginIds, { strictE2E, managed })), { file: '.gateforge.yml' });
-        writeFileSync(join(cwd, '.gateforge.yml'), configTemplate(languages, pluginIds, { strictE2E, managed }), 'utf8');
+        parseConfig(parseYaml(configTemplate(languages, pluginIds, { strictE2E })), { file: '.gateforge.yml' });
+        writeFileSync(join(cwd, '.gateforge.yml'), configTemplate(languages, pluginIds, { strictE2E }), 'utf8');
       },
     },
     {
@@ -1078,7 +1003,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         path: join(cwd, '.gateforge.yml'),
         label: 'config (with behaviorPolicy)',
         write: () => {
-          const text = configTemplate(languages, pluginIds, { strictE2E, managed });
+          const text = configTemplate(languages, pluginIds, { strictE2E });
           const withBehavior = text.replace(
             /^policies:/m,
             'behaviorPolicy: .gateforge/behavior.yml\npolicies:',
@@ -1097,17 +1022,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
 
   for (const target of targets) {
     if (existsSync(target.path)) {
-      if (managed && target.path === join(cwd, '.gateforge.yml')) {
-        const updated = upgradeManagedConfig(target.path);
-        writeLine(
-          io.stdout,
-          updated
-            ? `updated: ${target.path} (managed enforcement)`
-            : `exists, leaving untouched: ${target.path}`,
-        );
-      } else {
-        writeLine(io.stdout, `exists, leaving untouched: ${target.path}`);
-      }
+      writeLine(io.stdout, `exists, leaving untouched: ${target.path}`);
       continue;
     }
     target.write();
@@ -1149,6 +1064,10 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   //                       changed = debt-friendly `check --changed`;
   //                       staged  = strict `check --staged --require-e2e`
   //                       (+ the standalone staged-gate script)
+  //   --witnessed staged|full
+  //                       run a fresh supervised witness gate in the
+  //                       exact staged checkout before receipt validation;
+  //                       staged selects affected tests, full selects all
   //   --ci / --no-ci      wire the .gitlab-ci.yml include + job template
   //   --blocking          legacy all-in: pre-commit (staged) + CI
   const modeValue = options['mode'];
@@ -1157,8 +1076,18 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       throw new UsageError(`flag '--mode' must be 'changed' or 'staged'`);
     }
   }
-  const blocking = managed || (await resolveBlocking(io, options));
-  const preCommit = options['pre-commit'] === true || blocking;
+  const witnessedValue = options['witnessed'];
+  if (
+    witnessedValue !== undefined &&
+    (typeof witnessedValue !== 'string' || (witnessedValue !== 'staged' && witnessedValue !== 'full'))
+  ) {
+    throw new UsageError(`flag '--witnessed' must be 'staged' or 'full'`);
+  }
+  if (witnessedValue !== undefined && modeValue !== undefined) {
+    throw new UsageError("init: --witnessed selects the pre-commit execution mode and cannot be combined with '--mode'");
+  }
+  const blocking = await resolveBlocking(io, options);
+  const preCommit = options['pre-commit'] === true || blocking || witnessedValue !== undefined;
   const ci = options['ci'] === true || blocking;
   const mode: 'changed' | 'staged' =
     typeof modeValue === 'string'
@@ -1173,16 +1102,34 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     // is shared; only the gate invocation differs, recorded at generation
     // time by the wiring command's mode.
     const gateArgs =
-      mode === 'staged' ? ['check', '--staged', '--require-e2e'] : ['check', '--changed'];
+      witnessedValue === 'staged'
+        ? ['pre-commit', '--scope', 'staged']
+        : witnessedValue === 'full'
+          ? ['pre-commit', '--scope', 'full']
+          : mode === 'staged'
+            ? ['check', '--staged', '--require-e2e']
+            : ['check', '--changed'];
     ensureHookScript(io, engineRootFromInvocation(), gateArgs);
     // The ACTIVE hook (plan Phase 5 item 1): install into the resolved
     // hooks directory AND verify activation — never merely write a
     // config file.
-    if (mode === 'staged') {
-      const gateScript = writeStandaloneGateScript(cwd);
-      writeLine(io.stdout, `created: ${gateScript} (standalone staged gate: check --staged --require-e2e)`);
+    if (mode === 'staged' || witnessedValue !== undefined) {
+      const standaloneBefore = existsSync(join(cwd, '.gateforge', 'hooks', 'gateforge-staged.sh'))
+        ? readFileSync(join(cwd, '.gateforge', 'hooks', 'gateforge-staged.sh'), 'utf8')
+        : null;
+      const gateScript = writeStandaloneGateScript(cwd, gateArgs);
+      const standaloneAfter = readFileSync(gateScript, 'utf8');
+      const standaloneState =
+        standaloneBefore === null
+          ? 'created'
+          : hasGateforgeMarker(standaloneAfter)
+            ? standaloneBefore === standaloneAfter
+              ? 'verified'
+              : 'updated'
+            : 'preserved foreign file';
+      writeLine(io.stdout, `${standaloneState}: ${gateScript} (standalone staged gate: ${gateArgs.join(' ')})`);
     }
-    const outcome = installCommitHook(cwd, io.env);
+    const outcome = installCommitHook(cwd, io.env, gateArgs);
     // A pre-commit-FRAMEWORK-managed .git hook is not a conflict: the
     // framework regenerates that file from .pre-commit-config.yaml on every
     // install, so chaining into it would be silently wiped. Gateforge
@@ -1192,6 +1139,9 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     switch (outcome.status) {
       case 'installed':
         writeLine(io.stdout, `installed: ${outcome.detail}`);
+        break;
+      case 'updated':
+        writeLine(io.stdout, `updated: ${outcome.detail}`);
         break;
       case 'verified':
         writeLine(io.stdout, `verified: ${outcome.detail}`);

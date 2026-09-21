@@ -102,6 +102,25 @@ describe('installCommitHook (install AND verify an ACTIVE hook)', () => {
       expect(readFileSync(hookPath, 'utf8')).toBe(before);
     }));
 
+  it('updates a Gateforge-owned direct hook when the requested mode changes', () =>
+    withTempRepo({}, (repo) => {
+      const first = installCommitHook(repo.root, gitEnv(), ['check', '--changed']);
+      expect(first.status).toBe('installed');
+      const hookPath = join(repo.path('.git/hooks'), PRE_COMMIT_HOOK_NAME);
+      const generated = readFileSync(hookPath, 'utf8');
+      writeFileSync(hookPath, `#!/bin/sh\necho foreign-before\n${generated}echo foreign-after\n`, 'utf8');
+      chmodSync(hookPath, 0o755);
+
+      const updated = installCommitHook(repo.root, gitEnv(), ['pre-commit', '--scope', 'full']);
+      expect(updated.status).toBe('updated');
+      const body = readFileSync(hookPath, 'utf8');
+      expect(body).toContain('foreign-before');
+      expect(body).toContain('foreign-after');
+      expect(body).toContain('pre-commit --scope full');
+      expect(body).not.toContain('check --changed');
+      expect(verifyHookActivation(hookPath).ok).toBe(true);
+    }));
+
   it('NEVER clobbers a foreign hook: typed conflict naming the exact chaining action', () =>
     withTempRepo({}, (repo) => {
       const hookPath = join(repo.path('.git/hooks'), PRE_COMMIT_HOOK_NAME);

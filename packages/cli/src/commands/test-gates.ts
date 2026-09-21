@@ -67,6 +67,8 @@ import {
   EMPTY_BEHAVIOR_CATALOG_DIGEST,
   engineBundleDigestOf,
   EvidenceRecordSchema,
+  executionBoundaryDigestOf,
+  LOCAL_UNISOLATED_BOUNDARY,
   isWitnessedRecord,
   renderRun,
   requiredCaseSetDigestOf,
@@ -130,7 +132,6 @@ import { tryReuseReceipt } from '../receipts.js';
 import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
 import { resolveProvider } from '../providers.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
-import { isolationProfileForEnvironment, resolveIsolation } from '../isolation.js';
 import {
   clearGateReceipt,
   httpRoutesView,
@@ -208,7 +209,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
     scope = scopeFlag;
   }
   if (changed) {
-    return supervisedTestGates(io, {
+    return runSupervisedTestGates(io, {
       out,
       format,
       witnessUrl,
@@ -536,7 +537,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
 }
 
 /** Options of the supervised (`--changed`) path. */
-interface SupervisedOptions {
+export interface SupervisedOptions {
   /** State-dir override. */
   out: string | undefined;
   /** Report format. */
@@ -553,6 +554,16 @@ interface SupervisedOptions {
    * runs and seals only the affected slice.
    */
   scope: 'full' | 'changed';
+  /** Trusted staged-candidate changed paths supplied by the pre-commit orchestrator. */
+  fixedChangedFiles?: readonly string[];
+  /** Trusted staged-candidate tree id supplied by the pre-commit orchestrator. */
+  fixedCandidateTreeId?: string;
+  /** Trusted parent sha supplied by the pre-commit orchestrator. */
+  fixedParentSha?: string | null;
+  /** Digest of dependency bytes reused by the staged candidate runtime. */
+  runtimeReuseDigest?: string | null;
+  /** Recomputes the external reuse digest at the end of a staged run. */
+  runtimeReuseCheck?: () => string | null;
 }
 
 /**
@@ -576,30 +587,23 @@ interface SupervisedOptions {
  *   supervision/evidence failure, 2 config/usage.
  * @throws fail-closed errors (exit 2) from config/plugin/pipeline layers.
  */
-async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<number> {
+export async function runSupervisedTestGates(io: Io, options: SupervisedOptions): Promise<number> {
   const { out, format, witnessUrl, runTimeoutMs } = options;
+  const runtimeReuseDigest = options.runtimeReuseDigest;
   const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
   const config = loadConfigAt(io.cwd);
   const stateDir = resolveStateDir(io.cwd, out);
-  // The authority owns the requested profile. Candidate configuration never
-  // selects managed mode, and a managed request never falls back to local.
-  const isolationProfile = isolationProfileForEnvironment(io.env);
-  const isolation = resolveIsolation(
-    {
-      profile: isolationProfile,
-      candidateDir: io.cwd,
-      engineBundleDir: io.env['GATEFORGE_ENGINE_BUNDLE_DIR'] ?? (isolationProfile === 'podman-rootless' ? '/engine' : ''),
-      appStateDir: stateDir,
-    },
-    io.env,
-  );
+  const executionBoundary = io.env['GATEFORGE_AUTHORITY_BOUNDARY']?.trim() || LOCAL_UNISOLATED_BOUNDARY;
+  const executionBoundaryDigest = executionBoundaryDigestOf(executionBoundary);
   // Scoped sealing (Goal 2): resolve the changed-file basis through the
   // SAME configured provider `check --changed` uses (auto → GHA/GitLab/
   // staged), and stamp the resolved identity into the run manifest so a
   // scoped run names the diff basis it sliced from. Full mode keeps
   // `all-files` — byte-identical to the historical run.
   const providerIdentity =
-    options.scope === 'changed'
+    options.fixedChangedFiles !== undefined
+      ? 'local-staged'
+      : options.scope === 'changed'
       ? resolveProvider(config.changed.provider, io.cwd, io.env).provider
       : 'all-files';
 
@@ -619,11 +623,17 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     config,
     provider: providerIdentity,
     stateDir,
+    ...(options.fixedChangedFiles !== undefined
+      ? { changedFilesOverride: options.fixedChangedFiles }
+      : {}),
   });
   // The scoped slice's changed set: exactly what the resolved provider
   // reported for THIS tree (the pipeline already ran it — one resolution,
   // one diff basis stamped in the manifest).
-  const scopeChangedFiles = options.scope === 'changed' ? pipeline.changedFiles : null;
+  const scopeChangedFiles =
+    options.scope === 'changed'
+      ? options.fixedChangedFiles ?? pipeline.changedFiles
+      : null;
   const httpRoutes = httpRoutesView(pipeline.graph);
   let expectedDigest: string | null = null;
   if (!snapshotUnavailable) {
@@ -643,6 +653,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       obligations: pipeline.policy.obligations,
       httpRoutes,
       plugins: pipeline.manifest.plugins.map((plugin) => ({ id: plugin.id, version: plugin.version })),
+      runtimeReuseDigest,
     }).inputDigest;
   }
   const invocationId = randomUUID();
@@ -653,8 +664,9 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   // explicit drift block, never a mixed-bytes seal.
   const freezeGitDir = resolveGitDir(io.cwd, io.env);
   const frozenTreeId =
-    freezeGitDir === null ? null : computeCandidateTreeId(freezeGitDir, io.cwd, io.env, stateDir, 'record');
-  const frozenParentSha = parentSha(io.cwd);
+    options.fixedCandidateTreeId ??
+    (freezeGitDir === null ? null : computeCandidateTreeId(freezeGitDir, io.cwd, io.env, stateDir, 'record'));
+  const frozenParentSha = options.fixedParentSha !== undefined ? options.fixedParentSha : parentSha(io.cwd);
 
   // 2. Catalog + mappings (Phase 3 resolver) → expected set + claim
   // injections + typed mapping blockers. A failed discovery blocks the
@@ -813,7 +825,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
     trustedPolicyDigest: trustedPolicy,
     selectionDigest,
     candidateTreeId: frozenTreeId,
-    executionBoundaryDigest: isolation.boundaryDigest,
+    executionBoundaryDigest,
     ...behaviorReceiptBindings(pipeline.behaviorCatalog),
     scope: options.scope === 'changed' ? 'changed' : 'full',
     ...(options.scope === 'changed' ? { coveredObligationFingerprints: coveredFingerprints } : {}),
@@ -1240,6 +1252,17 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       await stopWitnessProcess(spawnedWitness);
     }
   }
+  if (options.runtimeReuseCheck !== undefined) {
+    const currentReuseDigest = options.runtimeReuseCheck();
+    if (currentReuseDigest !== runtimeReuseDigest) {
+      clearGateReceipt(stateDir);
+      writeLine(
+        io.stderr,
+        'test-gates: reused dependency bytes changed during the run; no receipt is sealed over mixed runtime inputs',
+      );
+      return 1;
+    }
+  }
   const outcomesDoc =
     readRunnerOutcomes(join(stateDir, 'runner-outcomes.json'));
   const sealed = sealExecutionResult({
@@ -1426,7 +1449,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
   // (the drift-checked seal-time value, equal to the frozen evaluation tree),
   // the behavior catalog + required case set, authenticated executed
   // behavior cases that contributed to satisfied verdicts, the engine
-  // bundle, the controller-inspected execution boundary, and target artifact.
+  // bundle, the execution boundary, and target artifact.
   const candidateTreeId = sealTreeId;
   const behaviorBindings = behaviorReceiptBindings(pipeline.behaviorCatalog);
   const receipt = issueGateReceipt({
@@ -1459,7 +1482,7 @@ async function supervisedTestGates(io: Io, options: SupervisedOptions): Promise<
       evaluated.verdicts,
     ),
     engineBundleDigest: engineBundleDigestOf(VERSION, trustedPolicy),
-    executionBoundaryDigest: isolation.boundaryDigest,
+    executionBoundaryDigest,
     targetArtifactDigest: targetArtifactDigestOf(candidateTreeId),
     verdictSummary: {
       total: evaluated.verdicts.length,

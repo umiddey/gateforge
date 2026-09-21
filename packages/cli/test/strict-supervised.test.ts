@@ -270,6 +270,56 @@ test('archives the account through the rendered UI', {
 });
 `;
 
+/**
+ * Explicit sidecar mapping for the staged/full pre-commit fixture: the
+ * three annotated journeys are ALSO declared through the tracked sidecar
+ * so changed-scope planning can resolve a testable slice BEFORE any run
+ * (scoped planning binds declared sidecar/native bindings only — a fresh
+ * materialized checkout has no prior-run claims to borrow).
+ */
+const TEST_MAP_YML = `schemaVersion: 1
+tests:
+  - key: playwright:chromium:specs/crud.spec.js:creates an account through the rendered UI
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/crud.spec.js
+      titlePath:
+        - creates an account through the rendered UI
+    kind: browser-e2e
+    categories:
+      - persistence.create
+    claims:
+      - tenant.accounts:crud:create
+    reason: The journey creates an account through the rendered UI and verifies persistence.
+  - key: playwright:chromium:specs/crud.spec.js:updates the account through the rendered UI
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/crud.spec.js
+      titlePath:
+        - updates the account through the rendered UI
+    kind: browser-e2e
+    categories:
+      - persistence.update
+    claims:
+      - tenant.accounts:crud:update
+    reason: The journey updates the account through the rendered UI and verifies persistence.
+  - key: playwright:chromium:specs/crud.spec.js:archives the account through the rendered UI
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/crud.spec.js
+      titlePath:
+        - archives the account through the rendered UI
+    kind: browser-e2e
+    categories:
+      - persistence.delete
+    claims:
+      - tenant.accounts:crud:delete
+    reason: The journey archives the account through the rendered UI and verifies persistence.
+`;
+
 const PLAYWRIGHT_CONFIG = `import { defineConfig } from 'playwright/test';
 export default defineConfig({
   testDir: 'specs',
@@ -794,4 +844,137 @@ policies:
       expect(gated.stderr).toMatch(/approved|policy|weakened|ENFORCEMENT_UNTRUSTED/i);
     });
   }, 120_000);
+
+  it('runs staged-scope and full witnessed pre-commit gates against the frozen index', async () => {
+    // Candidate-owned app bytes: the example app is committed INTO the
+    // fixture (app/), and the tracked runtime document starts it from
+    // the materialized checkout. The build marker appended to the app's
+    // module makes the executed build observable: staged and unstaged
+    // variants log different markers, and the runtime log (an audit
+    // artifact copied back from the checkout) proves WHICH bytes served.
+    const appServer = readFileSync(join(ROOT, 'example/server.js'), 'utf8');
+    const appLib = readFileSync(join(ROOT, 'example/lib/app.js'), 'utf8');
+    const marker = (variant: string): string => `\nconsole.log('APP_BUILD_MARKER: ${variant}');\n`;
+    await withTempRepo({}, async (repo) => {
+      installStrictFixture(repo);
+      // The explicit mapping is tracked BEFORE the base commit, so the
+      // frozen candidate carries it and the owner pin (computed below)
+      // covers this trusted declaration (test-map.yml is policy input).
+      repo.writeFiles({ '.gateforge/test-map.yml': TEST_MAP_YML });
+      // Candidate-owned application + staged-runtime declaration (both
+      // tracked → both materialized into the checkout; runtime.yml is
+      // hashed into the trusted policy digest the pin covers). The
+      // fixture config gains ONLY the runtime declaration — the shared
+      // fixture keeps its exact bytes for the other legs.
+      repo.writeFiles({
+        'app/server.js': appServer,
+        'app/lib/app.js': `${appLib}${marker('base')}`,
+        'app/package.json': `${JSON.stringify({ type: 'module' }, null, 2)}\n`,
+        '.gateforge.yml': `${GATEFORGE_YML}runtime: .gateforge/runtime.yml\n`,
+        '.gateforge/runtime.yml': `schemaVersion: 1
+prepare:
+  reuse:
+    - node_modules
+services:
+  - id: app
+    command: node app/server.js --port ${'${service:app:port}'}
+    attested: true
+    fingerprint: ${FINGERPRINT}
+    target: true
+    ready:
+      log: listening on
+      timeoutSeconds: 30
+envAllowlist: []
+`,
+        // An UNRELATED test: claims no obligation. Full scope (the
+        // complete relevant mapped suite) plans every catalog row and
+        // runs it; changed scope (the affected slice) must NOT run it.
+        'specs/unrelated.spec.js': `import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
+
+const test = gateforgeTest.extend({});
+
+test('unrelated smoke test claims no obligation', async () => {
+  expect(1 + 1).toBe(2);
+});
+`,
+      });
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'strict fixture']);
+
+      // The staged candidate: the app's module bytes carry the STAGED
+      // marker. The worktree then holds UNSTAGED bytes with a different
+      // marker — only the staged bytes may ever execute or be served.
+      const stagedAppLib = `${appLib}${marker('staged-candidate-app')}`;
+      const unstagedAppLib = `${appLib}${marker('unstaged-worktree-app')}`;
+      repo.writeFiles({ 'app/lib/app.js': stagedAppLib });
+      repo.git(['add', 'app/lib/app.js']);
+      repo.writeFiles({ 'app/lib/app.js': unstagedAppLib });
+      repo.writeFiles({
+        'src/accounts.js': '// fixture source: staged candidate.\n',
+      });
+      repo.git(['add', 'src/accounts.js']);
+      repo.writeFiles({
+        'src/accounts.js': '// unstaged worktree bytes must not enter the witnessed candidate.\n',
+      });
+
+      // NO external app/proxy: the candidate runtime owns the attested
+      // target (started from the checkout by the gate itself). The
+      // operator env carries only the witness authority and the
+      // owner-approved policy pin.
+      const config = loadConfigAt(repo.root);
+      const env: Record<string, string> = {
+        GATEFORGE_WITNESS_VERIFIER_KEY: 'pre-commit-witness-verifier-key',
+        GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
+      };
+
+      const staged = await runCli(repo, ['pre-commit', '--scope', 'staged'], env);
+      expect(staged.code, `staged stdout:\n${staged.stdout}\nstderr:\n${staged.stderr}`).toBe(0);
+      const stagedReceipt = JSON.parse(
+        readFileSync(join(repo.root, '.gateforge/test-gates/receipt.json'), 'utf8'),
+      ) as { scope?: string; coveredObligationFingerprints?: string[] };
+      expect(stagedReceipt.scope).toBe('changed');
+      expect(stagedReceipt.coveredObligationFingerprints?.length).toBeGreaterThan(0);
+      // The worktree bytes were never touched by the gate.
+      expect(readFileSync(join(repo.root, 'src/accounts.js'), 'utf8')).toContain('unstaged worktree bytes');
+      expect(readFileSync(join(repo.root, 'app/lib/app.js'), 'utf8')).toContain('unstaged-worktree-app');
+      // Runtime audit artifacts copied back from the checkout: the
+      // candidate-owned app ran and logged the STAGED build marker.
+      const runtimeLog = readFileSync(join(repo.root, '.gateforge/test-gates/runtime/app.log'), 'utf8');
+      expect(runtimeLog).toContain('APP_BUILD_MARKER: staged-candidate-app');
+      expect(runtimeLog).not.toContain('unstaged-worktree-app');
+      expect(runtimeLog).toContain('listening on');
+      // Browser witness records were created during pre-commit.
+      const stagedRecords = JSON.parse(
+        readFileSync(join(repo.root, '.gateforge/test-gates/records.json'), 'utf8'),
+      ) as unknown[];
+      expect(stagedRecords.length).toBeGreaterThan(0);
+      // Changed scope executed ONLY the affected mapped spec — the
+      // unrelated catalog row did not run.
+      const stagedOutcomes = JSON.parse(
+        readFileSync(join(repo.root, '.gateforge/test-gates/runner-outcomes.json'), 'utf8'),
+      ) as { outcomes?: Array<{ file?: string }> };
+      const stagedFiles = new Set((stagedOutcomes.outcomes ?? []).map((row) => row.file ?? ''));
+      expect(stagedFiles.has('specs/crud.spec.js')).toBe(true);
+      expect(stagedFiles.has('specs/unrelated.spec.js')).toBe(false);
+
+      const full = await runCli(repo, ['pre-commit', '--scope', 'full'], env);
+      expect(full.code, `full stdout:\n${full.stdout}\nstderr:\n${full.stderr}`).toBe(0);
+      const fullReceipt = JSON.parse(
+        readFileSync(join(repo.root, '.gateforge/test-gates/receipt.json'), 'utf8'),
+      ) as { scope?: string };
+      expect(fullReceipt.scope === undefined || fullReceipt.scope === 'full').toBe(true);
+      // Full scope runs the complete relevant mapped suite: affected AND
+      // unrelated rows both executed.
+      const fullOutcomes = JSON.parse(
+        readFileSync(join(repo.root, '.gateforge/test-gates/runner-outcomes.json'), 'utf8'),
+      ) as { outcomes?: Array<{ file?: string }> };
+      const fullFiles = new Set((fullOutcomes.outcomes ?? []).map((row) => row.file ?? ''));
+      expect(fullFiles.has('specs/crud.spec.js')).toBe(true);
+      expect(fullFiles.has('specs/unrelated.spec.js')).toBe(true);
+
+      // The receipt passes the staged gate a REAL git commit runs.
+      const checked = await runCli(repo, ['check', '--staged', '--require-e2e'], env);
+      expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+    });
+  }, 600_000);
 });

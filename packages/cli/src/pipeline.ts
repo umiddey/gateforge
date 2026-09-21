@@ -32,6 +32,7 @@ import {
   normalizeChangedFiles,
   parseBehaviorPolicy,
   runClassification,
+  sortLifecycleRules,
     type BehaviorCatalog,
   type ChangedProvider,
   type Claim,
@@ -327,7 +328,13 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   // classifier — plugin output can never carry it. Only the
   // `internality` marker is minted here (a bare marker carries no
   // assertion payload); other declaration keys stay detector-translated.
-  const authority = mintDeclarationSignals(cwd, paths, policyDocParsed.data, built.resources);
+  const authority = mintDeclarationSignals(
+    cwd,
+    paths,
+    policyDocParsed.data,
+    built.resources,
+    config.classificationPolicy,
+  );
   // Per-detector coverage (red-team round 3): coverage is judged PER
   // DETECTOR against the policy's declared rules — never flattened into
   // a union (a detector that cannot see routes reading a file proves
@@ -481,9 +488,10 @@ export function effectiveClassifications(
  * marker; every match mints one `internality: true` declaration signal
  * (engine issuer `gateforge.core@1`) targeted at each resource whose
  * source file contains the marker. A marker in a file with no resource
- * mints nothing (an inert owner note, never a guess). Other declaration
- * keys (e.g. `archiveState`) need a structured payload and stay
- * detector-translated.
+ * mints nothing (an inert owner note, never a guess). Exact owner
+ * `lifecycleRules` are minted below as closed-world authority signals;
+ * other declaration keys (e.g. `archiveState`) need a structured payload
+ * and stay detector-translated.
  *
  * Deterministic: same files + policy + resources ⇒ byte-identical signals.
  */
@@ -492,6 +500,7 @@ function mintDeclarationSignals(
   paths: readonly string[],
   policy: ClassificationPolicy,
   resources: readonly GraphResource[],
+  policyPath: string,
 ): ClassificationSignal[] {
   // Supported minted dimensions: `internality` (assertion true) and
   // `plane.<value>` (assertion <value>, validated below). Both are
@@ -511,7 +520,7 @@ function mintDeclarationSignals(
       rules.push({ dimension: 'plane', assertion: plane, marker });
     }
   }
-  if (rules.length === 0) return [];
+  if (rules.length === 0 && (policy.lifecycleRules ?? []).length === 0) return [];
   const minted: ClassificationSignal[] = [];
   for (const relPath of paths) {
     let text: string;
@@ -544,6 +553,29 @@ function mintDeclarationSignals(
           );
         }
       }
+    }
+  }
+  // Owner lifecycle disables use the same host-issued authority channel as
+  // source declarations. Each signal carries an exact plane-qualified
+  // resource id and the closed-world basis, so the classifier retains its
+  // complete-scan, contradiction, and fail-closed guarantees. A rule whose
+  // id is absent from the discovered graph is still minted: the classifier
+  // reports it as a stale target instead of silently dropping the policy.
+  for (const rule of sortLifecycleRules(policy.lifecycleRules ?? [])) {
+    const target = resources.find((resource) => resource.id === rule.match.resourceId);
+    for (const operation of rule.disable) {
+      minted.push(
+        ClassificationSignalSchema.parse({
+          schemaVersion: 1,
+          target: { resourceId: rule.match.resourceId },
+          dimension: `lifecycle.${operation}`,
+          assertion: false,
+          basis: 'code-negative-closed-world',
+          source: 'gateforge.policy:lifecycleRules',
+          location: target?.location ?? { file: policyPath, line: 1, col: 0 },
+          detector: { id: 'gateforge.core', version: '1' },
+        }),
+      );
     }
   }
   return minted.sort((a, b) => compareStrings(signalIdText(a), signalIdText(b)));
