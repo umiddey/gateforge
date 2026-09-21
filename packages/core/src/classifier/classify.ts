@@ -349,10 +349,16 @@ function isOperationalEndpoint(resource: ClassifierResourceRef): boolean {
  * union of the configured roots, so a hole anywhere in the attested
  * range invalidates every closed-world proof in this run.
  */
-function completeScanHolds(policy: ClassificationPolicy, scan: ClassifierScanInput): boolean {
+function completeScanHolds(
+  policy: ClassificationPolicy,
+  scan: ClassifierScanInput,
+  relevantPaths?: readonly string[],
+  relevantDetector?: string,
+): boolean {
   if (
     policy.scanRoots.length === 0 ||
-    (scan.configuredDetectors !== undefined &&
+    (relevantDetector === undefined &&
+      scan.configuredDetectors !== undefined &&
       scan.successfulDetectors !== undefined &&
       scan.successfulDetectors !== scan.configuredDetectors)
   ) {
@@ -362,10 +368,16 @@ function completeScanHolds(policy: ClassificationPolicy, scan: ClassifierScanInp
   if (requested.length === 0) {
     return false;
   }
+  if (relevantPaths !== undefined) {
+    const requestedSet = new Set(requested);
+    if (relevantPaths.some((path) => !requestedSet.has(path))) return false;
+  }
   // Coverage rules (red-team round 3): per-detector, per-file — never a
   // flattened union. Declaring NO rules means no scan is provably
   // complete: closed-world proofs stay unavailable (fail closed).
-  const rules = policy.coverage ?? [];
+  const rules = (policy.coverage ?? []).filter(
+    (rule) => relevantDetector === undefined || rule.detector === relevantDetector,
+  );
   if (rules.length === 0) return false;
   for (const rule of rules) {
     const report = scan.coverage?.find((entry) => entry.detector === rule.detector);
@@ -379,19 +391,42 @@ function completeScanHolds(policy: ClassificationPolicy, scan: ClassifierScanInp
     }
   }
   // Coverage gaps (red-team round 4): every requested file must be
-  // applicable to at least one rule. A file no rule covers is a hole in
-  // the proof scope — the policy is incomplete, not the scan complete.
-  for (const path of requested) {
+  // applicable to at least one rule. A resource-scoped proof checks only
+  // files applicable to its selected detector; unrelated language roots do
+  // not become holes in that resource's proof.
+  const coveredScope =
+    relevantDetector === undefined
+      ? requested
+      : requested.filter((path) =>
+          rules.some((rule) => rule.appliesTo.some((pattern) => globMatch(path, pattern))),
+        );
+  if (
+    relevantPaths !== undefined &&
+    relevantPaths.some(
+      (path) => !rules.some((rule) => rule.appliesTo.some((pattern) => globMatch(path, pattern))),
+    )
+  ) {
+    return false;
+  }
+  for (const path of coveredScope) {
     const covered = rules.some((rule) => rule.appliesTo.some((pattern) => globMatch(path, pattern)));
     if (!covered) return false;
   }
   for (const finding of scan.findings) {
     for (const location of finding.locations) {
-      if (pathInRoots(location.file, policy)) return false;
+      if (
+        relevantPaths === undefined
+          ? pathInRoots(location.file, policy)
+          : relevantPaths.includes(location.file)
+      ) return false;
     }
   }
   for (const entry of scan.unresolved) {
-    if (pathInRoots(entry.location.file, policy)) return false;
+    if (
+      relevantPaths === undefined
+        ? pathInRoots(entry.location.file, policy)
+        : relevantPaths.includes(entry.location.file)
+    ) return false;
   }
   return true;
 }
@@ -687,6 +722,7 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
   );
   const ctx: ClassifyContext = {
     policy: input.policy,
+    scan: input.scan,
     adapters: input.adapters,
     scanComplete,
     exposureComplete,
@@ -851,6 +887,7 @@ function assertionShapeError(signal: ClassificationSignal): string | null {
 /** Context one resource is classified within. */
 interface ClassifyContext {
   policy: ClassificationPolicy;
+  scan: ClassifierScanInput;
   adapters: readonly string[];
   scanComplete: boolean;
   /** Exhaustive exposure-capability coverage holds (round 6). */
@@ -1189,6 +1226,13 @@ function classifyOne(
     const policySignals = closedWorld.filter((signal) => signal.source === LIFECYCLE_POLICY_SOURCE);
     const policyReasons =
       policySignals.length > 0 ? lifecycleRuleReasons(policyRules) : [];
+    // Owner lifecycle rules prove one exact resource. Their proof must not
+    // be invalidated by unrelated findings elsewhere in the requested scan.
+    // Generic detector closed-world assertions keep the run-wide proof.
+    const proofComplete =
+      policySignals.length > 0
+        ? completeScanHolds(ctx.policy, ctx.scan, [resource.source], resource.detector.id)
+        : ctx.scanComplete;
     const declaredSupported = signals.filter(
       (s) =>
         s.dimension === dimension &&
@@ -1222,7 +1266,7 @@ function classifyOne(
         });
         contradictions.push({ dimension, detail, locations });
       }
-    } else if (closedWorld.length > 0 && ctx.scanComplete && declaredSupported.length === 0) {
+    } else if (closedWorld.length > 0 && proofComplete && declaredSupported.length === 0) {
       contribute(...closedWorld);
       lifecycle[operation] = false;
       if (policyReasons.length > 0) {
@@ -1239,7 +1283,7 @@ function classifyOne(
       lifecycle[operation] = true;
       defaultsApplied.push(`${RULES.lifecycleDefault}(${operation})`);
       const reason =
-        !ctx.scanComplete
+        !proofComplete
           ? 'the complete-scan attestation fails'
           : 'contradicting supported declarations exist';
       const ownerReason =
