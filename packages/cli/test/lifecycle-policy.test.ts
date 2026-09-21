@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo } from '@gate-forge/core';
 import { runPipeline } from '../src/pipeline.js';
@@ -181,6 +182,84 @@ describe('classification policy lifecycleRules pipeline', () => {
       expect(pipeline.classification.staleTargets).toHaveLength(2);
       expect(pipeline.classification.staleTargets.every((block) => block.code === 'STALE_SIGNAL_TARGET')).toBe(true);
       expect(pipeline.policy.blocking.some((entry) => entry.detail.includes('STALE_SIGNAL_TARGET'))).toBe(true);
+    });
+  });
+
+  it('uses project exclusions for proof scope while keeping included coverage gaps blocking', async () => {
+    await withTempRepo({}, async (repo) => {
+      installBundledFixture(repo, lifecyclePolicy('excluded model is outside the scan'));
+      repo.writeFiles({
+        '.gateforge.yml': `schemaVersion: 1
+project:
+  languages: [python]
+  paths:
+    include: ['models/**/*.py']
+    exclude: ['models/orders.py']
+plugins:
+  - id: gateforge.pack-sqlalchemy
+    version: '0.2.0'
+    transport: in-process
+    module: ${SQLALCHEMY_PACK}
+policies: .gateforge/policies.yml
+classificationPolicy: .gateforge/classification-policy.yml
+adapters: .gateforge/adapters
+waivers: .gateforge/waivers
+baselines: .gateforge/baselines/obligations.json
+changed:
+  provider: auto
+witness:
+  maxDurationSeconds: 5
+clock:
+  mode: fixed
+  fixedAt: '2026-01-01T00:00:00.000Z'
+`,
+        '.gateforge/policies.yml': CRUD_POLICIES_YML,
+      });
+      rmSync(repo.path('.gateforge/adapters/tenant.orders.mjs'));
+
+      const excluded = await runFixture(repo.root);
+      const accounts = excluded.pipeline.classification.decisions.find(
+        (entry) => entry.name === 'accounts',
+      );
+      expect(accounts?.classification?.lifecycle).toMatchObject({ update: false, delete: false });
+      expect(excluded.pipeline.policy.blocking).toEqual([]);
+
+      repo.writeFiles({
+        '.gateforge.yml': `schemaVersion: 1
+project:
+  languages: [python]
+  paths:
+    include: ['models/**/*.py']
+    exclude: []
+plugins:
+  - id: gateforge.pack-sqlalchemy
+    version: '0.2.0'
+    transport: in-process
+    module: ${SQLALCHEMY_PACK}
+policies: .gateforge/policies.yml
+classificationPolicy: .gateforge/classification-policy.yml
+adapters: .gateforge/adapters
+waivers: .gateforge/waivers
+baselines: .gateforge/baselines/obligations.json
+changed:
+  provider: auto
+witness:
+  maxDurationSeconds: 5
+clock:
+  mode: fixed
+  fixedAt: '2026-01-01T00:00:00.000Z'
+`,
+        '.gateforge/classification-policy.yml': lifecyclePolicy(
+          'included uncovered model must block',
+        ).replace("appliesTo: ['models/**/*.py']", "appliesTo: ['models/accounts.py']"),
+      });
+
+      const uncovered = await runFixture(repo.root);
+      expect(
+        uncovered.pipeline.policy.blocking.some((entry) =>
+          entry.detail.includes('INCOMPLETE_PROOF_SCOPE'),
+        ),
+      ).toBe(true);
     });
   });
 
