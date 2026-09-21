@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/core",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "license": "Apache-2.0",
   "description": "Gateforge core: artifact schemas, canonical JSON, fingerprints, config loading.",
   "type": "module",

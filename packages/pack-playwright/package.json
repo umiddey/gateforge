@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-playwright",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "license": "Apache-2.0",
   "description": "Gateforge Playwright evidence pack: loopback witness service, engine-side adapter execution, trusted evidence fixture, verdict reporter.",
   "type": "module",
@@ -44,7 +44,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.6.1",
+    "@gate-forge/core": "^0.6.2",
     "playwright": "1.58.2",
     "typescript": "^5.9.2",
     "yaml": "^2.8.1"

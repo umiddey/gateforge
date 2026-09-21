@@ -363,7 +363,15 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     policy: policyDocParsed.data,
     adapters,
     scan: {
-      requestedPaths: expandIncludePaths(policyDocParsed.data.scanRoots, [], cwd),
+      // The proof request must describe the same repository scope that
+      // detector discovery scans. Project exclusions remove files from the
+      // requested scope, while included files remain subject to the
+      // classifier's fail-closed coverage checks.
+      requestedPaths: expandIncludePaths(
+        policyDocParsed.data.scanRoots,
+        config.project.paths.exclude,
+        cwd,
+      ),
       scannedPaths,
       coverage,
       configuredDetectors: config.plugins.length,

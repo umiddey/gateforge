@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-validation",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "license": "Apache-2.0",
   "description": "Validation discovery pack: TS-only AST-light detector (GPP/3) for zod / joi / yup / class-validator request schemas; boundary + side-effect contracts.",
   "type": "module",
@@ -23,8 +23,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.6.1",
-    "@gate-forge/plugin-protocol": "^0.6.1"
+    "@gate-forge/core": "^0.6.2",
+    "@gate-forge/plugin-protocol": "^0.6.2"
   },
   "devDependencies": {
     "typescript": "*",
