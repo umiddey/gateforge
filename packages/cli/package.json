@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "bin": {
-    "gateforge": "./bin/gateforge.js"
+    "gateforge": "bin/gateforge.js"
   },
   "exports": {
     ".": {
