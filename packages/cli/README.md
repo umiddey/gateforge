@@ -6,6 +6,14 @@ repository's existing tests, evaluate obligations, run the supervised E2E
 gate, enforce the exact staged candidate, and maintain baselines.
 **0.7.0 vs. published 0.6.3:** external key ring, owner-approved docs exclusions, result-only runs, surface-doctor, protocol-based package-compatibility guard, diagnostic context, trusted `baseURL`/`storageState`, and the shared-dist spool race fix.
 
+## Start here
+
+- [Quickstart](guides/QUICKSTART.md)
+- [Test environment](guides/TEST-ENVIRONMENT.md)
+- [Upgrade from 0.6 to 0.7](guides/UPGRADE-0.6-to-0.7.md)
+
+Also at https://github.com/umiddey/gateforge/tree/main/packages/cli/guides.
+
 Just added a new table or endpoint and the gate is blocking? Run
 `gateforge next` (or `gateforge next --json`) — it prints the ONE blocking
 next action. New proof tests go in `tests/e2e/gateforge/` (overlay);
@@ -87,7 +95,7 @@ paths remain authoritative and do not accept `--result-only`.
 
 `gateforge pre-commit` executes the candidate inside a materialized checkout
 that contains TRACKED bytes only — no installed dependencies, no built
-assets, no application processes. The owner-reviewed staged-runtime document
+assets, no application processes. The reviewed staged-runtime document
 declares how that checkout becomes a runnable candidate. It is
 security-sensitive: its bytes are hashed into the trusted policy digest and
 the authenticated input snapshot, so a candidate that edits its own runtime
@@ -304,14 +312,14 @@ and `--require-e2e` blocks — it never downgrades to a weaker pass.
 Gateforge hashes all inputs and all candidate files. On a terminal, the first
 `gateforge init` asks for documentation-only folders to exclude. Automation can
 use `gateforge init --docs-exclude docs,handbook`; a non-interactive run with no
-option keeps the default. Gateforge writes the owner declaration to
+option keeps the default. Gateforge writes the approved declaration to
 `.gateforge/docs-exclusions.yml` and prints the candidate trusted-policy digest
 to approve through the protected `GATEFORGE_APPROVED_POLICY_DIGEST` setting.
 Gate checks refuse to use the exclusions until that external pin matches. A
 later change to the exclusion declaration changes the digest; use
 `--confirm-doc-exclusions` when `init` changes an existing approval.
 
-The owner declares that these folders do not affect the product or its tests.
+The project states these folders do not affect the product or its tests.
 Gateforge does not prove this. If application or test code reads an excluded
 file, a later edit can make old evidence look valid without running the tests
 again. Reports show the approved folders, pin identity, and this reduced
@@ -320,7 +328,7 @@ source files, gate or trust metadata, manifests, lockfiles, or symlinks.
 Every file must also use a supported document or raster-image format. MDX,
 WASM, SVG, HTML, and unknown formats fail closed. This format allowlist does
 not prove that an allowed file cannot affect application or test behavior;
-the owner assertion and its reduced guarantee still apply.
+the project assertion and its reduced guarantee still apply.
 
 **Owner-declared Python bytecode exclusions (explicit trust mode).** By
 default, Python bytecode remains part of candidate and input identity. To
