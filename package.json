@@ -1,6 +1,6 @@
 {
   "name": "gateforge",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "Converts recognized source artifacts into explicit, machine-verifiable test obligations.",
   "type": "module",
@@ -9,7 +9,19 @@
     "node": ">=20"
   },
   "workspaces": [
-    "packages/*"
+    "packages/core",
+    "packages/plugin-protocol",
+    "packages/http-contract",
+    "packages/pack-auth",
+    "packages/pack-fastapi",
+    "packages/pack-http",
+    "packages/pack-playwright",
+    "packages/pack-sqlalchemy",
+    "packages/pack-task",
+    "packages/pack-validation",
+    "packages/pack-webhook",
+    "packages/pack-workflow",
+    "packages/cli"
   ],
   "scripts": {
     "test": "vitest run",

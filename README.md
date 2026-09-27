@@ -9,6 +9,13 @@ or a reused old green report. Unresolved obligations block the gate; every
 failure explains which detector found the resource, which policy created the
 obligation, and which evidence is missing or invalid.
 
+## Start here
+
+- [Quickstart](packages/cli/guides/QUICKSTART.md)
+- [Test environment](packages/cli/guides/TEST-ENVIRONMENT.md)
+- [Upgrade from 0.6 to 0.7](packages/cli/guides/UPGRADE-0.6-to-0.7.md)
+- [Changelog](CHANGELOG.md)
+
 The core flow:
 
 ```text
