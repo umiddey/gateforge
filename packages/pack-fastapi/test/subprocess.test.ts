@@ -3,11 +3,13 @@
  * wrapped by the pack's canonicalization (phase 4: no signal minting).
  * Engine-class tests: deterministic, offline (spawn + files only).
  */
-import { readFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ClassificationSignalSchema, ResourceSchema } from '@gate-forge/core';
-import { createFastapiDetector } from '../src/detector.js';
+import { createFastapiDetector, pythonEnvironment } from '../src/detector.js';
 import { PACK_VERSION } from '../src/version.js';
 import { ALL_FIXTURES, FIXTURE_ROOT, pythonEnv, runDetector, runDiscover } from './helpers.js';
 
@@ -178,6 +180,32 @@ describe('fastapi detector (subprocess, real python)', () => {
     expect(rawFacts.every((fact) => fact.attributes['normalizedPath'] === '')).toBe(true);
     expect(raw.classificationSignals).toEqual([]);
   });
+  it('does not write bytecode while launching the detector', async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'gateforge-fastapi-bytecode-'));
+    const packageCopy = join(tempRoot, 'gateforge_fastapi_detector');
+    const protocolCopy = join(tempRoot, 'gateforge_plugin');
+    const previousBytecodeSetting = process.env['PYTHONDONTWRITEBYTECODE'];
+    delete process.env['PYTHONDONTWRITEBYTECODE'];
+    try {
+      cpSync(fileURLToPath(new URL('../python/gateforge_fastapi_detector', import.meta.url)), packageCopy, {
+        recursive: true,
+        filter: (source) => !source.split(sep).includes('__pycache__') && !/\.(?:pyc|pyo)$/.test(source),
+      });
+      cpSync(fileURLToPath(new URL('../../plugin-protocol/python/gateforge_plugin', import.meta.url)), protocolCopy, {
+        recursive: true,
+        filter: (source) => !source.split(sep).includes('__pycache__') && !/\.(?:pyc|pyo)$/.test(source),
+      });
+      const detector = createFastapiDetector({ cwd: FIXTURE_ROOT, env: pythonEnvironment([tempRoot]) });
+      await detector.discover(['simple/main.py']);
+      expect(existsSync(join(packageCopy, '__pycache__'))).toBe(false);
+      expect(existsSync(join(protocolCopy, '__pycache__'))).toBe(false);
+    } finally {
+      if (previousBytecodeSetting === undefined) delete process.env['PYTHONDONTWRITEBYTECODE'];
+      else process.env['PYTHONDONTWRITEBYTECODE'] = previousBytecodeSetting;
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
 
   it('keeps the python and TS pack versions in lockstep', async () => {
     const init = readFileSync(

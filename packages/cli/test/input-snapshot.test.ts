@@ -173,7 +173,7 @@ describe('input snapshot (§11.2)', () => {
     });
   });
 
-  it('keeps ignored Python bytecode strict unless an exact file is owner-excluded', async () => {
+  it('preserves default input behavior and owner-excludes bytecode from tree identity', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       const cacheFile = 'src/__pycache__/accounts.cpython-313.pyc';
@@ -210,7 +210,8 @@ describe('input snapshot (§11.2)', () => {
 
       repo.writeFiles({ [cacheFile]: 'rewritten-bytecode\n' });
 
-      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest).not.toBe(strictInput);
+      expect(approvedInput).toBe(strictInput);
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest).toBe(strictInput);
       expect(
         computeInputSnapshot({ cwd: repo.root, config, stateDir, cacheExclusions: exclusions }).inputDigest,
       ).toBe(approvedInput);
@@ -575,6 +576,37 @@ describe('input snapshot (§11.2)', () => {
       expect(drift.some((line) => line.includes('src/added.txt'))).toBe(true);
     });
   });
+  it('matches published default snapshots and tree identity with ignored bytecode', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const cacheFile = 'src/__pycache__/accounts.cpython-313.pyc';
+      repo.writeFiles({
+        '.gitignore': 'src/__pycache__/\n',
+        [cacheFile]: 'first-bytecode\n',
+      });
+      const config = fixtureConfig(repo);
+      const stateDir = resolveStateDir(repo.root);
+      const gitDir = resolveGitDir(repo.root, process.env);
+      if (gitDir === null) throw new Error('test repository has no Git directory');
+      const beforeFiles = collectInputFiles(repo.root, config, stateDir);
+      const beforeInput = computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest;
+      expect(beforeFiles.some((entry) => entry.path === cacheFile)).toBe(false);
+
+      const beforeTree = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+      repo.writeFiles({ [cacheFile]: 'rewritten-bytecode\n' });
+      const afterFiles = collectInputFiles(repo.root, config, stateDir);
+      const afterInput = computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest;
+      const afterTree = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+      expect(diffInputFiles(beforeFiles, afterFiles)).toEqual([]);
+      expect(afterInput).toBe(beforeInput);
+      expect(afterTree).not.toBe(beforeTree);
+
+      repo.git(['add', '--all', '--force']);
+      const publishedTree = repo.git(['write-tree']).stdout.trim();
+      expect(afterTree).toBe(publishedTree);
+    });
+  });
+
 
   it('never hashes tokens, keys, or absolute paths into the digest', async () => {
     await withTempRepo({}, async (repo) => {

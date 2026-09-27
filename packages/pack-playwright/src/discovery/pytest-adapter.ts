@@ -106,7 +106,7 @@ export async function collectPytestSuite(suite: DiagnosticSuite, cwd: string): P
   const argv = pytestCollectArgv(suite);
   const child = spawn(argv[0] ?? '', argv.slice(1), {
     cwd,
-    env: untrustedEnv(process.env),
+    env: { ...untrustedEnv(process.env), PYTHONDONTWRITEBYTECODE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const outcome = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null }>(

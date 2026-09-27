@@ -1230,6 +1230,23 @@ describe('pytest diagnostic adapter', () => {
       'backend/tests/test_a.py::test_one',
     ]);
   });
+  it('collects pytest tests without writing Python bytecode into the repo', async () => {
+    const root = makeTempDir('gateforge-pytest-bytecode-');
+    writeTree(root, { 'backend/helper.py': 'VALUE = 1\n' });
+    const previousBytecodeSetting = process.env['PYTHONDONTWRITEBYTECODE'];
+    delete process.env['PYTHONDONTWRITEBYTECODE'];
+    try {
+      const suite = suiteConfig({
+        argv: ['python3', '-c', 'import backend.helper\nprint("tests/test_a.py::test_one")\n'],
+      });
+      const result = await collectPytestSuite(suite, root);
+      expect(result.status).toBe('discovered');
+      expect(existsSync(join(root, 'backend', '__pycache__'))).toBe(false);
+    } finally {
+      if (previousBytecodeSetting === undefined) delete process.env['PYTHONDONTWRITEBYTECODE'];
+      else process.env['PYTHONDONTWRITEBYTECODE'] = previousBytecodeSetting;
+    }
+  });
 
   it('reports collection failure as unavailable with the error (exit 1)', async () => {
     const root = makeTempDir('gateforge-pytest-err-');

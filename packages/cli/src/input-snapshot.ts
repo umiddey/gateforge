@@ -618,23 +618,6 @@ function collectGitInventory(cwd: string): { inventory: string[]; tracked: Set<s
   for (const name of splitNul(gitNul(cwd, ['ls-files', '--others', '--exclude-standard', '-z']))) {
     paths.add(toPosix(name));
   }
-  // Python bytecode is commonly gitignored, but remains part of strict
-  // input identity unless the owner explicitly excludes that exact path.
-  for (const name of splitNul(
-    gitNul(cwd, [
-      'ls-files',
-      '--others',
-      '--ignored',
-      '--exclude-standard',
-      '-z',
-      '--',
-      ':(glob)**/__pycache__/*.pyc',
-      ':(glob)**/__pycache__/*.pyo',
-    ]),
-  )) {
-    const path = toPosix(name);
-    if (/(?:^|\/)__pycache__\/[^/]+\.(?:pyc|pyo)$/.test(path)) paths.add(path);
-  }
   return { inventory: [...paths].sort(compareStrings), tracked };
 }
 
