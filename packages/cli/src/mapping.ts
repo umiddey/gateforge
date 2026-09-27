@@ -40,6 +40,7 @@ import {
   discoverTestCatalog,
   scanTestFiles,
   TestDiscoveryError,
+  type NativeInstance,
   type StaticScanResult,
 } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
@@ -283,6 +284,8 @@ export interface MappingResolutionOptions {
   nativeClaims?: readonly Claim[];
   /** Native Playwright reporter load errors from the same discovery pass. */
   nativeErrors?: readonly string[];
+  /** Native Playwright instances from the same discovery pass. */
+  nativeInstances?: readonly NativeInstance[];
   /**
    * Authenticated claim declarations used instead of live annotations.
    * `check` supplies these only from a verified receipt; the sidecar is
@@ -336,6 +339,8 @@ export async function resolveRepositoryMappings(
   let catalog: TestCatalog;
   let discoveredClaims: Claim[];
   let nativeErrors = [...(options.nativeErrors ?? [])];
+  let nativeInstances = [...(options.nativeInstances ?? [])];
+  let nativeInstancesKnown = options.nativeInstances !== undefined;
   if (options.catalog !== undefined) {
     catalog = options.catalog;
     discoveredClaims = [...(options.nativeClaims ?? [])];
@@ -353,6 +358,8 @@ export async function resolveRepositoryMappings(
       catalog = discovered.catalog;
       discoveredClaims = discovered.nativeClaims;
       nativeErrors = [...discovered.nativeErrors];
+      nativeInstances = [...discovered.nativeInstances];
+      nativeInstancesKnown = true;
     } catch (error) {
       if (error instanceof TestDiscoveryError) throw new UsageError(error.message);
       throw error;
@@ -360,6 +367,30 @@ export async function resolveRepositoryMappings(
   }
   const nativeClaims = [...(options.claimBindings ?? discoveredClaims)];
   const sidecar = loadOptionalTestMap(options.cwd);
+  const sidecarEntries = sidecar?.tests ?? [];
+  const normalizedNativeErrors = nativeErrors.map((error) => error.replaceAll('\\', '/'));
+  const nativeErrorFiles = [
+    ...new Set(
+      sidecarEntries
+        .filter(
+          (entry) =>
+            entry.selector.runner === 'playwright' &&
+            normalizedNativeErrors.some((error) =>
+              error.includes(`/${entry.selector.file.replaceAll('\\', '/')}`),
+            ),
+        )
+        .map((entry) => entry.selector.file),
+    ),
+  ];
+  const nativeEnumerationFailed =
+    nativeErrors.length > 0 &&
+    (nativeInstancesKnown
+      ? nativeInstances.length === 0
+      : !catalog.entries.some(
+          (entry) =>
+            entry.runner === 'playwright' &&
+            (entry.reconciliation === 'matched' || entry.reconciliation === 'list-only'),
+        ));
   const resolved = resolveTestMappings({
     catalog,
     nativeClaims,
@@ -367,18 +398,19 @@ export async function resolveRepositoryMappings(
     obligationIds: options.obligations.map((obligation) => obligation.id),
     ...(options.priorRunHints !== undefined ? { priorRunHints: options.priorRunHints } : {}),
     ...(options.behaviorCatalog !== undefined ? { behaviorCatalog: options.behaviorCatalog } : {}),
+    ...(nativeErrors.length > 0 ? { nativeErrorFiles, nativeEnumerationFailed } : {}),
   });
-  const enumerationFailedCompletely =
-    nativeErrors.length > 0 && !catalog.entries.some((entry) => entry.runner === 'playwright');
-  const resolution = enumerationFailedCompletely
-    ? {
-        ...resolved,
-        problems: resolved.problems.filter((problem) => problem.cause !== 'TEST_MAPPING_STALE'),
-      }
-    : resolved;
-  const claimInventory = currentClaimInventory(catalog, resolution, nativeClaims);
+  const claimInventory = currentClaimInventory(catalog, resolved, nativeClaims);
   const nativeLoadProblem = nativeInventoryProblem(nativeErrors);
-  return { catalog, sidecar, resolution, nativeClaims, claimInventory, nativeErrors, nativeLoadProblem };
+  return {
+    catalog,
+    sidecar,
+    resolution: resolved,
+    nativeClaims,
+    claimInventory,
+    nativeErrors,
+    nativeLoadProblem,
+  };
 }
 /**
  * Combines claim declarations used by the resolver with sidecar

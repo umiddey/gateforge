@@ -342,6 +342,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
           catalog: discoveryResult.catalog,
           nativeClaims: discoveryResult.nativeClaims,
           nativeErrors: discoveryResult.nativeErrors,
+          nativeInstances: discoveryResult.nativeInstances,
         }
       : {}),
     behaviorCatalog: pipeline.behaviorCatalog,

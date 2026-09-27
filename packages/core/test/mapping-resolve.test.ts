@@ -100,6 +100,8 @@ function resolveInput(overrides: {
   sidecar?: TestMap;
   obligationIds?: string[];
   priorRunHints?: PriorRunHint[];
+  nativeErrorFiles?: string[];
+  nativeEnumerationFailed?: boolean;
 } = {}): Parameters<typeof resolveTestMappings>[0] {
   return {
     catalog: overrides.catalog ?? catalog([row({ logicalKey: KEY })]),
@@ -107,6 +109,10 @@ function resolveInput(overrides: {
     sidecar: overrides.sidecar ?? { schemaVersion: 1, tests: [] },
     obligationIds: overrides.obligationIds ?? [OBLIGATION, OTHER_OBLIGATION],
     ...(overrides.priorRunHints !== undefined ? { priorRunHints: overrides.priorRunHints } : {}),
+    ...(overrides.nativeErrorFiles !== undefined ? { nativeErrorFiles: overrides.nativeErrorFiles } : {}),
+    ...(overrides.nativeEnumerationFailed !== undefined
+      ? { nativeEnumerationFailed: overrides.nativeEnumerationFailed }
+      : {}),
   };
 }
 
@@ -364,6 +370,51 @@ describe('resolveTestMappings — staleness', () => {
     expect(stale[0]?.detail).toContain('no catalog rows anymore');
     expect(bindingsFor(resolution, OBLIGATION)).toEqual([]);
   });
+  it('suppresses stale selectors only for files with native load errors', () => {
+    const resolution = resolveTestMappings(
+      resolveInput({
+        catalog: catalog([
+          row({ logicalKey: KEY, reconciliation: 'static-only' }),
+          row({
+            logicalKey: 'playwright:chromium:e2e/healthy.spec.js:still exists',
+            file: 'e2e/healthy.spec.js',
+            title: 'still exists',
+            titlePath: ['still exists'],
+            sourceLocation: { file: 'e2e/healthy.spec.js', line: 3, col: 0 },
+          }),
+        ]),
+        sidecar: sidecar([
+          sidecarEntry({
+            key: 'load-error',
+            selector: {
+              runner: 'playwright',
+              project: 'chromium',
+              file: 'e2e/accounts.spec.js',
+              titlePath: ['vanished'],
+            },
+          }),
+          sidecarEntry({
+            key: 'healthy-stale',
+            selector: {
+              runner: 'playwright',
+              project: 'chromium',
+              file: 'e2e/healthy.spec.js',
+              titlePath: ['vanished'],
+            },
+            claims: [OTHER_OBLIGATION],
+          }),
+        ]),
+        nativeErrorFiles: ['e2e/accounts.spec.js'],
+        nativeEnumerationFailed: false,
+      }),
+    );
+    const stale = resolution.problems.filter((problem) => problem.cause === 'TEST_MAPPING_STALE');
+    expect(stale).toHaveLength(1);
+    expect(stale[0]?.obligationId).toBe(OTHER_OBLIGATION);
+    expect(stale[0]?.detail).toContain('e2e/healthy.spec.js');
+    expect(declaredBindingsFor(resolution, OBLIGATION)).toEqual([]);
+  });
+
 
   it('flags a changed title path and suggests the migration target on a rename', () => {
     // Project renamed: the same file/title now lives under a firefox key.

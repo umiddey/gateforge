@@ -485,6 +485,68 @@ describe('gateforge tests suggest', () => {
       expect(stale?.cause).toBe('TEST_MAPPING_STALE');
     });
   }, 180_000);
+  it('keeps static rows unknown when native enumeration reports load errors', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      repo.writeFiles({
+        'e2e/accounts.spec.js': [
+          "import { test } from 'playwright/test';",
+          "import 'gateforge-missing-load-dependency';",
+          "test('statically present account journey', async () => {});",
+          '',
+        ].join('\n'),
+        '.gateforge/test-map.yml': [
+          'schemaVersion: 1',
+          'tests:',
+          '  - key: first-mapping',
+          '    selector: { runner: playwright, file: e2e/accounts.spec.js, titlePath: [first] }',
+          '    kind: browser-e2e',
+          `    claims: [${OBLIGATION_ACCOUNTS}]`,
+          '    reason: Existing declaration one.',
+          '  - key: second-mapping',
+          '    selector: { runner: playwright, file: e2e/accounts.spec.js, titlePath: [second] }',
+          '    kind: browser-e2e',
+          `    claims: [${OBLIGATION_ORDERS}]`,
+          '    reason: Existing declaration two.',
+          '',
+        ].join('\n'),
+      });
+
+      const config = loadConfig(repo.path('.gateforge.yml'));
+      const discovered = await discoverTestCatalog({ cwd: repo.root, config });
+      expect(discovered.nativeErrors.length).toBeGreaterThan(0);
+      expect(
+        discovered.catalog.entries.some(
+          (entry) => entry.file === 'e2e/accounts.spec.js' && entry.reconciliation === 'static-only',
+        ),
+      ).toBe(true);
+
+      const suggestion = await runCli(repo, ['tests', 'suggest', '--json']);
+      expect(suggestion.code).toBe(0);
+      const suggestionReport = JSON.parse(suggestion.stdout) as {
+        problems: Array<{ cause: string; detail: string }>;
+      };
+      expect(
+        suggestionReport.problems.filter((problem) => problem.cause === 'TEST_INVENTORY_INCOMPLETE'),
+      ).toHaveLength(1);
+      expect(
+        suggestionReport.problems.filter((problem) => problem.cause === 'TEST_MAPPING_STALE'),
+      ).toHaveLength(0);
+
+      const check = await runCli(repo, ['check', '--format', 'json']);
+      const checkReport = JSON.parse(check.stdout) as {
+        blocking: Array<{ cause?: string; detail?: string }>;
+      };
+      expect(
+        checkReport.blocking.filter((entry) => entry.cause === 'TEST_INVENTORY_INCOMPLETE'),
+      ).toHaveLength(1);
+      expect(
+        checkReport.blocking.filter((entry) => entry.cause === 'TEST_MAPPING_STALE'),
+      ).toHaveLength(0);
+    });
+  }, 180_000);
+
+
   it('reports failed native enumeration once instead of fanning out stale sidecar mappings', async () => {
     await withTempRepo({}, async (repo) => {
       installConsumer(repo);

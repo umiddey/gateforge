@@ -943,6 +943,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       nativeClaims,
       behaviorCatalog: pipeline.behaviorCatalog,
       nativeErrors,
+      nativeInstances,
     });
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
     claimInventory = mapped.claimInventory;

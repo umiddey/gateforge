@@ -324,6 +324,7 @@ async function suggestSubcommand(
     catalog: discovered.catalog,
     nativeClaims: discovered.nativeClaims,
     nativeErrors: discovered.nativeErrors,
+    nativeInstances: discovered.nativeInstances,
     behaviorCatalog: pipeline.behaviorCatalog,
   });
 
@@ -779,7 +780,8 @@ async function explainSubcommand(
     obligations: pipeline.policy.obligations,
     catalog: discovered.catalog,
     nativeClaims: discovered.nativeClaims,
-    behaviorCatalog: pipeline.behaviorCatalog,
+    nativeErrors: discovered.nativeErrors,
+    nativeInstances: discovered.nativeInstances,
   });
   const entry = discovered.catalog.entries.find((candidate) => candidate.logicalKey === testKey);
   if (entry === undefined) {
