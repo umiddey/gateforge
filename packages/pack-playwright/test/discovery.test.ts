@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfig, type GateforgeConfig } from '@gate-forge/core';
 import {
+  diffNativePlaywrightTests,
   collectPytestSuite,
   discoverTestCatalog,
   inferTestKind,
@@ -689,6 +690,36 @@ describe('kind/category inference rules', () => {
 });
 
 describe('native playwright reconciliation', () => {
+  it('reports project-qualified tests that differ between scrubbed and wired registration', () => {
+    const base = {
+      file: 'e2e/accounts.spec.ts',
+      titlePath: ['accounts', 'creates an account'],
+      title: 'creates an account',
+      project: 'chromium',
+      frameworkId: 'spec-1#chromium',
+      location: { file: 'e2e/accounts.spec.ts', line: 1, col: 0 },
+      expectedStatus: 'passed',
+      annotations: [],
+      claims: [],
+    };
+    const wiredTwin = {
+      ...base,
+      titlePath: ['accounts', 'creates an account (unwired twin)'],
+      title: 'creates an account (unwired twin)',
+      frameworkId: 'spec-2#chromium',
+    };
+
+    const diff = diffNativePlaywrightTests([base], [base, wiredTwin]);
+
+    expect(diff.scrubbedOnly).toEqual([]);
+    expect(diff.wiredOnly).toMatchObject([
+      {
+        file: 'e2e/accounts.spec.ts',
+        titlePath: ['accounts', 'creates an account (unwired twin)'],
+        project: 'chromium',
+      },
+    ]);
+  });
   /** Builds a temp playwright project the engine's playwright can list. */
   function makePlaywrightProject(files: Record<string, string>): string {
     const root = makeTempDir('gateforge-pw-list-');
