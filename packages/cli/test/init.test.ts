@@ -441,14 +441,20 @@ describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', ()
       expect(stdout).toContain('gateforge.pack-fastapi, gateforge.pack-sqlalchemy');
       expect(stdout).toContain('skipped:');
       expect(stdout).toContain('gateforge.pack-task');
+      expect(stdout).toContain('transport-only HTTP on consumed endpoints');
+      expect(stdout).toContain('not provable yet: no independent browser channel');
+      expect(stdout.match(/http:frontend-request-observed/g) ?? []).toHaveLength(1);
       const config = loadConfig(join(repo.root, '.gateforge.yml'));
       expect(config.plugins.map((plugin) => plugin.id)).toEqual([
         'gateforge.pack-fastapi',
         'gateforge.pack-sqlalchemy',
       ]);
-      // Persistence-only starter policy: no unavailable browser channel.
+      // The starter selects only gradable persistence and transport evidence.
       const policies = readFileSync(repo.path('.gateforge/policies.yml'), 'utf8');
       expect(policies).toContain('user-facing-persistence');
+      expect(policies).toContain('frontend-consumed-endpoints-transport-only');
+      expect(policies).toContain('- http:request-observed');
+      expect(policies).toContain('- http:response-status-ok');
       expect(policies).not.toContain('- http:frontend-request-observed');
     });
   });

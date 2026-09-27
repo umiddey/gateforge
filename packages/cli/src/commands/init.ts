@@ -167,27 +167,21 @@ function sourceIncludePatterns(languages: readonly string[]): string[] {
   return patterns.length > 0 ? patterns : ['**/*'];
 }
 /**
- * The starter policies document (plan phase 5): the gradable
- * `persistence:*` namespace for automatically classified resources.
- * UI-semantic `crud:*` stays opt-in and visibly fail-closed until a
- * trusted UI observer exists (ADR 0003 §3).
+ * The starter policies preserve available persistence evidence and use
+ * only transport-level proof for consumed HTTP endpoints.
  */
 /**
- * Opt-in transport-only endpoint policy (plan §8 / D1): proves only that
+ * Transport-only endpoint policy example (plan §8 / D1): proves only that
  * the witness observed a matching HTTP exchange in the bound run. Test
  * attribution is suite-claimed — it does not prove which browser, UI
- * action, or test produced the exchange. Selecting this document
- * changes the guarantee: it is a SEPARATE opt-in policy, never an
- * automatic migration of the default frontend requirement, baselines,
- * or waivers.
+ * action, or test produced the exchange.
  */
 export const TRANSPORT_ONLY_POLICY_EXAMPLE = `\
-# Transport-only endpoint policy (plan §8 / D1, explicit opt-in).
+# Transport-only endpoint policy (plan §8 / D1).
 # Each obligation proves only that the witness observed a matching HTTP
 # exchange in the bound run ("witness observed an HTTP exchange");
 # test attribution is suite-claimed ("suite-claimed"), never proven
-# browser-issued by an independent channel. Selecting this policy narrows the
-# guarantee relative to the default frontend requirement below.
+# browser-issued by an independent channel.
 schemaVersion: 1
 policies:
   - id: frontend-consumed-endpoints-transport-only
@@ -206,10 +200,9 @@ export const POLICIES_TEMPLATE = `\
 # and are graded on the witness's own engine-side observation.
 # UI-semantic crud:* contracts intentionally fail closed (no
 # witness-controlled UI observation channel exists yet) — add them only
-# deliberately. Endpoint proof stays transport-only and opt-in
-# (TRANSPORT_ONLY_POLICY_EXAMPLE below): 'http:frontend-request-observed'
-# has no independent browser/test observation channel, so it is NEVER a
-# starter requirement.
+# deliberately. Consumed HTTP endpoints use transport-only proof;
+# 'http:frontend-request-observed' has no independent browser/test channel
+# and is never included in a new-install starter.
 schemaVersion: 1
 policies:
   # Capability-scoped endpoint policies (workflow/validation/...) may be added
@@ -223,6 +216,13 @@ policies:
       - persistence:read
       - persistence:update
       - persistence:delete
+  - id: frontend-consumed-endpoints-transport-only
+    when:
+      kind: http.endpoint
+      consumed: true
+    require:
+      - http:request-observed
+      - http:response-status-ok
 `;
 
 /**

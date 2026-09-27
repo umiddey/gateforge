@@ -26,10 +26,11 @@ const byId = new Map(parsed.policies.map((policy) => [policy.id, policy]));
 /** Contract namespaces with no honest evidence channel today. */
 const UNPRODUCIBLE_NAMESPACES = ['auth:', 'workflow:', 'webhook:', 'task:', 'validation:'];
 
-describe('init policies template: persistence-only starter (Phase 1)', () => {
-  it('parses and lists exactly the persistence starter policy', () => {
+describe('init policies template: starter evidence policies', () => {
+  it('parses and lists the persistence and transport starters', () => {
     expect(parsed.policies.map((policy) => policy.id)).toEqual([
       'user-facing-persistence',
+      'frontend-consumed-endpoints-transport-only',
     ]);
   });
 

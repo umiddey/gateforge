@@ -191,13 +191,13 @@ export function renderScanBlock(
     `  signals: ${scan.signals.length > 0 ? scan.signals.join(', ') : '(none)'}`,
     'recommended:',
     `  plugins: ${plugins.length > 0 ? [...plugins].join(', ') : '(none)'}`,
-    '  policy: persistence:* on user-facing tables',
+    '  policy: persistence:* on user-facing tables; transport-only HTTP on consumed endpoints',
     proof === 'observe'
       ? '  proof: observe (existing suite through the witness — no new tests)'
       : '  proof: overlay (tests/e2e/gateforge/)',
     'skipped:',
     '  gateforge.pack-task — no semantic verifier (VERIFIER_UNSUPPORTED)',
-    '  http:frontend-request-observed — no independent browser channel',
+    '  http:frontend-request-observed — not provable yet: no independent browser channel',
     '  coveragePolicy / strictE2E — owner opt-in',
   ].join('\n');
 }

@@ -36,7 +36,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
-| `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e] [--docs-exclude <folder,...>] [--confirm-doc-exclusions]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence-only policy, overlay proof), and write the standard Gateforge scaffold. Idempotent — never overwrites existing files unless `--confirm-doc-exclusions` approves an exclusion update. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block and refuses unavailable required proof channels. | 0/1/2 |
+| `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e] [--docs-exclude <folder,...>] [--confirm-doc-exclusions]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence policy, transport-only HTTP policy for consumed endpoints, overlay proof), and write the standard Gateforge scaffold. Idempotent — never overwrites existing files unless `--confirm-doc-exclusions` approves an exclusion update. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block and refuses unavailable required proof channels. | 0/1/2 |
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking`). Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. Snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
@@ -334,7 +334,7 @@ else):
 | --- | --- |
 | `persistence:create\|read\|update\|delete` | AVAILABLE — engine-observed same-entity persistence reads with the exact-value echo requirement (`EVIDENCE_VALUE_MISMATCH` on a mismatched echo, even when the status was 2xx) |
 | `http:request-observed`, `http:response-status-ok` | AVAILABLE — transport semantics only: a witness-observed exchange plus a provenance-verified claimed `ui.action` anchor from the declaring test |
-| `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; grades blocking `missing` before examining evidence |
+| `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; explicit selection remains blocking `missing` with `VERIFIER_UNSUPPORTED` |
 | `crud:*` (UI-semantic) | FAIL-CLOSED — the tested suite owns the browser; use `persistence:*` |
 | `http:effect-verified`, `http:read-result-verified` | AVAILABLE (behavior-case channel) — graded across the approved required cases with witness-issued `behavior.case` records; needs a compiled `behaviorPolicy` requirement set |
 | `auth:*`, `validation:*` | AVAILABLE (behavior-case channel) — same required-case aggregation over engine-controlled requests with independent state scopes |
@@ -342,6 +342,11 @@ else):
 
 Unsupported proof stays blocking. Nothing silently replaces browser proof
 with HTTP status proof.
+`gateforge init` includes the available transport-only contracts for consumed
+HTTP endpoints in new installations. Existing policies are unchanged;
+explicitly requiring `http:frontend-request-observed` still blocks. The init
+scan names that unavailable channel once as not yet provable.
+
 
 ## Configuration
 
