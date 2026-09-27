@@ -159,7 +159,7 @@ For a GitHub Actions pull request, set `GITHUB_BASE_REF`. For a GitLab merge req
 gateforge test-gates --changed --scope changed --result-only
 ```
 
-For an authoritative run, use `gateforge test-gates --changed` without `--result-only`, then run `gateforge check --changed --require-e2e` on the same inputs.
+For an authoritative slice, run `gateforge test-gates --changed --scope changed` without `--result-only`. `gateforge test-gates --changed` alone runs the full relevant mapped suite. Then run `gateforge check --changed --require-e2e` on the same inputs.
 
 ## Write witnessed tests for observable behavior
 

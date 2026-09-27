@@ -119,7 +119,7 @@ The command prints a key ID, not the secret. Set the app URL and any session sta
 gateforge test-gates --changed
 ```
 
-Gateforge supervises the selected suite and writes an authenticated receipt only after a complete successful run.
+Gateforge supervises the full relevant mapped suite and writes an authenticated receipt only after a complete successful run. To run only the tests affected by your change, add `--scope changed` (see [How much runs?](#how-much-runs)).
 
 **You should see:** the selected tests pass and the run seals a receipt.
 
@@ -161,6 +161,19 @@ The hook and CI gate block changes that lack the required evidence. Configure pr
 **You should see:** `installed:`, `updated:`, `verified:`, or a framework-managed hook message, followed by `blocking gate wired`.
 
 **If not:** follow the exact `required action` printed for an incomplete installation. Resolve hook-manager conflicts, then rerun `gateforge init --blocking` and verify the active hook.
+
+## How much runs?
+
+| Command | Runs |
+| --- | --- |
+| `gateforge test-gates --changed` | every mapped test relevant to the repository (full scope) |
+| `gateforge test-gates --changed --scope changed` | only tests mapped to obligations affected by the changed files |
+
+"Changed files" come from `changed.provider`: the staged index locally, or the pull/merge request diff against its base in CI. No earlier receipt or full run is needed first, and commits already on the base branch are not re-tested.
+
+A changed slice that affects no obligation (for example, only a log constant changed) does not seal a receipt, because "nothing affected" is not proof. Run full scope in that case. Documentation-only edits avoid this when their folders are approved with `gateforge init --docs-exclude`.
+
+`check --changed --require-e2e` accepts a slice receipt only when it covers every currently changed obligation.
 
 ## Coming next
 
