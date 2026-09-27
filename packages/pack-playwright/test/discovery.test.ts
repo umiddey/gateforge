@@ -784,6 +784,7 @@ describe('native playwright reconciliation', () => {
     expect(result.status).toBe('unavailable');
     expect(result.detail).toContain('reconciliation: unavailable — no playwright config');
     expect(result.instances).toEqual([]);
+    expect(result.errors).toEqual([]);
   });
 
   it('fails typed when the invocation exceeds its timeout', async () => {

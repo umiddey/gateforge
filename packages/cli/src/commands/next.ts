@@ -35,6 +35,7 @@ import {
   loadOptionalTestMap,
   mappedCoverageFrom,
   mappingBlocking,
+  nativeInventoryBlocking,
   resolveRepositoryMappings,
 } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
@@ -106,6 +107,8 @@ function rankCause(cause: CauseCode | null | undefined, kind: string): number {
     case 'TEST_NOT_EXECUTED':
     case 'TEST_FAILED':
       return 7;
+    case 'TEST_INVENTORY_INCOMPLETE':
+      return 0;
     case 'TEST_MAPPING_MISSING':
     case 'TEST_MAPPING_AMBIGUOUS':
     case 'TEST_MAPPING_STALE':
@@ -335,12 +338,19 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     config,
     obligations: pipeline.policy.obligations,
     ...(discoveryResult !== undefined
-      ? { catalog: discoveryResult.catalog, nativeClaims: discoveryResult.nativeClaims }
+      ? {
+          catalog: discoveryResult.catalog,
+          nativeClaims: discoveryResult.nativeClaims,
+          nativeErrors: discoveryResult.nativeErrors,
+        }
       : {}),
     behaviorCatalog: pipeline.behaviorCatalog,
   });
   const claimInventory: Claim[] = mapped.claimInventory;
-  const mappingBlockers = mappingBlocking(mapped.resolution.problems);
+  const mappingBlockers = [
+    ...mappingBlocking(mapped.resolution.problems),
+    ...nativeInventoryBlocking(mapped.nativeLoadProblem),
+  ];
   const mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
 
   const evaluated = evaluateRun({

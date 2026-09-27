@@ -40,6 +40,7 @@ import { CAUSE_NEXT_ACTIONS } from '../schemas/verdict.js';
 /** Why a mapping problem exists (plan §5.4 rows TEST_MAPPING_* + TEST_KIND_UNKNOWN). */
 export type MappingProblemCause =
   | 'TEST_MAPPING_AMBIGUOUS'
+  | 'TEST_INVENTORY_INCOMPLETE'
   | 'TEST_MAPPING_STALE'
   | 'TEST_KIND_UNKNOWN'
   | 'BEHAVIOR_CASE_UNMAPPED';
@@ -156,6 +157,7 @@ const PROBLEM_RANK: Readonly<Record<MappingProblemCause, number>> = Object.freez
   TEST_MAPPING_STALE: 1,
   TEST_KIND_UNKNOWN: 2,
   BEHAVIOR_CASE_UNMAPPED: 3,
+  TEST_INVENTORY_INCOMPLETE: 4,
 });
 
 /** Test kinds that claim end-to-end proof (mocking disqualifies them, §3.2). */

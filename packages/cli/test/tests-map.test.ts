@@ -14,13 +14,15 @@ import { parse as parseYaml } from 'yaml';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, CAUSE_NEXT_ACTIONS, type TempRepo } from '@gate-forge/core';
+import { loadConfig, withTempRepo } from '@gate-forge/core';
 import {
+  configYml,
   installFixture,
   OBLIGATION_ACCOUNTS,
   OBLIGATION_ORDERS,
   runCli,
 } from './helpers.js';
+import { discoverTestCatalog } from '@gate-forge/pack-playwright';
 
 /** The gateforge monorepo root (for playwright module resolution). */
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -481,6 +483,86 @@ describe('gateforge tests suggest', () => {
         (suggestion) => suggestion.obligationId === OBLIGATION_ACCOUNTS,
       );
       expect(stale?.cause).toBe('TEST_MAPPING_STALE');
+    });
+  }, 180_000);
+  it('reports failed native enumeration once instead of fanning out stale sidecar mappings', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      repo.writeFiles({
+        '.gateforge.yml': configYml(),
+        'e2e/accounts.spec.js': "import 'gateforge-missing-load-dependency';\n",
+        '.gateforge/test-map.yml': [
+          'schemaVersion: 1',
+          'tests:',
+          '  - key: first-mapping',
+          '    selector: { runner: playwright, file: e2e/accounts.spec.js, titlePath: [first] }',
+          '    kind: browser-e2e',
+          `    claims: [${OBLIGATION_ACCOUNTS}]`,
+          '    reason: Existing declaration one.',
+          '  - key: second-mapping',
+          '    selector: { runner: playwright, file: e2e/accounts.spec.js, titlePath: [second] }',
+          '    kind: browser-e2e',
+          `    claims: [${OBLIGATION_ORDERS}]`,
+          '    reason: Existing declaration two.',
+          '',
+        ].join('\n'),
+      });
+
+      const config = loadConfig(repo.path('.gateforge.yml'));
+      const nativeErrors = (await discoverTestCatalog({ cwd: repo.root, config })).nativeErrors;
+      expect(nativeErrors.length).toBeGreaterThan(0);
+
+      const suggestion = await runCli(repo, ['tests', 'suggest', '--json']);
+      expect(suggestion.code).toBe(0);
+      const suggestionReport = JSON.parse(suggestion.stdout) as SuggestJson & {
+        problems: Array<{ cause: string; detail: string; nextAction?: string }>;
+        suggestions: unknown[];
+      };
+      const inventoryProblems = suggestionReport.problems.filter(
+        (problem) => problem.cause === 'TEST_INVENTORY_INCOMPLETE',
+      );
+      expect(inventoryProblems).toHaveLength(1);
+      expect(inventoryProblems[0]?.detail).toContain(`${nativeErrors.length} load error(s)`);
+      expect(inventoryProblems[0]?.detail.endsWith(nativeErrors[0] ?? '')).toBe(true);
+      expect(inventoryProblems[0]?.nextAction).toContain('Install');
+      expect(suggestionReport.problems.filter((problem) => problem.cause === 'TEST_MAPPING_STALE')).toHaveLength(0);
+      expect(suggestionReport.suggestions).toEqual([]);
+
+      const check = await runCli(repo, ['check', '--format', 'json']);
+      const checkReport = JSON.parse(check.stdout) as {
+        blocking: Array<{ cause?: string; detail?: string; nextAction?: string }>;
+      };
+      const checkInventory = checkReport.blocking.filter((entry) => entry.cause === 'TEST_INVENTORY_INCOMPLETE');
+      expect(checkInventory).toHaveLength(1);
+      expect(checkInventory[0]?.detail?.endsWith(nativeErrors[0] ?? '')).toBe(true);
+      expect(checkInventory[0]?.nextAction).toContain('Install');
+      expect(checkReport.blocking.filter((entry) => entry.cause === 'TEST_MAPPING_STALE')).toHaveLength(0);
+
+      const next = await runCli(repo, ['next', '--json']);
+      const nextReport = JSON.parse(next.stdout) as { cause: string; why: string; do: string };
+      expect(nextReport.cause).toBe('TEST_INVENTORY_INCOMPLETE');
+      expect(nextReport.why.endsWith(nativeErrors[0] ?? '')).toBe(true);
+      expect(nextReport.do).toContain('Install');
+
+      const supervised = await runCli(repo, [
+        'test-gates',
+        '--changed',
+        '--scope',
+        'changed',
+        '--result-only',
+        '--format',
+        'json',
+      ]);
+      const supervisedReport = JSON.parse(supervised.stdout) as {
+        blocking: Array<{ cause?: string; detail?: string; nextAction?: string }>;
+      };
+      const supervisedInventory = supervisedReport.blocking.filter(
+        (entry) => entry.cause === 'TEST_INVENTORY_INCOMPLETE',
+      );
+      expect(supervisedInventory, supervised.stdout).toHaveLength(1);
+      expect(supervisedInventory[0]?.detail?.endsWith(nativeErrors[0] ?? '')).toBe(true);
+      expect(supervisedInventory[0]?.nextAction).toContain('Install');
+      expect(supervisedReport.blocking.filter((entry) => entry.cause === 'TEST_MAPPING_STALE')).toHaveLength(0);
     });
   }, 180_000);
 });

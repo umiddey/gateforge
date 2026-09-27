@@ -39,7 +39,7 @@ import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { obligationFingerprint, evaluateRun } from '../evaluate.js';
-import { annotationMapSyncAdvisories, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
+import { annotationMapSyncAdvisories, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
   collectInputFiles,
@@ -652,7 +652,10 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       behaviorCatalog: pipeline.behaviorCatalog,
     });
     claimInventory = mapped.claimInventory;
-    mappingBlockers = mappingBlocking(mapped.resolution.problems);
+    mappingBlockers = [
+      ...mappingBlocking(mapped.resolution.problems),
+      ...nativeInventoryBlocking(mapped.nativeLoadProblem),
+    ];
     mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
   }
 

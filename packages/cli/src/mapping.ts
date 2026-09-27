@@ -29,9 +29,11 @@ import {
   type Location,
   type Obligation,
   type ResolvedMappings,
+  type MappingProblem,
   type ResourceGraph,
   type TestCatalog,
   type TestMap,
+  type TestMapEntry,
 } from '@gate-forge/core';
 import type { MappedCoverage, CoverageOperation } from '@gate-forge/core';
 import {
@@ -279,6 +281,8 @@ export interface MappingResolutionOptions {
   catalog?: TestCatalog;
   /** Current native annotations from the same discovery pass as catalog. */
   nativeClaims?: readonly Claim[];
+  /** Native Playwright reporter load errors from the same discovery pass. */
+  nativeErrors?: readonly string[];
   /**
    * Authenticated claim declarations used instead of live annotations.
    * `check` supplies these only from a verified receipt; the sidecar is
@@ -303,6 +307,10 @@ export interface MappingResolutionResult {
   nativeClaims: Claim[];
   /** Sidecar and resolver claim declarations with current source locations. */
   claimInventory: Claim[];
+  /** Native Playwright reporter load errors from the discovery pass. */
+  nativeErrors: string[];
+  /** Inventory blocker details, or null when Playwright enumeration succeeded. */
+  nativeLoadProblem: MappingProblem | null;
 }
 
 /**
@@ -327,6 +335,7 @@ export async function resolveRepositoryMappings(
 ): Promise<MappingResolutionResult> {
   let catalog: TestCatalog;
   let discoveredClaims: Claim[];
+  let nativeErrors = [...(options.nativeErrors ?? [])];
   if (options.catalog !== undefined) {
     catalog = options.catalog;
     discoveredClaims = [...(options.nativeClaims ?? [])];
@@ -343,6 +352,7 @@ export async function resolveRepositoryMappings(
       const discovered = await discoverTestCatalog({ cwd: options.cwd, config: options.config, collectPytest: true });
       catalog = discovered.catalog;
       discoveredClaims = discovered.nativeClaims;
+      nativeErrors = [...discovered.nativeErrors];
     } catch (error) {
       if (error instanceof TestDiscoveryError) throw new UsageError(error.message);
       throw error;
@@ -350,7 +360,7 @@ export async function resolveRepositoryMappings(
   }
   const nativeClaims = [...(options.claimBindings ?? discoveredClaims)];
   const sidecar = loadOptionalTestMap(options.cwd);
-  const resolution = resolveTestMappings({
+  const resolved = resolveTestMappings({
     catalog,
     nativeClaims,
     sidecar: sidecar ?? { schemaVersion: 1, tests: [] },
@@ -358,8 +368,17 @@ export async function resolveRepositoryMappings(
     ...(options.priorRunHints !== undefined ? { priorRunHints: options.priorRunHints } : {}),
     ...(options.behaviorCatalog !== undefined ? { behaviorCatalog: options.behaviorCatalog } : {}),
   });
+  const enumerationFailedCompletely =
+    nativeErrors.length > 0 && !catalog.entries.some((entry) => entry.runner === 'playwright');
+  const resolution = enumerationFailedCompletely
+    ? {
+        ...resolved,
+        problems: resolved.problems.filter((problem) => problem.cause !== 'TEST_MAPPING_STALE'),
+      }
+    : resolved;
   const claimInventory = currentClaimInventory(catalog, resolution, nativeClaims);
-  return { catalog, sidecar, resolution, nativeClaims, claimInventory };
+  const nativeLoadProblem = nativeInventoryProblem(nativeErrors);
+  return { catalog, sidecar, resolution, nativeClaims, claimInventory, nativeErrors, nativeLoadProblem };
 }
 /**
  * Combines claim declarations used by the resolver with sidecar
@@ -414,6 +433,48 @@ function currentClaimInventory(
   return [...unique.entries()]
     .sort(([left], [right]) => compareStrings(left, right))
     .map(([, claim]) => claim);
+}
+/**
+ * Builds the single typed problem for native Playwright reporter load errors.
+ *
+ * Args:
+ *   errors: verbatim errors returned by Playwright's JSON reporter.
+ *
+ * Returns:
+ *   MappingProblem | null: inventory failure details, or null when enumeration succeeded.
+ */
+export function nativeInventoryProblem(errors: readonly string[]): MappingProblem | null {
+  if (errors.length === 0) return null;
+  return {
+    cause: 'TEST_INVENTORY_INCOMPLETE',
+    obligationId: null,
+    detail: `Playwright enumeration reported ${errors.length} load error(s); first error: ${errors[0] ?? ''}`,
+    locations: [],
+  };
+}
+
+/**
+ * Projects native reporter load errors into one actionable gate blocker.
+ *
+ * Args:
+ *   problem: the typed inventory problem, or null when there are no native errors.
+ *
+ * Returns:
+ *   BlockingEntry[]: one blocker for an incomplete native inventory, otherwise empty.
+ */
+export function nativeInventoryBlocking(problem: MappingProblem | null): BlockingEntry[] {
+  if (problem === null) return [];
+  return [
+    {
+      kind: 'finding',
+      resourceId: null,
+      name: null,
+      detail: problem.detail,
+      location: null,
+      cause: 'TEST_INVENTORY_INCOMPLETE',
+      nextAction: 'Install the missing test dependency, then rerun Gateforge.',
+    },
+  ];
 }
 
 

@@ -75,6 +75,7 @@ import {
   loadOptionalTestMap,
   relativeToRepo,
   resolveRepositoryMappings,
+  nativeInventoryBlocking,
   serializeTestMap,
   TEST_MAP_RELATIVE,
   annotationTestMapEntries,
@@ -322,6 +323,7 @@ async function suggestSubcommand(
     obligations: pipeline.policy.obligations,
     catalog: discovered.catalog,
     nativeClaims: discovered.nativeClaims,
+    nativeErrors: discovered.nativeErrors,
     behaviorCatalog: pipeline.behaviorCatalog,
   });
 
@@ -340,11 +342,27 @@ async function suggestSubcommand(
     );
   }
 
-  const suggestions = mappingSuggestions({
-    catalog: discovered.catalog,
-    obligationIds: scoped.map((obligation) => obligation.id),
-    resolution: mapped.resolution,
-  });
+  const enumerationFailedCompletely =
+    mapped.nativeErrors.length > 0 &&
+    !discovered.catalog.entries.some((entry) => entry.runner === 'playwright');
+  const suggestions = enumerationFailedCompletely
+    ? []
+    : mappingSuggestions({
+        catalog: discovered.catalog,
+        obligationIds: scoped.map((obligation) => obligation.id),
+        resolution: mapped.resolution,
+      });
+  const mappingProblems = [
+    ...mapped.resolution.problems,
+    ...(mapped.nativeLoadProblem === null
+      ? []
+      : [
+          {
+            ...mapped.nativeLoadProblem,
+            nextAction: nativeInventoryBlocking(mapped.nativeLoadProblem)[0]?.nextAction ?? '',
+          },
+        ]),
+  ];
   // Required-case hints (plan 2026-09-19 Phase 6 item 6): candidates
   // come from the current inventory (resolver suggestions above); the
   // unmapped required cases name what final approval still needs —
@@ -393,7 +411,7 @@ async function suggestSubcommand(
           changedFiles: [...pipeline.changedFiles].sort(compareStrings),
           obligationsInScope: scoped.length,
         },
-        problems: mapped.resolution.problems as unknown as JsonValue,
+        problems: mappingProblems as unknown as JsonValue,
         suggestions: suggestionJson,
       } as unknown as JsonValue),
     );
@@ -404,12 +422,13 @@ async function suggestSubcommand(
     io.stdout,
     `suggest: ${String(pipeline.policy.obligations.length)} obligation(s) considered` +
       ` (${String(scoped.length)} in ${scopeMode} scope),` +
-      ` ${String(mapped.resolution.problems.length)} mapping problem(s),` +
+      ` ${String(mappingProblems.length)} mapping problem(s),` +
       ` ${String(suggestions.length)} suggestion(s)`,
   );
-  for (const problem of mapped.resolution.problems) {
+  for (const problem of mappingProblems) {
     const where = problem.obligationId === null ? '' : ` for '${problem.obligationId}'`;
     writeLine(io.stdout, `problem [${problem.cause}]${where}: ${problem.detail}`);
+    if ('nextAction' in problem) writeLine(io.stdout, `  next action: ${problem.nextAction}`);
   }
   for (const suggestion of suggestions) {
     writeLine(io.stdout, `[${suggestion.cause}] ${suggestion.obligationId}`);

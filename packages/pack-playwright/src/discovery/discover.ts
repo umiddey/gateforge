@@ -87,7 +87,8 @@ export interface DiscoverResult {
   json: string;
   /** Gateforge annotations on tests the current native list enumerated. */
   nativeClaims: Claim[];
-  /** Instances from the scrubbed native list, before catalog reconciliation. */
+  /** Playwright JSON reporter errors from native enumeration, verbatim. */
+  nativeErrors: string[];
   nativeInstances: NativeInstance[];
   /** Static registration sites guarded by Gateforge environment state. */
   registrationWarnings: StaticRegistrationWarning[];
@@ -179,6 +180,7 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
       json: canonicalJson(catalog as unknown as JsonValue),
       nativeClaims,
       nativeInstances: native.instances,
+      nativeErrors: [...native.errors],
       registrationWarnings: scan.registrationWarnings,
     };
 }

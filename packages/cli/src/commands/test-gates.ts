@@ -137,7 +137,7 @@ import {
   type InputSnapshot,
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
-import { mappingBlocking, mappedCoverageFrom, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
+import { mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline } from '../pipeline.js';
 import { tryReuseReceipt } from '../receipts.js';
 import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
@@ -859,6 +859,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let discoveryError: string | null = null;
   let catalog: TestCatalog | null = null;
   let nativeClaims: Claim[] = [];
+  let nativeErrors: string[] = [];
   let nativeInstances: NativeInstance[] = [];
   try {
     // collectPytest is REQUIRED here (GAP 1 fix, server-witnessed
@@ -873,6 +874,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     const discovered = await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true });
     catalog = discovered.catalog;
     nativeClaims = discovered.nativeClaims;
+    nativeErrors = discovered.nativeErrors;
     nativeInstances = discovered.nativeInstances;
     for (const warning of discovered.registrationWarnings) {
       writeLine(
@@ -940,6 +942,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       catalog,
       nativeClaims,
       behaviorCatalog: pipeline.behaviorCatalog,
+      nativeErrors,
     });
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
     claimInventory = mapped.claimInventory;
@@ -988,20 +991,22 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
             nextAction: CAUSE_NEXT_ACTIONS.TEST_INVENTORY_INCOMPLETE,
           },
         ]
-      : !catalog?.inventoryComplete
-        ? [
-            {
-              kind: 'finding',
-              resourceId: null,
-              name: null,
-              detail:
-                'test inventory incomplete (parse errors, budget cuts, or unenumerated cases) — the expected set cannot be sealed over an incomplete inventory',
-              location: null,
-              cause: 'TEST_INVENTORY_INCOMPLETE',
-              nextAction: CAUSE_NEXT_ACTIONS.TEST_INVENTORY_INCOMPLETE,
-            },
-          ]
-        : [];
+      : nativeErrors.length > 0
+        ? nativeInventoryBlocking(nativeInventoryProblem(nativeErrors))
+        : !catalog?.inventoryComplete
+          ? [
+              {
+                kind: 'finding',
+                resourceId: null,
+                name: null,
+                detail:
+                  'test inventory incomplete (parse errors, budget cuts, or unenumerated cases) — the expected set cannot be sealed over an incomplete inventory',
+                location: null,
+                cause: 'TEST_INVENTORY_INCOMPLETE',
+                nextAction: CAUSE_NEXT_ACTIONS.TEST_INVENTORY_INCOMPLETE,
+              },
+            ]
+          : [];
   const selection = {
     runner: 'playwright',
     // The selection mode names the slice honestly: a scoped run seals
