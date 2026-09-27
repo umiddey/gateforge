@@ -313,8 +313,8 @@ auditQueue.process(async (job) => {
       const obligations = await runCli(repo, ['obligations', '--json']);
       expect(obligations.code).toBe(0);
       const obs = JSON.parse(obligations.stdout) as { obligations: Array<{ id: string }> };
-      // The conservatively user-facing model accrues obligations:
-      expect(obs.obligations.length).toBeGreaterThan(0);
+      // C5 marks read as not-observable because this model has no read route.
+      expect(obs.obligations).toEqual([]);
 
       // Gate check is RED (obligations are unmet — the sound outcome):
       const check = await runCli(repo, ['check', '--format', 'json']);

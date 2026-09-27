@@ -14,7 +14,7 @@ import { parse as parseYaml } from 'yaml';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { loadConfig, withTempRepo } from '@gate-forge/core';
+import { CAUSE_NEXT_ACTIONS, loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
 import {
   configYml,
   installFixture,
@@ -514,7 +514,7 @@ describe('gateforge tests suggest', () => {
 
       const suggestion = await runCli(repo, ['tests', 'suggest', '--json']);
       expect(suggestion.code).toBe(0);
-      const suggestionReport = JSON.parse(suggestion.stdout) as SuggestJson & {
+      const suggestionReport = JSON.parse(suggestion.stdout) as {
         problems: Array<{ cause: string; detail: string; nextAction?: string }>;
         suggestions: unknown[];
       };

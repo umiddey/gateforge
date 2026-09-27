@@ -385,19 +385,27 @@ describe('observe finalize (update / read / delete)', () => {
     }
   });
 
-  it('notes an update of an entity absent from the open snapshot', async () => {
+  it('notes an update for an entity created after the open snapshot', async () => {
     const fixture = await startFixturedWitness();
     try {
       await declare(fixture.witness.url, [UPDATE_CLAIM]);
       const session = await openClaimedSession(fixture.witness.url, [UPDATE_CLAIM]);
-      // acc-9 does not exist — but the marker stamps headers before it
-      // can downgrade the status, so the exchange arrives 2xx-shaped and
-      // matches the template; the snapshot check then refuses it (the id
-      // was never witness-observed before the test).
-      await proxyExchange(session.proxyUrl as string, 'PATCH', '/api/accounts/acc-9', JSON.stringify({ first_name: 'Zed' }));
+      const created = await fetch(`${fixture.target.url}/api/accounts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ first_name: 'Zed', last_name: 'Unknown' }),
+      });
+      expect(created.status).toBe(200);
+      const entity = (await created.json()) as { id: string };
+      await proxyExchange(
+        session.proxyUrl as string,
+        'PATCH',
+        `/api/accounts/${entity.id}`,
+        JSON.stringify({ first_name: 'Updated' }),
+      );
       const done = await finalize(fixture.witness.url, session.sessionId);
       expect(done.body['finalized']).toEqual([]);
-      expect(JSON.stringify(done.body['notes'])).toContain("was not in the session-open snapshot");
+      expect(JSON.stringify(done.body['notes'])).toContain('was not in the session-open snapshot');
       await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
     } finally {
       await fixture.witness.stop();
