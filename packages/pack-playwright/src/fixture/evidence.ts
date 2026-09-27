@@ -76,6 +76,8 @@ export interface Receipt {
    * verify the before/after delta (create postcondition, audit round 4).
    */
   readonly preObservationId?: string;
+  /** Witness interval that binds this receipt to one observed UI action. */
+  readonly anchorId: string;
 }
 
 /** Outcome of `persistence.verify` (verdict-relevant, witness-issued). */
@@ -411,6 +413,7 @@ export async function createEvidence({
       fields: response.enteredFields,
       mode: operation === 'read' ? 'form' : 'row',
       ...(response.preObservationId !== null ? { preObservationId: response.preObservationId } : {}),
+      anchorId: response.anchorId,
     };
     return { receipt, preObservationId: response.preObservationId };
   }
@@ -468,6 +471,7 @@ export async function createEvidence({
         claimIds: [...claims],
         entityId: receipt.entityId,
         operation: receipt.operation,
+        anchorId: receipt.anchorId,
       });
       return { entityId: response.entityId, fields: response.fields };
     },
@@ -492,6 +496,7 @@ export async function createEvidence({
         ...(receipt.preObservationId !== undefined
           ? { preObservationId: receipt.preObservationId }
           : {}),
+        anchorId: receipt.anchorId,
       });
       return {
         recordId: response.recordId,

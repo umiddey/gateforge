@@ -331,19 +331,60 @@ describe('evaluateObligation — satisfied requires complete witnessed evidence 
         before: { found: true, fields: { name: 'Revision 2' } },
       },
     });
-    for (const records of [
+    const recordOrders = [
       [firstAction, secondAction, firstSnapshot, secondSnapshot],
       [secondAction, firstAction, firstSnapshot, secondSnapshot],
-    ]) {
-      const outcome = evaluateObligation(obligation, {
-        claims: [makeClaim('test-1')],
-        records,
-        waivers: [],
-        classification,
-        now: NOW,
-      });
-      expect(outcome.verdict).toBe('satisfied');
+    ];
+    for (let iteration = 0; iteration < 25; iteration += 1) {
+      for (const records of recordOrders) {
+        const outcome = evaluateObligation(obligation, {
+          claims: [makeClaim('test-1')],
+          records,
+          waivers: [],
+          classification,
+          now: NOW,
+        });
+        expect(outcome.verdict).toBe('satisfied');
+      }
     }
+  });
+
+  it('rejects repeated same-entity updates when the adapter has no per-anchor snapshots', () => {
+    const records = [
+      witnessedAction({
+        payload: { operation: 'update', entityId: 'acc-1', fields: { name: 'Revision 2' } },
+      }),
+      witnessedAction({
+        payload: { operation: 'update', entityId: 'acc-1', fields: { name: 'Revision 3' } },
+      }),
+      witnessedPersistence({
+        payload: {
+          entityId: 'acc-1',
+          found: true,
+          fields: { name: 'Revision 2' },
+          before: { found: true, fields: { name: 'Initial' } },
+        },
+      }),
+      witnessedPersistence({
+        payload: {
+          entityId: 'acc-1',
+          found: true,
+          fields: { name: 'Revision 3' },
+          before: { found: true, fields: { name: 'Revision 2' } },
+        },
+      }),
+    ];
+
+    const outcome = evaluateObligation(obligation, {
+      claims: [makeClaim('test-1')],
+      records,
+      waivers: [],
+      classification,
+      now: NOW,
+    });
+
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('per-anchor snapshots');
   });
 
   it('keeps a genuinely wrong later update value blocking', () => {

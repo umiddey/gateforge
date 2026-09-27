@@ -1367,6 +1367,7 @@ async function handleBrowserAction(
           entityId: observation.entityId,
           fields: observation.enteredFields,
           sessionId: session.sessionId,
+          anchorId: intervalId,
         },
         'engine-observed',
       ),
@@ -1380,6 +1381,7 @@ async function handleBrowserAction(
       enteredFields: observation.enteredFields,
       renderedFields: observation.renderedFields,
       appStatus,
+      anchorId: intervalId,
       preObservationId,
       recordIds: issued.map((record) => record.recordId),
     };
@@ -1414,7 +1416,7 @@ async function handleBrowserVisible(
   if (!isPlainObject(body)) {
     throw new HttpError(400, 'browser visible body must be an object');
   }
-  const { testId, entityId, operation } = body as Record<string, unknown>;
+  const { testId, entityId, operation, anchorId } = body as Record<string, unknown>;
   if (typeof testId !== 'string' || testId.length === 0) {
     throw new HttpError(400, 'browser visible requires a non-empty testId');
   }
@@ -1424,9 +1426,39 @@ async function handleBrowserVisible(
   if (operation !== 'create' && operation !== 'read' && operation !== 'update' && operation !== 'delete') {
     throw new HttpError(400, "browser visible operation must be one of 'create' | 'read' | 'update' | 'delete'");
   }
+  if (anchorId !== undefined && (typeof anchorId !== 'string' || anchorId.length === 0)) {
+    throw new HttpError(400, 'anchorId must be a non-empty string when present');
+  }
   const session = requireOpenSession(state, body);
   const boundTestId = requireSessionTestId(session, testId);
   const { claimIds } = requireBrowserClaims(body);
+  if (typeof anchorId === 'string') {
+    const interval = session.intervals.get(anchorId);
+    if (interval === undefined || interval.endTick === null || interval.operation !== operation) {
+      throw new HttpError(400, `action anchor '${anchorId}' is unknown or does not match this operation`);
+    }
+    for (const claimId of claimIds) {
+      const action = [...state.ledger.values()].find((record) => {
+        if (
+          record.kind !== 'ui.action' ||
+          record.obligationId !== claimId ||
+          record.testId !== boundTestId ||
+          !isPlainObject(record.payload)
+        ) {
+          return false;
+        }
+        return (
+          record.payload['anchorId'] === anchorId &&
+          record.payload['sessionId'] === session.sessionId &&
+          record.payload['operation'] === operation &&
+          record.payload['entityId'] === entityId
+        );
+      });
+      if (action === undefined) {
+        throw new HttpError(400, `action anchor '${anchorId}' does not identify claim '${claimId}'`);
+      }
+    }
+  }
   const { surface } = requireEngineSurface(session);
   // The driven origin comes from trusted configuration on EVERY call —
   // never from stored suite input (there is none anymore).
@@ -1441,7 +1473,12 @@ async function handleBrowserVisible(
         claimId,
         'ui.visible-result',
         boundTestId,
-        { entityId, fields, sessionId: session.sessionId },
+        {
+          entityId,
+          fields,
+          sessionId: session.sessionId,
+          ...(typeof anchorId === 'string' ? { anchorId } : {}),
+        },
         'engine-observed',
       ),
     );
@@ -3123,7 +3160,7 @@ async function handlePersistence(
   if (!isPlainObject(body)) {
     throw new HttpError(400, 'request body must be an object');
   }
-  const { resourceId, entityId, testId, claimId, preObservationId } = body as Record<
+  const { resourceId, entityId, testId, claimId, preObservationId, anchorId } = body as Record<
     string,
     unknown
   >;
@@ -3142,12 +3179,92 @@ async function handlePersistence(
   ) {
     throw new HttpError(400, 'preObservationId must be a non-empty string when present');
   }
+  if (anchorId !== undefined && (typeof anchorId !== 'string' || anchorId.length === 0)) {
+    throw new HttpError(400, 'anchorId must be a non-empty string when present');
+  }
   // Phase 1: engine-side reads run under the supervisor-opened session,
   // so the persistence record binds to the same channel the UI action
   // used (and the record's testId is the session's, never caller-declared).
   const session = requireOpenSession(state, body);
   const boundTestId = requireSessionTestId(session, testId);
   const boundClaimId = String(claimId);
+  if (typeof anchorId === 'string') {
+    const interval = session.intervals.get(anchorId);
+    if (interval === undefined || interval.endTick === null) {
+      throw new HttpError(400, `action anchor '${anchorId}' is unknown or still open for this session`);
+    }
+    const anchorEndTick = interval.endTick;
+    const action = [...state.ledger.values()].find((record) => {
+      if (
+        record.kind !== 'ui.action' ||
+        record.obligationId !== boundClaimId ||
+        record.testId !== boundTestId ||
+        !isPlainObject(record.payload)
+      ) {
+        return false;
+      }
+      return (
+        record.payload['anchorId'] === anchorId &&
+        record.payload['sessionId'] === session.sessionId &&
+        record.payload['operation'] === interval.operation
+      );
+    });
+    if (action === undefined || !isPlainObject(action.payload)) {
+      throw new HttpError(400, `action anchor '${anchorId}' does not identify this claim's witnessed UI action`);
+    }
+    let sameEntity = false;
+    try {
+      sameEntity = canonicalOf(action.payload['entityId']) === canonicalOf(entityId);
+    } catch {
+      sameEntity = false;
+    }
+    if (!sameEntity) {
+      throw new HttpError(400, `action anchor '${anchorId}' targets a different entity`);
+    }
+    const laterAction = [...state.ledger.values()].some((record) => {
+      if (
+        record.kind !== 'ui.action' ||
+        record.obligationId !== boundClaimId ||
+        record.testId !== boundTestId ||
+        !isPlainObject(record.payload)
+      ) {
+        return false;
+      }
+      const laterAnchorId = record.payload['anchorId'];
+      if (typeof laterAnchorId !== 'string' || laterAnchorId === anchorId) return false;
+      const laterInterval = session.intervals.get(laterAnchorId);
+      if (
+        laterInterval === undefined ||
+        laterInterval.endTick === null ||
+        laterInterval.endTick <= anchorEndTick
+      ) {
+        return false;
+      }
+      try {
+        return canonicalOf(record.payload['entityId']) === canonicalOf(entityId);
+      } catch {
+        return false;
+      }
+    });
+    if (laterAction) {
+      throw new HttpError(
+        409,
+        `persistence for action anchor '${anchorId}' must be observed before another UI action on the same entity`,
+      );
+    }
+    const duplicate = [...state.ledger.values()].some((record) => {
+      return (
+        record.kind.startsWith(PERSISTENCE_KIND) &&
+        record.obligationId === boundClaimId &&
+        record.testId === boundTestId &&
+        isPlainObject(record.payload) &&
+        record.payload['anchorId'] === anchorId
+      );
+    });
+    if (duplicate) {
+      throw new HttpError(409, `persistence for action anchor '${anchorId}' was already observed`);
+    }
+  }
 
   const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
 
@@ -3251,6 +3368,7 @@ async function handlePersistence(
     ...(found && normalized !== null ? { fields: normalized.fields } : {}),
     ...(before !== undefined ? { before } : {}),
     sessionId: session.sessionId,
+    ...(typeof anchorId === 'string' ? { anchorId } : {}),
   };
   const issued = issuePersistenceRecord(state, boundClaimId, boundTestId, payload);
   // Witness-side activity (review recheck fix 2026-09-14): an

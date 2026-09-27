@@ -85,6 +85,8 @@ export interface PersistenceRequest {
   resourceId: string;
   entityId: unknown;
   preObservationId?: string;
+  /** Closed UI-action interval whose post-state this persistence read binds to. */
+  anchorId?: string;
 }
 
 /**
@@ -381,6 +383,8 @@ export interface BrowserActionResponse {
   appStatus: number;
   /** Engine-side pre-observation id (create/update; consumed by persistence verify). */
   preObservationId: string | null;
+  /** Closed UI-action interval used to bind the observed action and persistence read. */
+  anchorId: string;
   /** Record ids the engine issued for this action (per claim). */
   recordIds: string[];
 }
@@ -400,8 +404,9 @@ export interface BrowserVisibleRequest {
   entityId: string;
   /** The original action (decides row vs form readback). */
   operation: 'create' | 'read' | 'update' | 'delete';
+  /** Optional for legacy clients; new fixture receipts bind visible reads to one action. */
+  anchorId?: string;
 }
-
 /** `POST /browser/visible` response. */
 export interface BrowserVisibleResponse {
   entityId: string;

@@ -1057,11 +1057,12 @@ function browserAnchoredPersistenceClaim(
   // ones do not. Satisfaction weight lives in requirement 2, the
   // engine-observed persistence read.
   const actions = evidence.filter((entry) => entry.record.kind === UI_ACTION_KIND);
-  const matchingAction = actions.find(
+  const matchingActions = actions.filter(
     (entry) =>
       isProvenancedRecord(entry.record) &&
       payloadOf(entry.record)?.['operation'] === requiredOp,
   );
+  const matchingAction = matchingActions[0];
   if (matchingAction === undefined) {
     if (actions.length === 0) {
       return {
@@ -1128,9 +1129,87 @@ function browserAnchoredPersistenceClaim(
       payloadOf(entry.record)?.['channel'] !== SERVER_CHANNEL,
   );
   const witnessedPersistence = persistence.filter((entry) => entry.trust === 'witnessed');
-  const sameEntity = witnessedPersistence.filter((entry) => {
+  const actionAnchorId =
+    typeof actionPayload['anchorId'] === 'string' && actionPayload['anchorId'].length > 0
+      ? actionPayload['anchorId']
+      : null;
+  const sameEntityActions = matchingActions.filter((entry) => {
     const entity = normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey);
     return entity.ok && entity.key === actionEntity.key;
+  });
+  const verifiedAnchorRecords: RecordLike[] = [];
+  if (sameEntityActions.length > 1) {
+    const anchorIds = sameEntityActions.map((entry) => {
+      const anchorId = payloadOf(entry.record)?.['anchorId'];
+      return typeof anchorId === 'string' && anchorId.length > 0 ? anchorId : null;
+    });
+    if (anchorIds.some((anchorId) => anchorId === null) || new Set(anchorIds).size !== anchorIds.length) {
+      return {
+        status: 'invalid',
+        reason:
+          `multiple '${UI_ACTION_KIND}' anchors target entity ${actionEntity.key}, but ` +
+          'per-anchor snapshots are unavailable; refusing timing-dependent persistence evidence',
+      };
+    }
+    for (const [index, action] of sameEntityActions.entries()) {
+      const anchorId = anchorIds[index] as string;
+      const snapshot = witnessedPersistence.find((entry) => {
+        const payload = payloadOf(entry.record);
+        const entity = normalizeEntityId(payload?.['entityId'], primaryKey);
+        return entity.ok && entity.key === actionEntity.key && payload?.['anchorId'] === anchorId;
+      });
+      if (snapshot === undefined) {
+        return {
+          status: 'missing',
+          reason:
+            `no per-anchor '${PERSISTENCE_KIND_PREFIX}*' snapshot for '${UI_ACTION_KIND}' ` +
+            `anchor '${anchorId}' on entity ${actionEntity.key}`,
+        };
+      }
+      const failure = persistencePostconditionFailure(
+        obligation,
+        requiredOp,
+        snapshot.record,
+        actionEntity.key,
+      );
+      if (failure !== null) {
+        return { status: 'invalid', reason: `${failure} (obligation '${obligation.id}')` };
+      }
+      if (requiredOp === 'create' || requiredOp === 'update') {
+        const echoFailure = exactValueEchoFailure(requiredOp, action.record, snapshot.record);
+        if (echoFailure !== null) {
+          return { status: 'invalid', reason: `${echoFailure} (obligation '${obligation.id}')` };
+        }
+      }
+      const visible = evidence.find((entry) => {
+        if (entry.record.kind !== UI_VISIBLE_KIND) return false;
+        const payload = payloadOf(entry.record);
+        const entity = normalizeEntityId(payload?.['entityId'], primaryKey);
+        return entity.ok && entity.key === actionEntity.key && payload?.['anchorId'] === anchorId;
+      });
+      if (
+        visible !== undefined &&
+        fieldsDisagreement(
+          payloadOf(visible.record)?.['fields'],
+          payloadOf(snapshot.record)?.['fields'],
+        ) !== null
+      ) {
+        return {
+          status: 'invalid',
+          reason: `visible and persisted fields disagree (obligation '${obligation.id}')`,
+        };
+      }
+      verifiedAnchorRecords.push(action.record, snapshot.record);
+    }
+  }
+  const sameEntity = witnessedPersistence.filter((entry) => {
+    const payload = payloadOf(entry.record);
+    const entity = normalizeEntityId(payload?.['entityId'], primaryKey);
+    return (
+      entity.ok &&
+      entity.key === actionEntity.key &&
+      (actionAnchorId === null || payload?.['anchorId'] === actionAnchorId)
+    );
   });
   if (sameEntity.length === 0) {
     const claimedPersistence = persistence.find((entry) => entry.trust === 'claimed');
@@ -1213,8 +1292,14 @@ function browserAnchoredPersistenceClaim(
   // engine-observed persisted fields is a fabrication signal).
   const visible = evidence.find((entry) => {
     if (entry.record.kind !== UI_VISIBLE_KIND) return false;
-    const entity = normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey);
-    return entity.ok && entity.key === actionEntity.key;
+    const payload = payloadOf(entry.record);
+    const entity = normalizeEntityId(payload?.['entityId'], primaryKey);
+    const visibleAnchorId = payload?.['anchorId'];
+    const sameAnchor =
+      actionAnchorId === null ||
+      visibleAnchorId === actionAnchorId ||
+      (sameEntityActions.length === 1 && visibleAnchorId === undefined);
+    return entity.ok && entity.key === actionEntity.key && sameAnchor;
   });
   if (visible !== undefined) {
     const disagreement = fieldsDisagreement(
@@ -1232,8 +1317,9 @@ function browserAnchoredPersistenceClaim(
   }
 
   const used = [
-    matchingAction.record,
-    matchingPersistence.record,
+    ...(verifiedAnchorRecords.length > 0
+      ? verifiedAnchorRecords
+      : [matchingAction.record, matchingPersistence.record]),
     ...(visible !== undefined ? [visible.record] : []),
   ]
     .map((record) => (typeof record.recordId === 'string' ? record.recordId : ''));

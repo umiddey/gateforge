@@ -225,12 +225,15 @@ describe('engine-owned browser (positive: full five-way binding)', () => {
       // The rendered readback echoes the entered values exactly.
       expect(action.json['renderedFields']).toMatchObject({ first_name: 'Ada', last_name: 'Lovelace' });
       const preObservationId = action.json['preObservationId'] as string;
+      const anchorId = action.json['anchorId'] as string;
+      expect(anchorId).toBeTruthy();
       expect(typeof preObservationId).toBe('string');
       const visible = (await post(scope, '/browser/visible', {
         ...channel,
         claimIds: [CLAIM],
         entityId,
         operation: 'create',
+        anchorId,
       })) as { status: number; json: Record<string, unknown> };
       expect(visible.status).toBe(200);
       expect(visible.json['fields']).toMatchObject({ first_name: 'Ada', last_name: 'Lovelace' });
@@ -249,6 +252,7 @@ describe('engine-owned browser (positive: full five-way binding)', () => {
         entityId,
         claimId: CLAIM,
         preObservationId,
+        anchorId,
       });
       expect(persisted.status, JSON.stringify(persisted.json)).toBe(200);
       // The REAL crud:create verifier is satisfied by engine evidence.
@@ -412,6 +416,7 @@ describe('engine-owned browser (positive: full five-way binding)', () => {
         ...channel,
         claimIds: [CLAIM],
         entityId,
+        anchorId: createdBody['anchorId'],
         operation: 'create',
       });
       expect(createdVisible.status, JSON.stringify(createdVisible.json)).toBe(200);
@@ -429,6 +434,7 @@ describe('engine-owned browser (positive: full five-way binding)', () => {
         entityId,
         claimId: CLAIM,
         preObservationId: createdBody['preObservationId'],
+        anchorId: createdBody['anchorId'],
       });
       expect(persistence.status, JSON.stringify(persistence.json)).toBe(200);
 
@@ -449,6 +455,48 @@ describe('engine-owned browser (positive: full five-way binding)', () => {
       });
       expect(update.status, JSON.stringify(update.json)).toBe(200);
       expect(update.json).toMatchObject({ renderedFields: { first_name: 'Ada', last_name: 'Byron', status: 'active' } });
+      const firstUpdateBody = update.json as Record<string, unknown>;
+      const firstUpdateAnchorId = firstUpdateBody['anchorId'] as string;
+      const firstUpdatePersistence = await post(scope, '/witness/persistence', {
+        ...channel,
+        resourceId: RESOURCE,
+        entityId,
+        claimId: CLAIM,
+        preObservationId: firstUpdateBody['preObservationId'],
+        anchorId: firstUpdateAnchorId,
+      });
+      expect(firstUpdatePersistence.status, JSON.stringify(firstUpdatePersistence.json)).toBe(200);
+      const secondUpdate = await post(scope, '/browser/action', {
+        ...channel,
+        claimIds: [CLAIM],
+        operation: 'update',
+        entityId,
+        fields: { first_name: 'Ada', last_name: 'Shelley' },
+      });
+      expect(secondUpdate.status, JSON.stringify(secondUpdate.json)).toBe(200);
+      const secondUpdateBody = secondUpdate.json as Record<string, unknown>;
+      const secondUpdateAnchorId = secondUpdateBody['anchorId'] as string;
+      const delayedPersistence = await post(scope, '/witness/persistence', {
+        ...channel,
+        resourceId: RESOURCE,
+        entityId,
+        claimId: CLAIM,
+        preObservationId: firstUpdateBody['preObservationId'],
+        anchorId: firstUpdateAnchorId,
+      });
+      expect(delayedPersistence.status).toBe(409);
+      expect((delayedPersistence.json as Record<string, unknown>)['error']).toContain(
+        'before another UI action on the same entity',
+      );
+      const secondUpdatePersistence = await post(scope, '/witness/persistence', {
+        ...channel,
+        resourceId: RESOURCE,
+        entityId,
+        claimId: CLAIM,
+        preObservationId: secondUpdateBody['preObservationId'],
+        anchorId: secondUpdateAnchorId,
+      });
+      expect(secondUpdatePersistence.status, JSON.stringify(secondUpdatePersistence.json)).toBe(200);
       const archive = await post(scope, '/browser/action', {
         ...channel,
         claimIds: [CLAIM],
@@ -456,12 +504,13 @@ describe('engine-owned browser (positive: full five-way binding)', () => {
         entityId,
       });
       expect(archive.status, JSON.stringify(archive.json)).toBe(200);
-      expect(archive.json).toMatchObject({ renderedFields: { first_name: 'Ada', last_name: 'Byron', status: 'archived' } });
+      expect(archive.json).toMatchObject({ renderedFields: { first_name: 'Ada', last_name: 'Shelley', status: 'archived' } });
       const visibleArchive = await post(scope, '/browser/visible', {
         ...channel,
         claimIds: [CLAIM],
         entityId,
         operation: 'delete',
+        anchorId: (archive.json as Record<string, unknown>)['anchorId'],
       });
       expect(visibleArchive.status, JSON.stringify(visibleArchive.json)).toBe(200);
       expect(visibleArchive.json).toMatchObject({ fields: { status: 'archived' } });
@@ -472,8 +521,29 @@ describe('engine-owned browser (positive: full five-way binding)', () => {
         'delete',
         'read',
         'update',
+        'update',
       ]);
       expect(actions.every((record) => record.origin === 'engine-observed')).toBe(true);
+      const firstPersistenceRecord = (firstUpdatePersistence.json as Record<string, unknown>)['recordId'];
+      const secondPersistenceRecord = (secondUpdatePersistence.json as Record<string, unknown>)['recordId'];
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          recordId: firstPersistenceRecord,
+          payload: expect.objectContaining({
+            anchorId: firstUpdateAnchorId,
+            fields: expect.objectContaining({ last_name: 'Byron' }),
+          }),
+        }),
+      );
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          recordId: secondPersistenceRecord,
+          payload: expect.objectContaining({
+            anchorId: secondUpdateAnchorId,
+            fields: expect.objectContaining({ last_name: 'Shelley' }),
+          }),
+        }),
+      );
     } finally {
       if (scope !== null) await scope.dispose();
       await new Promise<void>((resolve) => app.close(() => resolve()));
