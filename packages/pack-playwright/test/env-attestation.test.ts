@@ -95,7 +95,7 @@ describe('assertLoopback (async contract)', () => {
   it('passes literal and resolving loopback bases', async () => {
     await assertLoopback('http://127.0.0.1:18000', 'adapter');
     await assertLoopback(
-      'http://app.example.test:13001',
+      'http://app.localhost:13001',
       'attestation subject',
     );
   });

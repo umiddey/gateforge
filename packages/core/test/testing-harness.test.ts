@@ -445,7 +445,7 @@ describe('changed-file provider stubs', () => {
 
         const local = localStagedProvider(localRepo);
         const github = fakeProvider('github-pr', ['models/accounts.py']);
-        const gitlab = fakeProvider('gitlab-mr', ['models/accounts.py']);
+        const otherCi = fakeProvider('gitlab-mr', ['models/accounts.py']);
         expect(local.changedFiles()).toEqual(github.changedFiles());
         expect(otherCi.changedFiles()).toEqual(github.changedFiles());
 
