@@ -10,6 +10,7 @@
  * `example-e2e` class: CLI process behavior over a real project tree.
  */
 import { existsSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -514,4 +515,55 @@ describe('grading seam (plan §5.3: a mapping declares intent, supplies no resul
       expect(mappedVerdicts.verdicts.every((v) => v.verdict !== 'satisfied' && v.verdict !== 'waived')).toBe(true);
     });
   }, 180_000);
+});
+describe('gateforge tests sync', () => {
+  it('adds static annotation claims and leaves hand-written entries intact', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      repo.writeFiles({
+        'e2e/accounts.spec.js': [
+          "import { test } from 'playwright/test';",
+          "test('creates an account', { annotation: { type: 'gateforge', description: 'tenant.accounts:persistence:read' } }, async () => {});",
+          "test('deletes an account', async () => {});",
+          '',
+        ].join('\n'),
+        '.gateforge/test-map.yml': [
+          'schemaVersion: 1',
+          'tests:',
+          `  - key: ${DELETE_KEY}`,
+          '    selector:',
+          '      runner: playwright',
+          '      project: chromium',
+          '      file: e2e/accounts.spec.js',
+          '      titlePath: [deletes an account]',
+          '    kind: browser-e2e',
+          '    categories: [persistence.delete]',
+          `    claims: [${OBLIGATION_ORDERS}]`,
+          '    reason: Existing deletion journey remains owner-mapped.',
+          '',
+        ].join('\n'),
+      });
+      const before = parseYaml(readFileSync(repo.path('.gateforge/test-map.yml'), 'utf8')) as {
+        tests: Array<Record<string, unknown>>;
+      };
+      const handwritten = before.tests[0];
+      const result = await runCli(repo, ['tests', 'sync']);
+      expect(result.code).toBe(0);
+      const after = parseYaml(readFileSync(repo.path('.gateforge/test-map.yml'), 'utf8')) as {
+        tests: Array<Record<string, unknown>>;
+      };
+      expect(after.tests.find((entry) => entry['key'] === DELETE_KEY)).toEqual(handwritten);
+      const generated = after.tests.find((entry) => entry['source'] === 'annotation');
+      expect(generated).toMatchObject({
+        source: 'annotation',
+        selector: {
+          runner: 'playwright',
+          project: 'chromium',
+          file: 'e2e/accounts.spec.js',
+          titlePath: ['creates an account'],
+        },
+        claims: [OBLIGATION_ACCOUNTS],
+      });
+    });
+  }, 120_000);
 });

@@ -36,10 +36,8 @@ export async function startMarkerServer(
   let nextId = INITIAL.length + 1;
 
   const server = createServer((req, res) => {
-    res.writeHead(200, {
-      'content-type': 'application/json',
-      ...(fingerprint === null ? {} : { [ENV_FINGERPRINT_HEADER]: fingerprint }),
-    });
+    res.setHeader('content-type', 'application/json');
+    if (fingerprint !== null) res.setHeader(ENV_FINGERPRINT_HEADER, fingerprint);
     handle(req, res, accounts, () => String(nextId++));
   });
   await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));

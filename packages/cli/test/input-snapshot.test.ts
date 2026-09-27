@@ -171,6 +171,38 @@ describe('input snapshot (§11.2)', () => {
     });
   });
 
+  it('keeps ignored Python cache bytes strict unless explicitly excluded', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gitignore': '.pytest_cache/\n',
+        '.pytest_cache/v/state': 'first\n',
+      });
+      const stateDir = resolveStateDir(repo.root);
+      const gitDir = resolveGitDir(repo.root, process.env);
+      const beforeStrict = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+      const beforeExcluded = Reflect.apply(
+        computeCandidateTreeId,
+        undefined,
+        [gitDir, repo.root, process.env, stateDir, 'record', [], [], ['.pytest_cache']] as unknown as Parameters<
+          typeof computeCandidateTreeId
+        >,
+      );
+
+      repo.writeFiles({ '.pytest_cache/v/state': 'changed\n' });
+      const afterStrict = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+      const afterExcluded = Reflect.apply(
+        computeCandidateTreeId,
+        undefined,
+        [gitDir, repo.root, process.env, stateDir, 'record', [], [], ['.pytest_cache']] as unknown as Parameters<
+          typeof computeCandidateTreeId
+        >,
+      );
+
+      expect(afterStrict).not.toBe(beforeStrict);
+      expect(afterExcluded).toBe(beforeExcluded);
+    });
+  });
   it('rejects exclusions that overlap source, gate inputs, or symlinks', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

@@ -336,6 +336,32 @@ describe('static discovery', () => {
       ['e2e/zz.spec.ts', 'b'],
     ]);
   });
+  it('reports registration conditions that branch on GATEFORGE environment state', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/env.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "if (process.env.GATEFORGE_STATE_DIR) test('witness branch', () => {});",
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({
+      cwd: root,
+      include: ['e2e/**/*.ts'],
+      exclude: [],
+    });
+    const warnings =
+      'registrationWarnings' in result && Array.isArray(result.registrationWarnings)
+        ? result.registrationWarnings
+        : [];
+    expect(warnings).toEqual([
+      expect.objectContaining({
+        file: 'e2e/env.spec.ts',
+        titlePath: ['witness branch'],
+        environmentVariable: 'GATEFORGE_STATE_DIR',
+      }),
+    ]);
+  });
 });
 
 describe('non-test call shapes stay out of the inventory (consumer E22)', () => {

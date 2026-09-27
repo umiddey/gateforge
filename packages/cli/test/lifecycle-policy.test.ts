@@ -167,7 +167,92 @@ describe('classification policy lifecycleRules pipeline', () => {
       expect(pipeline.policy.blocking).toEqual([]);
     });
   });
+  it('omits operations the detector facts show cannot be performed', async () => {
+    await withTempRepo({}, async (repo) => {
+      installBundledFixture(
+        repo,
+        `schemaVersion: 1
+scanRoots: ['models/**/*.py']
+trustedInternalEntryPoints: []
+internalRules: []
+coverage:
+  - capability: models.sqlalchemy
+    detector: gateforge.pack-sqlalchemy
+    appliesTo: ['models/**/*.py']
+declarations: {}
+volatileFields: []
+`,
+      );
+      repo.writeFiles({
+        '.gateforge/policies.yml': CRUD_POLICIES_YML,
+        'models/accounts.py': `from sqlalchemy import Column, Integer
+from sqlalchemy.orm import declarative_base
 
+Base = declarative_base()
+
+class Account(Base):
+    __tablename__ = 'accounts'
+    __gateforge_delete_semantics__ = 'hard'
+    __gateforge_updateable_fields__ = ()
+    id = Column(Integer, primary_key=True)
+`,
+      });
+      const { pipeline } = await runFixture(repo.root);
+      const accounts = pipeline.policy.obligations.filter((entry) => entry.resourceId === 'tenant.accounts');
+      expect(
+        accounts.map((entry) => entry.contract),
+        JSON.stringify({
+          resources: pipeline.graph.resources.map((entry) => ({
+            id: entry.id,
+            name: entry.name,
+            exposure: entry.classification?.exposure,
+            lifecycle: entry.classification?.lifecycle,
+          })),
+        }),
+      ).toContain('persistence:create');
+      expect(accounts.map((entry) => entry.contract)).toContain('persistence:read');
+      expect(accounts.map((entry) => entry.contract)).not.toContain('persistence:update');
+      expect(accounts.map((entry) => entry.contract)).not.toContain('persistence:delete');
+    });
+  });
+
+  it('blocks when a model updateable field is missing from adapter projection', async () => {
+    await withTempRepo({}, async (repo) => {
+      installBundledFixture(
+        repo,
+        `schemaVersion: 1
+scanRoots: ['models/**/*.py']
+trustedInternalEntryPoints: []
+internalRules: []
+coverage:
+  - capability: models.sqlalchemy
+    detector: gateforge.pack-sqlalchemy
+    appliesTo: ['models/**/*.py']
+declarations: {}
+volatileFields: []
+`,
+      );
+      repo.writeFiles({
+        '.gateforge/policies.yml': CRUD_POLICIES_YML,
+        '.gateforge/adapters/tenant.accounts.mjs': "export default { fields: ['id', 'name'] };\n",
+        'models/accounts.py': `from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class Account(Base):
+    __tablename__ = 'accounts'
+    __gateforge_delete_semantics__ = 'hard'
+    __gateforge_updateable_fields__ = ('description',)
+    id = Column(Integer, primary_key=True)
+    description = Column(String)
+`,
+      });
+      const { pipeline } = await runFixture(repo.root);
+      const contradiction = pipeline.policy.blocking.find((entry) => entry.detail.includes('description'));
+      expect(contradiction, JSON.stringify(pipeline.policy.blocking)).toBeDefined();
+    });
+  });
   it('reports a stale exact-resource rule instead of silently dropping it', async () => {
     await withTempRepo({}, async (repo) => {
       installBundledFixture(

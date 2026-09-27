@@ -8,6 +8,7 @@
  * clears a blocking obligation, a failing diagnostic never changes the
  * E2E exit. Runs REAL pytest against temp repos.
  */
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, type DiagnosticSuite, type GateforgeConfig, type TempRepo } from '@gate-forge/core';
@@ -321,6 +322,29 @@ describe('hard separation: diagnostics never touch the E2E decision (E25)', () =
       expect(cliDiagnose.stdout).toMatch(/advisory alarm/);
       const checkAgain = await runCli(repo, ['check']);
       expect(checkAgain.code).toBe(0);
+    });
+  });
+  it('keeps diagnostic pytest imports from writing bytecode into the repository', async () => {
+    await withTempRepo({}, async (repo) => {
+      const bytecodeSetting = process.env['PYTHONDONTWRITEBYTECODE'];
+      delete process.env['PYTHONDONTWRITEBYTECODE'];
+      try {
+        repo.writeFiles({
+          '.gateforge.yml': projectYaml([suite('backend')]),
+          'tests/helper.py': 'value = 7\n',
+          'tests/test_import.py': 'import helper\n\ndef test_import():\n    assert helper.value == 7\n',
+        });
+        const run = await diagnose(repo, null);
+        expect(run.exitCode).toBe(0);
+        const cacheDirectory = join(repo.root, 'tests', '__pycache__');
+        const bytecode = existsSync(cacheDirectory)
+          ? readdirSync(cacheDirectory).filter((name) => name.startsWith('helper.') && name.endsWith('.pyc'))
+          : [];
+        expect(bytecode).toEqual([]);
+      } finally {
+        if (bytecodeSetting === undefined) delete process.env['PYTHONDONTWRITEBYTECODE'];
+        else process.env['PYTHONDONTWRITEBYTECODE'] = bytecodeSetting;
+      }
     });
   });
 });

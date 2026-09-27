@@ -306,6 +306,69 @@ describe('evaluateObligation — satisfied requires complete witnessed evidence 
     expect(outcome.reason).toContain("'create'");
     expect(outcome.reason).toContain("'persistence:update' requires 'update'");
   });
+  it('grades two updates against their own anchor snapshots, independent of record order', () => {
+    const firstAction = witnessedAction({
+      payload: { operation: 'update', entityId: 'acc-1', anchorId: 'revision-2', fields: { name: 'Revision 2' } },
+    });
+    const secondAction = witnessedAction({
+      payload: { operation: 'update', entityId: 'acc-1', anchorId: 'revision-3', fields: { name: 'Revision 3' } },
+    });
+    const firstSnapshot = witnessedPersistence({
+      payload: {
+        entityId: 'acc-1',
+        found: true,
+        anchorId: 'revision-2',
+        fields: { name: 'Revision 2' },
+        before: { found: true, fields: { name: 'Initial' } },
+      },
+    });
+    const secondSnapshot = witnessedPersistence({
+      payload: {
+        entityId: 'acc-1',
+        found: true,
+        anchorId: 'revision-3',
+        fields: { name: 'Revision 3' },
+        before: { found: true, fields: { name: 'Revision 2' } },
+      },
+    });
+    for (const records of [
+      [firstAction, secondAction, firstSnapshot, secondSnapshot],
+      [secondAction, firstAction, firstSnapshot, secondSnapshot],
+    ]) {
+      const outcome = evaluateObligation(obligation, {
+        claims: [makeClaim('test-1')],
+        records,
+        waivers: [],
+        classification,
+        now: NOW,
+      });
+      expect(outcome.verdict).toBe('satisfied');
+    }
+  });
+
+  it('keeps a genuinely wrong later update value blocking', () => {
+    const action = witnessedAction({
+      payload: { operation: 'update', entityId: 'acc-1', anchorId: 'revision-3', fields: { name: 'Revision 3' } },
+    });
+    const snapshot = witnessedPersistence({
+      payload: {
+        entityId: 'acc-1',
+        found: true,
+        anchorId: 'revision-3',
+        fields: { name: 'Wrong value' },
+        before: { found: true, fields: { name: 'Revision 2' } },
+      },
+    });
+    const outcome = evaluateObligation(obligation, {
+      claims: [makeClaim('test-1')],
+      records: [action, snapshot],
+      waivers: [],
+      classification,
+      now: NOW,
+    });
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('EVIDENCE_VALUE_MISMATCH');
+  });
 });
 
 describe('evaluateObligation — persistence postconditions, owner-owned (audit round 5)', () => {
