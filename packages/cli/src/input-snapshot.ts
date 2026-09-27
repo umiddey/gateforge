@@ -1,7 +1,8 @@
 /**
- * Deterministic input snapshot (plan §11.2): the bytes the pipeline
- * examines plus the gate context it produces, hashed into one digest
- * the v2 attestation binds evidence to.
+ * Deterministic input snapshot (plan §11.2): the captured candidate
+ * inventory plus gate context. Every captured file contributes to the
+ * evidence digest. The exact candidate tree id remains a separate
+ * receipt binding.
  *
  * The snapshot covers:
  * - all Git-tracked working-tree files (NUL-delimited inventory — never
@@ -25,9 +26,9 @@
  * unresolvable links, directory links, and submodules cannot be captured
  * and fail closed with {@link UnsupportedSnapshotError} — never a silent
  * omission. Only the actual resolved run-state directory (`--out`) is
- * excluded; `.git` internals, absolute paths, timestamps, run tokens, and
- * verifier keys never enter the digest. There is no "ignore source
- * changes" flag.
+ * excluded from the evidence digest; `.git` internals, absolute paths,
+ * timestamps, run tokens, and verifier keys never enter it. There is no
+ * "ignore source changes" flag.
  *
  * Repositories without usable Git inventory keep discovery working, but
  * evidence authorization fails with a `snapshot-unavailable` diagnostic
@@ -35,7 +36,7 @@
  * of scope.
  */
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import {
@@ -47,9 +48,15 @@ import {
 } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { expandIncludePaths } from './glob.js';
+import {
+  isRuntimeReusePath,
+  RuntimeReuseBoundaryError,
+  type RuntimeReuseMount,
+  validateRuntimeReuseMounts,
+} from './runtime-reuse.js';
 
 /** Snapshot format version hashed into every digest. */
-export const INPUT_SNAPSHOT_VERSION = 1;
+export const INPUT_SNAPSHOT_VERSION = 3;
 
 /**
  * Verification format bound into the digest: the verdict semantics this
@@ -108,6 +115,7 @@ export const PACK_CONFIGS = ['.gateforge/planes.json', '.gateforge/endpoints.jso
 export const MANIFEST_NAMES = [
   'package.json',
   'package-lock.json',
+  'npm-shrinkwrap.json',
   'pnpm-lock.yaml',
   'yarn.lock',
   'pyproject.toml',
@@ -187,11 +195,13 @@ export interface SnapshotGateContext {
 
 /** The complete snapshot: inventory + context + digest. */
 export interface InputSnapshot {
-  snapshotVersion: 1;
+  snapshotVersion: 3;
   files: SnapshotFileEntry[];
   gateContext: SnapshotGateContext;
   verifierFormat: string;
-  /** 64-char lowercase hex digest over the canonical snapshot body. */
+  /** 64-char lowercase digest over evidence-relevant files and gate context. */
+  evidenceInputDigest: string;
+  /** Compatibility name used by receipt and execution-result envelopes. */
   inputDigest: string;
 }
 
@@ -213,6 +223,10 @@ export interface ComputeSnapshotInput {
   plugins?: Array<{ id: string; version: string }>;
   /** Deterministic digest of staged-runtime reuse bytes, when configured. */
   runtimeReuseDigest?: string | null;
+  /** Exact owner-approved external dependency mounts in a staged checkout. */
+  runtimeReuseMounts?: readonly RuntimeReuseMount[];
+  /** Owner-declared documentation folders approved by the external policy pin. */
+  docsExclusions?: readonly string[];
 }
 
 /**
@@ -379,7 +393,12 @@ function entryForPath(cwd: string, path: string): SnapshotFileEntry {
           'explicit unsupported-snapshot block',
       );
     }
-    return { path, type: 'file', contentDigest: hashEntry('file', path, bytes) };
+    const mode = (stat.mode & 0o111) !== 0 ? 'executable\0' : 'regular\0';
+    return {
+      path,
+      type: 'file',
+      contentDigest: hashEntry('file', path, Buffer.concat([Buffer.from(mode, 'utf8'), bytes])),
+    };
   }
   throw new UnsupportedSnapshotError(
     `input snapshot rejects non-file input '${path}'; explicit unsupported-snapshot block`,
@@ -433,7 +452,7 @@ export function normalizeRepoModule(module: string): string | null {
  *   string[]: deduplicated, codepoint-sorted posix paths plus explicit
  *   absence markers (`absent:<path>`).
  */
-function collectDeclaredInputs(cwd: string, config: GateforgeConfig): string[] {
+export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): string[] {
   const paths = new Set<string>();
 
   // Configured scan inputs even when Git ignores them (the expansion
@@ -457,6 +476,9 @@ function collectDeclaredInputs(cwd: string, config: GateforgeConfig): string[] {
     ...(config.runtime === undefined ? [] : [toPosix(config.runtime)]),
     ...PACK_CONFIGS,
   ];
+  if (existsSync(join(cwd, '.gateforge/docs-exclusions.yml'))) {
+    explicitFiles.push('.gateforge/docs-exclusions.yml');
+  }
   for (const candidate of explicitFiles) {
     if (candidate.length > 0) paths.add(candidate);
   }
@@ -803,7 +825,7 @@ export function buildGateContext(
  *   gateContext: canonical gate context.
  *
  * Returns:
- *   string: 64-char lowercase hex input digest.
+ *   string: 64-char lowercase hex evidence-input digest.
  */
 export function digestSnapshot(files: readonly SnapshotFileEntry[], gateContext: SnapshotGateContext): string {
   return sha256Canonical({
@@ -827,7 +849,8 @@ export function digestSnapshot(files: readonly SnapshotFileEntry[], gateContext:
  *   obligations, httpRoutes, and pinned plugins.
  *
  * Returns:
- *   InputSnapshot: files, gateContext, verifierFormat, and inputDigest.
+ *   InputSnapshot: full inventory, gate context, verifier format, and
+ *   evidenceInputDigest (also exposed as the legacy inputDigest name).
  *
  * Throws:
  *   SnapshotUnavailableError: no usable Git inventory.
@@ -836,11 +859,13 @@ export function digestSnapshot(files: readonly SnapshotFileEntry[], gateContext:
  *   UsageError: unsafe output overlap (exit 2).
  */
 export function computeInputSnapshot(input: ComputeSnapshotInput): InputSnapshot {
-  const declared = collectDeclaredInputs(input.cwd, input.config);
-  assertOutputDisjoint(input.cwd, input.stateDir, declared);
-  const git = collectGitInventory(input.cwd);
-  const inventory = [...new Set([...declared, ...git.inventory])].sort(compareStrings);
-  const files = buildFileEntries(input.cwd, inventory, git.tracked, input.stateDir);
+  const files = collectInputFiles(
+    input.cwd,
+    input.config,
+    input.stateDir,
+    input.runtimeReuseMounts,
+    input.docsExclusions,
+  );
   const gateContext = buildGateContext(
     input.config,
     input.plugins,
@@ -849,12 +874,14 @@ export function computeInputSnapshot(input: ComputeSnapshotInput): InputSnapshot
     input.httpRoutes ?? [],
     input.runtimeReuseDigest,
   );
+  const evidenceInputDigest = digestSnapshot(files, gateContext);
   return {
-    snapshotVersion: 1,
+    snapshotVersion: INPUT_SNAPSHOT_VERSION,
     files,
     gateContext,
     verifierFormat: GATEFORGE_VERIFIER_FORMAT,
-    inputDigest: digestSnapshot(files, gateContext),
+    evidenceInputDigest,
+    inputDigest: evidenceInputDigest,
   };
 }
 
@@ -875,11 +902,43 @@ export function collectInputFiles(
   cwd: string,
   config: GateforgeConfig,
   stateDir: string,
+  runtimeReuseMounts: readonly RuntimeReuseMount[] = [],
+  docsExclusions: readonly string[] = [],
 ): SnapshotFileEntry[] {
   const declared = collectDeclaredInputs(cwd, config);
   assertOutputDisjoint(cwd, stateDir, declared);
+  const statePrefix = toPosix(relative(resolve(cwd), resolve(stateDir)));
+  for (const folder of docsExclusions) {
+    const segments = folder.split('/');
+    if (
+      folder.length === 0 || folder.startsWith('/') || folder.includes('\\') ||
+      segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
+    ) {
+      throw new UsageError(`invalid approved documentation exclusion '${folder}' (fail closed)`);
+    }
+    if (
+      statePrefix !== '' &&
+      (statePrefix === folder || statePrefix.startsWith(`${folder}/`) || folder.startsWith(`${statePrefix}/`))
+    ) {
+      throw new UsageError(`documentation exclusion '${folder}' overlaps the run-state directory (fail closed)`);
+    }
+    if (declared.some((path) => !path.startsWith('absent:') && (path === folder || path.startsWith(`${folder}/`)))) {
+      throw new UsageError(`documentation exclusion '${folder}' overlaps a configured scan or gate input (fail closed)`);
+    }
+  }
+  try {
+    validateRuntimeReuseMounts(cwd, runtimeReuseMounts);
+  } catch (error) {
+    if (error instanceof RuntimeReuseBoundaryError) {
+      throw new UnsupportedSnapshotError(`${error.message}; explicit unsupported-snapshot block`);
+    }
+    throw error;
+  }
   const git = collectGitInventory(cwd);
-  const inventory = [...new Set([...declared, ...git.inventory])].sort(compareStrings);
+  const inventory = [...new Set([...declared, ...git.inventory])]
+    .filter((path) => !isRuntimeReusePath(path.replace(/^absent:/, ''), runtimeReuseMounts))
+    .filter((path) => path.startsWith('absent:') || !docsExclusions.some((folder) => path === folder || path.startsWith(`${folder}/`)))
+    .sort(compareStrings);
   return buildFileEntries(cwd, inventory, git.tracked, stateDir);
 }
 

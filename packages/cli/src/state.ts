@@ -41,6 +41,7 @@ import {
   type ResourceGraph,
   type RunManifest,
 } from '@gate-forge/core';
+import type { InputSnapshot } from './input-snapshot.js';
 import { UsageError } from './errors.js';
 
 /** Default run-state directory, repo-root-relative. */
@@ -172,6 +173,11 @@ function writeStateFile(stateDir: string, name: string, value: JsonValue): void 
 /** Persists the validated run manifest. */
 export function writeManifest(stateDir: string, manifest: RunManifest): void {
   writeStateFile(stateDir, 'manifest.json', manifest as unknown as JsonValue);
+}
+
+/** Persists the input inventory for authenticated stale-input diagnosis. */
+export function writeInputSnapshot(stateDir: string, snapshot: InputSnapshot): void {
+  writeStateFile(stateDir, 'input-snapshot.json', snapshot as unknown as JsonValue);
 }
 
 /** Persists the suite-visible obligations document (sorted by id). */

@@ -1077,6 +1077,9 @@ export type { WaiverCounts } from './report/index.js';
 export type { RenderRunOptions } from './report/index.js';
 /** Effective evaluation scope carried by run reports (plan §12.4). */
 export type { ScopeMetadata } from './report/index.js';
+/** Measured supervised work and repository debt carried by run reports. */
+export type { RunExecutionSummary } from './report/index.js';
+export type { DiagnosticContext } from './report/index.js';
 
 // ---------------------------------------------------------------------------
 // Fixture harness (G7) — deterministic temp repos, injected clock/env,

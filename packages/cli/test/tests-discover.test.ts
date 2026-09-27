@@ -110,6 +110,59 @@ function sourceSnapshot(repo: TempRepo): Map<string, string> {
 }
 
 describe('gateforge tests discover', () => {
+  it('lists missing UI surfaces without loading or executing consumer tests', async () => {
+    await withTempRepo({}, async (repo) => {
+      const files: Record<string, string> = {};
+      for (let index = 0; index < 40; index += 1) {
+        const name = `e2e/missing-${String(index).padStart(2, '0')}.spec.ts`;
+        files[name] = [
+          "import { test as gateforgeTest } from '@gate-forge/pack-playwright';",
+          "const test = gateforgeTest.extend({});",
+          "throw new Error('SURFACE_DOCTOR_EXECUTED');",
+          `test('missing surface ${String(index)}', async ({ evidence }) => {`,
+          "  await evidence.ui.create({ fields: { name: 'example' } });",
+          '});',
+          '',
+        ].join('\n');
+      }
+      files['e2e/helper-only.spec.ts'] = [
+        "import { test } from '@gate-forge/pack-playwright';",
+        "test('helper only', async ({ evidence }) => { await evidence.http.observe({ method: 'GET', path: '/health' }); });",
+        '',
+      ].join('\n');
+      for (const version of [1, 2, 3]) {
+        files[`e2e/surface-v${String(version)}.spec.ts`] = [
+          "import { test as gateforgeTest } from '@gate-forge/pack-playwright';",
+          `const test = gateforgeTest.extend({ surface: { schemaVersion: ${String(version)} } });`,
+          `test('valid surface v${String(version)}', async ({ evidence }) => {`,
+          "  await evidence.ui.create({ fields: { name: 'example' } });",
+          '});',
+          '',
+        ].join('\n');
+      }
+      repo.writeFiles(files);
+
+      const result = await runCli(repo, ['tests', 'surface-doctor', '--json']);
+      expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
+      expect(result.stderr).not.toContain('SURFACE_DOCTOR_EXECUTED');
+      const report = JSON.parse(result.stdout) as {
+        missingSurface: Array<{ file: string; title: string }>;
+        action: string;
+      };
+      expect(report.missingSurface).toHaveLength(40);
+      expect(report.missingSurface[0]).toMatchObject({ file: 'e2e/missing-00.spec.ts', title: 'missing surface 0' });
+      expect(report.missingSurface[39]).toMatchObject({ file: 'e2e/missing-39.spec.ts', title: 'missing surface 39' });
+      expect(report.action).toMatch(/test\.extend\(\{ surface/);
+
+      const human = await runCli(repo, ['tests', 'surface-doctor']);
+      expect(human.code).toBe(0);
+      expect(human.stdout).toContain('UI surface diagnostic: 40 test(s) need a surface descriptor');
+      expect(human.stdout).toContain('e2e/missing-39.spec.ts: missing surface 39');
+      expect(human.stdout).toContain('action: Add a surface descriptor with test.extend({ surface: ... })');
+      expect(human.stderr).not.toContain('SURFACE_DOCTOR_EXECUTED');
+    });
+  });
+
   it('writes a deterministic catalog under run state and never touches test files', async () => {
     await withTempRepo({}, async (repo) => {
       installConsumer(repo);

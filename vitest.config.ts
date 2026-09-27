@@ -4,6 +4,8 @@ import { defineConfig } from 'vitest/config';
 // config never needs edits when new packages appear.
 export default defineConfig({
   test: {
+    // Build shared workspace dists before any project worker starts.
+    globalSetup: ['packages/pack-playwright/test/global-setup.ts'],
     projects: ['packages/*/vitest.config.ts'],
   },
 });

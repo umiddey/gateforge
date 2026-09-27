@@ -11,7 +11,7 @@
  */
 import { cpSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { CAUSE_NEXT_ACTIONS, type RuntimeConfig } from '@gate-forge/core';
+import { CAUSE_NEXT_ACTIONS } from '@gate-forge/core';
 import { parseArgs, stringFlag } from '../args.js';
 import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
@@ -24,10 +24,11 @@ import {
   prepareRuntime,
   startRuntimeServices,
   stopRuntimeChildren,
-  runtimeReuseDigest as computeRuntimeReuseDigest,
   type RunningRuntime,
 } from '../runtime.js';
+import { digestRuntimeReuseMounts, type RuntimeReuseMount } from '../runtime-reuse.js';
 import {
+  assertRuntimeReuseOwnerApproval,
   freezeStagedCandidate,
   materializeStagedCandidate,
   recheckStagedCandidate,
@@ -36,10 +37,12 @@ import {
   type StagedCandidate,
 } from '../staged-candidate.js';
 import { resolveStateDir } from '../state.js';
+import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { runCheckGate } from './check.js';
 import { runSupervisedTestGates } from './test-gates.js';
 import { evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
+import { loadDocsExclusions } from '../docs-exclusions.js';
 
 export const PRE_COMMIT_USAGE =
   'usage: gateforge pre-commit --scope staged|full\n' +
@@ -59,6 +62,7 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
   if (scope !== 'staged' && scope !== 'full') {
     throw new UsageError("pre-commit: --scope must be 'staged' or 'full'");
   }
+  const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [resolveStateDir(io.cwd)]);
 
   let frozen: StagedCandidate;
   try {
@@ -71,7 +75,7 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
   const previousCwd = process.cwd();
   let runtime: RunningRuntime | null = null;
   let runtimeReuseDigest: string | null = null;
-  let preparedRuntime: RuntimeConfig | null = null;
+  let runtimeReuseMounts: RuntimeReuseMount[] = [];
   // Interruption safety: while candidate services are alive, SIGINT/
   // SIGTERM tear the process groups down BEFORE the gate dies (the
   // handlers restore the default disposition and re-raise so the shell
@@ -102,6 +106,7 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     copyStateIfPresent(io.cwd, checkoutDir);
     const candidateStateDir = resolveStateDir(checkoutDir);
     const checkoutConfig = loadConfigAt(checkoutDir);
+    const docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
     // The runtime document contains executable commands. Evaluate the same
     // owner-approved policy gate used by supervised runs BEFORE any prepare
     // or service command can start in the staged checkout.
@@ -113,20 +118,20 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     const policyGate = evaluateApprovedPolicy(
       policyResolution,
       trustedPolicyDigestForConfig(checkoutDir, checkoutConfig),
-      checkoutConfig.enforcement?.strictE2E === true,
+      checkoutConfig.enforcement?.strictE2E === true || docsExclusions.length > 0,
     );
     if (policyGate.status === 'blocked') {
       return renderCandidateBlock(io, policyGate.detail, policyGate.nextAction);
     }
     const runtimeDoc = loadRuntimeConfigAt(checkoutDir, checkoutConfig.runtime);
     if (runtimeDoc !== null) {
-      preparedRuntime = runtimeDoc;
+      assertRuntimeReuseOwnerApproval(frozen.approvedReusePaths, runtimeDoc.prepare?.reuse ?? []);
       // Armed BEFORE preparation: a SIGINT during a long prepare (or a
       // readiness wait) still tears the detached process groups down.
       armInterruptHandlers();
-      runtimeReuseDigest = (
-        await prepareRuntime(io.cwd, checkoutDir, runtimeDoc, io, candidateStateDir)
-      ).reuseDigest;
+      const prepared = await prepareRuntime(io.cwd, checkoutDir, runtimeDoc, io, candidateStateDir);
+      runtimeReuseDigest = prepared.reuseDigest;
+      runtimeReuseMounts = prepared.reuseMounts;
       runtime = await startRuntimeServices(checkoutDir, runtimeDoc, io, candidateStateDir);
     }
     process.chdir(checkoutDir);
@@ -154,7 +159,15 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     const candidateTreeId =
       checkoutGitDir === null
         ? undefined
-        : computeCandidateTreeId(checkoutGitDir, checkoutDir, io.env, candidateStateDir, 'record');
+        : computeCandidateTreeId(
+            checkoutGitDir,
+            checkoutDir,
+            io.env,
+            candidateStateDir,
+            'record',
+            runtimeReuseMounts,
+            docsExclusions,
+          );
     const runCode = await runSupervisedTestGates(candidateIo, {
       out: undefined,
       format: 'text',
@@ -167,8 +180,9 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
       fixedCandidateTreeId: candidateTreeId,
       fixedParentSha: frozen.headSha,
       runtimeReuseDigest,
-      runtimeReuseCheck:
-        preparedRuntime === null ? undefined : () => computeRuntimeReuseDigest(io.cwd, preparedRuntime as RuntimeConfig),
+      runtimeReuseMounts,
+      runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
+      verifierKeyring,
     });
 
     const checkCode =
@@ -178,7 +192,11 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
             requireE2E: true,
             format: 'text',
             fixedChangedFiles: frozen.changedPaths,
+            fixedCandidateTreeId: candidateTreeId ?? null,
             runtimeReuseDigest,
+      runtimeReuseMounts,
+      runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
+      verifierKeyring,
           })
         : runCode;
 

@@ -45,9 +45,11 @@
  * session's engine browser context.
  */
 import type { Page, TestInfo } from 'playwright/test';
+import { createRequire } from 'node:module';
 import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
 import {
   SURFACE_DESCRIPTOR_VERSION,
+  SURFACE_DESCRIPTOR_VERSION_2,
   declaredSurfaceFields,
   validateSurface,
   type SurfaceDescriptor,
@@ -55,7 +57,10 @@ import {
 import type { SessionCredential } from '../witness/types.js';
 import { WitnessClient } from './witness-client.js';
 
-export { SURFACE_DESCRIPTOR_VERSION, type SurfaceDescriptor };
+const require = createRequire(import.meta.url);
+const PACK_VERSION = (require('../../package.json') as { version: string }).version;
+
+export { SURFACE_DESCRIPTOR_VERSION, SURFACE_DESCRIPTOR_VERSION_2, type SurfaceDescriptor };
 
 /** A UI-action receipt: the ONLY token `visible`/`persistence` accept. */
 export interface Receipt {
@@ -202,6 +207,14 @@ async function resolveSessionCredential(
   testInfo: { testId: string; workerIndex: number; title: string },
   timeoutMs: number,
 ): Promise<SessionCredential> {
+  if (typeof witness.resolveSession !== 'function') {
+    const cliVersion = process.env['GATEFORGE_CLI_VERSION'] ?? 'unknown';
+    throw new Error(
+      `GATEFORGE_PACKAGE_INCOMPATIBLE: @gate-forge/pack-playwright ${PACK_VERSION} cannot use ` +
+        `the session protocol from @gate-forge/cli ${cliVersion}; install matching Gateforge packages ` +
+        'that declare the same supervised-fixture contract',
+    );
+  }
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const resolved = await witness.resolveSession({
@@ -238,13 +251,9 @@ async function resolveSessionCredential(
  *     the engine drives its own page; the worker page is never an
  *     evidence channel.
  *   testInfo: the running test's info (annotations, testId, workerIndex).
- *   surface: REQUIRED consumer-declared {@link SurfaceDescriptor} — the
- *     pack carries no application-specific selectors (plan Phase 1
- *     item 7). Registered with the witness; the ENGINE drives it
- *     against the provisioned attested subject (fake-frontend fix:
- *     the driven origin comes from trusted witness configuration,
- *     never from suite input — there is no app-base parameter here
- *     by design).
+ *   surface: optional consumer-declared {@link SurfaceDescriptor}.
+ *     It is validated and registered only when a UI primitive is called;
+ *     non-UI channels do not need application selectors.
  *   client: witness transport override (tests inject their own).
  *   session: pre-resolved session credential (harnesses that opened the
  *     session themselves); default resolves it from the supervisor
@@ -257,9 +266,8 @@ async function resolveSessionCredential(
  *   Promise<EvidenceApi>: the frozen primitive surface.
  *
  * Throws:
- *   Error: on a missing/outdated surface descriptor (migration error
- *     naming the new required `surface` parameter), when the test
- *     declares no gateforge claim and its session carries no
+ *   Error: when a UI primitive is called without a valid surface, when
+ *     the test declares no gateforge claim and its session carries no
  *     supervisor-registered (mapped) claims, when no app base or witness
  *     or OPEN session is wired, or when an action/verification fails
  *     fail-closed.
@@ -280,23 +288,6 @@ export async function createEvidence({
   sessionResolveTimeoutMs?: number;
 }): Promise<EvidenceApi> {
   void page; // the engine drives its own page; the worker page is never evidence
-  // Versioned compatibility (plan Phase 1 item 7): the old no-surface
-  // shape carried Accounts selectors INSIDE the pack — that behavior was
-  // moved to the consumer. Never silently keep it.
-  if (surface === undefined || surface === null) {
-    throw new Error(
-      "createEvidence now requires a consumer-declared 'surface' descriptor " +
-        `(SurfaceDescriptor, schemaVersion ${String(SURFACE_DESCRIPTOR_VERSION)}): pass the ` +
-        'declarative surface (list page, row/field selectors, form templates, archive control, ' +
-        'status values) with the evidence call or via `test.extend({ surface })`. The previous ' +
-        'Accounts-specific fixture was removed from the pack (plan Phase 1 item 7) — see ' +
-        'example/e2e/accounts-surface.js for a complete consumer declaration',
-    );
-  }
-  // Worker-side structural validation (fail fast with the exact missing
-  // piece); the ENGINE re-validates authoritatively at registration —
-  // worker approval never substitutes for it.
-  const descriptor = validateSurface(surface);
   const testId = testInfo.testId;
   // The witness transport is built LAZILY: supplying a pre-resolved
   // session credential (harnesses) must not require witness env wiring
@@ -350,6 +341,30 @@ export async function createEvidence({
     sessionId: credential.sessionId,
     sessionToken: credential.sessionToken,
   };
+  let validatedSurface: SurfaceDescriptor | null = null;
+  /**
+   * Resolves and validates the consumer surface for a UI operation.
+   *
+   * Returns:
+   *   SurfaceDescriptor: the validated consumer surface.
+   *
+   * Throws:
+   *   Error: when the consumer did not provide a surface descriptor.
+   */
+  function requireSurface(): SurfaceDescriptor {
+    if (validatedSurface !== null) return validatedSurface;
+    if (surface === undefined || surface === null) {
+      throw new Error(
+        'evidence.ui requires a consumer-declared SurfaceDescriptor: extend the gateforge runner ' +
+          'with `test.extend({ surface })` before the first UI operation. The pack ships no ' +
+          'application selectors; see example/e2e/accounts-surface.js',
+      );
+    }
+    // Worker validation improves diagnostics; the witness validates it
+    // again at registration and remains the authority for browser proof.
+    validatedSurface = validateSurface(surface);
+    return validatedSurface;
+  }
   // Register the consumer surface with the witness lazily on the first
   // UI call (construction performs no I/O): the engine validates it and
   // drives every later action against the provisioned attested subject.
@@ -359,6 +374,7 @@ export async function createEvidence({
   let surfaceRegistered = false;
   async function ensureSurfaceRegistered(): Promise<void> {
     if (surfaceRegistered) return;
+    const descriptor = requireSurface();
     await witness().registerBrowserSurface({
       ...sessionChannel,
       testId,
@@ -403,7 +419,7 @@ export async function createEvidence({
 
   const ui = {
     async create(input: { fields: Record<string, string> }): Promise<Receipt> {
-      const fields = declaredSurfaceFields('ui.create', input.fields, descriptor.create.fields);
+      const fields = declaredSurfaceFields('ui.create', input.fields, requireSurface().create.fields);
       const resourceId = resourceIdOfClaim(claims[0] as string);
       const { receipt } = await engineAction('create', resourceId, { fields });
       return receiptBrand.stamp(receipt);
@@ -421,7 +437,7 @@ export async function createEvidence({
       input: { entityId: string; fields: Record<string, string> },
     ): Promise<Receipt> {
       const { entityId } = input;
-      const fields = declaredSurfaceFields('ui.update', input.fields, descriptor.edit.fields);
+      const fields = declaredSurfaceFields('ui.update', input.fields, requireSurface().edit.fields);
       const resourceId = resourceIdOfClaim(claims[0] as string);
       const { receipt } = await engineAction('update', resourceId, { fields, entityId });
       return receiptBrand.stamp(receipt);

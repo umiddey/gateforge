@@ -34,6 +34,7 @@ import {
   verifyGateReceipt,
   type BlockingEntry,
   type CauseCode,
+  type Claim,
   type ExecutionResult,
   type ExecutedOutcome,
   type GateReceipt,
@@ -50,6 +51,7 @@ import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';
 import { normalizeRepoModule } from './input-snapshot.js';
+import { DOCS_EXCLUSIONS_PATH } from './docs-exclusions.js';
 import type { GateforgeConfig } from '@gate-forge/core';
 import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
@@ -161,12 +163,16 @@ export function computeTrustedPolicyDigest(
     configPaths.runtimePolicy === undefined || configPaths.runtimePolicy === null
       ? { name: '.gateforge/runtime.yml (absent)', bytes: '' }
       : entry(configPaths.runtimePolicy, configPaths.runtimePolicy, true);
+  const docsExclusionsEntry = existsSync(join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/')))
+    ? [entry(DOCS_EXCLUSIONS_PATH, DOCS_EXCLUSIONS_PATH, true)]
+    : [];
   return trustedPolicyDigest([
     entry('.gateforge.yml', configPaths.config, true),
     entry(configPaths.policies, configPaths.policies, true),
     entry(configPaths.classificationPolicy, configPaths.classificationPolicy, true),
     behaviorEntry,
     runtimeEntry,
+    ...docsExclusionsEntry,
     entry('.gateforge/test-map.yml', configPaths.sidecar, false),
     ...adapterEntries,
     ...waiverEntries,
@@ -556,6 +562,8 @@ export interface SealExecutionResultInput {
   catalog: TestCatalog;
   /** Planned rows (from {@link planExpectedSet}). */
   plannedRows: readonly PlannedRow[];
+  /** Current native annotation claims sealed for later check inventory. */
+  claimInventory?: readonly Claim[];
   /** The adapter's structured envelope. */
   envelope: RunnerExecutionEnvelope;
   /** Parsed runner-outcomes document (input; may be null when missing). */
@@ -595,8 +603,8 @@ export interface SealedExecutionResult {
  * result with `complete: true` and a clean gate.
  *
  * Args:
- *   input: run identity, digests, planned rows, envelope, and outcomes
- *     document.
+ *   input: run identity, digests, planned rows, native claim inventory,
+ *     envelope, and outcomes document.
  *
  * Returns:
  *   SealedExecutionResult: the validated record + digest.
@@ -641,6 +649,7 @@ export function sealExecutionResult(input: SealExecutionResultInput): SealedExec
     selection,
     selectionDigest: selectionDigestOf(selection),
     catalogDigest: sha256Canonical(input.catalog as unknown as Record<string, never>),
+    ...(input.claimInventory !== undefined ? { claimInventory: input.claimInventory } : {}),
     planned: input.plannedRows.map((row) => row.planned),
     outcomes: executed,
     ...(input.enumerationDigest !== undefined ? { enumerationDigest: input.enumerationDigest } : {}),
@@ -670,6 +679,8 @@ export function sealExecutionResult(input: SealExecutionResultInput): SealedExec
 export interface IssueGateReceiptInput {
   /** Witness verifier key (the SAME authority as witness records). */
   verifierKey: string;
+  /** Non-secret id of the key that signs this receipt. */
+  verifierKeyId?: string;
   /** Run manifest identity. */
   runId: string;
   /** Fresh trusted invocation id. */
@@ -786,6 +797,7 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
     schemaVersion: 1,
     receiptVersion: 2,
     receiptId: randomUUID(),
+    ...(input.verifierKeyId !== undefined ? { verifierKeyId: input.verifierKeyId } : {}),
     runId: input.runId,
     invocationId: input.invocationId,
     inputDigest: input.inputDigest,

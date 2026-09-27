@@ -4,6 +4,7 @@ The gateforge command-line interface: initialize a project, discover
 resources and classification signals, inspect automatic decisions, reuse a
 repository's existing tests, evaluate obligations, run the supervised E2E
 gate, enforce the exact staged candidate, and maintain baselines.
+**0.7.0 vs. published 0.6.3:** external key ring, owner-approved docs exclusions, result-only runs, surface-doctor, protocol-based package-compatibility guard, diagnostic context, trusted `baseURL`/`storageState`, and the shared-dist spool race fix.
 
 Just added a new table or endpoint and the gate is blocking? Run
 `gateforge next` (or `gateforge next --json`) — it prints the ONE blocking
@@ -17,6 +18,9 @@ never rewrite existing journeys, never `tests mark` as proof.
   Strongest: the engine types the form itself. `gateforge init`
   scaffolds the directory README. Multi-screen creates use surface v2
   wizard steps (`create.steps[]`; see `example/e2e/vendor-wizard-surface.js`).
+  Surface v3 adds card support through row-relative `idLocator` and
+  `fieldLocators`; existing cell-index descriptors remain valid. Non-UI
+  evidence tests do not need a surface descriptor.
 - **Observe (`--proof observe`).** Existing suite-driven Playwright
   tests keep driving `page`; the witness watches their session-proxy
   traffic and reads state itself through the adapter. Map them
@@ -32,7 +36,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
-| `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence-only policy, overlay proof), and write `.gateforge.yml`, `.gateforge/policies.yml`, `.gateforge/classification-policy.yml`, `.gateforge/baselines/obligations.json`, `GATEFORGE.md`, and (overlay proof only) `tests/e2e/gateforge/README.md`. Idempotent — never overwrites existing files. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block and refuses unavailable required proof channels. | 0/1/2 |
+| `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e] [--docs-exclude <folder,...>] [--confirm-doc-exclusions]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence-only policy, overlay proof), and write the standard Gateforge scaffold. Idempotent — never overwrites existing files unless `--confirm-doc-exclusions` approves an exclusion update. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block and refuses unavailable required proof channels. | 0/1/2 |
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking`). Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. Snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
@@ -43,9 +47,10 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, `New test needed`. | 0/2 (unknown key → 2) |
 | `gateforge tests diagnose [--suite <name>] [--json]` | Run the configured pytest diagnostic suites once per suite, isolated (own process, `GATEFORGE_*` stripped, finite timeout). Advisory: exit 0 completed run (≥1 pass, no unexpected failures), 1 test failures, 2 unavailable/incomplete (collection error, timeout, missing interpreter, interruption, zero tests, or only skipped/xfail). Never E2E proof. | 0/1/2 |
 | `gateforge obligations [--json]` | Evaluate policies against the automatically classified graph and dump obligations, blocking entries, and claim assessments. | 0/1/2 |
-| `gateforge check [--changed] [--staged] [--require-e2e] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` evaluates one effective scope: only obligations/blockers tied to files the resolved diff provider reports — unless the diff touches a gate-defining input (`.gateforge.yml`, configured policy/classification paths, planes/http-clients/fastapi configs, adapters, waivers, repo-local plugin modules, dependency manifests/lockfiles, ignore controls), a test file or helper, the runner configuration, or the mapping sidecar, which expands the run to all obligations (reported as `scope` metadata with `expandedBecause` reasons). `--staged` gates the EXACT staged candidate (frozen index checkout, never the worktree; mutually exclusive with `--changed`). `--require-e2e` blocks without a valid, non-stale gate receipt (see Enforcement). `--format` default `text`. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env (see trust model). | 0 clean/waived, 1 unresolved, 2 config/usage |
-| `gateforge test-gates [--changed] [--scope full\|changed] [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | Two modes. Supervised `--changed`: trusted runner supervision over the obligations — resolves catalog + mappings, fixes the expected test set, executes the configured Playwright suite through the adapter, enforces planned-vs-executed completeness, and seals an authenticated gate receipt ONLY after complete success. `--scope changed` (supervised only, opt-in): plan, execute, and seal only the slice of tests whose files claim obligations affected by the resolved changed-file set — an affected obligation with no testable declared mapping blocks (`EVIDENCE_SCOPE_INCOMPLETE`), an empty slice seals nothing, and `check --require-e2e` accepts a slice receipt only when it covers every obligation arising from the currently-changed files. Without the flag behavior is unchanged (full suite, whole-repo receipt). Legacy `--suite`: the orchestration escape hatch (cannot be combined with `--changed`, and can never redefine the strict gate's expected cases). A nonzero suite exit fails the run. Verifier key via `GATEFORGE_WITNESS_VERIFIER_KEY` env. | 0/1/2 (suite failure forces 1) |
-| `gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]` | Managed-mode commit broker (MECHANISM, not deployment): snapshots the workspace bytes into a throwaway index, recomputes the input + trusted-policy digests, verifies a valid non-stale gate receipt for EXACTLY those bytes, then creates the commit via compare-and-swap `git update-ref`. Typed rejections (`ENFORCEMENT_UNTRUSTED` / `EVIDENCE_STALE` / `RUN_INCOMPLETE` / `BROKER_CAS_MISMATCH` / `BROKER_UNSAFE_MESSAGE`); symlinks/submodules are typed rejections. Verifier key via env; runs with cwd = the AUTHORITATIVE repository. | 0/2 |
+| `gateforge check [--changed] [--staged] [--require-e2e] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` evaluates one effective scope: only obligations/blockers tied to files the resolved diff provider reports — unless the diff touches a gate-defining input (`.gateforge.yml`, configured policy/classification paths, planes/http-clients/fastapi configs, adapters, waivers, repo-local plugin modules, dependency manifests/lockfiles, ignore controls), a test file or helper, the runner configuration, or the mapping sidecar, which expands the run to all obligations (reported as `scope` metadata with `expandedBecause` reasons). `--staged` gates the EXACT staged candidate (frozen index checkout, never the worktree; mutually exclusive with `--changed`). `--require-e2e` blocks without a valid, non-stale gate receipt (see Enforcement). `--format` default `text`. Verifier keys use `GATEFORGE_WITNESS_VERIFIER_KEY` or `GATEFORGE_WITNESS_VERIFIER_KEY_FILE` (see trust model). | 0 clean/waived, 1 unresolved, 2 config/usage |
+| `gateforge test-gates [--changed] [--scope full\|changed] [--result-only] [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | Supervised `--changed` plans and runs mapped Playwright tests through the trusted adapter, checks planned/executed completeness, and seals an authenticated receipt only after complete success. `--scope changed` limits a sealed slice to obligations affected by changed files; incomplete mappings block, and `check --require-e2e` accepts it only when it covers every currently changed obligation. `--result-only` requires `--changed --scope changed`, reports selected results plus repository debt, and has no gate authority: without an external witness it uses private temporary state; with `--witness-url` it requires `--out` + `--run-token` shared with the external witness in a separate state directory (not the configured authoritative state directory). It never creates or clears a receipt. `--suite` remains legacy and cannot combine with `--changed` or redefine strict expected cases. Verifier keys use `GATEFORGE_WITNESS_VERIFIER_KEY` or the external key ring selected by `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`. | 0/1/2 (suite failure forces 1) |
+| `gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]` | Managed-mode commit broker (MECHANISM, not deployment): snapshots the workspace bytes into a throwaway index, recomputes the input + trusted-policy digests, verifies a valid non-stale gate receipt for EXACTLY those bytes, then creates the commit via compare-and-swap `git update-ref`. Typed rejections (`ENFORCEMENT_UNTRUSTED` / `EVIDENCE_STALE` / `RUN_INCOMPLETE` / `KEY_UNKNOWN` / `BROKER_CAS_MISMATCH` / `BROKER_UNSAFE_MESSAGE`); symlinks/submodules are typed rejections. Verifier keys use either supported environment source; the key file must be outside authority, workspace, and receipt artifact roots. | 0/2 |
+| `gateforge key create|import-env|rotate|retire --file <path> --confirm` | Owner-only key ceremony. Creates an external key ring, imports an existing environment key, rotates the active key while retaining old keys, or retires an inactive key. The secret is never printed. See verifier-key trust notes. | 0/2 |
 | `gateforge pre-commit --scope staged\|full` | The witnessed commit gate: freezes the Git index, materializes it into a scratch checkout, prepares the candidate's staged runtime (`.gateforge/runtime.yml` — below), runs the supervised witness gate INSIDE that checkout (`staged`: only tests mapped to obligations affected by the staged paths, `EVIDENCE_SCOPE_INCOMPLETE` blocks an unmapped affected obligation; `full`: the complete relevant mapped suite), validates the fresh receipt against the same checkout, rechecks the original index/HEAD/MERGE_HEAD, and copies only Gateforge audit artifacts (run state incl. runtime logs) back. Runtime preparation/readiness failures are typed (`RUNTIME_PREPARATION_FAILED` / `RUNTIME_READINESS_FAILED`); child process groups are cleaned up on every exit path. Install via `gateforge init --blocking --witnessed staged\|full`. | 0/1/2 |
 | `gateforge enforcement doctor [--json]` | Honest enforcement diagnostics: config, hook presence + ACTIVATION, runner readiness, observer capability, trusted binary/policy ownership, snapshot mode, and the standard/managed boundary. Detecting a hook NEVER counts as managed protection. Diagnostic only: exit 0 whenever it runs. | 0/2 |
 | `gateforge baseline update <fp...>` | Shrink the baseline to a strict subset (invariant 4). | 0/2 |
@@ -54,6 +59,28 @@ Global flags: `--help`, `--version`. Exit codes per architecture contract 4:
 `0` clean/waived, `1` unresolved obligations (or a failed/supervision-blocked
 run), `2` config/usage error. `tests diagnose` has its own advisory contract
 (0/1/2 above).
+
+### Result-only with an external witness
+
+Start the witness with a dedicated state directory, then pass that same
+directory and its run token to `test-gates`. The directory must be separate
+from the configured authoritative `.gateforge/test-gates` directory:
+
+```sh
+gateforge test-gates --changed --scope changed --result-only \
+  --witness-url "$GATEFORGE_WITNESS_URL" \
+  --out "$GATEFORGE_STATE_DIR" \
+  --run-token "$GATEFORGE_RUN_TOKEN"
+```
+
+`test-gates` claim planning reads current Playwright annotations using a
+disposable `GATEFORGE_STATE_DIR`, plus the tracked `test-map.yml`. It never
+treats a previous run's `claims.json` as a declaration source.
+
+The report remains `authority: non-authoritative`. The external-witness
+state may contain this run's report and attestation, but this command never
+creates, replaces, or clears a gate receipt. Pre-commit, hook, and CI gate
+paths remain authoritative and do not accept `--result-only`.
 
 ## Staged runtime (`.gateforge/runtime.yml`)
 
@@ -218,6 +245,17 @@ check:
   HONEST LIMIT: `--no-verify`, an alternate `core.hooksPath`, direct
   plumbing, or an unrelated clone bypass any local hook — keeping bypassed
   commits out of protected history is the server's job, not the hook's.
+- The CI template checks that the installed `@gate-forge/cli` version equals
+  the version that generated it. Add that exact version as a root
+  `devDependency`. The template uses a package-manager lockfile when present;
+  without one, it installs from the manifest. Set
+  `GATEFORGE_CI_NESTED_PACKAGE_DIRS` to a space-separated list such as `e2e`
+  when the Playwright config imports dependencies from nested packages.
+  `enforce` and `adopt` use the same install and version checks, then run the
+  static `check --changed` gate. They do not recommend gating on report counts.
+- A generated hook uses `GATEFORGE_DEV_ENGINE` when set, then the
+  repository-pinned CLI, `.gateforge/engine`, and `GATEFORGE_CLI`. A global
+  `gateforge` on `PATH` is a last-resort fallback with a warning.
 - `check --staged [--require-e2e]` gates the EXACT staged bytes: the index
   tree is frozen, materialized into an isolated scratch checkout, and the
   regular gate runs against those bytes (never the worktree). The candidate
@@ -251,6 +289,28 @@ fail the run. Identical authenticated inputs may reuse a prior receipt
 (printed as `reused receipt <id>`); any changed input forces a fresh run.
 Without the verifier key in the trusted environment nothing can be sealed
 and `--require-e2e` blocks — it never downgrades to a weaker pass.
+
+**Owner-declared documentation exclusions (explicit trust mode).** By default,
+Gateforge hashes all inputs and all candidate files. On a terminal, the first
+`gateforge init` asks for documentation-only folders to exclude. Automation can
+use `gateforge init --docs-exclude docs,handbook`; a non-interactive run with no
+option keeps the default. Gateforge writes the owner declaration to
+`.gateforge/docs-exclusions.yml` and prints the candidate trusted-policy digest
+to approve through the protected `GATEFORGE_APPROVED_POLICY_DIGEST` setting.
+Gate checks refuse to use the exclusions until that external pin matches. A
+later change to the exclusion declaration changes the digest; use
+`--confirm-doc-exclusions` when `init` changes an existing approval.
+
+The owner declares that these folders do not affect the product or its tests.
+Gateforge does not prove this. If application or test code reads an excluded
+file, a later edit can make old evidence look valid without running the tests
+again. Reports show the approved folders, pin identity, and this reduced
+guarantee. Gateforge rejects exclusions that contain configured scan inputs,
+source files, gate or trust metadata, manifests, lockfiles, or symlinks.
+Every file must also use a supported document or raster-image format. MDX,
+WASM, SVG, HTML, and unknown formats fail closed. This format allowlist does
+not prove that an allowed file cannot affect application or test behavior;
+the owner assertion and its reduced guarantee still apply.
 
 **Managed mode** (config `enforcement.mode: managed`) — the literal
 no-bypass guarantee requires putting the authoritative Git metadata, commit
@@ -461,19 +521,24 @@ and print the tip.
 | `obligations.json` | Every obligation the suite must cover, with pin #2 fingerprint and resource source/location. |
 | `env.json` | `GATEFORGE_RUN_ID`, `GATEFORGE_RUN_TOKEN`, `GATEFORGE_STATE_DIR`, `GATEFORGE_OBLIGATIONS`, `GATEFORGE_WITNESS_URL`. |
 | `claims.json` / `records.json` | Reporter output consumed by the verifier (written by the suite). |
-| `execution-result.json` / `receipt.json` / `diagnostics.json` | Supervised `--changed` mode: the sealed execution result (planned vs executed instances, outcomes, runner exit, completeness), the authenticated gate receipt issued after complete success, and the separate advisory diagnostic report. |
+| `execution-result.json` / `receipt.json` / `diagnostics.json` | Supervised `--changed` mode: the sealed execution result (planned vs executed instances, outcomes, native claim inventory, runner exit, completeness), the authenticated gate receipt issued after complete success, and the separate advisory diagnostic report. |
 | `report.json` | Canonical json-format run report after evaluation. |
 
 The legacy suite command (`--suite`) runs with those env vars; its reporter
 extracts claims from `{type: 'gateforge', description: '<obligation id>'}`
 annotations and posts evidence through the witness service (pin #7, header
 `x-gateforge-run: <token>`; `GATEFORGE_WITNESS_URL` is set when a witness
-service URL is provided via `--witness-url`). `gateforge check` reads the
-same state directory for claims and records. Records whose provenance does
-not verify never satisfy (GF-23). The legacy escape hatch can never
-redefine the strict gate's expected cases or turn an arbitrary exit-zero
-command into E2E proof — the hook and the CI job run `check
---staged/--changed --require-e2e`, which accept only supervised receipts.
+service URL is provided via `--witness-url`). `gateforge check` reads
+run-state evidence but takes native bindings only from `claimInventory`
+in an execution result authenticated by a receipt for the current inputs;
+it combines those with the current tracked `test-map.yml`. Raw
+`claims.json` cannot add current declarations. Receipts created before
+`claimInventory` existed remain valid, but supply no native bindings.
+Records whose provenance does not verify never satisfy (GF-23). The
+legacy escape hatch can never redefine the strict gate's expected cases
+or turn an arbitrary exit-zero command into E2E proof — the hook and CI
+run `check --staged/--changed --require-e2e`, which accept only supervised
+receipts.
 
 ### Provenance trust model (GF-23, audited 2026-08-31, three rounds)
 
@@ -587,15 +652,47 @@ contexts are validated independently and never merged; mismatches
 surface as explicit `evidence-context` blockers (missing vs malformed
 vs forged stay distinguished) that waivers cannot hide.
 
-The key travels by ENVIRONMENT (`GATEFORGE_WITNESS_VERIFIER_KEY`),
-never argv — `/proc/<pid>/cmdline` is world-readable. `test-gates`
-strips the var from the suite child's environment so a suite cannot
-inherit it, and the witness binary reads it from the TRUSTED parent
-env only (never argv/stdout/state/suite env). A suite-owned
-Playwright global setup therefore cannot bootstrap trusted issuance
-by inheriting the key — it fails closed unless an externally wired
-trusted witness is provided. Residuals (not eliminable by env hygiene
-alone): a same-uid process can read environ when yama
+The key comes from one trusted source: the protected
+`GATEFORGE_WITNESS_VERIFIER_KEY` environment variable, or an external
+owner-only key ring named by `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`.
+Do not set both. The file must be a regular file owned by the current
+user, with mode `0600` or stricter, and it must not be a symlink. Store
+it outside the candidate repository, Git directory, run state, `--out`
+directory, workspace, and receipt-artifact directory. Gateforge refuses
+unsafe paths and permissions. File mode is not supported on Windows;
+use the protected environment source there.
+
+Create and rotate keys only after an owner review:
+
+If you already use an environment key, keep it in the protected environment
+while you import it. Do not place key material in shell history or argv.
+
+```sh
+gateforge key create --file "$HOME/.config/gateforge/keys.json" --confirm
+gateforge key import-env --file "$HOME/.config/gateforge/keys.json" --confirm
+unset GATEFORGE_WITNESS_VERIFIER_KEY
+export GATEFORGE_WITNESS_VERIFIER_KEY_FILE="$HOME/.config/gateforge/keys.json"
+gateforge key rotate --file "$HOME/.config/gateforge/keys.json" --confirm
+gateforge key retire --file "$HOME/.config/gateforge/keys.json" --key-id key-old-id --confirm
+```
+
+Create the parent directory first. `key import-env` retains an existing
+environment key under its stable id before switching to the file source.
+Key commands print only a non-secret
+key id. Rotation keeps old keys so their receipts still verify. Retire an
+old key only when its receipts no longer need to verify. Gateforge stores
+the key id, not the secret, in new receipts. A receipt for a removed id
+fails with `KEY_UNKNOWN`. The key ring file contains raw signing keys, so
+protect its backups with the same care as the original.
+
+`test-gates` strips both key-source variables from the suite child's
+environment. The supervised browser runner and candidate runtime also
+refuse both sources, and Gateforge does not write either value or file
+path into run state. The trusted witness process receives the active key
+to authenticate records. A suite-owned Playwright global setup therefore
+cannot bootstrap trusted issuance by inheriting the key — it fails closed
+unless an externally wired trusted witness is provided. Residuals (not
+eliminable by env hygiene alone): a same-uid process can read environ when yama
 `ptrace_scope=0`, and env vars never isolate hostile same-user OS
 processes — for strong isolation run the suite as a distinct user or
 container. File-change capture is snapshot-based, not an OS sandbox:

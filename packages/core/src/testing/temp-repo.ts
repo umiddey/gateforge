@@ -90,15 +90,19 @@ export class TempRepo {
    * Args:
    *   args: argument vector (without the `git` binary).
    *   allowFailure: when true a non-zero exit does not throw.
+   *   env: extra child environment values for this one Git command.
    *
    * Returns:
    *   GitResult: exit status plus captured stdout/stderr.
    * @throws Error naming the failing command when `allowFailure` is false.
    */
-  git(args: string[], { allowFailure = false }: { allowFailure?: boolean } = {}): GitResult {
+  git(
+    args: string[],
+    { allowFailure = false, env = {} }: { allowFailure?: boolean; env?: NodeJS.ProcessEnv } = {},
+  ): GitResult {
     const result = spawnSync('git', [...FIXED_FLAGS, ...args], {
       cwd: this.root,
-      env: this.gitEnv,
+      env: { ...this.gitEnv, ...env },
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
     });

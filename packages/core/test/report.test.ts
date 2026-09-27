@@ -122,6 +122,31 @@ describe('renderRun — json format', () => {
     expect(missing.recordIds).toEqual([]);
   });
 
+  it('attaches bounded run provenance to blocking predicates', () => {
+    const provenance = {
+      scope: 'changed',
+      candidateTreeId: 'a'.repeat(40),
+      inputDigest: 'b'.repeat(64),
+      evidenceState: 'attested',
+      authority: 'authoritative',
+    };
+    const options = {
+      format: 'json',
+      blocking: BLOCKING,
+      diagnosticContext: provenance,
+    } as unknown as Parameters<typeof renderRun>[1];
+    const output = renderRun([entry(accounts, 'invalid', { cause: 'EVIDENCE_VALUE_MISMATCH' })], options);
+    const report = JSON.parse(output);
+    expect(report.diagnosticContext).toEqual(provenance);
+    expect(report.verdicts[0]).toMatchObject({
+      obligationId: accounts.id,
+      verdict: 'invalid',
+      cause: 'EVIDENCE_VALUE_MISMATCH',
+      reason: `invalid: evidence gap for ${accounts.id}`,
+    });
+    expect(report.blocking).toEqual(BLOCKING);
+  });
+
   it('includes the run manifest when provided', () => {
     const run = {
       schemaVersion: 1,

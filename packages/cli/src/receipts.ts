@@ -23,13 +23,20 @@ import {
   ExecutionResultSchema,
   compareStrings,
   executionResultDigestOf,
-  verifyGateReceipt,
   type BlockingEntry,
   type CauseCode,
   type ExecutionResult,
   type GateReceipt,
 } from '@gate-forge/core';
 import { readStateDocument } from './state.js';
+import {
+  digestSnapshot,
+  diffInputFiles,
+  INPUT_SNAPSHOT_VERSION,
+  type InputSnapshot,
+  type SnapshotFileEntry,
+} from './input-snapshot.js';
+import { verifyGateReceiptWithKeyring, verifierKeyringFrom, type VerifierKeyring } from './verifier-keys.js';
 
 /** The §5.4 next action per cause (single source: core). */
 const NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = CAUSE_NEXT_ACTIONS;
@@ -78,6 +85,8 @@ export type ReceiptLoad =
   | { status: 'absent' }
   | { status: 'malformed'; detail: string }
   | { status: 'unverified'; detail: string }
+  | { status: 'unknown-key'; detail: string }
+  | { status: 'key-mismatch'; detail: string }
   | { status: 'stale'; detail: string }
   | { status: 'execution-mismatch'; detail: string };
 
@@ -111,18 +120,19 @@ export function receiptScope(receipt: GateReceipt): 'full' | 'changed' {
  */
 export function loadReceiptFor(
   stateDir: string,
-  verifierKey: string | null,
+  verifierKey: string | VerifierKeyring | null,
   expected: ReceiptExpectations,
 ): ReceiptLoad {
   const document = readStateDocument(stateDir, 'receipt.json');
   if (document === null) return { status: 'absent' };
-  if (verifierKey === null) {
+  const keyring = verifierKeyringFrom(verifierKey);
+  if (keyring === null) {
     return {
       status: 'unverified',
       detail: 'no witness verifier key available; the gate receipt cannot be authenticated (fail closed)',
     };
   }
-  const verified = verifyGateReceipt(verifierKey, document, {
+  const verified = verifyGateReceiptWithKeyring(keyring, document, {
     inputDigest: expected.inputDigest,
     trustedPolicyDigest: expected.trustedPolicyDigest,
     selectionDigest: expected.selectionDigest,
@@ -139,6 +149,8 @@ export function loadReceiptFor(
     if (verified.rejection === 'mac-fail') {
       return { status: 'unverified', detail: verified.detail };
     }
+    if (verified.rejection === 'key-unknown') return { status: 'unknown-key', detail: verified.detail };
+    if (verified.rejection === 'key-mismatch') return { status: 'key-mismatch', detail: verified.detail };
     if (verified.rejection === 'not-clean') {
       return { status: 'malformed', detail: verified.detail };
     }
@@ -206,6 +218,41 @@ export function loadReceiptFor(
   return { status: 'ok', receipt: verified.receipt, executionResult };
 }
 
+/** Returns changed input paths only when the saved inventory matches a signed receipt. */
+export function authenticatedChangedInputs(
+  stateDir: string,
+  verifierKeyring: VerifierKeyring | null,
+  currentSnapshot: InputSnapshot | null,
+): string[] {
+  if (verifierKeyring === null || currentSnapshot === null) return [];
+  try {
+    const rawReceipt = readStateDocument(stateDir, 'receipt.json');
+    const verified = verifyGateReceiptWithKeyring(verifierKeyring, rawReceipt);
+    if (!verified.ok) return [];
+    const rawSnapshot = readStateDocument(stateDir, 'input-snapshot.json');
+    if (rawSnapshot === null || typeof rawSnapshot !== 'object') return [];
+    const saved = rawSnapshot as Partial<InputSnapshot>;
+    if (
+      saved.snapshotVersion !== INPUT_SNAPSHOT_VERSION ||
+      !Array.isArray(saved.files) ||
+      saved.gateContext === null ||
+      typeof saved.gateContext !== 'object'
+    ) {
+      return [];
+    }
+    const savedFiles = saved.files as SnapshotFileEntry[];
+    if (digestSnapshot(savedFiles, saved.gateContext) !== verified.receipt.inputDigest) return [];
+    const changed = diffInputFiles(savedFiles, currentSnapshot.files);
+    if (changed.length > 0) return changed;
+    if (currentSnapshot.inputDigest !== verified.receipt.inputDigest) {
+      return ['gate context (effective policy, classifications, routes, plugins, or trusted runtime bytes)'];
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Maps a receipt load outcome onto `check --require-e2e` blocking
  * entries (plan §5.4: RUN_INCOMPLETE / EVIDENCE_STALE /
@@ -220,6 +267,19 @@ export function loadReceiptFor(
  */
 export function receiptGateBlocking(load: ReceiptLoad): BlockingEntry[] {
   if (load.status === 'ok') return [];
+  if (load.status === 'unknown-key' || load.status === 'key-mismatch') {
+    return [
+      {
+        kind: 'finding',
+        resourceId: null,
+        name: null,
+        detail: load.detail,
+        location: null,
+        cause: 'ENFORCEMENT_UNTRUSTED',
+        nextAction: NEXT_ACTIONS.ENFORCEMENT_UNTRUSTED,
+      },
+    ];
+  }
   const block = (cause: CauseCode, detail: string): BlockingEntry => ({
     kind: 'finding',
     resourceId: null,
@@ -328,11 +388,11 @@ export function scopedReceiptCoverageBlocking(
  */
 export function tryReuseReceipt(
   stateDir: string,
-  verifierKey: string | null,
+  verifierKey: string | VerifierKeyring | null,
   expected: ReceiptExpectations,
-): { reuse: true; receipt: GateReceipt } | { reuse: false } {
+): { reuse: true; receipt: GateReceipt; executionResult: ExecutionResult } | { reuse: false } {
   if (verifierKey === null) return { reuse: false };
   const load = loadReceiptFor(stateDir, verifierKey, expected);
   if (load.status !== 'ok') return { reuse: false };
-  return { reuse: true, receipt: load.receipt };
+  return { reuse: true, receipt: load.receipt, executionResult: load.executionResult };
 }

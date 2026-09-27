@@ -28,6 +28,11 @@ import { lstatSync, opendirSync, readFileSync, readlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { UsageError } from './errors.js';
+import {
+  RuntimeReuseBoundaryError,
+  type RuntimeReuseMount,
+  validateRuntimeReuseMounts,
+} from './runtime-reuse.js';
 
 /** 40-char lowercase sha1 hex. */
 const TREE_PATTERN = /^[0-9a-f]{40}$/;
@@ -133,6 +138,8 @@ function collectEntries(
   workspace: string,
   excludeDir: string | null,
   symlinks: 'reject' | 'record',
+  reuseMounts: readonly RuntimeReuseMount[],
+  docsExclusions: readonly string[],
 ): TreeEntry[] {
   // Repo-relative posix prefix of the excluded output tree (null = none).
   // Only a directory strictly INSIDE the workspace can be excluded; an
@@ -147,7 +154,36 @@ function collectEntries(
     if (rel.startsWith(`${root}/`)) excludePrefix = rel.slice(root.length + 1);
   }
   const excluded = (rel: string): boolean =>
-    excludePrefix !== null && (rel === excludePrefix || rel.startsWith(`${excludePrefix}/`));
+    (excludePrefix !== null && (rel === excludePrefix || rel.startsWith(`${excludePrefix}/`))) ||
+    docsExclusions.some((folder) => rel === folder || rel.startsWith(`${folder}/`));
+  const inspectExcludedDirectory = (directory: string, relativeDirectory: string): void => {
+    let handle;
+    try {
+      handle = opendirSync(directory);
+    } catch (error) {
+      throw new UsageError(
+        `candidate tree ingestion: cannot inspect approved documentation folder '${relativeDirectory}': ${(error as Error).message}`,
+      );
+    }
+    try {
+      let dirent;
+      while ((dirent = handle.readSync()) !== null) {
+        const relativePath = `${relativeDirectory}/${dirent.name}`;
+        const absolute = join(directory, dirent.name);
+        const stat = lstatSync(absolute);
+        if (stat.isSymbolicLink()) {
+          throw new UsageError(`candidate tree ingestion: approved documentation folder contains symlink '${relativePath}' (fail closed)`);
+        }
+        if (stat.isDirectory()) {
+          inspectExcludedDirectory(absolute, relativePath);
+        } else if (!stat.isFile()) {
+          throw new UsageError(`candidate tree ingestion: approved documentation folder contains unsupported entry '${relativePath}' (fail closed)`);
+        }
+      }
+    } finally {
+      handle.closeSync();
+    }
+  };
   const entries: TreeEntry[] = [];
   const stack: Array<{ dir: string; rel: string }> = [{ dir: workspace, rel: '' }];
   while (stack.length > 0) {
@@ -183,7 +219,30 @@ function collectEntries(
             `candidate tree ingestion: cannot inspect '${rel}': ${(error as Error).message}`,
           );
         }
+        if (docsExclusions.includes(rel)) {
+          if (stat.isSymbolicLink() || !stat.isDirectory()) {
+            throw new UsageError(`candidate tree ingestion: approved documentation exclusion '${rel}' is not a real directory (fail closed)`);
+          }
+          inspectExcludedDirectory(absolute, rel);
+          continue;
+        }
         if (stat.isSymbolicLink()) {
+          const reuseMount = reuseMounts.find((mount) => mount.path === rel);
+          if (reuseMount !== undefined) {
+            // The external dependency bytes are bound by the reuse digest.
+            // Keep only a stable marker here, never the absolute link target.
+            const marker = `gateforge-runtime-reuse-mount:v1:${rel}`;
+            const hashed = plumbing(gitDir, env, ['hash-object', '-w', '--stdin'], Buffer.from(marker, 'utf8'));
+            if (hashed.status !== 0) {
+              throw new UsageError(`candidate tree ingestion: hash-object failed for runtime reuse mount '${rel}'`);
+            }
+            const mountSha = hashed.stdout.trim();
+            if (!TREE_PATTERN.test(mountSha)) {
+              throw new UsageError(`candidate tree ingestion: hash-object returned an unusable id for '${rel}'`);
+            }
+            entries.push({ mode: '120000', sha: mountSha, path: rel });
+            continue;
+          }
           if (symlinks === 'reject') {
             throw new UsageError(
               `candidate tree ingestion: symlink at '${rel}' — symlink candidates cannot be verified (fail closed)`,
@@ -303,8 +362,19 @@ export function computeCandidateTreeId(
   env: NodeJS.ProcessEnv,
   excludeDir?: string | null,
   symlinks: 'reject' | 'record' = 'reject',
+  reuseMounts: readonly RuntimeReuseMount[] = [],
+  docsExclusions: readonly string[] = [],
 ): string {
-  const entries = collectEntries(gitDir, env, workspace, excludeDir ?? null, symlinks);
+  try {
+    validateRuntimeReuseMounts(workspace, reuseMounts);
+  } catch (error) {
+    throw new UsageError(
+      error instanceof RuntimeReuseBoundaryError
+        ? `candidate tree ingestion: ${error.message}`
+        : `candidate tree ingestion: runtime reuse boundary validation failed`,
+    );
+  }
+  const entries = collectEntries(gitDir, env, workspace, excludeDir ?? null, symlinks, reuseMounts, docsExclusions);
   // Group by parent directory; build deepest-first so every subtree id
   // exists before its parent references it (mimics `git write-tree`).
   const filesByDir = new Map<string, TreeEntry[]>();

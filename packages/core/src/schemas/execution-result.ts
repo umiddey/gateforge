@@ -14,6 +14,7 @@
  * data, not the reporter's own summary.
  */
 import { z } from 'zod';
+import { ClaimSchema } from './claim.js';
 import { SchemaVersionField } from './common.js';
 import { sha256Canonical } from '../canonical-json.js';
 
@@ -179,6 +180,12 @@ export const ExecutionResultSchema = z
      * account. Present only when the supervisor fetched it.
      */
     sessionTrace: z.array(TracedTestSchema).optional(),
+    /**
+     * Current native annotation claims sealed with the supervised
+     * result. This is mapping inventory, never evidence or gate authority.
+     * Optional so historical execution results remain schema-valid.
+     */
+    claimInventory: z.array(ClaimSchema).optional(),
     /** Framework process exit code (supplementary, never decisive). */
     runnerExit: z.number().int().nullable(),
     /** Supervision verdict: true only when the complete expected set passed. */

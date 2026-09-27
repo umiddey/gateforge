@@ -74,6 +74,10 @@ export interface TrustedConfigInput {
   runId: string;
   /** Absolute engine reporter entry (see {@link trustedReporterEntry}). */
   reporterEntry: string;
+  /** Trusted operator-provided app proxy URL for relative browser navigation. */
+  appBaseUrl?: string;
+  /** Operator-provided browser storage state, embedded only in trusted config. */
+  storageState?: string;
   /** Exact repo-relative posix test files to run (undefined = default). */
   testFiles?: readonly string[];
   /** Bare project names to run (undefined = no project filter). */
@@ -141,7 +145,12 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
     "    ['list'],",
     `    [${JSON.stringify(input.reporterEntry)}, ${JSON.stringify(reporterOptions)}],`,
     '  ],',
-    '  use: { headless: true, trace: "off" },',
+    `  use: ${JSON.stringify({
+      headless: true,
+      trace: 'off',
+      ...(input.appBaseUrl !== undefined ? { baseURL: input.appBaseUrl } : {}),
+      ...(input.storageState !== undefined ? { storageState: input.storageState } : {}),
+    })},`,
     `  outputDir: ${JSON.stringify(join(input.stateDir, 'playwright-artifacts'))},`,
     '};',
     '',

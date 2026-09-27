@@ -23,13 +23,18 @@ export {
   createEvidence,
   claimsFromAnnotations,
   resourceIdOfClaim,
-  SURFACE_DESCRIPTOR_VERSION,
   type EvidenceApi,
   type Receipt,
   type PersistenceOutcome,
   type WitnessRecord,
   type SurfaceDescriptor,
 } from './fixture/evidence.js';
+export {
+  SURFACE_DESCRIPTOR_VERSION,
+  SURFACE_DESCRIPTOR_VERSION_1,
+  SURFACE_DESCRIPTOR_VERSION_2,
+} from './surface.js';
+export type { SurfaceList, SurfaceListCells, SurfaceListLocators } from './surface.js';
 export { WitnessClient, WitnessRequestError, resolveWitnessUrl } from './fixture/witness-client.js';
 export type { IssuedLedgerRecord } from './fixture/witness-client.js';
 
@@ -170,6 +175,7 @@ export {
   DEFAULT_MAX_IMPORT_DEPTH,
   BROWSER_FIXTURE_PARAMS,
   API_FIXTURE_PARAMS,
+  diagnoseMissingUiSurfaces,
 } from './discovery/index.js';
 export type {
   StaticScanOptions,
@@ -194,6 +200,8 @@ export type {
   DiagnosticCause,
   RunnerOutcomesDocument,
   SupervisedRunOptions,
+  MissingSurfaceTest,
+  SurfaceDoctorReport,
 } from './discovery/index.js';
 
 export {

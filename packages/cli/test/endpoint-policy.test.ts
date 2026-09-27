@@ -16,6 +16,7 @@ import { withTempRepo } from '@gate-forge/core';
 import { PolicyFileSchema } from '@gate-forge/core';
 import { POLICIES_TEMPLATE, TRANSPORT_ONLY_POLICY_EXAMPLE } from '../src/commands/init.js';
 import { installFixture, runCli, writeV2Manifest } from './helpers.js';
+import { mintCompleteRunReceipt } from './gate-receipts.js';
 import { startWitness } from '../../pack-playwright/src/witness/server.js';
 import { beginTestInterval, endTestInterval, openTestSession } from './witness-sessions.js';
 
@@ -191,7 +192,7 @@ describe('plan §8 integration: Node-only attack ledger through the authoritativ
     }
   }
 
-  it('frontend policy: the Node attack ledger stays blocking missing (exit 1)', async () => {
+  it('frontend policy: run-only claims cannot declare the Node attack ledger', async () => {
     const ledger = await nodeAttackLedger('http:frontend-request-observed');
     expect(ledger.records.length).toBeGreaterThan(0);
     await withTempRepo({}, async (repo) => {
@@ -217,18 +218,15 @@ describe('plan §8 integration: Node-only attack ledger through the authoritativ
       expect(code).toBe(1);
       const report = JSON.parse(stdout) as {
         summary: { blocking: number };
-        verdicts: Array<{ obligationId: string; verdict: string; reason: string | null }>;
+        verdicts: Array<{ obligationId: string; verdict: string; cause?: string | null }>;
         blocking: Array<{ kind: string; detail?: string }>;
       };
-      // Two missing verdicts plus the §11.6 evidence-context blocker:
-      // witnessed records with no verifier key demote and stay visible
-      // (fail closed — never silently unattributed).
+      // Two missing verdicts plus the §11.6 evidence-context blocker.
       expect(report.summary.blocking).toBe(3);
       expect(report.verdicts.map((v) => v.obligationId).sort()).toEqual([...obligations].sort());
       for (const row of report.verdicts) {
         expect(row.verdict).toBe('missing');
-        expect(row.reason ?? '').toContain("'http:frontend-request-observed'");
-        expect(row.reason ?? '').toContain('no independent browser/test observation channel');
+        expect(row.cause).toBe('VERIFIER_UNSUPPORTED');
       }
       expect(
         report.blocking.some(
@@ -271,6 +269,15 @@ describe('plan §8 integration: Node-only attack ledger through the authoritativ
       // v2 attestation over the CURRENT inputs (plan §11.3): records
       // must authorize before the engine reaches route attribution.
       await writeV2Manifest(repo, { runId: RUN_ID, verifierKey: VERIFIER_KEY, recordIds });
+      await mintCompleteRunReceipt(repo, {
+        verifierKey: VERIFIER_KEY,
+        claimInventory: obligations.map((obligationId) => ({
+          schemaVersion: 1,
+          obligationId,
+          testId: TEST_ID,
+          testFile: 'tests/attack.spec.ts',
+        })),
+      });
       const { code, stdout } = await runCli(repo, ['check', '--format', 'json'], {
         GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
       });

@@ -13,9 +13,9 @@
  * which diff basis it used (GF-09: local-staged, github-pr, and gitlab-mr
  * produce identical resource-change sets for identical repos).
  *
- * Claims and records come from the run-state directory
- * (`.gateforge/test-gates/` by default) — the same surface the
- * `test-gates` suite contract writes.
+ * Current claim declarations come from `.gateforge/test-map.yml` and,
+ * when available, a verified receipt for the current input digest. Raw
+ * `claims.json` contents and live annotations are not check bindings.
  */
 import { cpSync, existsSync, mkdirSync } from 'node:fs';
 import {
@@ -38,7 +38,7 @@ import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { obligationFingerprint, evaluateRun } from '../evaluate.js';
-import { gradingClaimsFor, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
+import { loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
   collectInputFiles,
@@ -46,11 +46,14 @@ import {
   diffInputFiles,
   SnapshotUnavailableError,
   UnsupportedSnapshotError,
+  type InputSnapshot,
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
 import { runPipeline, resolveRepoPath, sourcesByResourceId } from '../pipeline.js';
 import { RuntimeBlockError, loadRuntimeConfigAt, prepareRuntime } from '../runtime.js';
+import { digestRuntimeReuseMounts, type RuntimeReuseMount } from '../runtime-reuse.js';
 import {
+  authenticatedChangedInputs,
   loadReceiptFor,
   receiptGateBlocking,
   scopedReceiptCoverageBlocking,
@@ -63,6 +66,7 @@ import {
   type ScopeDecision,
 } from '../scope.js';
 import {
+  assertRuntimeReuseOwnerApproval,
   freezeStagedCandidate,
   materializeStagedCandidate,
   recheckStagedCandidate,
@@ -76,12 +80,16 @@ import {
   evaluateApprovedPolicy,
   resolveApprovedPolicyDigest,
 } from '../trusted-policy.js';
-import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
+import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERSION } from './common.js';
+import { resolveVerifierKeyring, type VerifierKeyring } from '../verifier-keys.js';
 import { renderEndpointInventory } from '../endpoint-report.js';
+import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
+import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
 
 export const CHECK_USAGE =
   'usage: gateforge check [--changed] [--staged] [--require-e2e] [--format text|json|sarif]\n' +
   '       [--approved-policy-digest <hex64>]\n' +
+  '       verifier key: GATEFORGE_WITNESS_VERIFIER_KEY or GATEFORGE_WITNESS_VERIFIER_KEY_FILE\n' +
   '       approved policy digest: the OWNER-APPROVED policy revision pin. Never sourced from\n' +
   '       candidate-controlled files in strict mode — provision it via the protected\n' +
   '       GATEFORGE_APPROVED_POLICY_DIGEST variable, this flag, or GATEFORGE_TRUSTED_CONFIG outside the candidate.';
@@ -102,6 +110,10 @@ export interface CheckGateOptions {
    * candidate-controlled files in strict mode.
    */
   approvedPolicyDigest?: string;
+  /** Trusted key ring resolved before candidate materialization. */
+  verifierKeyring?: VerifierKeyring | null;
+  /** Frozen candidate tree from a staged-candidate orchestrator. */
+  fixedCandidateTreeId?: string | null;
   /**
    * Phase 5 staged-candidate runs: the fixed changed set computed from
    * the FROZEN index vs base. When present no diff provider runs (the
@@ -112,6 +124,10 @@ export interface CheckGateOptions {
   fixedChangedFiles?: readonly string[];
   /** Digest of dependency bytes reused by the staged candidate runtime. */
   runtimeReuseDigest?: string | null;
+  /** Exact owner-approved external dependency mounts in the staged checkout. */
+  runtimeReuseMounts?: readonly RuntimeReuseMount[];
+  /** Recomputes mounted dependency bytes after discovery. */
+  runtimeReuseCheck?: () => string | null;
 }
 
 /**
@@ -139,14 +155,16 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
   const format = parseRunFormat(stringFlag(options, 'format') ?? 'text');
   const requireE2E = options['require-e2e'] === true;
   const approvedPolicyDigest = stringFlag(options, 'approved-policy-digest');
+  const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [resolveStateDir(io.cwd)]);
   if (options['staged'] === true) {
-    return stagedCheckCommand(io, { requireE2E, format, approvedPolicyDigest });
+    return stagedCheckCommand(io, { requireE2E, format, approvedPolicyDigest, verifierKeyring });
   }
   return runCheckGate(io, {
     diffScoped: options['changed'] === true,
     requireE2E,
     format,
     approvedPolicyDigest,
+    verifierKeyring,
   });
 }
 
@@ -175,7 +193,12 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
  */
 async function stagedCheckCommand(
   io: Io,
-  options: { requireE2E: boolean; format: 'text' | 'json' | 'sarif'; approvedPolicyDigest?: string },
+  options: {
+    requireE2E: boolean;
+    format: 'text' | 'json' | 'sarif';
+    approvedPolicyDigest?: string;
+    verifierKeyring: VerifierKeyring | null;
+  },
 ): Promise<number> {
   let frozen: StagedCandidate;
   try {
@@ -188,6 +211,7 @@ async function stagedCheckCommand(
   }
   let checkoutDir: string;
   let runtimeReuseDigest: string | null = null;
+  let runtimeReuseMounts: RuntimeReuseMount[] = [];
   try {
     checkoutDir = materializeStagedCandidate(io.cwd, io.env, frozen);
     // Empty directories are invisible to Git trees — checkout-index cannot
@@ -198,6 +222,7 @@ async function stagedCheckCommand(
     // checkout of the SAME bytes (the bytes themselves stay exactly the
     // staged tree; only the marker-relevant empty dirs are mirrored).
     const checkoutConfig = loadConfigAt(checkoutDir);
+    const docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
     for (const dir of [checkoutConfig.adapters, checkoutConfig.waivers]) {
       const userDir = resolveRepoPath(io.cwd, dir);
       const checkoutPath = resolveRepoPath(checkoutDir, dir);
@@ -225,7 +250,7 @@ async function stagedCheckCommand(
         candidateConfig: checkoutConfig,
       }),
       candidatePolicyDigest,
-      checkoutConfig.enforcement?.strictE2E === true,
+      checkoutConfig.enforcement?.strictE2E === true || docsExclusions.length > 0,
     );
     if (policyGate.status === 'blocked') {
       releaseStagedCandidate(frozen);
@@ -233,9 +258,10 @@ async function stagedCheckCommand(
     }
     const runtimeDoc = loadRuntimeConfigAt(checkoutDir, checkoutConfig.runtime);
     if (runtimeDoc !== null) {
-      runtimeReuseDigest = (
-        await prepareRuntime(io.cwd, checkoutDir, runtimeDoc, io, resolveStateDir(checkoutDir))
-      ).reuseDigest;
+      assertRuntimeReuseOwnerApproval(frozen.approvedReusePaths, runtimeDoc.prepare?.reuse ?? []);
+      const preparedRuntime = await prepareRuntime(io.cwd, checkoutDir, runtimeDoc, io, resolveStateDir(checkoutDir));
+      runtimeReuseDigest = preparedRuntime.reuseDigest;
+      runtimeReuseMounts = preparedRuntime.reuseMounts;
     }
   } catch (error) {
     releaseStagedCandidate(frozen);
@@ -268,8 +294,11 @@ async function stagedCheckCommand(
       requireE2E: options.requireE2E,
       format: options.format,
       approvedPolicyDigest: options.approvedPolicyDigest,
+      verifierKeyring: options.verifierKeyring,
       fixedChangedFiles: frozen.changedPaths,
       runtimeReuseDigest,
+      runtimeReuseMounts,
+      runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
     });
     // Re-check BEFORE authorizing: different bytes never pass.
     const recheck = recheckStagedCandidate(io.cwd, io.env, frozen);
@@ -330,6 +359,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   const { diffScoped, requireE2E, format } = options;
   const fixedChangedFiles = options.fixedChangedFiles;
   const runtimeReuseDigest = options.runtimeReuseDigest;
+  const runtimeReuseMounts = options.runtimeReuseMounts ?? [];
   // Witness verifier key (GF-23, plan §11): read from the
   // environment — never argv, whose cmdline is world-readable. With the
   // key, the manifest's v2 `attestation` envelope can be authenticated
@@ -338,9 +368,28 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // suite-writable artifact can prove issuance and the provenance gate
   // fails closed. Legacy v1 `recordIdsMac` never authorizes, even when
   // it verifies.
-  const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
-
   const config = loadConfigAt(io.cwd);
+  const docsExclusions = loadDocsExclusions(io.cwd, config);
+  const docsApprovalDigest = docsExclusions.length === 0 ? null : trustedPolicyDigestForConfig(io.cwd, config);
+  const docsApprovalResolution =
+    docsExclusions.length === 0
+      ? null
+      : resolveApprovedPolicyDigest({
+          flag: options.approvedPolicyDigest,
+          env: io.env,
+          candidateCwd: io.cwd,
+          candidateConfig: config,
+        });
+  const docsApprovalStatus =
+    docsApprovalResolution === null
+      ? null
+      : docsApprovalResolution.status !== 'ok'
+        ? 'invalid'
+        : docsApprovalResolution.digest === null
+          ? 'missing'
+          : docsApprovalResolution.digest === docsApprovalDigest
+            ? 'matched'
+            : 'mismatch';
   const providerIdentity: ChangedProvider =
     fixedChangedFiles !== undefined
       ? 'local-staged'
@@ -348,6 +397,8 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         ? resolveProvider(config.changed.provider, io.cwd, io.env).provider
         : 'all-files';
   const stateDir = resolveStateDir(io.cwd);
+  const verifierKeyring = options.verifierKeyring ?? resolveVerifierKeyring(io.cwd, io.env, [stateDir]);
+  const witnessVerifierKey = verifierKeyring?.active.key;
 
   // Pre-discovery file inventory (plan §11.5): the gate context does not
   // exist yet, so only file bytes are captured. A repository without
@@ -357,7 +408,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   let preFiles: SnapshotFileEntry[] | null = null;
   let snapshotUnavailable = false;
   try {
-    preFiles = collectInputFiles(io.cwd, config, stateDir);
+    preFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
   } catch (error) {
     if (error instanceof SnapshotUnavailableError) {
       snapshotUnavailable = true;
@@ -377,6 +428,19 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     ...(fixedChangedFiles !== undefined ? { changedFilesOverride: fixedChangedFiles } : {}),
   });
 
+  if (options.runtimeReuseCheck !== undefined) {
+    let currentReuseDigest: string | null;
+    try {
+      currentReuseDigest = options.runtimeReuseCheck();
+    } catch {
+      currentReuseDigest = null;
+    }
+    if (currentReuseDigest !== runtimeReuseDigest) {
+      writeLine(io.stderr, 'check: reused dependency bytes changed during discovery; refusing the staged check');
+      return 1;
+    }
+  }
+
   // Post-discovery stability + full digest (plan §11.5): the input tree
   // must not have moved under discovery, and the current digest is what
   // the stored envelope must equal (D3). A changing tree cannot
@@ -384,13 +448,16 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   const httpRoutes = httpRoutesView(pipeline.graph);
   let expectedDigest: string | null = null;
   let changedInputs = false;
+  let currentSnapshot: InputSnapshot | null = null;
+  let diagnosticCandidateTreeId = options.fixedCandidateTreeId ?? null;
+  let diagnosticEvidenceState = 'not-required';
   if (!snapshotUnavailable) {
     try {
-      const postFiles = collectInputFiles(io.cwd, config, stateDir);
+      const postFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
       if (preFiles !== null && diffInputFiles(preFiles, postFiles).length > 0) {
         changedInputs = true;
       } else {
-        expectedDigest = computeInputSnapshot({
+        currentSnapshot = computeInputSnapshot({
           cwd: io.cwd,
           config,
           stateDir,
@@ -402,7 +469,10 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             version: plugin.version,
           })),
           runtimeReuseDigest,
-        }).inputDigest;
+          runtimeReuseMounts,
+          docsExclusions,
+        });
+      expectedDigest = currentSnapshot.inputDigest;
       }
     } catch (error) {
       if (error instanceof SnapshotUnavailableError) {
@@ -414,6 +484,30 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       }
     }
   }
+  let claimBindings: Claim[] = [];
+  if (expectedDigest !== null && verifierKeyring !== null) {
+    const claimPolicyDigest = docsApprovalDigest ?? trustedPolicyDigestForConfig(io.cwd, config);
+    const claimReceipt = loadReceiptFor(stateDir, verifierKeyring, {
+      inputDigest: expectedDigest,
+      trustedPolicyDigest: claimPolicyDigest,
+    });
+    if (
+      claimReceipt.status === 'ok' &&
+      claimReceipt.executionResult.inputDigest === expectedDigest &&
+      claimReceipt.executionResult.trustedPolicyDigest === claimPolicyDigest
+    ) {
+      claimBindings = [...(claimReceipt.executionResult.claimInventory ?? [])];
+    }
+  }
+  diagnosticEvidenceState = snapshotUnavailable
+    ? 'snapshot-unavailable'
+    : changedInputs
+      ? 'inputs-changed'
+      : expectedDigest === null
+        ? 'input-digest-unavailable'
+        : requireE2E
+          ? 'receipt-not-checked'
+          : 'not-required';
 
   // One effective evaluation scope (plan §12.2, D4; Phase 4 item 2
   // conservative expansion), computed BEFORE grading and applied to
@@ -443,7 +537,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           .map((entry) => entry.file);
       } catch {
         // Discovery problems surface on their own gates; scope expansion
-        // proceeds with the infra signals it does have (fail visible).
+        // proceeds with the infrastructure signals it does have.
         testFiles = [];
       }
     }
@@ -519,27 +613,21 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     }
   }
 
-  // Test-mapping seam (plan 2026-09-13 §5.3, Phase 3): when the
-  // repository declares a `.gateforge/test-map.yml` sidecar, the ONE core
-  // resolver normalizes sidecar declarations + native claims against a
-  // freshly discovered catalog. Resolved bindings join grading as
-  // DECLARED claims (mapping declares intent; with no witnessed evidence
-  // the obligation grades EVIDENCE_NOT_COLLECTED — blocking, never
-  // satisfied), and unsafe/out-of-date declarations become typed blocking
-  // entries. Without a sidecar nothing changes for the run. Mapping
-  // claims cannot waive or weaken anything, so strict mode is unaffected.
-  let mappingClaims: Claim[] = [];
+  // A check binds claims from the tracked sidecar plus a complete,
+  // authenticated execution result for this input digest. Live annotations
+  // and partial run-state claims are not check declarations.
+  let claimInventory: Claim[] = claimBindings;
   let mappingBlockers: BlockingEntry[] = [];
   let mappedCoverage: MappedCoverage[] = [];
   if (loadOptionalTestMap(io.cwd) !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
       config,
-      stateDir,
       obligations: pipeline.policy.obligations,
+      claimBindings,
       behaviorCatalog: pipeline.behaviorCatalog,
     });
-    mappingClaims = gradingClaimsFor(mapped.resolution, mapped.nativeClaims);
+    claimInventory = mapped.claimInventory;
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
     mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
   }
@@ -561,9 +649,10 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     // (gate-defining) diff evaluates everything — obligations AND
     // blockers — exactly like the unrestricted run.
     changedFiles: scopeDecision.mode === 'all' ? null : scopeDecision.changedFiles,
-    mappingClaims,
+    claimInventory,
     mappedCoverage,
     witnessVerifierKey,
+    witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
     baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
     evidenceContext: {
       expectedInputDigest: expectedDigest,
@@ -632,15 +721,20 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         },
       ];
     } else {
-      const candidatePolicyDigest = trustedPolicyDigestForConfig(io.cwd, config);
-      const resolution = resolveApprovedPolicyDigest({
+      const candidatePolicyDigest = docsApprovalDigest ?? trustedPolicyDigestForConfig(io.cwd, config);
+      const resolution = docsApprovalResolution ?? resolveApprovedPolicyDigest({
         flag: options.approvedPolicyDigest,
         env: io.env,
         candidateCwd: io.cwd,
         candidateConfig: config,
       });
-      const gate = evaluateApprovedPolicy(resolution, candidatePolicyDigest, config.enforcement?.strictE2E === true);
+      const gate = evaluateApprovedPolicy(
+        resolution,
+        candidatePolicyDigest,
+        config.enforcement?.strictE2E === true || docsExclusions.length > 0,
+      );
       if (gate.status === 'blocked') {
+        diagnosticEvidenceState = 'owner-policy-blocked';
         receiptBlocking = [
           {
             kind: 'finding',
@@ -653,12 +747,21 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           },
         ];
       } else {
+        const gitDir = resolveGitDir(io.cwd, io.env);
+        const candidateTreeId =
+          options.fixedCandidateTreeId !== undefined
+            ? options.fixedCandidateTreeId
+            : gitDir === null
+              ? null
+              : computeCandidateTreeId(gitDir, io.cwd, io.env, stateDir, 'record', runtimeReuseMounts, docsExclusions);
+        diagnosticCandidateTreeId = candidateTreeId;
         const load = loadReceiptFor(
           stateDir,
-          witnessVerifierKey ?? null,
+          verifierKeyring,
           {
             inputDigest: expectedDigest,
             trustedPolicyDigest: candidatePolicyDigest,
+            candidateTreeId,
             // check cannot know the run's selection/catalog identity —
             // those expectations are skipped here and enforced on the
             // test-gates reuse path; the input-digest binding is the
@@ -670,6 +773,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             ),
           },
         );
+        diagnosticEvidenceState = load.status === 'ok' ? 'receipt-verified' : `receipt-${load.status}`;
         if (load.status === 'ok') {
           // A provisioned pin binds the receipt too: a receipt sealed
           // under a since-revoked/different approved revision is a typed
@@ -697,8 +801,22 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             // evaluation demands or the typed blocker names the gap.
             receiptBlocking = scopedReceiptCoverageBlocking(load.receipt, requiredCoverage());
           }
+          if (receiptBlocking.length > 0) diagnosticEvidenceState = 'receipt-verified-with-blocking-entry';
         } else {
           receiptBlocking = receiptGateBlocking(load);
+          if (load.status === 'stale') {
+            const changedPaths = authenticatedChangedInputs(stateDir, verifierKeyring, currentSnapshot);
+            const changedSummary =
+              changedPaths.length > 0
+                ? ` changed inputs: ${changedPaths.join(', ')}.`
+                : ' the saved input inventory is unavailable or the change is in gate context rather than file bytes.';
+            const revalidation = 'gateforge test-gates --changed --scope full --run-timeout-min 5';
+            receiptBlocking = receiptBlocking.map((entry) => ({
+              ...entry,
+              detail: `${entry.detail}${changedSummary}`,
+              nextAction: `Run \`${revalidation}\` to test the full configured scope within five minutes.`,
+            }));
+          }
         }
       }
     }
@@ -713,6 +831,23 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     run: pipeline.manifest,
     toolVersion: VERSION,
     scope: { mode: scopeDecision.mode, expandedBecause: scopeDecision.expandedBecause },
+    diagnosticContext: {
+      scope: scopeDecision.mode === 'changed' ? 'changed' : 'full',
+      candidateTreeId: diagnosticCandidateTreeId,
+      inputDigest: expectedDigest,
+      evidenceState: diagnosticEvidenceState,
+      authority: 'authoritative',
+      ...(docsExclusions.length === 0
+        ? {}
+        : {
+            docsExclusions: {
+              folders: docsExclusions,
+              approvalDigest: docsApprovalResolution?.status === 'ok' ? docsApprovalResolution.digest : null,
+              approvalStatus: docsApprovalStatus ?? 'missing',
+              guarantee: DOCS_EXCLUSIONS_GUARANTEE,
+            },
+          }),
+    },
   });
   if (format === 'text') {
     // Plan phase 7: the endpoint inventory rides the text report —

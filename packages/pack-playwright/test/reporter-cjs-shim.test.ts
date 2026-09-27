@@ -19,14 +19,13 @@
  * Runs the BUILT shim (`dist/reporter/reporter.cjs`) against a stub
  * loopback witness; no browsers, no network beyond loopback.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildPack } from './helpers.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const SHIM_PATH = join(ROOT, 'packages/pack-playwright/dist/reporter/reporter.cjs');
@@ -126,11 +125,6 @@ function suiteHierarchy() {
 }
 
 describe('reporter CJS shim (the require-condition entry Playwright loads)', () => {
-  beforeAll(() => {
-    const build = buildPack();
-    expect(build.status, `pack build failed:\n${build.stderr}`).toBe(0);
-  });
-
   it('writes the lifecycle spool events (the supervisor session open/close input survives require)', async () => {
     const witness = await stubWitness();
     const stateDir = tempDir('gateforge-shim-state-');

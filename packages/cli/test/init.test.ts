@@ -2,11 +2,13 @@
  * `gateforge init`: generation, idempotence, and the no-overwrite rule
  * (automatic classification contract).
  */
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { withTempRepo, loadConfig } from '@gate-forge/core';
+import { VERSION } from '../src/commands/common.js';
 import { readPlanesConfigOrNull } from '@gate-forge/pack-sqlalchemy';
 import { runCli } from './helpers.js';
 
@@ -28,8 +30,112 @@ describe('gateforge init', () => {
       }
       expect(existsSync(repo.path('.gateforge/adapters'))).toBe(true);
       expect(existsSync(repo.path('.gateforge/waivers'))).toBe(true);
+      expect(existsSync(repo.path('.gateforge/docs-exclusions.yml'))).toBe(false);
       // The generated config must be loadable by the pinned schema.
       expect(() => loadConfig(join(repo.root, '.gateforge.yml'))).not.toThrow();
+    });
+  });
+
+  it('records explicit owner docs exclusions and keeps the declaration idempotent', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ 'docs/guide.md': '# Owner-only assertion\n' });
+      const first = await runCli(repo, ['init', '--no-scan', '--docs-exclude', 'docs']);
+      expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(0);
+      const approval = readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8');
+      expect(approval).toContain('schemaVersion: 1');
+      expect(approval).toContain('- "docs"');
+      expect(first.stdout).toContain('owner-declared documentation folders: docs');
+      expect(first.stdout).toContain('app/test read can make old evidence look valid');
+      expect(first.stdout).toMatch(/candidate policy digest to approve outside the repository: [0-9a-f]{64}/);
+      expect(first.stdout).toContain('GATEFORGE_APPROVED_POLICY_DIGEST');
+
+      const second = await runCli(repo, ['init', '--no-scan']);
+      expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(0);
+      expect(readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8')).toBe(approval);
+      expect(second.stdout).toContain('owner-declared documentation folders: docs');
+      expect(second.stdout).not.toContain(`updated: ${repo.path('.gateforge/docs-exclusions.yml')}`);
+    });
+  });
+  it('accepts markdown documentation names that contain lock', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'docs/notes/signature_lock.md': '# Signature guidance\n',
+        'docs/unlock-guide.md': '# Unlock guide\n',
+        'docs/blocklist.md': '# Blocklist reference\n',
+        'docs/memory/20260908_1700_employee_bericht_coworker_time_tracking_and_signature_lock.md':
+          '# Employee report\n',
+      });
+
+      const result = await runCli(repo, [
+        'init',
+        '--no-scan',
+        '--docs-exclude',
+        'docs',
+        '--confirm-doc-exclusions',
+      ]);
+
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8')).toContain('- "docs"');
+    });
+  });
+
+  it.each([
+    'package-lock.json',
+    'yarn.lock',
+    'pnpm-lock.yaml',
+    'bun.lockb',
+    'poetry.lock',
+    'Cargo.lock',
+    'composer.lock',
+    'npm-shrinkwrap.json',
+    'fixture-lock.json',
+    'fixture-lock.yaml',
+    'fixture.lock.json',
+  ])('rejects lockfile %s from docs exclusions', async (lockfile) => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ [`docs/${lockfile}`]: '{}\n' });
+
+      const result = await runCli(repo, ['init', '--no-scan', '--docs-exclude', 'docs']);
+
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(2);
+      expect(result.stderr).toContain(`cannot exclude executable or gate input 'docs/${lockfile}'`);
+    });
+  });
+
+  it('accepts markdown documentation filenames that describe config files', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ 'docs/config-guide.config.md': '# Configuration guide\n' });
+
+      const result = await runCli(repo, ['init', '--no-scan', '--docs-exclude', 'docs']);
+
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    });
+  });
+
+
+
+  it('requires an explicit confirmation before it changes an existing docs approval', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ 'docs/guide.md': '# Guide\n', 'handbook/index.md': '# Handbook\n' });
+      const first = await runCli(repo, ['init', '--no-scan', '--docs-exclude', 'docs']);
+      expect(first.code).toBe(0);
+      const original = readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8');
+
+      const refused = await runCli(repo, ['init', '--no-scan', '--docs-exclude', 'docs,handbook']);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain('needs explicit owner review');
+      expect(readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8')).toBe(original);
+
+      const approved = await runCli(repo, [
+        'init',
+        '--no-scan',
+        '--docs-exclude',
+        'docs,handbook',
+        '--confirm-doc-exclusions',
+      ]);
+      expect(approved.code, `${approved.stdout}\n${approved.stderr}`).toBe(0);
+      expect(readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8')).toContain('- "handbook"');
+      expect(approved.stdout).toContain('updated:');
     });
   });
 
@@ -139,6 +245,51 @@ describe('gateforge init', () => {
     });
   });
 
+  it('--blocking selects the repository-pinned CLI before an unrelated global CLI', async () => {
+    await withTempRepo({}, async (repo) => {
+      const result = await runCli(repo, ['init', '--blocking']);
+      expect(result.code).toBe(0);
+      const hook = readFileSync(repo.path('.gateforge/hooks/gateforge-check.mjs'), 'utf8');
+      const pinnedCli = hook.indexOf('node_modules/@gate-forge/cli/bin/gateforge.js');
+      const pathCli = hook.indexOf("spawnSync('gateforge', args");
+      expect(pinnedCli).toBeGreaterThanOrEqual(0);
+      expect(pathCli).toBeGreaterThanOrEqual(0);
+      expect(pinnedCli).toBeLessThan(pathCli);
+
+      const localCli = repo.path('node_modules/@gate-forge/cli/bin/gateforge.js');
+      const globalDir = repo.path('fake-global-bin');
+      const localMarker = repo.path('selected-local.txt');
+      const globalMarker = repo.path('selected-global.txt');
+      mkdirSync(join(repo.root, 'node_modules/@gate-forge/cli/bin'), { recursive: true });
+      mkdirSync(globalDir, { recursive: true });
+      writeFileSync(
+        localCli,
+        "require('node:fs').writeFileSync(process.env.GATEFORGE_TEST_MARKER, 'local');\n",
+      );
+      writeFileSync(
+        join(globalDir, 'gateforge'),
+        "#!/usr/bin/env node\nrequire('node:fs').writeFileSync(process.env.GATEFORGE_GLOBAL_MARKER, 'global');\n",
+        { mode: 0o755 },
+      );
+      const hookEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: `${globalDir}:${dirname(process.execPath)}:${process.env.PATH ?? ''}`,
+        GATEFORGE_TEST_MARKER: localMarker,
+        GATEFORGE_GLOBAL_MARKER: globalMarker,
+      };
+      delete hookEnv.GATEFORGE_DEV_ENGINE;
+      delete hookEnv.GATEFORGE_CLI;
+      const execution = spawnSync(process.execPath, [repo.path('.gateforge/hooks/gateforge-check.mjs')], {
+        cwd: repo.root,
+        encoding: 'utf8',
+        env: hookEnv,
+      });
+      expect(execution.status, `${execution.stdout}\n${execution.stderr}`).toBe(0);
+      expect(readFileSync(localMarker, 'utf8')).toBe('local');
+      expect(existsSync(globalMarker)).toBe(false);
+    });
+  });
+
   it('--blocking wires the pre-commit hook, check script, and CI template', async () => {
     await withTempRepo({}, async (repo) => {
       const first = await runCli(repo, ['init', '--blocking']);
@@ -157,9 +308,13 @@ describe('gateforge init', () => {
       const ciTemplate = readFileSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'), 'utf8');
       expect(ciTemplate).toContain('gateforge test-gates --changed');
       expect(ciTemplate).toContain('gateforge check --changed --require-e2e');
+      expect(ciTemplate).toContain('.gateforge/test-gates/report.json');
+      expect(ciTemplate).toContain('.gateforge/test-gates/receipt.json');
+      expect(ciTemplate).not.toContain('summary.satisfied');
       // Pinned engine install (lockfile-based), with a version assertion.
       expect(ciTemplate).toContain('npm ci');
       expect(ciTemplate).toContain('GATEFORGE_VERSION');
+      expect(ciTemplate).toContain(`GATEFORGE_VERSION: "${VERSION}"`);
       // The honest limits are carried in the template comments: the
       // signing material boundary, the approved-policy pin (E17), and
       // the server-side settings act.

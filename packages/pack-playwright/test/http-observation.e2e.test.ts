@@ -28,6 +28,7 @@ import {
   openSupervisorSession,
   type SupervisorSession,
 } from './helpers.js';
+import { routePageThroughSessionProxy } from '../src/fixture/fixture.js';
 
 const RUN_ID = '2b4a6c80-1e3d-4f5a-8b7c-9d0e1f2a3b4c';
 const TOKEN = 'browser-observation-run-token';
@@ -133,7 +134,8 @@ describe('browser-driven observation proxy (real chromium, playwright-evidence)'
       try {
         const context = await browser.newContext();
         const page = await context.newPage();
-        await page.goto(`${session.proxyUrl as string}/`);
+        await routePageThroughSessionProxy(page, target.url, session.proxyUrl as string);
+        await page.goto(`${target.url}/`);
         expect((await page.locator('h1').textContent())?.trim()).toBe('Contracts');
         const [response] = await Promise.all([
           page.waitForResponse(

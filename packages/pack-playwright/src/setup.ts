@@ -20,6 +20,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  ENV_PROXY_TARGET,
   ENV_RUN_ID,
   ENV_RUN_TOKEN,
   ENV_STATE_DIR,
@@ -59,26 +60,37 @@ export async function startWitnessProcess(
   // bin ships beside the package, not beside the compiled module).
   const pkgPath = fileURLToPath(new URL('../package.json', import.meta.url));
   const bin = join(pkgPath.slice(0, -'package.json'.length), 'bin', 'gateforge-witness.js');
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env };
+  const proxyExpected = (childEnv[ENV_PROXY_TARGET] ?? '').length > 0;
   const child = spawn(process.execPath, [bin], {
-    env: { ...process.env, ...env },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const urlPromise = new Promise<{ url: string; proxyUrl: string | null }>((resolveUrl, rejectUrl) => {
     let stdout = '';
     let stderr = '';
     let proxyUrl: string | null = null;
+    let witnessUrl: string | null = null;
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      rejectUrl(new Error('witness child did not report its URL in time'));
+      rejectUrl(
+        new Error(
+          proxyExpected
+            ? 'witness child did not report its URL and proxy URL in time'
+            : 'witness child did not report its URL in time',
+        ),
+      );
     }, timeoutMs);
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout += chunk.toString('utf8');
       const proxyMatch = /^GATEFORGE_WITNESS_PROXY_URL=(.+)$/m.exec(stdout);
       if (proxyMatch !== null) proxyUrl = proxyMatch[1] ?? null;
-      const match = /^GATEFORGE_WITNESS_URL=(.+)$/m.exec(stdout);
-      if (match !== null) {
+      const urlMatch = /^GATEFORGE_WITNESS_URL=(.+)$/m.exec(stdout);
+      if (urlMatch !== null) witnessUrl = urlMatch[1] ?? null;
+      // The proxy URL is a separate stdout line; wait for both before resolving.
+      if (witnessUrl !== null && (!proxyExpected || proxyUrl !== null)) {
         clearTimeout(timer);
-        resolveUrl({ url: match[1] as string, proxyUrl });
+        resolveUrl({ url: witnessUrl, proxyUrl });
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => {

@@ -53,12 +53,15 @@ function commitEnv(extra: Record<string, string>): Record<string, string | undef
 
 interface CommitResult {
   status: number;
+  signal: NodeJS.Signals | null;
+  durationMs: number;
   stdout: string;
   stderr: string;
 }
 
 /** Runs a real `git commit` (hook executes) and returns combined output. */
 function realCommit(repo: TempRepo, message: string, env: Record<string, string>): CommitResult {
+  const started = Date.now();
   const result = spawnSync(
     'git',
     ['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', message],
@@ -66,9 +69,31 @@ function realCommit(repo: TempRepo, message: string, env: Record<string, string>
   );
   return {
     status: result.status ?? -1,
+    signal: result.signal,
+    durationMs: Date.now() - started,
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
   };
+}
+
+/**
+ * Renders one commit attempt as an assertion message, so a failing
+ * status assertion carries the hook's full output. Git routes a
+ * pre-commit hook's stdout to its own stderr, so `stderr` holds the
+ * gate's text report.
+ *
+ * Args:
+ *   label (string): which commit leg this is.
+ *   result (CommitResult): the finished `git commit`.
+ *
+ * Returns:
+ *   string: status, signal, duration, stdout, and stderr.
+ */
+function describeCommit(label: string, result: CommitResult): string {
+  return (
+    `${label}: git commit exit=${result.status} signal=${result.signal ?? 'none'} ` +
+    `duration=${result.durationMs}ms\n--- stdout ---\n${result.stdout}\n--- stderr (hook output) ---\n${result.stderr}`
+  );
 }
 
 /** Commit count on the current branch (`rev-list --count HEAD`). */
@@ -220,8 +245,8 @@ describe('the hook gates real commits (end to end, real git + compiled CLI)', ()
         repo.stage(['docs/note.md']);
         const headBefore = repo.headSha();
         const blocked = realCommit(repo, 'unauthorized change', env);
-        expect(blocked.status).not.toBe(0);
-        expect(blocked.stdout + blocked.stderr).toContain('RUN_INCOMPLETE');
+        expect(blocked.status, describeCommit('unauthorized commit', blocked)).not.toBe(0);
+        expect(blocked.stdout + blocked.stderr, describeCommit('unauthorized commit', blocked)).toContain('RUN_INCOMPLETE');
         expect(commitCount(repo)).toBe(1);
         expect(repo.headSha()).toBe(headBefore);
         expect(repo.stagedFiles()).toEqual(['docs/note.md']); // index untouched by the block
@@ -234,8 +259,8 @@ describe('the hook gates real commits (end to end, real git + compiled CLI)', ()
         // Same staged candidate, valid receipt: the hook authorizes and
         // the commit IS created.
         const authorized = realCommit(repo, 'authorized change', env);
-        expect(authorized.status).toBe(0);
-        expect(commitCount(repo)).toBe(2);
+        expect(authorized.status, describeCommit('authorized commit', authorized)).toBe(0);
+        expect(commitCount(repo), describeCommit('authorized commit', authorized)).toBe(2);
         expect(repo.git(['log', '-1', '--format=%s']).stdout.trim()).toBe('authorized change');
         expect(repo.git(['show', 'HEAD:docs/note.md']).stdout).toBe('# notes\n');
       });
@@ -260,8 +285,8 @@ describe('the hook gates real commits (end to end, real git + compiled CLI)', ()
         // No GATEFORGE_CLI, minimal PATH (gateforge is not on it): the
         // hook must block instead of letting the commit through.
         const blocked = realCommit(repo, 'no engine', { GATEFORGE_CLI: '', PATH: '/usr/bin:/bin' });
-        expect(blocked.status).not.toBe(0);
-        expect(blocked.stdout + blocked.stderr).toContain('CLI engine not found');
+        expect(blocked.status, describeCommit('no-engine commit', blocked)).not.toBe(0);
+        expect(blocked.stdout + blocked.stderr, describeCommit('no-engine commit', blocked)).toContain('CLI engine not found');
         expect(commitCount(repo)).toBe(1);
       });
     },

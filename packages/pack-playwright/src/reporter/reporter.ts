@@ -107,6 +107,14 @@ interface RunnerOutcomesDocument {
   shard: { index: number; total: number } | null;
 }
 
+/** Separate runner work, selected claim results, and whole-repository debt. */
+interface ReporterRunSummary {
+  schemaVersion: 1;
+  selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
+  selectedClaims: { selected: number; satisfied: number; blocking: number; waived: number };
+  repositoryDebt: { obligations: number; unclaimed: number; blocking: number };
+}
+
 /** The claim-injections document the orchestrating CLI writes. */
 interface ClaimInjectionsDocument {
   schemaVersion: 1;
@@ -377,6 +385,21 @@ export class GateforgeReporter {
               .filter((entry) => !this.rows.some((row) => row.claims.includes(entry.id)))
               .map((entry) => entry.id),
           ).size;
+    const summary = this.runSummary(ledger, obligations, unclaimed);
+    writeJson(stateDir, 'run-summary.json', summary);
+    console.log(
+      `selected tests: ${String(summary.selectedTests.passed)} passed, ${String(summary.selectedTests.failed)} failed ` +
+        `(selected: ${String(summary.selectedTests.selected)}, skipped: ${String(summary.selectedTests.skipped)}, ` +
+        `expected failures: ${String(summary.selectedTests.expectedFailures)})`,
+    );
+    console.log(
+      `selected claims: ${String(summary.selectedClaims.satisfied)} satisfied, ${String(summary.selectedClaims.blocking)} blocking ` +
+        `(selected: ${String(summary.selectedClaims.selected)}, waived: ${String(summary.selectedClaims.waived)})`,
+    );
+    console.log(
+      `repository debt: ${String(summary.repositoryDebt.unclaimed)} unclaimed / ` +
+        `${String(summary.repositoryDebt.obligations)} obligations (${String(summary.repositoryDebt.blocking)} blocking)`,
+    );
     this.printLedger(ledger, unclaimed);
     this.printRegistryMismatches(obligations, records);
 
@@ -389,6 +412,46 @@ export class GateforgeReporter {
       // printed, so exiting here loses nothing but the runner summary.
       process.exit(1);
     }
+  }
+
+  /** Builds non-authoritative counts from the runner events and ledger.
+   *
+   * Args:
+   *   ledger: selected claimed-obligation results from the real engine.
+   *   obligations: the complete repository obligation registry, when valid.
+   *   unclaimed: unique registered obligations without any claim row.
+   *
+   * Returns:
+   *   ReporterRunSummary: distinct counts for runner work, claims, and repository debt.
+   */
+  private runSummary(
+    ledger: readonly LedgerRow[],
+    obligations: ReturnType<typeof parseObligationsDocument>,
+    unclaimed: number,
+  ): ReporterRunSummary {
+    const latestByTest = new Map<string, RunnerOutcomeRow>();
+    for (const outcome of this.runnerOutcomes) {
+      const previous = latestByTest.get(outcome.testId);
+      if (previous === undefined || outcome.attempt >= previous.attempt) latestByTest.set(outcome.testId, outcome);
+    }
+    const outcomes = [...latestByTest.values()];
+    const skipped = outcomes.filter((outcome) => outcome.status === 'skipped').length;
+    const passed = outcomes.filter((outcome) => outcome.status === 'passed' && !outcome.expectedFailure).length;
+    const expectedFailures = outcomes.filter((outcome) => outcome.expectedFailure && outcome.status !== 'passed').length;
+    const failed = outcomes.length - skipped - passed - expectedFailures;
+    const satisfied = ledger.filter((row) => row.verdict === 'satisfied').length;
+    const blockingClaims = ledger.filter((row) => isBlocking(row.verdict));
+    const waived = ledger.filter((row) => row.verdict === 'waived').length;
+    return {
+      schemaVersion: 1,
+      selectedTests: { selected: outcomes.length, passed, failed, skipped, expectedFailures },
+      selectedClaims: { selected: ledger.length, satisfied, blocking: blockingClaims.length, waived },
+      repositoryDebt: {
+        obligations: obligations?.obligations.length ?? 0,
+        unclaimed,
+        blocking: new Set(blockingClaims.map((row) => row.claim)).size + unclaimed,
+      },
+    };
   }
 
   /** Full title path of a test (runner API when present, else [title]). */
@@ -720,8 +783,11 @@ export class GateforgeReporter {
         .map((entry) => entry.id)
         .sort();
       if (unclaimed.length > 0) {
+        const preview = unclaimed.slice(0, 10).join(', ');
+        const more = unclaimed.length > 10 ? ` (+${String(unclaimed.length - 10)} more)` : '';
         console.warn(
-          `[gateforge] obligations without any claim (will grade missing): ${unclaimed.join(', ')}`,
+          `[gateforge] obligations without any claim (will grade missing): ${String(unclaimed.length)} ` +
+            `(${preview}${more})`,
         );
       }
     }

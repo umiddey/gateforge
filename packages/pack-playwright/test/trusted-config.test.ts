@@ -38,6 +38,8 @@ describe('synthesizeTrustedConfig', () => {
       stateDir,
       runId: 'run-1',
       reporterEntry: '/engine/reporter.js',
+      appBaseUrl: 'http://127.0.0.1:43127',
+      storageState: '/tmp/e2e/.auth/contractor.json',
       testFiles: ['specs/a.spec.js', 'specs/b.spec.js'],
       projects: ['chromium'],
     });
@@ -47,6 +49,8 @@ describe('synthesizeTrustedConfig', () => {
     expect(content).not.toMatch(/playwright\.config/);
     // Exact selected files + bare projects as data.
     expect(content).toContain(JSON.stringify(['specs/a.spec.js', 'specs/b.spec.js']));
+    expect(content).toContain('"baseURL":"http://127.0.0.1:43127"');
+    expect(content).toContain('"storageState":"/tmp/e2e/.auth/contractor.json"');
     expect(content).toContain('"chromium"');
     // Engine reporter forced by absolute entry with embedded options.
     expect(content).toContain('/engine/reporter.js');

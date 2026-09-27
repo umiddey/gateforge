@@ -79,6 +79,10 @@ export interface SupervisedRunOptions {
   timeoutMs?: number;
   /** Repo root override (default: process cwd; the trusted testDir). */
   cwd?: string;
+  /** Trusted operator-provided app proxy URL used by relative navigation. */
+  appBaseUrl?: string;
+  /** Trusted operator-provided browser session file (never passed to workers). */
+  storageState?: string;
   /**
    * Exact repo-relative posix test files to run (the supervisor's
    * selection as data). Undefined = the runner default (every spec
@@ -153,6 +157,8 @@ export async function executeSupervisedPlaywright(
     stateDir: env.stateDir,
     runId: env.runId,
     reporterEntry: options.reporterEntry ?? trustedReporterEntry(),
+    ...(options.appBaseUrl !== undefined ? { appBaseUrl: options.appBaseUrl } : {}),
+    ...(options.storageState !== undefined ? { storageState: options.storageState } : {}),
     ...(options.testFiles !== undefined ? { testFiles: options.testFiles } : {}),
     ...(options.projects !== undefined ? { projects: options.projects } : {}),
   });

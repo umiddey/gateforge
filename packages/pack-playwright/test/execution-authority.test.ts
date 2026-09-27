@@ -30,7 +30,7 @@ import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { superviseExecution } from '@gate-forge/core';
 import { startWitness } from '../src/witness/server.js';
 import { startSupervisorSpoolDrain } from '../src/supervisor/drain.js';
@@ -40,24 +40,8 @@ import {
   executeSupervisedPlaywright,
   readRunnerOutcomes,
 } from '../src/discovery/supervised-run.js';
-import { buildPack } from './helpers.js';
-import { spawnSync } from 'node:child_process';
 
 const DIRECTORIES: string[] = [];
-
-beforeAll(() => {
-  // The trusted synthesis forces the BUILT engine reporter and supervision
-  // runs against the BUILT core (workspace resolution) — rebuild both so
-  // the children load the current implementation, not a stale dist.
-  const core = spawnSync('npx', ['tsc', '-p', 'packages/core/tsconfig.build.json'], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    timeout: 180_000,
-  });
-  expect(core.status, `core build failed:\n${core.stderr}`).toBe(0);
-  const build = buildPack();
-  expect(build.status, `pack build failed:\n${build.stderr}`).toBe(0);
-});
 
 afterEach(() => {
   for (const dir of DIRECTORIES.splice(0)) {

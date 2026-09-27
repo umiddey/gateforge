@@ -29,6 +29,7 @@ import { startWitness } from '../../pack-playwright/src/witness/server.js';
 import { beginTestInterval, endTestInterval, openTestSession, type TestSession } from './witness-sessions.js';
 import { httpRoutesView } from '../src/state.js';
 import { configYml, runCli, writeV2Manifest } from './helpers.js';
+import { mintCompleteRunReceipt } from './gate-receipts.js';
 
 /** In-process detector plugin emitting the two overlapping routes. */
 const HTTP_PLUGIN_SOURCE = `import { readFileSync } from 'node:fs';
@@ -296,6 +297,12 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
         // v2 attestation over the CURRENT inputs (plan §11.3): the same
         // real ledger authorizes only while the tree is unchanged.
         await writeV2Manifest(repo, { runId, verifierKey, recordIds });
+        await mintCompleteRunReceipt(repo, {
+          verifierKey,
+          claimInventory: [
+            { schemaVersion: 1, obligationId: PARAM_OBLIGATION, testId: TEST_ID, testFile: 'route.mjs' },
+          ],
+        });
 
         const { code, verdicts } = await checkJson(repo, {
           GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey,
@@ -396,6 +403,12 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
         // reversed-order rerun below keeps the same digest (run state is
         // excluded), so the verdict must be identical.
         await writeV2Manifest(repo, { runId, verifierKey, recordIds });
+        await mintCompleteRunReceipt(repo, {
+          verifierKey,
+          claimInventory: [
+            { schemaVersion: 1, obligationId: PARAM_OBLIGATION, testId: TEST_ID, testFile: 'route.mjs' },
+          ],
+        });
         const first = await checkJson(repo, env);
 
         repo.writeFiles({
@@ -481,6 +494,12 @@ describe('F4 e2e: literal request claimed for the overlapping parameter endpoint
         });
         // v2 attestation over the CURRENT inputs (plan §11.3).
         await writeV2Manifest(repo, { runId, verifierKey, recordIds });
+        await mintCompleteRunReceipt(repo, {
+          verifierKey,
+          claimInventory: [
+            { schemaVersion: 1, obligationId: PARAM_OBLIGATION, testId: TEST_ID, testFile: 'route.mjs' },
+          ],
+        });
 
         // The literal obligation stays missing (unclaimed) so the run
         // still exits 1 — but the parameter row itself satisfies: the

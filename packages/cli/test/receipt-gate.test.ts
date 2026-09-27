@@ -7,7 +7,8 @@
  * integrity check, failure-after-evidence blocking a later check, and
  * exact cache reuse on identical authenticated inputs only.
  */
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -15,12 +16,23 @@ import {
   loadConfig,
   recordIdOf,
   sha256Canonical,
+  targetArtifactDigestOf,
   type BehaviorCatalog,
+  type Claim,
   type ObligationVerdict,
   type TempRepo,
   type TestCatalog,
 } from '@gate-forge/core';
-import { currentInputDigest, FIXED_AT, PLUGIN_SOURCE, runCli, withTempRepo } from './helpers.js';
+import {
+  currentInputDigest,
+  FIXED_AT,
+  installFixture,
+  OBLIGATION_ACCOUNTS,
+  OBLIGATION_ORDERS,
+  PLUGIN_SOURCE,
+  runCli,
+  withTempRepo,
+} from './helpers.js';
 import {
   trustedPolicyDigestForConfig,
   issueGateReceipt,
@@ -30,6 +42,7 @@ import {
 import { loadReceiptFor, receiptGateBlocking, tryReuseReceipt } from '../src/receipts.js';
 import { testReceiptV2Bindings } from './gate-receipts.js';
 import { executedBehaviorCaseDigest } from '../src/commands/test-gates.js';
+import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
 import {
   clearGateReceipt,
   readStateDocument,
@@ -37,7 +50,7 @@ import {
   writeExecutionResult,
   writeGateReceipt,
 } from '../src/state.js';
-import { VERIFIER_KEY_ENV } from '../src/commands/common.js';
+import { VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
 import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 
 const KEY = 'e2e-receipt-verifier-key';
@@ -139,14 +152,26 @@ const EMPTY_CATALOG: TestCatalog = {
  * Simulates exactly what a complete supervised `test-gates --changed`
  * seals for the CURRENT tree: a complete execution result + a receipt
  * bound to it, written into the run state.
+ *
+ * Args:
+ *   repo: disposable repository fixture.
+ *   inputDigest: current trusted input digest.
+ *   options: optional key identity and native claim inventory.
+ *
+ * Returns:
+ *   Promise<string>: the issued receipt id.
  */
 async function sealGreenRun(
   repo: TempRepo,
   inputDigest: string,
+  options: { verifierKey?: string; verifierKeyId?: string; claimInventory?: readonly Claim[] } = {},
 ): Promise<string> {
   const config = loadConfig(join(repo.root, '.gateforge.yml'));
   const stateDir = resolveStateDir(repo.root);
   const trustedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
+  const gitDir = resolveGitDir(repo.root, process.env);
+  const candidateTreeId =
+    gitDir === null ? null : computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
   const plannedRows = [plannedRow()];
   const sealed = sealExecutionResult({
     runId: RUN_ID,
@@ -156,6 +181,7 @@ async function sealGreenRun(
     runner: 'playwright',
     logicalKeys: [PLANNED_KEY],
     catalog: EMPTY_CATALOG,
+    ...(options.claimInventory !== undefined ? { claimInventory: options.claimInventory } : {}),
     plannedRows,
     envelope: {
       processExit: 0,
@@ -173,7 +199,8 @@ async function sealGreenRun(
   });
   writeExecutionResult(stateDir, sealed.result);
   const receipt = issueGateReceipt({
-    verifierKey: KEY,
+    verifierKey: options.verifierKey ?? KEY,
+    verifierKeyId: options.verifierKeyId,
     runId: RUN_ID,
     invocationId: INVOCATION_ID,
     inputDigest,
@@ -186,6 +213,8 @@ async function sealGreenRun(
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: null,
     ...testReceiptV2Bindings(trustedPolicyDigest),
+    candidateTreeId,
+    targetArtifactDigest: targetArtifactDigestOf(candidateTreeId),
     verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
     issuedAt: FIXED_AT,
   });
@@ -298,6 +327,99 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
       expect(receiptId).toMatch(/^[0-9a-f-]{36}$/);
     });
   });
+  it('uses only claim inventory sealed for the current input digest', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const claimInventory: Claim[] = [
+        {
+          schemaVersion: 1,
+          obligationId: OBLIGATION_ACCOUNTS,
+          testId: 'tests/accounts.spec.ts::reads accounts',
+          testFile: 'tests/accounts.spec.ts',
+          location: { file: 'tests/accounts.spec.ts', line: 4, col: 0 },
+        },
+        {
+          schemaVersion: 1,
+          obligationId: OBLIGATION_ORDERS,
+          testId: 'tests/orders.spec.ts::reads orders',
+          testFile: 'tests/orders.spec.ts',
+          location: { file: 'tests/orders.spec.ts', line: 4, col: 0 },
+        },
+      ];
+      repo.writeFiles({ '.gateforge/test-gates/claims.json': JSON.stringify(claimInventory) });
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest, { claimInventory });
+
+      const current = await runCli(repo, ['check', '--format', 'json'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(current.code).toBe(1);
+      const currentReport = JSON.parse(current.stdout) as { verdicts: Array<{ cause?: string | null }> };
+      expect(currentReport.verdicts.every((entry) => entry.cause !== 'TEST_MAPPING_MISSING')).toBe(true);
+
+      repo.writeFiles({ 'src/accounts.txt': 'accounts fixture.table\n# changed after receipt\n' });
+      const stale = await runCli(repo, ['check', '--format', 'json'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(stale.code).toBe(1);
+      const staleReport = JSON.parse(stale.stdout) as { verdicts: Array<{ cause?: string | null }> };
+      expect(staleReport.verdicts.some((entry) => entry.cause === 'TEST_MAPPING_MISSING')).toBe(true);
+      const changedDigest = await currentInputDigest(repo);
+      await sealGreenRun(repo, changedDigest);
+      const legacyReceipt = await runCli(repo, ['check', '--format', 'json'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(legacyReceipt.code).toBe(1);
+      const legacyReport = JSON.parse(legacyReceipt.stdout) as { verdicts: Array<{ cause?: string | null }> };
+      expect(legacyReport.verdicts.some((entry) => entry.cause === 'TEST_MAPPING_MISSING')).toBe(true);
+    });
+  });
+
+
+  it('verifies a retained external key across separate CLI calls and reports a retired id', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest, { verifierKeyId: 'key-old' });
+      const directory = mkdtempSync(join(tmpdir(), 'gateforge-keyring-e2e-'));
+      const keyFile = join(directory, 'keys.json');
+      const fileKeyEnv = { [VERIFIER_KEY_FILE_ENV]: keyFile };
+      writeFileSync(
+        keyFile,
+        `${JSON.stringify({
+          schemaVersion: 1,
+          activeKeyId: 'key-new',
+          keys: { 'key-old': KEY, 'key-new': 'rotated-verifier-key' },
+        })}\n`,
+        { mode: 0o600 },
+      );
+      try {
+        for (let invocation = 0; invocation < 2; invocation += 1) {
+          const verified = await runCli(repo, ['check', '--require-e2e'], fileKeyEnv);
+          expect(verified.code).toBe(0);
+          expect(`${verified.stdout}\n${verified.stderr}`).not.toContain(KEY);
+          expect(`${verified.stdout}\n${verified.stderr}`).not.toContain(keyFile);
+        }
+        const stateDir = resolveStateDir(repo.root);
+        const stateText = readdirSync(stateDir)
+          .map((name) => readFileSync(join(stateDir, name)))
+          .join('\n');
+        expect(stateText).not.toContain(KEY);
+        expect(stateText).not.toContain(keyFile);
+
+        const retired = await runCli(repo, [
+          'key',
+          'retire',
+          '--file',
+          keyFile,
+          '--key-id',
+          'key-old',
+          '--confirm',
+        ]);
+        expect(retired.code).toBe(0);
+        const rejected = await runCli(repo, ['check', '--require-e2e'], fileKeyEnv);
+        expect(rejected.code).toBe(1);
+        expect(rejected.stdout).toContain('KEY_UNKNOWN');
+        expect(rejected.stdout).toContain('key-old');
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  });
 
   it('touching a helper after green makes the receipt stale (EVIDENCE_STALE); resealing clears it', async () => {
     await withTempRepo({}, async (repo) => {
@@ -337,7 +459,7 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
       const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
       expect(result.code).toBe(1);
       expect(result.stdout).toMatch(/ENFORCEMENT_UNTRUSTED/);
-      expect(result.stdout).toMatch(/forged or tampered/);
+      expect(result.stdout).toMatch(/KEY_MISMATCH/);
     });
   });
 
@@ -425,7 +547,11 @@ describe('receipt load + reuse decisions (Phase 4 item 8: exact cache reuse)', (
       await sealGreenRun(repo, digest);
       const expected = { inputDigest: digest, trustedPolicyDigest };
 
-      expect(tryReuseReceipt(stateDir, KEY, expected)).toEqual({ reuse: true, receipt: expect.objectContaining({ runId: RUN_ID }) });
+      expect(tryReuseReceipt(stateDir, KEY, expected)).toEqual({
+        reuse: true,
+        receipt: expect.objectContaining({ runId: RUN_ID }),
+        executionResult: expect.objectContaining({ runId: RUN_ID, complete: true }),
+      });
 
       // ANY changed input → no reuse.
       repo.writeFiles({ 'src/accounts.txt': 'accounts fixture.table v2\n' });
@@ -549,4 +675,3 @@ describe('receipt load + reuse decisions (Phase 4 item 8: exact cache reuse)', (
     });
   });
 });
-

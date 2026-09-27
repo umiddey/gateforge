@@ -4,8 +4,7 @@
  * preflight fails closed with a precise capability error, waived E2E
  * obligations block with ENFORCEMENT_UNTRUSTED under strict mode, the
  * coverage policy blocks with CRUD_COVERAGE_MISSING (unknown tables exit
- * 2), and one small consumer shows three different blocking causes with
- * useful next actions.
+ * 2), and a stale run-only claim cannot hide an unmapped obligation.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -245,8 +244,8 @@ describe('coverage policy via check (plan §3.6, ADR 0005 D5)', () => {
   });
 });
 
-describe('Phase 0 acceptance: three different blocking causes with useful actions', () => {
-  it('unmapped test, missing observation, and unsupported verifier show distinct causes', async () => {
+describe('Phase 0 acceptance: stale run claims do not hide missing mappings', () => {
+  it('a run-only claim remains missing while unsupported verifier keeps its distinct cause', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       repo.writeFiles({
@@ -276,9 +275,10 @@ describe('Phase 0 acceptance: three different blocking causes with useful action
       expect(byId.get(OBLIGATION_ACCOUNTS)?.nextAction).toBe(
         CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING'],
       );
-      // Missing observation: the orders claim exists but collected nothing.
-      expect(byId.get(OBLIGATION_ORDERS)?.cause).toBe('EVIDENCE_NOT_COLLECTED');
-      expect(byId.get(OBLIGATION_ORDERS)?.nextAction).toBe(CAUSE_NEXT_ACTIONS['EVIDENCE_NOT_COLLECTED']);
+      // Orders appears only in the prior run's claims.json. With no current
+      // annotation or sidecar, it is still unmapped, not evidence-bearing.
+      expect(byId.get(OBLIGATION_ORDERS)?.cause).toBe('TEST_MAPPING_MISSING');
+      expect(byId.get(OBLIGATION_ORDERS)?.nextAction).toBe(CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING']);
       // Unsupported verifier: the task contracts still have no honest proof channel.
       const task = report.verdicts.filter((v) => v.cause === 'VERIFIER_UNSUPPORTED');
       expect(task).toHaveLength(2);

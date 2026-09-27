@@ -4,9 +4,8 @@
  *
  * - the evidence object is FROZEN and exposes EXACTLY
  *   ui/visible/persistence/http/finalize (no `prove` escape hatch);
- * - the consumer-declared `surface` descriptor is REQUIRED: the old
- *   no-argument (Accounts-specific) shape throws a precise migration
- *   error, and a wrong schemaVersion fails closed;
+ * - non-UI evidence can be created without a `surface`; the first UI
+ *   call requires a valid consumer descriptor and fails closed;
  * - construction fails closed when no supervisor-opened session exists;
  * - forged receipts (hand-rolled or Object.create-branded) are
  *   rejected by `visible.confirm`/`persistence.verify` BEFORE any page
@@ -21,7 +20,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { Page, TestInfo } from 'playwright/test';
-import { createEvidence, SURFACE_DESCRIPTOR_VERSION, type SurfaceDescriptor } from '../src/fixture/evidence.js';
+import {
+  createEvidence,
+  SURFACE_DESCRIPTOR_VERSION,
+  SURFACE_DESCRIPTOR_VERSION_2,
+  type SurfaceDescriptor,
+} from '../src/fixture/evidence.js';
 import { WitnessClient, resolveWitnessUrl } from '../src/fixture/witness-client.js';
 import { startWitness } from '../src/witness/server.js';
 import { startMarkerServer } from './marker-server.js';
@@ -47,7 +51,7 @@ const OBLIGATION = 'tenant.accounts:persistence:update';
  * the point is the contract shape, not any application.
  */
 const PLACEHOLDER_SURFACE: SurfaceDescriptor = {
-  schemaVersion: SURFACE_DESCRIPTOR_VERSION,
+  schemaVersion: SURFACE_DESCRIPTOR_VERSION_2,
   list: {
     path: '/list',
     readySelector: 'h1:has-text("List")',
@@ -115,7 +119,7 @@ async function startFixtureWitness() {
 }
 
 interface FixtureOptions {
-  surface?: SurfaceDescriptor;
+  surface?: SurfaceDescriptor | null;
   annotations?: Array<{ type: string; description: string }>;
   sessionTestId?: string;
 }
@@ -130,7 +134,7 @@ async function buildEvidence(
   return createEvidence({
     page: dummyPage(),
     testInfo: testInfoOf(options.annotations ?? [{ type: 'gateforge', description: OBLIGATION }]),
-    surface: options.surface ?? PLACEHOLDER_SURFACE,
+    ...(options.surface === null ? {} : { surface: options.surface ?? PLACEHOLDER_SURFACE }),
     // Deterministic loopback stand-ins: the dummy page is never driven,
     // and the witness transport is bound explicitly (no env leakage).
     client: new WitnessClient(witnessUrl, TOKEN),
@@ -238,36 +242,46 @@ describe('frozen surface, no escape hatch (invariant 6, GF-11)', () => {
   });
 });
 
-describe('versioned surface descriptor (plan Phase 1 item 7)', () => {
-  it('throws the migration error naming the new required parameter when surface is omitted', async () => {
+describe('lazy surface descriptor (plan Phase 5)', () => {
+  it('allows helper evidence without a surface and requires one only on the first UI call', async () => {
     const fixture = await startFixtureWitness();
     try {
-      await expect(
-        createEvidence({ page: dummyPage(), testInfo: testInfoOf([{ type: 'gateforge', description: OBLIGATION }]) }),
-      ).rejects.toThrow(/requires a consumer-declared 'surface' descriptor/);
-      // No silent fallback to the removed Accounts behavior: no session
-      // existed and none was needed — the surface check fires first.
-      const ledger = (await (
-        await fetch(`${fixture.witness.url}/records`, { headers: { 'x-gateforge-run': TOKEN } })
-      ).json()) as { records: unknown[] };
-      expect(ledger.records).toHaveLength(0);
+      const evidence = await buildEvidence(fixture.witness.url, { surface: null });
+      expect(typeof evidence.http.observe).toBe('function');
+      await expect(evidence.ui.create({ fields: { field_a: 'value' } })).rejects.toThrow(
+        /evidence\.ui requires a consumer-declared SurfaceDescriptor/,
+      );
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();
     }
   });
 
+  it('reports package incompatibility before calling a missing session method', async () => {
+    const staleClient = {} as WitnessClient;
+    await expect(
+      createEvidence({
+        page: dummyPage(),
+        testInfo: testInfoOf([{ type: 'gateforge', description: OBLIGATION }]),
+        client: staleClient,
+      }),
+    ).rejects.toThrow(
+      /GATEFORGE_PACKAGE_INCOMPATIBLE.*@gate-forge\/pack-playwright.*@gate-forge\/cli.*install matching Gateforge packages/,
+    );
+  });
+
   it('fails closed on an unsupported surface schemaVersion', async () => {
     const fixture = await startFixtureWitness();
     try {
       const session = await openSupervisorSession(fixture.witness.url, TOKEN, 'fixture-test-id-1', 0, VERIFIER_KEY);
+      const evidence = await createEvidence({
+        page: dummyPage(),
+        testInfo: testInfoOf([{ type: 'gateforge', description: OBLIGATION }]),
+        surface: { ...PLACEHOLDER_SURFACE, schemaVersion: SURFACE_DESCRIPTOR_VERSION + 1 },
+        session: { ...session },
+      });
       await expect(
-        createEvidence({
-          page: dummyPage(),
-          testInfo: testInfoOf([{ type: 'gateforge', description: OBLIGATION }]),
-          surface: { ...PLACEHOLDER_SURFACE, schemaVersion: SURFACE_DESCRIPTOR_VERSION + 1 },
-          session: { ...session },
-        }),
+        evidence.ui.create({ fields: { field_a: 'value' } }),
       ).rejects.toThrow(/surface.schemaVersion .* is not supported/);
     } finally {
       await fixture.witness.stop();

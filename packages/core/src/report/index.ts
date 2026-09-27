@@ -56,6 +56,32 @@ export interface ScopeMetadata {
   expandedBecause: readonly string[];
 }
 
+/** Measured work and whole-repository debt; descriptive only, never authorization. */
+export interface RunExecutionSummary {
+  scope: 'full' | 'changed';
+  mode: 'executed' | 'reused';
+  testsPerformedThisInvocation: number;
+  selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
+  selectedClaims: { selected: number; satisfied: number; blocking: number; blockingEntries: number; waived: number };
+  repositoryDebt: { obligations: number; blocking: number; blockingEntries: number; unclaimed: number };
+}
+
+/** Safe identifiers that let operators compare two gate reports. */
+export interface DiagnosticContext {
+  scope: 'full' | 'changed';
+  candidateTreeId: string | null;
+  inputDigest: string | null;
+  evidenceState: string;
+  authority: 'authoritative' | 'non-authoritative';
+  /** Owner-approved documentation folders and their reduced trust guarantee. */
+  docsExclusions?: {
+    folders: readonly string[];
+    approvalDigest: string | null;
+    approvalStatus: 'matched' | 'mismatch' | 'missing' | 'invalid';
+    guarantee: string;
+  };
+}
+
 /** Options for {@link renderRun}. */
 export interface RenderRunOptions {
   /** Output format. */
@@ -74,6 +100,10 @@ export interface RenderRunOptions {
    * `all` scope when omitted.
    */
   scope?: ScopeMetadata;
+  /** Optional count breakdown for supervised runner work, always descriptive. */
+  execution?: RunExecutionSummary;
+  /** Candidate identity and evidence state used to explain blocking entries. */
+  diagnosticContext?: DiagnosticContext;
   /**
    * Classification decision provenance per resource id (ADR 0003):
    * decision fingerprint + rule trace, included in json/SARIF/text when
@@ -246,6 +276,8 @@ function jsonReport(
     // Canonical JSON sorts keys, so insertion order is irrelevant.
     report['classifications'] = options.classificationTraces;
   }
+  if (options.execution !== undefined) report['execution'] = options.execution;
+  if (options.diagnosticContext !== undefined) report['diagnosticContext'] = options.diagnosticContext;
   return report;
 }
 
@@ -320,6 +352,8 @@ function sarifReport(
         // which obligations were evaluated and why the scope expanded.
         properties: {
           scope: { mode: scope.mode, expandedBecause: [...scope.expandedBecause] },
+          ...(options.execution === undefined ? {} : { execution: options.execution }),
+          ...(options.diagnosticContext === undefined ? {} : { diagnosticContext: options.diagnosticContext }),
         },
         // Blocking policy entries (unclassified/unresolved resources,
         // detector findings, stale references) are not obligation
@@ -375,6 +409,42 @@ function textReport(
     lines.push(
       `scope: all obligations; expanded because ${[...scope.expandedBecause].join(', ')}`,
     );
+  }
+  if (options.execution !== undefined) {
+    const execution = options.execution;
+    lines.push(
+      `execution: ${execution.scope} scope, ${execution.mode}; ` +
+        `${execution.testsPerformedThisInvocation} test(s) run in this invocation`,
+    );
+    lines.push(
+      `selected tests: ${execution.selectedTests.passed} passed, ${execution.selectedTests.failed} failed ` +
+        `(selected ${execution.selectedTests.selected}; ${execution.selectedTests.skipped} skipped; ` +
+        `${execution.selectedTests.expectedFailures} expected failures)`,
+    );
+    lines.push(
+      `selected claims: ${execution.selectedClaims.satisfied} satisfied, ${execution.selectedClaims.blocking} blocking ` +
+        `(selected ${execution.selectedClaims.selected}; ${execution.selectedClaims.blockingEntries} blocking entries; ` +
+        `${execution.selectedClaims.waived} waived)`,
+    );
+    lines.push(
+      `repository debt: ${execution.repositoryDebt.blocking} blocking / ${execution.repositoryDebt.obligations} obligations ` +
+        `(${execution.repositoryDebt.unclaimed} unclaimed; ${execution.repositoryDebt.blockingEntries} blocking entries)`,
+    );
+  }
+  if (options.diagnosticContext !== undefined) {
+    const context = options.diagnosticContext;
+    lines.push(
+      `diagnostic context: scope=${context.scope} candidateTreeId=${context.candidateTreeId ?? '<unavailable>'} ` +
+        `inputDigest=${context.inputDigest ?? '<unavailable>'} evidence=${context.evidenceState} authority=${context.authority}`,
+    );
+    if (context.docsExclusions !== undefined) {
+      lines.push(
+        `documentation exclusions: folders=${context.docsExclusions.folders.join(',')} ` +
+          `approvalStatus=${context.docsExclusions.approvalStatus} ` +
+          `approvalDigest=${context.docsExclusions.approvalDigest ?? '<missing>'} ` +
+          `guarantee="${context.docsExclusions.guarantee}"`,
+      );
+    }
   }
   if (options.waiverCounts !== undefined) {
     const wc = options.waiverCounts;

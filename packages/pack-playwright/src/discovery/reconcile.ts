@@ -8,8 +8,10 @@
  * consumer's playwright config and test modules as UNTRUSTED code —
  * they execute in a child process. This module therefore:
  * - strips every `GATEFORGE_*` variable (witness keys, run tokens, run
- *   state) from the child environment, so enumeration never runs with
- *   signing material or production credentials;
+ *   state) from the child environment, then sets only an isolated,
+ *   secret-free temporary `GATEFORGE_STATE_DIR` so supervised-only test
+ *   declarations are registered;
+ * - deletes that temporary directory after enumeration;
  * - enforces a finite timeout (the child is killed; a timeout is a
  *   typed failure, never a hang or an empty inventory);
  * - treats a failed invocation as a typed error (CLI exit 2), while
@@ -31,9 +33,11 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
 import type { Location } from '@gate-forge/core';
 
 /** Config file names checked at the repo root and one level deep
@@ -88,6 +92,8 @@ export interface NativeInstance {
   expectedStatus: string;
   /** Native annotation types on the instance (e.g. `skip`, `fixme`). */
   annotations: string[];
+  /** Current `{type: 'gateforge'}` annotation descriptions. */
+  claims: string[];
 }
 
 /** Outcome of one native list run. */
@@ -148,20 +154,23 @@ export function localPlaywrightCliCandidates(cwd: string): string[] {
 
 /**
  * Strips every `GATEFORGE_*` variable from the environment for UNTRUSTED
- * child runs: config/test-module enumeration must execute without
- * gateforge signing env (witness keys, run tokens, run state).
+ * child runs, then adds only a caller-owned temporary state directory.
  *
  * Args:
  *   env: the parent environment.
+ *   discoveryStateDir: empty temporary directory used only to register
+ *     supervised tests; it never contains verifier keys or run tokens.
  *
  * Returns:
- *   NodeJS.ProcessEnv: a copy without any `GATEFORGE_*` keys.
+ *   NodeJS.ProcessEnv: a copy without caller `GATEFORGE_*` values except
+ *   the supplied isolated state directory.
  */
-export function untrustedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function untrustedEnv(env: NodeJS.ProcessEnv, discoveryStateDir?: string): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = { ...env };
   for (const key of Object.keys(child)) {
     if (key.startsWith('GATEFORGE_')) delete child[key];
   }
+  if (discoveryStateDir !== undefined) child['GATEFORGE_STATE_DIR'] = discoveryStateDir;
   return child;
 }
 
@@ -232,10 +241,9 @@ interface ReporterSpec {
     projectId?: string;
     projectName?: string;
     expectedStatus?: string;
-    annotations?: Array<{ type?: string }>;
+    annotations?: Array<{ type?: string; description?: string }>;
   }>;
 }
-
 /** Minimal parsed JSON-reporter document shape. */
 interface ReporterDocument {
   config?: { rootDir?: string };
@@ -295,13 +303,16 @@ export async function listNativePlaywrightTests(options: {
   const cli = playwrightCliPath(options.cwd, configDir);
   const args = [cli, 'test', '--list', '--reporter=json'];
   if (configDir !== '.') args.push('--config', basename(configPath));
-  const child = spawn(process.execPath, args, {
-    cwd: childCwd,
-    env: untrustedEnv(process.env),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const outcome = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null }>(
-    (settle) => {
+  const discoveryStateDir = mkdtempSync(join(tmpdir(), 'gateforge-discovery-state-'));
+  let outcome: { code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null };
+  try {
+    const child = spawn(process.execPath, args, {
+      cwd: childCwd,
+      env: untrustedEnv(process.env, discoveryStateDir),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    outcome = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null }>(
+      (settle) => {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
@@ -332,6 +343,9 @@ export async function listNativePlaywrightTests(options: {
       });
     },
   );
+  } finally {
+    rmSync(discoveryStateDir, { recursive: true, force: true });
+  }
   if (outcome.error !== null) {
     throw new TestDiscoveryError(`playwright --list failed to run: ${outcome.error.message}`);
   }
@@ -386,6 +400,12 @@ export async function listNativePlaywrightTests(options: {
             },
             expectedStatus: test.expectedStatus ?? 'unknown',
             annotations: (test.annotations ?? []).map((annotation) => annotation.type ?? '').filter((type) => type.length > 0),
+            claims: [...new Set(
+              (test.annotations ?? [])
+                .filter((annotation) => annotation.type === CLAIM_ANNOTATION_TYPE)
+                .map((annotation) => annotation.description ?? '')
+                .filter((description) => description.length > 0),
+            )],
           });
         }
       }
@@ -397,7 +417,7 @@ export async function listNativePlaywrightTests(options: {
   const configDetail = configDir !== '.' ? ` (cwd '${configDir}')` : '';
   return {
     status: 'discovered',
-    detail: `native playwright --list over '${configPath}'${configDetail} enumerated ${String(instances.length)} instance(s) as untrusted code (no GATEFORGE_* env)`,
+    detail: `native playwright --list over '${configPath}'${configDetail} enumerated ${String(instances.length)} instance(s) as untrusted code (isolated temporary GATEFORGE_STATE_DIR only)`,
     instances,
     errors,
   };

@@ -44,8 +44,8 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join, resolve } from 'node:path';
-import { loadConfig, verifyGateReceipt, executionBoundaryDigestOf, type GateReceipt, type GateforgeConfig } from '@gate-forge/core';
+import { dirname, join, resolve } from 'node:path';
+import { loadConfig, executionBoundaryDigestOf, type GateReceipt, type GateforgeConfig } from '@gate-forge/core';
 import { parseArgs } from './args.js';
 import { trustedPolicyDigestForConfig, SUPERVISED_INVOCATION } from './execution.js';
 import { UsageError } from './errors.js';
@@ -54,11 +54,13 @@ import { writeLine } from './io.js';
 import { computeCandidateTreeId, resolveGitDir } from './candidate-tree.js';
 import { resolveStateDir } from './state.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from './trusted-policy.js';
-import { rejectUnknownFlags } from './commands/common.js';
+import { rejectUnknownFlags, VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from './commands/common.js';
+import { resolveVerifierKeyring, verifyGateReceiptWithKeyring } from './verifier-keys.js';
+import { loadDocsExclusions } from './docs-exclusions.js';
 
 export const BROKER_USAGE =
   'usage: gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]\n' +
-  '       (verifier key via GATEFORGE_WITNESS_VERIFIER_KEY env; runs with cwd = the AUTHORITATIVE repository)\n' +
+  `       (verifier key via ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV}; cwd = the AUTHORITATIVE repository)\n` +
   '       approved policy pin: GATEFORGE_APPROVED_POLICY_DIGEST (protected broker env) — when provisioned,\n' +
   '       the workspace policy revision and the receipt must bind exactly that approved revision.\n' +
   '       Managed-mode boundary: this command implements the broker MECHANISM, not the deployment.\n' +
@@ -193,6 +195,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
     typeof options['receipt'] === 'string' && options['receipt'].length > 0
       ? resolve(io.cwd, options['receipt'])
       : join(resolveStateDir(workspace), 'receipt.json');
+  const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [workspace, dirname(receiptPath)]);
 
   // Unsafe messages (plan item 6): NUL bytes can smuggle extra "fields"
   // into commit objects — reject before any git call.
@@ -216,8 +219,17 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
   if (authorityGitDir === null) {
     throw new UsageError('broker: the authoritative directory is not a Git checkout (fail closed)');
   }
-  const treeId = computeCandidateTreeId(authorityGitDir, workspace, io.env, resolveStateDir(workspace));
   const digests = recomputeWorkspaceDigests(workspace);
+  const docsExclusions = loadDocsExclusions(workspace, digests.config);
+  const treeId = computeCandidateTreeId(
+    authorityGitDir,
+    workspace,
+    io.env,
+    resolveStateDir(workspace),
+    'reject',
+    [],
+    docsExclusions,
+  );
 
   // 1b. Approved-policy ownership gate (review 2026-09-13 P1 #5): the
   //     workspace's recomputed policy revision must match the
@@ -234,7 +246,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
   const policyGate = evaluateApprovedPolicy(
     policyResolution,
     digests.trustedPolicyDigest,
-    digests.config.enforcement?.strictE2E === true,
+    digests.config.enforcement?.strictE2E === true || docsExclusions.length > 0,
   );
   if (policyGate.status === 'blocked') {
     throw new BrokerRejection(
@@ -275,20 +287,25 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
       `the gate receipt at '${receiptPath}' is unreadable/malformed: ${(error as Error).message}`,
     );
   }
-  const verifierKey = io.env['GATEFORGE_WITNESS_VERIFIER_KEY'];
-  if (verifierKey === undefined || verifierKey.length === 0) {
+  if (verifierKeyring === null) {
     throw new BrokerRejection(
       'ENFORCEMENT_UNTRUSTED',
-      'no witness verifier key in the broker environment; the receipt cannot be authenticated (fail closed)',
+      `no witness verifier key in ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV}; the receipt cannot be authenticated (fail closed)`,
     );
   }
   const expectedBoundary = executionBoundaryDigestOf(authorityBoundaryLabel(io.env));
-  const verified = verifyGateReceipt(verifierKey, receiptRaw, {
+  const verified = verifyGateReceiptWithKeyring(verifierKeyring, receiptRaw, {
     candidateTreeId: treeId,
     trustedPolicyDigest: digests.trustedPolicyDigest,
     executionBoundaryDigest: expectedBoundary,
   });
   if (!verified.ok) {
+    if (verified.rejection === 'key-unknown') {
+      throw new BrokerRejection('KEY_UNKNOWN', `broker: ${verified.detail}`);
+    }
+    if (verified.rejection === 'key-mismatch') {
+      throw new BrokerRejection('ENFORCEMENT_UNTRUSTED', `broker: ${verified.detail}`);
+    }
     if (
       verified.rejection === 'input-digest-mismatch' ||
       verified.rejection === 'policy-digest-mismatch' ||

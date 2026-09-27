@@ -160,7 +160,11 @@ export function readSpoolEvents(
     events.push(parsed as unknown as SpoolEvent);
   }
   const trailing = lines[lines.length - 1] ?? '';
-  const completeBytes = raw.endsWith('\n') ? size : size - Buffer.byteLength(trailing, 'utf8');
+  // The runner is another process and may append after statSync but before
+  // readFileSync. Advance through the bytes actually parsed, or the next poll
+  // can replay an end event that already closed its session.
+  const rawBytes = Buffer.byteLength(raw, 'utf8');
+  const completeBytes = raw.endsWith('\n') ? rawBytes : rawBytes - Buffer.byteLength(trailing, 'utf8');
   return { events, nextOffset: Math.max(offset, completeBytes) };
 }
 

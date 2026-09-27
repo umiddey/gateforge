@@ -59,7 +59,7 @@ describe('gateforge next', () => {
     });
   });
 
-  it('ranks missing evidence (rank 6) above unmapped intent (rank 8)', async () => {
+  it('ignores a run-only claim when ranking current mapping gaps', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       repo.writeFiles({
@@ -74,8 +74,8 @@ describe('gateforge next', () => {
       });
       const { code, stdout } = await runCli(repo, ['next']);
       expect(code).toBe(1);
-      expect(stdout).toContain(`next: ${OBLIGATION_ORDERS}`);
-      expect(stdout).toContain('cause: EVIDENCE_NOT_COLLECTED');
+      expect(stdout).toContain(`next: ${OBLIGATION_ACCOUNTS}`);
+      expect(stdout).toContain('cause: TEST_MAPPING_MISSING');
       expect(stdout).toContain('tests/e2e/gateforge');
     });
   });

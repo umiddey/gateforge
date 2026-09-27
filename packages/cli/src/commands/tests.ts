@@ -48,7 +48,11 @@ import { join } from 'node:path';import {
   type TestMap,
   type TestMapEntry,
 } from '@gate-forge/core';
-import { discoverTestCatalog, TestDiscoveryError } from '@gate-forge/pack-playwright';
+import {
+  discoverTestCatalog,
+  TestDiscoveryError,
+  type DiscoverResult,
+} from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { diagnosticsJson, renderDiagnosticsText, runDiagnosticSuites } from '../diagnostics.js';
 import { UsageError } from '../errors.js';
@@ -74,9 +78,11 @@ import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { resolveProvider } from '../providers.js';
 import { httpRoutesView, resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
+import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
 
 export const TESTS_USAGE = `\
 usage: gateforge tests discover [--json] [--pytest]
+       gateforge tests surface-doctor [--json]
        gateforge tests suggest [--changed] [--json]
        gateforge tests mark --test <key> --kind <kind> [--category <c>]... \\
          --obligation <id>... --reason "<text>"
@@ -111,6 +117,8 @@ export async function testsCommand(io: Io, argv: readonly string[]): Promise<num
   switch (subcommand) {
     case 'discover':
       return discoverSubcommand(io, options);
+    case 'surface-doctor':
+      return surfaceDoctorSubcommand(io, options);
     case 'suggest':
       return suggestSubcommand(io, options);
     case 'mark':
@@ -124,14 +132,43 @@ export async function testsCommand(io: Io, argv: readonly string[]): Promise<num
   }
 }
 
+/** Prints a static list of UI test cases that lack a surface descriptor.
+ *
+ * Args:
+ *   io: process context.
+ *   options: parsed command flags.
+ *
+ * Returns:
+ *   number: 0 when the diagnostic completes, including when it finds rows.
+ */
+async function surfaceDoctorSubcommand(io: Io, options: Record<string, string | boolean | string[]>): Promise<number> {
+  rejectUnknownFlags(options, ['json'], TESTS_USAGE);
+  const compatibilityError = installedPlaywrightCompatibilityError();
+  if (compatibilityError !== null) {
+    writeLine(io.stderr, compatibilityError);
+    return 2;
+  }
+  const { diagnoseMissingUiSurfaces } = await import('@gate-forge/pack-playwright');
+  const report = diagnoseMissingUiSurfaces(io.cwd);
+  if (options['json'] === true) {
+    writeLine(io.stdout, canonicalJson(report as unknown as JsonValue));
+    return 0;
+  }
+  writeLine(io.stdout, `UI surface diagnostic: ${String(report.missingSurface.length)} test(s) need a surface descriptor`);
+  for (const entry of report.missingSurface) writeLine(io.stdout, `  ${entry.file}: ${entry.title}`);
+  for (const warning of report.warnings) writeLine(io.stdout, `scan warning: ${warning}`);
+  writeLine(io.stdout, `action: ${report.action}`);
+  return 0;
+}
+
 /** Runs one discovery pass and persists the derived catalog artifact. */
 async function runDiscovery(
   cwd: string,
   config: GateforgeConfig,
   stateDir: string,
   collectPytest: boolean,
-): Promise<{ catalog: TestCatalog; json: string }> {
-  let discovered: { catalog: TestCatalog; json: string };
+): Promise<DiscoverResult> {
+  let discovered: DiscoverResult;
   try {
     discovered = await discoverTestCatalog({ cwd, config, collectPytest });
   } catch (error) {
@@ -242,9 +279,9 @@ async function suggestSubcommand(
   const mapped = await resolveRepositoryMappings({
     cwd: io.cwd,
     config,
-    stateDir,
     obligations: pipeline.policy.obligations,
     catalog: discovered.catalog,
+    nativeClaims: discovered.nativeClaims,
     behaviorCatalog: pipeline.behaviorCatalog,
   });
 
@@ -604,9 +641,9 @@ async function explainSubcommand(
   const mapped = await resolveRepositoryMappings({
     cwd: io.cwd,
     config,
-    stateDir,
     obligations: pipeline.policy.obligations,
     catalog: discovered.catalog,
+    nativeClaims: discovered.nativeClaims,
     behaviorCatalog: pipeline.behaviorCatalog,
   });
   const entry = discovered.catalog.entries.find((candidate) => candidate.logicalKey === testKey);

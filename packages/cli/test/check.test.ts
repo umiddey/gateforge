@@ -18,6 +18,7 @@ import {
   writeV2Manifest,
   type CliResult,
 } from './helpers.js';
+import { mintCompleteRunReceipt } from './gate-receipts.js';
 
 /** A valid, unexpired waiver for one fixture obligation. */
 function waiverJson(resourceId: string): string {
@@ -38,6 +39,7 @@ function parseReport(report: string): {
     obligationId: string;
     contract: string;
     verdict: string;
+    cause?: string | null;
     reason: string | null;
     recordIds: string[];
     policyId: string;
@@ -90,18 +92,20 @@ describe('gateforge check', () => {
     });
   });
 
-  it('GF-23 at the CLI boundary: claimed-only records never satisfy', async () => {
+  it('GF-23 at the CLI boundary: claimed-only records never satisfy a receipt-bound claim', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
+      const claimInventory = [
+        {
+          schemaVersion: 1 as const,
+          obligationId: OBLIGATION_ACCOUNTS,
+          testId: 'suite-test',
+          testFile: 'tests/accounts.spec.ts',
+        },
+      ];
+      const verifierKey = 'claimed-record-verifier-key';
       repo.writeFiles({
-        '.gateforge/test-gates/claims.json': JSON.stringify([
-          {
-            schemaVersion: 1,
-            obligationId: OBLIGATION_ACCOUNTS,
-            testId: 'suite-test',
-            testFile: 'tests/accounts.spec.ts',
-          },
-        ]),
+        '.gateforge/test-gates/claims.json': JSON.stringify(claimInventory),
         '.gateforge/test-gates/records.json': JSON.stringify([
           {
             schemaVersion: 1,
@@ -115,11 +119,13 @@ describe('gateforge check', () => {
           },
         ]),
       });
-      const { code, stdout } = await runCli(repo, ['check', '--format', 'json']);
+      await mintCompleteRunReceipt(repo, { verifierKey, claimInventory });
+      const { code, stdout } = await runCli(repo, ['check', '--format', 'json'], {
+        GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey,
+      });
       expect(code).toBe(1);
       const report = parseReport(stdout);
       const accounts = report.verdicts.find((v) => v.obligationId === OBLIGATION_ACCOUNTS);
-      // The fabricated bundle is considered and rejected (GF-23).
       expect(accounts?.verdict).toBe('invalid');
       expect(accounts?.recordIds).toEqual(['a'.repeat(64)]);
       expect(report.verdicts.find((v) => v.obligationId === OBLIGATION_ORDERS)?.verdict).toBe(
@@ -263,20 +269,22 @@ describe('gateforge check', () => {
         attestationScope: null,
       };
       const recordIds = [actionRecordId, persistenceRecordId];
+      const claimInventory = [
+        {
+          schemaVersion: 1 as const,
+          obligationId: OBLIGATION_ACCOUNTS,
+          testId: 'suite-test',
+          testFile: 'tests/accounts.spec.ts',
+        },
+      ];
       repo.writeFiles({
-        '.gateforge/test-gates/claims.json': JSON.stringify([
-          {
-            schemaVersion: 1,
-            obligationId: OBLIGATION_ACCOUNTS,
-            testId: 'suite-test',
-            testFile: 'tests/accounts.spec.ts',
-          },
-        ]),
+        '.gateforge/test-gates/claims.json': JSON.stringify(claimInventory),
         '.gateforge/test-gates/records.json': JSON.stringify([action, persistence, visible]),
         // orders is not under test here: keep it waived so the accounts
         // verdict alone decides the exit code.
         '.gateforge/waivers/orders.json': waiverJson('tenant.orders'),
       });
+      await mintCompleteRunReceipt(repo, { verifierKey, claimInventory });
       const writeManifest = (extra: Record<string, unknown>): void => {
         repo.writeFiles({
           '.gateforge/test-gates/manifest.json': `${JSON.stringify({ ...manifestBase, ...extra })}\n`,
@@ -297,13 +305,12 @@ describe('gateforge check', () => {
       // 3: /proc/<pid>/cmdline is world-readable).
       const withKey = { GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey };
 
-      // Bypass attempt (exactly what a hostile suite can do): plant the
-      // computed ids in the suite-writable manifest, no MAC. Never green —
-      // with or without a verifier key on the CLI.
+      // A missing MAC cannot authorize the manifest. Without a verifier
+      // key, the receipt-bound annotation inventory is unavailable too.
       writeManifest({ recordIds });
       expect(await accountsVerdict(['check', '--format', 'json'])).toMatchObject({
         code: 1,
-        verdict: 'invalid',
+        verdict: 'missing',
       });
       expect(await accountsVerdict(['check', '--format', 'json'], withKey)).toMatchObject({
         code: 1,
@@ -352,11 +359,11 @@ describe('gateforge check', () => {
       });
 
       // The same genuine envelope is not evaluable without the key:
-      // trust requires verification — fail closed, never "trust on
-      // presence".
+      // trust requires verification — the raw run-state claim cannot
+      // restore its mapping.
       expect(await accountsVerdict(['check', '--format', 'json'])).toMatchObject({
         code: 1,
-        verdict: 'invalid',
+        verdict: 'missing',
       });
 
       // Tampered digest: the envelope's inputDigest rewritten without a
@@ -430,20 +437,6 @@ describe('gateforge check', () => {
       repo.writeFiles({
         '.gateforge/policies.yml':
           'schemaVersion: 1\npolicies:\n  - id: user-facing-crud\n    when:\n      exposure: user-facing\n    require: [http:does-not-exist]\n',
-        '.gateforge/test-gates/claims.json': JSON.stringify([
-          {
-            schemaVersion: 1,
-            obligationId: 'tenant.accounts:http:does-not-exist',
-            testId: 'suite-test',
-            testFile: 'tests/accounts.spec.ts',
-          },
-          {
-            schemaVersion: 1,
-            obligationId: 'tenant.orders:http:does-not-exist',
-            testId: 'suite-test',
-            testFile: 'tests/orders.spec.ts',
-          },
-        ]),
       });
       const { code, stdout } = await runCli(repo, ['check', '--format', 'json']);
       expect(code).toBe(1);
@@ -455,11 +448,6 @@ describe('gateforge check', () => {
       ]);
       expect(report.verdicts.every((v) => v.verdict === 'missing')).toBe(true);
       expect(report.verdicts.every((v) => v.contract === 'http:does-not-exist')).toBe(true);
-      expect(
-        report.verdicts.every(
-          (v) => v.reason !== null && v.reason.includes("'http:does-not-exist'"),
-        ),
-      ).toBe(true);
     });
   });
 

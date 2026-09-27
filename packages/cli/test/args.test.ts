@@ -13,6 +13,10 @@ describe('parseArgs', () => {
     expect(parsed.positionals).toEqual([]);
   });
 
+  it('parses result-only as a bare boolean flag', () => {
+    expect(parseArgs(['--changed', '--scope', 'changed', '--result-only']).options['result-only']).toBe(true);
+  });
+
   it('collects positionals and stops flag parsing at --', () => {
     const parsed = parseArgs(['baseline', 'update', '--', '--not-a-flag']);
     expect(parsed.positionals).toEqual(['baseline', 'update', '--not-a-flag']);

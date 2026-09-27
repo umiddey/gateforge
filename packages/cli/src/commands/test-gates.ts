@@ -55,8 +55,9 @@
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   AttestationSchema,
   BEHAVIOR_CASE_KIND,
@@ -80,10 +81,13 @@ import {
   type Attestation,
   type BehaviorCatalog,
   type BlockingEntry,
+  type ExecutionResult,
   type GateforgeConfig,
+  type Claim,
   type JsonValue,
   type ObligationVerdict,
   type RunManifest,
+  type RunExecutionSummary,
   type RunnerExecutionEnvelope,
   type TestCatalog,
   type TracedTestInput,
@@ -117,19 +121,23 @@ import {
   SUPERVISED_INVOCATION,
   type PlannedRow,
 } from '../execution.js';
-import { evaluateRun } from '../evaluate.js';
+import { evaluateRun, type EvaluateInput } from '../evaluate.js';
+import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
+import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
 import {
   collectInputFiles,
   computeInputSnapshot,
   diffInputFiles,
   SnapshotUnavailableError,
   UnsupportedSnapshotError,
+  type InputSnapshot,
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
 import { mappingBlocking, mappedCoverageFrom, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline } from '../pipeline.js';
 import { tryReuseReceipt } from '../receipts.js';
 import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
+import type { RuntimeReuseMount } from '../runtime-reuse.js';
 import { resolveProvider } from '../providers.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import {
@@ -144,20 +152,31 @@ import {
   writeExecutionResult,
   writeGateReceipt,
   writeHttpRoutesView,
+  writeInputSnapshot,
   writeManifest,
   writeObligations,
   writeReport,
 } from '../state.js';
-import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERIFIER_KEY_ENV, VERSION } from './common.js';
+import {
+  loadConfigAt,
+  parseRunFormat,
+  rejectUnknownFlags,
+  VERIFIER_KEY_ENV,
+  VERIFIER_KEY_FILE_ENV,
+  VERSION,
+} from './common.js';
+import { resolveVerifierKeyring, type VerifierKeyring } from '../verifier-keys.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
-  '[--format text|json|sarif] [--witness-url <url>] [--run-token <token>] ' +
+  '[--result-only] [--format text|json|sarif] [--witness-url <url>] [--run-token <token>] ' +
   '[--run-timeout-min <minutes>] ' +
-  '(verifier key via GATEFORGE_WITNESS_VERIFIER_KEY env)\n' +
+  `(verifier key via ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV})\n` +
   '       --scope changed (supervised --changed only): plan, execute, and seal only the slice of tests\n' +
   '       claiming obligations affected by the resolved changed-file set; an affected obligation with no\n' +
-  '       testable declared mapping blocks (EVIDENCE_SCOPE_INCOMPLETE) — narrower selection is never guessed';
+  '       testable declared mapping blocks (EVIDENCE_SCOPE_INCOMPLETE) — narrower selection is never guessed\n' +
+  '       --result-only (requires --changed --scope changed): report selected results without gate authority or receipt changes; ' +
+    'external witnesses require a separate --out directory and --run-token';
 
 /**
  * Runs the test-gates subcommand.
@@ -179,14 +198,20 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
   }
   rejectUnknownFlags(
     options,
-    ['suite', 'out', 'format', 'witness-url', 'run-token', 'run-timeout-min', 'changed', 'scope', 'help'],
+    ['suite', 'out', 'format', 'witness-url', 'run-token', 'run-timeout-min', 'changed', 'scope', 'result-only', 'help'],
     TEST_GATES_USAGE,
   );
+  const compatibilityError = installedPlaywrightCompatibilityError();
+  if (compatibilityError !== null) {
+    writeLine(io.stderr, compatibilityError);
+    return 2;
+  }
   const suite = stringFlag(options, 'suite');
   const out = stringFlag(options, 'out');
   const format = parseRunFormat(stringFlag(options, 'format') ?? 'text');
   const witnessUrl = stringFlag(options, 'witness-url');
   const changed = options['changed'] === true;
+  const resultOnly = options['result-only'] === true;
   if (changed && suite !== undefined) {
     throw new UsageError(
       'test-gates: --changed runs the configured suite through the supervised adapter; ' +
@@ -208,17 +233,90 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
     }
     scope = scopeFlag;
   }
-  if (changed) {
-    return runSupervisedTestGates(io, {
-      out,
-      format,
-      witnessUrl,
-      runToken: stringFlag(options, 'run-token'),
-      runTimeoutMs: parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')),
-      scope,
-    });
+  if (resultOnly && (!changed || scope !== 'changed' || suite !== undefined)) {
+    throw new UsageError(
+      'test-gates: --result-only requires --changed --scope changed and cannot be combined with --suite',
+    );
   }
-  return legacyTestGates(io, { suite, out, format, witnessUrl, runToken: stringFlag(options, 'run-token') });
+  if (resultOnly && witnessUrl === undefined && out !== undefined) {
+    throw new UsageError(
+      'test-gates: --result-only accepts --out only with --witness-url; without an external witness it owns a private temporary state directory',
+    );
+  }
+  if (resultOnly && witnessUrl !== undefined) {
+    if (out === undefined) {
+      throw new UsageError(
+        'test-gates: --result-only with --witness-url requires --out <dir> shared with the external witness; ' +
+          'use a separate non-authoritative state directory, not the configured gate state directory',
+      );
+    }
+    if (stringFlag(options, 'run-token') === undefined) {
+      throw new UsageError('test-gates: --result-only with --witness-url requires --run-token <token>');
+    }
+    const externalStateDir = canonicalizeStateDir(resolveStateDir(io.cwd, out));
+    const authoritativeStateDir = canonicalizeStateDir(resolveStateDir(io.cwd));
+    const relativeOut = relative(authoritativeStateDir, externalStateDir);
+    if (
+      relativeOut === '' ||
+      (relativeOut !== '..' && !relativeOut.startsWith(`..${sep}`) && !isAbsolute(relativeOut))
+    ) {
+      throw new UsageError(
+        `test-gates: --result-only --out '${out}' must be a separate non-authoritative state directory, ` +
+          `not the configured authoritative state directory '${resolveStateDir(io.cwd)}'`,
+      );
+    }
+  }
+  const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [resolveStateDir(io.cwd, out)]);
+  if (changed) {
+    const isolatedStateDir = resultOnly && witnessUrl === undefined ? mkdtempSync(join(tmpdir(), 'gateforge-selected-result-')) : undefined;
+    try {
+      return await runSupervisedTestGates(io, {
+        out: isolatedStateDir ?? out,
+        format,
+        witnessUrl,
+        runToken: stringFlag(options, 'run-token'),
+        runTimeoutMs: parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')),
+        scope,
+        resultOnly,
+        verifierKeyring,
+      });
+    } finally {
+      if (isolatedStateDir !== undefined) rmSync(isolatedStateDir, { recursive: true, force: true });
+    }
+  }
+  return legacyTestGates(io, {
+    suite,
+    out,
+    format,
+    witnessUrl,
+    runToken: stringFlag(options, 'run-token'),
+    verifierKeyring,
+  });
+}
+
+/**
+ * Resolves a path through existing symlinks and appends a not-yet-existing
+ * suffix so state-directory comparisons cannot be bypassed with aliases.
+ *
+ * Args:
+ *   path: absolute or relative state-directory path.
+ *
+ * Returns:
+ *   string: canonical absolute path.
+ */
+function canonicalizeStateDir(path: string): string {
+  let cursor = resolve(path);
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      return resolve(realpathSync(cursor), ...suffix.reverse());
+    } catch {
+      const parent = dirname(cursor);
+      if (parent === cursor) return resolve(path);
+      suffix.push(cursor.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
+      cursor = parent;
+    }
+  }
 }
 
 /**
@@ -262,6 +360,8 @@ interface LegacyOptions {
   witnessUrl: string | undefined;
   /** External witness run token. */
   runToken: string | undefined;
+  /** Trusted key ring resolved before run-state creation. */
+  verifierKeyring: VerifierKeyring | null;
 }
 
 /**
@@ -282,15 +382,10 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
   // already holds its own token; the CLI must adopt it or every
   // fixture call answers 401 (x-gateforge-run mismatch).
   const runToken = options.runToken;
-  // Verifier key for the attestation surface (GF-23, audit round 3):
-  // read from the environment — never argv, whose /proc cmdline is
-  // world-readable. Shared by the orchestrator with the witness and
-  // this CLI, never with the suite; without it no suite-writable
-  // artifact can prove issuance and the gate fails closed.
-  const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
-
   const config = loadConfigAt(io.cwd);
   const stateDir = resolveStateDir(io.cwd, out);
+  const verifierKeyring = options.verifierKeyring ?? resolveVerifierKeyring(io.cwd, io.env, [stateDir]);
+  const witnessVerifierKey = verifierKeyring?.active.key;
 
   // 1. Inventory/hash inputs BEFORE discovery (plan §11.5). Only file
   // bytes exist yet; the gate context joins after discovery. Unsafe
@@ -444,7 +539,12 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
         cwd: io.cwd,
         // The verifier key must NEVER reach the suite: strip it from the
         // ambient env the child inherits (audit round 3).
-        env: { ...io.env, [VERIFIER_KEY_ENV]: undefined, ...suiteEnv },
+        env: {
+          ...io.env,
+          [VERIFIER_KEY_ENV]: undefined,
+          [VERIFIER_KEY_FILE_ENV]: undefined,
+          ...suiteEnv,
+        },
       });
       suiteFailed = suiteStatus !== 0;
       if (suiteFailed) {
@@ -502,6 +602,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
     now: pipeline.now,
     changedFiles: null,
     witnessVerifierKey,
+    witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
     witnessAttestation: liveAttestation,
     evidenceContext: {
       expectedInputDigest: expectedDigest,
@@ -554,6 +655,10 @@ export interface SupervisedOptions {
    * runs and seals only the affected slice.
    */
   scope: 'full' | 'changed';
+  /** Report the selected slice without writing or clearing a gate receipt. */
+  resultOnly?: boolean;
+  /** Trusted key ring resolved before candidate materialization, when provided. */
+  verifierKeyring?: VerifierKeyring | null;
   /** Trusted staged-candidate changed paths supplied by the pre-commit orchestrator. */
   fixedChangedFiles?: readonly string[];
   /** Trusted staged-candidate tree id supplied by the pre-commit orchestrator. */
@@ -562,6 +667,8 @@ export interface SupervisedOptions {
   fixedParentSha?: string | null;
   /** Digest of dependency bytes reused by the staged candidate runtime. */
   runtimeReuseDigest?: string | null;
+  /** Exact owner-approved external dependency mounts in a staged checkout. */
+  runtimeReuseMounts?: readonly RuntimeReuseMount[];
   /** Recomputes the external reuse digest at the end of a staged run. */
   runtimeReuseCheck?: () => string | null;
 }
@@ -573,10 +680,10 @@ export interface SupervisedOptions {
  * independent `playwright --list` child (scrubbed env, finite timeout) →
  * execute through the adapter under the supervisor spool drain → enforce
  * planned vs executed + the witness-side session trace → seal the
- * execution result → run diagnostics (separate, advisory) → evaluate →
- * issue the gate receipt only on complete success. Identical
- * authenticated inputs reuse a prior receipt (printed, exit reflects the
- * current gate evaluation); any changed input forces a fresh run.
+ * execution result → run diagnostics (separate, advisory) → evaluate.
+ * Normal gate mode issues a receipt only on complete success and may
+ * reuse an identical prior receipt; `--result-only` only reports the
+ * selected scope and never reads, creates, replaces, or clears receipts.
  *
  * Args:
  *   io: process context.
@@ -590,9 +697,12 @@ export interface SupervisedOptions {
 export async function runSupervisedTestGates(io: Io, options: SupervisedOptions): Promise<number> {
   const { out, format, witnessUrl, runTimeoutMs } = options;
   const runtimeReuseDigest = options.runtimeReuseDigest;
-  const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
+  const runtimeReuseMounts = options.runtimeReuseMounts ?? [];
   const config = loadConfigAt(io.cwd);
+  const docsExclusions = loadDocsExclusions(io.cwd, config);
   const stateDir = resolveStateDir(io.cwd, out);
+  const verifierKeyring = options.verifierKeyring ?? resolveVerifierKeyring(io.cwd, io.env, [stateDir]);
+  const witnessVerifierKey = verifierKeyring?.active.key;
   const executionBoundary = io.env['GATEFORGE_AUTHORITY_BOUNDARY']?.trim() || LOCAL_UNISOLATED_BOUNDARY;
   const executionBoundaryDigest = executionBoundaryDigestOf(executionBoundary);
   // Scoped sealing (Goal 2): resolve the changed-file basis through the
@@ -611,7 +721,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let preFiles: SnapshotFileEntry[] | null = null;
   let snapshotUnavailable = false;
   try {
-    preFiles = collectInputFiles(io.cwd, config, stateDir);
+    preFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
   } catch (error) {
     if (error instanceof SnapshotUnavailableError) snapshotUnavailable = true;
     else if (error instanceof UnsupportedSnapshotError) throw new UsageError(`unsupported input snapshot: ${error.message}`);
@@ -636,8 +746,9 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       : null;
   const httpRoutes = httpRoutesView(pipeline.graph);
   let expectedDigest: string | null = null;
+  let inputSnapshot: InputSnapshot | null = null;
   if (!snapshotUnavailable) {
-    const postDiscovery = collectInputFiles(io.cwd, config, stateDir);
+    const postDiscovery = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
     const drift = preFiles === null ? [] : diffInputFiles(preFiles, postDiscovery);
     if (drift.length > 0) {
       throw new UsageError(
@@ -645,7 +756,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
           'no reliable digest can be established — refusing the run',
       );
     }
-    expectedDigest = computeInputSnapshot({
+    inputSnapshot = computeInputSnapshot({
       cwd: io.cwd,
       config,
       stateDir,
@@ -654,7 +765,23 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       httpRoutes,
       plugins: pipeline.manifest.plugins.map((plugin) => ({ id: plugin.id, version: plugin.version })),
       runtimeReuseDigest,
-    }).inputDigest;
+      runtimeReuseMounts,
+      docsExclusions,
+    });
+    expectedDigest = inputSnapshot.evidenceInputDigest;
+  }
+  if (options.runtimeReuseCheck !== undefined) {
+    let currentReuseDigest: string | null;
+    try {
+      currentReuseDigest = options.runtimeReuseCheck();
+    } catch {
+      currentReuseDigest = null;
+    }
+    if (currentReuseDigest !== runtimeReuseDigest) {
+      if (!options.resultOnly) clearGateReceipt(stateDir);
+      writeLine(io.stderr, 'test-gates: reused dependency bytes changed during discovery; refusing the run');
+      return 1;
+    }
   }
   const invocationId = randomUUID();
 
@@ -665,7 +792,9 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   const freezeGitDir = resolveGitDir(io.cwd, io.env);
   const frozenTreeId =
     options.fixedCandidateTreeId ??
-    (freezeGitDir === null ? null : computeCandidateTreeId(freezeGitDir, io.cwd, io.env, stateDir, 'record'));
+    (freezeGitDir === null
+      ? null
+      : computeCandidateTreeId(freezeGitDir, io.cwd, io.env, stateDir, 'record', runtimeReuseMounts, docsExclusions));
   const frozenParentSha = options.fixedParentSha !== undefined ? options.fixedParentSha : parentSha(io.cwd);
 
   // 2. Catalog + mappings (Phase 3 resolver) → expected set + claim
@@ -673,6 +802,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // gate (E16) — never an empty-success fallback.
   let discoveryError: string | null = null;
   let catalog: TestCatalog | null = null;
+  let nativeClaims: Claim[] = [];
   try {
     // collectPytest is REQUIRED here (GAP 1 fix, server-witnessed
     // channel): the supervised run's expected set, mapping resolution,
@@ -683,7 +813,9 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     // failure is honest data: the suite's runner summary turns
     // `unavailable`, `inventoryComplete` goes false, and the gate blocks
     // TEST_INVENTORY_INCOMPLETE — never a silently narrower inventory.
-    catalog = (await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true })).catalog;
+    const discovered = await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true });
+    catalog = discovered.catalog;
+    nativeClaims = discovered.nativeClaims;
   } catch (error) {
     discoveryError = error instanceof TestDiscoveryError ? error.message : (error as Error).message;
   }
@@ -698,10 +830,10 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   const policyGate = evaluateApprovedPolicy(
     resolveApprovedPolicyDigest({ env: io.env, candidateCwd: io.cwd, candidateConfig: config }),
     trustedPolicy,
-    config.enforcement?.strictE2E === true,
+    config.enforcement?.strictE2E === true || docsExclusions.length > 0,
   );
   if (policyGate.status === 'blocked') {
-    clearGateReceipt(stateDir);
+    if (!options.resultOnly) clearGateReceipt(stateDir);
     writeLine(io.stderr, `test-gates: ${policyGate.cause}: ${policyGate.detail}`);
     writeLine(io.stderr, `next action: ${policyGate.nextAction}`);
     return 1;
@@ -723,6 +855,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // blocked as uncovered even when mapped — phantom findings over an
   // honest gate).
   let mappedCoverage: ReturnType<typeof mappedCoverageFrom> = [];
+  let claimInventory: Claim[] = [];
   // Server-e2e obligations (server-witnessed persistence channel): the
   // trusted mapping resolution decides which obligations may stamp
   // `channel: 'server'` evidence — the drain registers exactly this set
@@ -737,12 +870,13 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
       config,
-      stateDir,
       obligations: pipeline.policy.obligations,
       catalog,
+      nativeClaims,
       behaviorCatalog: pipeline.behaviorCatalog,
     });
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
+    claimInventory = mapped.claimInventory;
     plannedRows = planExpectedSet(catalog);
     injections = claimInjectionsFor(mapped.resolution, catalog);
     mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
@@ -814,22 +948,27 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   const selectionDigest = selectionDigestOf(selection);
   const catalogDigest = catalog === null ? NO_CATALOG_DIGEST : sha256Canonical(catalog as unknown as Record<string, never>);
 
-  // 3. Cache reuse (plan Phase 4 item 8): identical authenticated input
-  // digests + complete result only. Never reuse across changed inputs.
+  // 3. Cache reuse: identical evidence inputs, exact candidate tree, and
+  // complete result only. No changed path is presumed inert.
   // The scope axis is part of the identity: a full run demands a
   // full-scope (or legacy unscoped) receipt, a scoped run demands a
   // changed-scope receipt sealing the IDENTICAL covered set — a slice
   // never reuses as a whole-suite seal or vice versa.
-  const reuse = tryReuseReceipt(stateDir, witnessVerifierKey ?? null, {
-    inputDigest: expectedDigest ?? NO_DIGEST,
-    trustedPolicyDigest: trustedPolicy,
-    selectionDigest,
-    candidateTreeId: frozenTreeId,
-    executionBoundaryDigest,
-    ...behaviorReceiptBindings(pipeline.behaviorCatalog),
-    scope: options.scope === 'changed' ? 'changed' : 'full',
-    ...(options.scope === 'changed' ? { coveredObligationFingerprints: coveredFingerprints } : {}),
-  });
+  const reuseCandidate = options.resultOnly
+    ? { reuse: false as const }
+    : tryReuseReceipt(stateDir, verifierKeyring, {
+        inputDigest: expectedDigest ?? NO_DIGEST,
+        trustedPolicyDigest: trustedPolicy,
+        selectionDigest,
+        executionBoundaryDigest,
+        ...behaviorReceiptBindings(pipeline.behaviorCatalog),
+        scope: options.scope === 'changed' ? 'changed' : 'full',
+        ...(options.scope === 'changed' ? { coveredObligationFingerprints: coveredFingerprints } : {}),
+      });
+  const reuse =
+    reuseCandidate.reuse && frozenTreeId !== null && reuseCandidate.receipt.candidateTreeId === frozenTreeId
+      ? reuseCandidate
+      : { reuse: false as const };
   if (reuse.reuse) {
     // Under a provisioned pin the reused receipt must bind the CURRENT
     // approved revision (policy revision changed after sealing → rerun).
@@ -841,7 +980,6 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
         return 1;
       }
     }
-    writeLine(io.stderr, `reused receipt ${reuse.receipt.receiptId} (identical authenticated inputs; complete result)`);
     // Witnessed suites are part of the SEALED supervised run: a reused
     // receipt means nothing re-executed (the identical-input contract
     // already pins the pytest bytes), so they are never re-run here —
@@ -866,7 +1004,9 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       // contract above already pinned scope + covered set); full reuse
       // stays unscoped. A scoped run without the flag never happens.
       changedFiles: scopeChangedFiles,
+      claimInventory,
       witnessVerifierKey,
+      witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
       // Goal 1: the reused gate grades through the SAME adopted-baseline
       // seam as check — baselined obligations waive (loudly) instead of
       // blocking the reused evaluation.
@@ -885,9 +1025,28 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       waiverCounts: evaluated.waiverCounts,
       run: { ...pipeline.manifest, invocationId, inputDigest: expectedDigest ?? undefined },
       toolVersion: VERSION,
+      diagnosticContext: {
+        scope: options.scope ?? 'full',
+        candidateTreeId: frozenTreeId,
+        inputDigest: expectedDigest,
+        evidenceState: 'receipt-reused',
+        authority: 'authoritative',
+        ...(docsExclusions.length === 0
+          ? {}
+          : {
+              docsExclusions: {
+                folders: docsExclusions,
+                approvalDigest: approvedPolicyDigest ?? trustedPolicy,
+                approvalStatus: 'matched' as const,
+                guarantee: DOCS_EXCLUSIONS_GUARANTEE,
+              },
+            }),
+      },
     });
     writeLine(io.stdout, report);
-    return runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
+    const gateCode = runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
+    writeLine(io.stderr, `reused receipt ${reuse.receipt.receiptId} (identical authenticated inputs; complete result)`);
+    return gateCode;
   }
 
   // 3.5 Scoped empty-slice fast-fail (Goal 2): when the changed set maps
@@ -898,7 +1057,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // slice receipt over nothing is ever minted, and the previous receipt
   // is invalidated (E07 discipline).
   if (options.scope === 'changed' && plannedRows.length === 0) {
-    clearGateReceipt(stateDir);
+    if (!options.resultOnly) clearGateReceipt(stateDir);
     const emptySliceBlocking: BlockingEntry[] =
       inventoryBlocking.length > 0
         ? // A failed/incomplete discovery already explains the block.
@@ -934,7 +1093,9 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       stateDir,
       now: pipeline.now,
       changedFiles: scopeChangedFiles,
+      claimInventory,
       witnessVerifierKey,
+      witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
       baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
       mappedCoverage,
       evidenceContext: {
@@ -968,6 +1129,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // is rewritten after adoption below; the views are content-stable.)
   let manifest = pipeline.manifest;
   writeManifest(stateDir, manifest);
+  if (inputSnapshot !== null) writeInputSnapshot(stateDir, inputSnapshot);
   writeObligations(stateDir, stateObligations(pipeline.policy.obligations, pipeline.graph));
   writeHttpRoutesView(stateDir, httpRoutes);
   writeClassificationsView(stateDir, pipeline.classificationsView);
@@ -1053,7 +1215,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       await stopWitnessProcess(spawnedWitness);
     }
     throw new UsageError(
-      'test-gates --changed requires GATEFORGE_WITNESS_VERIFIER_KEY in the orchestrating environment: ' +
+      `test-gates --changed requires ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV} in the orchestrating environment: ` +
         'the witness supervisor surface (expected set, session lifecycle, execution trace) is ' +
         'verifier-key authenticated and the key never reaches the suite or the runner child',
     );
@@ -1117,6 +1279,8 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     config,
     run: {
       testFiles: plannedRows.map((row) => row.planned.file),
+      ...(io.env['GATEFORGE_APP_BASE_URL'] ? { appBaseUrl: io.env['GATEFORGE_APP_BASE_URL'] } : {}),
+      ...(io.env['GATEFORGE_SESSION_STATE'] ? { storageState: io.env['GATEFORGE_SESSION_STATE'] } : {}),
       projects: [
         ...new Set(
           plannedRows.map((row) => row.planned.project).filter((project): project is string => project !== null),
@@ -1130,6 +1294,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   });
   const suiteEnv: Record<string, string> = {
     GATEFORGE_RUN_TOKEN: envRecord.GATEFORGE_RUN_TOKEN,
+    GATEFORGE_CLI_VERSION: VERSION,
   };
   if (envRecord.GATEFORGE_WITNESS_URL !== null) {
     suiteEnv['GATEFORGE_WITNESS_URL'] = envRecord.GATEFORGE_WITNESS_URL;
@@ -1253,9 +1418,14 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     }
   }
   if (options.runtimeReuseCheck !== undefined) {
-    const currentReuseDigest = options.runtimeReuseCheck();
+    let currentReuseDigest: string | null;
+    try {
+      currentReuseDigest = options.runtimeReuseCheck();
+    } catch {
+      currentReuseDigest = null;
+    }
     if (currentReuseDigest !== runtimeReuseDigest) {
-      clearGateReceipt(stateDir);
+      if (!options.resultOnly) clearGateReceipt(stateDir);
       writeLine(
         io.stderr,
         'test-gates: reused dependency bytes changed during the run; no receipt is sealed over mixed runtime inputs',
@@ -1277,6 +1447,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     ...(options.scope === 'changed' ? { mode: 'mapped-selection' as const } : {}),
     logicalKeys: selection.logicalKeys,
     catalog: catalog ?? EMPTY_CATALOG,
+    claimInventory: nativeClaims,
     plannedRows,
     envelope,
     outcomesDoc,
@@ -1291,7 +1462,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let changedInputs = false;
   if (!snapshotUnavailable && preFiles !== null) {
     try {
-      const postSuite = collectInputFiles(io.cwd, config, stateDir);
+      const postSuite = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
       changedInputs = diffInputFiles(preFiles, postSuite).length > 0;
     } catch {
       changedInputs = true;
@@ -1345,7 +1516,12 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     cause: 'RUN_INCOMPLETE' as const,
     nextAction: CAUSE_NEXT_ACTIONS['RUN_INCOMPLETE'],
   }));
-  const evaluated = evaluateRun({
+  const repositoryBlocking: BlockingEntry[] = [
+    ...pipeline.policy.blocking,
+    ...mappingBlockers,
+    ...inventoryBlocking,
+  ];
+  const evaluationInput: EvaluateInput = {
     cwd: io.cwd,
     config,
     graph: pipeline.graph,
@@ -1354,9 +1530,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       pipeline.behaviorCatalog === null ? null : engineBundleDigestOf(VERSION, trustedPolicy),
     obligations: pipeline.policy.obligations,
     blocking: [
-      ...pipeline.policy.blocking,
-      ...mappingBlockers,
-      ...inventoryBlocking,
+      ...repositoryBlocking,
       // Scoped planning gaps (Goal 2): affected obligations no declared,
       // catalog-live claim covers. Fail closed — never diff-scoped away,
       // never waived, and they alone prevent the receipt.
@@ -1377,7 +1551,9 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     // obligations are exactly the covered set the receipt seals. Full
     // mode stays unscoped (changedFiles: null), byte-identical.
     changedFiles: scopeChangedFiles,
+    claimInventory,
     witnessVerifierKey,
+    witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
     witnessAttestation: liveAttestation,
     // Goal 1: the supervised gate honors the adopted baseline through the
     // SAME fail-closed seam as `check` (no adoption record → nothing is
@@ -1392,13 +1568,56 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       requireInvocationId: true,
       changedInputs,
     },
+  };
+  const evaluated = evaluateRun(evaluationInput);
+  const repositoryEvaluation = evaluateRun({
+    ...evaluationInput,
+    blocking: repositoryBlocking,
+    changedFiles: null,
   });
+  const executionSummary = runExecutionSummaryOf({
+    executionResult: sealed.result,
+    mode: 'executed',
+    scope: options.scope === 'changed' ? 'changed' : 'full',
+    selectedVerdicts: evaluated.verdicts,
+    selectedBlocking: evaluated.blocking,
+    repositoryVerdicts: repositoryEvaluation.verdicts,
+    repositoryBlocking: repositoryEvaluation.blocking,
+    unclaimed: countUnclaimedObligations(stateDir, pipeline.policy.obligations),
+  });
+  const diagnosticContext = {
+    scope: options.scope,
+    candidateTreeId: frozenTreeId,
+    inputDigest: expectedDigest,
+    evidenceState: snapshotUnavailable
+      ? 'snapshot-unavailable'
+      : changedInputs
+        ? 'inputs-changed-during-run'
+        : !sealed.result.complete
+          ? 'execution-incomplete'
+          : liveAttestation === null
+            ? 'witness-attestation-unavailable'
+            : 'attested',
+    authority: options.resultOnly ? ('non-authoritative' as const) : ('authoritative' as const),
+    ...(docsExclusions.length === 0
+      ? {}
+      : {
+          docsExclusions: {
+            folders: docsExclusions,
+            approvalDigest: approvedPolicyDigest ?? trustedPolicy,
+            approvalStatus: 'matched' as const,
+            guarantee: DOCS_EXCLUSIONS_GUARANTEE,
+          },
+        }),
+  };
   const report = renderRun(evaluated.verdicts, {
     format,
     blocking: evaluated.blocking,
     waiverCounts: evaluated.waiverCounts,
     run: manifest,
     toolVersion: VERSION,
+    execution: executionSummary,
+    diagnosticContext,
   });
   writeLine(io.stdout, report);
   writeReport(
@@ -1409,21 +1628,48 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       waiverCounts: evaluated.waiverCounts,
       run: manifest,
       toolVersion: VERSION,
+      execution: executionSummary,
+      diagnosticContext,
     }),
   );
 
-  // 10. Seal the gate: receipt ONLY after complete supervision success
-  // and clean evidence grading; any failure invalidates the cached
-  // receipt (E07 — a later failing run blocks a subsequent check too).
+  // 10. Only authoritative gate mode invalidates a previous receipt on
+  // failure. Result-only reporting never creates, replaces, or clears one.
   const gateCode = runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
   if (gateCode !== 0 || !sealed.result.complete || changedInputs || snapshotUnavailable || expectedDigest === null) {
-    clearGateReceipt(stateDir);
+    if (!options.resultOnly) clearGateReceipt(stateDir);
     return gateCode === 0 ? 1 : gateCode;
+  }
+  // The result-only selection uses either a private temporary state dir or
+  // the external witness's separate caller-provided state dir. It never
+  // reads, writes, or clears the configured authoritative receipt.
+  // Confirm the same candidate-tree drift check before returning a
+  // descriptive pass.
+  const resultGitDir = resolveGitDir(io.cwd, io.env);
+  const resultTreeId =
+    resultGitDir === null
+      ? null
+      : computeCandidateTreeId(resultGitDir, io.cwd, io.env, stateDir, 'record', runtimeReuseMounts, docsExclusions);
+  if (resultTreeId !== frozenTreeId) {
+    writeLine(
+      io.stderr,
+      'test-gates: the workspace changed during the run ' +
+        `(${frozenTreeId ?? 'unborn'} → ${resultTreeId ?? 'unborn'}); ` +
+        'no result is reported for mixed bytes (fail closed)',
+    );
+    return 1;
+  }
+  if (options.resultOnly) {
+    writeLine(
+      io.stderr,
+      'selected result passed; this result is non-authoritative and did not create a gate receipt',
+    );
+    return 0;
   }
   if (witnessVerifierKey === undefined) {
     // No verifier key: the receipt cannot be signed by the same
     // authority as witness records — never mint an unverifiable one.
-    clearGateReceipt(stateDir);
+    if (!options.resultOnly) clearGateReceipt(stateDir);
     writeLine(io.stderr, 'test-gates: no witness verifier key — no gate receipt can be sealed (require-e2e consumers will block)');
     return gateCode;
   }
@@ -1432,19 +1678,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // Phase 3 drift gate: the tree at seal time must equal the frozen
   // evaluation tree — a live-workspace edit mid-run blocks explicitly
   // instead of sealing mixed bytes.
-  const sealGitDir = resolveGitDir(io.cwd, io.env);
-  const sealTreeId =
-    sealGitDir === null ? null : computeCandidateTreeId(sealGitDir, io.cwd, io.env, stateDir, 'record');
-  if (sealTreeId !== frozenTreeId) {
-    clearGateReceipt(stateDir);
-    writeLine(
-      io.stderr,
-      'test-gates: the workspace changed during the run ' +
-        `(${frozenTreeId ?? 'unborn'} → ${sealTreeId ?? 'unborn'}); ` +
-        'no receipt is sealed over mixed bytes — rerun the gate for the exact candidate (fail closed)',
-    );
-    return 1;
-  }
+  const sealTreeId = resultTreeId;
   // Phase 3 v2 bindings: the immutable candidate tree actually tested
   // (the drift-checked seal-time value, equal to the frozen evaluation tree),
   // the behavior catalog + required case set, authenticated executed
@@ -1454,6 +1688,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   const behaviorBindings = behaviorReceiptBindings(pipeline.behaviorCatalog);
   const receipt = issueGateReceipt({
     verifierKey: witnessVerifierKey,
+    verifierKeyId: verifierKeyring?.active.keyId,
     runId: manifest.runId,
     invocationId,
     inputDigest: expectedDigest,
@@ -1629,6 +1864,87 @@ export function executedBehaviorCaseDigest(
     executedCaseIds.push(payload.data.caseId);
   }
   return caseExecutionDigestOf(executedCaseIds);
+}
+
+/** Counts obligations with no claim row in the selected run state.
+ *
+ * Args:
+ *   stateDir: run-state directory containing the claim registry.
+ *   obligations: complete policy obligation set.
+ *
+ * Returns:
+ *   number: unique obligations with no claim row.
+ */
+function countUnclaimedObligations(stateDir: string, obligations: readonly { id: string }[]): number {
+  const claimed = new Set<string>();
+  for (const raw of readJsonArray(stateDir, 'claims.json')) {
+    if (typeof raw !== 'object' || raw === null || !('obligationId' in raw)) continue;
+    const obligationId = (raw as { obligationId?: unknown }).obligationId;
+    if (typeof obligationId === 'string') claimed.add(obligationId);
+  }
+  return obligations.filter((obligation) => !claimed.has(obligation.id)).length;
+}
+
+/** Builds the report counts from trusted execution and full-scope evaluation.
+ *
+ * Args:
+ *   input: execution result, selected result, full repository result, and scope.
+ *
+ * Returns:
+ *   RunExecutionSummary: descriptive counts that never authorize a gate.
+ */
+function runExecutionSummaryOf(input: {
+  executionResult: ExecutionResult;
+  mode: 'executed' | 'reused';
+  scope: 'full' | 'changed';
+  selectedVerdicts: readonly ObligationVerdict[];
+  selectedBlocking: readonly BlockingEntry[];
+  repositoryVerdicts: readonly ObligationVerdict[];
+  repositoryBlocking: readonly BlockingEntry[];
+  unclaimed: number;
+}): RunExecutionSummary {
+  const latestOutcomes = new Map<string, ExecutionResult['outcomes'][number]>();
+  for (const outcome of input.executionResult.outcomes) {
+    const previous = latestOutcomes.get(outcome.logicalKey);
+    if (previous === undefined || outcome.attempt >= previous.attempt) latestOutcomes.set(outcome.logicalKey, outcome);
+  }
+  const finalOutcomes = [...latestOutcomes.values()];
+  const performed = finalOutcomes.filter((outcome) => outcome.status !== 'skipped' && outcome.status !== 'fixme').length;
+  const passed = finalOutcomes.filter((outcome) => outcome.status === 'passed' && !outcome.expectedFailure).length;
+  const skipped = finalOutcomes.filter((outcome) => outcome.status === 'skipped' || outcome.status === 'fixme').length;
+  const expectedFailures = finalOutcomes.filter((outcome) => outcome.status === 'failed' && outcome.expectedFailure).length;
+  const selected = input.executionResult.planned.length;
+  const blockingSelected = input.selectedVerdicts.filter(
+    (verdict) => verdict.verdict !== 'satisfied' && verdict.verdict !== 'waived',
+  ).length;
+  const blockingRepository = input.repositoryVerdicts.filter(
+    (verdict) => verdict.verdict !== 'satisfied' && verdict.verdict !== 'waived',
+  ).length;
+  return {
+    scope: input.scope,
+    mode: input.mode,
+    testsPerformedThisInvocation: input.mode === 'executed' ? performed : 0,
+    selectedTests: {
+      selected,
+      passed,
+      failed: Math.max(0, selected - passed - skipped - expectedFailures),
+      skipped,
+      expectedFailures,
+    },
+    selectedClaims: {
+      selected: input.selectedVerdicts.length,
+      satisfied: input.selectedVerdicts.filter((verdict) => verdict.verdict === 'satisfied').length,
+      blocking: blockingSelected,
+      blockingEntries: input.selectedBlocking.length,
+      waived: input.selectedVerdicts.filter((verdict) => verdict.verdict === 'waived').length,
+    },
+    repositoryDebt: {
+      obligations: input.repositoryVerdicts.length,
+      blocking: blockingRepository + input.repositoryBlocking.length,
+      blockingEntries: input.repositoryBlocking.length,
+      unclaimed: input.unclaimed,
+    },
+  };
 }
 
 /** A schema-valid empty catalog (used only when discovery itself failed). */

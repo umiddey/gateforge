@@ -28,7 +28,7 @@
  *    the test itself passes fails the run under
  *    GATEFORGE_REPORTER_FAIL_RUN=1.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -40,7 +40,6 @@ import {
 	PACK_REPORTER,
 	PLAYWRIGHT_CLI,
 	ROOT,
-	buildPack,
 	makeTempProject,
 	readJson,
 	removeTempProject,
@@ -82,11 +81,6 @@ const CRUD_CLAIMS = {
 /** Cleanup safety net (each scenario also disposes itself). */
 const CLEANUPS: Array<() => Promise<void> | void> = [];
 
-beforeAll(() => {
-	const build = buildPack();
-	expect(build.status, `pack build failed:\n${build.stderr}`).toBe(0);
-});
-
 afterAll(async () => {
 	for (const cleanup of CLEANUPS.splice(0)) {
 		await cleanup();
@@ -94,7 +88,17 @@ afterAll(async () => {
 });
 
 /**
- * One full scenario scaffold: project, app, proxy, witness, config.
+ * Builds a real-application scenario with a temporary project, witness,
+ * application, and attestation proxy.
+ *
+ * Args:
+ *   spec: Playwright source copied to `specs/run.spec.js`.
+ *   options: Optional adapter, backend mutation, strict contract, or a
+ *     sidecar claim declaration for the current test.
+ *
+ * Returns:
+ *   Promise of the project and runtime handles needed to execute and
+ *   dispose the scenario.
  *
  * Phase 1 options:
  *   adapter — 'honest' (default), 'wrong-entity' (GF-05), or 'absent'
@@ -106,19 +110,17 @@ afterAll(async () => {
  *     the policy requires exactly this contract, the graph gains the
  *     compiled `http.endpoint` inventory, and the witness runs an
  *     observation proxy so sessions get the dedicated browser channel.
- *     'persistence:create' = the honest browser journey's obligation;
- *     'crud:create' = the fail-closed UI-semantic probe (review
- *     recheck 2026-09-14: the session channel cannot prove a rendered
- *     browser action, so crud claims stay VERIFIER_UNSUPPORTED even for
- *     a genuine journey).
+ *   sidecarClaim — declares one existing test in `.gateforge/test-map.yml`.
  */
 async function scaffoldSuite(
 	spec: string,
 	options: {
 		adapter?: 'honest' | 'wrong-entity' | 'absent';
 		lieAboutStoredValues?: boolean;
-		/** Strict-flow contract the policy requires ('crud:create' = the fail-closed UI-semantic probe). */
+		/** Strict-flow contract the policy requires. */
 		strictContract?: 'crud:create' | 'persistence:create';
+		/** Current sidecar claim to write before the scenario commit. */
+		sidecarClaim?: { key: string; obligationId: string; titlePath: readonly string[] };
 	} = {},
 ) {
 	const project = makeTempProject('e2e');
@@ -232,6 +234,26 @@ async function scaffoldSuite(
 		].join('\n'),
 	);
 	writeFileSync(join(project, 'specs/run.spec.js'), spec);
+	if (options.sidecarClaim !== undefined) {
+		const { key, obligationId, titlePath } = options.sidecarClaim;
+		writeFileSync(
+			join(project, '.gateforge/test-map.yml'),
+			[
+				'schemaVersion: 1',
+				'tests:',
+				`  - key: ${JSON.stringify(key)}`,
+				'    selector:',
+				'      runner: playwright',
+				'      file: specs/run.spec.js',
+				'      titlePath:',
+				...titlePath.map((title) => `        - ${JSON.stringify(title)}`),
+				'    kind: browser-e2e',
+				`    claims: [${JSON.stringify(obligationId)}]`,
+				'    reason: This existing journey declares the update claim.',
+				'',
+			].join('\n'),
+		);
+	}
 	// Plan §11.2/§11.7: the CLI binds evidence to a Git-tracked input
 	// snapshot, so every scenario project is a COMMITTED fixture repo.
 	// Ephemeral Playwright/test outputs are gitignored up front so the
@@ -693,7 +715,14 @@ test('feeds a hand-rolled receipt to persistence.verify', {
 	});
 
 	it('GF-23: fabricated records.json without service-issued recordIds → gate grades invalid, never satisfied', async () => {
-		const scaffold = await scaffoldSuite(HONEST_LIFECYCLE_SPEC);
+		const updateMapKey = 'gf23-update';
+		const scaffold = await scaffoldSuite(HONEST_LIFECYCLE_SPEC, {
+			sidecarClaim: {
+				key: updateMapKey,
+				obligationId: CLAIMS.update,
+				titlePath: ['updates the account through the rendered UI'],
+			},
+		});
 		try {
 			const honest = await runTestGates(
 				scaffold,
@@ -702,6 +731,12 @@ test('feeds a hand-rolled receipt to persistence.verify', {
 			);
 			expect(honest.result.status, `honest baseline should be green:\n${honest.result.stderr}`).toBe(0);
 			expect(verdictOf(honest.report, CLAIMS.update)).toBe('satisfied');
+			const runClaims = readJson(join(scaffold.stateDir, 'claims.json')) as Array<{
+				obligationId: string;
+				testId: string;
+			}> | null;
+			const updateClaim = runClaims?.find((claim) => claim.obligationId === CLAIMS.update);
+			if (updateClaim === undefined) throw new Error('honest run did not record its update claim');
 
 			// Adversarial replay: REPLACE the reporter's records.json with a
 			// fabricated, internally consistent bundle whose recordIds were
@@ -714,7 +749,7 @@ test('feeds a hand-rolled receipt to persistence.verify', {
 					trust: 'witnessed',
 					obligationId: CLAIMS.update,
 					kind: 'ui.action',
-					testId: 'fake-test',
+					testId: updateClaim.testId,
 					payload: {
 						operation: 'update',
 						entityId: 'acc-1',
@@ -726,7 +761,7 @@ test('feeds a hand-rolled receipt to persistence.verify', {
 					trust: 'witnessed',
 					obligationId: CLAIMS.update,
 					kind: 'persistence.entity',
-					testId: 'fake-test',
+					testId: updateClaim.testId,
 					payload: {
 						resourceId: 'tenant.accounts',
 						entityId: 'acc-1',
@@ -735,17 +770,6 @@ test('feeds a hand-rolled receipt to persistence.verify', {
 				},
 			];
 			writeFileSync(join(scaffold.stateDir, 'records.json'), `${JSON.stringify(fabricated)}\n`);
-			writeFileSync(
-				join(scaffold.stateDir, 'claims.json'),
-				`${JSON.stringify([
-					{
-						schemaVersion: 1,
-						obligationId: CLAIMS.update,
-						testId: 'fake-test',
-						testFile: 'fake.spec.js',
-					},
-				])}\n`,
-			);
 
 			const check = run(process.execPath, [CLI_BIN, 'check', '--format', 'json'], {
 				cwd: scaffold.project,
@@ -755,9 +779,9 @@ test('feeds a hand-rolled receipt to persistence.verify', {
 			// `check` prints its report; report.json is test-gates' artifact
 			// (and would still hold the honest run's satisfied verdicts).
 			const report = JSON.parse(check.stdout) as {
-				verdicts?: Array<{ obligationId: string; verdict: string }>;
+				verdicts?: Array<{ obligationId: string; verdict: string; cause?: string | null; reason?: string | null }>;
 			} | null;
-			expect(verdictOf(report, CLAIMS.update)).toBe('invalid');
+			expect(verdictOf(report, CLAIMS.update), JSON.stringify(report?.verdicts)).toBe('invalid');
 		} finally {
 			await scaffold.dispose();
 			removeTempProject(scaffold.project);

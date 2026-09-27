@@ -18,6 +18,7 @@ import {
   BLOCKING_VERDICTS,
   blockingEntryFingerprint,
   CAUSE_NEXT_ACTIONS,
+  ClaimSchema,
   classificationBlockedIdentity,
   HTTP_ENDPOINT_RESOURCE_KIND,
   evaluateCoveragePolicy,
@@ -88,19 +89,13 @@ export interface EvaluateInput {
    */
   behaviorAuthorityProfileDigest?: string | null;
   /**
-   * Declared claims derived from resolved test mappings (plan
-   * 2026-09-13 §5.3, Phase 3): sidecar/native mapping bindings join the
-   * natively annotated claims so an existing mapped test reaches the SAME
-   * authoritative grading path. A mapping declares intent and supplies no
-   * test result — with no witnessed evidence the obligation grades
-   * EVIDENCE_NOT_COLLECTED (blocking), never satisfied. Claims cannot
-   * waive or weaken anything, so strict mode is unaffected. Phase 4 gap:
-   * the runtime fixture submits evidence per annotations with the
-   * reporter's own testIds, so sidecar claims (testId = logical key)
-   * receive no runtime evidence until Phase 4 wires claim injection
-   * through session open.
+   * Complete current native annotations and tracked sidecar declarations,
+   * discovered before execution. When supplied, run-state claims are
+   * accepted only if the same obligation and source file/line/column
+   * still declare that claim.
+   * This keeps partial or stale `claims.json` from defining the inventory.
    */
-  mappingClaims?: readonly Claim[];
+  claimInventory?: readonly Claim[];
   /**
    * Coverage facts derived from resolved test mappings (plan §3.6,
    * Phase 3): browser-e2e-declared bindings for CRUD-contract
@@ -118,6 +113,8 @@ export interface EvaluateInput {
    * issuance.
    */
   witnessVerifierKey?: string | null;
+  /** Active and retained keys used to verify older witnessed envelopes. */
+  witnessVerifierKeys?: readonly string[];
   /**
    * Live v2 attestation envelope fetched by `test-gates` while a wired
    * witness was still serving (plan §11.3: the same signed object the
@@ -167,6 +164,42 @@ export interface EvaluateInput {
      */
     classificationBlocked?: ReadonlySet<string>;
   } | null;
+}
+
+/**
+ * Uses current declarations as the inventory and retains runner-produced
+ * claim identities only when their source location still matches.
+ *
+ * Args:
+ *   runClaims: untrusted claim rows written by an earlier or current run.
+ *   inventory: current annotations and sidecar declarations.
+ *
+ * Returns:
+ *   Claim[]: current declarations, preferring matching run rows.
+ */
+function claimsFromCurrentInventory(runClaims: readonly unknown[], inventory: readonly Claim[]): Claim[] {
+  const declaredBySource = new Map(inventory.map((claim) => [claimSourceKey(claim), claim]));
+  const observedBySource = new Map<string, Claim>();
+  for (const raw of runClaims) {
+    const parsed = ClaimSchema.safeParse(raw);
+    if (!parsed.success) continue;
+    const key = claimSourceKey(parsed.data);
+    if (declaredBySource.has(key) && !observedBySource.has(key)) observedBySource.set(key, parsed.data);
+  }
+  return [...declaredBySource.entries()].map(([key, declared]) => observedBySource.get(key) ?? declared);
+}
+
+/**
+ * Builds a stable key for one source-level claim declaration.
+ *
+ * Args:
+ *   claim: the schema-validated claim.
+ *
+ * Returns:
+ *   string: obligation, source file, line, and column identity.
+ */
+function claimSourceKey(claim: Claim): string {
+  return `${claim.obligationId}\u0000${claim.testFile ?? ''}\u0000${claim.location?.line ?? ''}\u0000${claim.location?.col ?? ''}`;
 }
 
 /** The evaluated run. */
@@ -405,13 +438,16 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
 
   const waiverLoad = loadWaivers(resolveRepoPath(cwd, config.waivers), { now });
 
-  // Native annotation claims (run state) plus declared mapping claims
-  // (plan §5.3, Phase 3): both normalize through the one resolver seam so
-  // a mapped existing test grades on the SAME path as an annotated one.
-  // Mapping claims carry intent only — dedup happens at the seam.
-  const claims = [...readJsonArray(stateDir, 'claims.json'), ...(input.mappingClaims ?? [])];
+  // Run-state claims are retained only as execution records. When a
+  // current declaration inventory is available, stale rows are filtered.
+  const runClaims = readJsonArray(stateDir, 'claims.json');
+  const claims =
+    input.claimInventory === undefined
+      ? runClaims
+      : claimsFromCurrentInventory(runClaims, input.claimInventory);
   const authorized = authorizeRecords(readJsonArray(stateDir, 'records.json'), stateDir, {
     verifierKey: input.witnessVerifierKey,
+    verifierKeys: input.witnessVerifierKeys,
     live: input.witnessAttestation,
     expectedInputDigest: input.evidenceContext?.expectedInputDigest,
     snapshotUnavailable: input.evidenceContext?.snapshotUnavailable,
@@ -657,6 +693,7 @@ function authorizeRecords(
   stateDir: string,
   auth: {
     verifierKey?: string | null;
+    verifierKeys?: readonly string[];
     live?: unknown;
     expectedInputDigest?: string | null;
     snapshotUnavailable?: boolean;
@@ -666,8 +703,10 @@ function authorizeRecords(
   } = {},
 ): { records: unknown[]; evidenceBlocking: BlockingEntry[] } {
   const issuedRecordId = /^[0-9a-f]{64}$/;
-  const verifierKey =
-    typeof auth.verifierKey === 'string' && auth.verifierKey.length > 0 ? auth.verifierKey : null;
+  const verifierKeys = [
+    ...(auth.verifierKeys ?? []),
+    ...(typeof auth.verifierKey === 'string' && auth.verifierKey.length > 0 ? [auth.verifierKey] : []),
+  ].filter((key, index, keys) => keys.indexOf(key) === index);
   const expectedDigest =
     typeof auth.expectedInputDigest === 'string' && auth.expectedInputDigest.length > 0
       ? auth.expectedInputDigest
@@ -760,22 +799,19 @@ function authorizeRecords(
       };
     }
     const envelope = parsed.data as Attestation;
-    if (verifierKey === null) {
+    if (verifierKeys.length === 0) {
       return {
         rejection: 'mac-fail',
         detail: `${label} attestation cannot verify without a witness verifier key (fail closed)`,
       };
     }
-    const macOk = verifyAttestationMac(
-      verifierKey,
-      {
-        runId: envelope.runId,
-        invocationId: envelope.invocationId,
-        inputDigest: envelope.inputDigest,
-        recordIds: envelope.recordIds,
-      },
-      envelope.mac,
-    );
+    const attestationBody = {
+      runId: envelope.runId,
+      invocationId: envelope.invocationId,
+      inputDigest: envelope.inputDigest,
+      recordIds: envelope.recordIds,
+    };
+    const macOk = verifierKeys.some((key) => verifyAttestationMac(key, attestationBody, envelope.mac));
     if (!macOk) {
       return {
         rejection: 'mac-fail',
@@ -891,7 +927,7 @@ function authorizeRecords(
     }
   }
   if (witnessedCount > 0 && validEnvelopes.length === 0 && !durablePresent && auth.live == null) {
-    if (verifierKey === null) {
+    if (verifierKeys.length === 0) {
       block(
         'evidence-context: no witness verifier key; suite-writable artifacts alone cannot ' +
           'prove issuance and witnessed records demote (fail closed)',

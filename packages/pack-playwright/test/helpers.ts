@@ -75,14 +75,6 @@ export function run(
 	};
 }
 
-/** Builds the pack's dist (required before any Playwright run). */
-export function buildPack(): SpawnOutcome {
-	return run('npx', ['tsc', '-p', 'packages/pack-playwright/tsconfig.build.json'], {
-		cwd: ROOT,
-		timeoutMs: 180_000,
-	});
-}
-
 /** Creates a disposable temp project and returns its absolute path. */
 export function makeTempProject(label: string): string {
 	const dir = mkdtempSync(join(tmpdir(), `gateforge-${label}-`));

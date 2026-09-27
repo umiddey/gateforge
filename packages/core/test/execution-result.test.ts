@@ -76,6 +76,22 @@ describe('ExecutionResultSchema internal consistency', () => {
   it('a complete run with zero causes parses', () => {
     expect(ExecutionResultSchema.safeParse(result()).success).toBe(true);
   });
+  it('keeps legacy results valid and binds optional claim inventory into the receipt digest', () => {
+    const legacy = result();
+    const claimInventory = [
+      {
+        schemaVersion: 1 as const,
+        obligationId: 'tenant.accounts:persistence:read',
+        testId: 'playwright:chromium:e2e/a.spec.ts:deletes',
+        testFile: 'e2e/a.spec.ts',
+        location: { file: 'e2e/a.spec.ts', line: 12, col: 4 },
+      },
+    ];
+    const sealedInventory = result({ claimInventory });
+    expect(ExecutionResultSchema.parse(legacy).claimInventory).toBeUndefined();
+    expect(ExecutionResultSchema.parse(sealedInventory).claimInventory).toEqual(claimInventory);
+    expect(executionResultDigestOf(sealedInventory)).not.toBe(executionResultDigestOf(legacy));
+  });
 
   it('a "complete" run carrying causes is a rejected contradiction (fail closed)', () => {
     const contradictory = result({

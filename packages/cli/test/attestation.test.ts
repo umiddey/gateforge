@@ -26,6 +26,7 @@ import { verifyAttestationMac, withTempRepo, type TempRepo } from '@gate-forge/c
 import { startWitness } from '../../pack-playwright/src/witness/server.js';
 import { beginTestInterval, endTestInterval, openTestSession, type TestSession } from './witness-sessions.js';
 import { configYml, currentInputDigest, runCli, writeV2Manifest } from './helpers.js';
+import { mintCompleteRunReceipt } from './gate-receipts.js';
 
 /** Absolute path of the compiled CLI bin (child-process runs). */
 const CLI_BIN = join(process.cwd(), 'packages/cli/bin/gateforge.js');
@@ -100,6 +101,22 @@ function installPingRepo(repo: TempRepo): void {
     }),
     'plugin.mjs': PING_PLUGIN_SOURCE,
     'backend/api/v1/accounts.py': '# accounts router fixture\n',
+  });
+}
+/**
+ * Seals the fixture's current native claim inventory for check.
+ *
+ * Args:
+ *   repo: disposable fixture repository.
+ *   obligationId: current obligation the annotated test claims.
+ *
+ * Returns:
+ *   Promise<void>: resolves after the current input receipt is written.
+ */
+async function sealCurrentClaimInventory(repo: TempRepo, obligationId: string): Promise<void> {
+  await mintCompleteRunReceipt(repo, {
+    verifierKey: VERIFIER_KEY,
+    claimInventory: [{ schemaVersion: 1, obligationId, testId: TEST_ID, testFile: 'ping.mjs' }],
   });
 }
 
@@ -287,6 +304,7 @@ describe('attestation matrix: valid current run (real CLI + real witness)', () =
           '.gateforge/test-gates/records.json': JSON.stringify(ledger.records),
         });
         await writeV2Manifest(repo, { runId: RUN_ID, verifierKey: VERIFIER_KEY, recordIds, invocationId: INVOCATION_ID });
+        await sealCurrentClaimInventory(repo, obligationId);
         const { code, stdout } = await runCli(repo, ['check', '--format', 'json'], {
           GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
         });
@@ -330,6 +348,7 @@ describe('attestation matrix: stale evidence blocks (real CLI)', () => {
           '.gateforge/test-gates/records.json': JSON.stringify(ledger),
         });
         await writeV2Manifest(repo, { runId: RUN_ID, verifierKey: VERIFIER_KEY, recordIds, invocationId: INVOCATION_ID });
+        await sealCurrentClaimInventory(repo, obligationId);
         // Sanity: the current tree authorizes.
         expect((await runCli(repo, ['check', '--format', 'json'], { GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY })).code).toBe(0);
         // Same HEAD, unstaged source edit: old evidence blocks.
@@ -375,6 +394,7 @@ describe('attestation matrix: stale evidence blocks (real CLI)', () => {
           '.gateforge/test-gates/records.json': JSON.stringify(ledger),
         });
         await writeV2Manifest(repo, { runId: RUN_ID, verifierKey: VERIFIER_KEY, recordIds, invocationId: INVOCATION_ID });
+        await sealCurrentClaimInventory(repo, obligationId);
         repo.writeFiles({ '.gateforge/policies.yml': `${PING_POLICIES_YML}# policy tweak\n` });
         const { code, stdout } = await runCli(repo, ['check', '--format', 'json'], {
           GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
@@ -418,6 +438,7 @@ describe('attestation matrix: stale evidence blocks (real CLI)', () => {
           '.gateforge/test-gates/records.json': JSON.stringify(ledger),
         });
         await writeV2Manifest(repo, { runId: RUN_ID, verifierKey: VERIFIER_KEY, recordIds, invocationId: INVOCATION_ID });
+        await sealCurrentClaimInventory(repo, obligationId);
         const env = { GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY };
         const blocked = async (): Promise<MatrixReport> => {
           const { code, stdout } = await runCli(repo, ['check', '--format', 'json'], env);
@@ -487,12 +508,14 @@ describe('attestation matrix: stale evidence blocks (real CLI)', () => {
           '.gateforge/test-gates/records.json': JSON.stringify(ledger),
         });
         await writeV2Manifest(repo, { runId: RUN_ID, verifierKey: VERIFIER_KEY, recordIds, invocationId: INVOCATION_ID });
+        await sealCurrentClaimInventory(repo, obligationId);
         const oldManifest = readFileSync(join(repo.root, '.gateforge/test-gates/manifest.json'), 'utf8');
         const env = { GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY };
         expect((await runCli(repo, ['check', '--format', 'json'], env)).code).toBe(0);
         // Tree moves on (newer run), then the OLD bundle is restored.
         repo.writeFiles({ 'backend/api/v1/accounts.py': '# accounts router fixture\n# v2\n' });
         await writeV2Manifest(repo, { runId: RUN_ID, verifierKey: VERIFIER_KEY, recordIds, invocationId: '66666666-0000-4000-8000-000000000066' });
+        await sealCurrentClaimInventory(repo, obligationId);
         expect((await runCli(repo, ['check', '--format', 'json'], env)).code).toBe(0);
         repo.writeFiles({ '.gateforge/test-gates/manifest.json': oldManifest });
         const { code, stdout } = await runCli(repo, ['check', '--format', 'json'], env);
@@ -853,6 +876,7 @@ console.log('suite-done');
         };
         expect(durable.attestation?.invocationId).toBe(manifest.attestation?.invocationId);
         await target.stop();
+
       } catch (error) {
         try {
           await witness.stop();

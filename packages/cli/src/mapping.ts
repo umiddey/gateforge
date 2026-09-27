@@ -1,23 +1,13 @@
 /**
- * The CLI test-mapping seam (plan 2026-09-13 §5.3, Phase 3): loads and
- * atomically writes the `.gateforge/test-map.yml` sidecar, runs the ONE
- * core resolver over (catalog, native claims, sidecar, obligations), and
- * projects the result into the two grading-surface inputs:
+ * The CLI test-mapping seam: loads and atomically writes the
+ * `.gateforge/test-map.yml` sidecar, resolves it with the current native
+ * test catalog, and produces a source-located claim inventory for grading.
  *
- * - declared claims (`mappingGradingClaims`): mapping bindings become
- *   Claim-shaped declared claims so a mapped existing test reaches the
- *   SAME authoritative grading path as natively annotated ones. A mapping
- *   declares intent and supplies no test result — with no witnessed
- *   evidence the obligation grades EVIDENCE_NOT_COLLECTED (blocking),
- *   never satisfied, and strict mode is unaffected (claims cannot waive).
- *   PHASE 4 GAP: the runtime fixture submits evidence per native
- *   annotations using the reporter's own testIds; sidecar claims (whose
- *   testId is the logical key) cannot receive runtime evidence until
- *   Phase 4 wires claim injection through session open — do NOT treat
- *   this projection as runtime selection.
- * - typed blocking entries: resolver problems (ambiguous/stale) block
- *   the gate with their plan §5.4 causes — an unsafe or out-of-date
- *   declaration is never silently dropped (and never weakens anything).
+ * The inventory uses declarations from the current native annotations and
+ * current sidecar bindings. Prior-run `claims.json` records are never an
+ * input to declaration completeness, so stale state cannot hide a missing
+ * current test mapping. Declarations are not evidence: an unmapped claim
+ * cannot satisfy an obligation or weaken strict-mode authority.
  *
  * YAML parsing uses the repository's `yaml` dependency (the same one
  * `.gateforge.yml` uses); core stays YAML-free and speaks validated data.
@@ -29,7 +19,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
   CAUSE_NEXT_ACTIONS,
   ClaimSchema,
-  mappingGradingClaims,
+  compareStrings,
   resolveTestMappings,
   TestMapSchema,
   type BlockingEntry,
@@ -46,7 +36,6 @@ import {
 import type { MappedCoverage, CoverageOperation } from '@gate-forge/core';
 import { discoverTestCatalog, TestDiscoveryError } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
-import { readJsonArray } from './state.js';
 
 /** The tracked sidecar path, repo-root-relative (plan §5.1 row 2). */
 export const TEST_MAP_RELATIVE = '.gateforge/test-map.yml';
@@ -136,16 +125,18 @@ export interface MappingResolutionOptions {
   cwd: string;
   /** Validated `.gateforge.yml` (drives discovery). */
   config: GateforgeConfig;
-  /** Absolute run-state directory (native claims source). */
-  stateDir: string;
   /** The run's obligations (the registry the resolver validates against). */
   obligations: readonly Obligation[];
-  /**
-   * Pre-discovered catalog; when absent the module discovers fresh.
-   * Callers that ALREADY ran discovery (tests suggest/mark/explain) pass
-   * it here so one command never scans the tree twice.
-   */
+  /** Pre-discovered catalog; when absent the module discovers fresh. */
   catalog?: TestCatalog;
+  /** Current native annotations from the same discovery pass as catalog. */
+  nativeClaims?: readonly Claim[];
+  /**
+   * Authenticated claim declarations used instead of live annotations.
+   * `check` supplies these only from a verified receipt; the sidecar is
+   * still resolved against the current catalog.
+   */
+  claimBindings?: readonly Claim[];
   /** Optional prior-run hints (suggestions only, never grading). */
   priorRunHints?: readonly { logicalKey: string; obligationId: string }[];
   /** Compiled behavior catalog when complete-behavior is enabled. */
@@ -160,21 +151,24 @@ export interface MappingResolutionResult {
   sidecar: TestMap | null;
   /** The resolved bindings + typed problems. */
   resolution: ResolvedMappings;
-  /** Native claims read from the run state (already registry-filtered). */
+  /** Current or receipt-authenticated claims supplied to the resolver. */
   nativeClaims: Claim[];
+  /** Sidecar and resolver claim declarations with current source locations. */
+  claimInventory: Claim[];
 }
 
 /**
- * Runs discovery + sidecar load + native-claim read and the ONE core
- * resolver over them. The catalog is always freshly discovered (never
- * read back from the derived state file) so staleness judgments reflect
- * the current tree.
+ * Runs discovery + sidecar load and the ONE core resolver over current
+ * catalog annotations and declarations. Run-state claims are evidence
+ * from an earlier execution, never the source of current declarations.
  *
  * Args:
- *   options: cwd, config, state dir, obligations, optional hints.
+ *   options: cwd, config, obligations, optional catalog and its native
+ *     claims, optional authenticated claim bindings, plus hints.
  *
  * Returns:
- *   Promise<MappingResolutionResult>: catalog, sidecar, resolution, claims.
+ *   Promise<MappingResolutionResult>: current catalog, declarations,
+ *   resolved mappings, and current native or authenticated claim inventory.
  *
  * Throws:
  *   UsageError: when native enumeration could not run at all (exit 2 —
@@ -184,8 +178,10 @@ export async function resolveRepositoryMappings(
   options: MappingResolutionOptions,
 ): Promise<MappingResolutionResult> {
   let catalog: TestCatalog;
+  let discoveredClaims: Claim[];
   if (options.catalog !== undefined) {
     catalog = options.catalog;
+    discoveredClaims = [...(options.nativeClaims ?? [])];
   } else {
     try {
       // collectPytest is REQUIRED here (GAP 1 fix, server-witnessed
@@ -196,17 +192,16 @@ export async function resolveRepositoryMappings(
       // that exists. Collection failure stays honest data (the pytest
       // runner summary turns `unavailable`); `tests discover` alone keeps
       // its explicit `--pytest` opt-in.
-      ({ catalog } = await discoverTestCatalog({ cwd: options.cwd, config: options.config, collectPytest: true }));
+      const discovered = await discoverTestCatalog({ cwd: options.cwd, config: options.config, collectPytest: true });
+      catalog = discovered.catalog;
+      discoveredClaims = discovered.nativeClaims;
     } catch (error) {
       if (error instanceof TestDiscoveryError) throw new UsageError(error.message);
       throw error;
     }
   }
+  const nativeClaims = [...(options.claimBindings ?? discoveredClaims)];
   const sidecar = loadOptionalTestMap(options.cwd);
-  const nativeClaims = readJsonArray(options.stateDir, 'claims.json')
-    .map((entry) => ClaimSchema.safeParse(entry))
-    .filter((parsed): parsed is { success: true; data: Claim } => parsed.success)
-    .map((parsed) => parsed.data);
   const resolution = resolveTestMappings({
     catalog,
     nativeClaims,
@@ -215,8 +210,64 @@ export async function resolveRepositoryMappings(
     ...(options.priorRunHints !== undefined ? { priorRunHints: options.priorRunHints } : {}),
     ...(options.behaviorCatalog !== undefined ? { behaviorCatalog: options.behaviorCatalog } : {}),
   });
-  return { catalog, sidecar, resolution, nativeClaims };
+  const claimInventory = currentClaimInventory(catalog, resolution, nativeClaims);
+  return { catalog, sidecar, resolution, nativeClaims, claimInventory };
 }
+/**
+ * Combines claim declarations used by the resolver with sidecar
+ * declarations joined to the current catalog. Source locations let
+ * verdict evaluation ignore stale rows left by earlier runs.
+ *
+ * Args:
+ *   catalog: current runner catalog.
+ *   resolution: mappings resolved against this catalog and registry.
+ *   nativeClaims: current or authenticated claims supplied to resolution.
+ *
+ * Returns:
+ *   Claim[]: deterministic, source-located current declarations.
+ */
+function currentClaimInventory(
+  catalog: TestCatalog,
+  resolution: ResolvedMappings,
+  nativeClaims: readonly Claim[],
+): Claim[] {
+  const entryByInstance = new Map(
+    catalog.entries.map((entry) => [`${entry.file}#${entry.titlePath.join('>')}`, entry]),
+  );
+  const claims = [...nativeClaims];
+  for (const group of resolution.obligations) {
+    for (const binding of group.bindings) {
+      if (binding.origin !== 'sidecar') continue;
+      for (const instance of binding.instances) {
+        const entry = entryByInstance.get(`${instance.file}#${instance.titlePath.join('>')}`);
+        if (entry === undefined) continue;
+        claims.push(
+          ClaimSchema.parse({
+            schemaVersion: 1,
+            obligationId: group.obligationId,
+            testId: binding.logicalKey,
+            testFile: entry.file,
+            location: entry.sourceLocation,
+          }),
+        );
+      }
+    }
+  }
+  const unique = new Map<string, Claim>();
+  for (const claim of claims) {
+    const key = [
+      claim.obligationId,
+      claim.testFile ?? '',
+      claim.location?.line ?? '',
+      claim.location?.col ?? '',
+    ].join('\u0000');
+    if (!unique.has(key)) unique.set(key, claim);
+  }
+  return [...unique.entries()]
+    .sort(([left], [right]) => compareStrings(left, right))
+    .map(([, claim]) => claim);
+}
+
 
 /**
  * Projects resolver problems into gate blocking entries (fail closed):
@@ -249,26 +300,6 @@ export function mappingBlocking(problems: ResolvedMappings['problems']): Blockin
       };
     })
     .sort((a, b) => (a.detail < b.detail ? -1 : a.detail > b.detail ? 1 : 0));
-}
-
-/**
- * Computes the DECLARED grading claims for a run (the check seam):
- * resolved native/sidecar bindings become Claim-shaped declared claims,
- * deduplicated against the run state's own claims (exact duplicates
- * disappear idempotently). Mapping claims NEVER waive or weaken: they
- * only move an obligation from `no claim declares` to
- * `declared but produced no evidence records` until witnessed evidence
- * exists. See the module doc for the Phase 4 runtime-injection gap.
- *
- * Args:
- *   resolution: the resolved-mappings surface.
- *   nativeClaims: the run-state claims (already schema-validated).
- *
- * Returns:
- *   Claim[]: the additional declared claims, sorted by (obligationId, testId).
- */
-export function gradingClaimsFor(resolution: ResolvedMappings, nativeClaims: readonly Claim[]): Claim[] {
-  return mappingGradingClaims(resolution, nativeClaims);
 }
 
 /**
@@ -379,6 +410,7 @@ export function mappedCoverageFrom(
     const operation = coverageOperationOfContract(obligation.contract);
     if (operation === null) continue;
     for (const binding of group.bindings) {
+      if (binding.origin !== 'sidecar') continue;
       if (binding.declaredKind !== 'browser-e2e' && binding.declaredKind !== 'observed-e2e') continue;
       const key = `${resource.name}\u0000${operation}`;
       if (key in seen) continue;

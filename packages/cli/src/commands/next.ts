@@ -19,7 +19,12 @@ import {
   type Claim,
   type ObligationVerdict,
 } from '@gate-forge/core';
-import { discoverTestCatalog, findPlaywrightConfig } from '@gate-forge/pack-playwright';
+import {
+  discoverTestCatalog,
+  findPlaywrightConfig,
+  TestDiscoveryError,
+  type DiscoverResult,
+} from '@gate-forge/pack-playwright';
 import { parseArgs } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
@@ -27,7 +32,6 @@ import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { evaluateRun } from '../evaluate.js';
 import {
-  gradingClaimsFor,
   loadOptionalTestMap,
   mappedCoverageFrom,
   mappingBlocking,
@@ -249,17 +253,21 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   // CHANGE_UNMAPPED blockers; staged/worktree divergence blocks loudly.
   let changedFiles: readonly string[] | null = null;
   let mismatchBlocking: BlockingEntry[] = [];
+  let discoveryResult: DiscoverResult | undefined;
   if (diffScoped) {
     const sidecar = loadOptionalTestMap(io.cwd);
     const runnerConfig = findPlaywrightConfig(io.cwd);
     let testFiles: string[] = [];
     if (runnerConfig !== null) {
       try {
-        testFiles = (await discoverTestCatalog({ cwd: io.cwd, config })).catalog.entries
+        const discovered = await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true });
+        discoveryResult = discovered;
+        testFiles = discovered.catalog.entries
           .filter((entry) => entry.runner === 'playwright')
           .map((entry) => entry.file);
-      } catch {
-        testFiles = [];
+      } catch (error) {
+        if (error instanceof TestDiscoveryError) throw new UsageError(error.message);
+        throw error;
       }
     }
     const knownSourceFiles = [
@@ -319,21 +327,18 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     }
   }
 
-  let mappingClaims: Claim[] = [];
-  let mappingBlockers: BlockingEntry[] = [];
-  let mappedCoverage: MappedCoverage[] = [];
-  if (loadOptionalTestMap(io.cwd) !== null) {
-    const mapped = await resolveRepositoryMappings({
-      cwd: io.cwd,
-      config,
-      stateDir,
-      obligations: pipeline.policy.obligations,
-      behaviorCatalog: pipeline.behaviorCatalog,
-    });
-    mappingClaims = gradingClaimsFor(mapped.resolution, mapped.nativeClaims);
-    mappingBlockers = mappingBlocking(mapped.resolution.problems);
-    mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
-  }
+  const mapped = await resolveRepositoryMappings({
+    cwd: io.cwd,
+    config,
+    obligations: pipeline.policy.obligations,
+    ...(discoveryResult !== undefined
+      ? { catalog: discoveryResult.catalog, nativeClaims: discoveryResult.nativeClaims }
+      : {}),
+    behaviorCatalog: pipeline.behaviorCatalog,
+  });
+  const claimInventory: Claim[] = mapped.claimInventory;
+  const mappingBlockers = mappingBlocking(mapped.resolution.problems);
+  const mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
 
   const evaluated = evaluateRun({
     cwd: io.cwd,
@@ -345,7 +350,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     stateDir,
     now: pipeline.now,
     changedFiles,
-    mappingClaims,
+    claimInventory,
     mappedCoverage,
     witnessVerifierKey,
     baseline: resolveAdoptedBaseline(io.cwd, config.baselines),

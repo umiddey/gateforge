@@ -13,6 +13,7 @@ import {
   loadConfig,
   selectionDigestOf,
   sha256Canonical,
+  type Claim,
   type RunnerExecutionEnvelope,
   type TempRepo,
   type TestCatalog,
@@ -113,11 +114,10 @@ export interface MintedReceipt {  /** The workspace/candidate input digest the r
  *   repo: fixture repository (gateforge config + sources committed).
  *   options: verifierKey (signing authority), an optional parentSha
  *     override (defaults to the repo HEAD; pass a sha to simulate a
- *     receipt sealed against a specific base), digestOverride
- *     (simulate stale/different-bytes receipts: the MAC then covers the
  *     overridden digest, so the receipt no longer matches the repo), and
  *     approvedPolicyDigest (the additive v1 approved-policy binding —
- *     omitted when not provided, matching pre-pin receipts).
+ *     omitted when not provided, matching pre-pin receipts). Optional
+ *     claimInventory is sealed to test receipt-backed check declarations.
  *
  * Returns:
  *   Promise<MintedReceipt>: the minted binding values.
@@ -130,6 +130,7 @@ export async function mintCompleteRunReceipt(
     digestOverride?: string;
     approvedPolicyDigest?: string;
     executionBoundaryProfile?: string;
+    claimInventory?: readonly Claim[];
   },
 ): Promise<MintedReceipt> {
   const actualDigest = await currentInputDigest(repo);
@@ -154,6 +155,7 @@ export async function mintCompleteRunReceipt(
     trustedPolicyDigest,
     runner: 'playwright',
     logicalKeys: selection.logicalKeys,
+    ...(options.claimInventory !== undefined ? { claimInventory: options.claimInventory } : {}),
     catalog,
     plannedRows: [
       {

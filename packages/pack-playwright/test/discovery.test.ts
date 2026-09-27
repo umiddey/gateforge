@@ -8,8 +8,8 @@
  * the installed playwright CLI in list mode against a TEMP project
  * (no browsers launched, no network).
  */
-import { afterAll, beforeAll, afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +29,6 @@ import {
   untrustedEnv,
 } from '../src/discovery/index.js';
 import { AdapterCapabilityError } from '../src/discovery/adapters.js';
-import { buildPack } from './helpers.js';
 
 /** The gateforge monorepo root (for playwright module resolution). */
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -730,6 +729,63 @@ describe('native playwright reconciliation', () => {
     await expect(listNativePlaywrightTests({ cwd: root, timeoutMs: 1 })).rejects.toThrow(TestDiscoveryError);
   });
 
+  it('enumerates current claim annotations in an isolated gate context', async () => {
+    const root = makePlaywrightProject({
+      'e2e/conditional.spec.js': [
+        "import { writeFileSync } from 'node:fs';",
+        "import { test } from 'playwright/test';",
+        "writeFileSync('discovery-state.json', JSON.stringify({",
+        "  stateDir: process.env.GATEFORGE_STATE_DIR ?? null,",
+        "  verifierKey: process.env.GATEFORGE_WITNESS_VERIFIER_KEY ?? null,",
+        "  runToken: process.env.GATEFORGE_RUN_TOKEN ?? null,",
+        "}));",
+        "test('raw journey', () => {});",
+        'if (process.env.GATEFORGE_STATE_DIR) {',
+        "  test('witnessed journey', { annotation: { type: 'gateforge', description: 'tenant.accounts:crud:read' } }, () => {});",
+        '}',
+        '',
+      ].join('\n'),
+    });
+    const saved = {
+      stateDir: process.env['GATEFORGE_STATE_DIR'],
+      verifierKey: process.env['GATEFORGE_WITNESS_VERIFIER_KEY'],
+      runToken: process.env['GATEFORGE_RUN_TOKEN'],
+    };
+    process.env['GATEFORGE_STATE_DIR'] = '/authoritative/state';
+    process.env['GATEFORGE_WITNESS_VERIFIER_KEY'] = 'must-not-reach-discovery';
+    process.env['GATEFORGE_RUN_TOKEN'] = 'must-not-reach-discovery';
+    try {
+      const discovered = await discoverTestCatalog({
+        cwd: root,
+        config: fixtureConfig(['e2e/**/*.spec.js']),
+      });
+      expect(discovered.catalog.entries.map((entry) => entry.title)).toEqual([
+        'raw journey',
+        'witnessed journey',
+      ]);
+      expect(discovered.nativeClaims.map((claim) => [claim.obligationId, claim.testFile])).toEqual([
+        ['tenant.accounts:crud:read', 'e2e/conditional.spec.js'],
+      ]);
+      const childEnvironment = JSON.parse(readFileSync(join(root, 'discovery-state.json'), 'utf8')) as {
+        stateDir: string | null;
+        verifierKey: string | null;
+        runToken: string | null;
+      };
+      expect(childEnvironment.stateDir).not.toBe('/authoritative/state');
+      expect(childEnvironment.verifierKey).toBeNull();
+      expect(childEnvironment.runToken).toBeNull();
+      expect(childEnvironment.stateDir).not.toBeNull();
+      expect(existsSync(childEnvironment.stateDir as string)).toBe(false);
+    } finally {
+      if (saved.stateDir === undefined) delete process.env['GATEFORGE_STATE_DIR'];
+      else process.env['GATEFORGE_STATE_DIR'] = saved.stateDir;
+      if (saved.verifierKey === undefined) delete process.env['GATEFORGE_WITNESS_VERIFIER_KEY'];
+      else process.env['GATEFORGE_WITNESS_VERIFIER_KEY'] = saved.verifierKey;
+      if (saved.runToken === undefined) delete process.env['GATEFORGE_RUN_TOKEN'];
+      else process.env['GATEFORGE_RUN_TOKEN'] = saved.runToken;
+    }
+  });
+
   it('strips every GATEFORGE_* variable for untrusted enumeration', () => {
     const child = untrustedEnv({
       PATH: '/usr/bin',
@@ -911,14 +967,9 @@ describe('native playwright reconciliation', () => {
  * on it — while every OTHER module-external import stays unresolved
  * (fail closed). The reconciliation spec runs the installed playwright
  * CLI against a TEMP project (no browsers, no network) and therefore
- * needs the pack's built dist.
+ * needs the pack's built dist (built once by test/global-setup.ts).
  */
 describe('pack-runner consumer binding (E22)', () => {
-  beforeAll(() => {
-    const build = buildPack();
-    expect(build.status, `pack build failed:\n${build.stderr}`).toBe(0);
-  });
-
   /** A playwright project that can also resolve the pack specifier. */
   function makePackConsumerProject(files: Record<string, string>): string {
     const root = makeTempDir('gateforge-pack-consumer-');

@@ -9,7 +9,7 @@
  *   provenance (claimed ⇒ invalid/missing, never satisfied — GF-23);
  * - obligations without any claim are flagged (GF-24).
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -799,5 +799,72 @@ describe('aggregate honesty (plan Phase 4 item 7): the reporter is never the fin
     const line = gateSummaryLine([row('satisfied'), row('satisfied')], 0);
     expect(line).toMatch(/GATEFORGE GATE: PASS \(2\/2 claimed obligations satisfied/);
     expect(line).toMatch(/never this reporter/);
+  });
+
+  it('reports runner work, selected claims, and full-repository debt as separate results', async () => {
+    saveEnv('GATEFORGE_WITNESS_URL', 'GATEFORGE_RUN_TOKEN', 'GATEFORGE_STATE_DIR', 'GATEFORGE_OBLIGATIONS');
+    const run = await setupRun();
+    const output: string[] = [];
+    const logger = vi.spyOn(console, 'log').mockImplementation((...values: unknown[]) => {
+      output.push(values.map(String).join(' '));
+    });
+    try {
+      process.env.GATEFORGE_WITNESS_URL = run.witness.url;
+      process.env.GATEFORGE_RUN_TOKEN = TOKEN;
+      process.env.GATEFORGE_STATE_DIR = run.stateDir;
+      process.env.GATEFORGE_OBLIGATIONS = join(run.project, '.gateforge/test-gates/obligations.json');
+      const obligationsPath = join(run.project, '.gateforge/test-gates/obligations.json');
+      const document = JSON.parse(readFileSync(obligationsPath, 'utf8')) as {
+        obligations: Array<Record<string, unknown>>;
+      };
+      for (let index = 0; index < 510; index += 1) {
+        document.obligations.push({
+          id: `tenant.debt-${String(index)}:persistence:create`,
+          resourceId: `tenant.debt-${String(index)}`,
+          contract: 'persistence:create',
+          policyId: 'crud',
+          lifecycle: { create: true, read: false, update: false, delete: false },
+          fingerprint: String(index + 1).padStart(64, '0'),
+          source: 'src/accounts.js',
+          location: { file: 'src/accounts.js', line: 1, col: 0 },
+        });
+      }
+      writeFileSync(obligationsPath, `${JSON.stringify(document)}\n`);
+
+      const client = new WitnessClient(run.witness.url, TOKEN);
+      const session = await openSupervisorSession(run.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      await postHonestCreate(client, run.target.url, session);
+      const reporter = new GateforgeReporter({
+        stateDir: run.stateDir,
+        runId: RUN_ID,
+        outcomesPath: join(run.stateDir, 'runner-outcomes.json'),
+        obligationsPath,
+      });
+      reporter.onTestEnd(
+        {
+          id: TEST_ID,
+          title: 'honest create',
+          annotations: [{ type: 'gateforge', description: CREATE }],
+        } as never,
+        { status: 'passed', workerIndex: 0, retry: 0 },
+      );
+      await reporter.onEnd({ status: 'passed' });
+
+      const result = JSON.parse(readFileSync(join(run.stateDir, 'run-summary.json'), 'utf8')) as {
+        selectedTests: { selected: number; passed: number; failed: number };
+        selectedClaims: { selected: number; satisfied: number; blocking: number };
+        repositoryDebt: { obligations: number; unclaimed: number };
+      };
+      expect(result.selectedTests).toMatchObject({ selected: 1, passed: 1, failed: 0 });
+      expect(result.selectedClaims).toMatchObject({ selected: 1, satisfied: 1, blocking: 0 });
+      expect(result.repositoryDebt).toMatchObject({ obligations: 512, unclaimed: 511 });
+      expect(output.join('\n')).toMatch(/selected tests: 1 passed, 0 failed/);
+      expect(output.join('\n')).toMatch(/selected claims: 1 satisfied, 0 blocking/);
+      expect(output.join('\n')).toMatch(/repository debt: 511 unclaimed/);
+    } finally {
+      logger.mockRestore();
+      await run.witness.stop();
+      await run.target.stop();
+    }
   });
 });

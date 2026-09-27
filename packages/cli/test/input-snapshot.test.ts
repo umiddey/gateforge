@@ -9,7 +9,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { join } from 'node:path';
-import { symlinkSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { chmodSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { loadConfig, withTempRepo, type RuntimeConfig, type TempRepo } from '@gate-forge/core';
 import {
   GATEFORGE_VERIFIER_FORMAT,
@@ -23,6 +24,8 @@ import {
 } from '../src/input-snapshot.js';
 import { resolveStateDir } from '../src/state.js';
 import { runtimeReuseDigest } from '../src/runtime.js';
+import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
+import { loadDocsExclusions } from '../src/docs-exclusions.js';
 import { FIXED_AT, installFixture } from './helpers.js';
 
 /** Loads the fixture config from an absolute path. */
@@ -41,6 +44,217 @@ function filesDigest(repo: TempRepo): string {
 }
 
 describe('input snapshot (§11.2)', () => {
+  it('keeps documentation read through dynamic code in the evidence digest', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const docPath = ['docs', ['gui', 'de.md'].join('')].join('/');
+      repo.writeFiles({ [docPath]: 'first document value\n' });
+      const config = fixtureConfig(repo);
+      const stateDir = resolveStateDir(repo.root);
+      const readers = [
+        {
+          path: 'src/split-path-reader.mjs',
+          source: [
+            "import { readFileSync } from 'node:fs';",
+            "import { join } from 'node:path';",
+            "export function readDocument() {",
+            "  const name = ['gui', 'de.md'].join('');",
+            "  return readFileSync(join('docs', name), 'utf8');",
+            '}',
+          ].join('\n'),
+        },
+        {
+          path: 'src/directory-reader.mjs',
+          source: [
+            "import { readFileSync, readdirSync } from 'node:fs';",
+            "import { join } from 'node:path';",
+            "export function readDocument() {",
+            "  return readdirSync('docs').filter((name) => name.endsWith('.md')).sort()",
+            "    .map((name) => readFileSync(join('docs', name), 'utf8')).join('');",
+            '}',
+          ].join('\n'),
+        },
+      ];
+
+      const digestChanges: boolean[] = [];
+      const originalCwd = process.cwd();
+      process.chdir(repo.root);
+      try {
+        for (const reader of readers) {
+          repo.writeFiles({ [reader.path]: reader.source });
+          const imported = await import(pathToFileURL(join(repo.root, reader.path)).href);
+          const before = computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest;
+          expect(imported.readDocument()).toBe('first document value\n');
+
+          repo.writeFiles({ [docPath]: 'changed document value\n' });
+          const after = computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest;
+          expect(imported.readDocument()).toBe('changed document value\n');
+          digestChanges.push(after !== before);
+          repo.writeFiles({ [docPath]: 'first document value\n' });
+        }
+      } finally {
+        process.chdir(originalCwd);
+      }
+      expect(digestChanges, 'each dynamic reader must change the evidence digest').toEqual([true, true]);
+    });
+  });
+
+  it('keeps documentation changes in evidence identity and exact candidate identity', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const docName = ['guide', '.md'].join('');
+      const docPath = ['docs', docName].join('/');
+      repo.writeFiles({ [docPath]: '# First guide\n' });
+      repo.stage();
+      repo.commit('base docs');
+
+      const config = fixtureConfig(repo);
+      const stateDir = resolveStateDir(repo.root);
+      const before = computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest;
+      const gitDir = resolveGitDir(repo.root, process.env);
+      if (gitDir === null) throw new Error('test repository has no Git directory');
+      const beforeTree = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+
+      repo.writeFiles({ [docPath]: '# Corrected spelling\n' });
+      repo.stage([docPath]);
+
+      const after = computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest;
+      const afterTree = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+      expect(afterTree).not.toBe(beforeTree);
+      expect(after).not.toBe(before);
+
+      repo.writeFiles({ 'src/accounts.txt': 'accounts fixture.table\nexecutable change\n' });
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest).not.toBe(after);
+    });
+  });
+
+  it('omits only an owner-approved documentation folder from both identities', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        'docs/guide.md': '# Owner-approved guide\n',
+        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+      });
+      repo.stage();
+      repo.commit('approved documentation folder');
+
+      const config = fixtureConfig(repo);
+      const stateDir = resolveStateDir(repo.root);
+      const exclusions = loadDocsExclusions(repo.root, config);
+      const gitDir = resolveGitDir(repo.root, process.env);
+      if (gitDir === null) throw new Error('test repository has no Git directory');
+      const beforeInput = computeInputSnapshot({ cwd: repo.root, config, stateDir, docsExclusions: exclusions }).inputDigest;
+      const beforeTree = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record', [], exclusions);
+
+      repo.writeFiles({ 'docs/guide.md': '# Corrected guide\n', 'docs/new-page.md': '# Added page\n' });
+      repo.stage(['docs/guide.md', 'docs/new-page.md']);
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir, docsExclusions: exclusions }).inputDigest).toBe(
+        beforeInput,
+      );
+      expect(computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record', [], exclusions)).toBe(beforeTree);
+
+      repo.writeFiles({ 'src/accounts.txt': 'accounts fixture.table\nsource changed\n' });
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir, docsExclusions: exclusions }).inputDigest).not.toBe(
+        beforeInput,
+      );
+      expect(computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record', [], exclusions)).not.toBe(
+        beforeTree,
+      );
+
+      repo.writeFiles({ '.gateforge/docs-exclusions.yml': '# approval revision changed\nschemaVersion: 1\nfolders:\n  - docs\n' });
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir, docsExclusions: exclusions }).inputDigest).not.toBe(
+        beforeInput,
+      );
+      expect(computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record', [], exclusions)).not.toBe(
+        beforeTree,
+      );
+    });
+  });
+
+  it('rejects exclusions that overlap source, gate inputs, or symlinks', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const config = fixtureConfig(repo);
+      repo.writeFiles({
+        'docs/readme.md': '# Guide\n',
+        'docs/run.js': 'export const unsafe = true;\n',
+        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+      });
+      expect(() => loadDocsExclusions(repo.root, config)).toThrow(/cannot exclude executable or gate input 'docs\/run.js'/);
+
+      unlinkSync(join(repo.root, 'docs/run.js'));
+      repo.writeFiles({
+        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - src\n',
+      });
+      expect(() => loadDocsExclusions(repo.root, config)).toThrow(/cannot exclude executable or gate input 'src\//);
+
+      repo.writeFiles({
+        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+      });
+      symlinkSync(join(repo.root, 'src/accounts.txt'), join(repo.root, 'docs/current.txt'));
+      expect(() => loadDocsExclusions(repo.root, config)).toThrow(/rejects symlink 'docs\/current.txt'/);
+
+      unlinkSync(join(repo.root, 'docs/current.txt'));
+      repo.writeFiles({ 'docs/package.json': '{"scripts":{"test":"unsafe"}}\n' });
+      expect(() => loadDocsExclusions(repo.root, config)).toThrow(/cannot exclude executable or gate input 'docs\/package.json'/);
+      unlinkSync(join(repo.root, 'docs/package.json'));
+      repo.writeFiles({ 'docs/diagram.png': 'static raster placeholder\n' });
+      expect(loadDocsExclusions(repo.root, config)).toEqual(['docs']);
+
+      unlinkSync(join(repo.root, 'docs/diagram.png'));
+      rmSync(join(repo.root, 'docs'), { recursive: true });
+      expect(() => loadDocsExclusions(repo.root, config)).toThrow(/folder 'docs' does not exist/);
+    });
+  });
+
+  it('keeps Markdown referenced by test configuration in the evidence digest', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const docName = ['guide', '.md'].join('');
+      const docPath = ['docs', docName].join('/');
+      repo.writeFiles({ [docPath]: '# First guide\n' });
+      const config = fixtureConfig(repo);
+      const stateDir = resolveStateDir(repo.root);
+      repo.writeFiles({ 'playwright.config.ts': `export default { testDir: '${docPath}' };\n` });
+      const before = computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest;
+      repo.writeFiles({ [docPath]: '# Corrected spelling\n' });
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest).not.toBe(before);
+
+      const secondName = ['index', '.md'].join('');
+      const secondPath = ['docs', secondName].join('/');
+      repo.writeFiles({ [secondPath]: '# First index\n' });
+      const glob = ['docs', '**', '*.md'].join('/');
+      repo.writeFiles({ 'playwright.config.ts': `export default { testMatch: '${glob}' };\n` });
+      const beforeGlobEdit = computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest;
+      repo.writeFiles({ [secondPath]: '# Corrected index\n' });
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest).not.toBe(beforeGlobEdit);
+    });
+  });
+
+  it('keeps executable and gate-definition files in the evidence digest', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const config = fixtureConfig(repo);
+      const stateDir = resolveStateDir(repo.root);
+      const evidenceInputs = [
+        'tests/example.test.ts',
+        'test/helpers.ts',
+        'scripts/build.sh',
+        '.gateforge/policies.yml',
+        'package-lock.json',
+        '.gateforge/runtime.yml',
+        '.gateforge/adapters/adapter.mjs',
+      ];
+      let previous = computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest;
+      for (const [index, path] of evidenceInputs.entries()) {
+        repo.writeFiles({ [path]: `changed ${index}\n` });
+        const next = computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest;
+        expect(next, `${path} must invalidate evidence`).not.toBe(previous);
+        previous = next;
+      }
+    });
+  });
+
   it('is deterministic: identical inputs in two runs produce identical digests', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
@@ -54,6 +268,7 @@ describe('input snapshot (§11.2)', () => {
         stateDir: resolveStateDir(repo.root),
       });
       expect(snapshot.snapshotVersion).toBe(INPUT_SNAPSHOT_VERSION);
+      expect(snapshot.evidenceInputDigest).toBe(snapshot.inputDigest);
       expect(snapshot.verifierFormat).toBe(GATEFORGE_VERIFIER_FORMAT);
       // Reordered file enumeration cannot change the digest (entries
       // are codepoint-sorted before hashing).
@@ -177,6 +392,20 @@ describe('input snapshot (§11.2)', () => {
       rmSync(join(repo.root, 'src/link.txt'));
       symlinkSync(join(repo.root, 'src/orders.txt'), join(repo.root, 'src/link.txt'));
       expect(filesDigest(repo)).not.toBe(baseline);
+    });
+  });
+
+  it('preserves executable mode in the evidence digest', async () => {
+    if (process.platform === 'win32') return;
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const config = fixtureConfig(repo);
+      const stateDir = resolveStateDir(repo.root);
+      repo.writeFiles({ 'scripts/run.sh': '#!/bin/sh\ntrue\n' });
+      chmodSync(join(repo.root, 'scripts/run.sh'), 0o644);
+      const before = computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest;
+      chmodSync(join(repo.root, 'scripts/run.sh'), 0o755);
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir }).evidenceInputDigest).not.toBe(before);
     });
   });
 

@@ -49,21 +49,24 @@ function tempStateDir(): string {
   return dir;
 }
 
-/** A stub runner command: writes the given outcomes document, exits with `code`. */
+/** A stub runner: writes outcomes, optionally captures trusted config, exits with `code`. */
 function stubRunner(
   stateDir: string,
   document: RunnerOutcomesDocument | null,
   code: number,
   delayMs = 0,
+  captureConfigPath?: string,
 ): readonly string[] {
   // The outcomes path is baked into the stub (execution-authority fix:
   // GATEFORGE_OUTCOMES_FILE no longer crosses to the runner child — the
   // engine reporter receives it as a trusted-config option instead).
   const outcomesPath = join(stateDir, 'runner-outcomes.json');
+  const trustedConfigPath = join(stateDir, 'trusted.playwright.config.mjs');
   const script = `
     const fs = require('node:fs');
     const path = ${JSON.stringify(outcomesPath)};
     ${document === null ? '' : `fs.writeFileSync(path, ${JSON.stringify(JSON.stringify(document))});`}
+    ${captureConfigPath === undefined ? '' : `fs.copyFileSync(${JSON.stringify(trustedConfigPath)}, ${JSON.stringify(captureConfigPath)});`}
     setTimeout(() => process.exit(${String(code)}), ${String(delayMs)});
   `;
   return [process.execPath, '-e', script];
@@ -104,6 +107,27 @@ describe('executeSupervisedPlaywright (wired adapter execute)', () => {
     expect(envelope.retriesDetected).toBe(false);
     expect(envelope.engines?.['node']).toBe(process.version);
     expect(envelope.engines?.['playwright']).toBe(playwrightVersion());
+  });
+
+  it('embeds trusted browser proxy and session state in the config', async () => {
+    const cwd = tempProject();
+    const stateDir = tempStateDir();
+    const capturedConfigPath = join(stateDir, 'captured-config.mjs');
+    const envelope = await executeSupervisedPlaywright(
+      { logicalKeys: ['k'] },
+      { stateDir, runId: 'run', vars: {} },
+      {
+        command: stubRunner(stateDir, PASSING_DOC, 0, 0, capturedConfigPath),
+        cwd,
+        timeoutMs: 30_000,
+        appBaseUrl: 'http://127.0.0.1:43127',
+        storageState: '/tmp/e2e/.auth/contractor.json',
+      },
+    );
+    expect(envelope.complete).toBe(true);
+    const trustedConfig = readFileSync(capturedConfigPath, 'utf8');
+    expect(trustedConfig).toContain('"baseURL":"http://127.0.0.1:43127"');
+    expect(trustedConfig).toContain('"storageState":"/tmp/e2e/.auth/contractor.json"');
   });
 
   it('a missing outcomes document (reporter not wired) is INCOMPLETE — wiring is never silently replaced', async () => {

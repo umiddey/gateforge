@@ -242,7 +242,7 @@ export async function runCli(repo: TempRepo, argv: readonly string[], env: Recor
  * Returns:
  *   string: 64-char lowercase hex input digest for the current tree.
  */
-export async function currentInputDigest(repo: TempRepo): Promise<string> {
+export async function currentInputDigest(repo: TempRepo, docsExclusions: readonly string[] = []): Promise<string> {
   const previousCwd = process.cwd();
   if (previousCwd !== repo.root) process.chdir(repo.root);
   try {
@@ -266,6 +266,7 @@ export async function currentInputDigest(repo: TempRepo): Promise<string> {
         id: plugin.id,
         version: plugin.version,
       })),
+      docsExclusions,
     }).inputDigest;
   } finally {
     if (previousCwd !== repo.root) process.chdir(previousCwd);

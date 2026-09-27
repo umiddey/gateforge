@@ -27,6 +27,8 @@
 import { join } from 'node:path';
 import {
   canonicalJson,
+  ClaimSchema,
+  type Claim,
   type JsonValue,
   deriveLogicalKey,
   TestCatalogSchema,
@@ -76,11 +78,13 @@ export interface DiscoverOptions {
   playwrightTimeoutMs?: number;
 }
 
-/** The discovery result: the validated catalog plus its canonical JSON. */
+/** The discovery result: validated catalog, canonical JSON, and live native claims. */
 export interface DiscoverResult {
   catalog: TestCatalog;
   /** Canonical JSON of the catalog (deterministic, snapshot-able). */
   json: string;
+  /** Gateforge annotations on tests the current native list enumerated. */
+  nativeClaims: Claim[];
 }
 
 /**
@@ -97,7 +101,7 @@ export interface DiscoverResult {
  *   options: cwd, config, optional pytest collection + timeouts.
  *
  * Returns:
- *   Promise<DiscoverResult>: validated catalog + canonical JSON.
+ *   Promise<DiscoverResult>: validated catalog, canonical JSON, and current native annotation claims.
  *
  * Throws:
  *   TestDiscoveryError: when an enabled native enumeration could not
@@ -152,7 +156,19 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
     }
 
     const catalog = builder.finalize(entries, runnerSummaries);
-    return { catalog, json: canonicalJson(catalog as unknown as JsonValue) };
+    const nativeClaims = native.instances.flatMap((instance) =>
+      instance.claims.flatMap((obligationId) => {
+        const parsed = ClaimSchema.safeParse({
+          schemaVersion: 1,
+          obligationId,
+          testId: instance.frameworkId,
+          testFile: instance.file,
+          location: instance.location,
+        });
+        return parsed.success ? [parsed.data] : [];
+      }),
+    );
+    return { catalog, json: canonicalJson(catalog as unknown as JsonValue), nativeClaims };
 }
 
 /** Assembles catalog rows from the scan + native enumeration. */
