@@ -6,13 +6,15 @@
  * the authoritative ref untouched. Real git; receipts minted with the
  * trusted issuance machinery (see gate-receipts.ts).
  */
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { installFixture, runCli } from './helpers.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 import { BrokerRejection } from '../src/broker.js';
+import { VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
 
 /** The broker's receipt-signing verifier key for this suite. */
 const VERIFIER_KEY = 'broker-suite-verifier-key';
@@ -51,6 +53,39 @@ async function brokerCommit(
 }
 
 describe('broker commit (the happy path authorizes exactly the verified bytes)', () => {
+  it('verifies a packed receipt with an external owner-only key ring', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'gateforge-broker-keyring-'));
+    const keyFile = join(directory, 'keys.json');
+    try {
+      await inAuthorityRepo(async (authority) => {
+        await inFixtureWorkspace(async (workspace) => {
+          const minted = await mintCompleteRunReceipt(workspace, {
+            verifierKey: VERIFIER_KEY,
+            parentSha: authority.headSha(),
+          });
+          writeFileSync(
+            keyFile,
+            `${JSON.stringify({ schemaVersion: 1, activeKeyId: 'broker-key', keys: { 'broker-key': VERIFIER_KEY } })}\n`,
+            { mode: 0o600 },
+          );
+          const result = await brokerCommit(
+            authority,
+            {
+              workspace: workspace.root,
+              message: 'external key ring commit',
+              receipt: minted.receiptPath,
+            },
+            { [VERIFIER_KEY_ENV]: undefined, [VERIFIER_KEY_FILE_ENV]: keyFile },
+          );
+          expect(result.code).toBe(0);
+          expect(result.stdout).toContain('broker: committed');
+        });
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('valid receipt + matching parent → commit created on the authoritative ref', async () => {
     await inAuthorityRepo(async (authority) => {
       await inFixtureWorkspace(async (workspace) => {
@@ -162,7 +197,7 @@ describe('broker commit (typed rejections never touch the authoritative ref)', (
           receipt: forgedPath,
         });
         expect(result.code).toBe(2);
-        expect(result.stderr).toContain('forged or tampered');
+        expect(result.stderr).toContain('KEY_MISMATCH');
         expect(authority.headSha()).toBe(headBefore);
       });
     });

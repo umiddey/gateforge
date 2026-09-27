@@ -23,16 +23,24 @@
  *   drift (index or HEAD moved during the run) is a typed
  *   `ENFORCEMENT_UNTRUSTED` block — different bytes never receive
  *   authorization.
- * - UNSUPPORTED CANDIDATES are explicit typed blocks, never fallbacks:
- *   symlinks and submodules in the candidate (until implemented), and
- *   unmerged (conflicting) index entries. Partial staging is FINE — the
- *   gate evaluates exactly what is staged.
+ * - SYMLINKS are accepted only at reuse paths declared by the committed
+ *   base runtime. The candidate runtime is checked against that same
+ *   owner-approved list before it can run. Submodules and unmerged
+ *   (conflicting) index entries remain typed blocks. Partial staging is
+ *   FINE — the gate evaluates exactly what is staged.
  */
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { CAUSE_NEXT_ACTIONS, normalizeChangedFiles, type CauseCode } from '@gate-forge/core';
+import { parse as parseYaml } from 'yaml';
+import {
+  CAUSE_NEXT_ACTIONS,
+  GateforgeConfigSchema,
+  normalizeChangedFiles,
+  RuntimeConfigSchema,
+  type CauseCode,
+} from '@gate-forge/core';
 import { UsageError } from './errors.js';
 
 /** The verify argument a generated hook accepts to prove activation. */
@@ -100,6 +108,8 @@ export interface StagedCandidate {
   scratchDir: string;
   /** Absolute path of the materialized candidate checkout (after materialization). */
   checkoutDir: string | null;
+  /** Reuse roots approved by the committed base runtime document. */
+  approvedReusePaths: string[];
 }
 
 /** Options for one git invocation against the USER's repository. */
@@ -280,9 +290,10 @@ function copyIndex(cwd: string, env: NodeJS.ProcessEnv, scratchDir: string): str
 }
 
 /**
- * Rejects unsupported candidate entry modes with typed blocks (plan
- * Phase 5 item 4: symlinks/submodules stay explicit blocks until
- * implemented — never a silent pass-through).
+ * Rejects unsupported candidate entry modes with typed blocks. A
+ * symlink is allowed only when its path is in the committed base runtime's
+ * reuse list; the runtime layer later verifies its target. Submodules stay
+ * explicit blocks.
  *
  * Args:
  *   treeId: the frozen candidate tree.
@@ -290,9 +301,15 @@ function copyIndex(cwd: string, env: NodeJS.ProcessEnv, scratchDir: string): str
  *   env: process environment.
  *
  * Throws:
- *   StagedCandidateBlockError: on the first symlink or submodule entry.
+ *   StagedCandidateBlockError: on the first unapproved symlink or submodule.
  */
-function assertSupportedTree(cwd: string, env: NodeJS.ProcessEnv, treeId: string): void {
+function assertSupportedTree(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  treeId: string,
+  approvedReusePaths: readonly string[],
+): void {
+  const approved = new Set(approvedReusePaths);
   const out = git(cwd, env, { args: ['ls-tree', '-r', '-z', treeId] });
   for (const entry of out.stdout.split('\0')) {
     if (entry.length === 0) continue;
@@ -301,6 +318,7 @@ function assertSupportedTree(cwd: string, env: NodeJS.ProcessEnv, treeId: string
     const mode = entry.slice(0, tab).split(' ')[0] ?? '';
     const path = entry.slice(tab + 1);
     if (mode === '120000') {
+      if (approved.has(path)) continue;
       throw new StagedCandidateBlockError(
         'ENFORCEMENT_UNTRUSTED',
         `the staged candidate contains symlink '${path}'; symlink candidates are not verifiable yet ` +
@@ -316,6 +334,47 @@ function assertSupportedTree(cwd: string, env: NodeJS.ProcessEnv, treeId: string
         'Remove the staged submodule, or run the gate without --staged after implementing submodule support.',
       );
     }
+  }
+}
+
+/** Reads the committed base runtime's owner-approved dependency paths. */
+function committedReusePaths(cwd: string, env: NodeJS.ProcessEnv, headSha: string | null): string[] {
+  if (headSha === null) return [];
+  const configBlob = git(cwd, env, { args: ['show', `${headSha}:.gateforge.yml`], allowFailure: true });
+  if (configBlob.status !== 0) return [];
+  let configDocument: unknown;
+  try {
+    configDocument = parseYaml(configBlob.stdout);
+  } catch {
+    return [];
+  }
+  const config = GateforgeConfigSchema.safeParse(configDocument);
+  if (!config.success || config.data.runtime === undefined) return [];
+  const runtimeBlob = git(cwd, env, { args: ['show', `${headSha}:${config.data.runtime}`], allowFailure: true });
+  if (runtimeBlob.status !== 0) return [];
+  let runtimeDocument: unknown;
+  try {
+    runtimeDocument = parseYaml(runtimeBlob.stdout);
+  } catch {
+    return [];
+  }
+  const runtime = RuntimeConfigSchema.safeParse(runtimeDocument);
+  return runtime.success ? [...(runtime.data.prepare?.reuse ?? [])] : [];
+}
+
+/** Blocks a staged runtime that adds reuse authority beyond the base commit. */
+export function assertRuntimeReuseOwnerApproval(
+  approvedPaths: readonly string[],
+  requestedPaths: readonly string[],
+): void {
+  const approved = new Set(approvedPaths);
+  const added = requestedPaths.filter((path) => !approved.has(path));
+  if (added.length > 0) {
+    throw new StagedCandidateBlockError(
+      'ENFORCEMENT_UNTRUSTED',
+      `the staged runtime requests dependency reuse not approved by the committed base: ${added.join(', ')}`,
+      'Ask the owner to approve the reuse-root change in a separate trusted revision, then rerun the gate.',
+    );
   }
 }
 
@@ -343,8 +402,9 @@ export function freezeStagedCandidate(cwd: string, env: NodeJS.ProcessEnv): Stag
   try {
     const indexPath = copyIndex(cwd, env, scratchDir);
     const treeId = writeTreeOfIndexCopy(cwd, env, indexPath);
-    assertSupportedTree(cwd, env, treeId);
     const headSha = resolveSha(cwd, env, 'HEAD');
+    const approvedReusePaths = committedReusePaths(cwd, env, headSha);
+    assertSupportedTree(cwd, env, treeId, approvedReusePaths);
     const mergeHeadSha = resolveSha(cwd, env, 'MERGE_HEAD');
     const base = headSha ?? EMPTY_TREE_ID;
     const changed = parseNameStatus(
@@ -365,6 +425,7 @@ export function freezeStagedCandidate(cwd: string, env: NodeJS.ProcessEnv): Stag
       changedPaths,
       scratchDir,
       checkoutDir: null,
+      approvedReusePaths,
     };
   } catch (error) {
     rmSync(scratchDir, { recursive: true, force: true });

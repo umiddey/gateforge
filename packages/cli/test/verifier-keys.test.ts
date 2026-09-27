@@ -1,0 +1,156 @@
+import {
+  chmodSync,
+  lstatSync,
+  linkSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { withTempRepo } from '@gate-forge/core';
+import { installFixture, runCli } from './helpers.js';
+import { VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
+import { environmentVerifierKeyId, resolveVerifierKeyring } from '../src/verifier-keys.js';
+
+const externalRoots: string[] = [];
+
+/** Creates a fresh external directory for key-file tests. */
+function externalRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'gateforge-key-source-'));
+  externalRoots.push(root);
+  return root;
+}
+
+afterEach(() => {
+  for (const root of externalRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe('verifier key-ring source', () => {
+  it('requires an explicit ceremony, creates owner-only keys, rotates, and retires without printing secrets', async () => {
+    await withTempRepo({}, async (repo) => {
+      const path = join(externalRoot(), 'keys.json');
+      const missingConfirm = await runCli(repo, ['key', 'create', '--file', path]);
+      expect(missingConfirm.code).toBe(2);
+      const created = await runCli(repo, ['key', 'create', '--file', path, '--confirm']);
+      expect(created.code).toBe(0);
+      const initial = JSON.parse(readFileSync(path, 'utf8')) as {
+        activeKeyId: string;
+        keys: Record<string, string>;
+      };
+      const oldKey = initial.keys[initial.activeKeyId] ?? '';
+      expect(oldKey).not.toBe('');
+      expect(created.stdout).toContain(initial.activeKeyId);
+      expect(created.stdout).not.toContain(oldKey);
+      expect(lstatSync(path).mode & 0o777).toBe(0o600);
+
+      const rotated = await runCli(repo, ['key', 'rotate', '--file', path, '--confirm']);
+      expect(rotated.code).toBe(0);
+      const afterRotation = JSON.parse(readFileSync(path, 'utf8')) as {
+        activeKeyId: string;
+        keys: Record<string, string>;
+      };
+      expect(afterRotation.activeKeyId).not.toBe(initial.activeKeyId);
+      expect(afterRotation.keys[initial.activeKeyId]).toBe(oldKey);
+      expect(Object.keys(afterRotation.keys)).toHaveLength(2);
+      expect(rotated.stdout).not.toContain(afterRotation.keys[afterRotation.activeKeyId] ?? '');
+
+      const retired = await runCli(repo, [
+        'key',
+        'retire',
+        '--file',
+        path,
+        '--key-id',
+        initial.activeKeyId,
+        '--confirm',
+      ]);
+      expect(retired.code).toBe(0);
+      const afterRetirement = JSON.parse(readFileSync(path, 'utf8')) as {
+        activeKeyId: string;
+        keys: Record<string, string>;
+      };
+      expect(afterRetirement.keys[initial.activeKeyId]).toBeUndefined();
+      expect(afterRetirement.activeKeyId).toBe(afterRotation.activeKeyId);
+    });
+  });
+
+  it('rejects in-repository, artifact-root, symlink, and group-readable sources', async () => {
+    await withTempRepo({}, async (repo) => {
+      const external = externalRoot();
+      const keyFile = join(external, 'keys.json');
+      const document = { schemaVersion: 1, activeKeyId: 'key-old', keys: { 'key-old': 'old-secret' } };
+      const fs = await import('node:fs');
+      fs.writeFileSync(keyFile, `${JSON.stringify(document)}\n`, { mode: 0o600 });
+      const env = { [VERIFIER_KEY_FILE_ENV]: keyFile };
+      const inRepoPath = join(repo.root, 'keys.json');
+      fs.writeFileSync(inRepoPath, `${JSON.stringify(document)}\n`, { mode: 0o600 });
+      expect(() => resolveVerifierKeyring(repo.root, { [VERIFIER_KEY_FILE_ENV]: inRepoPath })).toThrow(
+        /outside the candidate repository/,
+      );
+      expect(() => resolveVerifierKeyring(repo.root, env, [external])).toThrow(/uploaded artifact roots/);
+
+      const link = join(external, 'keys-link.json');
+      symlinkSync(keyFile, link);
+      expect(() => resolveVerifierKeyring(repo.root, { [VERIFIER_KEY_FILE_ENV]: link })).toThrow(/symbolic link/);
+      const hardLink = join(external, 'keys-hardlink.json');
+      linkSync(keyFile, hardLink);
+      expect(() => resolveVerifierKeyring(repo.root, env)).toThrow(/other hard links/);
+      rmSync(hardLink);
+
+      chmodSync(keyFile, 0o640);
+      expect(() => resolveVerifierKeyring(repo.root, env)).toThrow(/owner-only/);
+    });
+  });
+
+  it('imports an existing environment key without printing it or changing the active key', async () => {
+    await withTempRepo({}, async (repo) => {
+      const path = join(externalRoot(), 'keys.json');
+      expect((await runCli(repo, ['key', 'create', '--file', path, '--confirm'])).code).toBe(0);
+      const before = JSON.parse(readFileSync(path, 'utf8')) as { activeKeyId: string };
+      const legacyKey = 'legacy-env-key-material';
+      const imported = await runCli(repo, ['key', 'import-env', '--file', path, '--confirm'], {
+        [VERIFIER_KEY_ENV]: legacyKey,
+      });
+      expect(imported.code).toBe(0);
+      expect(imported.stdout).not.toContain(legacyKey);
+      const keyring = resolveVerifierKeyring(repo.root, { [VERIFIER_KEY_FILE_ENV]: path });
+      expect(keyring?.active.keyId).toBe(before.activeKeyId);
+      expect(keyring?.keys).toContainEqual({ keyId: environmentVerifierKeyId(legacyKey), key: legacyKey });
+    });
+  });
+
+  it('does not pass the key or file source to a legacy suite or write either to run state', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const key = 'key-file-suite-secret';
+      const path = join(externalRoot(), 'keys.json');
+      const keyId = 'key-suite';
+      const fs = await import('node:fs');
+      fs.writeFileSync(
+        path,
+        `${JSON.stringify({ schemaVersion: 1, activeKeyId: keyId, keys: { [keyId]: key } })}\n`,
+        { mode: 0o600 },
+      );
+      const probe =
+        `if (process.env[${JSON.stringify(VERIFIER_KEY_ENV)}] || ` +
+        `process.env[${JSON.stringify(VERIFIER_KEY_FILE_ENV)}]) process.exit(43)`;
+      const suite = `${process.execPath} -e '${probe}'`;
+      const result = await runCli(
+        repo,
+        ['test-gates', '--suite', suite],
+        { [VERIFIER_KEY_ENV]: undefined, [VERIFIER_KEY_FILE_ENV]: path },
+      );
+      expect(result.stderr).not.toContain('suite exited with status 43');
+
+      const stateDir = join(repo.root, '.gateforge', 'test-gates');
+      const stateText = readdirSync(stateDir)
+        .map((name) => readFileSync(join(stateDir, name)))
+        .join('\n');
+      expect(stateText).not.toContain(key);
+      expect(stateText).not.toContain(path);
+    });
+  });
+});

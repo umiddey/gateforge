@@ -23,7 +23,6 @@
  * snapshot, so a candidate cannot change its own runtime commands and
  * approve the change in the same commit.
  */
-import { createHash } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import net from 'node:net';
 import {
@@ -33,7 +32,6 @@ import {
   openSync,
   readFileSync,
   readdirSync,
-  readlinkSync,
   realpathSync,
   symlinkSync,
 } from 'node:fs';
@@ -44,13 +42,20 @@ import {
   DEFAULT_READY_TIMEOUT_SECONDS,
   RuntimeConfigSchema,
   isNormalizedRepoRelativePath,
-  sha256Canonical,
   type RuntimeConfig,
   type RuntimeService,
 } from '@gate-forge/core';
 import { startAttestationProxy, type AttestationProxyHandle } from '@gate-forge/pack-playwright';
 import type { Io } from './io.js';
 import { resolveStateDir } from './state.js';
+import { VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from './commands/common.js';
+import {
+  digestRuntimeReuseMounts,
+  digestRuntimeReuseSources,
+  RuntimeReuseBoundaryError,
+  type RuntimeReuseMount,
+  validateRuntimeReuseMounts,
+} from './runtime-reuse.js';
 
 /** Operator env vars always available to preparation commands and services. */
 const RUNTIME_ENV_BASE = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'SHELL', 'TMPDIR'] as const;
@@ -228,10 +233,14 @@ function runtimeChildEnv(
     if (value !== undefined) child[name] = value;
   }
   for (const name of allowlist) {
+    if (name === VERIFIER_KEY_ENV || name === VERIFIER_KEY_FILE_ENV) continue;
     const value = ioEnv[name];
     if (value !== undefined) child[name] = value;
   }
-  return { ...child, ...injected };
+  const result = { ...child, ...injected };
+  delete result[VERIFIER_KEY_ENV];
+  delete result[VERIFIER_KEY_FILE_ENV];
+  return result;
 }
 
 /**
@@ -325,118 +334,6 @@ function reusePaths(sourceRoot: string, checkoutRoot: string, path: string): { s
 }
 
 /**
- * Collects deterministic identity records for one reused dependency tree.
- * Symlinks are followed, including sanctioned links to an external
- * dependency store, so the digest covers the bytes a candidate can execute.
- *
- * Args:
- *   absolute: current filesystem entry.
- *   logicalPath: stable path label in the reuse manifest.
- *   active: real paths on the current recursion stack.
- *   entries: output records.
- */
-function collectReuseEntries(
-  absolute: string,
-  logicalPath: string,
-  active: Set<string>,
-  entries: Array<Record<string, string | number>>,
-): void {
-  let stat;
-  try {
-    stat = lstatSync(absolute);
-  } catch (error) {
-    throw new RuntimeBlockError(
-      'RUNTIME_PREPARATION_FAILED',
-      `runtime prepare.reuse cannot inspect '${logicalPath}': ${(error as Error).message}`,
-    );
-  }
-  if (stat.isSymbolicLink()) {
-    let target: string;
-    let resolvedTarget: string;
-    try {
-      target = readlinkSync(absolute);
-      resolvedTarget = realpathSync(absolute);
-    } catch (error) {
-      throw new RuntimeBlockError(
-        'RUNTIME_PREPARATION_FAILED',
-        `runtime prepare.reuse cannot resolve symlink '${logicalPath}': ${(error as Error).message}`,
-      );
-    }
-    entries.push({
-      path: logicalPath,
-      type: 'symlink',
-      target,
-    });
-    if (active.has(resolvedTarget)) {
-      entries.push({ path: `${logicalPath}=>cycle`, type: 'cycle' });
-      return;
-    }
-    collectReuseEntries(
-      resolvedTarget,
-      `${logicalPath}=>${target.split('\\').join('/')}`,
-      new Set([...active, resolvedTarget]),
-      entries,
-    );
-    return;
-  }
-  let resolved: string;
-  try {
-    resolved = realpathSync(absolute);
-  } catch (error) {
-    throw new RuntimeBlockError(
-      'RUNTIME_PREPARATION_FAILED',
-      `runtime prepare.reuse cannot resolve '${logicalPath}': ${(error as Error).message}`,
-    );
-  }
-  if (active.has(resolved)) {
-    entries.push({ path: logicalPath, type: 'cycle' });
-    return;
-  }
-  if (stat.isDirectory()) {
-    entries.push({ path: logicalPath, type: 'directory' });
-    let children: string[];
-    try {
-      children = readdirSync(absolute).sort();
-    } catch (error) {
-      throw new RuntimeBlockError(
-        'RUNTIME_PREPARATION_FAILED',
-        `runtime prepare.reuse cannot read '${logicalPath}': ${(error as Error).message}`,
-      );
-    }
-    for (const child of children) {
-      collectReuseEntries(
-        join(absolute, child),
-        `${logicalPath}/${child}`,
-        new Set([...active, resolved]),
-        entries,
-      );
-    }
-    return;
-  }
-  if (!stat.isFile()) {
-    throw new RuntimeBlockError(
-      'RUNTIME_PREPARATION_FAILED',
-      `runtime prepare.reuse entry '${logicalPath}' is not a regular file, directory, or safe symlink`,
-    );
-  }
-  let bytes: Buffer;
-  try {
-    bytes = readFileSync(absolute);
-  } catch (error) {
-    throw new RuntimeBlockError(
-      'RUNTIME_PREPARATION_FAILED',
-      `runtime prepare.reuse cannot read '${logicalPath}': ${(error as Error).message}`,
-    );
-  }
-  entries.push({
-    path: logicalPath,
-    type: 'file',
-    mode: stat.mode & 0o777,
-    digest: createHash('sha256').update(bytes).digest('hex'),
-  });
-}
-
-/**
  * Computes the deterministic digest bound to a staged run for reused
  * dependency bytes. A changed dependency therefore changes the run's input
  * identity even though the candidate checkout contains a symlink.
@@ -449,35 +346,62 @@ function collectReuseEntries(
  *   string | null: the reuse digest, or null when no reuse is configured.
  */
 export function runtimeReuseDigest(sourceRoot: string, runtime: RuntimeConfig): string | null {
-  const paths = runtime.prepare?.reuse ?? [];
-  if (paths.length === 0) return null;
-  let sourceRootReal: string;
   try {
-    sourceRootReal = realpathSync(resolve(sourceRoot));
+    return digestRuntimeReuseSources(sourceRoot, runtime.prepare?.reuse ?? []);
   } catch (error) {
     throw new RuntimeBlockError(
       'RUNTIME_PREPARATION_FAILED',
-      `runtime prepare.reuse cannot resolve the user repository root: ${(error as Error).message}`,
+      error instanceof RuntimeReuseBoundaryError
+        ? error.message
+        : `runtime prepare.reuse cannot resolve the user repository root: ${(error as Error).message}`,
     );
   }
-  const entries: Array<Record<string, string | number>> = [];
-  for (const path of paths) {
-    const { source } = reusePaths(sourceRootReal, sourceRootReal, path);
-    if (!existsSync(source)) {
-      // A staged candidate may carry its own dependency bytes. In that case
-      // linkReuseDir leaves them in place and the candidate tree identity
-      // binds those bytes; record the absent external source explicitly.
-      entries.push({ path, type: 'source-absent' });
-      continue;
-    }
-    collectReuseEntries(source, path, new Set(), entries);
+}
+
+/** Returns the approved mount for a linked reuse path, or null for candidate-owned bytes. */
+function runtimeReuseMount(sourceRoot: string, checkoutRoot: string, path: string): RuntimeReuseMount | null {
+  const { source, target } = reusePaths(sourceRoot, checkoutRoot, path);
+  let targetStat;
+  try {
+    targetStat = lstatSync(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new RuntimeBlockError('RUNTIME_PREPARATION_FAILED', `runtime prepare.reuse cannot inspect '${path}'`);
   }
-  return sha256Canonical({ domain: 'gateforge.runtime-reuse.v1', entries });
+  if (!targetStat.isSymbolicLink()) return null;
+  try {
+    const ownerRoot = realpathSync(resolve(sourceRoot));
+    const sourcePath = realpathSync(source);
+    const actualTarget = realpathSync(target);
+    if (sourcePath === ownerRoot || actualTarget !== sourcePath) {
+      throw new RuntimeReuseBoundaryError(`runtime prepare.reuse link '${path}' does not match its approved source`);
+    }
+    if (!lstatSync(sourcePath).isDirectory()) {
+      throw new RuntimeReuseBoundaryError(`runtime prepare.reuse source '${path}' is not a directory`);
+    }
+    return { path, checkoutRoot: resolve(checkoutRoot), ownerRoot, sourceRoot: sourcePath };
+  } catch (error) {
+    throw new RuntimeBlockError(
+      'RUNTIME_PREPARATION_FAILED',
+      error instanceof RuntimeReuseBoundaryError
+        ? error.message
+        : `runtime prepare.reuse link '${path}' is broken or unavailable`,
+    );
+  }
 }
 
 function linkReuseDir(sourceRoot: string, checkoutRoot: string, path: string): void {
   const { source, target } = reusePaths(sourceRoot, checkoutRoot, path);
-  if (existsSync(target)) return; // candidate carries its own bytes — never overridden
+  try {
+    const targetStat = lstatSync(target);
+    if (targetStat.isSymbolicLink()) {
+      runtimeReuseMount(sourceRoot, checkoutRoot, path);
+      return;
+    }
+    return; // candidate carries its own bytes — never overridden
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   if (!existsSync(source)) {
     throw new RuntimeBlockError(
       'RUNTIME_PREPARATION_FAILED',
@@ -485,8 +409,58 @@ function linkReuseDir(sourceRoot: string, checkoutRoot: string, path: string): v
         'install dependencies in the user repository or fix the tracked runtime document',
     );
   }
+  let ownerRoot: string;
+  let sourcePath: string;
+  try {
+    ownerRoot = realpathSync(resolve(sourceRoot));
+    sourcePath = realpathSync(source);
+  } catch {
+    throw new RuntimeBlockError('RUNTIME_PREPARATION_FAILED', `runtime prepare.reuse source '${path}' is unavailable`);
+  }
+  if (sourcePath === ownerRoot || !lstatSync(sourcePath).isDirectory()) {
+    throw new RuntimeBlockError(
+      'RUNTIME_PREPARATION_FAILED',
+      `runtime prepare.reuse source '${path}' escapes its approved root or is not a directory`,
+    );
+  }
   mkdirSync(join(target, '..'), { recursive: true });
   symlinkSync(source, target, process.platform === 'win32' ? 'junction' : 'dir');
+}
+
+/** Rejects external candidate links before any candidate prepare command runs. */
+function assertCandidateSymlinksSafe(checkoutRoot: string, mounts: readonly RuntimeReuseMount[]): void {
+  const root = resolve(checkoutRoot);
+  const mountsByPath = new Set(mounts.map((mount) => mount.path));
+  const stack: Array<{ absolute: string; relativePath: string }> = [{ absolute: root, relativePath: '' }];
+  try {
+    validateRuntimeReuseMounts(root, mounts);
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (current === undefined) break;
+      for (const name of readdirSync(current.absolute).sort()) {
+        if (current.relativePath === '' && name === '.git') continue;
+        const relativePath = current.relativePath === '' ? name : `${current.relativePath}/${name}`;
+        const absolute = join(current.absolute, name);
+        const stat = lstatSync(absolute);
+        if (stat.isSymbolicLink()) {
+          if (mountsByPath.has(relativePath)) continue;
+          const target = realpathSync(absolute);
+          if (!pathInside(root, target) || !lstatSync(target).isFile()) {
+            throw new RuntimeReuseBoundaryError(`candidate symlink '${relativePath}' is not an approved file link`);
+          }
+          continue;
+        }
+        if (stat.isDirectory()) stack.push({ absolute, relativePath });
+      }
+    }
+  } catch (error) {
+    throw new RuntimeBlockError(
+      'RUNTIME_PREPARATION_FAILED',
+      error instanceof RuntimeReuseBoundaryError
+        ? error.message
+        : 'candidate contains a broken, external, or unsupported symbolic link',
+    );
+  }
 }
 
 /**
@@ -680,19 +654,32 @@ export async function prepareRuntime(
   runtime: RuntimeConfig,
   io: Io,
   stateDir: string,
-): Promise<{ reuseDigest: string | null }> {
+): Promise<{ reuseDigest: string | null; reuseMounts: RuntimeReuseMount[] }> {
   const logDir = join(stateDir, 'runtime');
   mkdirSync(logDir, { recursive: true });
   for (const relative of runtime.prepare?.reuse ?? []) {
     linkReuseDir(sourceRoot, checkoutRoot, relative);
   }
+  const reuseMounts = (runtime.prepare?.reuse ?? [])
+    .map((path) => runtimeReuseMount(sourceRoot, checkoutRoot, path))
+    .filter((mount): mount is RuntimeReuseMount => mount !== null);
+  assertCandidateSymlinksSafe(checkoutRoot, reuseMounts);
   await runPrepareCommand(checkoutRoot, runtime, io, join(logDir, 'prepare.log'));
   // Bind the bytes that the witnessed runtime will actually execute. A
   // trusted prepare command may materialize or update a reused dependency;
   // hashing after it completes prevents check/reuse from carrying a
   // pre-prepare digest over post-prepare bytes.
-  const reuseDigest = runtimeReuseDigest(sourceRoot, runtime);
-  return { reuseDigest };
+  try {
+    const reuseDigest = digestRuntimeReuseMounts(reuseMounts);
+    return { reuseDigest, reuseMounts };
+  } catch (error) {
+    throw new RuntimeBlockError(
+      'RUNTIME_PREPARATION_FAILED',
+      error instanceof RuntimeReuseBoundaryError
+        ? error.message
+        : `runtime prepare.reuse could not be authenticated: ${(error as Error).message}`,
+    );
+  }
 }
 
 /**

@@ -80,6 +80,8 @@ export const GateReceiptSchema = z
     receiptVersion: z.literal(2),
     /** Receipt identity (UUID) — the `reused receipt <id>` surface value. */
     receiptId: z.string().uuid(),
+    /** Non-secret verifier-key id used for safe key-ring rotation. */
+    verifierKeyId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/).optional(),
     /** Run manifest identity of the sealed run. */
     runId: z.string().uuid(),
     /** Fresh trusted invocation identity of the sealed run. */

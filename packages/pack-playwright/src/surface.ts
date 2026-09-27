@@ -13,28 +13,48 @@
  */
 
 /**
- * The surface-descriptor contract version this pack speaks. Version 2
- * adds opt-in `create.steps[]` (wizard flows); version 1 descriptors
- * keep working unchanged (steps forbidden under v1).
+ * The current surface-descriptor version. Version 3 adds constrained
+ * locator-based list fields; earlier cell-index descriptors stay valid.
  */
-export const SURFACE_DESCRIPTOR_VERSION = 2;
+export const SURFACE_DESCRIPTOR_VERSION = 3;
 
 /** Legacy surface-descriptor version (single-form create only). */
 export const SURFACE_DESCRIPTOR_VERSION_1 = 1;
+/** Surface-descriptor version with optional wizard create steps. */
+export const SURFACE_DESCRIPTOR_VERSION_2 = 2;
 
-/** How the rendered LIST page is observed (rows and their cells). */
-export interface SurfaceList {
+/** Shared list-page and row selectors. */
+interface SurfaceListBase {
   /** List page path relative to the app base (e.g. `/`). */
   path: string;
   /** Selector proving the list page rendered (e.g. the page heading). */
   readySelector: string;
   /** Selector matching one entity row inside the list. */
   rowSelector: string;
+}
+
+/** How v1/v2 list rows expose ids and fields in table cells. */
+export interface SurfaceListCells extends SurfaceListBase {
   /** Index of the row cell carrying the entity id (0-based). */
   idCellIndex: number;
   /** Field name → 0-based row-cell index, for reading rendered fields. */
   fieldCellIndexes: Record<string, number>;
+  idLocator?: never;
+  fieldLocators?: never;
 }
+
+/** How a v3 list row exposes ids and fields through relative locators. */
+export interface SurfaceListLocators extends SurfaceListBase {
+  /** Locator evaluated inside one matched row to read its entity id. */
+  idLocator: string;
+  /** Field name → locator evaluated inside the matched row. */
+  fieldLocators: Record<string, string>;
+  idCellIndex?: never;
+  fieldCellIndexes?: never;
+}
+
+/** List shape selected by the surface descriptor version. */
+export type SurfaceList = SurfaceListCells | SurfaceListLocators;
 
 /** How the CREATE form is driven (legacy single form, v1 + v2). */
 export interface SurfaceCreate {
@@ -136,7 +156,7 @@ export interface SurfaceStatus {
  * entity id before use.
  */
 export interface SurfaceDescriptor {
-  /** `SURFACE_DESCRIPTOR_VERSION_1` (legacy) or `SURFACE_DESCRIPTOR_VERSION` (steps allowed). */
+  /** Version 3 adds relative list locators; cell indexes remain compatible. */
   schemaVersion: number;
   list: SurfaceList;
   create: SurfaceCreateFlow;
@@ -190,11 +210,16 @@ export function validateSurface(surface: SurfaceDescriptor): SurfaceDescriptor {
   if (typeof surface !== 'object' || surface === null || Array.isArray(surface)) {
     throw new Error('surface must be a SurfaceDescriptor object declared by the consumer');
   }
-  if (surface.schemaVersion !== SURFACE_DESCRIPTOR_VERSION_1 && surface.schemaVersion !== SURFACE_DESCRIPTOR_VERSION) {
+  if (
+    surface.schemaVersion !== SURFACE_DESCRIPTOR_VERSION_1 &&
+    surface.schemaVersion !== SURFACE_DESCRIPTOR_VERSION_2 &&
+    surface.schemaVersion !== SURFACE_DESCRIPTOR_VERSION
+  ) {
     throw new Error(
       `surface.schemaVersion ${String(surface.schemaVersion)} is not supported: this pack speaks ` +
         `surface-descriptor versions ${String(SURFACE_DESCRIPTOR_VERSION_1)} (legacy single-form ` +
-        `create) and ${String(SURFACE_DESCRIPTOR_VERSION)} (wizard steps allowed) — redeclare ` +
+        `create), ${String(SURFACE_DESCRIPTOR_VERSION_2)} (wizard steps), and ` +
+        `${String(SURFACE_DESCRIPTOR_VERSION)} (relative list locators) — redeclare ` +
         'the surface against a current version',
     );
   }
@@ -208,10 +233,35 @@ export function validateSurface(surface: SurfaceDescriptor): SurfaceDescriptor {
       throw new Error(`surface.list.${key} must be a non-empty string`);
     }
   }
-  if (!Number.isInteger(surface.list.idCellIndex) || surface.list.idCellIndex < 0) {
-    throw new Error('surface.list.idCellIndex must be a non-negative integer');
+  if (surface.schemaVersion === SURFACE_DESCRIPTOR_VERSION) {
+    const hasRelativeLocators = 'idLocator' in surface.list || 'fieldLocators' in surface.list;
+    if (hasRelativeLocators) {
+      const locatorList = surface.list as SurfaceListLocators;
+      if (typeof locatorList.idLocator !== 'string' || locatorList.idLocator.length === 0) {
+        throw new Error('surface.list.idLocator must be a non-empty locator relative to the row');
+      }
+      requireSelectorMap('list.fieldLocators', locatorList.fieldLocators);
+      if ('idCellIndex' in surface.list || 'fieldCellIndexes' in surface.list) {
+        throw new Error('surface v3 list must not mix relative locators and cell indexes');
+      }
+    } else {
+      // A v3 descriptor may keep an existing table-index map unchanged.
+      const cellList = surface.list as SurfaceListCells;
+      if (!Number.isInteger(cellList.idCellIndex) || (cellList.idCellIndex as number) < 0) {
+        throw new Error('surface.list.idLocator or a non-negative idCellIndex is required');
+      }
+      requireIndexMap('list.fieldCellIndexes', cellList.fieldCellIndexes);
+    }
+  } else {
+    const cellList = surface.list as SurfaceListCells;
+    if (!Number.isInteger(cellList.idCellIndex) || (cellList.idCellIndex as number) < 0) {
+      throw new Error('surface.list.idCellIndex must be a non-negative integer');
+    }
+    requireIndexMap('list.fieldCellIndexes', cellList.fieldCellIndexes);
+    if ('idLocator' in surface.list || 'fieldLocators' in surface.list) {
+      throw new Error('surface v1/v2 list must use cell indexes, not v3 relative locators');
+    }
   }
-  requireIndexMap('list.fieldCellIndexes', surface.list.fieldCellIndexes);
   validateCreateFlow(surface.schemaVersion, surface.create);
   for (const key of ['linkSelector', 'formReadySelectorTemplate', 'saveSelectorTemplate'] as const) {
     if (typeof surface.edit[key] !== 'string' || surface.edit[key].length === 0) {
@@ -266,9 +316,8 @@ function requireIndexMap(where: string, map: Record<string, number>): void {
 }
 
 /**
- * Validates the create flow: legacy single-form trio, or (v2 only) a
- * wizard step walk. Mixed shapes are refused fail-closed — the engine
- * never drives half a form and half a wizard.
+ * Validates the create flow: legacy single-form trio, or a wizard step
+ * walk in versions 2 and 3. Mixed shapes fail closed.
  */
 function validateCreateFlow(schemaVersion: number, create: SurfaceCreateFlow): void {
   if (typeof create !== 'object' || create === null || Array.isArray(create)) {
@@ -276,10 +325,11 @@ function validateCreateFlow(schemaVersion: number, create: SurfaceCreateFlow): v
   }
   const record = create as unknown as Record<string, unknown>;
   if ('steps' in record) {
-    if (schemaVersion !== SURFACE_DESCRIPTOR_VERSION) {
+    if (schemaVersion !== SURFACE_DESCRIPTOR_VERSION_2 && schemaVersion !== SURFACE_DESCRIPTOR_VERSION) {
       throw new Error(
         'surface.create.steps requires surface-descriptor version ' +
-          `${String(SURFACE_DESCRIPTOR_VERSION)} (declared ${String(schemaVersion)})`,
+          `${String(SURFACE_DESCRIPTOR_VERSION_2)} or ${String(SURFACE_DESCRIPTOR_VERSION)} ` +
+          `(declared ${String(schemaVersion)})`,
       );
     }
     for (const legacy of ['formPath', 'formReadySelector', 'submitSelector'] as const) {

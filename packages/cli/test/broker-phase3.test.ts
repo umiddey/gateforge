@@ -157,7 +157,8 @@ describe('broker receipt v2 enforcement', () => {
           receipt: tamperedPath,
         });
         expect(result.code).toBe(2);
-        expect(result.stderr).toContain('forged or tampered');
+        expect(result.stderr).toContain('KEY_MISMATCH');
+        expect(result.stderr).toContain('MAC check failed');
         expect(authority.headSha()).toBe(headBefore);
       });
     });

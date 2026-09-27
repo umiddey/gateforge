@@ -29,6 +29,7 @@ import { testsCommand } from './commands/tests.js';
 
 import { enforcementCommand } from './commands/enforcement.js';
 import { brokerCommand } from './broker.js';
+import { keysCommand } from './commands/keys.js';
 /** The top-level usage text (also printed for `--help`). */
 export const USAGE = `\
 usage: gateforge <command> [options]
@@ -65,6 +66,8 @@ commands:
         --message MSG [--receipt P]      receipt for the exact workspace bytes, then commits via compare-and-swap
         [--ref REF]                      ref update. Guaranteed only when the broker runs outside the agent's
                                          write/process boundary (ADR 0005 D1)
+  key create|import-env|rotate|retire     owner-only verifier-key ceremony; stores keys outside the repo
+        --file PATH --confirm             key IDs are safe to log; key material is never printed
   enforcement doctor [--json]            honest enforcement diagnostics: hook activation, runner/observer readiness,
                                          trusted binary/policy ownership, snapshot mode, standard/managed boundary
   baseline update <fp...>                shrink the baseline to a strict subset (invariant 4)
@@ -136,6 +139,8 @@ export async function main(
       return runWithExitCodes(io, () => enforcementCommand(io, rest));
     case 'broker':
       return runWithExitCodes(io, () => brokerCommand(io, rest));
+    case 'key':
+      return runWithExitCodes(io, () => Promise.resolve(keysCommand(io, rest)));
     case 'baseline':
       return runWithExitCodes(io, () => Promise.resolve(baselineCommand(io, rest)));
     case 'waive':

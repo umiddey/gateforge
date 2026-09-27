@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { blockingEntryFingerprint } from '@gate-forge/core';
+import { VERSION } from '../src/commands/common.js';
 import {
   FIXED_AT,
   PLUGIN_SOURCE,
@@ -97,6 +98,10 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
       // Wiring went through the shared init --blocking path.
       expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(true);
       expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(true);
+      const ciTemplate = readFileSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'), 'utf8');
+      expect(ciTemplate).toContain(`GATEFORGE_VERSION: "${VERSION}"`);
+      expect(ciTemplate).toContain('GATEFORGE_CI_NESTED_PACKAGE_DIRS');
+      expect(ciTemplate).not.toContain('summary.satisfied');
       expect(readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8')).toContain('gateforge-check');
 
       // The baseline holds exactly the captured red set: both obligation

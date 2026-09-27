@@ -26,10 +26,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import { writeFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 import { ObligationSchema, evaluateObligation, fingerprint } from '@gate-forge/core';
+import { driveEngineAction } from '../src/witness/browser.js';
+import { SURFACE_DESCRIPTOR_VERSION, type SurfaceDescriptor } from '../src/surface.js';
 import { startWitness } from '../src/witness/server.js';
 import { SupervisorClient } from '../src/supervisor/client.js';
 import {
@@ -86,11 +89,24 @@ interface Scaffold {
   dispose: () => Promise<void>;
 }
 
-async function scaffold(testId = 'engine-create-test'): Promise<Scaffold> {
+/**
+ * Starts a disposable witness, proxy, and engine browser around a local app.
+ *
+ * Args:
+ *   testId: the supervisor-bound test id.
+ *   targetApp: an optional app for a focused consumer-shaped E2E.
+ *
+ * Returns:
+ *   Promise<Scaffold>: the temporary project and trusted test session.
+ */
+async function scaffold(
+  testId = 'engine-create-test',
+  targetApp?: { url: string; stop: () => void },
+): Promise<Scaffold> {
   const project = makeTempProject('browser-engine');
   writeFixtureProject(project);
   writeHonestAdapter(project);
-  const app = await startExampleApp();
+  const app = targetApp ?? (await startExampleApp());
   const proxy = await startAttestationProxy(app.url, FINGERPRINT);
   const runId = `browser-engine-${Math.random().toString(36).slice(2)}`;
   const witness = await startWitness({
@@ -246,6 +262,221 @@ describe('engine-owned browser (positive: full five-way binding)', () => {
       expect(outcome.verdict).toBe('satisfied');
     } finally {
       await scope.dispose();
+    }
+  });
+
+  it('surface v3 records create, read, update, and archive on cards with no td elements', async () => {
+    let saved: { id: string; first_name: string; last_name: string; status: string } | null = null;
+    const app: Server = createServer(async (req, res) => {
+      const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+      const sendJson = (body: unknown, status = 200): void => {
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(body));
+      };
+      if (req.method === 'GET' && pathname === '/api/accounts') {
+        sendJson({ accounts: saved === null ? [] : [saved] });
+        return;
+      }
+      const apiAccount = /^\/api\/accounts\/([^/]+)$/.exec(pathname);
+      if (req.method === 'GET' && apiAccount !== null) {
+        if (saved === null || saved.id !== apiAccount[1]) sendJson({ error: 'not found' }, 404);
+        else sendJson(saved);
+        return;
+      }
+      if (req.method === 'GET' && pathname === '/accounts/new') {
+        res.setHeader('content-type', 'text/html');
+        res.end(
+          '<form action="/accounts" method="post">' +
+            '<input name="first_name"><input name="last_name"><button type="submit">Save</button></form>',
+        );
+        return;
+      }
+      if (req.method === 'POST' && pathname === '/accounts') {
+        let body = '';
+        for await (const chunk of req) body += chunk.toString();
+        const fields = new URLSearchParams(body);
+        saved = {
+          id: 'account-1',
+          first_name: fields.get('first_name') ?? '',
+          last_name: fields.get('last_name') ?? '',
+          status: 'active',
+        };
+        res.writeHead(303, { location: '/accounts' });
+        res.end();
+        return;
+      }
+      const editMatch = /^\/accounts\/([^/]+)\/edit$/.exec(pathname);
+      if (req.method === 'GET' && editMatch !== null && saved !== null) {
+        res.setHeader('content-type', 'text/html');
+        res.end(
+          `<form action="/accounts/${editMatch[1]}" method="post">` +
+            `<input name="first_name" value="${saved.first_name}">` +
+            `<input name="last_name" value="${saved.last_name}">` +
+            '<button type="submit">Save</button></form>',
+        );
+        return;
+      }
+      const updateMatch = /^\/accounts\/([^/]+)$/.exec(pathname);
+      if (req.method === 'POST' && updateMatch !== null && saved !== null) {
+        let body = '';
+        for await (const chunk of req) body += chunk.toString();
+        const fields = new URLSearchParams(body);
+        saved = {
+          ...saved,
+          first_name: fields.get('first_name') ?? saved.first_name,
+          last_name: fields.get('last_name') ?? saved.last_name,
+        };
+        res.writeHead(303, { location: '/accounts' });
+        res.end();
+        return;
+      }
+      const archiveMatch = /^\/accounts\/([^/]+)\/archive$/.exec(pathname);
+      if (req.method === 'POST' && archiveMatch !== null && saved !== null) {
+        saved = { ...saved, status: 'archived' };
+        res.writeHead(303, { location: '/accounts' });
+        res.end();
+        return;
+      }
+      if (req.method === 'GET' && pathname === '/accounts') {
+        res.setHeader('content-type', 'text/html');
+        const card = saved === null
+          ? ''
+          : `<article class="account-card"><span class="account-id">${saved.id}</span>` +
+            `<span class="first-name">${saved.first_name}</span>` +
+            `<span class="last-name">${saved.last_name}</span>` +
+            `<span class="status">${saved.status}</span>` +
+            `<a class="edit" href="/accounts/${saved.id}/edit">Edit</a>` +
+            `<form action="/accounts/${saved.id}/archive" method="post">` +
+            `<button type="submit" data-archive="${saved.id}">Archive</button></form></article>`;
+        res.end(`<h1>Accounts</h1>${card}`);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => app.listen(0, '127.0.0.1', resolve));
+    const address = app.address();
+    if (address === null || typeof address === 'string') throw new Error('no card app port');
+    const appBase = `http://127.0.0.1:${address.port}`;
+    let scope: Scaffold | null = null;
+    const surface: SurfaceDescriptor = {
+      schemaVersion: SURFACE_DESCRIPTOR_VERSION,
+      list: {
+        path: '/accounts',
+        readySelector: 'h1',
+        rowSelector: '.account-card',
+        idLocator: '.account-id',
+        fieldLocators: { first_name: '.first-name', last_name: '.last-name', status: '.status' },
+      },
+      create: {
+        formPath: '/accounts/new',
+        formReadySelector: 'form',
+        fields: { first_name: 'input[name="first_name"]', last_name: 'input[name="last_name"]' },
+        submitSelector: 'button[type="submit"]',
+      },
+      edit: {
+        linkSelector: 'a.edit',
+        formReadySelectorTemplate: 'form[action="/accounts/{id}"]',
+        fields: { first_name: 'input[name="first_name"]', last_name: 'input[name="last_name"]' },
+        saveSelectorTemplate: 'form[action="/accounts/{id}"] button',
+      },
+      archive: { controlSelectorTemplate: 'button[data-archive="{id}"]' },
+      status: { field: 'status', createdValue: 'active', archivedValue: 'archived' },
+      afterAction: { path: '/accounts' },
+      deleteFields: { status: 'archived' },
+    };
+    try {
+      scope = await scaffold('surface-v3-card', { url: appBase, stop: () => undefined });
+      const channel = {
+        sessionId: scope.session.sessionId,
+        sessionToken: scope.session.sessionToken,
+        testId: scope.session.testId,
+      };
+      const registered = await post(scope, '/browser/surface', { ...channel, surface });
+      expect(registered.status, JSON.stringify(registered.json)).toBe(200);
+      const created = await post(scope, '/browser/action', {
+        ...channel,
+        claimIds: [CLAIM],
+        operation: 'create',
+        fields: { first_name: 'Ada', last_name: 'Lovelace' },
+      });
+      const createdBody = created.json as Record<string, unknown>;
+      expect(created.status, JSON.stringify(created.json)).toBe(200);
+      expect(createdBody).toMatchObject({
+        entityId: 'account-1',
+        enteredFields: { first_name: 'Ada', last_name: 'Lovelace' },
+        renderedFields: { first_name: 'Ada', last_name: 'Lovelace', status: 'active' },
+      });
+      const entityId = createdBody['entityId'] as string;
+      const createdVisible = await post(scope, '/browser/visible', {
+        ...channel,
+        claimIds: [CLAIM],
+        entityId,
+        operation: 'create',
+      });
+      expect(createdVisible.status, JSON.stringify(createdVisible.json)).toBe(200);
+      expect(createdVisible.json).toMatchObject({ fields: { first_name: 'Ada', last_name: 'Lovelace', status: 'active' } });
+      const httpEvidence = await post(scope, '/witness/http-observation', {
+        ...channel,
+        claimIds: [CLAIM],
+        method: 'POST',
+        path: '/accounts',
+      });
+      expect(httpEvidence.status, JSON.stringify(httpEvidence.json)).toBe(200);
+      const persistence = await post(scope, '/witness/persistence', {
+        ...channel,
+        resourceId: RESOURCE,
+        entityId,
+        claimId: CLAIM,
+        preObservationId: createdBody['preObservationId'],
+      });
+      expect(persistence.status, JSON.stringify(persistence.json)).toBe(200);
+
+      const read = await post(scope, '/browser/action', {
+        ...channel,
+        claimIds: [CLAIM],
+        operation: 'read',
+        entityId,
+      });
+      expect(read.status, JSON.stringify(read.json)).toBe(200);
+      expect(read.json).toMatchObject({ renderedFields: { first_name: 'Ada', last_name: 'Lovelace' } });
+      const update = await post(scope, '/browser/action', {
+        ...channel,
+        claimIds: [CLAIM],
+        operation: 'update',
+        entityId,
+        fields: { first_name: 'Ada', last_name: 'Byron' },
+      });
+      expect(update.status, JSON.stringify(update.json)).toBe(200);
+      expect(update.json).toMatchObject({ renderedFields: { first_name: 'Ada', last_name: 'Byron', status: 'active' } });
+      const archive = await post(scope, '/browser/action', {
+        ...channel,
+        claimIds: [CLAIM],
+        operation: 'delete',
+        entityId,
+      });
+      expect(archive.status, JSON.stringify(archive.json)).toBe(200);
+      expect(archive.json).toMatchObject({ renderedFields: { first_name: 'Ada', last_name: 'Byron', status: 'archived' } });
+      const visibleArchive = await post(scope, '/browser/visible', {
+        ...channel,
+        claimIds: [CLAIM],
+        entityId,
+        operation: 'delete',
+      });
+      expect(visibleArchive.status, JSON.stringify(visibleArchive.json)).toBe(200);
+      expect(visibleArchive.json).toMatchObject({ fields: { status: 'archived' } });
+      const records = await ledgerRecords(scope);
+      const actions = records.filter((record) => record.kind === 'ui.action');
+      expect(actions.map((record) => (record.payload as { operation: string }).operation).sort()).toEqual([
+        'create',
+        'delete',
+        'read',
+        'update',
+      ]);
+      expect(actions.every((record) => record.origin === 'engine-observed')).toBe(true);
+    } finally {
+      if (scope !== null) await scope.dispose();
+      await new Promise<void>((resolve) => app.close(() => resolve()));
     }
   });
 });

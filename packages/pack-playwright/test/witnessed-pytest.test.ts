@@ -45,6 +45,7 @@ describe('witnessed pytest participant env (buildWitnessedPytestChildEnv)', () =
     HOME: '/home/consumer',
     PORTAL_TX_TEST_DSN: 'postgresql://postgres@127.0.0.1:25433/tx_test',
     GATEFORGE_WITNESS_VERIFIER_KEY: 'ambient-verifier-secret',
+    GATEFORGE_WITNESS_VERIFIER_KEY_FILE: '/home/consumer/.config/gateforge/keys.json',
     GATEFORGE_OBLIGATIONS: '/ambient/obligations.json',
     GATEFORGE_OUTCOMES_FILE: '/ambient/runner-outcomes.json',
     GATEFORGE_ADAPTERS_DIR: '/ambient/adapters',
@@ -68,6 +69,7 @@ describe('witnessed pytest participant env (buildWitnessedPytestChildEnv)', () =
     expect(child['GATEFORGE_RUN_ID']).toBe('run-1');
     // Everything else privileged stays parent-side.
     expect(child['GATEFORGE_WITNESS_VERIFIER_KEY']).toBeUndefined();
+    expect(child['GATEFORGE_WITNESS_VERIFIER_KEY_FILE']).toBeUndefined();
     expect(child['GATEFORGE_OBLIGATIONS']).toBeUndefined();
     expect(child['GATEFORGE_OUTCOMES_FILE']).toBeUndefined();
     expect(child['GATEFORGE_ADAPTERS_DIR']).toBeUndefined();
@@ -97,6 +99,7 @@ describe('witnessed pytest participant env (buildWitnessedPytestChildEnv)', () =
       expect(() => buildRunnerChildEnv({ [parentSide]: '/x' }, {})).toThrow(RunnerEnvError);
     }
     expect(() => buildRunnerChildEnv({ GATEFORGE_WITNESS_VERIFIER_KEY: 'x' }, {})).toThrow(RunnerEnvError);
+    expect(() => buildRunnerChildEnv({ GATEFORGE_WITNESS_VERIFIER_KEY_FILE: '/private/keyring' }, {})).toThrow(RunnerEnvError);
   });
 });
 

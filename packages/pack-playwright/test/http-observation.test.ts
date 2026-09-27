@@ -17,11 +17,7 @@ import { describe, expect, it } from 'vitest';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import { evaluateObligation, recordIdOf, type Obligation } from '@gate-forge/core';
 import type { Page, TestInfo } from 'playwright/test';
-import {
-  createEvidence,
-  SURFACE_DESCRIPTOR_VERSION,
-  type SurfaceDescriptor,
-} from '../src/fixture/evidence.js';
+import { createEvidence } from '../src/fixture/evidence.js';
 import type { WitnessClient } from '../src/fixture/witness-client.js';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
 import {
@@ -959,34 +955,6 @@ describe('explicit http claim selection (plan §8 step 7)', () => {
   const CLAIM_A = 'tenant.http-post-api-contracts-x1:http:request-observed';
   const CLAIM_B = 'tenant.http-post-api-contracts-x1:http:response-status-ok';
 
-  /** A minimal VALID consumer surface (never driven by these tests). */
-  const SURFACE_PLACEHOLDER: SurfaceDescriptor = {
-    schemaVersion: SURFACE_DESCRIPTOR_VERSION,
-    list: {
-      path: '/list',
-      readySelector: 'h1',
-      rowSelector: 'tbody tr',
-      idCellIndex: 0,
-      fieldCellIndexes: { status: 3 },
-    },
-    create: {
-      formPath: '/list/new',
-      formReadySelector: 'form',
-      fields: { field_a: 'input[name="field_a"]' },
-      submitSelector: 'button[type="submit"]',
-    },
-    edit: {
-      linkSelector: 'a[href$="/edit"]',
-      formReadySelectorTemplate: 'form[action="/list/{id}"]',
-      fields: { field_a: 'input[name="field_a"]' },
-      saveSelectorTemplate: 'form[action="/list/{id}"] button',
-    },
-    archive: { controlSelectorTemplate: 'form[action="/list/{id}/archive"] button' },
-    status: { field: 'status' },
-    afterAction: { path: '/list' },
-    deleteFields: { status: 'archived' },
-  };
-
   /** A Page stand-in: http.observe never reaches the browser. */
   function dummyPage(): Page {
     return new Proxy(
@@ -1035,8 +1003,7 @@ describe('explicit http claim selection (plan §8 step 7)', () => {
     return createEvidence({
       page: dummyPage(),
       testInfo: testInfoOf(claims),
-      surface: SURFACE_PLACEHOLDER,
-        client: stubClient(captured),
+      client: stubClient(captured),
       session: {
         sessionId: 'harness-session',
         sessionToken: 'harness-secret',

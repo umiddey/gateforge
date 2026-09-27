@@ -298,6 +298,29 @@ describe('staged-runtime supervision', () => {
     expect(prepared.reuseDigest).toBe(runtimeReuseDigest(sourceRoot, runtime));
   });
 
+  it('never passes verifier secrets to candidate runtime commands, even when the candidate allowlists them', async () => {
+    const root = tempDir();
+    const observedPath = join(root, 'verifier-env.json');
+    const probe =
+      `require("fs").writeFileSync(${JSON.stringify(observedPath)}, JSON.stringify({` +
+      `key: process.env["GATEFORGE_WITNESS_VERIFIER_KEY"] ?? null, ` +
+      `file: process.env["GATEFORGE_WITNESS_VERIFIER_KEY_FILE"] ?? null}))`;
+    const runtime: RuntimeConfig = {
+      schemaVersion: 1,
+      envAllowlist: ['GATEFORGE_WITNESS_VERIFIER_KEY', 'GATEFORGE_WITNESS_VERIFIER_KEY_FILE'],
+      prepare: { command: `node -e '${probe}'` },
+    };
+    const protectedIo = {
+      env: {
+        ...process.env,
+        GATEFORGE_WITNESS_VERIFIER_KEY: 'runtime-secret-must-not-cross',
+        GATEFORGE_WITNESS_VERIFIER_KEY_FILE: '/external/private/keys.json',
+      },
+    } as unknown as typeof io;
+    await prepareRuntime(root, root, runtime, protectedIo, join(root, 'state'));
+    expect(JSON.parse(readFileSync(observedPath, 'utf8'))).toEqual({ key: null, file: null });
+  });
+
   it('rejects absolute, dot, and traversal reuse paths in the schema', () => {
     for (const path of ['/tmp/deps', '.', '..', './node_modules', 'node_modules/../deps', 'node_modules\\deps']) {
       const parsed = RuntimeConfigSchema.safeParse({ schemaVersion: 1, prepare: { reuse: [path] } });

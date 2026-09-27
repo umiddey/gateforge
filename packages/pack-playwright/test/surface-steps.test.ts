@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   SURFACE_DESCRIPTOR_VERSION,
+  SURFACE_DESCRIPTOR_VERSION_2,
   validateSurface,
   type SurfaceDescriptor,
   type SurfaceStep,
@@ -190,7 +191,45 @@ describe('driveCreateSteps (stub page, no browser)', () => {
     ).rejects.toBeInstanceOf(EngineBrowserError);
   });
 
-  it('exposes the current descriptor version as 2', () => {
-    expect(SURFACE_DESCRIPTOR_VERSION).toBe(2);
+  it('exposes the current descriptor version as 3 and retains v2', () => {
+    expect(SURFACE_DESCRIPTOR_VERSION_2).toBe(2);
+    expect(SURFACE_DESCRIPTOR_VERSION).toBe(3);
+  });
+
+  it('validates v3 row-relative locators and preserves v1/v2 cell compatibility', () => {
+    const surface = legacySurface({
+      schemaVersion: SURFACE_DESCRIPTOR_VERSION,
+      list: {
+        path: '/',
+        readySelector: 'h1',
+        rowSelector: 'article.card',
+        idLocator: '.record-id',
+        fieldLocators: { name: 'h2', status: '.status' },
+      },
+    }) as unknown as SurfaceDescriptor;
+    expect(validateSurface(surface)).toBe(surface);
+    const legacyCells = {
+      ...surface,
+      list: {
+        path: '/',
+        readySelector: 'h1',
+        rowSelector: 'tbody tr',
+        idCellIndex: 0,
+        fieldCellIndexes: { name: 1 },
+      },
+    } as unknown as SurfaceDescriptor;
+    expect(validateSurface(legacyCells)).toBe(legacyCells);
+    expect(() =>
+      validateSurface({
+        ...surface,
+        list: { ...surface.list, fieldCellIndexes: { name: 1 } },
+      } as unknown as SurfaceDescriptor),
+    ).toThrow(/must not mix relative locators and cell indexes/);
+    expect(() =>
+      validateSurface({
+        ...surface,
+        list: { ...surface.list, idLocator: '' },
+      } as unknown as SurfaceDescriptor),
+    ).toThrow(/idLocator must be a non-empty locator relative to the row/);
   });
 });

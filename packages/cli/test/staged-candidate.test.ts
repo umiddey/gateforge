@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { fixtureFingerprint, runCli, installFixture, PLUGIN_SOURCE } from './helpers.js';
 import {
+  assertRuntimeReuseOwnerApproval,
   freezeStagedCandidate,
   materializeStagedCandidate,
   recheckStagedCandidate,
@@ -169,6 +170,12 @@ describe('freezeStagedCandidate / recheckStagedCandidate (identity, parents, dri
 
       expect(() => freezeStagedCandidate(repo.root, gitEnv())).toThrowError(/symlink/);
     }));
+
+  it('does not let a staged runtime add an owner-approved reuse root', () => {
+    expect(() => assertRuntimeReuseOwnerApproval(['node_modules'], ['node_modules', 'vendor/cache'])).toThrow(
+      /not approved by the committed base/,
+    );
+  });
 });
 
 describe('check --staged gates the exact staged candidate (CLI)', () => {
@@ -315,5 +322,25 @@ describe('check --staged gates the exact staged candidate (CLI)', () => {
       expect(result.stdout).toContain('ENFORCEMENT_UNTRUSTED');
       expect(result.stdout).toContain('symlink');
       expect(result.stdout).toContain('next action:');
+    }));
+
+  it('blocks a staged runtime that adds a reuse root after the base commit', () =>
+    withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': `${readFileSync(repo.path('.gateforge.yml'), 'utf8')}runtime: .gateforge/runtime.yml\n`,
+        '.gateforge/runtime.yml': 'schemaVersion: 1\nprepare:\n  reuse: [node_modules]\n',
+      });
+      repo.stage();
+      repo.commit('base reuse policy');
+      repo.writeFiles({
+        '.gateforge/runtime.yml': 'schemaVersion: 1\nprepare:\n  reuse: [node_modules, vendor/cache]\n',
+      });
+      repo.stage(['.gateforge/runtime.yml']);
+
+      const result = await runCli(repo, ['check', '--staged']);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('not approved by the committed base');
+      expect(result.stdout).toContain('vendor/cache');
     }));
 });

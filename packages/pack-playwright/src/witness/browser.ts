@@ -32,6 +32,8 @@ import {
   declaredSurfaceFields,
   renderSurfaceTemplate,
   type SurfaceDescriptor,
+  type SurfaceList,
+  type SurfaceListLocators,
   type SurfaceStep,
 } from '../surface.js';
 
@@ -381,7 +383,7 @@ function canonicalExchangePath(pathname: string): string {
   return path;
 }
 
-/** Reads one row's cells (trimmed text, DOM order). */
+/** Reads the cells of a legacy table row in DOM order. */
 async function rowCells(row: Locator): Promise<string[]> {
   const cells = row.locator('td');
   const count = await cells.count();
@@ -392,14 +394,44 @@ async function rowCells(row: Locator): Promise<string[]> {
   return out;
 }
 
+/**
+ * Checks whether one descriptor uses v3 row-relative field locators.
+ *
+ * Args:
+ *   list: the validated list descriptor.
+ *
+ * Returns:
+ *   boolean: true when v3 relative locators are present.
+ */
+function usesRelativeListLocators(list: SurfaceList): list is SurfaceListLocators {
+  return typeof (list as SurfaceListLocators).idLocator === 'string';
+}
+
+/**
+ * Reads an entity id from a row with its versioned list strategy.
+ *
+ * Args:
+ *   row: the matched entity row or card.
+ *   surface: the validated consumer surface descriptor.
+ *
+ * Returns:
+ *   Promise<string>: the trimmed rendered entity id.
+ */
+async function readRowEntityId(row: Locator, surface: SurfaceDescriptor): Promise<string> {
+  if (usesRelativeListLocators(surface.list)) {
+    return ((await row.locator(surface.list.idLocator).textContent()) ?? '').trim();
+  }
+  const cells = await rowCells(row);
+  return (cells[surface.list.idCellIndex] ?? '').trim();
+}
+
 /** Every entity id rendered in the list right now. */
 async function collectIds(page: Page, surface: SurfaceDescriptor): Promise<Set<string>> {
   const rows = page.locator(surface.list.rowSelector);
   const count = await rows.count();
   const ids = new Set<string>();
   for (let i = 0; i < count; i++) {
-    const cells = await rowCells(rows.nth(i));
-    const id = (cells[surface.list.idCellIndex] ?? '').trim();
+    const id = await readRowEntityId(rows.nth(i), surface);
     if (id !== '') ids.add(id);
   }
   return ids;
@@ -411,8 +443,7 @@ async function findRow(page: Page, surface: SurfaceDescriptor, entityId: string)
   const count = await rows.count();
   for (let i = 0; i < count; i++) {
     const row = rows.nth(i);
-    const cells = await rowCells(row);
-    if ((cells[surface.list.idCellIndex] ?? '').trim() === entityId) return row;
+    if ((await readRowEntityId(row, surface)) === entityId) return row;
   }
   return null;
 }
@@ -424,10 +455,16 @@ async function readRowFields(
   row: Locator,
 ): Promise<Record<string, string>> {
   void page;
-  const cells = await rowCells(row);
   const fields: Record<string, string> = {};
-  for (const [name, index] of Object.entries(surface.list.fieldCellIndexes)) {
-    fields[name] = (cells[index] ?? '').trim();
+  if (usesRelativeListLocators(surface.list)) {
+    for (const [name, selector] of Object.entries(surface.list.fieldLocators)) {
+      fields[name] = ((await row.locator(selector).textContent()) ?? '').trim();
+    }
+  } else {
+    const cells = await rowCells(row);
+    for (const [name, index] of Object.entries(surface.list.fieldCellIndexes)) {
+      fields[name] = (cells[index] ?? '').trim();
+    }
   }
   return fields;
 }

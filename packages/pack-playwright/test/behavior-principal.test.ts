@@ -14,7 +14,7 @@ import { mkdtempSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { startWitness } from '../src/witness/server.js';
-import { SURFACE_DESCRIPTOR_VERSION } from '../src/surface.js';
+import { SURFACE_DESCRIPTOR_VERSION_2 } from '../src/surface.js';
 import { createMemoryFixtureProvider } from '../src/witness/fixture-provider.js';
 import { createTestStateService, type TestStateService } from './test-state-service.js';
 // The example app is an untyped checked-in fixture (not a workspace package).
@@ -628,7 +628,7 @@ describe('principal boundary + attribution', () => {  it('a foreign session cann
 
 describe('surface principal (bundle resolution + browser boundary)', () => {
   const SURFACE_DESCRIPTOR = {
-    schemaVersion: SURFACE_DESCRIPTOR_VERSION,
+    schemaVersion: SURFACE_DESCRIPTOR_VERSION_2,
     list: { path: '/', readySelector: 'h1', rowSelector: 'li', idCellIndex: 0, fieldCellIndexes: {} },
     create: { formPath: '/new', formReadySelector: 'form', fields: {}, submitSelector: 'button' },
     edit: {

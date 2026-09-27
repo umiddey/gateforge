@@ -2,7 +2,7 @@
  * The supervised runner child's ENVIRONMENT ALLOWLIST (enforcement-
  * review fix 1): `executeSupervisedPlaywright` used to merge
  * `process.env` into the runner child, so `GATEFORGE_WITNESS_VERIFIER_KEY`
- * — the key that authenticates gate receipts and the witness's
+ * or its external key-ring source path — the key that authenticates gate receipts and the witness's
  * attestation/supervisor surface — was inherited by UNTRUSTED test code.
  *
  * The child env is now built from an explicit allowlist, never from the
@@ -17,7 +17,8 @@
  * (fail closed on the wiring bug instead of leaking).
  *
  * Secret/non-secret classification of every known `GATEFORGE_*` name:
- * - SECRET (never crosses to the runner child): GATEFORGE_WITNESS_VERIFIER_KEY
+ * - SECRET SOURCE (never crosses to the runner child):
+ *   GATEFORGE_WITNESS_VERIFIER_KEY and GATEFORGE_WITNESS_VERIFIER_KEY_FILE
  *   (authenticates gate receipts + the witness supervisor/attestation
  *   surface).
  * - NON-SECRET run wiring (allowlisted): GATEFORGE_RUN_TOKEN (the
@@ -48,7 +49,7 @@
  *   (locate the run's intents spool), GATEFORGE_WITNESS_URL,
  *   GATEFORGE_RUN_TOKEN (run-scoped submission wiring, both already
  *   non-secret by design);
- * - still forbidden, as everywhere: GATEFORGE_WITNESS_VERIFIER_KEY
+ * - still forbidden, as everywhere: both verifier-key source names
  *   (refused even when a caller explicitly stuffs it into `vars`) and
  *   every OTHER parent-side name (obligations/adapters/classifications/
  *   outcomes paths — the witnessed participant is a pytest process with
@@ -75,7 +76,10 @@ export class RunnerEnvError extends Error {
  * files are excluded by construction elsewhere). Keep this list in sync
  * with the module doc's classification.
  */
-export const RUNNER_SECRET_ENV: readonly string[] = ['GATEFORGE_WITNESS_VERIFIER_KEY'];
+export const RUNNER_SECRET_ENV: readonly string[] = [
+  'GATEFORGE_WITNESS_VERIFIER_KEY',
+  'GATEFORGE_WITNESS_VERIFIER_KEY_FILE',
+];
 
 /**
  * Run-state paths that must NEVER reach the runner child through ANY

@@ -17,7 +17,7 @@
  * `gateforge.receipt.v1` domain); no browser is launched.
  */
 import { describe, expect, it } from 'vitest';
-import { loadConfig, runExitCode, sha256Canonical, withTempRepo, type TempRepo, type TestCatalog } from '@gate-forge/core';
+import { loadConfig, runExitCode, sha256Canonical, targetArtifactDigestOf, withTempRepo, type TempRepo, type TestCatalog } from '@gate-forge/core';
 import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { currentInputDigest, fixtureFingerprint, installFixture, runCli, FIXED_AT } from './helpers.js';
 import { resolveAdoptedBaseline } from '../src/adopted-baseline.js';
@@ -27,6 +27,7 @@ import { evaluateRun, obligationFingerprint } from '../src/evaluate.js';
 import { runPipeline } from '../src/pipeline.js';
 import { resolveStateDir, writeExecutionResult, writeGateReceipt } from '../src/state.js';
 import { VERIFIER_KEY_ENV } from '../src/commands/common.js';
+import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
 
 const KEY = 'scoped-receipt-verifier-key';
 const RUN_ID = '11111111-2222-4333-8444-555555555555';
@@ -108,6 +109,9 @@ function sealGreenRun(
   const config = loadConfig(`${repo.root}/.gateforge.yml`);
   const stateDir = resolveStateDir(repo.root);
   const trustedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
+  const gitDir = resolveGitDir(repo.root, process.env);
+  const candidateTreeId =
+    gitDir === null ? null : computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
   const sealed = sealExecutionResult({
     runId: RUN_ID,
     invocationId: INVOCATION_ID,
@@ -150,6 +154,8 @@ function sealGreenRun(
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: null,
     ...testReceiptV2Bindings(trustedPolicyDigest),
+    candidateTreeId,
+    targetArtifactDigest: targetArtifactDigestOf(candidateTreeId),
     verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
     issuedAt: FIXED_AT,
   });
@@ -188,6 +194,23 @@ describe('check --require-e2e: scope-aware receipt consumption (acceptance/rejec
       const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
       expect(result.code).toBe(0);
       expect(result.stdout).not.toMatch(/EVIDENCE_SCOPE_INCOMPLETE|EVIDENCE_STALE|RUN_INCOMPLETE/);
+    });
+  });
+
+  it('a documentation edit changes evidence identity and makes the prior receipt stale', async () => {
+    await withTempRepo({}, async (repo) => {
+      installWaivedFixture(repo);
+      const docName = ['guide', '.md'].join('');
+      const docPath = ['docs', docName].join('/');
+      repo.writeFiles({ [docPath]: '# First guide\n' });
+      const digest = await currentInputDigest(repo);
+      sealGreenRun(repo, digest);
+      repo.writeFiles({ [docPath]: '# Corrected spelling\n' });
+
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('EVIDENCE_STALE');
+      expect(result.stdout).toContain('gate receipt input digest does not match the current run');
     });
   });
 

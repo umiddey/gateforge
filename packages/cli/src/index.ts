@@ -11,7 +11,7 @@
  *   providers (pin #5).
  */
 export { main, USAGE } from './cli.js';
-export { VERSION } from './commands/common.js';
+export { VERSION, VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from './commands/common.js';
 export {
   DEFAULT_STATE_DIR,
   resolveStateDir,

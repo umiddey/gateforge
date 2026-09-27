@@ -24,10 +24,13 @@ export const VERSION: string = require('../../package.json').version;
  * readable only by the same uid and, under the default yama
  * ptrace_scope ≥ 1, a child cannot read its parent's environ; for
  * stronger isolation run the suite as a distinct user or container.)
- * `test-gates` strips this var from the suite child's environment so a
- * suite can never inherit it.
+ * The explicit key-file source is resolved by verifier-keys.ts. Both
+ * source variables are stripped from suite and runner child environments.
  */
 export const VERIFIER_KEY_ENV = 'GATEFORGE_WITNESS_VERIFIER_KEY';
+
+/** Explicit external owner-only key-ring file path. */
+export const VERIFIER_KEY_FILE_ENV = 'GATEFORGE_WITNESS_VERIFIER_KEY_FILE';
 
 /** Report formats renderRun accepts (pin #10). */
 export const REPORT_FORMATS = ['text', 'json', 'sarif'] as const;
