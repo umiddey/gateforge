@@ -341,9 +341,9 @@ describe('classification signals (plan phase 3, ADR 0003 D1)', () => {
     // Tuple and list literals are copied in written order.
     expect(attrOf('departments')).toEqual(['name', 'description']);
     expect(attrOf('settings')).toEqual(['theme']);
-    // Non-literal and empty declarations contribute NOTHING — never a guess.
+    // An explicit empty literal is distinct from a value the detector cannot resolve.
+    expect(attrOf('empty_fields')).toEqual([]);
     expect(attrOf('computed_fields')).toBeUndefined();
-    expect(attrOf('empty_fields')).toBeUndefined();
   }, 60_000);
 
   it('signal documents are deterministic across sessions (byte-identical)', async () => {

@@ -12,6 +12,7 @@
  *   deletion: 'hard' | 'archive',
  *   fields: ['id', 'name'],                     // optional normalized field projection
  *   baseUrl: 'http://…',                    // optional override of the witness's adapter base
+ *   identity: 'natural-key',                  // optional entity-scoped create absence proof
  *   list: async (ctx) => bodies,            // optional: powers create pre-observations + Observe snapshots
  *   observe: {                              // optional: Observe-channel mutation bindings (Phase 2)
  *     create: { method: 'POST', path: '/api/v2/accounts' },
@@ -110,9 +111,8 @@ async function importAdapter(
  *
  * Throws:
  *   AdapterRegistryError: when any required member is missing or shaped
- *   wrong. Optional `baseUrl` overrides the witness's adapter base, and
- *   optional `fields` names the normalized projection available to
- *   persistence checks.
+ *   wrong. Optional `baseUrl`, `identity`, and `fields` refine read and
+ *   create-proof capabilities without changing adapters that omit them.
  */
 export function validateAdapter(module: unknown, name: string): EvidenceAdapter {
   if (typeof module !== 'object' || module === null) {
@@ -135,6 +135,9 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
     (typeof adapter['baseUrl'] !== 'string' || adapter['baseUrl'].length === 0)
   ) {
     problems.push('baseUrl must be a non-empty string when present');
+  }
+  if (adapter['identity'] !== undefined && adapter['identity'] !== 'natural-key') {
+    problems.push("identity must be 'natural-key' when present");
   }
   if (adapter['list'] !== undefined && typeof adapter['list'] !== 'function') {
     problems.push('list must be a function (ctx) => entity[] when present');
@@ -182,6 +185,7 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
     normalize: adapter['normalize'] as EvidenceAdapter['normalize'],
     deletion: adapter['deletion'] as 'hard' | 'archive',
     environmentFingerprint: adapter['environmentFingerprint'] as string,
+    ...(adapter['identity'] !== undefined ? { identity: 'natural-key' as const } : {}),
     baseUrl: adapter['baseUrl'] as string | undefined,
     ...(adapter['fields'] !== undefined
       ? { fields: [...(adapter['fields'] as string[])] }

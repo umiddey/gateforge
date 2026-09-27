@@ -336,7 +336,7 @@ describe('persistence endpoint (pin #7)', () => {
       await fixture.target.stop();
     }
   });
-  it('uses an entity-scoped absence snapshot for a natural-key create', async () => {
+  it('keeps unanchored entity snapshots distinct and bound to their observed key', async () => {
     const fixture = await startFixturedWitness({ fingerprint: 'example-v1', adapterIdentity: 'natural-key' });
     try {
       const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
@@ -356,6 +356,20 @@ describe('persistence endpoint (pin #7)', () => {
       expect(pre.status).toBe(200);
       const observation = (await pre.json()) as { observationId: string; observed: number };
       expect(observation.observed).toBe(0);
+      const mismatched = await fetch(`${fixture.witness.url}/witness/persistence`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resourceId: 'tenant.accounts',
+          entityId: '3',
+          testId: TEST_ID,
+          claimId: 'tenant.accounts:persistence:create',
+          preObservationId: observation.observationId,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+        }),
+      });
+      expect(mismatched.status).toBe(409);
       const created = await fetch(`${fixture.target.url}/api/accounts`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -381,7 +395,7 @@ describe('persistence endpoint (pin #7)', () => {
         await fetch(`${fixture.witness.url}/records`, { headers: { [RUN_HEADER]: TOKEN } })
       ).json()) as { records: Array<{ kind: string; payload: Record<string, unknown> }> };
       const persistence = ledger.records.find((record) => record.kind === 'persistence.entity');
-      expect(persistence?.payload['before']).toEqual({ entityAbsent: true });
+      expect(persistence?.payload['before']).toEqual({ found: false });
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();

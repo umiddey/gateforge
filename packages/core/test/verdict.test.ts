@@ -549,6 +549,19 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
     ]);
     expect(withBefore.verdict).toBe('satisfied');
 
+    const presentBefore = claimOutcome('persistence:create', LIFECYCLE, [
+      action,
+      witnessedPersistence({
+        payload: {
+          entityId: 'acc-9',
+          found: true,
+          fields: { name: 'New', status: 'active' },
+          before: { found: true },
+        },
+      }),
+    ]);
+    expect(presentBefore.verdict).toBe('invalid');
+
     const neverAppeared = claimOutcome('persistence:create', LIFECYCLE, [
       action,
       witnessedPersistence({

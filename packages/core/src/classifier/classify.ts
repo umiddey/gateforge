@@ -31,6 +31,7 @@ import {
   type ClassifierBlock,
   type ClassifierContradiction,
   type ClassificationDecisionTrace,
+  type LifecycleDerivation,
 } from './schema.js';
 import { globMatch } from './glob.js';
 import { HTTP_ENDPOINT_RESOURCE_KIND } from '../graph/schema.js';
@@ -102,6 +103,8 @@ export interface ClassifyResourcesInput {
   policy: ClassificationPolicy;
   /** Reviewed adapter names available for binding. */
   adapters: readonly string[];
+  /** Derive absent lifecycle operations only when the scan proves its scope complete. */
+  deriveLifecycleDefaults?: boolean;
   /** Findings/unresolved entries the complete-scan attestation is judged against. */
   scan: ClassifierScanInput;
 }
@@ -174,6 +177,8 @@ const OPERATIONS = ['create', 'read', 'update', 'delete'] as const;
 
 /** Stable source name for owner lifecycle authority minted by the host. */
 const LIFECYCLE_POLICY_SOURCE = 'gateforge.policy:lifecycleRules';
+/** Stable provenance prefix for lifecycle suppressions derived by the engine. */
+const LIFECYCLE_DERIVATION_SOURCE = 'gateforge.core:lifecycleDerivation';
 
 /** Location sorter (codepoint, then line, then col). */
 /** Locations sorted deterministically and DEDUPLICATED: a location is a
@@ -597,6 +602,119 @@ function lifecycleRuleReasons(rules: readonly LifecycleRule[]): string[] {
 }
 
 /**
+ * Explains the stable reason codes used by lifecycle derivation reports.
+ *
+ * Args:
+ *   reason: the detector fact that made an operation unavailable.
+ *
+ * Returns:
+ *   string: a concise human-readable explanation.
+ */
+function lifecycleDerivationDetail(reason: LifecycleDerivation['reason']): string {
+  switch (reason) {
+    case 'no-read-route':
+      return 'No linked GET or HEAD route was detected.';
+    case 'no-updateable-fields':
+      return 'The model declares no updateable fields.';
+    case 'no-delete-route-or-method':
+      return 'No linked DELETE route or positive delete-method signal was detected.';
+  }
+}
+
+/**
+ * Mints host-owned negative lifecycle facts from complete model and route evidence.
+ *
+ * Args:
+ *   resources: graph resources, including compiled HTTP endpoints.
+ *   signals: detector signals used to preserve positive operation evidence.
+ *   policy: validated policy used to preserve explicit lifecycle rules.
+ *
+ * Returns:
+ *   ClassificationSignal[]: sorted closed-world suppressions for operations
+ *   the complete detector facts show cannot be performed.
+ */
+function deriveLifecycleSignals(
+  resources: readonly ClassifierResourceRef[],
+  signals: readonly ClassificationSignal[],
+  policy: ClassificationPolicy,
+): ClassificationSignal[] {
+  const derived: ClassificationSignal[] = [];
+  const operations = ['read', 'update', 'delete'] as const;
+  for (const resource of resources) {
+    if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND) continue;
+    for (const operation of operations) {
+      const dimension = `lifecycle.${operation}` as const;
+      const positive = signals.some((signal) => {
+        if (signal.dimension !== dimension || assertionBoolean(signal.assertion) !== true) return false;
+        const targetId = signal.target.resourceId;
+        return (
+          signal.target.resourceName === resource.name ||
+          targetId === resource.id ||
+          targetId === resource.name ||
+          (targetId !== undefined && targetId.endsWith(`.${resource.name}`))
+        );
+      });
+      const ownerRule = (policy.lifecycleRules ?? []).some(
+        (rule) =>
+          rule.disable.includes(operation) &&
+          rule.match.resourceId.endsWith(`.${resource.name}`),
+      );
+      if (positive || ownerRule) continue;
+
+      const routeExists = resources.some((endpoint) => {
+        if (endpoint.kind !== HTTP_ENDPOINT_RESOURCE_KIND) return false;
+        if (endpoint.attributes['linkedResourceName'] !== resource.name) return false;
+        const method = endpoint.attributes['method'];
+        const capabilities = endpoint.attributes['capabilities'];
+        if (
+          operation === 'read' &&
+          (method === 'GET' || method === 'HEAD' ||
+            (Array.isArray(capabilities) && capabilities.includes('crud-read')))
+        ) return true;
+        if (
+          operation === 'update' &&
+          (method === 'PUT' || method === 'PATCH' ||
+            (Array.isArray(capabilities) && capabilities.includes('crud-update')))
+        ) return true;
+        return (
+          operation === 'delete' &&
+          (method === 'DELETE' ||
+            (Array.isArray(capabilities) &&
+              (capabilities.includes('crud-delete') || capabilities.includes('crud-archive'))))
+        );
+      });
+      if (routeExists) continue;
+
+      let reason: LifecycleDerivation['reason'] | null = null;
+      if (
+        operation === 'update' &&
+        Array.isArray(resource.attributes['updateableFields']) &&
+        resource.attributes['updateableFields'].length === 0
+      ) {
+        reason = 'no-updateable-fields';
+      } else if (operation === 'read') {
+        reason = 'no-read-route';
+      } else if (operation === 'delete') {
+        reason = 'no-delete-route-or-method';
+      }
+      if (reason === null) continue;
+
+      derived.push({
+        schemaVersion: 1,
+        target: { resourceName: resource.name },
+        dimension,
+        assertion: false,
+        basis: 'code-negative-closed-world',
+        source: `${LIFECYCLE_DERIVATION_SOURCE}:${reason}`,
+        location: resource.location,
+        detector: { id: 'gateforge.core', version: '1' },
+      });
+    }
+  }
+  return derived.sort((a, b) => compareStrings(signalId(a), signalId(b)));
+}
+
+/**
  * Classifies every resource through the deterministic lattice (ADR 0003 D2).
  *
  * Args:
@@ -613,7 +731,12 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
   const invalidSignals: ClassifierBlock[] = [];
   const unauthorizedSuppressive: ClassifierBlock[] = [];
   const pluginSignals = [...input.signals].sort((a, b) => compareStrings(signalId(a), signalId(b)));
-  const authoritySignals = [...(input.authority ?? [])].sort((a, b) =>
+  const scanComplete = completeScanHolds(input.policy, input.scan);
+  const derivedSignals =
+    input.deriveLifecycleDefaults && scanComplete
+      ? deriveLifecycleSignals(input.resources, pluginSignals, input.policy)
+      : [];
+  const authoritySignals = [...(input.authority ?? []), ...derivedSignals].sort((a, b) =>
     compareStrings(signalId(a), signalId(b)),
   );
   const trustedEntries = input.policy.trustedInternalEntryPoints;
@@ -715,7 +838,6 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     route(signal, 'authority', matched.length > 0, matched);
   }
 
-  const scanComplete = completeScanHolds(input.policy, input.scan);
   const exposureComplete = exposureCoverageHolds(input.policy, input.scan);
   const trustedCategories = new Set(
     input.policy.trustedInternalEntryPoints.map((entry) => entry.category),
@@ -933,6 +1055,7 @@ function classifyOne(
   const rules: string[] = [];
   const defaultsApplied: string[] = [];
   const contributing: ClassificationSignal[] = [];
+  const lifecycleDerivation: LifecycleDerivation[] = [];
   const contribute = (...signalList: ClassificationSignal[]): void => {
     contributing.push(...signalList);
   };
@@ -1223,6 +1346,9 @@ function classifyOne(
         s.basis === 'code-negative-closed-world' &&
         assertionBoolean(s.assertion) === false,
     );
+    const derivedLifecycle = closedWorld.filter((signal) =>
+      signal.source.startsWith(`${LIFECYCLE_DERIVATION_SOURCE}:`),
+    );
     const policySignals = closedWorld.filter((signal) => signal.source === LIFECYCLE_POLICY_SOURCE);
     const policyReasons =
       policySignals.length > 0 ? lifecycleRuleReasons(policyRules) : [];
@@ -1275,6 +1401,21 @@ function classifyOne(
         }
       } else {
         rules.push(`${RULES.lifecycleClosedWorldDisabled}(${operation})`);
+      }
+      for (const signal of derivedLifecycle) {
+        const reason = signal.source.slice(LIFECYCLE_DERIVATION_SOURCE.length + 1);
+        if (
+          reason !== 'no-read-route' &&
+          reason !== 'no-updateable-fields' &&
+          reason !== 'no-delete-route-or-method'
+        ) continue;
+        if (operation === 'create') continue;
+        lifecycleDerivation.push({
+          operation,
+          disposition: operation === 'read' ? 'not-observable' : 'disabled',
+          reason,
+          detail: lifecycleDerivationDetail(reason),
+        });
       }
     } else if (closedWorld.length > 0) {
       // A closed-world assertion whose proof does not hold: the intent to
@@ -1481,6 +1622,7 @@ function classifyOne(
       ...new Set(blocks.map((block) => BLOCK_DIMENSIONS[block.code] ?? block.code)),
     ].sort(compareStrings),
     decisionFingerprint: fingerprint,
+    ...(lifecycleDerivation.length > 0 ? { lifecycleDerivation } : {}),
   };
   // The classification must always be a VALID Classification (the same
   // schema policy/verdict code consumes). Definitional blocks — delete

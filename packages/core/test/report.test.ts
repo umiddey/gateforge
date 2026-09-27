@@ -471,3 +471,82 @@ describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR
     expect(plain).not.toContain('(cause:');
   });
 });
+
+describe('renderRun — lifecycle derivation visibility', () => {
+  it('surfaces one ordered derivation line per resource in json, sarif, and text', () => {
+    const lifecycleDerivation = [
+      {
+        resourceId: 'tenant.accounts',
+        resourceName: 'accounts',
+        operation: 'update',
+        disposition: 'disabled',
+        reason: 'no-updateable-fields',
+        detail: 'The model declares no updateable fields.',
+      },
+      {
+        resourceId: 'tenant.accounts',
+        resourceName: 'accounts',
+        operation: 'read',
+        disposition: 'not-observable',
+        reason: 'no-read-route',
+        detail: 'No linked GET or HEAD route was detected.',
+      },
+    ] as const;
+    const json = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'json', lifecycleDerivation }),
+    ) as { lifecycleDerivation: Array<{ operation: string; disposition: string }> };
+    expect(json.lifecycleDerivation.map((item) => item.operation)).toEqual(['read', 'update']);
+    expect(json.lifecycleDerivation[0]).toMatchObject({
+      operation: 'read',
+      disposition: 'not-observable',
+    });
+
+    const sarif = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'sarif', lifecycleDerivation }),
+    ) as { runs: Array<{ properties: Record<string, unknown> }> };
+    expect(sarif.runs[0]?.properties['lifecycleDerivation']).toEqual(json.lifecycleDerivation);
+
+    const text = renderRun([entry(accounts, 'satisfied')], { format: 'text', lifecycleDerivation });
+    const resourceLines = text
+      .split('\n')
+      .filter((line) => line.startsWith('  tenant.accounts:'));
+    expect(resourceLines).toHaveLength(1);
+    expect(resourceLines[0]).toContain('read: not-observable');
+    expect(resourceLines[0]).toContain('update: disabled');
+  });
+});
+
+describe('renderRun — Python cache exclusion visibility', () => {
+  it('includes exact paths and the owner pin status in every report format', () => {
+    const diagnosticContext = {
+      scope: 'full' as const,
+      candidateTreeId: 'a'.repeat(40),
+      inputDigest: 'b'.repeat(64),
+      evidenceState: 'attested',
+      authority: 'authoritative' as const,
+      cacheExclusions: {
+        files: ['src/__pycache__/accounts.cpython-313.pyc'],
+        approvalDigest: 'c'.repeat(64),
+        approvalStatus: 'matched' as const,
+        guarantee: 'owner assertion only',
+      },
+    };
+    const json = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'json', diagnosticContext }),
+    ) as { diagnosticContext: typeof diagnosticContext };
+    expect(json.diagnosticContext.cacheExclusions).toEqual(diagnosticContext.cacheExclusions);
+
+    const sarif = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'sarif', diagnosticContext }),
+    ) as { runs: Array<{ properties: { diagnosticContext: typeof diagnosticContext } }> };
+    expect(sarif.runs[0]?.properties.diagnosticContext.cacheExclusions).toEqual(
+      diagnosticContext.cacheExclusions,
+    );
+
+    const text = renderRun([entry(accounts, 'satisfied')], { format: 'text', diagnosticContext });
+    expect(text).toContain(
+      'Python cache exclusions: files=src/__pycache__/accounts.cpython-313.pyc approvalStatus=matched',
+    );
+    expect(text).toContain(diagnosticContext.cacheExclusions.approvalDigest);
+  });
+});

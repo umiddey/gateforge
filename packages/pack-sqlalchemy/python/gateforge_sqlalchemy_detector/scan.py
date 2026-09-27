@@ -523,16 +523,18 @@ def _literal_record(node: ast.expr) -> dict[str, str | int | float | bool] | Non
 
 
 def _string_sequence_literal(node: ast.expr) -> list[str] | None:
-    """Reads a list/tuple literal of distinct non-empty string literals.
+    """Reads list/tuple literals of distinct non-empty strings.
+
+    Empty list/tuple literals are valid.
 
     Args:
         node: The AST expression (e.g. the value of
             ``__gateforge_updateable_fields__``).
 
     Returns:
-        list[str] | None: the strings in written order, or None when the
-            node is not a list/tuple of string literals (the classifier
-            then simply sees no attribute — never a guessed one).
+        list[str] | None: string values in written order, including an
+            empty list for an empty literal, or None when the node is not
+            a list/tuple of string literals.
     """
     if not isinstance(node, (ast.List, ast.Tuple)):
         return None
@@ -541,7 +543,7 @@ def _string_sequence_literal(node: ast.expr) -> list[str] | None:
         if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str) and elt.value):
             return None
         values.append(elt.value)
-    return values or None
+    return values
 
 
 def _table_args_elements(node: ast.expr | None) -> list[ast.expr]:
@@ -1064,7 +1066,7 @@ def _attribute_facts(facts: ColumnFacts, rec: ClassRecord | None) -> dict:
         entries["softDeleteCandidateFields"] = sorted(set(facts.soft_delete_candidates))
     if rec is not None and rec.read_only:
         entries["readOnly"] = True
-    if rec is not None and rec.updateable_fields_literal:
+    if rec is not None and rec.updateable_fields_literal is not None:
         entries["updateableFields"] = list(rec.updateable_fields_literal)
     return entries
 

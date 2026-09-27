@@ -47,6 +47,7 @@ import {
   type PolicyEvaluationResult,
   type ResourceGraph,
   type RunManifest,
+  type LifecycleDerivationReportEntry,
 } from '@gate-forge/core';
 import { staticAdapterFieldsFromSource } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
@@ -106,6 +107,8 @@ export interface PipelineResult {
    * never reads it back as input.
    */
   classificationsView: ClassificationFile;
+  /** Lifecycle omissions and observability limits derived from complete detector facts. */
+  lifecycleDerivation: LifecycleDerivationReportEntry[];
   /** Compiled complete-behavior catalog, or null when the document is absent. */
   behaviorCatalog: BehaviorCatalog | null;
 }
@@ -439,6 +442,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     authority,
     policy: policyDocParsed.data,
     adapters,
+    deriveLifecycleDefaults: true,
     scan: {
       // The proof request must describe the same repository scope that
       // detector discovery scans. Project exclusions remove files from the
@@ -521,6 +525,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     changedFiles,
     classification,
     classificationsView: effectiveClassifications(graph, classification),
+    lifecycleDerivation: lifecycleDerivationForReport(classification),
     behaviorCatalog,
   };
 }
@@ -564,6 +569,39 @@ export function effectiveClassifications(
     };
   }
   return { schemaVersion: 1, resources };
+}
+
+/**
+ * Projects classified lifecycle derivations into the stable report shape.
+ *
+ * Args:
+ *   classification: the classifier result with trace metadata.
+ *
+ * Returns:
+ *   LifecycleDerivationReportEntry[]: sorted resource-level report entries.
+ */
+export function lifecycleDerivationForReport(
+  classification: ClassificationResult,
+): LifecycleDerivationReportEntry[] {
+  const entries: LifecycleDerivationReportEntry[] = [];
+  for (const decision of classification.decisions) {
+    const derivations = decision.classification?.lifecycleDerivation ?? [];
+    if (derivations.length === 0) continue;
+    const resourceId =
+      decision.classification === null
+        ? decision.resourceId
+        : `${decision.classification.plane}.${decision.name}`;
+    for (const derivation of derivations) {
+      entries.push({ ...derivation, resourceId, resourceName: decision.name });
+    }
+  }
+  const operationOrder = { read: 0, update: 1, delete: 2 };
+  return entries.sort(
+    (left, right) =>
+      compareStrings(left.resourceId ?? left.resourceName, right.resourceId ?? right.resourceName) ||
+      compareStrings(left.resourceName, right.resourceName) ||
+      operationOrder[left.operation] - operationOrder[right.operation],
+  );
 }
 /**
  * Host-issued authority minting (red-team V1/V2 remediation, ADR 0003 D2):

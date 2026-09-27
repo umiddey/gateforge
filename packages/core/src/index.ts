@@ -642,6 +642,7 @@ export {
   ClassifierContradictionSchema,
   ClassificationDecisionTraceSchema,
   EffectiveClassificationSchema,
+  LifecycleDerivationSchema,
   compileGlob,
   globMatch,
   pathInScope,
@@ -661,6 +662,7 @@ export type {
   ClassifierContradiction,
   ClassificationDecisionTrace,
   EffectiveClassification,
+  LifecycleDerivation,
 } from './classifier/index.js';
 
 // ---------------------------------------------------------------------------
@@ -1080,6 +1082,7 @@ export type { ScopeMetadata } from './report/index.js';
 /** Measured supervised work and repository debt carried by run reports. */
 export type { RunExecutionSummary } from './report/index.js';
 export type { DiagnosticContext } from './report/index.js';
+export type { LifecycleDerivationReportEntry } from './report/index.js';
 
 // ---------------------------------------------------------------------------
 // Fixture harness (G7) — deterministic temp repos, injected clock/env,

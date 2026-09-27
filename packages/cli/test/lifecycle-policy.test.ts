@@ -125,7 +125,7 @@ async function runFixture(repoRoot: string) {
 }
 
 describe('classification policy lifecycleRules pipeline', () => {
-  it('mints exact-resource policy disables and omits only those CRUD obligations', async () => {
+  it('mints exact-resource policy disables alongside detector derivations', async () => {
     await withTempRepo({}, async (repo) => {
       installBundledFixture(repo, lifecyclePolicy('accounting history is append-only'));
       repo.writeFiles({
@@ -137,31 +137,29 @@ describe('classification policy lifecycleRules pipeline', () => {
       const orders = pipeline.classification.decisions.find((entry) => entry.name === 'orders');
       expect(accounts?.classification?.lifecycle).toMatchObject({
         create: true,
-        read: true,
+        read: false,
         update: false,
         delete: false,
       });
       expect(accounts?.classification?.rules).toContain(
         'LIFECYCLE_POLICY_DISABLED(update:accounting history is append-only)',
       );
+      const accountDerivations = accounts?.classification?.lifecycleDerivation?.map(
+        (entry) => entry.operation,
+      );
+      expect(accountDerivations).toEqual(['read']);
       expect(orders?.classification?.lifecycle).toMatchObject({
         create: true,
-        read: true,
+        read: false,
         update: true,
-        delete: true,
+        delete: false,
       });
       expect(pipeline.policy.obligations.map((obligation) => obligation.id)).toEqual([
         'tenant.accounts:crud:create',
-        'tenant.accounts:crud:read',
         'tenant.accounts:persistence:create',
-        'tenant.accounts:persistence:read',
         'tenant.orders:crud:create',
-        'tenant.orders:crud:delete',
-        'tenant.orders:crud:read',
         'tenant.orders:crud:update',
         'tenant.orders:persistence:create',
-        'tenant.orders:persistence:delete',
-        'tenant.orders:persistence:read',
         'tenant.orders:persistence:update',
       ]);
       expect(pipeline.policy.blocking).toEqual([]);
@@ -198,21 +196,75 @@ class Account(Base):
 `,
       });
       const { pipeline } = await runFixture(repo.root);
+      const accountDecision = pipeline.classification.decisions.find((entry) => entry.name === 'accounts');
+      expect(accountDecision?.classification?.lifecycle).toMatchObject({
+        create: true,
+        read: false,
+        update: false,
+        delete: false,
+      });
+      expect(accountDecision?.classification?.lifecycleDerivation).toEqual([
+        {
+          operation: 'read',
+          disposition: 'not-observable',
+          reason: 'no-read-route',
+          detail: expect.any(String),
+        },
+        {
+          operation: 'update',
+          disposition: 'disabled',
+          reason: 'no-updateable-fields',
+          detail: expect.any(String),
+        },
+        {
+          operation: 'delete',
+          disposition: 'disabled',
+          reason: 'no-delete-route-or-method',
+          detail: expect.any(String),
+        },
+      ]);
       const accounts = pipeline.policy.obligations.filter((entry) => entry.resourceId === 'tenant.accounts');
-      expect(
-        accounts.map((entry) => entry.contract),
-        JSON.stringify({
-          resources: pipeline.graph.resources.map((entry) => ({
-            id: entry.id,
-            name: entry.name,
-            exposure: entry.classification?.exposure,
-            lifecycle: entry.classification?.lifecycle,
-          })),
-        }),
-      ).toContain('persistence:create');
-      expect(accounts.map((entry) => entry.contract)).toContain('persistence:read');
+      expect(accounts.map((entry) => entry.contract)).toContain('persistence:create');
+      expect(accounts.map((entry) => entry.contract)).not.toContain('persistence:read');
       expect(accounts.map((entry) => entry.contract)).not.toContain('persistence:update');
       expect(accounts.map((entry) => entry.contract)).not.toContain('persistence:delete');
+      expect(pipeline.lifecycleDerivation).toEqual([
+        expect.objectContaining({
+          resourceId: 'tenant.accounts',
+          resourceName: 'accounts',
+          operation: 'read',
+          disposition: 'not-observable',
+          reason: 'no-read-route',
+        }),
+        expect.objectContaining({
+          resourceId: 'tenant.accounts',
+          resourceName: 'accounts',
+          operation: 'update',
+          disposition: 'disabled',
+          reason: 'no-updateable-fields',
+        }),
+        expect.objectContaining({
+          resourceId: 'tenant.accounts',
+          resourceName: 'accounts',
+          operation: 'delete',
+          disposition: 'disabled',
+          reason: 'no-delete-route-or-method',
+        }),
+        expect.objectContaining({
+          resourceId: 'tenant.orders',
+          resourceName: 'orders',
+          operation: 'read',
+          disposition: 'not-observable',
+          reason: 'no-read-route',
+        }),
+        expect.objectContaining({
+          resourceId: 'tenant.orders',
+          resourceName: 'orders',
+          operation: 'delete',
+          disposition: 'disabled',
+          reason: 'no-delete-route-or-method',
+        }),
+      ]);
     });
   });
 

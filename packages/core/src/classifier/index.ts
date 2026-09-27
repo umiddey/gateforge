@@ -15,6 +15,7 @@ export {
   ClassifierContradictionSchema,
   ClassificationDecisionTraceSchema,
   EffectiveClassificationSchema,
+  LifecycleDerivationSchema,
 } from './schema.js';
 export type {
   ClassifierBlock,
@@ -22,6 +23,7 @@ export type {
   ClassifierContradiction,
   ClassificationDecisionTrace,
   EffectiveClassification,
+  LifecycleDerivation,
 } from './schema.js';
 
 // ---------------------------------------------------------------------------

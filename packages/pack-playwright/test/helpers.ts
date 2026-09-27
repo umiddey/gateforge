@@ -239,6 +239,7 @@ export function writeFixtureProject(
  *   dir: disposable project root.
  *   fingerprint: target fingerprint to stamp, defaulting to the example value.
  *   fields: optional adapter projection declared for engine-side persistence checks.
+ *   identity: optional natural-key mode, which deliberately omits the collection list.
  *
  * Returns:
  *   void.
@@ -247,24 +248,30 @@ export function writeHonestAdapter(
   dir: string,
   fingerprint = FINGERPRINT,
   fields?: readonly string[],
+  identity?: 'natural-key',
 ): void {
 	writeFileSync(
 		join(dir, '.gateforge/adapters/tenant.accounts.mjs'),
 		[
 			'// Reviewed evidence adapter for tenant.accounts (GET-only).',
 			'export default {',
+			...(identity !== undefined ? ["  identity: 'natural-key',"] : []),
 			'  async read(ctx, id) {',
 			'    const res = await ctx.get(`/api/accounts/${encodeURIComponent(String(id))}`);',
 			'    if (res.status === 404) return null;',
 			'    if (res.status !== 200) throw new Error(`adapter read failed: HTTP ${res.status}`);',
 			'    return res.json();',
 			'  },',
-			'  async list(ctx) {',
-			'    const res = await ctx.get(\'/api/accounts\');',
-			'    if (res.status !== 200) throw new Error(`adapter list failed: HTTP ${res.status}`);',
-			'    const body = await res.json();',
-			'    return body.accounts;',
-			'  },',
+			...(identity === 'natural-key'
+				? []
+				: [
+						'  async list(ctx) {',
+						'    const res = await ctx.get(\'/api/accounts\');',
+						'    if (res.status !== 200) throw new Error(`adapter list failed: HTTP ${res.status}`);',
+						'    const body = await res.json();',
+						'    return body.accounts;',
+						'  },',
+					]),
 			'  normalize(body) {',
 			'    return {',
 			'      entityId: body.id,',

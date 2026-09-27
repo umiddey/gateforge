@@ -101,6 +101,23 @@ export const ClassifierContradictionSchema = z
 /** Inferred classifier-contradiction shape. */
 export type ClassifierContradiction = z.infer<typeof ClassifierContradictionSchema>;
 
+/** A visible lifecycle decision derived from complete detector facts. */
+export const LifecycleDerivationSchema = z
+  .object({
+    operation: z.enum(['read', 'update', 'delete']),
+    disposition: z.enum(['disabled', 'not-observable']),
+    reason: z.enum([
+      'no-read-route',
+      'no-updateable-fields',
+      'no-delete-route-or-method',
+    ]),
+    detail: z.string().min(1),
+  })
+  .strict();
+
+/** Inferred lifecycle derivation shape. */
+export type LifecycleDerivation = z.infer<typeof LifecycleDerivationSchema>;
+
 /**
  * The explainability trace of one classification decision (ADR 0003 D1):
  * rule ids that selected each value, the conservative defaults applied,
@@ -127,6 +144,8 @@ export const ClassificationDecisionTraceSchema = z
      * contributing signals changes this value (stale-awareness).
      */
     decisionFingerprint: z.string().min(1),
+    /** Lifecycle operations omitted or marked unobservable from detector facts. */
+    lifecycleDerivation: z.array(LifecycleDerivationSchema).optional(),
   })
   .strict();
 
@@ -154,6 +173,8 @@ export const EffectiveClassificationSchema = ClassificationSchema.extend({
   unresolvedDimensions: z.array(z.string().min(1)),
   /** sha256 over the canonical decision inputs (stale-aware identity). */
   decisionFingerprint: z.string().min(1),
+  /** Lifecycle operations omitted or marked unobservable from detector facts. */
+  lifecycleDerivation: z.array(LifecycleDerivationSchema).optional(),
 });
 
 /** Inferred effective-classification shape. */

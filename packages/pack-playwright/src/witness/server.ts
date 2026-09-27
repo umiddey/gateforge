@@ -1264,11 +1264,20 @@ function requireBrowserClaims(body: Record<string, unknown>): { claimIds: string
  * engine-observed records for exactly what the engine did. The full
  * binding in one call: the relevant rendered control + entered values,
  * the actual action, the resulting application request + entity
- * identity, the visible outcome — plus the engine-side pre-observation
- * the persistence read later consumes (create/update). The captured
- * exchanges join the witness observation log inside the engine's own
- * action interval, so the existing http-observation consume path binds
- * them with single-use semantics.
+ * identity, the visible outcome, and an engine-side pre-observation
+ * consumed by the later persistence read. Captured exchanges join the
+ * witness observation log inside the engine interval, binding the
+ * existing HTTP-observation consume path to this operation.
+ * Natural-key adapters capture create absence with an entity-scoped read
+ * instead of a collection listing.
+ *
+ * Args:
+ *   state: witness state and loaded adapter registry.
+ *   res: HTTP response to the action request.
+ *   body: validated browser operation and its requested entity data.
+ *
+ * Returns:
+ *   Promise<void>: completes after the action evidence is issued.
  */
 async function handleBrowserAction(
   state: WitnessState,
@@ -1294,6 +1303,13 @@ async function handleBrowserAction(
   const session = requireOpenSession(state, body);
   const boundTestId = requireSessionTestId(session, testId);
   const { claimIds, resourceId } = requireBrowserClaims(body);
+  const classification = state.classifications[resourceId] as Classification | undefined;
+  const adapterName = classification?.evidenceAdapter ?? resourceId;
+  const naturalKeyCreate =
+    operation === 'create' && state.adapters.get(adapterName)?.identity === 'natural-key';
+  if (naturalKeyCreate && (typeof entityId !== 'string' || entityId.length === 0)) {
+    throw new HttpError(400, 'natural-key create requires an entityId for an entity-scoped pre-observation');
+  }
   const { surface } = requireEngineSurface(session);
   // The driven origin comes from trusted configuration on EVERY call —
   // never from stored suite input (there is none anymore).
@@ -1302,16 +1318,16 @@ async function handleBrowserAction(
   // The engine's own observation interval (witness clock, never suite
   // time): exchanges captured during the drive land inside it.
   const { intervalId } = openActionInterval(state, session, operation);
-  // Engine-side pre-observation BEFORE the drive (create: id-set
-  // absence; update: entity-fields delta) — the persistence read later
-  // consumes it under the same session.
+  // Engine-side pre-observation BEFORE the drive (create: id-set or
+  // natural-key entity; update: entity-fields delta) — the persistence
+  // read later consumes it under the same session.
   let preObservationId: string | null = null;
   if (operation === 'create' || operation === 'update') {
     const pre = await takePreObservation(
       state,
       session,
       resourceId,
-      operation === 'update' ? (entityId ?? '') : undefined,
+      operation === 'update' ? (entityId ?? '') : naturalKeyCreate ? (entityId as string) : undefined,
     );
     preObservationId = pre.observationId;
   }
@@ -3140,17 +3156,23 @@ async function handleRecords(
 }
 
 /**
- * `POST /witness/persistence`: runs the engine-side adapter (GET-only)
- * for one entity, stamps a persistence record from the ADAPTER RESPONSE,
- * and returns the verdict-relevant comparison. Attestation failures
- * (GF-10 non-loopback base, GF-13 fingerprint mismatch) REJECT the
- * record with 409 — raw adapter responses never leave this process.
+ * `POST /witness/persistence` performs a mediated adapter read and stamps
+ * a persistence record from the adapter response. Raw responses remain
+ * inside the witness process.
  *
- * The issued record's payload is the ENGINE OBSERVATION the verdict
- * engine grades postconditions against (audit rounds 4-5): `{resourceId,
- * entityId, found, fields?, before?}`. Expectations NEVER come from the
- * tested suite; `before` links a consumed pre-observation (id-set
- * absence for create, entity-fields snapshot for update).
+ * An entity-scoped `found:false` pre-observation proves create absence
+ * only when a natural-key adapter read the exact entity key named by the
+ * same witnessed browser-create anchor. Matching the saved key before
+ * consuming the observation prevents an absence check for one entity
+ * from authorizing creation of another.
+ *
+ * Args:
+ *   state: witness configuration, sessions, and loaded adapters.
+ *   res: HTTP response for the persistence request.
+ *   body: requested resource, entity, claim, and optional action anchor.
+ *
+ * Returns:
+ *   Promise<void>: completes after the observation record is issued.
  */
 async function handlePersistence(
   state: WitnessState,
@@ -3188,6 +3210,7 @@ async function handlePersistence(
   const session = requireOpenSession(state, body);
   const boundTestId = requireSessionTestId(session, testId);
   let anchoredFields: string[] | null = null;
+  let anchoredOperation: string | null = null;
   const boundClaimId = String(claimId);
   if (typeof anchorId === 'string') {
     const interval = session.intervals.get(anchorId);
@@ -3195,6 +3218,7 @@ async function handlePersistence(
       throw new HttpError(400, `action anchor '${anchorId}' is unknown or still open for this session`);
     }
     const anchorEndTick = interval.endTick;
+    anchoredOperation = interval.operation;
     const action = [...state.ledger.values()].find((record) => {
       if (
         record.kind !== 'ui.action' ||
@@ -3292,6 +3316,17 @@ async function handlePersistence(
         `pre-observation '${preObservationId}' is unknown, already consumed, or belongs to another resource`,
       );
     }
+    if (observation.kind === 'entity') {
+      let sameEntity = false;
+      try {
+        sameEntity = observation.entityId === canonicalOf(entityId);
+      } catch {
+        sameEntity = false;
+      }
+      if (!sameEntity) {
+        throw new HttpError(409, `pre-observation '${preObservationId}' is for a different entity`);
+      }
+    }
     state.preObservations.delete(preObservationId);
     consumed = observation;
     before = { entityAbsent: true }; // refined below for ids-kind snapshots
@@ -3361,10 +3396,17 @@ async function handlePersistence(
       }
       before = { entityAbsent: absent };
     } else {
-      before = {
-        found: consumed.found,
-        ...(consumed.found ? { fields: consumed.fields } : {}),
-      };
+      const naturalKeyCreate =
+        typeof anchorId === 'string' &&
+        anchoredOperation === 'create' &&
+        adapter.identity === 'natural-key';
+      before =
+        naturalKeyCreate && !consumed.found
+          ? { entityAbsent: true }
+          : {
+              found: consumed.found,
+              ...(consumed.found ? { fields: consumed.fields } : {}),
+            };
     }
   }
 

@@ -97,6 +97,7 @@ interface Scaffold {
  *   testId: the supervisor-bound test id.
  *   targetApp: an optional app for a focused consumer-shaped E2E.
  *   adapterFields: optional adapter projection; omitted for legacy-compatible fixtures.
+ *   adapterIdentity: optional natural-key metadata, which omits adapter.list.
  *
  * Returns:
  *   Promise<Scaffold>: the temporary project and trusted test session.
@@ -105,10 +106,11 @@ async function scaffold(
   testId = 'engine-create-test',
   targetApp?: { url: string; stop: () => void },
   adapterFields?: readonly string[],
+  adapterIdentity?: 'natural-key',
 ): Promise<Scaffold> {
   const project = makeTempProject('browser-engine');
   writeFixtureProject(project);
-  writeHonestAdapter(project, FINGERPRINT, adapterFields);
+  writeHonestAdapter(project, FINGERPRINT, adapterFields, adapterIdentity);
   const app = targetApp ?? (await startExampleApp());
   const proxy = await startAttestationProxy(app.url, FINGERPRINT);
   const runId = `browser-engine-${Math.random().toString(36).slice(2)}`;
@@ -324,6 +326,67 @@ describe('engine-owned browser (projection guard and positive evidence)', () => 
       expect(kinds).toContain('persistence.entity:witnessed:engine-observed');
       const outcome = gradeClaim(scope.session.testId, records);
       expect(outcome.verdict).toBe('satisfied');
+    } finally {
+      await scope.dispose();
+    }
+  });
+
+  it('proves a natural-key browser create with entity-scoped absence and no adapter list', async () => {
+    const scope = await scaffold('natural-key-create-test', undefined, undefined, 'natural-key');
+    try {
+      const channel = {
+        sessionId: scope.session.sessionId,
+        sessionToken: scope.session.sessionToken,
+        testId: scope.session.testId,
+      };
+      const registered = await post(scope, '/browser/surface', {
+        ...channel,
+        surface: scope.surface,
+      });
+      expect(registered.status).toBe(200);
+
+      const action = await post(scope, '/browser/action', {
+        ...channel,
+        claimIds: [CLAIM],
+        operation: 'create',
+        entityId: 'acc-1',
+        fields: { first_name: 'Ada', last_name: 'Lovelace' },
+      });
+      expect(action.status, JSON.stringify(action.json)).toBe(200);
+      const actionBody = action.json as Record<string, unknown>;
+      expect(actionBody['entityId']).toBe('acc-1');
+
+      const anchorId = actionBody['anchorId'] as string;
+      const visible = await post(scope, '/browser/visible', {
+        ...channel,
+        claimIds: [CLAIM],
+        entityId: 'acc-1',
+        operation: 'create',
+        anchorId,
+      });
+      expect(visible.status, JSON.stringify(visible.json)).toBe(200);
+      const observed = await post(scope, '/witness/http-observation', {
+        ...channel,
+        claimIds: [CLAIM],
+        method: 'POST',
+        path: '/accounts',
+      });
+      expect(observed.status, JSON.stringify(observed.json)).toBe(200);
+
+      const persisted = await post(scope, '/witness/persistence', {
+        ...channel,
+        resourceId: RESOURCE,
+        entityId: 'acc-1',
+        claimId: CLAIM,
+        preObservationId: actionBody['preObservationId'] as string,
+        anchorId,
+      });
+      expect(persisted.status, JSON.stringify(persisted.json)).toBe(200);
+
+      const records = await ledgerRecords(scope);
+      const persistence = records.find((record) => record.kind === 'persistence.entity');
+      expect(persistence?.payload).toMatchObject({ before: { entityAbsent: true }, found: true });
+      expect(gradeClaim(scope.session.testId, records).verdict).toBe('satisfied');
     } finally {
       await scope.dispose();
     }

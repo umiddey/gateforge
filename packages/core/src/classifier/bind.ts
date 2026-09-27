@@ -43,6 +43,8 @@ export interface RunClassificationInput {
   policy: ClassificationPolicy;
   /** Reviewed adapter names available for binding. */
   adapters: readonly string[];
+  /** Enable host-derived lifecycle defaults for complete detector scans. */
+  deriveLifecycleDefaults?: boolean;
   scan?: {
     requestedPaths: string[];
     scannedPaths: string[];
@@ -141,6 +143,9 @@ function bindDecision(
       contradictions: bound.contradictions.map((entry) => ({ ...entry })),
       unresolvedDimensions: [...bound.unresolvedDimensions],
       decisionFingerprint: bound.decisionFingerprint,
+      ...(bound.lifecycleDerivation !== undefined
+        ? { lifecycleDerivation: bound.lifecycleDerivation.map((entry) => ({ ...entry })) }
+        : {}),
     },
   } as GraphResource;
 }
@@ -163,6 +168,7 @@ export function runClassification(input: RunClassificationInput): GraphClassific
     authority: input.authority ? [...input.authority] : [],
     policy: input.policy,
     adapters: input.adapters,
+    deriveLifecycleDefaults: input.deriveLifecycleDefaults,
     scan: {
       requestedPaths: input.scan?.requestedPaths ?? [],
       scannedPaths: input.scan?.scannedPaths ?? [],

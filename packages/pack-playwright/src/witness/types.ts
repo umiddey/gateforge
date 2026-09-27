@@ -676,6 +676,8 @@ export interface EvidenceAdapter {
    * absent the witness refuses pre-observations for the resource.
    */
   list?: (ctx: AdapterContext) => Promise<unknown[]> | unknown[];
+  /** Enables entity-scoped create absence checks without a collection list. */
+  identity?: 'natural-key';
   /** Declares normalized fields the adapter projects for persistence evidence. */
   fields?: readonly string[];
   /** Projects the raw body onto {entityId, fields} — stamped from the RESPONSE. */
