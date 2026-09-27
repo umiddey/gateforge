@@ -26,6 +26,8 @@ import { resolveStateDir } from '../src/state.js';
 import { runtimeReuseDigest } from '../src/runtime.js';
 import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
 import { loadDocsExclusions } from '../src/docs-exclusions.js';
+import { loadCacheExclusions } from '../src/cache-exclusions.js';
+import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { FIXED_AT, installFixture } from './helpers.js';
 
 /** Loads the fixture config from an absolute path. */
@@ -171,36 +173,56 @@ describe('input snapshot (§11.2)', () => {
     });
   });
 
-  it('keeps ignored Python cache bytes strict unless explicitly excluded', async () => {
+  it('keeps ignored Python bytecode strict unless an exact file is owner-excluded', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
+      const cacheFile = 'src/__pycache__/accounts.cpython-313.pyc';
       repo.writeFiles({
-        '.gitignore': '.pytest_cache/\n',
-        '.pytest_cache/v/state': 'first\n',
+        '.gitignore': 'src/__pycache__/\n',
+        [cacheFile]: 'first-bytecode\n',
+        '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - \"${cacheFile}\"\n`,
       });
+      const config = fixtureConfig(repo);
+      const exclusions = loadCacheExclusions(repo.root, config);
+      expect(exclusions).toEqual([cacheFile]);
+      const approvedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
       const stateDir = resolveStateDir(repo.root);
       const gitDir = resolveGitDir(repo.root, process.env);
-      const beforeStrict = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
-      const beforeExcluded = Reflect.apply(
-        computeCandidateTreeId,
-        undefined,
-        [gitDir, repo.root, process.env, stateDir, 'record', [], [], ['.pytest_cache']] as unknown as Parameters<
-          typeof computeCandidateTreeId
-        >,
+      if (gitDir === null) throw new Error('test repository has no Git directory');
+      const strictInput = computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest;
+      const approvedInput = computeInputSnapshot({
+        cwd: repo.root,
+        config,
+        stateDir,
+        cacheExclusions: exclusions,
+      }).inputDigest;
+      const strictTree = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+      const approvedTree = computeCandidateTreeId(
+        gitDir,
+        repo.root,
+        process.env,
+        stateDir,
+        'record',
+        [],
+        [],
+        exclusions,
       );
 
-      repo.writeFiles({ '.pytest_cache/v/state': 'changed\n' });
-      const afterStrict = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
-      const afterExcluded = Reflect.apply(
-        computeCandidateTreeId,
-        undefined,
-        [gitDir, repo.root, process.env, stateDir, 'record', [], [], ['.pytest_cache']] as unknown as Parameters<
-          typeof computeCandidateTreeId
-        >,
-      );
+      repo.writeFiles({ [cacheFile]: 'rewritten-bytecode\n' });
 
-      expect(afterStrict).not.toBe(beforeStrict);
-      expect(afterExcluded).toBe(beforeExcluded);
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest).not.toBe(strictInput);
+      expect(
+        computeInputSnapshot({ cwd: repo.root, config, stateDir, cacheExclusions: exclusions }).inputDigest,
+      ).toBe(approvedInput);
+      expect(computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record')).not.toBe(strictTree);
+      expect(
+        computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record', [], [], exclusions),
+      ).toBe(approvedTree);
+      expect(trustedPolicyDigestForConfig(repo.root, config)).toBe(approvedPolicyDigest);
+      repo.writeFiles({
+        '.gateforge/cache-exclusions.yml': `# owner approval revision\nschemaVersion: 1\nfiles:\n  - \"${cacheFile}\"\n`,
+      });
+      expect(trustedPolicyDigestForConfig(repo.root, config)).not.toBe(approvedPolicyDigest);
     });
   });
   it('rejects exclusions that overlap source, gate inputs, or symlinks', async () => {

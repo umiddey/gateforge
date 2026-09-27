@@ -127,6 +127,7 @@ import {
 import { evaluateRun, type EvaluateInput } from '../evaluate.js';
 import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
 import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
+import { CACHE_EXCLUSIONS_GUARANTEE, loadCacheExclusions } from '../cache-exclusions.js';
 import {
   collectInputFiles,
   computeInputSnapshot,
@@ -386,6 +387,22 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
   // fixture call answers 401 (x-gateforge-run mismatch).
   const runToken = options.runToken;
   const config = loadConfigAt(io.cwd);
+  const cacheExclusions = loadCacheExclusions(io.cwd, config);
+  const cachePolicyDigest = cacheExclusions.length > 0 ? trustedPolicyDigestForConfig(io.cwd, config) : null;
+  const cacheApprovalResolution =
+    cacheExclusions.length > 0
+      ? resolveApprovedPolicyDigest({ env: io.env, candidateCwd: io.cwd, candidateConfig: config })
+      : null;
+  const cachePolicyGate =
+    cachePolicyDigest === null || cacheApprovalResolution === null
+      ? null
+      : evaluateApprovedPolicy(cacheApprovalResolution, cachePolicyDigest, true);
+  if (cachePolicyGate?.status === 'blocked') {
+    writeLine(io.stderr, `test-gates: ${cachePolicyGate.cause}: ${cachePolicyGate.detail}`);
+    writeLine(io.stderr, `next action: ${cachePolicyGate.nextAction}`);
+    return 1;
+  }
+  const cacheApprovalDigest = cachePolicyGate?.status === 'enforced' ? cachePolicyGate.approved : null;
   const stateDir = resolveStateDir(io.cwd, out);
   const verifierKeyring = options.verifierKeyring ?? resolveVerifierKeyring(io.cwd, io.env, [stateDir]);
   const witnessVerifierKey = verifierKeyring?.active.key;
@@ -397,7 +414,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
   let preFiles: SnapshotFileEntry[] | null = null;
   let snapshotUnavailable = false;
   try {
-    preFiles = collectInputFiles(io.cwd, config, stateDir);
+    preFiles = collectInputFiles(io.cwd, config, stateDir, [], [], cacheExclusions);
   } catch (error) {
     if (error instanceof SnapshotUnavailableError) {
       snapshotUnavailable = true;
@@ -424,7 +441,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
   let trustedDigest: string | null = null;
   if (!snapshotUnavailable) {
     try {
-      const postDiscovery = collectInputFiles(io.cwd, config, stateDir);
+      const postDiscovery = collectInputFiles(io.cwd, config, stateDir, [], [], cacheExclusions);
       const drift =
         preFiles === null ? [] : diffInputFiles(preFiles, postDiscovery);
       if (drift.length > 0) {
@@ -444,6 +461,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
           id: plugin.id,
           version: plugin.version,
         })),
+        cacheExclusions,
       }).inputDigest;
     } catch (error) {
       if (error instanceof UsageError) throw error;
@@ -568,7 +586,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
   let changedInputs = false;
   if (!snapshotUnavailable && preFiles !== null) {
     try {
-      const postSuite = collectInputFiles(io.cwd, config, stateDir);
+      const postSuite = collectInputFiles(io.cwd, config, stateDir, [], [], cacheExclusions);
       changedInputs = diffInputFiles(preFiles, postSuite).length > 0;
     } catch {
       // A post-suite inventory failure is itself evidence the tree is
@@ -615,6 +633,26 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
       changedInputs,
     },
   });
+  const diagnosticContext =
+    cacheExclusions.length === 0
+      ? undefined
+      : {
+          scope: 'full' as const,
+          candidateTreeId: null,
+          inputDigest: expectedDigest,
+          evidenceState: snapshotUnavailable
+            ? 'snapshot-unavailable'
+            : changedInputs
+              ? 'inputs-changed-during-run'
+              : 'observed',
+          authority: 'non-authoritative' as const,
+          cacheExclusions: {
+            files: cacheExclusions,
+            approvalDigest: cacheApprovalDigest,
+            approvalStatus: 'matched' as const,
+            guarantee: CACHE_EXCLUSIONS_GUARANTEE,
+          },
+        };
 
   const report = renderRun(evaluated.verdicts, {
     format,
@@ -622,6 +660,8 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
     waiverCounts: evaluated.waiverCounts,
     run: manifest,
     toolVersion: VERSION,
+    lifecycleDerivation: pipeline.lifecycleDerivation,
+    diagnosticContext,
   });
   writeLine(io.stdout, report);
 
@@ -633,6 +673,8 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
       waiverCounts: evaluated.waiverCounts,
       run: manifest,
       toolVersion: VERSION,
+      lifecycleDerivation: pipeline.lifecycleDerivation,
+      diagnosticContext,
     }),
   );
 
@@ -703,6 +745,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   const runtimeReuseMounts = options.runtimeReuseMounts ?? [];
   const config = loadConfigAt(io.cwd);
   const docsExclusions = loadDocsExclusions(io.cwd, config);
+  const cacheExclusions = loadCacheExclusions(io.cwd, config);
   const stateDir = resolveStateDir(io.cwd, out);
   const verifierKeyring = options.verifierKeyring ?? resolveVerifierKeyring(io.cwd, io.env, [stateDir]);
   const witnessVerifierKey = verifierKeyring?.active.key;
@@ -724,7 +767,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let preFiles: SnapshotFileEntry[] | null = null;
   let snapshotUnavailable = false;
   try {
-    preFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
+    preFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions, cacheExclusions);
   } catch (error) {
     if (error instanceof SnapshotUnavailableError) snapshotUnavailable = true;
     else if (error instanceof UnsupportedSnapshotError) throw new UsageError(`unsupported input snapshot: ${error.message}`);
@@ -751,7 +794,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let expectedDigest: string | null = null;
   let inputSnapshot: InputSnapshot | null = null;
   if (!snapshotUnavailable) {
-    const postDiscovery = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
+    const postDiscovery = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions, cacheExclusions);
     const drift = preFiles === null ? [] : diffInputFiles(preFiles, postDiscovery);
     if (drift.length > 0) {
       throw new UsageError(
@@ -770,6 +813,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       runtimeReuseDigest,
       runtimeReuseMounts,
       docsExclusions,
+      cacheExclusions,
     });
     expectedDigest = inputSnapshot.evidenceInputDigest;
   }
@@ -797,7 +841,16 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     options.fixedCandidateTreeId ??
     (freezeGitDir === null
       ? null
-      : computeCandidateTreeId(freezeGitDir, io.cwd, io.env, stateDir, 'record', runtimeReuseMounts, docsExclusions));
+      : computeCandidateTreeId(
+          freezeGitDir,
+          io.cwd,
+          io.env,
+          stateDir,
+          'record',
+          runtimeReuseMounts,
+          docsExclusions,
+          cacheExclusions,
+        ));
   const frozenParentSha = options.fixedParentSha !== undefined ? options.fixedParentSha : parentSha(io.cwd);
 
   // 2. Catalog + mappings (Phase 3 resolver) → expected set + claim
@@ -817,6 +870,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     // failure is honest data: the suite's runner summary turns
     // `unavailable`, `inventoryComplete` goes false, and the gate blocks
     // TEST_INVENTORY_INCOMPLETE — never a silently narrower inventory.
+    const discovered = await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true });
     catalog = discovered.catalog;
     nativeClaims = discovered.nativeClaims;
     nativeInstances = discovered.nativeInstances;
@@ -842,7 +896,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   const policyGate = evaluateApprovedPolicy(
     resolveApprovedPolicyDigest({ env: io.env, candidateCwd: io.cwd, candidateConfig: config }),
     trustedPolicy,
-    config.enforcement?.strictE2E === true || docsExclusions.length > 0,
+    config.enforcement?.strictE2E === true || docsExclusions.length > 0 || cacheExclusions.length > 0,
   );
   if (policyGate.status === 'blocked') {
     if (!options.resultOnly) clearGateReceipt(stateDir);
@@ -1037,6 +1091,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       waiverCounts: evaluated.waiverCounts,
       run: { ...pipeline.manifest, invocationId, inputDigest: expectedDigest ?? undefined },
       toolVersion: VERSION,
+      lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext: {
         scope: options.scope ?? 'full',
         candidateTreeId: frozenTreeId,
@@ -1053,6 +1108,16 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
                 guarantee: DOCS_EXCLUSIONS_GUARANTEE,
               },
             }),
+            ...(cacheExclusions.length === 0
+              ? {}
+              : {
+                  cacheExclusions: {
+                    files: cacheExclusions,
+                    approvalDigest: approvedPolicyDigest ?? trustedPolicy,
+                    approvalStatus: 'matched' as const,
+                    guarantee: CACHE_EXCLUSIONS_GUARANTEE,
+                  },
+                }),
       },
     });
     writeLine(io.stdout, report);
@@ -1123,6 +1188,24 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       waiverCounts: evaluated.waiverCounts,
       run: { ...pipeline.manifest, invocationId, inputDigest: expectedDigest ?? undefined },
       toolVersion: VERSION,
+      lifecycleDerivation: pipeline.lifecycleDerivation,
+      diagnosticContext: {
+        scope: options.scope ?? 'full',
+        candidateTreeId: frozenTreeId,
+        inputDigest: expectedDigest,
+        evidenceState: snapshotUnavailable ? 'snapshot-unavailable' : 'not-executed',
+        authority: options.resultOnly ? 'non-authoritative' : 'authoritative',
+        ...(cacheExclusions.length === 0
+          ? {}
+          : {
+              cacheExclusions: {
+                files: cacheExclusions,
+                approvalDigest: approvedPolicyDigest ?? trustedPolicy,
+                approvalStatus: 'matched' as const,
+                guarantee: CACHE_EXCLUSIONS_GUARANTEE,
+              },
+            }),
+      },
     });
     writeLine(io.stdout, report);
     writeLine(
@@ -1500,7 +1583,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let changedInputs = false;
   if (!snapshotUnavailable && preFiles !== null) {
     try {
-      const postSuite = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
+      const postSuite = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions, cacheExclusions);
       changedInputs = diffInputFiles(preFiles, postSuite).length > 0;
     } catch {
       changedInputs = true;
@@ -1647,6 +1730,16 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
             guarantee: DOCS_EXCLUSIONS_GUARANTEE,
           },
         }),
+    ...(cacheExclusions.length === 0
+      ? {}
+      : {
+          cacheExclusions: {
+            files: cacheExclusions,
+            approvalDigest: approvedPolicyDigest ?? trustedPolicy,
+            approvalStatus: 'matched' as const,
+            guarantee: CACHE_EXCLUSIONS_GUARANTEE,
+          },
+        }),
   };
   const report = renderRun(evaluated.verdicts, {
     format,
@@ -1654,6 +1747,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     waiverCounts: evaluated.waiverCounts,
     run: manifest,
     toolVersion: VERSION,
+    lifecycleDerivation: pipeline.lifecycleDerivation,
     execution: executionSummary,
     diagnosticContext,
   });
@@ -1666,6 +1760,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       waiverCounts: evaluated.waiverCounts,
       run: manifest,
       toolVersion: VERSION,
+      lifecycleDerivation: pipeline.lifecycleDerivation,
       execution: executionSummary,
       diagnosticContext,
     }),
@@ -1687,7 +1782,16 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   const resultTreeId =
     resultGitDir === null
       ? null
-      : computeCandidateTreeId(resultGitDir, io.cwd, io.env, stateDir, 'record', runtimeReuseMounts, docsExclusions);
+      : computeCandidateTreeId(
+          resultGitDir,
+          io.cwd,
+          io.env,
+          stateDir,
+          'record',
+          runtimeReuseMounts,
+          docsExclusions,
+          cacheExclusions,
+        );
   if (resultTreeId !== frozenTreeId) {
     writeLine(
       io.stderr,

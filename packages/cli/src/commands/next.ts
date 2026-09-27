@@ -51,6 +51,7 @@ import { resolveProvider } from '../providers.js';
 import { computeEvaluationScope, detectStagedWorkingTreeMismatches } from '../scope.js';
 import { httpRoutesView, resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags, VERIFIER_KEY_ENV } from './common.js';
+import { loadCacheExclusions } from '../cache-exclusions.js';
 
 export const NEXT_USAGE = 'usage: gateforge next [--changed] [--json]';
 
@@ -185,6 +186,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
 
   const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
   const config = loadConfigAt(io.cwd);
+  const cacheExclusions = loadCacheExclusions(io.cwd, config);
   const providerIdentity: ChangedProvider = diffScoped
     ? resolveProvider(config.changed.provider, io.cwd, io.env).provider
     : 'all-files';
@@ -196,7 +198,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   let preFiles: SnapshotFileEntry[] | null = null;
   let snapshotUnavailable = false;
   try {
-    preFiles = collectInputFiles(io.cwd, config, stateDir);
+    preFiles = collectInputFiles(io.cwd, config, stateDir, [], [], cacheExclusions);
   } catch (error) {
     if (error instanceof SnapshotUnavailableError) {
       snapshotUnavailable = true;
@@ -220,7 +222,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   let changedInputs = false;
   if (!snapshotUnavailable) {
     try {
-      const postFiles = collectInputFiles(io.cwd, config, stateDir);
+      const postFiles = collectInputFiles(io.cwd, config, stateDir, [], [], cacheExclusions);
       if (preFiles !== null && diffInputFiles(preFiles, postFiles).length > 0) {
         changedInputs = true;
       } else {
@@ -235,6 +237,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
             id: plugin.id,
             version: plugin.version,
           })),
+          cacheExclusions,
         }).inputDigest;
       }
     } catch (error) {

@@ -43,6 +43,7 @@ import { runCheckGate } from './check.js';
 import { runSupervisedTestGates } from './test-gates.js';
 import { evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import { loadDocsExclusions } from '../docs-exclusions.js';
+import { loadCacheExclusions } from '../cache-exclusions.js';
 
 export const PRE_COMMIT_USAGE =
   'usage: gateforge pre-commit --scope staged|full\n' +
@@ -107,6 +108,7 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     const candidateStateDir = resolveStateDir(checkoutDir);
     const checkoutConfig = loadConfigAt(checkoutDir);
     const docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
+    const cacheExclusions = loadCacheExclusions(checkoutDir, checkoutConfig);
     // The runtime document contains executable commands. Evaluate the same
     // owner-approved policy gate used by supervised runs BEFORE any prepare
     // or service command can start in the staged checkout.
@@ -118,7 +120,7 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     const policyGate = evaluateApprovedPolicy(
       policyResolution,
       trustedPolicyDigestForConfig(checkoutDir, checkoutConfig),
-      checkoutConfig.enforcement?.strictE2E === true || docsExclusions.length > 0,
+      checkoutConfig.enforcement?.strictE2E === true || docsExclusions.length > 0 || cacheExclusions.length > 0,
     );
     if (policyGate.status === 'blocked') {
       return renderCandidateBlock(io, policyGate.detail, policyGate.nextAction);
@@ -167,6 +169,7 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
             'record',
             runtimeReuseMounts,
             docsExclusions,
+            cacheExclusions,
           );
     const runCode = await runSupervisedTestGates(candidateIo, {
       out: undefined,

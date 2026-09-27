@@ -57,6 +57,7 @@ import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPol
 import { rejectUnknownFlags, VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from './commands/common.js';
 import { resolveVerifierKeyring, verifyGateReceiptWithKeyring } from './verifier-keys.js';
 import { loadDocsExclusions } from './docs-exclusions.js';
+import { loadCacheExclusions } from './cache-exclusions.js';
 
 export const BROKER_USAGE =
   'usage: gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]\n' +
@@ -221,6 +222,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
   }
   const digests = recomputeWorkspaceDigests(workspace);
   const docsExclusions = loadDocsExclusions(workspace, digests.config);
+  const cacheExclusions = loadCacheExclusions(workspace, digests.config);
   const treeId = computeCandidateTreeId(
     authorityGitDir,
     workspace,
@@ -229,6 +231,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
     'reject',
     [],
     docsExclusions,
+    cacheExclusions,
   );
 
   // 1b. Approved-policy ownership gate (review 2026-09-13 P1 #5): the
@@ -246,7 +249,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
   const policyGate = evaluateApprovedPolicy(
     policyResolution,
     digests.trustedPolicyDigest,
-    digests.config.enforcement?.strictE2E === true || docsExclusions.length > 0,
+    digests.config.enforcement?.strictE2E === true || docsExclusions.length > 0 || cacheExclusions.length > 0,
   );
   if (policyGate.status === 'blocked') {
     throw new BrokerRejection(

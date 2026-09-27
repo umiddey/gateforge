@@ -52,6 +52,7 @@ import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';
 import { normalizeRepoModule } from './input-snapshot.js';
 import { DOCS_EXCLUSIONS_PATH } from './docs-exclusions.js';
+import { CACHE_EXCLUSIONS_PATH } from './cache-exclusions.js';
 import type { GateforgeConfig } from '@gate-forge/core';
 import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
@@ -166,6 +167,9 @@ export function computeTrustedPolicyDigest(
   const docsExclusionsEntry = existsSync(join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/')))
     ? [entry(DOCS_EXCLUSIONS_PATH, DOCS_EXCLUSIONS_PATH, true)]
     : [];
+  const cacheExclusionsEntry = existsSync(join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/')))
+    ? [entry(CACHE_EXCLUSIONS_PATH, CACHE_EXCLUSIONS_PATH, true)]
+    : [];
   return trustedPolicyDigest([
     entry('.gateforge.yml', configPaths.config, true),
     entry(configPaths.policies, configPaths.policies, true),
@@ -173,6 +177,7 @@ export function computeTrustedPolicyDigest(
     behaviorEntry,
     runtimeEntry,
     ...docsExclusionsEntry,
+    ...cacheExclusionsEntry,
     entry('.gateforge/test-map.yml', configPaths.sidecar, false),
     ...adapterEntries,
     ...waiverEntries,

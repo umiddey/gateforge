@@ -85,6 +85,7 @@ import { resolveProvider } from '../providers.js';
 import { httpRoutesView, resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
+import { loadCacheExclusions } from '../cache-exclusions.js';
 
 export const TESTS_USAGE = `\
 usage: gateforge tests discover [--json] [--pytest]
@@ -955,6 +956,7 @@ async function diagnoseSubcommand(
   const asJson = options['json'] === true;
   const suiteName = stringFlag(options, 'suite');
   const config = loadConfigAt(io.cwd);
+  const cacheExclusions = loadCacheExclusions(io.cwd, config);
   const stateDir = resolveStateDir(io.cwd);
 
   // The alarm runs WITHOUT a browser or witness (§3.5), but it still
@@ -963,7 +965,7 @@ async function diagnoseSubcommand(
   let preFiles: ReturnType<typeof collectInputFiles> | null = null;
   let snapshotUnavailable = false;
   try {
-    preFiles = collectInputFiles(io.cwd, config, stateDir);
+    preFiles = collectInputFiles(io.cwd, config, stateDir, [], [], cacheExclusions);
   } catch (error) {
     if (error instanceof SnapshotUnavailableError) {
       snapshotUnavailable = true;
@@ -982,7 +984,7 @@ async function diagnoseSubcommand(
   });
   let inputDigest: string | null = null;
   if (!snapshotUnavailable) {
-    const postDiscovery = collectInputFiles(io.cwd, config, stateDir);
+    const postDiscovery = collectInputFiles(io.cwd, config, stateDir, [], [], cacheExclusions);
     const drift = preFiles === null ? [] : diffInputFiles(preFiles, postDiscovery);
     if (drift.length > 0) {
       throw new UsageError(
@@ -997,6 +999,7 @@ async function diagnoseSubcommand(
       obligations: pipeline.policy.obligations,
       httpRoutes: httpRoutesView(pipeline.graph),
       plugins: pipeline.manifest.plugins.map((plugin) => ({ id: plugin.id, version: plugin.version })),
+      cacheExclusions,
     }).inputDigest;
   }
 

@@ -21,7 +21,7 @@
 import { canonicalJson, type JsonValue } from '../canonical-json.js';
 import { fingerprintObligation } from '../fingerprints.js';
 import { compareStrings } from '../graph/util.js';
-import type { ClassificationDecisionTrace } from '../classifier/schema.js';
+import type { ClassificationDecisionTrace, LifecycleDerivation } from '../classifier/schema.js';
 import type { BlockingEntry } from '../policy/index.js';
 import type { RunManifest } from '../schemas/run-manifest.js';
 import type { Verdict } from '../schemas/verdict.js';
@@ -56,6 +56,14 @@ export interface ScopeMetadata {
   expandedBecause: readonly string[];
 }
 
+/** One resource's visible lifecycle derivation for report consumers. */
+export interface LifecycleDerivationReportEntry extends LifecycleDerivation {
+  /** Plane-qualified resource id when classification resolved it. */
+  resourceId: string | null;
+  /** Bare resource name remains available when its id is unresolved. */
+  resourceName: string;
+}
+
 /** Measured work and whole-repository debt; descriptive only, never authorization. */
 export interface RunExecutionSummary {
   scope: 'full' | 'changed';
@@ -76,6 +84,13 @@ export interface DiagnosticContext {
   /** Owner-approved documentation folders and their reduced trust guarantee. */
   docsExclusions?: {
     folders: readonly string[];
+    approvalDigest: string | null;
+    approvalStatus: 'matched' | 'mismatch' | 'missing' | 'invalid';
+    guarantee: string;
+  };
+  /** Owner-approved Python bytecode files and their reduced trust guarantee. */
+  cacheExclusions?: {
+    files: readonly string[];
     approvalDigest: string | null;
     approvalStatus: 'matched' | 'mismatch' | 'missing' | 'invalid';
     guarantee: string;
@@ -113,6 +128,8 @@ export interface RenderRunOptions {
    * fingerprint change) is auditable — never authoritative input.
    */
   classificationTraces?: Record<string, ClassificationDecisionTrace>;
+  /** Lifecycle decisions derived from detector facts, visible in every report format. */
+  lifecycleDerivation?: readonly LifecycleDerivationReportEntry[];
   /**
    * Adoption-baseline forgiveness counts (phase 8 C), included in the
    * json summary and the text report when provided. Baselined debt is
@@ -190,6 +207,31 @@ export function renderRun(
   }
   if (options.format === 'text') return textReport(entries, options, blocking);
   throw new Error(`renderRun: unknown format '${String(options.format)}'`);
+}
+
+/**
+ * Orders lifecycle derivations by resource and canonical operation order.
+ *
+ * Args:
+ *   entries: lifecycle derivation records from classification.
+ *
+ * Returns:
+ *   LifecycleDerivationReportEntry[]: a sorted copy for stable reports.
+ */
+function orderedLifecycleDerivations(
+  entries: readonly LifecycleDerivationReportEntry[],
+): LifecycleDerivationReportEntry[] {
+  const operationOrder: Record<LifecycleDerivation['operation'], number> = {
+    read: 0,
+    update: 1,
+    delete: 2,
+  };
+  return [...entries].sort(
+    (left, right) =>
+      compareStrings(left.resourceId ?? left.resourceName, right.resourceId ?? right.resourceName) ||
+      compareStrings(left.resourceName, right.resourceName) ||
+      operationOrder[left.operation] - operationOrder[right.operation],
+  );
 }
 
 /** Per-verdict summary counts keyed by verdict name. */
@@ -281,6 +323,9 @@ function jsonReport(
     // Canonical JSON sorts keys, so insertion order is irrelevant.
     report['classifications'] = options.classificationTraces;
   }
+  if (options.lifecycleDerivation !== undefined && options.lifecycleDerivation.length > 0) {
+    report['lifecycleDerivation'] = orderedLifecycleDerivations(options.lifecycleDerivation);
+  }
   if (options.execution !== undefined) report['execution'] = options.execution;
   if (options.diagnosticContext !== undefined) report['diagnosticContext'] = options.diagnosticContext;
   return report;
@@ -359,6 +404,9 @@ function sarifReport(
           scope: { mode: scope.mode, expandedBecause: [...scope.expandedBecause] },
           ...(options.execution === undefined ? {} : { execution: options.execution }),
           ...(options.diagnosticContext === undefined ? {} : { diagnosticContext: options.diagnosticContext }),
+          ...(options.lifecycleDerivation === undefined || options.lifecycleDerivation.length === 0
+            ? {}
+            : { lifecycleDerivation: orderedLifecycleDerivations(options.lifecycleDerivation) }),
         },
         // Blocking policy entries (unclassified/unresolved resources,
         // detector findings, stale references) are not obligation
@@ -462,6 +510,35 @@ function textReport(
           `approvalDigest=${context.docsExclusions.approvalDigest ?? '<missing>'} ` +
           `guarantee="${context.docsExclusions.guarantee}"`,
       );
+    }
+    if (context.cacheExclusions !== undefined) {
+      lines.push(
+        `Python cache exclusions: files=${context.cacheExclusions.files.join(',')} ` +
+          `approvalStatus=${context.cacheExclusions.approvalStatus} ` +
+          `approvalDigest=${context.cacheExclusions.approvalDigest ?? '<missing>'} ` +
+          `guarantee=\"${context.cacheExclusions.guarantee}\"`,
+      );
+    }
+  }
+  if (options.lifecycleDerivation !== undefined && options.lifecycleDerivation.length > 0) {
+    const grouped = new Map<string, LifecycleDerivationReportEntry[]>();
+    for (const entry of orderedLifecycleDerivations(options.lifecycleDerivation)) {
+      const key = `${entry.resourceId ?? ''}\u0000${entry.resourceName}`;
+      const records = grouped.get(key);
+      if (records === undefined) grouped.set(key, [entry]);
+      else records.push(entry);
+    }
+    lines.push('', 'lifecycle derivation (detector facts):');
+    for (const records of grouped.values()) {
+      const first = records[0];
+      if (first === undefined) continue;
+      const detail = records
+        .map(
+          (entry) =>
+            `${entry.operation}: ${entry.disposition} (${entry.reason}) — ${entry.detail}`,
+        )
+        .join('; ');
+      lines.push(`  ${first.resourceId ?? first.resourceName}: ${detail}`);
     }
   }
   if (options.waiverCounts !== undefined) {

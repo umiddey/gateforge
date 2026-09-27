@@ -122,15 +122,25 @@ function plumbing(
 }
 
 /**
- * Collects raw tree entries by walking `workspace` (excluding a root
- * `.git` entry and, when given, the run-state output directory — sealed
- * receipts and execution records are run OUTPUTS, never candidate inputs,
- * exactly as the input snapshot treats them). Rejects anything that is
- * not a regular file.
+ * Collects raw tree entries by walking the workspace, excluding run state
+ * and approved documentation/cache paths. Rejects anything that is not a
+ * regular file.
+ *
+ * Args:
+ *   gitDir: authority object store used to hash tree entries.
+ *   env: sanitized child-process environment.
+ *   workspace: absolute candidate root.
+ *   excludeDir: absolute run-state path, if any.
+ *   symlinks: reject or record symlink entries.
+ *   reuseMounts: explicitly approved runtime dependency mounts.
+ *   docsExclusions: approved documentation directories.
+ *   cacheExclusions: exact approved Python bytecode files.
+ *
+ * Returns:
+ *   TreeEntry[]: raw candidate entries after approved exclusions.
  *
  * Throws:
- *   UsageError: on unreadable directories (fail closed — a hole in the
- *   walk must never become a silent omission) or unsupported entries.
+ *   UsageError: unreadable directories or unsupported entries.
  */
 function collectEntries(
   gitDir: string,
@@ -140,6 +150,7 @@ function collectEntries(
   symlinks: 'reject' | 'record',
   reuseMounts: readonly RuntimeReuseMount[],
   docsExclusions: readonly string[],
+  cacheExclusions: readonly string[],
 ): TreeEntry[] {
   // Repo-relative posix prefix of the excluded output tree (null = none).
   // Only a directory strictly INSIDE the workspace can be excluded; an
@@ -155,7 +166,8 @@ function collectEntries(
   }
   const excluded = (rel: string): boolean =>
     (excludePrefix !== null && (rel === excludePrefix || rel.startsWith(`${excludePrefix}/`))) ||
-    docsExclusions.some((folder) => rel === folder || rel.startsWith(`${folder}/`));
+    docsExclusions.some((folder) => rel === folder || rel.startsWith(`${folder}/`)) ||
+    cacheExclusions.includes(rel);
   const inspectExcludedDirectory = (directory: string, relativeDirectory: string): void => {
     let handle;
     try {
@@ -218,6 +230,12 @@ function collectEntries(
           throw new UsageError(
             `candidate tree ingestion: cannot inspect '${rel}': ${(error as Error).message}`,
           );
+        }
+        if (cacheExclusions.includes(rel)) {
+          if (stat.isSymbolicLink() || !stat.isFile()) {
+            throw new UsageError(`candidate tree ingestion: approved Python bytecode exclusion '${rel}' is not a regular file (fail closed)`);
+          }
+          continue;
         }
         if (docsExclusions.includes(rel)) {
           if (stat.isSymbolicLink() || !stat.isDirectory()) {
@@ -349,6 +367,8 @@ function buildLevel(
  *   symlinks: 'reject' (authority ingestion — symlink candidates cannot
  *   be verified) or 'record' (controller sealing — faithful git semantics:
  *   symlinks become 120000 blobs of the target string, never followed).
+ *   docsExclusions: owner-approved documentation folders to omit.
+ *   cacheExclusions: exact owner-approved Python bytecode files to omit.
  *
  * Returns:
  *   string: 40-char hex tree id pinned in the authority store.
@@ -364,6 +384,7 @@ export function computeCandidateTreeId(
   symlinks: 'reject' | 'record' = 'reject',
   reuseMounts: readonly RuntimeReuseMount[] = [],
   docsExclusions: readonly string[] = [],
+  cacheExclusions: readonly string[] = [],
 ): string {
   try {
     validateRuntimeReuseMounts(workspace, reuseMounts);
@@ -374,7 +395,16 @@ export function computeCandidateTreeId(
         : `candidate tree ingestion: runtime reuse boundary validation failed`,
     );
   }
-  const entries = collectEntries(gitDir, env, workspace, excludeDir ?? null, symlinks, reuseMounts, docsExclusions);
+  const entries = collectEntries(
+    gitDir,
+    env,
+    workspace,
+    excludeDir ?? null,
+    symlinks,
+    reuseMounts,
+    docsExclusions,
+    cacheExclusions,
+  );
   // Group by parent directory; build deepest-first so every subtree id
   // exists before its parent references it (mimics `git write-tree`).
   const filesByDir = new Map<string, TreeEntry[]>();

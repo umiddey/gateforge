@@ -227,6 +227,8 @@ export interface ComputeSnapshotInput {
   runtimeReuseMounts?: readonly RuntimeReuseMount[];
   /** Owner-declared documentation folders approved by the external policy pin. */
   docsExclusions?: readonly string[];
+  /** Exact owner-approved Python bytecode files approved by the external policy pin. */
+  cacheExclusions?: readonly string[];
 }
 
 /**
@@ -479,6 +481,9 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
   if (existsSync(join(cwd, '.gateforge/docs-exclusions.yml'))) {
     explicitFiles.push('.gateforge/docs-exclusions.yml');
   }
+  if (existsSync(join(cwd, '.gateforge/cache-exclusions.yml'))) {
+    explicitFiles.push('.gateforge/cache-exclusions.yml');
+  }
   for (const candidate of explicitFiles) {
     if (candidate.length > 0) paths.add(candidate);
   }
@@ -612,6 +617,23 @@ function collectGitInventory(cwd: string): { inventory: string[]; tracked: Set<s
   // Nonignored untracked files: new source counts before it is committed.
   for (const name of splitNul(gitNul(cwd, ['ls-files', '--others', '--exclude-standard', '-z']))) {
     paths.add(toPosix(name));
+  }
+  // Python bytecode is commonly gitignored, but remains part of strict
+  // input identity unless the owner explicitly excludes that exact path.
+  for (const name of splitNul(
+    gitNul(cwd, [
+      'ls-files',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '-z',
+      '--',
+      ':(glob)**/__pycache__/*.pyc',
+      ':(glob)**/__pycache__/*.pyo',
+    ]),
+  )) {
+    const path = toPosix(name);
+    if (/(?:^|\/)__pycache__\/[^/]+\.(?:pyc|pyo)$/.test(path)) paths.add(path);
   }
   return { inventory: [...paths].sort(compareStrings), tracked };
 }
@@ -845,8 +867,8 @@ export function digestSnapshot(files: readonly SnapshotFileEntry[], gateContext:
  * entries, canonical context, and digest.
  *
  * Args:
- *   input: cwd, config, stateDir, and (post-discovery) classifications,
- *   obligations, httpRoutes, and pinned plugins.
+ *   input: repository root, config, run state, optional post-discovery
+ *   classification context, and approved documentation/cache exclusions.
  *
  * Returns:
  *   InputSnapshot: full inventory, gate context, verifier format, and
@@ -865,6 +887,7 @@ export function computeInputSnapshot(input: ComputeSnapshotInput): InputSnapshot
     input.stateDir,
     input.runtimeReuseMounts,
     input.docsExclusions,
+    input.cacheExclusions,
   );
   const gateContext = buildGateContext(
     input.config,
@@ -894,9 +917,17 @@ export function computeInputSnapshot(input: ComputeSnapshotInput): InputSnapshot
  *   cwd: absolute repo root.
  *   config: validated `.gateforge.yml`.
  *   stateDir: absolute run-state directory.
+ *   runtimeReuseMounts: externally prepared dependencies bound by digest.
+ *   docsExclusions: owner-approved documentation folders to omit.
+ *   cacheExclusions: exact owner-approved Python bytecode files to omit.
  *
  * Returns:
  *   SnapshotFileEntry[]: sorted file entries (overlap-checked).
+ *
+ * Throws:
+ *   UsageError: an exclusion overlaps run state or a configured input.
+ *   SnapshotUnavailableError: no usable Git inventory.
+ *   UnsupportedSnapshotError: a required file cannot be captured.
  */
 export function collectInputFiles(
   cwd: string,
@@ -904,6 +935,7 @@ export function collectInputFiles(
   stateDir: string,
   runtimeReuseMounts: readonly RuntimeReuseMount[] = [],
   docsExclusions: readonly string[] = [],
+  cacheExclusions: readonly string[] = [],
 ): SnapshotFileEntry[] {
   const declared = collectDeclaredInputs(cwd, config);
   assertOutputDisjoint(cwd, stateDir, declared);
@@ -926,6 +958,26 @@ export function collectInputFiles(
       throw new UsageError(`documentation exclusion '${folder}' overlaps a configured scan or gate input (fail closed)`);
     }
   }
+  for (const file of cacheExclusions) {
+    const segments = file.split('/');
+    const cacheIndex = segments.lastIndexOf('__pycache__');
+    if (
+      file.length === 0 || file.startsWith('/') || file.includes('\\') ||
+      segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..') ||
+      cacheIndex !== segments.length - 2 || !/\.(?:pyc|pyo)$/.test(segments.at(-1) ?? '')
+    ) {
+      throw new UsageError(`invalid approved Python bytecode exclusion '${file}' (fail closed)`);
+    }
+    if (
+      statePrefix !== '' &&
+      (statePrefix === file || statePrefix.startsWith(`${file}/`) || file.startsWith(`${statePrefix}/`))
+    ) {
+      throw new UsageError(`Python bytecode exclusion '${file}' overlaps the run-state directory (fail closed)`);
+    }
+    if (declared.some((path) => !path.startsWith('absent:') && path === file)) {
+      throw new UsageError(`Python bytecode exclusion '${file}' overlaps a configured scan or gate input (fail closed)`);
+    }
+  }
   try {
     validateRuntimeReuseMounts(cwd, runtimeReuseMounts);
   } catch (error) {
@@ -938,6 +990,7 @@ export function collectInputFiles(
   const inventory = [...new Set([...declared, ...git.inventory])]
     .filter((path) => !isRuntimeReusePath(path.replace(/^absent:/, ''), runtimeReuseMounts))
     .filter((path) => path.startsWith('absent:') || !docsExclusions.some((folder) => path === folder || path.startsWith(`${folder}/`)))
+    .filter((path) => path.startsWith('absent:') || !cacheExclusions.includes(path))
     .sort(compareStrings);
   return buildFileEntries(cwd, inventory, git.tracked, stateDir);
 }

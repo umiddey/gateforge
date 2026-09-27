@@ -1614,4 +1614,57 @@ prepare:
       );
     });
   }, 180_000);
+  it('requires a matching owner pin and reports exact Python bytecode exclusions', async () => {
+    await withTempRepo({}, async (repo) => {
+      const cacheFile = 'generated/__pycache__/accounts.cpython-313.pyc';
+      installStrictFixture(repo);
+      repo.writeFiles({
+        '.gitignore': 'node_modules\ntest-results\nplaywright-report\n.playwright\n.gateforge/test-gates\ngenerated/__pycache__/\n',
+        '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - \"${cacheFile}\"\n`,
+        [cacheFile]: 'first-bytecode\n',
+      });
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'cache exclusion fixture']);
+      const config = loadConfigAt(repo.root);
+      const pin = trustedPolicyDigestForConfig(repo.root, config);
+      const args = ['check', '--require-e2e', '--format', 'json'];
+
+      const unpinned = await runWorkspaceCli(repo, args, { GATEFORGE_APPROVED_POLICY_DIGEST: '' });
+      expect(unpinned.code, `${unpinned.stdout}\n${unpinned.stderr}`).toBe(1);
+      const unpinnedReport = JSON.parse(unpinned.stdout) as {
+        diagnosticContext: { cacheExclusions?: { files: string[]; approvalStatus: string } };
+      };
+      expect(unpinnedReport.diagnosticContext.cacheExclusions).toMatchObject({
+        files: [cacheFile],
+        approvalStatus: 'missing',
+      });
+
+      const approved = await runWorkspaceCli(repo, args, { GATEFORGE_APPROVED_POLICY_DIGEST: pin });
+      expect(approved.code).toBe(1);
+      const approvedReport = JSON.parse(approved.stdout) as {
+        diagnosticContext: {
+          candidateTreeId: string | null;
+          inputDigest: string | null;
+          cacheExclusions?: { files: string[]; approvalStatus: string; approvalDigest: string | null };
+        };
+      };
+      expect(approvedReport.diagnosticContext.cacheExclusions).toMatchObject({
+        files: [cacheFile],
+        approvalStatus: 'matched',
+        approvalDigest: pin,
+      });
+      const approvedInput = approvedReport.diagnosticContext.inputDigest;
+      const approvedTree = approvedReport.diagnosticContext.candidateTreeId;
+
+      repo.writeFiles({ [cacheFile]: 'rewritten-bytecode\n' });
+      const changedCache = await runWorkspaceCli(repo, args, { GATEFORGE_APPROVED_POLICY_DIGEST: pin });
+      expect(changedCache.code).toBe(1);
+      const changedReport = JSON.parse(changedCache.stdout) as {
+        diagnosticContext: { candidateTreeId: string | null; inputDigest: string | null };
+      };
+      expect(changedReport.diagnosticContext.inputDigest).toBe(approvedInput);
+      expect(changedReport.diagnosticContext.candidateTreeId).toBe(approvedTree);
+    });
+  });
+
 });

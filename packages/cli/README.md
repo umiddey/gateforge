@@ -322,6 +322,20 @@ WASM, SVG, HTML, and unknown formats fail closed. This format allowlist does
 not prove that an allowed file cannot affect application or test behavior;
 the owner assertion and its reduced guarantee still apply.
 
+**Owner-declared Python bytecode exclusions (explicit trust mode).** By
+default, Python bytecode remains part of candidate and input identity. To
+exclude only exact generated cache files, run
+`gateforge init --cache-exclude src/__pycache__/module.cpython-313.pyc`.
+The command writes `.gateforge/cache-exclusions.yml` and prints the trusted
+policy digest to approve outside the repository. A matching protected
+`GATEFORGE_APPROVED_POLICY_DIGEST` pin is REQUIRED before a gate uses the
+list; changing an existing list requires `--confirm-cache-exclusions`.
+Only exact `.pyc` or `.pyo` files directly under `__pycache__` are allowed;
+globs, symlinks, configured inputs, and other file types fail closed. Reports
+show the exact files, pin status, and reduced trust guarantee. This is an
+owner assertion, not proof that the excluded bytecode cannot affect runtime
+behavior.
+
 **Managed mode** (config `enforcement.mode: managed`) — the literal
 no-bypass guarantee requires putting the authoritative Git metadata, commit
 service, gate executable, policy authority, and signing material OUTSIDE the

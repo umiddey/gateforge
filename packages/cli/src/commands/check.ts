@@ -86,6 +86,7 @@ import { resolveVerifierKeyring, type VerifierKeyring } from '../verifier-keys.j
 import { renderEndpointInventory } from '../endpoint-report.js';
 import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
 import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
+import { CACHE_EXCLUSIONS_GUARANTEE, loadCacheExclusions } from '../cache-exclusions.js';
 
 export const CHECK_USAGE =
   'usage: gateforge check [--changed] [--staged] [--require-e2e] [--format text|json|sarif]\n' +
@@ -224,6 +225,7 @@ async function stagedCheckCommand(
     // staged tree; only the marker-relevant empty dirs are mirrored).
     const checkoutConfig = loadConfigAt(checkoutDir);
     const docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
+    const cacheExclusions = loadCacheExclusions(checkoutDir, checkoutConfig);
     for (const dir of [checkoutConfig.adapters, checkoutConfig.waivers]) {
       const userDir = resolveRepoPath(io.cwd, dir);
       const checkoutPath = resolveRepoPath(checkoutDir, dir);
@@ -251,7 +253,7 @@ async function stagedCheckCommand(
         candidateConfig: checkoutConfig,
       }),
       candidatePolicyDigest,
-      checkoutConfig.enforcement?.strictE2E === true || docsExclusions.length > 0,
+      checkoutConfig.enforcement?.strictE2E === true || docsExclusions.length > 0 || cacheExclusions.length > 0,
     );
     if (policyGate.status === 'blocked') {
       releaseStagedCandidate(frozen);
@@ -371,9 +373,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // it verifies.
   const config = loadConfigAt(io.cwd);
   const docsExclusions = loadDocsExclusions(io.cwd, config);
-  const docsApprovalDigest = docsExclusions.length === 0 ? null : trustedPolicyDigestForConfig(io.cwd, config);
+  const cacheExclusions = loadCacheExclusions(io.cwd, config);
+  const hasOwnerExclusions = docsExclusions.length > 0 || cacheExclusions.length > 0;
+  const docsApprovalDigest = hasOwnerExclusions ? trustedPolicyDigestForConfig(io.cwd, config) : null;
   const docsApprovalResolution =
-    docsExclusions.length === 0
+    !hasOwnerExclusions
       ? null
       : resolveApprovedPolicyDigest({
           flag: options.approvedPolicyDigest,
@@ -409,7 +413,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   let preFiles: SnapshotFileEntry[] | null = null;
   let snapshotUnavailable = false;
   try {
-    preFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
+    preFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions, cacheExclusions);
   } catch (error) {
     if (error instanceof SnapshotUnavailableError) {
       snapshotUnavailable = true;
@@ -454,7 +458,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   let diagnosticEvidenceState = 'not-required';
   if (!snapshotUnavailable) {
     try {
-      const postFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions);
+      const postFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions, cacheExclusions);
       if (preFiles !== null && diffInputFiles(preFiles, postFiles).length > 0) {
         changedInputs = true;
       } else {
@@ -472,6 +476,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           runtimeReuseDigest,
           runtimeReuseMounts,
           docsExclusions,
+          cacheExclusions,
         });
       expectedDigest = currentSnapshot.inputDigest;
       }
@@ -750,7 +755,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       const gate = evaluateApprovedPolicy(
         resolution,
         candidatePolicyDigest,
-        config.enforcement?.strictE2E === true || docsExclusions.length > 0,
+        config.enforcement?.strictE2E === true || hasOwnerExclusions,
       );
       if (gate.status === 'blocked') {
         diagnosticEvidenceState = 'owner-policy-blocked';
@@ -772,7 +777,16 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             ? options.fixedCandidateTreeId
             : gitDir === null
               ? null
-              : computeCandidateTreeId(gitDir, io.cwd, io.env, stateDir, 'record', runtimeReuseMounts, docsExclusions);
+              : computeCandidateTreeId(
+                  gitDir,
+                  io.cwd,
+                  io.env,
+                  stateDir,
+                  'record',
+                  runtimeReuseMounts,
+                  docsExclusions,
+                  cacheExclusions,
+                );
         diagnosticCandidateTreeId = candidateTreeId;
         const load = loadReceiptFor(
           stateDir,
@@ -850,6 +864,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     baseline: evaluated.baselined ?? undefined,
     run: pipeline.manifest,
     toolVersion: VERSION,
+    lifecycleDerivation: pipeline.lifecycleDerivation,
     scope: { mode: scopeDecision.mode, expandedBecause: scopeDecision.expandedBecause },
     diagnosticContext: {
       scope: scopeDecision.mode === 'changed' ? 'changed' : 'full',
@@ -865,6 +880,16 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
               approvalDigest: docsApprovalResolution?.status === 'ok' ? docsApprovalResolution.digest : null,
               approvalStatus: docsApprovalStatus ?? 'missing',
               guarantee: DOCS_EXCLUSIONS_GUARANTEE,
+            },
+          }),
+      ...(cacheExclusions.length === 0
+        ? {}
+        : {
+            cacheExclusions: {
+              files: cacheExclusions,
+              approvalDigest: docsApprovalResolution?.status === 'ok' ? docsApprovalResolution.digest : null,
+              approvalStatus: docsApprovalStatus ?? 'missing',
+              guarantee: CACHE_EXCLUSIONS_GUARANTEE,
             },
           }),
     },

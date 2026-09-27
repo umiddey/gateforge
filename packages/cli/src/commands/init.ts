@@ -61,10 +61,17 @@ import {
   renderDocsExclusions,
   validateRequestedDocsFolders,
 } from '../docs-exclusions.js';
+import {
+  CACHE_EXCLUSIONS_GUARANTEE,
+  CACHE_EXCLUSIONS_PATH,
+  loadCacheExclusions,
+  renderCacheExclusions,
+  validateRequestedCacheFiles,
+} from '../cache-exclusions.js';
 export const INIT_USAGE =
   '[--no-scan] [--proof overlay|observe] [--blocking] [--pre-commit] [--mode changed|staged] ' +
   '[--witnessed staged|full] [--ci] [--no-ci] [--docs-exclude <folder,...> [--confirm-doc-exclusions]] ' +
-  '[--strict-e2e] [--planes] [--behavior]';
+  '[--cache-exclude <file,...> [--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--behavior]';
 
 /** Template for the complete-behavior owner document (plan §4.1). */
 export const BEHAVIOR_TEMPLATE = `\
@@ -629,6 +636,58 @@ async function resolveDocsExclusionsForInit(
   writeLine(io.stdout, 'tip: non-interactive init keeps full evidence identity; use --docs-exclude <folder,...> to opt in');
   return { folders: [], changed: false };
 }
+/**
+ * Resolves the init owner's explicit Python bytecode exclusion list.
+ *
+ * Args:
+ *   io: process context.
+ *   options: parsed init flags.
+ *   config: validated Gateforge configuration.
+ *
+ * Returns:
+ *   object: validated files and whether the declaration must be written.
+ *
+ * Throws:
+ *   UsageError: invalid flags or an unconfirmed owner-list change.
+ */
+function resolveCacheExclusionsForInit(
+  io: Io,
+  options: Readonly<Record<string, unknown>>,
+  config: ReturnType<typeof loadConfig>,
+): { files: string[]; changed: boolean } {
+  const current = loadCacheExclusions(io.cwd, config);
+  const declarationExists = existsSync(join(io.cwd, ...CACHE_EXCLUSIONS_PATH.split('/')));
+  const requestedValue = stringFlag(options, 'cache-exclude');
+  const confirmUpdate = options['confirm-cache-exclusions'] === true;
+  if (
+    typeof options['confirm-cache-exclusions'] !== 'boolean' &&
+    options['confirm-cache-exclusions'] !== undefined
+  ) {
+    throw new UsageError("init: '--confirm-cache-exclusions' must be a boolean flag");
+  }
+  if (requestedValue === undefined) {
+    if (confirmUpdate) throw new UsageError('init: --confirm-cache-exclusions requires --cache-exclude');
+    return { files: current, changed: false };
+  }
+  const requested = requestedValue.trim() === ''
+    ? []
+    : validateRequestedCacheFiles(
+        io.cwd,
+        requestedValue.split(',').map((file) => file.trim()).filter((file) => file.length > 0),
+        config,
+      );
+  const changed = JSON.stringify(requested) !== JSON.stringify(current);
+  if (declarationExists && changed && !confirmUpdate) {
+    throw new UsageError(
+      `init: changing ${CACHE_EXCLUSIONS_PATH} needs explicit owner review; repeat with --confirm-cache-exclusions`,
+    );
+  }
+  if (declarationExists && !changed && confirmUpdate) {
+    throw new UsageError('init: --confirm-cache-exclusions requires a changed --cache-exclude list');
+  }
+  return { files: requested, changed };
+}
+
 
 /**
  * Runs discovery over the repo's own include/exclude config, infers a
@@ -730,9 +789,10 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       'strict-e2e',
       'planes',
       'no-planes',
-      'behavior',
       'docs-exclude',
       'confirm-doc-exclusions',
+      'cache-exclude',
+      'confirm-cache-exclusions',
       'help',
     ],
     INIT_USAGE,
@@ -831,9 +891,12 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       draftConfig = loadConfig(join(cwd, '.gateforge.yml'));
     } catch (error) {
       const docsChoiceRequested = stringFlag(options, 'docs-exclude') !== undefined;
+      const cacheChoiceRequested = stringFlag(options, 'cache-exclude') !== undefined;
       if (
         docsChoiceRequested ||
+        cacheChoiceRequested ||
         existsSync(join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/'))) ||
+        existsSync(join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/'))) ||
         (process.stdin.isTTY === true && process.stdout.isTTY === true)
       ) {
         throw error;
@@ -844,6 +907,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     draftConfig = generatedDraftConfig();
   }
   const docsExclusionChoice = await resolveDocsExclusionsForInit(io, options, draftConfig);
+  const cacheExclusionChoice = resolveCacheExclusionsForInit(io, options, draftConfig);
   const gateforgeDir = join(cwd, '.gateforge');
   const targets: Array<{ path: string; write: () => void; label: string }> = [
     {
@@ -925,6 +989,24 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       },
     });
   }
+  if (cacheExclusionChoice.changed) {
+    const exclusionPath = join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/'));
+    const exclusionText = renderCacheExclusions(cacheExclusionChoice.files);
+    targets.push({
+      path: exclusionPath,
+      label: 'owner-declared Python bytecode exclusions',
+      write: () => {
+        const temporaryPath = join(gateforgeDir, `.cache-exclusions-${randomUUID()}.tmp`);
+        try {
+          writeFileSync(temporaryPath, exclusionText, { flag: 'wx', encoding: 'utf8' });
+          renameSync(temporaryPath, exclusionPath);
+        } catch (error) {
+          if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+          throw error;
+        }
+      },
+    });
+  }
 
   mkdirSync(join(gateforgeDir, 'adapters'), { recursive: true });
   mkdirSync(join(gateforgeDir, 'waivers'), { recursive: true });
@@ -973,7 +1055,10 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
 
   for (const target of targets) {
     if (existsSync(target.path)) {
-      if (target.label === 'owner-declared documentation exclusions' && docsExclusionChoice.changed) {
+      if (
+        (target.label === 'owner-declared documentation exclusions' && docsExclusionChoice.changed) ||
+        (target.label === 'owner-declared Python bytecode exclusions' && cacheExclusionChoice.changed)
+      ) {
         target.write();
         writeLine(io.stdout, `updated: ${target.path}`);
         continue;
@@ -1000,6 +1085,17 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     const approvalDigest = trustedPolicyDigestForConfig(cwd, writtenConfig);
     writeLine(io.stdout, `owner-declared documentation folders: ${docsExclusionChoice.folders.join(', ')}`);
     writeLine(io.stdout, `warning: ${DOCS_EXCLUSIONS_GUARANTEE}`);
+    writeLine(io.stdout, `candidate policy digest to approve outside the repository: ${approvalDigest}`);
+    writeLine(
+      io.stdout,
+      'set GATEFORGE_APPROVED_POLICY_DIGEST in a protected owner environment to this exact digest; without a matching pin, Gateforge refuses to use the exclusions',
+    );
+  }
+  if (cacheExclusionChoice.files.length > 0) {
+    const writtenConfig = loadConfig(join(cwd, '.gateforge.yml'));
+    const approvalDigest = trustedPolicyDigestForConfig(cwd, writtenConfig);
+    writeLine(io.stdout, `owner-declared Python bytecode files: ${cacheExclusionChoice.files.join(', ')}`);
+    writeLine(io.stdout, `warning: ${CACHE_EXCLUSIONS_GUARANTEE}`);
     writeLine(io.stdout, `candidate policy digest to approve outside the repository: ${approvalDigest}`);
     writeLine(
       io.stdout,
