@@ -62,6 +62,8 @@ export const TestMapEntrySchema = z
     selector: TestSelectorSchema,
     /** Declared kind; resolves `unknown`, never observed mocking (§5.3). */
     kind: TestKindSchema.optional(),
+    /** Origin marker for entries generated from test annotations. */
+    source: z.literal('annotation').optional(),
     /** Behavior-category labels (hints only, never proof; §3.2). */
     categories: z.array(z.string().min(1)).optional(),
     /** Claimed obligation ids — at least one; `'*'` never parses. */

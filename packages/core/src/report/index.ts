@@ -88,6 +88,8 @@ export interface RenderRunOptions {
   format: 'json' | 'sarif' | 'text';
   /** Blocking entries (unclassified/unresolved/findings/stale references). */
   blocking?: readonly BlockingEntry[];
+  /** Non-blocking notices; visible in every report format without changing the exit code. */
+  advisories?: readonly BlockingEntry[];
   /** Waiver-population counts; included in json/text when provided. */
   waiverCounts?: WaiverCounts;
   /** Run manifest; included in the json report when provided. */
@@ -266,6 +268,9 @@ function jsonReport(
     }),
     blocking,
   };
+  if (options.advisories !== undefined && options.advisories.length > 0) {
+    report['advisories'] = options.advisories;
+  }
   if (options.run !== undefined) {
     report['run'] = options.run;
   }
@@ -362,21 +367,34 @@ function sarifReport(
         // never silently omitted from the projection.
         invocations: [
           {
-            toolExecutionNotifications: (options.blocking ?? []).map((entry) => ({
-              level: 'error' as const,
-              message: {
-                text: `[${entry.kind}] ${entry.resourceId ?? entry.name ?? '<unnamed>'} — ${entry.detail}`,
-              },
-              properties: {
-                kind: entry.kind,
-                // Stable plan §5.4 cause + next action when the entry
-                // carries one (coverage/strict-enforcement findings).
-                ...(entry.cause !== undefined && entry.cause !== null
-                  ? { cause: entry.cause, nextAction: entry.nextAction ?? null }
-                  : {}),
-                ...(entry.location !== null ? { location: entry.location } : {}),
-              },
-            })),
+            toolExecutionNotifications: [
+              ...(options.blocking ?? []).map((entry) => ({
+                level: 'error' as const,
+                message: {
+                  text: `[${entry.kind}] ${entry.resourceId ?? entry.name ?? '<unnamed>'} — ${entry.detail}`,
+                },
+                properties: {
+                  kind: entry.kind,
+                  ...(entry.cause !== undefined && entry.cause !== null
+                    ? { cause: entry.cause, nextAction: entry.nextAction ?? null }
+                    : {}),
+                  ...(entry.location !== null ? { location: entry.location } : {}),
+                },
+              })),
+              ...(options.advisories ?? []).map((entry) => ({
+                level: 'warning' as const,
+                message: {
+                  text: `[${entry.cause ?? entry.name ?? 'advisory'}] ${entry.detail}`,
+                },
+                properties: {
+                  kind: entry.kind,
+                  ...(entry.cause !== undefined && entry.cause !== null
+                    ? { cause: entry.cause, nextAction: entry.nextAction ?? null }
+                    : {}),
+                  ...(entry.location !== null ? { location: entry.location } : {}),
+                },
+              })),
+            ],
           },
         ],
         results,
@@ -481,6 +499,18 @@ function textReport(
     lines.push(
       `  records: ${entry.recordIds.length > 0 ? entry.recordIds.join(', ') : '<none consulted>'}`,
     );
+  }
+  if (options.advisories !== undefined && options.advisories.length > 0) {
+    lines.push('');
+    lines.push('advisories (non-blocking):');
+    for (const entry of options.advisories) {
+      const where = entry.location !== null ? ` at ${entry.location.file}:${entry.location.line}` : '';
+      const cause =
+        entry.cause !== undefined && entry.cause !== null
+          ? ` (cause: ${entry.cause} → ${entry.nextAction ?? 'no action available'})`
+          : '';
+      lines.push(`  ${entry.detail}${where}${cause}`);
+    }
   }
   if (blocking.length > 0) {
     lines.push('');

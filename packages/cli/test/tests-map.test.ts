@@ -523,8 +523,10 @@ describe('gateforge tests sync', () => {
       repo.writeFiles({
         'e2e/accounts.spec.js': [
           "import { test } from 'playwright/test';",
-          "test('creates an account', { annotation: { type: 'gateforge', description: 'tenant.accounts:persistence:read' } }, async () => {});",
-          "test('deletes an account', async () => {});",
+          "function httpClaims(id) { return { annotation: { type: 'gateforge', description: id } }; }",
+          "test('creates an account', { annotation: { type: 'gateforge', description: 'tenant.accounts:persistence:read' } }, async ({ page }) => { await page.goto('/accounts'); });",
+          "test('reads an account', httpClaims('tenant.orders:persistence:read'), async ({ page }) => { await page.goto('/orders'); });",
+          "test('deletes an account', async ({ page }) => { await page.goto('/accounts'); });",
           '',
         ].join('\n'),
         '.gateforge/test-map.yml': [
@@ -553,17 +555,98 @@ describe('gateforge tests sync', () => {
         tests: Array<Record<string, unknown>>;
       };
       expect(after.tests.find((entry) => entry['key'] === DELETE_KEY)).toEqual(handwritten);
-      const generated = after.tests.find((entry) => entry['source'] === 'annotation');
-      expect(generated).toMatchObject({
-        source: 'annotation',
-        selector: {
-          runner: 'playwright',
-          project: 'chromium',
-          file: 'e2e/accounts.spec.js',
-          titlePath: ['creates an account'],
-        },
-        claims: [OBLIGATION_ACCOUNTS],
+      const generated = after.tests.filter((entry) => entry['source'] === 'annotation');
+      expect(generated).toHaveLength(2);
+      expect(generated).toContainEqual(
+        expect.objectContaining({
+          source: 'annotation',
+          selector: {
+            runner: 'playwright',
+            file: 'e2e/accounts.spec.js',
+            titlePath: ['creates an account'],
+          },
+          claims: [OBLIGATION_ACCOUNTS],
+        }),
+      );
+      expect(generated).toContainEqual(
+        expect.objectContaining({
+          source: 'annotation',
+          selector: {
+            runner: 'playwright',
+            file: 'e2e/accounts.spec.js',
+            titlePath: ['reads an account'],
+          },
+          claims: [OBLIGATION_ORDERS],
+        }),
+      );
+      const bytesAfterSync = readFileSync(repo.path('.gateforge/test-map.yml'), 'utf8');
+      expect((await runCli(repo, ['tests', 'sync'])).code).toBe(0);
+      expect(readFileSync(repo.path('.gateforge/test-map.yml'), 'utf8')).toBe(bytesAfterSync);
+    });
+  }, 120_000);
+  it('reports unresolved static annotation helpers instead of dropping them', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo, { include: "['src/**/*.txt', 'e2e/**/*.spec.js']" });
+      repo.writeFiles({
+        'e2e/unresolved.spec.js': [
+          "import { test } from 'playwright/test';",
+          "function claims() { return { annotation: { type: 'gateforge', description: process.env.GATEFORGE_CLAIM } }; }",
+          "test('uses a computed claim', claims(), async ({ page }) => { await page.goto('/accounts'); });",
+          '',
+        ].join('\n'),
       });
+
+      const result = await runCli(repo, ['tests', 'sync']);
+
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('UNRESOLVED');
+      expect(result.stdout).toContain('e2e/unresolved.spec.js');
+      expect(result.stdout).toContain('uses a computed claim');
+    });
+  });
+
+  it('warns when generated claims drift without blocking the check or requiring Playwright', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo, { include: "['src/**/*.txt', 'e2e/**/*.spec.js']" });
+      const source = [
+        "import { test } from 'playwright/test';",
+        `test('reads an account', { annotation: { type: 'gateforge', description: '${OBLIGATION_ACCOUNTS}' } }, async ({ page }) => { await page.goto('/accounts'); });`,
+        '',
+      ].join('\n');
+      repo.writeFiles({ 'e2e/accounts.spec.js': source });
+      expect((await runCli(repo, ['tests', 'sync'])).code).toBe(0);
+
+      const checkBefore = await runCli(repo, ['check', '--format', 'json']);
+      const before = JSON.parse(checkBefore.stdout) as {
+        summary: { blocking: number };
+        advisories?: Array<{ cause: string }>;
+        verdicts: Array<{ obligationId: string; cause: string | null }>;
+      };
+      expect(before.advisories ?? []).toHaveLength(0);
+      expect(before.verdicts.find((entry) => entry.obligationId === OBLIGATION_ACCOUNTS)?.cause).not.toBe(
+        'TEST_MAPPING_MISSING',
+      );
+
+      repo.writeFiles({ 'e2e/accounts.spec.js': source.replace(OBLIGATION_ACCOUNTS, OBLIGATION_ORDERS) });
+      const checkAfter = await runCli(repo, ['check', '--format', 'json']);
+      expect(checkAfter.code).toBe(checkBefore.code);
+      const after = JSON.parse(checkAfter.stdout) as {
+        summary: { blocking: number };
+        blocking: Array<{ cause?: string }>;
+        advisories?: Array<{ cause: string; detail: string; nextAction: string }>;
+      };
+      expect(after.advisories).toContainEqual(
+        expect.objectContaining({
+          cause: 'TEST_MAP_OUT_OF_SYNC',
+          nextAction: 'gateforge tests sync',
+        }),
+      );
+      const drift = after.advisories?.find((entry) => entry.cause === 'TEST_MAP_OUT_OF_SYNC');
+      expect(drift?.detail).toContain('e2e/accounts.spec.js');
+      expect(drift?.detail).toContain(OBLIGATION_ACCOUNTS);
+      expect(drift?.detail).toContain(OBLIGATION_ORDERS);
+      expect(after.blocking.some((entry) => entry.cause === 'TEST_MAP_OUT_OF_SYNC')).toBe(false);
+      expect(after.summary.blocking).toBe(before.summary.blocking);
     });
   }, 120_000);
 });

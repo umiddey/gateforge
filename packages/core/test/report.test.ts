@@ -75,6 +75,16 @@ const BLOCKING: BlockingEntry[] = [
   },
 ];
 
+const ADVISORY: BlockingEntry = {
+  kind: 'finding',
+  resourceId: 'tenant.accounts',
+  name: 'accounts',
+  detail: 'test annotation claims changed',
+  location: { file: 'e2e/accounts.spec.ts', line: 2, col: 1 },
+  cause: 'TEST_MAP_OUT_OF_SYNC',
+  nextAction: 'gateforge tests sync',
+};
+
 describe('renderRun — json format', () => {
   it('emits GF-canonical JSON that round-trips through canonicalJson', () => {
     const verdicts = [entry(accounts, 'missing'), entry(orders, 'satisfied')];
@@ -159,6 +169,48 @@ describe('renderRun — json format', () => {
     } as const satisfies RunManifest;
     const report = JSON.parse(renderRun([entry(accounts, 'missing')], { format: 'json', run }));
     expect(report.run).toEqual(run);
+  });
+});
+
+describe('renderRun — non-blocking advisories', () => {
+  it('includes advisories in canonical JSON without adding to the blocking count', () => {
+    const report = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'json', advisories: [ADVISORY] }),
+    );
+    expect(report.advisories).toEqual([ADVISORY]);
+    expect(report.summary.blocking).toBe(0);
+  });
+
+  it('projects advisories as SARIF warning notifications', () => {
+    const report = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'sarif', advisories: [ADVISORY] }),
+    ) as {
+      runs: Array<{
+        invocations: Array<{
+          toolExecutionNotifications: Array<{ level: string; properties: Record<string, unknown> }>;
+        }>;
+      }>;
+    };
+    const notifications = report.runs[0]?.invocations[0]?.toolExecutionNotifications ?? [];
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        level: 'warning',
+        properties: expect.objectContaining({
+          cause: 'TEST_MAP_OUT_OF_SYNC',
+          nextAction: 'gateforge tests sync',
+        }),
+      }),
+    );
+  });
+
+  it('prints advisories separately from blocking entries in text output', () => {
+    const text = renderRun([entry(accounts, 'satisfied')], {
+      format: 'text',
+      advisories: [ADVISORY],
+    });
+    expect(text).toContain('advisories (non-blocking):');
+    expect(text).toContain('test annotation claims changed');
+    expect(text).not.toContain('blocking entries (unclassified/unresolved/findings/stale references):');
   });
 });
 

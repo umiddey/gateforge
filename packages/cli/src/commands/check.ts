@@ -14,8 +14,9 @@
  * produce identical resource-change sets for identical repos).
  *
  * Current claim declarations come from `.gateforge/test-map.yml` and,
- * when available, a verified receipt for the current input digest. Raw
- * `claims.json` contents and live annotations are not check bindings.
+ * when available, a verified receipt for the current input digest. Static
+ * annotations are compared with generated sidecar entries but are not direct
+ * check bindings; raw `claims.json` is never a declaration source.
  */
 import { cpSync, existsSync, mkdirSync } from 'node:fs';
 import {
@@ -30,7 +31,7 @@ import {
   type ChangedProvider,
   type Claim,
 } from '@gate-forge/core';
-import { discoverTestCatalog, findPlaywrightConfig } from '@gate-forge/pack-playwright';
+import { discoverTestCatalog, findPlaywrightConfig, scanTestFiles } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
@@ -38,7 +39,7 @@ import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { obligationFingerprint, evaluateRun } from '../evaluate.js';
-import { loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
+import { annotationMapSyncAdvisories, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
   collectInputFiles,
@@ -613,13 +614,21 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     }
   }
 
-  // A check binds claims from the tracked sidecar plus a complete,
-  // authenticated execution result for this input digest. Live annotations
-  // and partial run-state claims are not check declarations.
+  // Static annotations are compared with generated sidecar entries. The
+  // advisory is deliberately separate from blockers for this warning-only
+  // release period; only the tracked sidecar and a verified receipt bind
+  // claims during check.
+  const currentTestMap = loadOptionalTestMap(io.cwd);
+  const annotationScan = scanTestFiles({
+    cwd: io.cwd,
+    include: config.project.paths.include,
+    exclude: config.project.paths.exclude,
+  });
+  const annotationAdvisories = annotationMapSyncAdvisories(annotationScan, currentTestMap);
   let claimInventory: Claim[] = claimBindings;
   let mappingBlockers: BlockingEntry[] = [];
   let mappedCoverage: MappedCoverage[] = [];
-  if (loadOptionalTestMap(io.cwd) !== null) {
+  if (currentTestMap !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
       config,
@@ -826,6 +835,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   const report = renderRun(evaluated.verdicts, {
     format,
     blocking: evaluatedBlocking,
+    advisories: annotationAdvisories,
     waiverCounts: evaluated.waiverCounts,
     baseline: evaluated.baselined ?? undefined,
     run: pipeline.manifest,

@@ -42,10 +42,10 @@ export type UnresolvedReason = z.infer<typeof UnresolvedReasonSchema>;
 /**
  * Stable cause codes for the shared report model (plan §5.4, ADR 0005).
  * Blocking-obligation causes name WHY an obligation is not satisfied and
- * select its next action; the three `DIAGNOSTIC_*` codes are advisory
- * result causes for the separate diagnostic run (plan §3.5) — never
- * obligation verdicts. The seven verdict VALUES are unchanged; causes
- * enrich them without weakening any contract.
+ * select its next action. `DIAGNOSTIC_*` codes advise on the separate
+ * diagnostic run; `TEST_MAP_OUT_OF_SYNC` advises on generated mappings.
+ * These report advisories are never obligation verdicts. The seven verdict
+ * VALUES are unchanged; causes enrich reports without weakening contracts.
  */
 export const CauseCodeSchema = z.enum([
   'TEST_INVENTORY_INCOMPLETE',
@@ -53,6 +53,7 @@ export const CauseCodeSchema = z.enum([
   'TEST_MAPPING_MISSING',
   'TEST_MAPPING_AMBIGUOUS',
   'TEST_MAPPING_STALE',
+  'TEST_MAP_OUT_OF_SYNC',
   'EVIDENCE_NOT_COLLECTED',
   'VERIFIER_UNSUPPORTED',
   'TEST_NOT_EXECUTED',
@@ -97,6 +98,7 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
     '— that cannot satisfy the obligation.',
   TEST_MAPPING_AMBIGUOUS: 'Correct the exact mapping',
   TEST_MAPPING_STALE: 'Correct the exact mapping',
+  TEST_MAP_OUT_OF_SYNC: 'gateforge tests sync',
   EVIDENCE_NOT_COLLECTED:
     'Write an overlay test in `tests/e2e/gateforge/` using the Gateforge Playwright fixture ' +
     '(`evidence.ui.*` + `persistence.verify`). Do not rewrite existing journeys. Mappings ' +

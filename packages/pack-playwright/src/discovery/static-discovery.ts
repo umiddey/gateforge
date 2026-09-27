@@ -33,6 +33,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import ts from 'typescript';
 import { pathInScope, type Location } from '@gate-forge/core';
+import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
 
 /** Default cap on files pulled in through import traversal. */
 export const DEFAULT_MAX_TRAVERSED_FILES = 200;
@@ -97,6 +98,10 @@ export interface StaticTestEntry {
   signals: Array<{ kind: 'skip' | 'only' | 'fixme'; detail: string; location: Location }>;
   /** Inference facts from the call + callback body. */
   facts: StaticTestFacts;
+  /** Literal claims from this test's Gateforge annotations, when present. */
+  annotationClaims?: string[];
+  /** Why a Gateforge annotation could not be resolved without execution. */
+  annotationIssue?: string;
 }
 
 /** One statically detected gap (unresolvable call, budget, dynamic title). */
@@ -1221,6 +1226,236 @@ function scanFileForTests(
   visit(source, [], null);
 }
 
+type StaticJson =
+  | string
+  | number
+  | boolean
+  | null
+  | StaticJson[]
+  | { [key: string]: StaticJson };
+
+type StaticJsonResult = { ok: true; value: StaticJson } | { ok: false };
+
+/**
+ * Finds one top-level local constant initializer by name.
+ *
+ * Args:
+ *   source: parsed test source file.
+ *   name: local identifier to resolve.
+ *
+ * Returns:
+ *   ts.Expression | null: a unique const initializer, or null when it
+ *   is absent, ambiguous, mutable, or destructured.
+ */
+function localConstantInitializer(source: ts.SourceFile, name: string): ts.Expression | null {
+  const matches: ts.Expression[] = [];
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.name.text === name && declaration.initializer !== undefined) {
+        matches.push(declaration.initializer);
+      }
+    }
+  }
+  return matches.length === 1 ? (matches[0] ?? null) : null;
+}
+
+/**
+ * Finds a pure local helper declared as a function or const arrow.
+ *
+ * Args:
+ *   source: parsed test source file.
+ *   name: helper identifier to resolve.
+ *
+ * Returns:
+ *   ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | null:
+ *   one unambiguous top-level function helper.
+ */
+function localStaticFunction(
+  source: ts.SourceFile,
+  name: string,
+): ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | null {
+  const matches: Array<ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression> = [];
+  for (const statement of source.statements) {
+    if (ts.isFunctionDeclaration(statement) && statement.name?.text === name) {
+      matches.push(statement);
+      continue;
+    }
+    if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name || declaration.initializer === undefined) continue;
+      if (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer)) {
+        matches.push(declaration.initializer);
+      }
+    }
+  }
+  return matches.length === 1 ? (matches[0] ?? null) : null;
+}
+
+/**
+ * Resolves a bounded JSON-like expression without executing consumer code.
+ *
+ * Args:
+ *   expression: source expression to resolve.
+ *   source: parsed file that may contain local consts and pure helpers.
+ *   bindings: literal arguments bound to a local helper's parameters.
+ *   depth: recursion depth used to reject cycles.
+ *
+ * Returns:
+ *   StaticJsonResult: a literal value when fully resolvable, else failure.
+ */
+function staticJsonValue(
+  expression: ts.Expression,
+  source: ts.SourceFile,
+  bindings: ReadonlyMap<string, StaticJson> = new Map(),
+  depth = 0,
+): StaticJsonResult {
+  if (depth > 8) return { ok: false };
+  if (
+    ts.isAsExpression(expression) ||
+    ts.isTypeAssertionExpression(expression) ||
+    ts.isSatisfiesExpression(expression) ||
+    ts.isNonNullExpression(expression)
+  ) {
+    return staticJsonValue(expression.expression, source, bindings, depth + 1);
+  }
+  if (ts.isStringLiteralLike(expression)) return { ok: true, value: expression.text };
+  if (ts.isNumericLiteral(expression)) {
+    const value = Number(expression.text);
+    return Number.isFinite(value) ? { ok: true, value } : { ok: false };
+  }
+  if (expression.kind === ts.SyntaxKind.TrueKeyword) return { ok: true, value: true };
+  if (expression.kind === ts.SyntaxKind.FalseKeyword) return { ok: true, value: false };
+  if (expression.kind === ts.SyntaxKind.NullKeyword) return { ok: true, value: null };
+  if (ts.isIdentifier(expression)) {
+    const bound = bindings.get(expression.text);
+    if (bound !== undefined) return { ok: true, value: bound };
+    const initializer = localConstantInitializer(source, expression.text);
+    return initializer === null ? { ok: false } : staticJsonValue(initializer, source, bindings, depth + 1);
+  }
+  if (ts.isArrayLiteralExpression(expression)) {
+    const values: StaticJson[] = [];
+    for (const element of expression.elements) {
+      if (!ts.isExpression(element)) return { ok: false };
+      const resolved = staticJsonValue(element, source, bindings, depth + 1);
+      if (!resolved.ok) return { ok: false };
+      values.push(resolved.value);
+    }
+    return { ok: true, value: values };
+  }
+  if (ts.isObjectLiteralExpression(expression)) {
+    const value: Record<string, StaticJson> = {};
+    for (const property of expression.properties) {
+      if (!ts.isPropertyAssignment(property)) return { ok: false };
+      const key = property.name;
+      if (!(ts.isIdentifier(key) || ts.isStringLiteralLike(key) || ts.isNumericLiteral(key))) return { ok: false };
+      const resolved = staticJsonValue(property.initializer, source, bindings, depth + 1);
+      if (!resolved.ok) return { ok: false };
+      value[key.text] = resolved.value;
+    }
+    return { ok: true, value };
+  }
+  if (ts.isCallExpression(expression) && ts.isIdentifier(expression.expression)) {
+    const helper = localStaticFunction(source, expression.expression.text);
+    if (helper === null || helper.parameters.length !== expression.arguments.length) return { ok: false };
+    const values: StaticJson[] = [];
+    for (const argument of expression.arguments) {
+      if (ts.isSpreadElement(argument)) return { ok: false };
+      const resolved = staticJsonValue(argument, source, bindings, depth + 1);
+      if (!resolved.ok) return { ok: false };
+      values.push(resolved.value);
+    }
+    const helperBindings = new Map<string, StaticJson>();
+    for (const [index, parameter] of helper.parameters.entries()) {
+      if (!ts.isIdentifier(parameter.name)) return { ok: false };
+      const value = values[index];
+      if (value === undefined) return { ok: false };
+      helperBindings.set(parameter.name.text, value);
+    }
+    const helperBody = helper.body;
+    let returned: ts.Expression | undefined;
+    if (helperBody === undefined) return { ok: false };
+    if (!ts.isBlock(helperBody)) {
+      returned = helperBody;
+    } else {
+      const statement = helperBody.statements[0];
+      if (
+        helperBody.statements.length === 1 &&
+        statement !== undefined &&
+        ts.isReturnStatement(statement) &&
+        statement.expression !== undefined
+      ) {
+        returned = statement.expression;
+      }
+    }
+    return returned === undefined
+      ? { ok: false }
+      : staticJsonValue(returned, source, helperBindings, depth + 1);
+  }
+  return { ok: false };
+}
+
+/**
+ * Extracts Gateforge claim annotations from one test call using literals only.
+ *
+ * Args:
+ *   node: parsed test-call node.
+ *   source: parsed test source file for local const/helper resolution.
+ *
+ * Returns:
+ *   { claims, issue }: deduplicated claim ids, or a visible reason when a
+ *   possible annotation cannot be resolved statically.
+ */
+function gateforgeAnnotationClaims(
+  node: ts.Node,
+  source: ts.SourceFile,
+): { claims: string[]; issue: string | null } {
+  if (!ts.isCallExpression(node)) return { claims: [], issue: null };
+  const options = node.arguments[1];
+  if (options === undefined || ts.isArrowFunction(options) || ts.isFunctionExpression(options)) {
+    return { claims: [], issue: null };
+  }
+  if (ts.isObjectLiteralExpression(options)) {
+    const hasAnnotation = options.properties.some(
+      (property) => ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === 'annotation',
+    );
+    if (!hasAnnotation) {
+      return {
+        claims: [],
+        issue: options.properties.some(ts.isSpreadAssignment)
+          ? 'test options contain a spread that may hide a Gateforge annotation'
+          : null,
+      };
+    }
+  }
+  const resolved = staticJsonValue(options, source);
+  if (!resolved.ok) {
+    return { claims: [], issue: 'test options may contain a Gateforge annotation but are not a local literal or pure helper result' };
+  }
+  if (resolved.value === null || Array.isArray(resolved.value) || typeof resolved.value !== 'object') {
+    return { claims: [], issue: null };
+  }
+  const annotation = resolved.value['annotation'];
+  if (annotation === undefined) return { claims: [], issue: null };
+  const items = Array.isArray(annotation) ? annotation : [annotation];
+  const claims: string[] = [];
+  for (const item of items) {
+    if (item === null || Array.isArray(item) || typeof item !== 'object') {
+      return { claims: [], issue: 'annotation value is not a statically resolved object' };
+    }
+    const type = item['type'];
+    if (typeof type !== 'string') {
+      return { claims: [], issue: 'annotation type is not a statically resolved string' };
+    }
+    if (type !== CLAIM_ANNOTATION_TYPE) continue;
+    const description = item['description'];
+    if (typeof description !== 'string' || description.length === 0) {
+      return { claims: [], issue: 'Gateforge annotation description is not a non-empty static string' };
+    }
+    claims.push(description);
+  }
+  return { claims: [...new Set(claims)].sort(), issue: null };
+}
 /** Builds one static entry: facts from the callback body + signals. */
 function buildEntry(input: {
   file: string;
@@ -1237,6 +1472,7 @@ function buildEntry(input: {
   gateforgeImport: Location | null;
 }): StaticTestEntry {
   const { file, source, node, callback, titlePath, location } = input;
+  const annotations = gateforgeAnnotationClaims(node, source);
   const params = callback === undefined ? [] : signatureParamsOf(callback);
   const signals: StaticTestEntry['signals'] = [...input.inheritedSignals];
   for (const kind of input.suppression) {
@@ -1263,5 +1499,7 @@ function buildEntry(input: {
       fileMockImport: input.fileMock,
       gateforgeFixtureImport: input.gateforgeImport,
     },
+    ...(annotations.claims.length > 0 ? { annotationClaims: annotations.claims } : {}),
+    ...(annotations.issue !== null ? { annotationIssue: annotations.issue } : {}),
   };
 }

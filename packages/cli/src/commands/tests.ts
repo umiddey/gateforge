@@ -1,7 +1,6 @@
 /**
- * `gateforge tests`: the existing-test workflow (plan 2026-09-13
- * Phase 2-3, Phase 4 diagnose). Five subcommands:
- *
+ * `gateforge tests`: seven subcommands for test inventory, annotation sync,
+ * mapping, and diagnostic workflows.
  * - `discover` — inventory the repository's tests into the derived
  *   run-state catalog (Phase 2).
  * - `suggest` — resolve mappings for the run's obligations and produce
@@ -13,6 +12,8 @@
  *   obligation registry, then write/update `.gateforge/test-map.yml`
  *   ATOMICALLY and idempotently, printing the exact diff. Never edits
  *   test files, never adds waivers, refuses contradictions.
+ * - `sync` — regenerate only annotation-sourced entries from an AST-only
+ *   scan; hand-written sidecar entries are never modified.
  * - `explain` — the per-test §4 report: requirements, existing-test
  *   identity, mapping origin, honest execution status, next action, and
  *   `New test needed`. Exit 2 for an unknown key.
@@ -32,11 +33,13 @@
  * failed native enumeration).
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';import {
+import { join } from 'node:path';
+import {
   canonicalJson,
   compareStrings,
   mappingSuggestions,
   TestKindSchema,
+  TestMapSchema,
   type Claim,
   type GateforgeConfig,
   type JsonValue,
@@ -51,6 +54,7 @@ import { join } from 'node:path';import {
 import {
   discoverTestCatalog,
   TestDiscoveryError,
+  scanTestFiles,
   type DiscoverResult,
 } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
@@ -72,6 +76,7 @@ import {
   resolveRepositoryMappings,
   serializeTestMap,
   TEST_MAP_RELATIVE,
+  annotationTestMapEntries,
   writeTestMapAtomic,
 } from '../mapping.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
@@ -86,6 +91,7 @@ usage: gateforge tests discover [--json] [--pytest]
        gateforge tests suggest [--changed] [--json]
        gateforge tests mark --test <key> --kind <kind> [--category <c>]... \\
          --obligation <id>... --reason "<text>"
+       gateforge tests sync [--json]
        gateforge tests explain --test <key> [--json]
        gateforge tests diagnose [--suite <name>] [--json]`;
 
@@ -123,6 +129,8 @@ export async function testsCommand(io: Io, argv: readonly string[]): Promise<num
       return suggestSubcommand(io, options);
     case 'mark':
       return markSubcommand(io, options);
+    case 'sync':
+      return syncSubcommand(io, options);
     case 'explain':
       return explainSubcommand(io, options);
     case 'diagnose':
@@ -615,6 +623,82 @@ function assertKindDeclarationAllowed(entry: TestCatalogEntry, kind: TestKind, k
 // tests explain (Phase 3)
 // ---------------------------------------------------------------------------
 
+/**
+ * Synchronizes generated test-map declarations without changing handwritten entries.
+ *
+ * Args:
+ *   io: process context.
+ *   options: parsed command flags.
+ *
+ * Returns:
+ *   number: 0 when the static scan is complete, 1 when unresolved rows
+ *   need owner review, or 2 for invalid configuration or sidecar data.
+ */
+async function syncSubcommand(
+  io: Io,
+  options: Record<string, string | boolean | string[]>,
+): Promise<number> {
+  rejectUnknownFlags(options, ['json'], TESTS_USAGE);
+  const config = loadConfigAt(io.cwd);
+  const scan = scanTestFiles({
+    cwd: io.cwd,
+    include: config.project.paths.include,
+    exclude: config.project.paths.exclude,
+  });
+  const generated = annotationTestMapEntries(scan);
+  const previous = loadOptionalTestMap(io.cwd);
+  const handwritten = (previous?.tests ?? []).filter((entry) => entry.source !== 'annotation');
+  const candidate = { schemaVersion: 1 as const, tests: [...handwritten, ...generated] };
+  const parsed = TestMapSchema.safeParse(candidate);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue === undefined ? '' : ` at '${issue.path.map(String).join('.')}':`;
+    throw new UsageError(`annotation sync produced an invalid test map${path} ${issue?.message ?? 'unknown schema error'}`);
+  }
+  const previousContent = serializeTestMap(previous ?? { schemaVersion: 1, tests: [] });
+  const nextContent = serializeTestMap(parsed.data as TestMap);
+  const changed = previousContent !== nextContent;
+  if (changed) writeTestMapAtomic(io.cwd, parsed.data as TestMap);
+
+  const unresolved = [
+    ...scan.parseErrors.map(
+      (entry) =>
+        `UNRESOLVED ${entry.file}:${entry.location.line}:${entry.location.col}: ${entry.message}`,
+    ),
+    ...scan.unresolved.map(
+      (entry) =>
+        `UNRESOLVED ${entry.file}:${entry.location.line}:${entry.location.col}: ` +
+        `${entry.titlePath.join(' > ')} — ${entry.code}: ${entry.detail}`,
+    ),
+    ...scan.entries
+      .filter((entry) => entry.annotationIssue !== undefined)
+      .map(
+        (entry) =>
+          `UNRESOLVED ${entry.file}:${entry.location.line}:${entry.location.col}: ` +
+          `${entry.titlePath.join(' > ')} — ${entry.annotationIssue}`,
+      ),
+  ].sort(compareStrings);
+  const asJson = options['json'] === true;
+  if (asJson) {
+    writeLine(
+      io.stdout,
+      canonicalJson({
+        schemaVersion: 1,
+        generatedEntries: generated.length,
+        changed,
+        unresolved,
+        nextAction: unresolved.length > 0 ? 'Review unresolved static test annotations.' : null,
+      }),
+    );
+  } else {
+    writeLine(
+      io.stdout,
+      `tests sync: ${generated.length} annotation mapping(s) ${changed ? 'updated' : 'unchanged'}`,
+    );
+    for (const row of unresolved) writeLine(io.stdout, row);
+  }
+  return unresolved.length > 0 ? 1 : 0;
+}
 /** Implements `tests explain --test <key>`. */
 async function explainSubcommand(
   io: Io,

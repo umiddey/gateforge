@@ -44,6 +44,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge tests discover [--json] [--pytest]` | Inventory existing tests into the derived run-state catalog: static analysis reconciled with native Playwright enumeration (`--list`). Unresolved wrappers, parse errors, and inventory gaps are DATA (never an empty catalog — failed native enumeration is exit 2). `--pytest` additionally collects the configured diagnostic suites' node ids (`--collect-only`). | 0/2 |
 | `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`) and a `newTestNeeded` verdict per obligation. An inspection surface, NOT a gate: exit 0 even with blocking mapping problems. | 0/2 |
 | `gateforge tests mark --test <key> --kind <kind> [--category <c>]... --obligation <id>... --reason "<text>"` | Declare an existing test in `.gateforge/test-map.yml` (see the test-reuse workflow below). Validates against the CURRENT catalog and obligation registry, writes atomically and idempotently, prints the exact diff. Never edits test files, never adds waivers, refuses contradictions. | 0/2 |
+| `gateforge tests sync [--json]` | AST-only scan of test annotations; updates generated `source: annotation` entries in `.gateforge/test-map.yml` and leaves handwritten entries unchanged. Reports unresolved helpers with source locations; does not run tests. | 0/1/2 |
 | `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, `New test needed`. | 0/2 (unknown key → 2) |
 | `gateforge tests diagnose [--suite <name>] [--json]` | Run the configured pytest diagnostic suites once per suite, isolated (own process, `GATEFORGE_*` stripped, finite timeout). Advisory: exit 0 completed run (≥1 pass, no unexpected failures), 1 test failures, 2 unavailable/incomplete (collection error, timeout, missing interpreter, interruption, zero tests, or only skipped/xfail). Never E2E proof. | 0/1/2 |
 | `gateforge obligations [--json]` | Evaluate policies against the automatically classified graph and dump obligations, blocking entries, and claim assessments. | 0/1/2 |
@@ -135,8 +136,9 @@ Contract highlights:
 
 The reuse-first workflow: inspect what exists, declare what is unclear, run
 it, and add a new test only for a confirmed behavior gap. The fixed agent
-sequence is: `tests discover` → `tests suggest` → `tests mark` (or edit the
-sidecar directly) → run the suite under supervision → `check --require-e2e`.
+sequence is: `tests discover` → `tests suggest` → `tests sync` for annotated
+tests or `tests mark` for hand-written sidecar mappings → run the suite under
+supervision → `check --require-e2e`.
 
 `tests discover` writes the catalog to `.gateforge/test-gates/test-catalog.json`
 — a DERIVED artifact under the excluded run-state directory, never a pipeline
@@ -145,6 +147,14 @@ input and never beside the tests it inventories. Logical keys are stable
 project) so manual mappings survive comment edits; source digests still move,
 so old evidence goes stale. Renamed/deleted tests and removed parameters
 surface as stale or ambiguous mappings — never a silent reassignment.
+
+`tests sync` statically resolves direct Gateforge annotations and local pure
+helpers that return literals. It never loads a test runner or executes a test.
+Entries marked `source: annotation` are regenerated; handwritten entries are
+preserved. Unresolvable annotations are printed as `UNRESOLVED` with the test
+file and location. `check` reports missing/extra generated claims as the
+non-blocking `TEST_MAP_OUT_OF_SYNC` advisory for this release period; run
+`gateforge tests sync` to reconcile them.
 
 `tests mark` validates the declaration against the current catalog AND the
 current obligation registry (an unknown obligation id or test key is a

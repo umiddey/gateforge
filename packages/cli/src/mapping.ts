@@ -34,7 +34,12 @@ import {
   type TestMap,
 } from '@gate-forge/core';
 import type { MappedCoverage, CoverageOperation } from '@gate-forge/core';
-import { discoverTestCatalog, TestDiscoveryError } from '@gate-forge/pack-playwright';
+import {
+  discoverTestCatalog,
+  scanTestFiles,
+  TestDiscoveryError,
+  type StaticScanResult,
+} from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 
 /** The tracked sidecar path, repo-root-relative (plan §5.1 row 2). */
@@ -119,6 +124,149 @@ export function writeTestMapAtomic(cwd: string, testMap: TestMap): void {
   }
 }
 
+interface AnnotationMapGroup {
+  file: string;
+  titlePath: string[];
+  claims: Set<string>;
+  keys: Set<string>;
+  location: Location | null;
+}
+
+/**
+ * Builds deterministic sidecar entries from statically resolved test annotations.
+ *
+ * Args:
+ *   scan: static test scan for the configured source files.
+ *
+ * Returns:
+ *   TestMapEntry[]: one generated mapping per file/title path, with claims
+ *   deduplicated and sorted.
+ */
+export function annotationTestMapEntries(scan: StaticScanResult): TestMapEntry[] {
+  const groups = new Map<string, AnnotationMapGroup>();
+  for (const entry of scan.entries) {
+    if (entry.annotationClaims === undefined || entry.annotationClaims.length === 0) continue;
+    const identity = `${entry.file}\u0000${entry.titlePath.join('\u0000')}`;
+    const group = groups.get(identity) ?? {
+      file: entry.file,
+      titlePath: [...entry.titlePath],
+      claims: new Set<string>(),
+      keys: new Set<string>(),
+      location: entry.location,
+    };
+    for (const claim of entry.annotationClaims) group.claims.add(claim);
+    groups.set(identity, group);
+  }
+  return [...groups.values()]
+    .map((group): TestMapEntry => ({
+      key: `playwright:annotation:${group.file}:${group.titlePath.join('>')}`,
+      selector: { runner: 'playwright', file: group.file, titlePath: [...group.titlePath] },
+      source: 'annotation',
+      claims: [...group.claims].sort(compareStrings),
+      reason: 'Generated from Gateforge test annotations.',
+    }))
+    .sort((a, b) => compareStrings(a.key, b.key));
+}
+
+/**
+ * Compares current static annotations with generated sidecar entries.
+ *
+ * Args:
+ *   scan: current AST-only test scan.
+ *   sidecar: validated sidecar, or null when none exists.
+ *
+ * Returns:
+ *   BlockingEntry[]: non-blocking report advisories naming every
+ *   missing/extra generated claim and unresolved annotation.
+ */
+export function annotationMapSyncAdvisories(
+  scan: StaticScanResult,
+  sidecar: TestMap | null,
+): BlockingEntry[] {
+  const expectedEntries = annotationTestMapEntries(scan);
+  const expectedByIdentity = new Map<string, AnnotationMapGroup>();
+  const actualByIdentity = new Map<string, AnnotationMapGroup>();
+  const unresolvedByIdentity = new Map<string, StaticScanResult['entries'][number][]>();
+  for (const entry of expectedEntries) {
+    const titlePath = entry.selector.titlePath ?? [];
+    const identity = `${entry.selector.file}\u0000${titlePath.join('\u0000')}`;
+    const group = expectedByIdentity.get(identity) ?? {
+      file: entry.selector.file,
+      titlePath: [...titlePath],
+      claims: new Set<string>(),
+      keys: new Set<string>(),
+      location: scan.entries.find(
+        (row) => row.file === entry.selector.file && row.titlePath.join('\u0000') === titlePath.join('\u0000'),
+      )?.location ?? null,
+    };
+    for (const claim of entry.claims) group.claims.add(claim);
+    group.keys.add(entry.key);
+    expectedByIdentity.set(identity, group);
+  }
+  for (const entry of sidecar?.tests ?? []) {
+    if (entry.source !== 'annotation') continue;
+    const titlePath = entry.selector.titlePath ?? [];
+    const identity = `${entry.selector.file}\u0000${titlePath.join('\u0000')}`;
+    const group = actualByIdentity.get(identity) ?? {
+      file: entry.selector.file,
+      titlePath: [...titlePath],
+      claims: new Set<string>(),
+      keys: new Set<string>(),
+      location: null,
+    };
+    for (const claim of entry.claims) group.claims.add(claim);
+    group.keys.add(entry.key);
+    actualByIdentity.set(identity, group);
+  }
+  for (const entry of scan.entries) {
+    if (entry.annotationIssue === undefined) continue;
+    const identity = `${entry.file}\u0000${entry.titlePath.join('\u0000')}`;
+    const rows = unresolvedByIdentity.get(identity) ?? [];
+    rows.push(entry);
+    unresolvedByIdentity.set(identity, rows);
+  }
+  const identities = new Set([
+    ...expectedByIdentity.keys(),
+    ...actualByIdentity.keys(),
+    ...unresolvedByIdentity.keys(),
+  ]);
+  const advisories: BlockingEntry[] = [];
+  for (const identity of [...identities].sort(compareStrings)) {
+    const expected = expectedByIdentity.get(identity);
+    const actual = actualByIdentity.get(identity);
+    const unresolved = unresolvedByIdentity.get(identity) ?? [];
+    const expectedClaims = expected?.claims ?? new Set<string>();
+    const actualClaims = actual?.claims ?? new Set<string>();
+    const missing = [...expectedClaims].filter((claim) => !actualClaims.has(claim)).sort(compareStrings);
+    const extra = [...actualClaims].filter((claim) => !expectedClaims.has(claim)).sort(compareStrings);
+    const expectedKeys = expected?.keys ?? new Set<string>();
+    const actualKeys = actual?.keys ?? new Set<string>();
+    const keyMismatch =
+      expectedKeys.size !== actualKeys.size ||
+      [...expectedKeys].some((key) => !actualKeys.has(key));
+    if (missing.length === 0 && extra.length === 0 && !keyMismatch && unresolved.length === 0) continue;
+    const group = expected ?? actual;
+    const file = group?.file ?? unresolved[0]?.file ?? '<unknown>';
+    const titlePath = group?.titlePath ?? unresolved[0]?.titlePath ?? [];
+    const detailParts = [`test '${titlePath.join(' > ')}' in '${file}'`];
+    if (missing.length > 0) detailParts.push(`missing claim(s): ${missing.join(', ')}`);
+    if (extra.length > 0) detailParts.push(`extra claim(s): ${extra.join(', ')}`);
+    if (keyMismatch) detailParts.push('generated entry key differs from the current annotation identity');
+    for (const entry of unresolved) {
+      detailParts.push(`UNRESOLVED: ${entry.annotationIssue ?? 'annotation could not be resolved statically'}`);
+    }
+    advisories.push({
+      kind: 'finding',
+      resourceId: null,
+      name: 'TEST_MAP_OUT_OF_SYNC',
+      detail: `${detailParts.join('; ')}. Run \`gateforge tests sync\`.`,
+      location: group?.location ?? unresolved[0]?.location ?? null,
+      cause: 'TEST_MAP_OUT_OF_SYNC',
+      nextAction: CAUSE_NEXT_ACTIONS['TEST_MAP_OUT_OF_SYNC'],
+    });
+  }
+  return advisories;
+}
 /** Everything one mapping resolution over a real repository needs. */
 export interface MappingResolutionOptions {
   /** Absolute repo root. */
