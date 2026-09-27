@@ -10,8 +10,8 @@
  *   read: async (ctx, id) => body | null,   // GET-only; ctx.get(path) is the transport
  *   normalize: (body) => ({ entityId, fields }), // stamped from the RESPONSE, never caller args
  *   deletion: 'hard' | 'archive',
- *   environmentFingerprint: '…',            // must match the target's marker header
- *   baseUrl: 'http://…',                    // optional override of the witness adapter base
+ *   fields: ['id', 'name'],                     // optional normalized field projection
+ *   baseUrl: 'http://…',                    // optional override of the witness's adapter base
  *   list: async (ctx) => bodies,            // optional: powers create pre-observations + Observe snapshots
  *   observe: {                              // optional: Observe-channel mutation bindings (Phase 2)
  *     create: { method: 'POST', path: '/api/v2/accounts' },
@@ -110,8 +110,9 @@ async function importAdapter(
  *
  * Throws:
  *   AdapterRegistryError: when any required member is missing or shaped
- *   wrong. Optional `baseUrl` (a string) overrides the witness's
- *   configured adapter base for this adapter.
+ *   wrong. Optional `baseUrl` overrides the witness's adapter base, and
+ *   optional `fields` names the normalized projection available to
+ *   persistence checks.
  */
 export function validateAdapter(module: unknown, name: string): EvidenceAdapter {
   if (typeof module !== 'object' || module === null) {
@@ -137,6 +138,14 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
   }
   if (adapter['list'] !== undefined && typeof adapter['list'] !== 'function') {
     problems.push('list must be a function (ctx) => entity[] when present');
+  }
+  if (
+    adapter['fields'] !== undefined &&
+    (!Array.isArray(adapter['fields']) ||
+      adapter['fields'].some((field) => typeof field !== 'string' || field.length === 0) ||
+      new Set(adapter['fields']).size !== adapter['fields'].length)
+  ) {
+    problems.push('fields must be an array of unique non-empty field names when present');
   }
   // Server probe (server-witnessed persistence channel): OPTIONAL — an
   // adapter without it simply cannot serve the channel and every server
@@ -174,6 +183,9 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
     deletion: adapter['deletion'] as 'hard' | 'archive',
     environmentFingerprint: adapter['environmentFingerprint'] as string,
     baseUrl: adapter['baseUrl'] as string | undefined,
+    ...(adapter['fields'] !== undefined
+      ? { fields: [...(adapter['fields'] as string[])] }
+      : {}),
     ...(adapter['list'] !== undefined
       ? { list: adapter['list'] as EvidenceAdapter['list'] }
       : {}),

@@ -50,12 +50,14 @@ import {
   fileDigest,
   listNativePlaywrightTests,
   reconciliationKey,
+  type NativeInstance,
   type NativeListResult,
 } from './reconcile.js';
 import type { InferenceResult } from './inference.js';
 import {
   scanTestFiles,
   UNRESOLVED_TITLE_PLACEHOLDER,
+  type StaticRegistrationWarning,
   type StaticScanResult,
   type StaticUnresolved,
 } from './static-discovery.js';
@@ -85,6 +87,10 @@ export interface DiscoverResult {
   json: string;
   /** Gateforge annotations on tests the current native list enumerated. */
   nativeClaims: Claim[];
+  /** Instances from the scrubbed native list, before catalog reconciliation. */
+  nativeInstances: NativeInstance[];
+  /** Static registration sites guarded by Gateforge environment state. */
+  registrationWarnings: StaticRegistrationWarning[];
 }
 
 /**
@@ -168,7 +174,13 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
         return parsed.success ? [parsed.data] : [];
       }),
     );
-    return { catalog, json: canonicalJson(catalog as unknown as JsonValue), nativeClaims };
+    return {
+      catalog,
+      json: canonicalJson(catalog as unknown as JsonValue),
+      nativeClaims,
+      nativeInstances: native.instances,
+      registrationWarnings: scan.registrationWarnings,
+    };
 }
 
 /** Assembles catalog rows from the scan + native enumeration. */

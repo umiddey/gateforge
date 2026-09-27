@@ -56,6 +56,7 @@ import {
   TestDiscoveryError,
   scanTestFiles,
   type DiscoverResult,
+  type StaticRegistrationWarning,
 } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { diagnosticsJson, renderDiagnosticsText, runDiagnosticSuites } from '../diagnostics.js';
@@ -192,6 +193,33 @@ async function runDiscovery(
   return discovered;
 }
 
+/**
+ * Prints static warnings for test registrations controlled by Gateforge
+ * environment state without changing the machine-readable catalog.
+ *
+ * Args:
+ *   io: command output streams.
+ *   warnings: registration warnings from static discovery.
+ *   command: command label used to identify the advisory.
+ *
+ * Returns:
+ *   void.
+ */
+function writeRegistrationWarnings(
+  io: Io,
+  warnings: readonly StaticRegistrationWarning[],
+  command: string,
+): void {
+  for (const warning of warnings) {
+    writeLine(
+      io.stderr,
+      `${command}: registration warning ${warning.file}:${String(warning.location.line)}: ` +
+        `${warning.titlePath.join(' > ')} is conditional on ${warning.environmentVariable}; ` +
+        'keep test registration independent of Gateforge run variables',
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // tests discover (Phase 2 surface, unchanged behavior)
 // ---------------------------------------------------------------------------
@@ -205,17 +233,18 @@ async function discoverSubcommand(
   const asJson = options['json'] === true;
   const config = loadConfigAt(io.cwd);
   const stateDir = resolveStateDir(io.cwd);
-  const { catalog, json } = await runDiscovery(io.cwd, config, stateDir, options['pytest'] === true);
+  const discovered = await runDiscovery(io.cwd, config, stateDir, options['pytest'] === true);
+  const { catalog, json } = discovered;
 
   if (asJson) {
     writeLine(io.stdout, json);
+    writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests discover');
     return 0;
   }
-
-  const discovered = catalog.entries.filter((entry) => entry.discoveryStatus === 'discovered').length;
+  const discoveredCount = catalog.entries.filter((entry) => entry.discoveryStatus === 'discovered').length;
   writeLine(
     io.stdout,
-    `test catalog: discovered=${String(discovered)}` +
+    `test catalog: discovered=${String(discoveredCount)}` +
       ` unresolved=${String(catalog.unresolved.length)}` +
       ` parseErrors=${String(catalog.parseErrors.length)}` +
       ` inventoryComplete=${catalog.inventoryComplete ? 'true' : 'false'}`,
@@ -229,6 +258,7 @@ async function discoverSubcommand(
   for (const summary of catalog.runnerSummaries) {
     writeLine(io.stdout, `runner ${summary.runner}/${summary.name}: ${summary.status} — ${summary.detail}`);
   }
+  writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests discover');
   if (catalog.unresolved.length > 0) {
     writeLine(io.stdout, `unresolved (${String(catalog.unresolved.length)}):`);
     for (const gap of catalog.unresolved) {
@@ -284,6 +314,7 @@ async function suggestSubcommand(
   const provider = diffScoped ? resolveProvider(config.changed.provider, io.cwd, io.env).provider : 'all-files';
   const pipeline = await runPipeline({ cwd: io.cwd, env: io.env, config, provider, stateDir });
   const discovered = await runDiscovery(io.cwd, config, stateDir, true);
+  writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests suggest');
   const mapped = await resolveRepositoryMappings({
     cwd: io.cwd,
     config,

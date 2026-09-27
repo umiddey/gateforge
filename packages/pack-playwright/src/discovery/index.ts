@@ -3,6 +3,7 @@
  * phase 2): bounded static scanning, native reconciliation, kind
  * inference, the runner adapters, and the pytest diagnostic adapter.
  */
+export * from './adapter-projection.js';
 export * from './static-discovery.js';
 export * from './inference.js';
 export * from './reconcile.js';

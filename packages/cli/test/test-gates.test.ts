@@ -117,6 +117,61 @@ describe('gateforge test-gates', () => {
       expect(accounts?.recordIds).toEqual(['b'.repeat(64)]);
     });
   });
+  it('refuses to execute when wired registration differs from scrubbed discovery', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const marker = repo.path('wired-test-ran');
+      const adapterSource = [
+        'export default {',
+        '  read: async () => null,',
+        '  normalize: (body) => ({ entityId: body.id, fields: {} }),',
+        "  deletion: 'hard',",
+        "  environmentFingerprint: 'preflight-test',",
+        '};',
+        '',
+      ].join('\n');
+      repo.writeFiles({
+        '.gateforge/adapters/accounts.mjs': adapterSource,
+        '.gateforge/adapters/orders.mjs': adapterSource,
+        'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
+        'e2e/registration.spec.mjs': [
+          "import { test } from 'playwright/test';",
+          'if (process.env.GATEFORGE_RUN_TOKEN === undefined) {',
+          "  test('scrubbed registration', () => {});",
+          '} else {',
+          "  test('wired registration', () => {});",
+          '}',
+          '',
+        ].join('\n'),
+        'node_modules/playwright/cli.js': [
+          "const { writeFileSync } = require('node:fs');",
+          'if (process.argv.includes("--list")) {',
+          "  const title = process.env.GATEFORGE_RUN_TOKEN ? 'wired registration' : 'scrubbed registration';",
+          "  process.stdout.write(JSON.stringify({ config: { rootDir: process.cwd() }, suites: [{ file: 'e2e/registration.spec.mjs', specs: [{ id: 'registration', title, line: 3, column: 0, tests: [{ projectId: 'chromium', projectName: 'chromium', expectedStatus: 'passed', annotations: [] }] }] }] }));",
+          '} else {',
+          `  writeFileSync(${JSON.stringify(marker)}, 'runner invoked');`,
+          '}',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+
+      const started = Date.now();
+      const result = await runCli(
+        repo,
+        ['test-gates', '--changed', '--format', 'json'],
+        { GATEFORGE_WITNESS_VERIFIER_KEY: 'preflight-verifier-key' },
+      );
+
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('registration differs');
+      expect(result.stderr).toContain('e2e/registration.spec.mjs');
+      expect(result.stderr).toContain('wired registration');
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(existsSync(marker)).toBe(false);
+    });
+  }, 30_000);
+
 
   it('fails the run when the suite exits nonzero, even with clean verdicts', async () => {
     await withTempRepo({}, async (repo) => {

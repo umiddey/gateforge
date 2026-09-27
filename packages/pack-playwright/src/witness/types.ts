@@ -676,6 +676,8 @@ export interface EvidenceAdapter {
    * absent the witness refuses pre-observations for the resource.
    */
   list?: (ctx: AdapterContext) => Promise<unknown[]> | unknown[];
+  /** Declares normalized fields the adapter projects for persistence evidence. */
+  fields?: readonly string[];
   /** Projects the raw body onto {entityId, fields} — stamped from the RESPONSE. */
   normalize: (body: unknown) => { entityId: unknown; fields: unknown };
   /** Removal semantics the adapter's resource uses. */

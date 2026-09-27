@@ -555,6 +555,12 @@ or turn an arbitrary exit-zero command into E2E proof — the hook and CI
 run `check --staged/--changed --require-e2e`, which accept only supervised
 receipts.
 
+Before supervised execution, Gateforge compares Playwright's scrubbed
+inventory with a second `--list` using the safe run variables supplied to
+the runner. A difference stops the run before tests start and names each
+project, file, and title present in only one inventory. Static discovery
+also warns when `process.env.GATEFORGE_*` controls test registration.
+
 ### Provenance trust model (GF-23, audited 2026-08-31, three rounds)
 
 `records.json` and `manifest.json` live in the suite-writable state
@@ -617,6 +623,12 @@ NEVER come from the tested suite:
   owner-declared `archiveFields` (e.g. `{status: archived}`) — the suite
   cannot bless an unarchived entity by declaring its current state as
   the expected result.
+
+An adapter may declare an optional literal `fields: [...]` projection.
+Anchored persistence fails before consuming its pre-observation when the
+action changes a field outside that projection. `check` also reports
+model updateable fields missing from a statically readable projection.
+Adapters without this metadata keep their existing behavior.
 
 Presence alone, contradicted observations, missing pre-observations, or
 absent deltas grade `invalid` — even when every provenance check passes.

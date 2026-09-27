@@ -232,8 +232,22 @@ export function writeFixtureProject(
 	);
 }
 
-/** Writes the HONEST adapter for `tenant.accounts` into a temp project. */
-export function writeHonestAdapter(dir: string, fingerprint = FINGERPRINT): void {
+/**
+ * Writes the reviewed adapter used by browser-engine fixtures.
+ *
+ * Args:
+ *   dir: disposable project root.
+ *   fingerprint: target fingerprint to stamp, defaulting to the example value.
+ *   fields: optional adapter projection declared for engine-side persistence checks.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeHonestAdapter(
+  dir: string,
+  fingerprint = FINGERPRINT,
+  fields?: readonly string[],
+): void {
 	writeFileSync(
 		join(dir, '.gateforge/adapters/tenant.accounts.mjs'),
 		[
@@ -258,6 +272,7 @@ export function writeHonestAdapter(dir: string, fingerprint = FINGERPRINT): void
 			'    };',
 			'  },',
 			"  deletion: 'archive',",
+			...(fields !== undefined ? [`  fields: ${JSON.stringify(fields)},`] : []),
 			`  environmentFingerprint: '${fingerprint}',`,
 			'};',
 			'',

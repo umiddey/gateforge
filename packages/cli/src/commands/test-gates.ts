@@ -94,6 +94,7 @@ import {
 } from '@gate-forge/core';
 import {
   buildWitnessedPytestChildEnv,
+  diffNativePlaywrightTests,
   discoverTestCatalog,
   listNativePlaywrightTests,
   PlaywrightAdapter,
@@ -102,6 +103,8 @@ import {
   startWitnessProcess,
   SupervisorClient,
   TestDiscoveryError,
+  type NativeInstance,
+  type NativeListResult,
 } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
@@ -803,6 +806,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let discoveryError: string | null = null;
   let catalog: TestCatalog | null = null;
   let nativeClaims: Claim[] = [];
+  let nativeInstances: NativeInstance[] = [];
   try {
     // collectPytest is REQUIRED here (GAP 1 fix, server-witnessed
     // channel): the supervised run's expected set, mapping resolution,
@@ -813,9 +817,17 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     // failure is honest data: the suite's runner summary turns
     // `unavailable`, `inventoryComplete` goes false, and the gate blocks
     // TEST_INVENTORY_INCOMPLETE — never a silently narrower inventory.
-    const discovered = await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true });
     catalog = discovered.catalog;
     nativeClaims = discovered.nativeClaims;
+    nativeInstances = discovered.nativeInstances;
+    for (const warning of discovered.registrationWarnings) {
+      writeLine(
+        io.stderr,
+        `test-gates: registration warning ${warning.file}:${String(warning.location.line)}: ` +
+          `${warning.titlePath.join(' > ')} is conditional on ${warning.environmentVariable}; ` +
+          'keep test registration independent of Gateforge run variables',
+      );
+    }
   } catch (error) {
     discoveryError = error instanceof TestDiscoveryError ? error.message : (error as Error).message;
   }
@@ -1306,6 +1318,32 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   for (const name of ['GATEFORGE_APP_BASE_URL', 'GATEFORGE_TARGET_BASE_URL', 'GATEFORGE_TARGET_FINGERPRINT'] as const) {
     const value = io.env[name];
     if (typeof value === 'string' && value !== '') suiteEnv[name] = value;
+  }
+
+  // Registration must be identical under planning's scrubbed env and
+  // the exact safe run variables before any Playwright test can execute.
+  let wiredNative: NativeListResult;
+  try {
+    wiredNative = await listNativePlaywrightTests({ cwd: io.cwd, wiredEnv: suiteEnv });
+  } catch (error) {
+    if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+    throw error;
+  }
+  const registrationDiff = diffNativePlaywrightTests(nativeInstances, wiredNative.instances);
+  if (registrationDiff.scrubbedOnly.length > 0 || registrationDiff.wiredOnly.length > 0) {
+    if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+    const details = [
+      ...registrationDiff.scrubbedOnly.map(
+        (instance) => `only with scrubbed env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
+      ),
+      ...registrationDiff.wiredOnly.map(
+        (instance) => `only with wired env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
+      ),
+    ];
+    throw new UsageError(
+      'test-gates: Playwright registration differs between scrubbed and wired --list; no tests were executed\n' +
+        details.join('\n'),
+    );
   }
   // 6. Execute through the adapter under trusted-config synthesis (the
   // consumer config file is never loaded) under the SUPERVISOR SPOOL

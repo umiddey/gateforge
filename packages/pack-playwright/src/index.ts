@@ -175,6 +175,8 @@ export {
   DEFAULT_MAX_IMPORT_DEPTH,
   BROWSER_FIXTURE_PARAMS,
   API_FIXTURE_PARAMS,
+  diffNativePlaywrightTests,
+  staticAdapterFieldsFromSource,
   diagnoseMissingUiSurfaces,
 } from './discovery/index.js';
 export type {
@@ -185,7 +187,7 @@ export type {
   StaticUnresolved,
   StaticParseError,
   NativeInstance,
-  NativeListResult,
+  StaticRegistrationWarning,
   InferenceFacts,
   InferenceResult,
   JunitDocument,

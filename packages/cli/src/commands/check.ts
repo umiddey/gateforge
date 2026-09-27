@@ -618,12 +618,22 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // advisory is deliberately separate from blockers for this warning-only
   // release period; only the tracked sidecar and a verified receipt bind
   // claims during check.
+  // Environment-dependent registration warnings are stderr advisories;
+  // they never declare claims or alter the gate result.
   const currentTestMap = loadOptionalTestMap(io.cwd);
   const annotationScan = scanTestFiles({
     cwd: io.cwd,
     include: config.project.paths.include,
     exclude: config.project.paths.exclude,
   });
+  for (const warning of annotationScan.registrationWarnings) {
+    writeLine(
+      io.stderr,
+      `check: registration warning ${warning.file}:${String(warning.location.line)}: ` +
+        `${warning.titlePath.join(' > ')} is conditional on ${warning.environmentVariable}; ` +
+        'keep test registration independent of Gateforge run variables',
+    );
+  }
   const annotationAdvisories = annotationMapSyncAdvisories(annotationScan, currentTestMap);
   let claimInventory: Claim[] = claimBindings;
   let mappingBlockers: BlockingEntry[] = [];

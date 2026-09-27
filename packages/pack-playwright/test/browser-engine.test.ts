@@ -49,6 +49,7 @@ import { ROOT } from './helpers.js';
 const TOKEN = 'browser-engine-token';
 const VERIFIER_KEY = 'browser-engine-verifier';
 const CLAIM = 'tenant.accounts:crud:create';
+const UPDATE_CLAIM = 'tenant.accounts:crud:update';
 const RESOURCE = 'tenant.accounts';
 
 const LIFECYCLE = {
@@ -95,6 +96,7 @@ interface Scaffold {
  * Args:
  *   testId: the supervisor-bound test id.
  *   targetApp: an optional app for a focused consumer-shaped E2E.
+ *   adapterFields: optional adapter projection; omitted for legacy-compatible fixtures.
  *
  * Returns:
  *   Promise<Scaffold>: the temporary project and trusted test session.
@@ -102,10 +104,11 @@ interface Scaffold {
 async function scaffold(
   testId = 'engine-create-test',
   targetApp?: { url: string; stop: () => void },
+  adapterFields?: readonly string[],
 ): Promise<Scaffold> {
   const project = makeTempProject('browser-engine');
   writeFixtureProject(project);
-  writeHonestAdapter(project);
+  writeHonestAdapter(project, FINGERPRINT, adapterFields);
   const app = targetApp ?? (await startExampleApp());
   const proxy = await startAttestationProxy(app.url, FINGERPRINT);
   const runId = `browser-engine-${Math.random().toString(36).slice(2)}`;
@@ -198,7 +201,64 @@ async function ledgerRecords(scaffold: Pick<Scaffold, 'witnessUrl' | 'token'>): 
   return body.records;
 }
 
-describe('engine-owned browser (positive: full five-way binding)', () => {
+describe('engine-owned browser (projection guard and positive evidence)', () => {
+  it('rejects persistence when the action field is absent from the adapter projection', async () => {
+    const app = await startExampleApp();
+    let scope: Scaffold | null = null;
+    try {
+      const created = await fetch(`${app.url}/accounts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ first_name: 'Ada', last_name: 'Lovelace' }),
+        redirect: 'manual',
+      });
+      expect(created.status).toBe(303);
+      const listed = await fetch(`${app.url}/api/accounts`);
+      const accounts = (await listed.json()) as { accounts: Array<{ id: string }> };
+      const entityId = accounts.accounts[0]?.id;
+      expect(entityId).toBeTruthy();
+
+      scope = await scaffold('missing-adapter-field-test', app, ['first_name', 'status']);
+      const channel = {
+        sessionId: scope.session.sessionId,
+        sessionToken: scope.session.sessionToken,
+        testId: scope.session.testId,
+      };
+      const registered = await post(scope, '/browser/surface', {
+        ...channel,
+        surface: scope.surface,
+      });
+      expect(registered.status, JSON.stringify(registered.json)).toBe(200);
+      const action = await post(scope, '/browser/action', {
+        ...channel,
+        claimIds: [UPDATE_CLAIM],
+        operation: 'update',
+        entityId,
+        fields: { last_name: 'Byron' },
+      });
+      expect(action.status, JSON.stringify(action.json)).toBe(200);
+      const actionBody = action.json as Record<string, unknown>;
+      const persistenceRequest = {
+        ...channel,
+        resourceId: RESOURCE,
+        entityId,
+        claimId: UPDATE_CLAIM,
+        preObservationId: actionBody['preObservationId'],
+        anchorId: actionBody['anchorId'],
+      };
+      const persistence = await post(scope, '/witness/persistence', persistenceRequest);
+      expect(persistence.status).toBe(409);
+      expect((persistence.json as Record<string, unknown>)['error']).toContain('last_name');
+
+      // A second identical request proves the rejection did not consume the one-use pre-observation.
+      const sameAnchorAgain = await post(scope, '/witness/persistence', persistenceRequest);
+      expect(sameAnchorAgain.status).toBe(409);
+      expect((sameAnchorAgain.json as Record<string, unknown>)['error']).toContain('last_name');
+    } finally {
+      if (scope !== null) await scope.dispose();
+      else app.stop();
+    }
+  });
   it('an engine create satisfies crud:create through the real verifier', async () => {
     const scope = await scaffold();
     try {

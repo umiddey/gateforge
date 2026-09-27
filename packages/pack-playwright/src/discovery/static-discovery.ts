@@ -125,11 +125,20 @@ export interface StaticParseError {
   location: Location;
 }
 
+/** A test registration is controlled by a Gateforge environment variable. */
+export interface StaticRegistrationWarning {
+  file: string;
+  titlePath: string[];
+  environmentVariable: string;
+  location: Location;
+}
+
 /** Result of one static scan. */
 export interface StaticScanResult {
   entries: StaticTestEntry[];
   unresolved: StaticUnresolved[];
   parseErrors: StaticParseError[];
+  registrationWarnings: StaticRegistrationWarning[];
   /** Repo-relative files that were parsed (seeded + traversed). */
   scannedFiles: string[];
   /** True when the import-traversal budget cut resolution short. */
@@ -230,6 +239,123 @@ function languageKindFor(file: string): ts.ScriptKind {
 function locationOf(file: string, source: ts.SourceFile, node: ts.Node): Location {
   const { line, character } = source.getLineAndCharacterOfPosition(node.getStart(source));
   return { file, line: line + 1, col: character };
+}
+
+/**
+ * Tests whether a syntax node is nested inside another node's subtree.
+ *
+ * Args:
+ *   container: candidate ancestor node.
+ *   target: node whose ancestry is checked.
+ *
+ * Returns:
+ *   boolean: true when target is inside container.
+ */
+function isWithinNode(container: ts.Node, target: ts.Node): boolean {
+  let current: ts.Node | undefined = target;
+  while (current !== undefined && current !== container) current = current.parent;
+  return current === container;
+}
+
+/**
+ * Finds Gateforge environment reads in conditional ancestors of a test
+ * registration so environment-dependent registrations can be reviewed.
+ *
+ * Args:
+ *   file: repo-relative file containing the registration.
+ *   source: parsed TypeScript source file.
+ *   node: registration call node.
+ *   titlePath: static title path for the registration.
+ *
+ * Returns:
+ *   StaticRegistrationWarning[]: one warning per relevant environment variable.
+ */
+function registrationWarningsForCall(
+  file: string,
+  source: ts.SourceFile,
+  node: ts.Node,
+  titlePath: string[],
+): StaticRegistrationWarning[] {
+  const guards: ts.Expression[] = [];
+  for (let parent = node.parent; parent !== undefined; parent = parent.parent) {
+    if (
+      ts.isIfStatement(parent) &&
+      (isWithinNode(parent.thenStatement, node) ||
+        (parent.elseStatement !== undefined && isWithinNode(parent.elseStatement, node)))
+    ) {
+      guards.push(parent.expression);
+    } else if (
+      ts.isConditionalExpression(parent) &&
+      (isWithinNode(parent.whenTrue, node) || isWithinNode(parent.whenFalse, node))
+    ) {
+      guards.push(parent.condition);
+    } else if (
+      ts.isBinaryExpression(parent) &&
+      isWithinNode(parent.right, node) &&
+      (parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+        parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+        parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
+    ) {
+      guards.push(parent.left);
+    }
+  }
+  if (guards.length === 0) return [];
+  const variables = new Map<string, Location>();
+  /**
+   * Recognizes property or literal-index access to process.env.
+   *
+   * Args:
+   *   expression: expression to inspect.
+   *
+   * Returns:
+   *   boolean: true when expression is process.env.
+   */
+  const isProcessEnv = (expression: ts.Expression): boolean =>
+    (ts.isPropertyAccessExpression(expression) &&
+      ts.isIdentifier(expression.expression) &&
+      expression.expression.text === 'process' &&
+      expression.name.text === 'env') ||
+    (ts.isElementAccessExpression(expression) &&
+      ts.isIdentifier(expression.expression) &&
+      expression.expression.text === 'process' &&
+      expression.argumentExpression !== undefined &&
+      ts.isStringLiteral(expression.argumentExpression) &&
+      expression.argumentExpression.text === 'env');
+  /**
+   * Records Gateforge environment reads from one registration guard.
+   *
+   * Args:
+   *   guard: conditional expression to scan.
+   *
+   * Returns:
+   *   void.
+   */
+  const visitGuard = (guard: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(guard) && isProcessEnv(guard.expression)) {
+      const name = guard.name.text;
+      if (name.startsWith('GATEFORGE_') && !variables.has(name)) {
+        variables.set(name, locationOf(file, source, guard));
+      }
+    } else if (
+      ts.isElementAccessExpression(guard) &&
+      isProcessEnv(guard.expression) &&
+      guard.argumentExpression !== undefined &&
+      ts.isStringLiteral(guard.argumentExpression)
+    ) {
+      const name = guard.argumentExpression.text;
+      if (name.startsWith('GATEFORGE_') && !variables.has(name)) {
+        variables.set(name, locationOf(file, source, guard));
+      }
+    }
+    ts.forEachChild(guard, visitGuard);
+  };
+  for (const guard of guards) visitGuard(guard);
+  return [...variables.entries()].map(([environmentVariable, location]) => ({
+    file,
+    titlePath: [...titlePath],
+    environmentVariable,
+    location,
+  }));
 }
 
 /**
@@ -915,14 +1041,21 @@ function findModuleMock(source: ts.SourceFile, file: string): Location | null {
  *   options: cwd, include/exclude globs, and optional budgets.
  *
  * Returns:
- *   StaticScanResult: entries, unresolved rows, parse errors, scanned
- *   files, and the budget flag. Never throws for scanner-detectable
- *   problems — those are rows (fail closed as data, not silence).
+ *   StaticScanResult: entries, unresolved rows, parse errors, registration
+ *   warnings, scanned files, and the budget flag. Never throws for
+ *   scanner-detectable problems — those are rows (fail closed as data, not silence).
  */
 export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
   const state: ScanState = {
     cwd: options.cwd,
-    result: { entries: [], unresolved: [], parseErrors: [], scannedFiles: [], budgetExceeded: false },
+    result: {
+      entries: [],
+      unresolved: [],
+      parseErrors: [],
+      registrationWarnings: [],
+      scannedFiles: [],
+      budgetExceeded: false,
+    },
     models: new Map(),
     seeded: new Set(),
     traversed: new Set(),
@@ -941,6 +1074,13 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     const gateforgeImport = findGateforgeFixtureImport(model.source, file);
     scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, gateforgeImport);
   }
+  state.result.registrationWarnings.sort(
+    (a, b) =>
+      (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) ||
+      a.location.line - b.location.line ||
+      (a.environmentVariable < b.environmentVariable ? -1 : a.environmentVariable > b.environmentVariable ? 1 : 0) ||
+      (a.titlePath.join('>') < b.titlePath.join('>') ? -1 : a.titlePath.join('>') > b.titlePath.join('>') ? 1 : 0),
+  );
 
   state.result.entries.sort((a, b) => compareEntry(a, b));
   state.result.unresolved.sort(
@@ -1132,6 +1272,9 @@ function scanFileForTests(
         gateforgeImport,
       });
       state.result.entries.push(entry);
+      state.result.registrationWarnings.push(
+        ...registrationWarningsForCall(file, source, node, entry.titlePath),
+      );
       // Walk the body so inner zero-arg `test.skip()` / `test.fixme()`
       // calls attach to THIS entry's signals.
       if (callback !== undefined) {
@@ -1175,6 +1318,9 @@ function scanFileForTests(
           gateforgeImport,
         });
         state.result.entries.push(entry);
+        state.result.registrationWarnings.push(
+          ...registrationWarningsForCall(file, source, outer, entry.titlePath),
+        );
         if (outerCallback !== undefined) {
           const enclosing = { facts: entry.facts, signals: entry.signals };
           ts.forEachChild(outerCallback, (child) => visit(child, describeStack, enclosing));

@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo } from '@gate-forge/core';
 import { runPipeline } from '../src/pipeline.js';
@@ -232,9 +232,15 @@ declarations: {}
 volatileFields: []
 `,
       );
+      const marker = repo.path('adapter-evaluated');
       repo.writeFiles({
         '.gateforge/policies.yml': CRUD_POLICIES_YML,
-        '.gateforge/adapters/tenant.accounts.mjs': "export default { fields: ['id', 'name'] };\n",
+        '.gateforge/adapters/tenant.accounts.mjs': [
+          "import { writeFileSync } from 'node:fs';",
+          `writeFileSync(${JSON.stringify(marker)}, 'evaluated');`,
+          "export default { fields: ['id', 'name'] };",
+          '',
+        ].join('\n'),
         'models/accounts.py': `from sqlalchemy import Column, Integer, String
 from sqlalchemy.orm import declarative_base
 
@@ -249,8 +255,11 @@ class Account(Base):
 `,
       });
       const { pipeline } = await runFixture(repo.root);
+      expect(existsSync(marker)).toBe(false);
       const contradiction = pipeline.policy.blocking.find((entry) => entry.detail.includes('description'));
-      expect(contradiction, JSON.stringify(pipeline.policy.blocking)).toBeDefined();
+      expect(contradiction).toMatchObject({ kind: 'classification', resourceId: 'tenant.accounts' });
+      expect(contradiction?.detail).toContain("missing from adapter 'tenant.accounts' fields projection");
+      expect(contradiction?.detail).toContain('description');
     });
   });
   it('reports a stale exact-resource rule instead of silently dropping it', async () => {

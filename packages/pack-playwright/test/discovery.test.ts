@@ -345,6 +345,13 @@ describe('static discovery', () => {
         "if (process.env.GATEFORGE_STATE_DIR) test('witness branch', () => {});",
         '',
       ].join('\n'),
+      'e2e/body.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "test('reads runner env at runtime', async () => {",
+        '  if (process.env.GATEFORGE_RUN_TOKEN) {}',
+        '});',
+        '',
+      ].join('\n'),
     });
     const result = scanTestFiles({
       cwd: root,

@@ -3187,6 +3187,7 @@ async function handlePersistence(
   // used (and the record's testId is the session's, never caller-declared).
   const session = requireOpenSession(state, body);
   const boundTestId = requireSessionTestId(session, testId);
+  let anchoredFields: string[] | null = null;
   const boundClaimId = String(claimId);
   if (typeof anchorId === 'string') {
     const interval = session.intervals.get(anchorId);
@@ -3211,6 +3212,9 @@ async function handlePersistence(
     });
     if (action === undefined || !isPlainObject(action.payload)) {
       throw new HttpError(400, `action anchor '${anchorId}' does not identify this claim's witnessed UI action`);
+    }
+    if (isPlainObject(action.payload['fields'])) {
+      anchoredFields = Object.keys(action.payload['fields']);
     }
     let sameEntity = false;
     try {
@@ -3266,7 +3270,11 @@ async function handlePersistence(
     }
   }
 
-  const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
+  const { adapterName, adapter, baseUrl } = await adapterReadContext(
+    state,
+    resourceId,
+    anchoredFields ?? undefined,
+  );
 
   // Consume the referenced pre-observation, if any (single-use). Its
   // contents — never suite-declared expectations — are what the engine
@@ -4440,14 +4448,20 @@ async function runServerProbe(
 }
 
 /**
- * Resolves the reviewed adapter + mediated read base for one resource,
- * enforcing the full attestation chain (ADR 0001 adapter, GF-10
- * loopback, GF-13 fingerprint). Shared by persistence reads and
- * pre-observations.
+ * Resolves the reviewed adapter and attested read base for a resource.
+ *
+ * Args:
+ *   state: witness-owned configuration and adapter registry.
+ *   resourceId: plane-qualified resource identity.
+ *   requiredFields: anchored action fields that must be in the adapter projection.
+ *
+ * Returns:
+ *   Promise<{adapterName, adapter, baseUrl}>: validated adapter and its read base.
  */
 async function adapterReadContext(
   state: WitnessState,
   resourceId: string,
+  requiredFields?: readonly string[],
 ): Promise<{ adapterName: string; adapter: EvidenceAdapter; baseUrl: string }> {
   const classification = state.classifications[resourceId] as Classification | undefined;
   const adapterName = classification?.evidenceAdapter ?? resourceId;
@@ -4459,6 +4473,22 @@ async function adapterReadContext(
         `(looked for '.gateforge/adapters/${adapterName}.mjs'); ` +
         'user-facing resources cannot be proven without a trusted adapter (ADR 0001)',
     );
+  }
+  if (adapter.fields !== undefined && requiredFields !== undefined) {
+    let missingFields: string[] | null = null;
+    for (const field of requiredFields) {
+      if (!adapter.fields.includes(field)) {
+        if (missingFields === null) missingFields = [];
+        missingFields.push(field);
+      }
+    }
+    if (missingFields !== null) {
+      missingFields.sort();
+      throw new HttpError(
+        409,
+        `adapter '${adapterName}' fields projection does not expose action field(s): ${missingFields.join(', ')}`,
+      );
+    }
   }
 
   const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl;

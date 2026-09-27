@@ -7,11 +7,12 @@
  * TRUST BOUNDARY (plan §3.3, phase 2 item 4): `--list` loads the
  * consumer's playwright config and test modules as UNTRUSTED code —
  * they execute in a child process. This module therefore:
- * - strips every `GATEFORGE_*` variable (witness keys, run tokens, run
- *   state) from the child environment, then sets only an isolated,
- *   secret-free temporary `GATEFORGE_STATE_DIR` so supervised-only test
- *   declarations are registered;
- * - deletes that temporary directory after enumeration;
+ * - strips every `GATEFORGE_*` variable from the scrubbed child
+ *   environment, then sets only an isolated, secret-free temporary
+ *   `GATEFORGE_STATE_DIR`;
+ * - gives wired comparison listings only the safe run-variable allowlist
+ *   actually exposed to runner children;
+ * - removes temporary state after scrubbed enumeration;
  * - enforces a finite timeout (the child is killed; a timeout is a
  *   typed failure, never a hang or an empty inventory);
  * - treats a failed invocation as a typed error (CLI exit 2), while
@@ -37,6 +38,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } 
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { buildRunnerChildEnv } from './runner-env.js';
 import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
 import type { Location } from '@gate-forge/core';
 
@@ -272,8 +274,8 @@ function toRepoRelative(cwd: string, path: string): string {
  * invocation (repo-root cwd, auto-discovered config, no `--config`).
  *
  * Args:
- *   options: `cwd` (absolute repo root) and optional `timeoutMs`
- *     (default {@link DEFAULT_LIST_TIMEOUT_MS}).
+ *   options: `cwd` (absolute repo root), optional `timeoutMs`, and
+ *     optional allowlisted wired-runner variables for registration comparison.
  *
  * Returns:
  *   Promise<NativeListResult>: enumerated instances, reporter errors,
@@ -286,6 +288,7 @@ function toRepoRelative(cwd: string, path: string): string {
 export async function listNativePlaywrightTests(options: {
   cwd: string;
   timeoutMs?: number;
+  wiredEnv?: Readonly<Record<string, string>>;
 }): Promise<NativeListResult> {
   const configPath = findPlaywrightConfig(options.cwd);
   if (configPath === null) {
@@ -303,12 +306,17 @@ export async function listNativePlaywrightTests(options: {
   const cli = playwrightCliPath(options.cwd, configDir);
   const args = [cli, 'test', '--list', '--reporter=json'];
   if (configDir !== '.') args.push('--config', basename(configPath));
-  const discoveryStateDir = mkdtempSync(join(tmpdir(), 'gateforge-discovery-state-'));
+  const discoveryStateDir =
+    options.wiredEnv === undefined ? mkdtempSync(join(tmpdir(), 'gateforge-discovery-state-')) : undefined;
   let outcome: { code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null };
   try {
+    const childEnv =
+      options.wiredEnv === undefined
+        ? untrustedEnv(process.env, discoveryStateDir)
+        : buildRunnerChildEnv(options.wiredEnv, process.env);
     const child = spawn(process.execPath, args, {
       cwd: childCwd,
-      env: untrustedEnv(process.env, discoveryStateDir),
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     outcome = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null }>(
@@ -344,7 +352,7 @@ export async function listNativePlaywrightTests(options: {
     },
   );
   } finally {
-    rmSync(discoveryStateDir, { recursive: true, force: true });
+    if (discoveryStateDir !== undefined) rmSync(discoveryStateDir, { recursive: true, force: true });
   }
   if (outcome.error !== null) {
     throw new TestDiscoveryError(`playwright --list failed to run: ${outcome.error.message}`);
@@ -415,11 +423,95 @@ export async function listNativePlaywrightTests(options: {
   walkSuites(document.suites ?? [], [], null);
   const errors = (document.errors ?? []).map((error) => error.message ?? String(error));
   const configDetail = configDir !== '.' ? ` (cwd '${configDir}')` : '';
+  const envDetail =
+    options.wiredEnv === undefined
+      ? 'isolated temporary GATEFORGE_STATE_DIR'
+      : 'allowlisted wired runner variables';
   return {
     status: 'discovered',
-    detail: `native playwright --list over '${configPath}'${configDetail} enumerated ${String(instances.length)} instance(s) as untrusted code (isolated temporary GATEFORGE_STATE_DIR only)`,
+    detail:
+      `native playwright --list over '${configPath}'${configDetail} enumerated ${String(instances.length)} ` +
+      `instance(s) as untrusted code (${envDetail})`,
     instances,
     errors,
+  };
+}
+
+/**
+ * Finds registration instances present in only one environment's native
+ * Playwright listing, treating project and duplicate instances as identity.
+ *
+ * Args:
+ *   scrubbed: native instances enumerated without run wiring.
+ *   wired: native instances enumerated with the runner's safe run variables.
+ *
+ * Returns:
+ *   An object containing project-qualified instances unique to each listing.
+ */
+export function diffNativePlaywrightTests(
+  scrubbed: readonly NativeInstance[],
+  wired: readonly NativeInstance[],
+): { scrubbedOnly: NativeInstance[]; wiredOnly: NativeInstance[] } {
+  /**
+   * Builds the project-qualified matching identity for one instance.
+   *
+   * Args:
+   *   instance: native test instance.
+   *
+   * Returns:
+   *   string: serialized file, title path, and project tuple.
+   */
+  const keyOf = (instance: NativeInstance): string =>
+    JSON.stringify([instance.file, instance.titlePath, instance.project]);
+  const wiredCounts = new Map<string, number>();
+  for (const instance of wired) {
+    const key = keyOf(instance);
+    wiredCounts.set(key, (wiredCounts.get(key) ?? 0) + 1);
+  }
+  const matchedCounts = new Map<string, number>();
+  const scrubbedOnly: NativeInstance[] = [];
+  for (const instance of scrubbed) {
+    const key = keyOf(instance);
+    const matched = matchedCounts.get(key) ?? 0;
+    if (matched < (wiredCounts.get(key) ?? 0)) {
+      matchedCounts.set(key, matched + 1);
+    } else {
+      scrubbedOnly.push(instance);
+    }
+  }
+  const wiredOnly: NativeInstance[] = [];
+  const emittedCounts = new Map<string, number>();
+  for (const instance of wired) {
+    const key = keyOf(instance);
+    const emitted = emittedCounts.get(key) ?? 0;
+    if (emitted < (matchedCounts.get(key) ?? 0)) {
+      emittedCounts.set(key, emitted + 1);
+    } else {
+      wiredOnly.push(instance);
+    }
+  }
+  /**
+   * Sorts instances deterministically by file, project, and title path.
+   *
+   * Args:
+   *   left: first native test instance.
+   *   right: second native test instance.
+   *
+   * Returns:
+   *   number: standard array comparator result.
+   */
+  const compare = (left: NativeInstance, right: NativeInstance): number => {
+    const byFile = left.file < right.file ? -1 : left.file > right.file ? 1 : 0;
+    if (byFile !== 0) return byFile;
+    const byProject = left.project < right.project ? -1 : left.project > right.project ? 1 : 0;
+    if (byProject !== 0) return byProject;
+    const leftTitlePath = left.titlePath.join('>');
+    const rightTitlePath = right.titlePath.join('>');
+    return leftTitlePath < rightTitlePath ? -1 : leftTitlePath > rightTitlePath ? 1 : 0;
+  };
+  return {
+    scrubbedOnly: scrubbedOnly.sort(compare),
+    wiredOnly: wiredOnly.sort(compare),
   };
 }
 

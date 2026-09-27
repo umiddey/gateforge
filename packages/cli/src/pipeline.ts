@@ -34,6 +34,7 @@ import {
   runClassification,
   sortLifecycleRules,
     type BehaviorCatalog,
+  type BlockingEntry,
   type ChangedProvider,
   type Claim,
   type ClassificationFile,
@@ -47,6 +48,7 @@ import {
   type ResourceGraph,
   type RunManifest,
 } from '@gate-forge/core';
+import { staticAdapterFieldsFromSource } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.js';
 import { clockFromConfig } from './clock.js';
@@ -216,6 +218,81 @@ export function resolveRepoPath(cwd: string, repoRelative: string): string {
   return join(cwd, ...normalized.split('/'));
 }
 
+/**
+ * Finds known model update fields omitted from statically declared adapter
+ * projections without importing or evaluating adapter modules.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   adaptersDir: repo-relative adapter directory.
+ *   adapterNames: discovered adapter module basenames.
+ *   decisions: effective classifier decisions for this pipeline run.
+ *
+ * Returns:
+ *   BlockingEntry[]: one visible blocker for each affected resource.
+ */
+function adapterProjectionBlockers(
+  cwd: string,
+  adaptersDir: string,
+  adapterNames: readonly string[],
+  decisions: ClassificationResult['decisions'],
+): BlockingEntry[] {
+  const fieldsByAdapter = new Map<string, string[]>();
+  const absoluteDir = resolveRepoPath(cwd, adaptersDir);
+  for (const adapterName of adapterNames) {
+    let source: string;
+    try {
+      source = readFileSync(join(absoluteDir, `${adapterName}.mjs`), 'utf8');
+    } catch {
+      continue;
+    }
+    const fields = staticAdapterFieldsFromSource(source);
+    if (fields !== null) {
+      fields.sort(compareStrings);
+      fieldsByAdapter.set(adapterName, fields);
+    }
+  }
+  const blockers: BlockingEntry[] = [];
+  for (const decision of decisions) {
+    const classified = decision.classification;
+    const adapterName = classified?.evidenceAdapter;
+    const projectedFields = adapterName === undefined ? undefined : fieldsByAdapter.get(adapterName);
+    const updateableFields = classified?.lifecycle.updateableFields;
+    if (
+      adapterName === undefined ||
+      projectedFields === undefined ||
+      updateableFields === undefined
+    ) {
+      continue;
+    }
+    let missing: string[] | null = null;
+    for (const field of updateableFields) {
+      if (!projectedFields.includes(field)) {
+        if (missing === null) missing = [];
+        missing.push(field);
+      }
+    }
+    if (missing === null) continue;
+    missing.sort(compareStrings);
+    blockers.push({
+      kind: 'classification',
+      resourceId: decision.resourceId,
+      name: decision.name,
+      detail:
+        `model updateable field(s) [${missing.join(', ')}] are missing from adapter '${adapterName}' ` +
+        `fields projection [${projectedFields.join(', ')}]`,
+      location: decision.location,
+      cause: null,
+      nextAction:
+        "Add the missing fields to the adapter's 'fields' projection or remove them from the model's " +
+        'updateable fields.',
+    });
+  }
+  return blockers.sort(
+    (left, right) => compareStrings(left.resourceId ?? '', right.resourceId ?? ''),
+  );
+}
+
 /** First zod issue as one actionable `path: message` line. */
 function firstIssueText(
   error: { issues?: Array<{ path: PropertyKey[]; message: string }> },
@@ -382,7 +459,10 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     graph,
     policies: policiesParsed.data,
     claims,
-    extraBlocking: blocking,
+    extraBlocking: [
+      ...blocking,
+      ...adapterProjectionBlockers(cwd, config.adapters, adapters, classification.decisions),
+    ],
   });
   let behaviorCatalog: BehaviorCatalog | null = null;
   if (config.behaviorPolicy !== undefined) {
