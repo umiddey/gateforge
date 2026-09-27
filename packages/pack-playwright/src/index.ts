@@ -187,6 +187,7 @@ export type {
   StaticUnresolved,
   StaticParseError,
   NativeInstance,
+  NativeListResult,
   StaticRegistrationWarning,
   InferenceFacts,
   InferenceResult,
