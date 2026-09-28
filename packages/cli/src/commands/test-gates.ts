@@ -2358,6 +2358,33 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     diagnosticContext,
     ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
   });
+  /** The json report plus this run's strictness/quarantine blocks. */
+  const jsonReportDocument = (): string =>
+    canonicalJson({
+      ...(JSON.parse(renderedReport) as Record<string, unknown>),
+      ...(gateMode === 'strict'
+        ? {}
+        : {
+            strictness: {
+              mode: strictness.mode,
+              wouldBlock: strictness.wouldBlock,
+              blockingInScope: strictness.blockingInScope,
+              blockingTotal: strictness.blockingTotal,
+            },
+          }),
+      ...(quarantines.active.length === 0
+        ? {}
+        : {
+            quarantine: {
+              count: quarantines.active.length,
+              tests: quarantines.active.map((entry) => ({
+                testKey: entry.quarantine.testKey,
+                expiresAt: entry.quarantine.expiresAt,
+                owner: entry.quarantine.owner,
+              })),
+            },
+          }),
+    } as unknown as JsonValue);
   const report =
     format === 'text'
       ? `${renderedReport}\n${strictnessSummaryLine(strictness)}${
@@ -2368,48 +2395,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
                 .join(', ')})`
         }`
       : format === 'json'
-        ? canonicalJson({
-            ...(JSON.parse(renderedReport) as Record<string, unknown>),
-            ...(gateMode === 'strict'
-              ? {}
-              : {
-                  strictness: {
-                    mode: strictness.mode,
-                    wouldBlock: strictness.wouldBlock,
-                    blockingInScope: strictness.blockingInScope,
-                    blockingTotal: strictness.blockingTotal,
-                  },
-                }),
-            ...(quarantines.active.length === 0
-              ? {}
-              : {
-                  quarantine: {
-                    count: quarantines.active.length,
-                    tests: quarantines.active.map((entry) => ({
-                      testKey: entry.quarantine.testKey,
-                      expiresAt: entry.quarantine.expiresAt,
-                      owner: entry.quarantine.owner,
-                    })),
-                  },
-                }),
-          } as unknown as JsonValue)
+        ? jsonReportDocument()
         : renderedReport;
   writeLine(io.stdout, report);
-  writeReport(
-    stateDir,
-    renderRun(evaluated.verdicts, {
-      format: 'json',
-      blocking: evaluated.blocking,
-      waiverCounts: evaluated.waiverCounts,
-      run: manifest,
-      toolVersion: VERSION,
-      engine: engineIdentity(),
-      lifecycleDerivation: pipeline.lifecycleDerivation,
-      execution: executionSummary,
-      diagnosticContext,
-      ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
-    }),
-  );
+  // The persisted report carries the SAME document stdout got: a later
+  // consumer must see the strictness the run used and the quarantined
+  // population, never a quieter one.
+  writeReport(stateDir, jsonReportDocument());
 
   // 10. Only authoritative gate mode invalidates a previous receipt on
   // failure. Result-only reporting never creates, replaces, or clears one.
