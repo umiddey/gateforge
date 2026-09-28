@@ -16,15 +16,15 @@
  *   format mismatch — all degrade to running the work again.
  * - The cache lives under the EXCLUDED run-state directory, never enters
  *   the input digest, and is never used as evidence.
- * - `GATEFORGE_NO_CACHE=1` (or `--no-cache`, or a CI environment) forces
- *   a full scan: no reads, no writes.
+ *   `GATEFORGE_NO_CACHE=1` (or `--no-cache`, or a recognized CI provider)
+ *   forces a full scan: no reads, no writes.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  readdirSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   renameSync,
   statSync,
   writeFileSync,
@@ -133,15 +133,16 @@ interface PluginCacheEntry {
  *
  * Returns:
  *   CacheControl: disabled when `--no-cache`, `GATEFORGE_NO_CACHE` is set,
- *   or a CI environment is detected (CI always runs a full scan).
+ *   or a recognized CI-provider marker is present.
  */
 export function resolveCacheControl(
   env: NodeJS.ProcessEnv,
   stateDir: string,
   noCacheFlag: boolean,
 ): CacheControl {
-  const ciDetected =
-    env['CI'] === 'true' || env['CI'] === '1' || env['GITHUB_ACTIONS'] === 'true';
+  const ciDetected = [
+    'GITHUB_ACTIONS', 'GITLAB_CI', 'BUILDKITE', 'CIRCLECI', 'JENKINS_URL', 'TF_BUILD',
+  ].some((name) => env[name] === 'true' || env[name] === '1');
   const noCacheEnv = env['GATEFORGE_NO_CACHE'] === '1' || env['GATEFORGE_NO_CACHE'] === 'true';
   return { stateDir: resolve(stateDir), disabled: noCacheFlag || noCacheEnv || ciDetected };
 }
@@ -805,58 +806,46 @@ export function writePytestCache(stateDir: string, key: string, result: unknown)
 }
 
 /**
- * Digests every Python and pytest-config file in the repository for the
- * collection cache key. Skips `.git` and explicitly excluded run-state
- * directories; any unreadable input returns null and forces collection.
+ * Digests Python and pytest-config files from Git's tracked and nonignored
+ * untracked inventory, excluding run-state directories.
  *
  * Args:
- *   cwd: absolute repo root.
- *   stateDirs: absolute run-state directories to exclude from the digest.
+ *   cwd: absolute repository root.
+ *   stateDirs: absolute run-state directories to exclude.
  *
  * Returns:
- *   string | null: hexadecimal digest, or null when an input is unreadable.
+ *   string | null: digest, or null when inventory or an input is unreadable.
  */
 export function digestPytestInputs(cwd: string, ...stateDirs: string[]): string | null {
   const root = resolve(cwd);
   const stateRoots = stateDirs.map((directory) => resolve(directory));
-  const configBasenames = new Set(['pytest.ini', 'pyproject.toml', 'setup.cfg', 'tox.ini']);
-  const parts: string[] = [];
-  const walk = (directory: string, relative: string): boolean => {
-    let entries;
-    try {
-      entries = readdirSync(directory, { withFileTypes: true });
-    } catch {
-      return false;
-    }
-    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-      const childAbsolute = join(directory, entry.name);
-      if (entry.isSymbolicLink()) {
-        if (entry.name.endsWith('.py') || PYTEST_CONFIG_BASENAMES[entry.name] === true) return false;
-        continue;
-      }
-      const childRelative = relative === '' ? entry.name : `${relative}/${entry.name}`;
-      if (entry.isDirectory()) {
-        if (entry.name === '.git') continue;
-        if (
-          stateRoots.some(
-            (stateRoot) =>
-              childAbsolute === stateRoot || childAbsolute.startsWith(`${stateRoot}${sep}`),
-          )
-        ) {
-          continue;
-        }
-        if (!walk(childAbsolute, childRelative)) return false;
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      const isPython = entry.name.endsWith('.py');
-      const isConfig = PYTEST_CONFIG_BASENAMES[entry.name] === true;
-      if (!isPython && !isConfig) continue;
-      const digest = fileDigest(childAbsolute, childRelative);
-      if (digest === null) return false;
-      parts.push(digest);
-    }
-    return true;
+  const configBasenames: Record<string, true> = {
+    'pytest.ini': true,
+    'pyproject.toml': true,
+    'setup.cfg': true,
+    'tox.ini': true,
   };
-  return walk(root, '') ? sha256Hex(parts.join('\n')) : null;
+  let inventory: string[];
+  try {
+    const bytes = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+      cwd: root,
+      encoding: 'buffer',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    inventory = bytes.toString('utf8').split('\0').filter(Boolean);
+  } catch {
+    return null;
+  }
+  const parts: string[] = [];
+  for (const name of inventory) {
+    const absolute = resolve(root, name);
+    if (!absolute.startsWith(`${root}${sep}`)) return null;
+    if (stateRoots.some((stateRoot) => absolute === stateRoot || absolute.startsWith(`${stateRoot}${sep}`))) continue;
+    const basename = name.slice(name.lastIndexOf('/') + 1);
+    if (!basename.endsWith('.py') && configBasenames[basename] !== true) continue;
+    const digest = fileDigest(absolute, name);
+    if (digest === null) return null;
+    parts.push(digest);
+  }
+  return sha256Hex(parts.sort().join('\n'));
 }

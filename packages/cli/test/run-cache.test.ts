@@ -3,7 +3,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { pluginCacheIdentity, pluginCacheKey, pytestCacheKey } from '../src/run-cache.js';
+import { digestPytestInputs, pluginCacheIdentity, pluginCacheKey, pytestCacheKey, resolveCacheControl } from '../src/run-cache.js';
+import { execFileSync } from 'node:child_process';
 
 const temporaryDirectories: string[] = [];
 
@@ -55,6 +56,27 @@ describe('subprocess cache identities', () => {
     expect(changedEngine).not.toBeNull();
     expect(pluginCacheKey(changedEngine!)).not.toBe(pluginCacheKey(changedSource!));
   });
+
+describe('pytest input inventory and cache policy', () => {
+  it('ignores ignored virtualenv Python files without reading them', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gateforge-pytest-inputs-'));
+    temporaryDirectories.push(root);
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    writeFileSync(join(root, '.gitignore'), '.venv/\n');
+    writeFileSync(join(root, 'app.py'), 'VALUE = 1\n');
+    execFileSync('git', ['add', '.gitignore', 'app.py'], { cwd: root });
+    mkdirSync(join(root, '.venv'), { recursive: true });
+    writeFileSync(join(root, '.venv', 'unreadable.py'), 'ignored\n');
+    const firstDigest = digestPytestInputs(root);
+    writeFileSync(join(root, '.venv', 'unreadable.py'), 'changed ignored bytes\n');
+    expect(digestPytestInputs(root)).toBe(firstDigest);
+  });
+
+  it('disables caching only on recognized CI providers, not bare CI=true', () => {
+    expect(resolveCacheControl({ CI: 'true' }, '/tmp/cache', false).disabled).toBe(false);
+    expect(resolveCacheControl({ GITHUB_ACTIONS: 'true' }, '/tmp/cache', false).disabled).toBe(true);
+  });
+});
 
   it('keys pytest collection by collector argv, environment, and engine version', () => {
     const identity = { path: '/python', version: '3.12', packagesDigest: 'packages' };
