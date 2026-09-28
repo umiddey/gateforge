@@ -163,7 +163,7 @@ describe('commit-time check reuse (plan 20260928_1430)', () => {
     }
   }, 120_000);
 
-  it('reuses the cached detector result on an unchanged second run', async () => {
+  it('reuses cached detector and pytest results on unchanged inputs', async () => {
     const counterDir = mkdtempSync(join(tmpdir(), 'gateforge-cache-reuse-'));
     try {
       await withTempRepo({}, async (repo) => {
@@ -174,6 +174,7 @@ describe('commit-time check reuse (plan 20260928_1430)', () => {
         const first = await runCli(repo, ['check', '--changed', '--timing', '--format', 'json'], { CI: undefined });
         expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(1);
         expect(countSpawns(fixture.detectorCounter)).toBe(1);
+        expect(countSpawns(fixture.collectorCounter)).toBe(1);
         expect(first.stdout).toContain('"cache":{"hits":0,"misses":2}');
 
         // Identical inputs: the second commit-time run must reuse the

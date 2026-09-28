@@ -211,6 +211,7 @@ describe('gateforge next: behavior ranking (plan §5)', () => {
       };
       expect(Object.keys(report).filter((key) => key !== 'engine').sort()).toEqual([
         'blocking',
+        'cache',
         'diagnosticContext',
         'run',
         'schemaVersion',
