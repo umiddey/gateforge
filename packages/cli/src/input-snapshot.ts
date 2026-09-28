@@ -443,9 +443,12 @@ export function normalizeRepoModule(module: string): string | null {
  * Expands a configured Alembic versions directory into its migration files.
  *
  * The chain config names a DIRECTORY; the snapshot digests files, so the
- * directory is walked and every file below it is declared instead. A
- * missing or unreadable directory contributes nothing here — the
- * compiler reports the broken chain itself.
+ * directory is walked and every file below it is declared instead.
+ * Python bytecode (`__pycache__/`, `*.pyc`, `*.pyo`) is skipped: Alembic
+ * writes it whenever it imports the migrations, so it would change the
+ * input identity without any source change. A missing or unreadable
+ * directory contributes nothing here — the compiler reports the broken
+ * chain itself.
  *
  * Args:
  *   cwd: absolute repo root.
@@ -474,8 +477,8 @@ export function migrationInputFiles(cwd: string, directory: string): string[] {
         continue;
       }
       if (stat.isDirectory()) {
-        walk(join(dir, entry), [...segments, entry]);
-      } else {
+        if (entry !== '__pycache__') walk(join(dir, entry), [...segments, entry]);
+      } else if (!/\.py[co]$/.test(entry)) {
         found.push(relativePath);
       }
     }
