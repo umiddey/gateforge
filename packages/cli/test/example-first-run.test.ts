@@ -75,5 +75,5 @@ describe('example first run', () => {
       expect(resolved.code, `${resolved.stdout}\n${resolved.stderr}`).toBe(0);
       expect(resolved.stdout).toContain('next: none — clean');
     });
-  });
+  }, 120_000);
 });

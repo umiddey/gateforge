@@ -64,6 +64,7 @@ export const AdoptionRecordSchema = z
     /** Source files for indexed obligations, used only to explain baseline drift. */
     obligationSourcesById: z.record(z.string().min(1), z.array(z.string().min(1))).optional(),
   })
+  .strict()
   .superRefine((record, ctx) => {
     const ids = record.classificationBlocked;
     if (ids === undefined) return;
