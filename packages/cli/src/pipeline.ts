@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { parse as parseYaml } from 'yaml';
 import {
   ClaimSchema,
@@ -111,6 +112,20 @@ export interface PipelineResult {
   lifecycleDerivation: LifecycleDerivationReportEntry[];
   /** Compiled complete-behavior catalog, or null when the document is absent. */
   behaviorCatalog: BehaviorCatalog | null;
+  /**
+   * Coarse per-step wall-clock timings (plan 20260928_1430 Phase 0,
+   * `check --timing`): plugin/detector duration and the whole-pipeline
+   * duration in milliseconds. Observability only — never an input.
+   */
+  timings: PipelineTimings;
+}
+
+/** Coarse pipeline step durations in milliseconds (`check --timing`). */
+export interface PipelineTimings {
+  /** Total `runPlugins` duration (all detectors, config order). */
+  pluginsMs: number;
+  /** Total `runPipeline` duration including the detector step. */
+  totalMs: number;
 }
 
 /** Source-file map resourceId → repo-relative source (for diff scoping). */
@@ -336,7 +351,10 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     cwd,
     expandErrors,
   );
+  const pipelineStartedAtMs = performance.now();
+  const pluginsStartedAtMs = performance.now();
   const { contributions, registrations } = await runPlugins(config.plugins, paths, cwd);
+  const pluginsMs = performance.now() - pluginsStartedAtMs;
 
   const policyDocRaw = loadYaml(resolveRepoPath(cwd, config.classificationPolicy), 'classification-policy');
   const policyDocParsed = ClassificationPolicySchema.safeParse(policyDocRaw);
@@ -529,6 +547,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     classificationsView: effectiveClassifications(graph, classification),
     lifecycleDerivation: lifecycleDerivationForReport(classification),
     behaviorCatalog,
+    timings: { pluginsMs, totalMs: performance.now() - pipelineStartedAtMs },
   };
 }
 

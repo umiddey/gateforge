@@ -39,6 +39,7 @@ const BOOLEAN_FLAGS: Record<string, true> = {
   'no-scan': true,
   failed: true,
   'result-only': true,
+  timing: true,
 };
 
 /**

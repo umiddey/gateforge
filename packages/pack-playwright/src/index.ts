@@ -197,6 +197,7 @@ export type {
   PytestCollectionResult,
   DiscoverOptions,
   DiscoverResult,
+  DiscoveryTimings,
   AdapterOptions,
   DiagnosticRunResult,
   DiagnosticRunStatus,

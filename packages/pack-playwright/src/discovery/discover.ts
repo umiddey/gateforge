@@ -25,6 +25,7 @@
  * project); unresolved/parse errors sort by location.
  */
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import {
   canonicalJson,
   ClaimSchema,
@@ -92,6 +93,24 @@ export interface DiscoverResult {
   nativeInstances: NativeInstance[];
   /** Static registration sites guarded by Gateforge environment state. */
   registrationWarnings: StaticRegistrationWarning[];
+  /**
+   * Coarse per-step wall-clock timings (plan 20260928_1430 Phase 0,
+   * `check --timing`): static scan, native list, pytest collection, and
+   * the whole discovery in milliseconds. Observability only.
+   */
+  timings: DiscoveryTimings;
+}
+
+/** Coarse discovery step durations in milliseconds (`check --timing`). */
+export interface DiscoveryTimings {
+  /** Static test-file scan duration. */
+  scanMs: number;
+  /** Native Playwright `--list` enumeration duration. */
+  nativeListMs: number;
+  /** All configured pytest suites' collection duration. */
+  pytestCollectMs: number;
+  /** Total `discoverTestCatalog` duration including all steps above. */
+  totalMs: number;
 }
 
 /**
@@ -118,16 +137,21 @@ export interface DiscoverResult {
  */
 export async function discoverTestCatalog(options: DiscoverOptions): Promise<DiscoverResult> {
   const { cwd, config } = options;
+  const discoveryStartedAtMs = performance.now();
+  const scanStartedAtMs = performance.now();
   const scan = scanTestFiles({
     cwd,
     include: config.project.paths.include,
     exclude: config.project.paths.exclude,
   });
+  const scanMs = performance.now() - scanStartedAtMs;
 
+  const nativeStartedAtMs = performance.now();
   const native = await listNativePlaywrightTests({
     cwd,
     timeoutMs: options.playwrightTimeoutMs,
   });
+  const nativeListMs = performance.now() - nativeStartedAtMs;
 
   const builder = new CatalogBuilder(cwd, scan, native);
   const runnerSummaries: RunnerSummary[] = [builder.playwrightSummary()];
@@ -135,6 +159,7 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
 
     // Registered pytest suites: diagnostic-only identities (§3.5).
     const suites = config.diagnostics?.suites ?? [];
+    const pytestCollectStartedAtMs = performance.now();
     for (const suite of suites) {
       if (options.collectPytest === true) {
         const collection = await collectPytestSuite(suite, join(cwd, suite.cwd));
@@ -182,6 +207,12 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
       nativeInstances: native.instances,
       nativeErrors: [...native.errors],
       registrationWarnings: scan.registrationWarnings,
+      timings: {
+        scanMs,
+        nativeListMs,
+        pytestCollectMs: performance.now() - pytestCollectStartedAtMs,
+        totalMs: performance.now() - discoveryStartedAtMs,
+      },
     };
 }
 

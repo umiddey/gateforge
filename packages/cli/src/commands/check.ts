@@ -21,6 +21,7 @@
 import { cpSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import {
   BLOCKING_VERDICTS,
   CAUSE_NEXT_ACTIONS,
@@ -39,7 +40,12 @@ import {
   type GateReceipt,
   type JsonValue,
 } from '@gate-forge/core';
-import { discoverTestCatalog, findPlaywrightConfig, scanTestFiles } from '@gate-forge/pack-playwright';
+import {
+  discoverTestCatalog,
+  findPlaywrightConfig,
+  scanTestFiles,
+  type DiscoveryTimings,
+} from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
@@ -379,7 +385,7 @@ function mockedOnlyEndpointAdvisories(
 
 export const CHECK_USAGE =
   'usage: gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--format text|json|sarif]\n' +
-  '       [--approved-policy-digest <hex64>]\n' +
+  '       [--approved-policy-digest <hex64>] [--timing]\n' +
   '       verifier key: GATEFORGE_WITNESS_VERIFIER_KEY or GATEFORGE_WITNESS_VERIFIER_KEY_FILE\n' +
   '       approved policy digest: the OWNER-APPROVED policy revision pin. Never sourced from\n' +
   '       candidate-controlled files in strict mode — provision it via the protected\n' +
@@ -419,6 +425,8 @@ export interface CheckGateOptions {
   runtimeReuseMounts?: readonly RuntimeReuseMount[];
   /** Recomputes mounted dependency bytes after discovery. */
   runtimeReuseCheck?: () => string | null;
+  /** Emit per-step wall-clock timings in the report (additive only). */
+  timing?: boolean;
 }
 
 /**
@@ -439,13 +447,14 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
     writeLine(io.stdout, CHECK_USAGE);
     return 0;
   }
-  rejectUnknownFlags(options, ['changed', 'staged', 'candidate-commit', 'require-e2e', 'format', 'approved-policy-digest', 'help'], CHECK_USAGE);
+  rejectUnknownFlags(options, ['changed', 'staged', 'candidate-commit', 'require-e2e', 'format', 'approved-policy-digest', 'timing', 'help'], CHECK_USAGE);
   if (options['staged'] === true && options['changed'] === true) {
     throw new UsageError('check: --staged already scopes the run to the staged candidate; --changed cannot be combined');
   }
   const format = parseRunFormat(stringFlag(options, 'format') ?? 'text');
   const requireE2E = options['require-e2e'] === true;
   const approvedPolicyDigest = stringFlag(options, 'approved-policy-digest');
+  const timing = options['timing'] === true;
   const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [resolveStateDir(io.cwd)]);
   const candidateCommitSha = stringFlag(options, 'candidate-commit');
   if (options['staged'] === true && candidateCommitSha !== undefined) {
@@ -459,10 +468,11 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
       format,
       approvedPolicyDigest,
       verifierKeyring,
+      timing,
     });
   }
   if (options['staged'] === true) {
-    return stagedCheckCommand(io, { diffScoped: true, requireE2E, format, approvedPolicyDigest, verifierKeyring });
+    return stagedCheckCommand(io, { diffScoped: true, requireE2E, format, approvedPolicyDigest, verifierKeyring, timing });
   }
   return runCheckGate(io, {
     diffScoped: options['changed'] === true,
@@ -470,6 +480,7 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
     format,
     approvedPolicyDigest,
     verifierKeyring,
+    timing,
   });
 }
 
@@ -505,6 +516,7 @@ async function stagedCheckCommand(
     format: 'text' | 'json' | 'sarif';
     approvedPolicyDigest?: string;
     verifierKeyring: VerifierKeyring | null;
+    timing?: boolean;
   },
 ): Promise<number> {
   let frozen: StagedCandidate;
@@ -658,6 +670,7 @@ async function stagedCheckCommand(
       runtimeReuseDigest,
       runtimeReuseMounts,
       runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
+      ...(options.timing === true ? { timing: true } : {}),
     });
     if (options.candidateCommitSha === undefined) {
       const recheck = recheckStagedCandidate(io.cwd, io.env, frozen);
@@ -716,6 +729,7 @@ function renderStagedBlock(io: Io, cause: CauseCode, detail: string, nextAction:
  * @throws fail-closed errors (exit 2) from config/plugin/pipeline layers.
  */
 export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<number> {
+  const gateStartedAtMs = performance.now();
   const { diffScoped, requireE2E, format } = options;
   const fixedChangedFiles = options.fixedChangedFiles;
   const runtimeReuseDigest = options.runtimeReuseDigest;
@@ -898,6 +912,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // `all-files` as the diff provider.
   let scopeDecision: ScopeDecision = { mode: 'all', changedFiles: [], expandedBecause: [], unmappedFiles: [] };
   let mismatchBlocking: BlockingEntry[] = [];
+  let scopeDiscoveryTimings: DiscoveryTimings | undefined;
   if (diffScoped) {
     // Phase 4 expansion inputs (E15): test inventory is loaded only when
     // test infrastructure exists (playwright config or mapping sidecar);
@@ -907,7 +922,9 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     let testFiles: string[] = [];
     if (runnerConfig !== null) {
       try {
-        testFiles = (await discoverTestCatalog({ cwd: io.cwd, config })).catalog.entries
+        const scopeDiscovery = await discoverTestCatalog({ cwd: io.cwd, config });
+        scopeDiscoveryTimings = scopeDiscovery.timings;
+        testFiles = scopeDiscovery.catalog.entries
           .filter((entry) => entry.runner === 'playwright')
           .map((entry) => entry.file);
       } catch {
@@ -995,11 +1012,13 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // Environment-dependent registration warnings are stderr advisories;
   // they never declare claims or alter the gate result.
   const currentTestMap = loadOptionalTestMap(io.cwd);
+  const annotationScanStartedAtMs = performance.now();
   const annotationScan = scanTestFiles({
     cwd: io.cwd,
     include: config.project.paths.include,
     exclude: config.project.paths.exclude,
   });
+  const tsScanMs = performance.now() - annotationScanStartedAtMs;
   for (const warning of annotationScan.registrationWarnings) {
     writeLine(
       io.stderr,
@@ -1016,6 +1035,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   let claimInventory: Claim[] = claimBindings;
   let mappingBlockers: BlockingEntry[] = [];
   let mappedCoverage: MappedCoverage[] = [];
+  let mappingDiscoveryTimings: DiscoveryTimings | undefined;
   if (currentTestMap !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -1024,6 +1044,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       claimBindings,
       behaviorCatalog: pipeline.behaviorCatalog,
     });
+    mappingDiscoveryTimings = mapped.discoveryTimings;
     claimInventory = mapped.claimInventory;
     mappingBlockers = [
       ...mappingBlocking(mapped.resolution.problems),
@@ -1414,6 +1435,27 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         nextAction: 'gateforge test-gates --changed',
       });
       report = `${report}\n${debtLine}`;
+    }
+  }
+  if (options.timing === true) {
+    // Per-step wall-clock timings (plan 20260928_1430 Phase 0): additive
+    // observability behind `--timing`, never an input to any verdict.
+    const collectionMs =
+      (scopeDiscoveryTimings?.totalMs ?? 0) + (mappingDiscoveryTimings?.totalMs ?? 0);
+    const timing = {
+      detectorsMs: Math.round(pipeline.timings.pluginsMs),
+      collectionMs: Math.round(collectionMs),
+      tsScanMs: Math.round(tsScanMs),
+      planningMs: Math.round(pipeline.timings.totalMs - pipeline.timings.pluginsMs),
+      totalMs: Math.round(performance.now() - gateStartedAtMs),
+    };
+    if (format === 'json') {
+      const document = JSON.parse(report) as Record<string, JsonValue>;
+      report = canonicalJson({ ...document, timing });
+    } else if (format === 'text') {
+      report =
+        `${report}\ntiming: detectors=${String(timing.detectorsMs)}ms collection=${String(timing.collectionMs)}ms ` +
+        `tsScan=${String(timing.tsScanMs)}ms planning=${String(timing.planningMs)}ms total=${String(timing.totalMs)}ms`;
     }
   }
   if (format === 'text') {

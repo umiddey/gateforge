@@ -40,6 +40,7 @@ import {
   discoverTestCatalog,
   scanTestFiles,
   TestDiscoveryError,
+  type DiscoveryTimings,
   type NativeInstance,
   type StaticScanResult,
 } from '@gate-forge/pack-playwright';
@@ -314,6 +315,11 @@ export interface MappingResolutionResult {
   nativeErrors: string[];
   /** Inventory blocker details, or null when Playwright enumeration succeeded. */
   nativeLoadProblem: MappingProblem | null;
+  /**
+   * Discovery step timings from the pass this module ran itself (absent
+   * when the caller supplied a pre-computed catalog).
+   */
+  discoveryTimings?: DiscoveryTimings;
 }
 
 /**
@@ -341,6 +347,7 @@ export async function resolveRepositoryMappings(
   let nativeErrors = [...(options.nativeErrors ?? [])];
   let nativeInstances = [...(options.nativeInstances ?? [])];
   let nativeInstancesKnown = options.nativeInstances !== undefined;
+  let discoveryTimings: DiscoveryTimings | undefined;
   if (options.catalog !== undefined) {
     catalog = options.catalog;
     discoveredClaims = [...(options.nativeClaims ?? [])];
@@ -360,6 +367,7 @@ export async function resolveRepositoryMappings(
       nativeErrors = [...discovered.nativeErrors];
       nativeInstances = [...discovered.nativeInstances];
       nativeInstancesKnown = true;
+      discoveryTimings = discovered.timings;
     } catch (error) {
       if (error instanceof TestDiscoveryError) throw new UsageError(error.message);
       throw error;
@@ -410,6 +418,7 @@ export async function resolveRepositoryMappings(
     claimInventory,
     nativeErrors,
     nativeLoadProblem,
+    ...(discoveryTimings !== undefined ? { discoveryTimings } : {}),
   };
 }
 /**
