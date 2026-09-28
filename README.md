@@ -50,13 +50,24 @@ channel once mapped `--kind observed-e2e`. Never rewrite existing
 or waivers to self-approve. `GATEFORGE.md` (written by `gateforge init`)
 carries the full loop contract.
 
+## What the gate catches that ordinary tests can miss
+
+Mocks and passing clicks can miss bugs in the real path:
+
+- A UI request succeeded, but the server response dropped a persisted source fingerprint. The mocked test checked the request only.
+- An update control changed only a synchronization timestamp, not the user-editable setting the test claimed to update.
+- Two journeys reused a shared tenant fixture, hiding a missing tenant boundary that appeared when the real application handled separate records.
+
+Gateforge connects existing journeys to obligations, then checks witness evidence from the configured run. It complements the test suite; it does not replace it.
+
+
 ## Package map
 
 | Package | Purpose |
 |---|---|
 | [`packages/core`](packages/core) | `@gate-forge/core` — artifact schemas (zod), GF-canonical-JSON + fingerprints, witness provenance verification, resource graph, policy engine, verdict engine + capability registry, test-catalog/mapping/coverage/receipt schemas, baselines, waivers, reports |
 | [`packages/plugin-protocol`](packages/plugin-protocol) | `@gate-forge/plugin-protocol` — GPP/3 host (TS) + reference client (py): newline JSON, 8 MiB line cap, digest-checked envelopes |
-| [`packages/cli`](packages/cli) | `@gate-forge/cli` — bin `gateforge`: `init`, `next`, `discover`, `classify`, `explain`, `tests discover|suggest|mark|explain|diagnose`, `obligations`, `check [--changed] [--staged] [--require-e2e]`, `test-gates [--changed]`, `broker commit`, `enforcement doctor`, `baseline update` |
+| [`packages/cli`](packages/cli) | `@gate-forge/cli` — bin `gateforge`: `init`, `next`, `discover`, `classify`, `explain`, `tests discover|catalog|suggest|mark|explain|diagnose`, `obligations`, `check [--changed] [--staged] [--require-e2e]`, `test-gates [--changed]`, `broker commit`, `enforcement doctor`, `baseline update` |
 | [`packages/http-contract`](packages/http-contract) | `@gate-forge/http-contract` — canonical HTTP contract facts, typed block codes, deterministic frontend-call ↔ server-route join engine |
 | [`packages/pack-sqlalchemy`](packages/pack-sqlalchemy) | `@gate-forge/pack-sqlalchemy` — Python SQLAlchemy detector plugin + TS registration + classification workflow |
 | [`packages/pack-fastapi`](packages/pack-fastapi) | `@gate-forge/pack-fastapi` — FastAPI server-route detector (Python AST over GPP/3) |

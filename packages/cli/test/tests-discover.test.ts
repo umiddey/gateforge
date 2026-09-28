@@ -110,6 +110,26 @@ function sourceSnapshot(repo: TempRepo): Map<string, string> {
 }
 
 describe('gateforge tests discover', () => {
+  it('prints the derived catalog with file, title, claim, and route fields', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      const result = await runCli(repo, ['tests', 'catalog', '--json']);
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+      const catalog = JSON.parse(result.stdout) as {
+        entries: Array<{ file: string; title: string; claims: string[]; routes: string[] }>;
+      };
+      const create = catalog.entries.find((entry) => entry.title === 'creates an account');
+      expect(create).toMatchObject({
+        file: 'e2e/accounts.spec.js',
+        title: 'creates an account',
+        claims: [],
+        routes: ['/accounts'],
+      });
+      expect(readFileSync(repo.path('.gateforge/test-gates/test-catalog.json'), 'utf8')).toContain(
+        'creates an account',
+      );
+    });
+  });
   it('lists missing UI surfaces without loading or executing consumer tests', async () => {
     await withTempRepo({}, async (repo) => {
       const files: Record<string, string> = {};

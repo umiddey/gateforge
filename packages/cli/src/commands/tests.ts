@@ -32,7 +32,7 @@
  * contract: 0 ok, 2 config/usage errors (including unknown keys/ids and
  * failed native enumeration).
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   canonicalJson,
@@ -90,6 +90,7 @@ import { loadCacheExclusions } from '../cache-exclusions.js';
 
 export const TESTS_USAGE = `\
 usage: gateforge tests discover [--json] [--pytest]
+       gateforge tests catalog [--json]
        gateforge tests surface-doctor [--json]
        gateforge tests suggest [--changed] [--json]
        gateforge tests mark --test <key> --kind <kind> [--category <c>]... \\
@@ -126,6 +127,8 @@ export async function testsCommand(io: Io, argv: readonly string[]): Promise<num
   switch (subcommand) {
     case 'discover':
       return discoverSubcommand(io, options);
+    case 'catalog':
+      return catalogSubcommand(io, options);
     case 'surface-doctor':
       return surfaceDoctorSubcommand(io, options);
     case 'suggest':
@@ -193,6 +196,58 @@ async function runDiscovery(
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, CATALOG_FILE_NAME), `${discovered.json}\n`, 'utf8');
   return discovered;
+}
+/**
+ * Builds a derived test catalog with mapped claims and related HTTP routes.
+ *
+ * Args:
+ *   io: repository context and output streams.
+ *   options: parsed catalog flags.
+ *
+ * Returns:
+ *   Promise<number>: zero when discovery completes, two for usage or discovery errors.
+ */
+async function catalogSubcommand(
+  io: Io,
+  options: Record<string, string | boolean | string[]>,
+): Promise<number> {
+  rejectUnknownFlags(options, ['json', 'help'], TESTS_USAGE);
+  const config = loadConfigAt(io.cwd);
+  const stateDir = resolveStateDir(io.cwd);
+  const discovered = await runDiscovery(io.cwd, config, stateDir, false);
+  const sidecar = loadOptionalTestMap(io.cwd);
+  const entries = discovered.catalog.entries.map((entry) => {
+    const claims = new Set<string>(
+      sidecar?.tests.find((declaration) => declaration.key === entry.logicalKey)?.claims ?? [],
+    );
+    for (const claim of discovered.nativeClaims) {
+      if (claim.testFile === entry.file && (claim.testId === entry.logicalKey || claim.testId === entry.title)) {
+        claims.add(claim.obligationId);
+      }
+    }
+    const sortedClaims = [...claims].sort(compareStrings);
+    const source = readFileSync(join(io.cwd, entry.file), 'utf8');
+    const routePattern = /(?:goto|route|url|path)\s*\(\s*(['"`])(\/[^'"`]*?)\1/g;
+    const routeMatches: string[] = [];
+    for (const match of source.matchAll(routePattern)) {
+      const route = match[2];
+      if (route !== undefined) routeMatches.push(route);
+    }
+    const routes = [...new Set(routeMatches)].sort(compareStrings);
+    return { file: entry.file, title: entry.title, claims: sortedClaims, routes };
+  });
+  if (options['json'] === true) {
+    writeLine(io.stdout, canonicalJson({ schemaVersion: 1, entries } as unknown as JsonValue));
+  } else {
+    writeLine(io.stdout, `tests catalog: ${entries.length} test(s)`);
+    for (const entry of entries) {
+      writeLine(io.stdout, `  ${entry.file}: ${entry.title}`);
+      if (entry.claims.length > 0) writeLine(io.stdout, `    claims: ${entry.claims.join(', ')}`);
+      if (entry.routes.length > 0) writeLine(io.stdout, `    routes: ${entry.routes.join(', ')}`);
+    }
+  }
+  writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests catalog');
+  return 0;
 }
 
 /**
@@ -291,7 +346,7 @@ async function discoverSubcommand(
 interface SuggestionJson {
   obligationId: string;
   cause: string;
-  candidates: Array<{ logicalKey: string; file: string; why: string[] }>;
+  candidates: Array<{ logicalKey: string; file: string; why: string[]; overlaps: string[] }>;
   missingEvidence: string;
   nextAction: string;
   newTestNeeded: boolean;
@@ -388,6 +443,14 @@ async function suggestSubcommand(
           pipeline.behaviorCatalog?.cases.find((item) => item.caseId === caseId)?.definition.id ?? caseId,
       );
   };
+  const obligationsByTestKey = new Map<string, string[]>();
+  for (const group of mapped.resolution.obligations) {
+    for (const binding of group.bindings) {
+      const obligations = obligationsByTestKey.get(binding.logicalKey) ?? [];
+      obligations.push(group.obligationId);
+      obligationsByTestKey.set(binding.logicalKey, obligations);
+    }
+  }
   const suggestionJson: SuggestionJson[] = suggestions.map((suggestion) => ({
     obligationId: suggestion.obligationId,
     cause: suggestion.cause,
@@ -395,6 +458,9 @@ async function suggestSubcommand(
       logicalKey: candidate.logicalKey,
       file: candidate.file,
       why: [...candidate.why],
+      overlaps: [...new Set(obligationsByTestKey.get(candidate.logicalKey) ?? [])]
+        .filter((obligationId) => obligationId !== suggestion.obligationId)
+        .sort(compareStrings),
     })),
     missingEvidence: suggestion.missingEvidence,
     nextAction: suggestion.nextAction,
@@ -446,6 +512,13 @@ async function suggestSubcommand(
         writeLine(io.stdout, `  - ${candidate.logicalKey} (${candidate.file})`);
         for (const why of candidate.why) {
           writeLine(io.stdout, `    why: ${why}`);
+        }
+        const overlaps = obligationsByTestKey.get(candidate.logicalKey) ?? [];
+        const otherObligations = [...new Set(overlaps)]
+          .filter((obligationId) => obligationId !== suggestion.obligationId)
+          .sort(compareStrings);
+        if (otherObligations.length > 0) {
+          writeLine(io.stdout, `    already declared for: ${otherObligations.join(', ')}`);
         }
       }
     }

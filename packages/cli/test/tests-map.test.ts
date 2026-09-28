@@ -40,11 +40,16 @@ const ACCOUNTS_SPEC = [
   "test('deletes an account', async ({ page }) => {",
   '  await page.goto("/accounts");',
   '});',
+  "test('accounts and orders share a journey', async ({ page }) => {",
+  '  await page.goto("/accounts");',
+  '  await page.goto("/orders");',
+  '});',
   '',
 ].join('\n');
 
 const DELETE_KEY = 'playwright:chromium:e2e/accounts.spec.js:deletes an account';
 const CREATE_KEY = 'playwright:chromium:e2e/accounts.spec.js:Accounts>creates an account';
+const SHARED_KEY = 'playwright:chromium:e2e/accounts.spec.js:accounts and orders share a journey';
 
 /**
  * Installs the standard gateforge fixture (plugin + policies generating
@@ -85,20 +90,30 @@ interface SuggestJson {
   suggestions: Array<{
     obligationId: string;
     cause: string;
-    candidates: Array<{ logicalKey: string; file: string; why: string[] }>;
+    candidates: Array<{ logicalKey: string; file: string; why: string[]; overlaps: string[] }>;
     newTestNeeded: boolean;
   }>;
 }
 
-/** The mark argv for the delete journey, claiming the accounts obligation. */
-function markArgv(obligation: string, extra: string[] = []): string[] {
+/**
+ * Builds argv for declaring one obligation against an existing journey.
+ *
+ * Args:
+ *   obligation: obligation id to declare.
+ *   extra: additional flags passed to the mark command.
+ *   testKey: catalog key of the journey to mark.
+ *
+ * Returns:
+ *   string[]: CLI arguments for `tests mark`.
+ */
+function markArgv(obligation: string, extra: string[] = [], testKey: string = DELETE_KEY): string[] {
   return [
     'tests', 'mark',
-    '--test', DELETE_KEY,
+    '--test', testKey,
     '--kind', 'browser-e2e',
     '--category', 'persistence.delete',
     '--obligation', obligation,
-    '--reason', 'The existing journey deletes an account and checks the result.',
+    '--reason', 'The existing journey exercises the declared operation.',
     ...extra,
   ];
 }
@@ -115,7 +130,7 @@ describe('gateforge tests mark', () => {
       expect(first.stdout).toContain(`- key: ${DELETE_KEY}`);
       expect(first.stdout).toContain('claims:');
       expect(first.stdout).toContain(`- ${OBLIGATION_ACCOUNTS}`);
-      expect(first.stdout).toContain('reason: The existing journey deletes an account');
+      expect(first.stdout).toContain('reason: The existing journey exercises the declared operation.');
 
       const sidecarPath = join(repo.root, '.gateforge/test-map.yml');
       expect(existsSync(sidecarPath)).toBe(true);
@@ -430,7 +445,7 @@ describe('gateforge tests suggest', () => {
       expect(missing?.candidates.some((candidate) => candidate.logicalKey === DELETE_KEY)).toBe(true);
 
       // Mark the existing journey — the mapping suggestion resolves.
-      expect((await runCli(repo, markArgv(OBLIGATION_ACCOUNTS))).code).toBe(0);
+      expect((await runCli(repo, markArgv(OBLIGATION_ACCOUNTS, [], SHARED_KEY))).code).toBe(0);
       const after = await runCli(repo, ['tests', 'suggest', '--json']);
       expect(after.code).toBe(0);
       const afterJson = JSON.parse(after.stdout) as SuggestJson;
@@ -445,6 +460,10 @@ describe('gateforge tests suggest', () => {
       expect(
         afterJson.suggestions.find((suggestion) => suggestion.obligationId === OBLIGATION_ORDERS)?.cause,
       ).toBe('TEST_MAPPING_MISSING');
+      const overlappingCandidate = afterJson.suggestions
+        .find((suggestion) => suggestion.obligationId === OBLIGATION_ORDERS)
+        ?.candidates.find((candidate) => candidate.logicalKey === SHARED_KEY);
+      expect(overlappingCandidate?.overlaps).toContain(OBLIGATION_ACCOUNTS);
 
       // Deterministic ordering + human surface.
       const repeat = await runCli(repo, ['tests', 'suggest', '--json']);
