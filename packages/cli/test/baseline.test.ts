@@ -100,3 +100,46 @@ describe('gateforge baseline update', () => {
     });
   });
 });
+describe('gateforge baseline diff', () => {
+  it('compares adopted obligations by id without printing fingerprints', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const first = 'a'.repeat(64);
+      const changed = 'b'.repeat(64);
+      const removed = 'c'.repeat(64);
+      const added = 'd'.repeat(64);
+      const baselineA = '.gateforge/baselines/a/obligations.json';
+      const baselineB = '.gateforge/baselines/b/obligations.json';
+      const record = (fingerprints: Record<string, string>) => ({
+        schemaVersion: 1,
+        adoptedAt: '2026-09-01T00:00:00.000Z',
+        gitSha: null,
+        adopted: Object.keys(fingerprints).length,
+        proven: 0,
+        classificationBlocked: [],
+        obligationFingerprintsById: fingerprints,
+        obligationSourcesById: {},
+      });
+      repo.writeFiles({
+        [baselineA]: `${JSON.stringify({ schemaVersion: 1, fingerprints: [first, removed].sort() })}\n`,
+        '.gateforge/baselines/a/adoption.json': `${JSON.stringify(record({
+          'tenant.accounts:persistence:read': first,
+          'tenant.orders:persistence:read': removed,
+        }))}\n`,
+        [baselineB]: `${JSON.stringify({ schemaVersion: 1, fingerprints: [added, changed].sort() })}\n`,
+        '.gateforge/baselines/b/adoption.json': `${JSON.stringify(record({
+          'tenant.accounts:persistence:read': changed,
+          'tenant.users:persistence:read': added,
+        }))}\n`,
+      });
+
+      const result = await runCli(repo, ['baseline', 'diff', baselineA, baselineB]);
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain('changed obligation tenant.accounts:persistence:read');
+      expect(result.stdout).toContain('removed obligation tenant.orders:persistence:read');
+      expect(result.stdout).toContain('added obligation tenant.users:persistence:read');
+      expect(result.stdout).not.toContain(first);
+      expect(result.stdout).not.toContain(changed);
+    });
+  });
+});

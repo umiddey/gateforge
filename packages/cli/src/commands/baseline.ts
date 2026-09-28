@@ -30,7 +30,7 @@ import { UsageError } from '../errors.js';
 
 export const BASELINE_USAGE =
   'usage: gateforge baseline update <fingerprint> [<fingerprint> ...] ' +
-  '[--classification-blocked <resourceId>]...';
+  '[--classification-blocked <resourceId>]... | gateforge baseline diff <before> <after>';
 
 /**
  * Collects the values of a repeatable string flag. A bare `--flag` (no
@@ -64,6 +64,58 @@ export function baselineCommand(io: Io, argv: readonly string[]): number {
   }
   rejectUnknownFlags(options, ['help', 'classification-blocked'], BASELINE_USAGE);
   const sub = positionals[0];
+  if (sub === 'diff') {
+    if (positionals.length !== 3 || options['classification-blocked'] !== undefined) {
+      throw new UsageError(`baseline diff requires exactly two baseline files (${BASELINE_USAGE})`);
+    }
+    const beforePath = resolveRepoPath(io.cwd, positionals[1] as string);
+    const afterPath = resolveRepoPath(io.cwd, positionals[2] as string);
+    const beforeDocument = loadBaseline(beforePath);
+    const afterDocument = loadBaseline(afterPath);
+    const beforeRecord = loadAdoptionRecord(join(dirname(beforePath), ADOPTION_RECORD_FILENAME));
+    const afterRecord = loadAdoptionRecord(join(dirname(afterPath), ADOPTION_RECORD_FILENAME));
+    if (beforeRecord?.obligationFingerprintsById === undefined) {
+      throw new UsageError(`baseline at '${beforePath}' has no obligation identity index`);
+    }
+    if (afterRecord?.obligationFingerprintsById === undefined) {
+      throw new UsageError(`baseline at '${afterPath}' has no obligation identity index`);
+    }
+    const beforeFingerprints = new Set(beforeDocument.fingerprints);
+    const afterFingerprints = new Set(afterDocument.fingerprints);
+    const before = new Map(
+      Object.entries(beforeRecord.obligationFingerprintsById).filter(([, fingerprint]) =>
+        beforeFingerprints.has(fingerprint),
+      ),
+    );
+    const after = new Map(
+      Object.entries(afterRecord.obligationFingerprintsById).filter(([, fingerprint]) =>
+        afterFingerprints.has(fingerprint),
+      ),
+    );
+    const removed = [...before.keys()].filter((id) => !after.has(id)).sort();
+    const added = [...after.keys()].filter((id) => !before.has(id)).sort();
+    const changed = [...before.keys()]
+      .filter((id) => after.has(id) && before.get(id) !== after.get(id))
+      .sort();
+    writeLine(
+      io.stdout,
+      `baseline diff: ${changed.length} changed, ${removed.length} removed, ${added.length} added obligation(s) (keyed by obligation id)`,
+    );
+    for (const id of changed) writeLine(io.stdout, `changed obligation ${id}`);
+    for (const id of removed) writeLine(io.stdout, `removed obligation ${id}`);
+    for (const id of added) writeLine(io.stdout, `added obligation ${id}`);
+    const indexedBefore = new Set(before.values());
+    const indexedAfter = new Set(after.values());
+    const unmatchedBefore = [...beforeFingerprints].filter((fingerprint) => !indexedBefore.has(fingerprint)).length;
+    const unmatchedAfter = [...afterFingerprints].filter((fingerprint) => !indexedAfter.has(fingerprint)).length;
+    if (unmatchedBefore > 0 || unmatchedAfter > 0) {
+      writeLine(
+        io.stdout,
+        `non-obligation baseline entries not shown: ${unmatchedBefore} before, ${unmatchedAfter} after`,
+      );
+    }
+    return 0;
+  }
   if (sub !== 'update') {
     throw new UsageError(
       `unknown baseline subcommand '${sub ?? '<none>'}' (${BASELINE_USAGE})`,

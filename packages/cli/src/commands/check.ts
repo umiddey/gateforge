@@ -787,6 +787,54 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           neverWitnessed: evaluated.baselined?.neverWitnessed ?? 0,
         };
 
+  const baselineDriftAdvisories: BlockingEntry[] = [];
+  if (
+    scopeDecision.mode === 'changed' &&
+    adoptedBaseline?.obligationFingerprintsById !== undefined &&
+    adoptedBaseline.obligationSourcesById !== undefined
+  ) {
+    const currentSources = sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog);
+    const currentFingerprints = new Map(
+      pipeline.policy.obligations.map((obligation) => [
+        obligation.id,
+        obligationFingerprint(obligation),
+      ]),
+    );
+    const lostByFile = new Map<string, Set<string>>();
+    for (const [id, oldFingerprint] of adoptedBaseline.obligationFingerprintsById) {
+      const currentFingerprint = currentFingerprints.get(id);
+      if (
+        currentFingerprint === undefined ||
+        currentFingerprint === oldFingerprint ||
+        !adoptedBaseline.fingerprints.has(oldFingerprint)
+      ) {
+        continue;
+      }
+      const sourcePaths = new Set([
+        ...(adoptedBaseline.obligationSourcesById.get(id) ?? []),
+        ...(currentSources.get(id) ?? []),
+      ]);
+      for (const file of scopeDecision.changedFiles) {
+        if (!sourcePaths.has(file)) continue;
+        const obligations = lostByFile.get(file) ?? new Set<string>();
+        obligations.add(id);
+        lostByFile.set(file, obligations);
+      }
+    }
+    for (const [file, obligations] of [...lostByFile].sort(([a], [b]) => a.localeCompare(b))) {
+      baselineDriftAdvisories.push({
+        kind: 'finding',
+        resourceId: null,
+        name: null,
+        detail:
+          `${obligations.size} adopted baseline obligation(s) lost their baseline because ${file} changed`,
+        location: null,
+        cause: null,
+        nextAction: 'Compare baseline files with `gateforge baseline diff <before> <after>`.',
+      });
+    }
+  }
+
   // `--require-e2e` (plan Phase 4 item 5, ADR 0005 D3): the strict
   // saved-state gate. Without a valid, non-stale receipt for the CURRENT
   // input digest the run blocks — missing receipt (RUN_INCOMPLETE),
@@ -989,7 +1037,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   const report = renderRun(reportVerdicts, {
     format,
     blocking: evaluatedBlocking,
-    advisories: annotationAdvisories,
+    advisories: [...annotationAdvisories, ...baselineDriftAdvisories],
     waiverCounts: evaluated.waiverCounts,
     baseline: baselineReport,
     run: pipeline.manifest,

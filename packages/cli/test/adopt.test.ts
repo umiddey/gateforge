@@ -118,7 +118,20 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
 
       // The loud receipt: dated (fixed clock), count-annotated, valid.
       const record = JSON.parse(readFileSync(repo.path(RECORD_PATH), 'utf8')) as Record<string, unknown>;
-      expect(record).toMatchObject({ schemaVersion: 1, adoptedAt: FIXED_AT, adopted: 3, proven: 0 });
+      expect(record).toMatchObject({
+        schemaVersion: 1,
+        adoptedAt: FIXED_AT,
+        adopted: 3,
+        proven: 0,
+        obligationFingerprintsById: {
+          'tenant.accounts:persistence:read': fixtureFingerprint('tenant.accounts'),
+          'tenant.orders:persistence:read': fixtureFingerprint('tenant.orders'),
+        },
+        obligationSourcesById: {
+          'tenant.accounts:persistence:read': ['src/accounts.txt'],
+          'tenant.orders:persistence:read': ['src/orders.txt'],
+        },
+      });
       expect(record['gitSha']).toBeNull(); // fixture repo has no commits
     });
   });
@@ -146,6 +159,33 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
       expect(report.blocking).toHaveLength(0);
       // The re-graded verdicts name the receipt (invariant 8: explain).
       expect(json.stdout).toContain('baselined: adopted as forgiven');
+    });
+  });
+  it('names adopted obligations whose fingerprints changed on the changed source path', async () => {
+    await withTempRepo({}, async (repo) => {
+      await installFindingFixture(repo);
+      const oldFingerprint = 'f'.repeat(64);
+      repo.writeFiles({
+        [BASELINE_PATH]: JSON.stringify({ schemaVersion: 1, fingerprints: [oldFingerprint] }) + '\n',
+        [RECORD_PATH]: JSON.stringify({
+          schemaVersion: 1,
+          adoptedAt: FIXED_AT,
+          gitSha: null,
+          adopted: 1,
+          proven: 0,
+          classificationBlocked: [],
+          obligationFingerprintsById: { 'tenant.accounts:persistence:read': oldFingerprint },
+          obligationSourcesById: { 'tenant.accounts:persistence:read': ['src/accounts.txt'] },
+        }) + '\n',
+        'src/accounts.txt': 'accounts fixture.table\n# changed after adoption\n',
+      });
+      repo.git(['add', 'src/accounts.txt']);
+
+      const result = await runCli(repo, ['check', '--changed']);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain(
+        '1 adopted baseline obligation(s) lost their baseline because src/accounts.txt changed',
+      );
     });
   });
 

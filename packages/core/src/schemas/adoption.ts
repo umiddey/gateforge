@@ -57,8 +57,13 @@ export const AdoptionRecordSchema = z
      * carries a real classification; NEW blocked resources never enter.
      */
     classificationBlocked: ClassificationBlockedIdsSchema.optional(),
+    /** Baseline obligation fingerprints indexed by stable obligation id; absent on older records. */
+    obligationFingerprintsById: z
+      .record(z.string().min(1), z.string().regex(/^[0-9a-f]{64}$/))
+      .optional(),
+    /** Source files for indexed obligations, used only to explain baseline drift. */
+    obligationSourcesById: z.record(z.string().min(1), z.array(z.string().min(1))).optional(),
   })
-  .strict()
   .superRefine((record, ctx) => {
     const ids = record.classificationBlocked;
     if (ids === undefined) return;

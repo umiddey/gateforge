@@ -71,6 +71,7 @@ commands:
   enforcement doctor [--json]            honest enforcement diagnostics: hook activation, runner/observer readiness,
                                          trusted binary/policy ownership, snapshot mode, standard/managed boundary
   baseline update <fp...>                shrink the baseline to a strict subset (invariant 4)
+  baseline diff <before> <after>         compare adopted obligations by ID without printing fingerprints
   waive <resourceId:contract>            write an expiring, owner-approved waiver for one obligation
         --owner N --approver N           (GF-15: all fields mandatory; justification URL required;
         --justification-url U --expires D  no --force — renewal is a hand-edit of the written file)
