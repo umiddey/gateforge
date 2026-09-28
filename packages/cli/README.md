@@ -57,6 +57,9 @@ never rewrite existing journeys, never `tests mark` as proof.
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
 | `gateforge init [--preset light\|normal\|strict] [--explain-presets] [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e] [--docs-exclude <folder,...>] [--confirm-doc-exclusions]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence policy, transport-only HTTP policy for consumed endpoints, overlay proof), and write the standard Gateforge scaffold. Idempotent — never overwrites existing files unless `--confirm-doc-exclusions` approves an exclusion update. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--preset` applies one goal in one step (`light` -> `mode: warn`, no hooks; `normal` -> `mode: changed` + pre-commit hook + CI job; `strict` -> `mode: strict` + staged gate + pre-push receipt check + CI job) and prints what it wrote plus an `undo:` line; `--explain-presets` prints that mapping and writes nothing. In a terminal init asks the same question instead; with no terminal and no `--preset` it writes `light` only and says a human must choose. A preset never writes a waiver, an adopted baseline or a plane rule, and an existing `.gateforge.yml` is never rewritten. `--strict-e2e` writes the `enforcement` block and refuses unavailable required proof channels. | 0/1/2 |
+
+
+
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking` and route-specific `guidance` when relevant). For an endpoint with no plane, ask which boundary owns its data and show the owner-reviewed choices; internality remains owner-only. Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. `classify plane` previews or explicitly appends an owner-reviewed endpoint plane rule to the existing `.gateforge/planes.json`; snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
@@ -78,6 +81,8 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge enforce [--ci github|gitlab]` | Add blocking wiring to an initialized repository. The provider defaults to GitLab unless GitHub is the only detected CI provider; the explicit flag selects GitHub Actions or GitLab CI. | 0/2 |
 | `gateforge baseline update <fp...>` | Shrink the baseline to a strict subset (invariant 4). | 0/2 |
 | `gateforge baseline diff <before> <after>` | Compare adopted obligations by ID without printing fingerprints. | 0/2 |
+
+On a repo that already has Gateforge files, `init` reports only what THAT run did: it keeps an existing `.gateforge.yml` and says so instead of claiming to write a preset, and the `undo:` line it prints names only the paths the run created (it prints no undo line when it created nothing) — so following it can never delete pre-existing config, baselines, waivers, hooks or CI files. A preset that wires no local hook says whether your existing commit hook and/or CI job still decide what blocks your commits.
 
 The cache is disabled by `--no-cache`, `GATEFORGE_NO_CACHE=1`, or recognized CI-provider markers (`GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI`, `JENKINS_URL`, `TF_BUILD`). A bare `CI=true` does not disable it.
 
@@ -738,6 +743,7 @@ and print the tip.
 | `execution-result.json` / `receipt.json` / `diagnostics.json` | Supervised `--changed` mode: the sealed execution result (planned vs executed instances, outcomes, native claim inventory, runner exit, completeness), the authenticated gate receipt issued after complete success, and the separate advisory diagnostic report. |
 | `report.json` | Canonical json-format run report after evaluation. |
 | `last-full-run.json` | Advisory test count and measured duration for the latest completed full run; used only to explain commit cost, never as gate evidence. |
+
 
 The legacy suite command (`--suite`) runs with those env vars; its reporter
 extracts claims from `{type: 'gateforge', description: '<obligation id>'}`

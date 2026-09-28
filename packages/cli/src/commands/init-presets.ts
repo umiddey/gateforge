@@ -178,20 +178,71 @@ export const HUMAN_MUST_CHOOSE_PRESET_LINE =
   'a human must choose the preset: gateforge init --preset normal|strict (in a terminal, `gateforge init` asks)';
 
 /**
- * The summary init prints after a preset is applied: what was written and
- * the command that undoes it. Pure so the wording is unit-testable.
+ * What this init run actually did, as the summary needs to report it.
+ *
+ * A preset describes what a FRESH repo gets. On an existing repo the
+ * same words would be false — the run may have written no config, no
+ * hook and no CI file at all — so the summary is driven by what
+ * happened here, not by what the preset would have done.
+ */
+export interface PresetRunOutcome {
+  /** True when `.gateforge.yml` already existed and was left alone. */
+  configExisted: boolean;
+  /** Repo-relative posix paths this run CREATED (the undo list). */
+  created: readonly string[];
+  /** True when the repo already had a commit hook before this run. */
+  repoHasCommitHook: boolean;
+  /** True when the repo already had a CI file before this run. */
+  repoHasCi: boolean;
+}
+
+/** Repo-relative predicate: the commit-hook files a preset would wire. */
+function isHookPath(path: string): boolean {
+  return path.startsWith('.git/hooks/') || path === '.pre-commit-config.yaml';
+}
+
+/** One hook claim: what this run did, never what the preset would do. */
+function hookLine(preset: InitPresetSettings, outcome: PresetRunOutcome): string {
+  const wroteHook = outcome.created.some(isHookPath);
+  if (preset.wiring === 'none') {
+    // "Nothing blocks your commits" is a claim about the REPO. When the
+    // repo already has a commit hook or a CI job, something does, and
+    // this run changed neither.
+    return outcome.repoHasCommitHook || outcome.repoHasCi
+      ? 'wrote no hooks: your existing commit hook and/or CI job (left untouched) still decide ' +
+          'what blocks your commits — this run changed neither'
+      : 'wrote no hooks: nothing blocks your commits — read the report instead';
+  }
+  if (!wroteHook) {
+    return `kept the commit hook already in place (this run created none) — it still runs gateforge check --${preset.mode}`;
+  }
+  return preset.wiring === 'pre-commit'
+    ? `wrote a pre-commit hook: gateforge check --${preset.mode} (fast, static — no test run)`
+    : `wrote the staged gate (gateforge check --${preset.mode}) plus a pre-push receipt check`;
+}
+
+/**
+ * The summary init prints after a preset is applied: what THIS run
+ * wrote, what it deliberately kept, and the command that undoes only
+ * what it created. Pure so the wording is unit-testable.
+ *
+ * The `undo:` line is the dangerous one: it names files, so on an
+ * existing repo it must name only the paths this run brought into
+ * existence. When it created nothing the line is omitted entirely —
+ * there is nothing to undo, and a fixed list would delete the owner's
+ * own config, baselines, waivers, hooks and CI file.
  *
  * Args:
  *   name (InitPresetName): the goal that was applied.
- *   configExisted (boolean): true when an existing config was left alone.
+ *   outcome (PresetRunOutcome): what this run created and what it kept.
  *
  * Returns:
  *   string[]: the summary lines, in print order.
  */
-export function renderPresetSummary(name: InitPresetName, configExisted: boolean): string[] {
+export function renderPresetSummary(name: InitPresetName, outcome: PresetRunOutcome): string[] {
   const preset = INIT_PRESETS[name];
   const lines = [`preset ${name}: ${preset.explanation}`];
-  if (configExisted) {
+  if (outcome.configExisted) {
     lines.push(
       'existing .gateforge.yml left untouched — its `mode:` key still decides how hard the gate blocks; ' +
         'edit it by hand to switch goals',
@@ -199,14 +250,16 @@ export function renderPresetSummary(name: InitPresetName, configExisted: boolean
   } else {
     lines.push(`wrote mode: ${preset.strictnessMode} (strict — block everything / changed — block only what this change touches / warn — block nothing)`);
   }
-  lines.push(
-    preset.wiring === 'none'
-      ? 'wrote no hooks: nothing blocks your commits — read the report instead'
-      : preset.wiring === 'pre-commit'
-        ? `wrote a pre-commit hook: gateforge check --${preset.mode} (fast, static — no test run)`
-        : `wrote the staged gate (gateforge check --${preset.mode}) plus a pre-push receipt check`,
-  );
-  if (preset.ci) lines.push('wrote the .gitlab-ci.yml include + job');
-  lines.push('undo: rm -rf .gateforge.yml .gateforge .git/hooks/pre-commit .git/hooks/pre-push .gitlab-ci.yml');
+  lines.push(hookLine(preset, outcome));
+  if (preset.ci) {
+    lines.push(
+      outcome.created.includes('.gitlab-ci.yml')
+        ? 'wrote the .gitlab-ci.yml include + job'
+        : 'kept the .gitlab-ci.yml already in place (this run created none)',
+    );
+  }
+  if (outcome.created.length > 0) {
+    lines.push(`undo: rm -rf ${outcome.created.join(' ')}`);
+  }
   return lines;
 }

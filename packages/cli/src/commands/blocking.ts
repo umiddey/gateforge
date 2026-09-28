@@ -11,7 +11,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Io } from '../io.js';
-import { writeLine } from '../io.js';
+import { recordInitPath, writeLine } from '../io.js';
 import { VERSION } from './common.js';
 
 /** Marker boundaries for the Gateforge-owned generated wrapper script. */
@@ -323,8 +323,10 @@ export function writeGithubActionsTemplate(io: Io): void {
   const path = join(dir, 'gateforge.yml');
   if (!existsSync(path)) {
     writeFileSync(path, renderGithubActionsTemplate());
+    recordInitPath(io, io.cwd, path, 'created');
     writeLine(io.stdout, `created: ${path}`);
   } else {
+    recordInitPath(io, io.cwd, path, 'preserved');
     writeLine(io.stdout, `exists, leaving untouched: ${path}`);
   }
 }
@@ -342,8 +344,10 @@ export function writeEngineReference(io: Io, engineRoot: string | null): void {
   }
   if (!existsSync(path)) {
     writeFileSync(path, `${engineRoot}\n`);
+    recordInitPath(io, io.cwd, path, 'created');
     writeLine(io.stdout, `created: ${path} (engine checkout root)`);
   } else {
+    recordInitPath(io, io.cwd, path, 'preserved');
     writeLine(io.stdout, `exists, leaving untouched: ${path}`);
   }
 }
@@ -369,8 +373,10 @@ export function ensureHookScript(
   if (!existsSync(hookScript)) {
     writeFileSync(hookScript, hookScriptTemplate(gateArgs));
     chmodSync(hookScript, 0o755);
+    recordInitPath(io, io.cwd, hookScript, 'created');
     writeLine(io.stdout, `created: ${hookScript}`);
   } else {
+    recordInitPath(io, io.cwd, hookScript, 'preserved');
     const current = readFileSync(hookScript, 'utf8');
     if (isGeneratedHookScript(current)) {
       const updated = replaceGeneratedHookBlock(current, hookScriptTemplate(gateArgs));
@@ -394,6 +400,7 @@ export function appendPreCommitHook(io: Io): void {
   if (existsSync(path)) {
     const current = readFileSync(path, 'utf8');
     if (current.includes('gateforge-check')) {
+      recordInitPath(io, io.cwd, path, 'preserved');
       writeLine(io.stdout, `exists, leaving untouched: ${path} (gateforge-check)`);
       return;
     }
@@ -402,6 +409,7 @@ export function appendPreCommitHook(io: Io): void {
     return;
   }
   writeFileSync(path, `repos:\n${PRE_COMMIT_BLOCK}`);
+  recordInitPath(io, io.cwd, path, 'created');
   writeLine(io.stdout, `created: ${path} (with gateforge-check hook)`);
 }
 
@@ -412,16 +420,20 @@ export function writeGitlabCiTemplate(io: Io, mode: GitlabGateMode = 'check'): v
   const path = join(dir, 'gitlab-gateforge.yml');
   if (!existsSync(path)) {
     writeFileSync(path, renderGitlabCiTemplate(mode));
+    recordInitPath(io, io.cwd, path, 'created');
     writeLine(io.stdout, `created: ${path}`);
   } else {
+    recordInitPath(io, io.cwd, path, 'preserved');
     writeLine(io.stdout, `exists, leaving untouched: ${path}`);
   }
   const gitlabCi = join(io.cwd, '.gitlab-ci.yml');
   if (!existsSync(gitlabCi)) {
     writeFileSync(gitlabCi, `include:\n  - local: '.gateforge/ci/gitlab-gateforge.yml'\n`);
+    recordInitPath(io, io.cwd, gitlabCi, 'created');
     writeLine(io.stdout, `created: ${gitlabCi} (includes the gateforge jobs)`);
     return;
   }
+  recordInitPath(io, io.cwd, gitlabCi, 'preserved');
   const current = readFileSync(gitlabCi, 'utf8');
   if (current.includes('gitlab-gateforge.yml')) {
     writeLine(io.stdout, `exists, leaving untouched: ${gitlabCi} (gateforge include present)`);

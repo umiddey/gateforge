@@ -42,7 +42,7 @@ import { PACK_VERSION as PACK_TASK_VERSION } from '@gate-forge/pack-task';
 import { renderAlembicOptIn } from '@gate-forge/pack-alembic';
 import { parseArgs, stringFlag } from '../args.js';
 import type { Io } from '../io.js';
-import { writeLine } from '../io.js';
+import { recordInitPath, writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { languageDefaultPlugins, recommendPlugins, renderScanBlock, scanRepo } from '../repo-scan.js';
 import { rejectUnknownFlags } from './common.js';
@@ -602,6 +602,7 @@ async function resolveGoal(
   io: Io,
   options: Readonly<Record<string, unknown>>,
   enforcementFlagGiven: boolean,
+  configExisted: boolean,
 ): Promise<{ name: InitPresetName; settings: InitPresetSettings } | null> {
   const explicit = options['preset'];
   if (explicit !== undefined && isInitPresetName(explicit)) {
@@ -615,7 +616,15 @@ async function resolveGoal(
   if (enforcementFlagGiven) return null;
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
   if (!interactive) {
-    writeLine(io.stdout, 'no terminal: writing the light preset (report everything, block nothing)');
+    // Claim only what the run will do: with an existing config the light
+    // preset's `mode:` is never written, so saying "writing the light
+    // preset" would be a false claim about the owner's own file.
+    writeLine(
+      io.stdout,
+      configExisted
+        ? 'no terminal: keeping your existing .gateforge.yml — its `mode:` still decides how hard the gate blocks'
+        : 'no terminal: writing the light preset (report everything, block nothing)',
+    );
     writeLine(io.stdout, HUMAN_MUST_CHOOSE_PRESET_LINE);
     return { name: 'light', settings: INIT_PRESETS.light };
   }
@@ -892,6 +901,10 @@ async function proposePlanesConfig(cwd: string, io: Io): Promise<void> {
  *   number: exit code (0).
  */
 export async function initCommand(io: Io, argv: readonly string[]): Promise<number> {
+  // The ledger every writer below fills: the closing summary names only
+  // what THIS run created or kept, so it can never offer to delete the
+  // owner's pre-existing config, baselines, waivers, hooks or CI file.
+  io.initPaths ??= { created: [], preserved: [] };
   const { options } = parseArgs(argv);
   if (options['help'] === true) {
     writeLine(io.stdout, INIT_USAGE);
@@ -1008,7 +1021,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     options['ci'] === true ||
     options['no-ci'] === true ||
     options['strict-e2e'] === true;
-  const goal = await resolveGoal(io, options, enforcementFlagGiven);
+  const goal = await resolveGoal(io, options, enforcementFlagGiven, existsSync(join(io.cwd, '.gateforge.yml')));
   const strictE2E = goal !== null ? goal.settings.strictE2E : options['strict-e2e'] === true;
 
   // Strict-setup preflight (plan Phase 0 item 4): BEFORE anything is
@@ -1239,10 +1252,12 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         writeLine(io.stdout, `updated: ${target.path}`);
         continue;
       }
+      recordInitPath(io, cwd, target.path, 'preserved');
       writeLine(io.stdout, `exists, leaving untouched: ${target.path}`);
       continue;
     }
     target.write();
+    recordInitPath(io, cwd, target.path, 'created');
     writeLine(io.stdout, `created: ${target.path}`);
   }
   // Observe proof checklist (observe proof only): the work no scaffold
@@ -1389,6 +1404,11 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     // integrates through the framework config instead (appendPreCommitHook
     // below) — the hook block runs on every commit like any other.
     const frameworkManaged = outcome.status === 'framework';
+    // The undo list must name the hook this run installed and NOT name
+    // one that was already there.
+    if (outcome.hookPath !== null) {
+      recordInitPath(io, cwd, outcome.hookPath, outcome.status === 'installed' ? 'created' : 'preserved');
+    }
     switch (outcome.status) {
       case 'installed':
         writeLine(io.stdout, `installed: ${outcome.detail}`);
@@ -1425,6 +1445,9 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       if (pushHook.status === 'conflict' || pushHook.status === 'incomplete') {
         throw new UsageError(`${pushHook.detail}\nRequired action:\n${pushHook.action}`);
       }
+      if (pushHook.hookPath !== null) {
+        recordInitPath(io, cwd, pushHook.hookPath, pushHook.status === 'installed' ? 'created' : 'preserved');
+      }
       writeLine(io.stdout, `${pushHook.status}: ${pushHook.detail}`);
     }
     writeServerProtectionInstructions(io);
@@ -1437,7 +1460,13 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   }
   // What the goal wrote, in plain words, plus the command that undoes it.
   if (goal !== null) {
-    for (const line of renderPresetSummary(goal.name, existedConfigAtStart)) {
+    const ledger = io.initPaths;
+    for (const line of renderPresetSummary(goal.name, {
+      configExisted: existedConfigAtStart,
+      created: [...(ledger?.created ?? [])],
+      repoHasCommitHook: existsSync(join(cwd, '.git/hooks/pre-commit')),
+      repoHasCi: existsSync(join(cwd, '.gitlab-ci.yml')) || existsSync(join(cwd, '.github/workflows/gateforge.yml')),
+    })) {
       writeLine(io.stdout, line);
     }
   }
