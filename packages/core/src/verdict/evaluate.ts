@@ -217,6 +217,18 @@ export interface VerdictContext {
    * cases instead of the legacy any-claim-satisfied shortcut.
    */
   behavior?: BehaviorObligationContext | null;
+  /**
+   * Engine-issued Alembic witness records for this process. Suite-writable
+   * `records` never satisfy `alembic:*`. Absent means no engine execution.
+   */
+  engineAlembicRecords?: readonly {
+    obligationId: string;
+    kind: string;
+    trust?: string;
+    origin?: string;
+    payload?: unknown;
+    recordId?: string;
+  }[];
   /** Injected clock instant (invariant 7) — the only time source. */
   now: Date | string;
 }
@@ -1922,6 +1934,56 @@ function gradeCrudSession(params: {
 }
 
 /**
+ * Grades an Alembic obligation from engine-issued records only.
+ *
+ * Args:
+ *   obligation: the parsed obligation. Its contract starts with `alembic:`.
+ *   context: verdict context. Suite records are ignored.
+ *
+ * Returns:
+ *   VerdictOutcome: satisfied only when this process issued a passing witness.
+ */
+function gradeAlembicObligation(obligation: Obligation, context: VerdictContext): VerdictOutcome {
+  const records = (context.engineAlembicRecords ?? []).filter(
+    (record) => record.obligationId === obligation.id && record.kind === 'alembic.witness',
+  );
+  const passing = records.find((record) => {
+    if (record.trust !== 'witnessed' || record.origin !== 'engine-observed') return false;
+    const payload = record.payload;
+    if (payload === null || typeof payload !== 'object') return false;
+    const body = payload as Record<string, unknown>;
+    return (
+      body['producer'] === 'gateforge.engine' &&
+      body['passed'] === true &&
+      body['contract'] === obligation.contract &&
+      typeof body['filesDigest'] === 'string' &&
+      /^[0-9a-f]{64}$/.test(body['filesDigest'])
+    );
+  });
+  if (passing !== undefined) {
+    return { verdict: 'satisfied', reason: null, recordIds: passing.recordId === undefined ? [] : [passing.recordId] };
+  }
+  const failed = records.find((record) => {
+    const payload = record.payload;
+    return payload !== null && typeof payload === 'object' && (payload as Record<string, unknown>)['passed'] === false;
+  });
+  const failedPayload =
+    failed?.payload !== null && typeof failed?.payload === 'object'
+      ? (failed.payload as Record<string, unknown>)
+      : null;
+  const cause = typeof failedPayload?.['cause'] === 'string' ? failedPayload['cause'] : 'MIGRATION_ROUNDTRIP_FAILED';
+  const detail =
+    typeof failedPayload?.['detail'] === 'string'
+      ? failedPayload['detail']
+      : 'no engine-executed Alembic witness exists for this obligation';
+  return {
+    verdict: 'missing',
+    reason: `${cause}: ${detail}`,
+    recordIds: failed?.recordId === undefined ? [] : [failed.recordId],
+  };
+}
+
+/**
  * Evaluates ONE obligation against the run's claims, records, waivers,
  * classification, and injected clock (pin #9). Pure and deterministic:
  * identical inputs produce identical outcomes.
@@ -1952,6 +2014,9 @@ export function evaluateObligation(
     );
   }
   const verified = parsedObligation.data;
+  if (verified.contract.startsWith('alembic:')) {
+    return gradeAlembicObligation(verified, context);
+  }
   const now = parseInstant(context.now);
 
   // 1. Unclassified resources block (invariant 1); unresolved resources

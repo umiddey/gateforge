@@ -123,6 +123,18 @@ export interface EvaluateInput {
    */
   witnessVerifierKey?: string | null;
   /** Active and retained keys used to verify older witnessed envelopes. */
+  /**
+   * Engine-issued Alembic witness records from this process. Never read
+   * from suite-writable state. Absent leaves `alembic:*` unproven.
+   */
+  engineAlembicRecords?: readonly {
+    obligationId: string;
+    kind: string;
+    trust?: string;
+    origin?: string;
+    payload?: unknown;
+    recordId?: string;
+  }[];
   witnessVerifierKeys?: readonly string[];
   /**
    * Live v2 attestation envelope fetched by `test-gates` while a wired
@@ -533,6 +545,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
       resource: resourceById.get(obligation.resourceId) ?? null,
       httpRoutes,
       ...(behaviorContext === undefined ? {} : { behavior: behaviorContext }),
+      ...(input.engineAlembicRecords === undefined ? {} : { engineAlembicRecords: input.engineAlembicRecords }),
       now,
     });
     const entry = entries[0];

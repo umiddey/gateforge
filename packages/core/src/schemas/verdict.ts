@@ -81,6 +81,14 @@ export const CauseCodeSchema = z.enum([
   'RUNTIME_PREPARATION_FAILED',
   'RUNTIME_READINESS_FAILED',
   'QUARANTINE_EXPIRED',
+  'MIGRATION_MISSING',
+  'MIGRATION_LINEAGE_BROKEN',
+  'MIGRATION_DOWNGRADE_NOOP',
+  'MIGRATION_DRIFT',
+  'MIGRATION_ROUNDTRIP_FAILED',
+  'MIGRATION_DATA_LOST',
+  'MIGRATION_CONFLICT',
+  'MIGRATION_SCRATCH_UNSAFE',
 ]);
 
 /** Inferred cause-code union. */
@@ -143,4 +151,16 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   RUNTIME_READINESS_FAILED:
     'Repair the tracked `runtime.services` command or readiness probe — the candidate ' +
     'runtime must become ready before evidence is trusted',
+  MIGRATION_MISSING: 'Write an Alembic revision for the changed model, then run `gateforge check`',
+  MIGRATION_LINEAGE_BROKEN:
+    'Repair the migration chain so it has one head, unique revision ids, and existing parents, then run `gateforge check`',
+  MIGRATION_DOWNGRADE_NOOP:
+    'Implement downgrade() so the chain round-trips, or pin the revision in `alembic.irreversible`, then run `gateforge check`',
+  MIGRATION_DRIFT: 'Make `alembic check` clean against the models, then run `gateforge check`',
+  MIGRATION_ROUNDTRIP_FAILED:
+    'Fix the migration so upgrade, downgrade base, and upgrade head succeed on a disposable database, then run `gateforge check`',
+  MIGRATION_DATA_LOST: 'Preserve declared table rows across the upgrade, then run `gateforge check`',
+  MIGRATION_CONFLICT: 'Rebase onto the target head and merge the named revisions, then run `gateforge check`',
+  MIGRATION_SCRATCH_UNSAFE:
+    'Set `alembic.scratch.adminUrl` to a trusted disposable Postgres admin URL. The engine only creates and drops `gf_tmp_` databases',
 });

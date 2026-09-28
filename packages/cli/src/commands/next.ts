@@ -100,6 +100,15 @@ function rankCause(cause: CauseCode | null | undefined, kind: string): number {
     case 'BEHAVIOR_UNEXPECTED_EFFECT':
     case 'ENFORCEMENT_BOUNDARY_UNVERIFIED':
       return 2;
+    case 'MIGRATION_MISSING':
+    case 'MIGRATION_LINEAGE_BROKEN':
+    case 'MIGRATION_DOWNGRADE_NOOP':
+    case 'MIGRATION_DRIFT':
+    case 'MIGRATION_ROUNDTRIP_FAILED':
+    case 'MIGRATION_DATA_LOST':
+    case 'MIGRATION_CONFLICT':
+    case 'MIGRATION_SCRATCH_UNSAFE':
+      return 2;
     case 'CRUD_COVERAGE_MISSING':
       return 3;
     case 'CHANGE_UNMAPPED':
@@ -421,6 +430,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     blocking: [...pipeline.policy.blocking, ...mismatchBlocking, ...mappingBlockers],
     stateDir,
     now: pipeline.now,
+    engineAlembicRecords: pipeline.engineAlembicRecords,
     changedFiles,
     claimInventory,
     mappedCoverage,

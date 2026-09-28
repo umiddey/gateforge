@@ -935,6 +935,9 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   const quarantines = loadQuarantines(join(io.cwd, ...QUARANTINE_DIR.split('/')), {
     now: pipeline.now,
   });
+  for (const notice of pipeline.alembicNotices) {
+    writeLine(io.stdout, `alembic: ${notice}`);
+  }
   if (diffScoped && format === 'text') {
     const base =
       providerIdentity === 'github-pr'
@@ -1252,6 +1255,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     blocking: [...pipeline.policy.blocking, ...mismatchBlocking, ...mappingBlockers],
     stateDir,
     now: pipeline.now,
+    engineAlembicRecords: pipeline.engineAlembicRecords,
     // One effective scope (§12.2), decided before grading: an expanded
     // (gate-defining) diff evaluates everything — obligations AND
     // blockers — exactly like the unrestricted run.

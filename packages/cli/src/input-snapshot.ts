@@ -477,6 +477,16 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
     ...(config.behaviorPolicy === undefined ? [] : [toPosix(config.behaviorPolicy)]),
     ...(config.runtime === undefined ? [] : [toPosix(config.runtime)]),
     ...PACK_CONFIGS,
+    ...(config.alembic === undefined
+      ? []
+      : [
+          ...config.alembic.chains.flatMap((chain) => [
+            chain.migrations,
+            chain.alembicIni ?? 'alembic.ini',
+            ...chain.models,
+          ]),
+          ...(config.alembic.seed === undefined ? [] : [config.alembic.seed.path]),
+        ]),
   ];
   if (existsSync(join(cwd, '.gateforge/docs-exclusions.yml'))) {
     explicitFiles.push('.gateforge/docs-exclusions.yml');

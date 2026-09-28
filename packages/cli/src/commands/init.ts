@@ -39,6 +39,7 @@ import {
 import { PACK_VERSION as PACK_FASTAPI_VERSION } from '@gate-forge/pack-fastapi';
 import { PACK_VERSION as PACK_HTTP_VERSION } from '@gate-forge/pack-http';
 import { PACK_VERSION as PACK_TASK_VERSION } from '@gate-forge/pack-task';
+import { renderAlembicOptIn } from '@gate-forge/pack-alembic';
 import { parseArgs, stringFlag } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
@@ -1441,5 +1442,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     }
   }
   writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');
+  const alembicOptIn = renderAlembicOptIn(cwd);
+  if (alembicOptIn !== null) writeLine(io.stdout, alembicOptIn);
   return 0;
 }
