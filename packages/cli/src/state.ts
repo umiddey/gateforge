@@ -306,6 +306,67 @@ export function writeClaimInjections(
   } as unknown as JsonValue);
 }
 
+/** Advisory timing data for the most recently completed full test run. */
+export interface LastFullRunSummary {
+  /** Number of tests selected by that full run. */
+  testCount: number;
+  /** Wall-clock duration of the supervised test execution in milliseconds. */
+  durationMs: number;
+}
+
+/**
+ * Persists advisory cost data for a completed full test run.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   summary: selected test count and measured execution duration.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeLastFullRunSummary(stateDir: string, summary: LastFullRunSummary): void {
+  writeStateFile(stateDir, 'last-full-run.json', {
+    schemaVersion: 1,
+    testCount: summary.testCount,
+    durationMs: summary.durationMs,
+  });
+}
+
+/**
+ * Reads advisory full-run cost data without letting it affect gate trust.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   LastFullRunSummary | null: valid saved cost data, or null when missing
+ *   or unusable.
+ */
+export function readLastFullRunSummary(stateDir: string): LastFullRunSummary | null {
+  let document: unknown;
+  try {
+    document = readStateDocument(stateDir, 'last-full-run.json');
+  } catch {
+    return null;
+  }
+  if (document === null || typeof document !== 'object' || Array.isArray(document)) return null;
+  const record = document as Record<string, unknown>;
+  const testCount = record['testCount'];
+  const durationMs = record['durationMs'];
+  if (
+    record['schemaVersion'] !== 1 ||
+    typeof testCount !== 'number' ||
+    !Number.isSafeInteger(testCount) ||
+    testCount < 0 ||
+    typeof durationMs !== 'number' ||
+    !Number.isFinite(durationMs) ||
+    durationMs < 0
+  ) {
+    return null;
+  }
+  return { testCount, durationMs };
+}
+
 /** Persists the sealed supervision execution result. */
 export function writeExecutionResult(stateDir: string, result: unknown): void {
   writeStateFile(stateDir, 'execution-result.json', result as JsonValue);

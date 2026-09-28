@@ -161,6 +161,7 @@ import {
   writeInputSnapshot,
   writeManifest,
   writeObligations,
+  writeLastFullRunSummary,
   writeReport,
 } from '../state.js';
 import {
@@ -1481,6 +1482,8 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // typed blocking details for any witnessed suite that did not complete
   // cleanly — collected inside the supervised window below.
   let witnessedBlocking: BlockingEntry[] = [];
+  const executionStartedAt = performance.now();
+  let executionDurationMs: number | null = null;
   try {
     // 6.5 WITNESSED pytest participants run INSIDE the supervised window
     // (server-witnessed persistence channel, GAP 2 fix): the drain is
@@ -1556,6 +1559,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       // the durable evidence channel is sealed before evaluation.
       await stopWitnessProcess(spawnedWitness);
     }
+    executionDurationMs = Math.max(0, Math.round(performance.now() - executionStartedAt));
   }
   if (options.runtimeReuseCheck !== undefined) {
     let currentReuseDigest: string | null;
@@ -1725,6 +1729,17 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     repositoryBlocking: repositoryEvaluation.blocking,
     unclaimed: countUnclaimedObligations(stateDir, pipeline.policy.obligations),
   });
+  if (
+    options.scope !== 'changed' &&
+    sealed.result.complete &&
+    !options.resultOnly &&
+    executionDurationMs !== null
+  ) {
+    writeLastFullRunSummary(stateDir, {
+      testCount: executionSummary.selectedTests.selected,
+      durationMs: executionDurationMs,
+    });
+  }
   const diagnosticContext = {
     scope: options.scope,
     candidateTreeId: frozenTreeId,

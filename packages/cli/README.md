@@ -40,6 +40,18 @@ never rewrite existing journeys, never `tests mark` as proof.
 - **`tests mark` is intent, never proof.** A mapped test with no
   witnessed evidence grades `EVIDENCE_NOT_COLLECTED` — blocking.
 
+## What the gate catches that green mocks do not
+
+- A test can intercept a request and return a complete response while the
+  real server drops a field. A mocked-only test is not evidence that the
+  server sends it.
+- A UI action can look successful while the witness sees only a timestamp
+  change; an update obligation still needs a change to a classified
+  updateable field.
+- A mocked route can hide a handler that never receives real traffic. The
+  gate needs a witnessed request and the resulting state, not a mock's
+  answer.
+
 ## Commands
 
 | Command | Purpose | Exit codes |
@@ -242,6 +254,11 @@ exit decision.
 
 Two named modes (ADR 0005 D1); the CLI never reports a hook as more than it
 is.
+
+When a witnessed pre-commit run reaches a blocking result, Gateforge reports
+how many tests the current commit selected and, when recorded, how long the
+last full run took. This is cost context only; the current run and its receipt
+still decide whether the commit passes.
 
 **Standard mode** — an active local hook PLUS a mandatory trusted server
 check:
@@ -586,6 +603,7 @@ and print the tip.
 | `claims.json` / `records.json` | Reporter output consumed by the verifier (written by the suite). |
 | `execution-result.json` / `receipt.json` / `diagnostics.json` | Supervised `--changed` mode: the sealed execution result (planned vs executed instances, outcomes, native claim inventory, runner exit, completeness), the authenticated gate receipt issued after complete success, and the separate advisory diagnostic report. |
 | `report.json` | Canonical json-format run report after evaluation. |
+| `last-full-run.json` | Advisory test count and measured duration for the latest completed full run; used only to explain commit cost, never as gate evidence. |
 
 The legacy suite command (`--suite`) runs with those env vars; its reporter
 extracts claims from `{type: 'gateforge', description: '<obligation id>'}`

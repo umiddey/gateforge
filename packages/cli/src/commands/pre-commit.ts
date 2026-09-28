@@ -36,7 +36,7 @@ import {
   StagedCandidateBlockError,
   type StagedCandidate,
 } from '../staged-candidate.js';
-import { resolveStateDir } from '../state.js';
+import { readLastFullRunSummary, readStateDocument, resolveStateDir } from '../state.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { runCheckGate } from './check.js';
@@ -206,8 +206,10 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     copyStateIfPresent(checkoutDir, io.cwd);
     const recheck = recheckStagedCandidate(io.cwd, io.env, frozen);
     if (!recheck.ok) {
+      writeCommitCostHint(io, resolveStateDir(io.cwd));
       return renderCandidateBlock(io, recheck.detail, 'Restage the intended bytes and run the pre-commit gate again.');
     }
+    if (checkCode !== 0) writeCommitCostHint(io, resolveStateDir(io.cwd));
     return checkCode;
   } catch (error) {
     if (error instanceof RuntimeBlockError) {
@@ -221,6 +223,58 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     if (process.cwd() !== previousCwd) process.chdir(previousCwd);
     releaseStagedCandidate(frozen);
   }
+}
+
+/**
+ * Formats the current candidate's test count and the last full-run time.
+ *
+ * Args:
+ *   report: parsed canonical report from the just-finished gate run.
+ *   lastFullRun: saved advisory full-run count and duration, if available.
+ *
+ * Returns:
+ *   string | null: plain-language cost context, or null without a test count.
+ */
+export function formatCommitCostHint(
+  report: unknown,
+  lastFullRun: { testCount: number; durationMs: number } | null,
+): string | null {
+  if (report === null || typeof report !== 'object' || Array.isArray(report)) return null;
+  const execution = (report as Record<string, unknown>)['execution'];
+  if (execution === null || typeof execution !== 'object' || Array.isArray(execution)) return null;
+  const selectedTests = (execution as Record<string, unknown>)['selectedTests'];
+  if (selectedTests === null || typeof selectedTests !== 'object' || Array.isArray(selectedTests)) return null;
+  const count = (selectedTests as Record<string, unknown>)['selected'];
+  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) return null;
+  if (lastFullRun === null) {
+    return `this commit needs ${count} ${count === 1 ? 'test' : 'tests'}; no full-run duration is recorded yet.`;
+  }
+  const minutes = (lastFullRun.durationMs / 60_000).toFixed(1);
+  return (
+    `this commit needs ${count} ${count === 1 ? 'test' : 'tests'}; ` +
+    `last full run took ${minutes} ${minutes === '1.0' ? 'minute' : 'minutes'}.`
+  );
+}
+
+/**
+ * Prints advisory cost context when a witnessed pre-commit gate blocks.
+ *
+ * Args:
+ *   io: process context.
+ *   stateDir: absolute run-state directory containing the latest report.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeCommitCostHint(io: Io, stateDir: string): void {
+  let report: unknown;
+  try {
+    report = readStateDocument(stateDir, 'report.json');
+  } catch {
+    return;
+  }
+  const hint = formatCommitCostHint(report, readLastFullRunSummary(stateDir));
+  if (hint !== null) writeLine(io.stdout, hint);
 }
 
 /** Copies Gateforge run-state artifacts between the user and candidate trees. */
