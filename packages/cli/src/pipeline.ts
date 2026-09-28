@@ -56,6 +56,7 @@ import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.
 import { clockFromConfig } from './clock.js';
 import { expandIncludePaths, type ExpandError } from './glob.js';
 import { runPlugins } from './plugins.js';
+import type { CacheControl, CacheCounts } from './run-cache.js';
 import { compileEndpointContribution, type EndpointInventory } from './endpoint-compiler.js';
 import { readJsonArray } from './state.js';
 import { providerFor } from './providers.js';
@@ -81,6 +82,11 @@ export interface PipelineOptions {
    * pipeline executes in has no diff basis of its own.
    */
   changedFilesOverride?: readonly string[];
+  /**
+   * Plugin result cache control (plan 20260928_1430 Phase 2). Absent or
+   * disabled = full scan (the historical behavior).
+   */
+  pluginCache?: CacheControl;
 }
 
 /** The complete pipeline result. */
@@ -118,6 +124,8 @@ export interface PipelineResult {
    * duration in milliseconds. Observability only — never an input.
    */
   timings: PipelineTimings;
+  /** Plugin cache accounting for this run (0/0 when disabled). */
+  cache: CacheCounts;
 }
 
 /** Coarse pipeline step durations in milliseconds (`check --timing`). */
@@ -353,7 +361,12 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   );
   const pipelineStartedAtMs = performance.now();
   const pluginsStartedAtMs = performance.now();
-  const { contributions, registrations } = await runPlugins(config.plugins, paths, cwd);
+  const { contributions, registrations, cache: pluginCacheCounts } = await runPlugins(
+    config.plugins,
+    paths,
+    cwd,
+    options.pluginCache,
+  );
   const pluginsMs = performance.now() - pluginsStartedAtMs;
 
   const policyDocRaw = loadYaml(resolveRepoPath(cwd, config.classificationPolicy), 'classification-policy');
@@ -548,6 +561,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     lifecycleDerivation: lifecycleDerivationForReport(classification),
     behaviorCatalog,
     timings: { pluginsMs, totalMs: performance.now() - pipelineStartedAtMs },
+    cache: pluginCacheCounts,
   };
 }
 

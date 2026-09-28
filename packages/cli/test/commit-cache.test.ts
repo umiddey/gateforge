@@ -6,7 +6,7 @@
  * result must equal a fresh full scan, and one changed input byte must
  * force a miss (full scan).
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -15,6 +15,7 @@ import {
   configYml,
   installFixture,
   OBLIGATION_ACCOUNTS,
+  PLUGIN_SOURCE,
   pythonPluginBlock,
   referenceDetectorPath,
   runCli,
@@ -81,6 +82,7 @@ function installCountingFixture(repo: TempRepo, counterDir: string): CountingFix
       testPaths: ['tests']
       timeoutMs: 15000
 `,
+    '.gitignore': '.gateforge/test-gates/\n',
     '.gateforge/counting-collector.py': collectorSource,
     [detectorRelativePath]: detectorSource,
     '.gateforge/test-map.yml': [
@@ -152,6 +154,154 @@ describe('commit-time check reuse (plan 20260928_1430)', () => {
         expect(result.stdout).toMatch(
           /timing: detectors=\d+ms collection=\d+ms tsScan=\d+ms planning=\d+ms total=\d+ms/,
         );
+      });
+    } finally {
+      rmSync(counterDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('reuses the cached detector result on an unchanged second run', async () => {
+    const counterDir = mkdtempSync(join(tmpdir(), 'gateforge-cache-reuse-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const fixture = installCountingFixture(repo, counterDir);
+        repo.stage();
+        repo.commit('candidate');
+        const first = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(1);
+        expect(countSpawns(fixture.detectorCounter)).toBe(1);
+        expect(first.stdout).toContain('"cache":{"hits":0,"misses":1}');
+
+        // Identical inputs: the second commit-time run must reuse the
+        // cached detector result, and its report must equal the fresh one
+        // (modulo the per-run manifest run id, which is a fresh UUID).
+        const second = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(1);
+        expect(countSpawns(fixture.detectorCounter)).toBe(1);
+        expect(second.stdout).toContain('"cache":{"hits":1,"misses":0}');
+        const stripRunId = (report: string): unknown => {
+          const document = JSON.parse(report) as {
+            run?: { runId?: string };
+            cache?: { hits: number; misses: number };
+          };
+          if (document.run !== undefined) delete document.run.runId;
+          // The cache counts are SUPPOSED to differ (0/1 fresh vs 1/0
+          // reused); everything else must be byte-identical results.
+          delete document.cache;
+          return document;
+        };
+        expect(stripRunId(second.stdout)).toStrictEqual(stripRunId(first.stdout));
+      });
+    } finally {
+      rmSync(counterDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('reuses the cached in-process plugin result and refuses it after the module changes', async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-cache-inproc-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const marker = join(markerDir, 'inproc-ran');
+        // The marker write lives INSIDE discover(): Node caches a module
+        // instance per URL for the whole process, so a top-level write
+        // would count imports, not fresh discoveries.
+        const markerPluginSource =
+          PLUGIN_SOURCE.replace(
+            "import { readFileSync } from 'node:fs';",
+            "import { appendFileSync, readFileSync } from 'node:fs';",
+          ).replace(
+            '    return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };',
+            `    appendFileSync(${JSON.stringify(marker)}, 'ran\\n');\n` +
+            '    return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };',
+          );
+        repo.writeFiles({
+          '.gitignore': '.gateforge/test-gates/\n',
+          'plugin.mjs': markerPluginSource,
+        });
+        repo.stage();
+        repo.commit('candidate');
+        const first = await runCli(repo, ['check', '--format', 'json'], { CI: undefined });
+        expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(1);
+        expect(readFileSync(marker, 'utf8').split('\n').filter((line) => line === 'ran')).toHaveLength(1);
+
+        const second = await runCli(repo, ['check', '--format', 'json'], { CI: undefined });
+        expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(1);
+        expect(readFileSync(marker, 'utf8').split('\n').filter((line) => line === 'ran')).toHaveLength(1);
+        expect(second.stdout).toContain('"cache":{"hits":1,"misses":0}');
+
+        // A changed plugin module must invalidate its cached result (the
+        // marker write stays so the fresh discovery is still observable).
+        repo.writeFiles({
+          'plugin.mjs': `${markerPluginSource}// comment changes the module bytes\n`,
+        });
+        repo.stage();
+        repo.commit('plugin change');
+        const third = await runCli(repo, ['check', '--format', 'json'], { CI: undefined });
+        expect(third.code, `${third.stdout}\n${third.stderr}`).toBe(1);
+        expect(readFileSync(marker, 'utf8').split('\n').filter((line) => line === 'ran')).toHaveLength(2);
+        expect(third.stdout).toContain('"cache":{"hits":0,"misses":1}');
+      });
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('forces a full scan when one input byte changes', async () => {
+    const counterDir = mkdtempSync(join(tmpdir(), 'gateforge-cache-byte-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const fixture = installCountingFixture(repo, counterDir);
+        repo.stage();
+        repo.commit('candidate');
+        const first = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(1);
+        expect(countSpawns(fixture.detectorCounter)).toBe(1);
+        repo.writeFiles({ 'src/accounts.txt': 'accounts fixture.table # touched\n' });
+        repo.stage();
+        const second = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(1);
+        expect(countSpawns(fixture.detectorCounter)).toBe(2);
+        expect(second.stdout).toContain('"cache":{"hits":0,"misses":1}');
+      });
+    } finally {
+      rmSync(counterDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('forces a full scan under GATEFORGE_NO_CACHE and on a corrupt cache entry', async () => {
+    const counterDir = mkdtempSync(join(tmpdir(), 'gateforge-cache-kill-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const fixture = installCountingFixture(repo, counterDir);
+        repo.stage();
+        repo.commit('candidate');
+        const first = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(1);
+        expect(countSpawns(fixture.detectorCounter)).toBe(1);
+
+        // Kill switch: no read, no write — a fresh detector run.
+        const killed = await runCli(repo, ['check', '--changed'], {
+          CI: undefined,
+          GATEFORGE_NO_CACHE: '1',
+        });
+        expect(killed.code, `${killed.stdout}\n${killed.stderr}`).toBe(1);
+        expect(countSpawns(fixture.detectorCounter)).toBe(2);
+
+        // Corrupt entries: any doubt is a miss, never a wrong reuse.
+        const cacheDir = join(repo.root, '.gateforge', 'test-gates', 'cache', 'plugin');
+        const entries = readdirSync(cacheDir);
+        expect(entries.length).toBeGreaterThan(0);
+        for (const entry of entries) {
+          writeFileSync(join(cacheDir, entry), '{ not json');
+        }
+        const corrupted = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(corrupted.code, `${corrupted.stdout}\n${corrupted.stderr}`).toBe(1);
+        expect(countSpawns(fixture.detectorCounter)).toBe(3);
+        expect(corrupted.stdout).toContain('"cache":{"hits":0,"misses":1}');
       });
     } finally {
       rmSync(counterDir, { recursive: true, force: true });

@@ -65,6 +65,7 @@ import {
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
 import { runPipeline, resolveRepoPath, sourcesByResourceId } from '../pipeline.js';
+import { resolveCacheControl, type CacheCounts } from '../run-cache.js';
 import { RuntimeBlockError, loadRuntimeConfigAt, prepareRuntime } from '../runtime.js';
 import { digestRuntimeReuseMounts, type RuntimeReuseMount } from '../runtime-reuse.js';
 import {
@@ -414,7 +415,7 @@ function mockedOnlyEndpointAdvisories(
 
 export const CHECK_USAGE =
   'usage: gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--format text|json|sarif]\n' +
-  '       [--approved-policy-digest <hex64>] [--timing]\n' +
+  '       [--approved-policy-digest <hex64>] [--timing] [--no-cache]\n' +
   '       verifier key: GATEFORGE_WITNESS_VERIFIER_KEY or GATEFORGE_WITNESS_VERIFIER_KEY_FILE\n' +
   '       approved policy digest: the OWNER-APPROVED policy revision pin. Never sourced from\n' +
   '       candidate-controlled files in strict mode — provision it via the protected\n' +
@@ -456,6 +457,19 @@ export interface CheckGateOptions {
   runtimeReuseCheck?: () => string | null;
   /** Emit per-step wall-clock timings in the report (additive only). */
   timing?: boolean;
+  /**
+   * Force a full scan (plan 20260928_1430): no detector or pytest
+   * collection cache reads or writes. Also forced by
+   * `GATEFORGE_NO_CACHE=1` and CI environments.
+   */
+  noCache?: boolean;
+  /**
+   * Persistent state directory for the run cache. Staged-candidate runs
+   * pass the USER's run-state dir so cached results survive the thrown
+   * away scratch checkout; the cache key covers every input, so sharing
+   * across materializations of the same repo is sound.
+   */
+  cacheStateDir?: string;
 }
 
 /**
@@ -476,7 +490,7 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
     writeLine(io.stdout, CHECK_USAGE);
     return 0;
   }
-  rejectUnknownFlags(options, ['changed', 'staged', 'candidate-commit', 'require-e2e', 'format', 'approved-policy-digest', 'timing', 'help'], CHECK_USAGE);
+  rejectUnknownFlags(options, ['changed', 'staged', 'candidate-commit', 'require-e2e', 'format', 'approved-policy-digest', 'timing', 'no-cache', 'help'], CHECK_USAGE);
   if (options['staged'] === true && options['changed'] === true) {
     throw new UsageError('check: --staged already scopes the run to the staged candidate; --changed cannot be combined');
   }
@@ -484,6 +498,7 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
   const requireE2E = options['require-e2e'] === true;
   const approvedPolicyDigest = stringFlag(options, 'approved-policy-digest');
   const timing = options['timing'] === true;
+  const noCache = options['no-cache'] === true;
   const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [resolveStateDir(io.cwd)]);
   const candidateCommitSha = stringFlag(options, 'candidate-commit');
   if (options['staged'] === true && candidateCommitSha !== undefined) {
@@ -498,10 +513,11 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
       approvedPolicyDigest,
       verifierKeyring,
       timing,
+      noCache,
     });
   }
   if (options['staged'] === true) {
-    return stagedCheckCommand(io, { diffScoped: true, requireE2E, format, approvedPolicyDigest, verifierKeyring, timing });
+    return stagedCheckCommand(io, { diffScoped: true, requireE2E, format, approvedPolicyDigest, verifierKeyring, timing, noCache });
   }
   return runCheckGate(io, {
     diffScoped: options['changed'] === true,
@@ -510,6 +526,7 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
     approvedPolicyDigest,
     verifierKeyring,
     timing,
+    noCache,
   });
 }
 
@@ -546,6 +563,7 @@ async function stagedCheckCommand(
     approvedPolicyDigest?: string;
     verifierKeyring: VerifierKeyring | null;
     timing?: boolean;
+    noCache?: boolean;
   },
 ): Promise<number> {
   let frozen: StagedCandidate;
@@ -707,6 +725,9 @@ async function stagedCheckCommand(
       runtimeReuseMounts,
       runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
       ...(options.timing === true ? { timing: true } : {}),
+      // The scratch checkout's state dir is thrown away — the cache lives
+      // in the USER's persistent run-state dir (same repo, content keys).
+      ...(options.noCache === true ? { noCache: true } : { cacheStateDir: resolveStateDir(io.cwd) }),
     });
     if (options.candidateCommitSha === undefined) {
       const recheck = recheckStagedCandidate(io.cwd, io.env, frozen);
@@ -819,6 +840,10 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // unsafe --out overlap fails closed before any evaluation.
   let preFiles: SnapshotFileEntry[] | null = null;
   let snapshotUnavailable = false;
+  // Content-addressed run cache (plan 20260928_1430 Phases 2-3): lives in
+  // the EXCLUDED run-state dir (never in the input digest), forced off by
+  // --no-cache / GATEFORGE_NO_CACHE / CI. A speed-up, never proof.
+  const cacheControl = resolveCacheControl(io.env, options.cacheStateDir ?? stateDir, options.noCache === true);
   try {
     preFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions, cacheExclusions);
   } catch (error) {
@@ -838,6 +863,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     provider: providerIdentity,
     stateDir,
     ...(fixedChangedFiles !== undefined ? { changedFilesOverride: fixedChangedFiles } : {}),
+    pluginCache: cacheControl,
   });
   if (diffScoped && format === 'text') {
     const base =
@@ -1492,6 +1518,21 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       report =
         `${report}\ntiming: detectors=${String(timing.detectorsMs)}ms collection=${String(timing.collectionMs)}ms ` +
         `tsScan=${String(timing.tsScanMs)}ms planning=${String(timing.planningMs)}ms total=${String(timing.totalMs)}ms`;
+    }
+  }
+  {
+    // Cache accounting (plan 20260928_1430, additive `cache` key): how
+    // many detector/pytest results were reused vs recomputed. Never an
+    // input to any verdict.
+    const cacheCounts: CacheCounts = {
+      hits: pipeline.cache.hits,
+      misses: pipeline.cache.misses,
+    };
+    if (format === 'json') {
+      const document = JSON.parse(report) as Record<string, JsonValue>;
+      report = canonicalJson({ ...document, cache: { hits: cacheCounts.hits, misses: cacheCounts.misses } });
+    } else if (format === 'text' && cacheCounts.hits + cacheCounts.misses > 0) {
+      report = `${report}\ncache: ${String(cacheCounts.hits)} hit(s), ${String(cacheCounts.misses)} miss(es)`;
     }
   }
   if (format === 'text') {

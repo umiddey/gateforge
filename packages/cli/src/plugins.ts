@@ -42,11 +42,20 @@ import {
 } from '@gate-forge/core';
 import { PluginSession } from '@gate-forge/plugin-protocol';
 import { UsageError } from './errors.js';
+import {
+  digestPathListInputs,
+  lookupPluginCache,
+  storePluginResult,
+  type CacheControl,
+  type CacheCounts,
+} from './run-cache.js';
 
-/** One plugin run: detector contributions + pinned registrations. */
+/** One plugin run: detector contributions + pinned registrations + cache accounting. */
 export interface PluginRunResult {
   contributions: DetectorOutput[];
   registrations: PluginRegistration[];
+  /** Cache accounting for this run (0/0 when the cache is disabled). */
+  cache: CacheCounts;
 }
 
 /** Default export shape every in-process plugin must provide. */
@@ -69,16 +78,23 @@ export interface InProcessPluginModule {
 }
 
 /**
- * Runs every configured plugin over the same path list.
+ * Runs every configured plugin over the same path list, reusing cached
+ * discovery results when a cache control is provided and every key input
+ * (plugin config, module bytes, input bytes, interpreter identity) is
+ * unchanged. A cache miss runs the plugin exactly as before and stores
+ * the validated result; any doubt (unreadable input, unprobeable
+ * interpreter, corrupt entry) runs fresh — the cache only ever skips
+ * work whose inputs are byte-identical.
  *
  * Args:
  *   plugins: plugin entries from `.gateforge.yml` (config order).
  *   paths: expanded repo-relative include paths (possibly empty).
  *   cwd: repo root; subprocess cwd and in-process module base.
+ *   cache: cache control; omitted or disabled means a full scan.
  *
  * Returns:
- *   PluginRunResult: one validated contribution per plugin, plus the
- *   pinned registrations for the run manifest.
+ *   PluginRunResult: one validated contribution per plugin, the pinned
+ *   registrations for the run manifest, and the cache hit/miss counts.
  *
  * Throws:
  *   UsageError (exit 2): config/usage problems — spawn failures,
@@ -89,18 +105,37 @@ export async function runPlugins(
   plugins: readonly ConfigPlugin[],
   paths: readonly string[],
   cwd: string,
+  cache?: CacheControl,
 ): Promise<PluginRunResult> {
   const contributions: DetectorOutput[] = [];
   const registrations: PluginRegistration[] = [];
+  const cacheCounts: CacheCounts = { hits: 0, misses: 0 };
+  const cacheActive = cache !== undefined && !cache.disabled;
+  const inputsDigest = cacheActive ? digestPathListInputs(cwd, paths) : null;
   for (const plugin of plugins) {
-    if (plugin.transport === 'subprocess') {
-      contributions.push(await runSubprocessPlugin(plugin, paths, cwd));
+    const cached =
+      cacheActive && inputsDigest !== null
+        ? lookupPluginCache(cache.stateDir, plugin, inputsDigest, cwd, process.env)
+        : null;
+    if (cached !== null) {
+      contributions.push(cached);
+      cacheCounts.hits += 1;
     } else {
-      contributions.push(await runInProcessPlugin(plugin, paths, cwd));
+      const fresh =
+        plugin.transport === 'subprocess'
+          ? await runSubprocessPlugin(plugin, paths, cwd)
+          : await runInProcessPlugin(plugin, paths, cwd);
+      contributions.push(fresh);
+      if (cacheActive) {
+        cacheCounts.misses += 1;
+        if (inputsDigest !== null) {
+          storePluginResult(cache.stateDir, plugin, inputsDigest, cwd, process.env, fresh);
+        }
+      }
     }
     registrations.push({ id: plugin.id, version: plugin.version, transport: plugin.transport });
   }
-  return { contributions, registrations };
+  return { contributions, registrations, cache: cacheCounts };
 }
 
 /** Drives one GPP/3 subprocess plugin session over the path list. */
