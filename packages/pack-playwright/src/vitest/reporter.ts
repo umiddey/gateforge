@@ -24,10 +24,10 @@
  * Loaded by the VitestRunnerAdapter through `--reporter=<this module>`;
  * Vitest instantiates custom reporters with `new`.
  */
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { canonicalOf } from '../json.js';
-import { CLAIM_INJECTIONS_FILE } from '../constants.js';
+import { claimInjectionsFor } from '../runner-claims.js';
 
 /** Env the runner child receives from the adapter's allowlist. */
 const ENV_STATE_DIR = 'GATEFORGE_STATE_DIR';
@@ -194,24 +194,7 @@ export default class GateforgeVitestReporter {
    */
   private claimsFor(identity: TestIdentity): { claims?: string[] } {
     if (this.stateDir === null) return {};
-    let raw: string;
-    try {
-      raw = readFileSync(join(this.stateDir, CLAIM_INJECTIONS_FILE), 'utf8');
-    } catch {
-      return {};
-    }
-    let document: unknown;
-    try {
-      document = JSON.parse(raw);
-    } catch {
-      return {};
-    }
-    if (typeof document !== 'object' || document === null || Array.isArray(document)) return {};
-    const injections = (document as Record<string, unknown>)['injections'];
-    if (typeof injections !== 'object' || injections === null || Array.isArray(injections)) return {};
-    const claims = (injections as Record<string, unknown>)[identity.testId];
-    if (!Array.isArray(claims)) return {};
-    const clean = [...new Set(claims.filter((claim): claim is string => typeof claim === 'string' && claim !== ''))].sort();
-    return clean.length > 0 ? { claims: clean } : {};
+    const claims = claimInjectionsFor(this.stateDir, identity.testId);
+    return claims.length > 0 ? { claims } : {};
   }
 }
