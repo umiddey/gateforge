@@ -129,9 +129,9 @@ export function renderGitlabCiTemplate(mode: GitlabGateMode = 'check'): string {
     mode === 'strict'
       ? [
           '    - run_gateforge test-gates --changed',
-          '    - run_gateforge check --changed --require-e2e',
+          '    - run_gateforge check --changed --candidate-commit "$CI_COMMIT_SHA" --require-e2e',
         ].join('\n')
-      : '    - run_gateforge check --changed';
+      : '    - run_gateforge check --changed --candidate-commit "$CI_COMMIT_SHA"';
   const artifacts =
     mode === 'strict'
       ? [
@@ -249,7 +249,7 @@ jobs:
           GATEFORGE_APPROVED_POLICY_DIGEST: \${{ secrets.GATEFORGE_APPROVED_POLICY_DIGEST }}
         run: |
           ./node_modules/.bin/gateforge test-gates --changed
-          ./node_modules/.bin/gateforge check --changed --require-e2e
+          ./node_modules/.bin/gateforge check --changed --candidate-commit "$GITHUB_SHA" --require-e2e
 `;
 }
 

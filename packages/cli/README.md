@@ -73,7 +73,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]` | Managed-mode commit broker (MECHANISM, not deployment): snapshots the workspace bytes into a throwaway index, recomputes the input + trusted-policy digests, verifies a valid non-stale gate receipt for EXACTLY those bytes, then creates the commit via compare-and-swap `git update-ref`. Typed rejections (`ENFORCEMENT_UNTRUSTED` / `EVIDENCE_STALE` / `RUN_INCOMPLETE` / `KEY_UNKNOWN` / `BROKER_CAS_MISMATCH` / `BROKER_UNSAFE_MESSAGE`); symlinks/submodules are typed rejections. Verifier keys use either supported environment source; the key file must be outside authority, workspace, and receipt artifact roots. | 0/2 |
 | `gateforge key create|import-env|rotate|retire --file <path> --confirm` | Owner-only key ceremony. Creates an external key ring, imports an existing environment key, rotates the active key while retaining old keys, or retires an inactive key. The secret is never printed. See verifier-key trust notes. | 0/2 |
 | `gateforge pre-commit --scope staged\|full` | The witnessed commit gate: freezes the Git index, materializes it into a scratch checkout, prepares the candidate's staged runtime (`.gateforge/runtime.yml` — below), runs the supervised witness gate INSIDE that checkout (`staged`: only tests mapped to obligations affected by the staged paths, `EVIDENCE_SCOPE_INCOMPLETE` blocks an unmapped affected obligation; `full`: the complete relevant mapped suite), validates the fresh receipt against the same checkout, rechecks the original index/HEAD/MERGE_HEAD, and copies only Gateforge audit artifacts (run state incl. runtime logs) back. Runtime preparation/readiness failures are typed (`RUNTIME_PREPARATION_FAILED` / `RUNTIME_READINESS_FAILED`); child process groups are cleaned up on every exit path. Install via `gateforge init --blocking --witnessed staged\|full`. | 0/1/2 |
-| `gateforge enforcement doctor [--json]` | Honest enforcement diagnostics: config, hook presence + ACTIVATION, runner readiness, observer capability, trusted binary/policy ownership, snapshot mode, and the standard/managed boundary. Detecting a hook NEVER counts as managed protection. Diagnostic only: exit 0 whenever it runs. | 0/2 |
+| `gateforge enforcement doctor [--json]` | Reports verified enforcement `level` (0–3), hook activation, wired CI templates, and read-only GitHub/GitLab branch-protection results; missing credentials or uncertain responses remain `not verified`. A local hook never counts as server protection. Diagnostic only: exit 0 whenever it runs. | 0/2 |
 | `gateforge enforce [--ci github|gitlab]` | Add blocking wiring to an initialized repository. The provider defaults to GitLab unless GitHub is the only detected CI provider; the explicit flag selects GitHub Actions or GitLab CI. | 0/2 |
 | `gateforge baseline update <fp...>` | Shrink the baseline to a strict subset (invariant 4). | 0/2 |
 | `gateforge baseline diff <before> <after>` | Compare adopted obligations by ID without printing fingerprints. | 0/2 |
@@ -273,10 +273,11 @@ check:
   existing gateforge-owned hook is verified, never rewritten.
   By default, `init --blocking` writes `.gateforge/ci/gitlab-gateforge.yml`
   plus the `.gitlab-ci.yml` include. `gateforge enforce --ci github` writes
-  `.github/workflows/gateforge.yml` instead. The generated GitHub workflow
-  installs the pinned CLI and runs `test-gates --changed`, then
-  `check --changed --require-e2e`, with its verifier key and policy pin read
-  from protected repository secrets.
+  `.github/workflows/gateforge.yml` instead. Both strict templates run
+  `test-gates --changed`, then verify the exact CI commit with
+  `check --changed --candidate-commit "$CI_COMMIT_SHA"` (GitLab) or
+  `--candidate-commit "$GITHUB_SHA"` (GitHub). The verifier key and policy
+  pin come from protected CI secrets.
   Protect the branch, require its Gateforge pipeline to succeed (skipped jobs
   do not count), exclude agent roles from direct pushes, and use an
   organization-controlled pipeline execution policy so a candidate cannot
@@ -284,6 +285,9 @@ check:
   `core.hooksPath`, direct plumbing, or an unrelated clone bypass any local
   hook — keeping bypassed commits out of protected history is the server's
   job, not the hook's.
+  `gateforge enforcement doctor` reports level 0–3. It reports level 3 only
+  when a read-only provider API confirms branch protection plus a required
+  Gateforge status check or passing-pipeline setting.
 - The CI template checks that the installed `@gate-forge/cli` version equals
   the version that generated it. Add that exact version as a root
   `devDependency`. The template uses a package-manager lockfile when present;

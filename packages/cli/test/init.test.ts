@@ -340,7 +340,7 @@ describe('gateforge init', () => {
       // receipt seal + require-e2e check, never an optional/static-only job.
       const ciTemplate = readFileSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'), 'utf8');
       expect(ciTemplate).toContain('gateforge test-gates --changed');
-      expect(ciTemplate).toContain('gateforge check --changed --require-e2e');
+      expect(ciTemplate).toContain('gateforge check --changed --candidate-commit "$CI_COMMIT_SHA" --require-e2e');
       expect(ciTemplate).toContain('.gateforge/test-gates/report.json');
       expect(ciTemplate).toContain('.gateforge/test-gates/receipt.json');
       expect(ciTemplate).not.toContain('summary.satisfied');

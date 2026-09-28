@@ -170,10 +170,11 @@ This installs and verifies an active pre-commit hook and adds CI wiring. Review 
 - `.gateforge/ci/gitlab-gateforge.yml` and `.gitlab-ci.yml` by default
 
 For GitHub Actions, use `gateforge enforce --ci github` in an initialized
-repository. It writes `.github/workflows/gateforge.yml`, which runs the
-supervised `test-gates --changed` step and then verifies its receipt with
-`check --changed --require-e2e`. Configure the verifier key and policy pin as
-protected secrets. A local hook alone is not server enforcement.
+repository. It writes `.github/workflows/gateforge.yml`, which runs
+`test-gates --changed` and verifies the pushed/PR commit with
+`check --changed --candidate-commit "$GITHUB_SHA" --require-e2e`. Configure
+the verifier key and policy pin as protected secrets. A local hook alone is
+not server enforcement.
 
 **You should see:** `installed:`, `updated:`, `verified:`, or a framework-managed hook message, followed by `blocking gate wired`.
 
