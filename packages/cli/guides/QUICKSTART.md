@@ -202,6 +202,37 @@ A changed slice that affects no obligation (for example, only a log constant cha
 
 `check --changed --require-e2e` accepts a slice receipt only when it covers every currently changed obligation.
 
+## Choose how strict the gate is
+
+`.gateforge.yml` takes one optional key:
+
+```yaml
+mode: warn      # evaluate and report everything, exit 0 (wouldBlock says what was found)
+mode: changed   # block only on debt this change touches; the full debt is still reported
+mode: strict    # today's behavior — also the default when the key is absent
+```
+
+The key changes the GATE, never the evidence: verdicts, counts and cause
+codes are identical in every mode, the active mode is printed in every
+report, and `gateforge enforcement doctor` reports a non-strict mode as
+`WARN`. A config/usage error still exits 2 in every mode. The key lives
+inside the pinned trusted policy, so changing it is an owner decision.
+
+## Quarantine a flaky test
+
+```bash
+gateforge quarantine 'playwright:chromium:tests/e2e/orders.spec.js:Orders>lists orders' \
+  --owner team-orders --approver lead@example.invalid \
+  --reason 'flaky in CI: seeded clock race' --expires 2026-04-30
+```
+
+The test key is the catalog's logical key (`gateforge tests discover`
+prints them). The quarantine removes that test from the required set for
+at most 14 days. It proves nothing (an obligation only it covered stays
+`missing`) and never blocks. An expired quarantine is ignored and BLOCKS
+until it is renewed or deleted. Only the owner can write one, and the
+file is part of the pinned trusted policy.
+
 ## Coming next
 
 - `gateforge tests sync` will generate test-map entries from annotations.

@@ -65,7 +65,7 @@ Gateforge connects existing journeys to obligations, then checks witness evidenc
 
 | Package | Purpose |
 |---|---|
-| [`packages/core`](packages/core) | `@gate-forge/core` — artifact schemas (zod), GF-canonical-JSON + fingerprints, witness provenance verification, resource graph, policy engine, verdict engine + capability registry, test-catalog/mapping/coverage/receipt schemas, baselines, waivers, reports |
+| [`packages/core`](packages/core) | `@gate-forge/core` — artifact schemas (zod), GF-canonical-JSON + fingerprints, witness provenance verification, resource graph, policy engine, verdict engine + capability registry, test-catalog/mapping/coverage/receipt schemas, baselines, waivers, quarantines, strictness modes, reports |
 | [`packages/plugin-protocol`](packages/plugin-protocol) | `@gate-forge/plugin-protocol` — GPP/3 host (TS) + reference client (py): newline JSON, 8 MiB line cap, digest-checked envelopes |
 | [`packages/cli`](packages/cli) | `@gate-forge/cli` — bin `gateforge`: `init`, `next`, `discover`, `classify`, `explain`, `tests discover|catalog|suggest|mark|explain|diagnose`, `obligations`, `check [--changed] [--staged] [--require-e2e]`, `test-gates [--changed]`, `broker commit`, `enforcement doctor`, `baseline update` |
 | [`packages/http-contract`](packages/http-contract) | `@gate-forge/http-contract` — canonical HTTP contract facts, typed block codes, deterministic frontend-call ↔ server-route join engine |
@@ -90,6 +90,7 @@ Gateforge connects existing journeys to obligations, then checks witness evidenc
 | 4 | Playwright evidence pack + witness service | shipped (commit 3fb49e7); provenance hardening 2026-08-31 (see below) |
 | 5 | ClientZero dogfood migration | blocked on human decisions (out of scope) |
 | 6–8 | Five additional contract packs (auth, workflow, webhook, task, validation) | shipped (commit 44b25da) — detectors + example-server integration tests; engine-level grading pending per-pack semantic verifiers |
+| 2026-09-25 | Owner-chosen strictness (`mode: strict|changed|warn`, absent = strict) + owner-only, expiring flaky-test quarantine that never proves and never blocks | shipped on branch `plan/strictness-modes` |
 | 2026-09-13 | Existing-test reuse + E2E enforcement (`tests` workflow, supervised runs + gate receipts, staged-candidate gate, active hook install, broker mechanism, GitLab strict-gate template) | in-repo work complete — see below; consumer-worktree authoring and server-side GitLab rollout remain owner actions |
 
 **2026-08-31 audit remediation (five rounds).** Evidence trust now rests
@@ -199,6 +200,19 @@ authorize. Existing bundles need a fresh run — nothing signs old
 records into the new format. Details and migration notes live in
 [`packages/cli/README.md`](packages/cli/README.md) (test-gates
 protocol + Layer 2).
+
+## Gate strictness and flaky tests
+
+The gate is strict by default, and that stays the default: a config
+without `mode` behaves exactly as it always has. The owner can soften
+the GATE (never the evidence) with `mode: changed` (block only on debt
+this change touches; the full debt is still reported) or `mode: warn`
+(evaluate and report everything, exit 0, with an additive `wouldBlock`),
+and can quarantine an individual flaky test with `gateforge quarantine`
+— owner-approved, expiring, never proof, never blocking, always visible
+in the report and in `gateforge enforcement doctor`. Both settings live
+inside the pinned trusted policy: an agent cannot soften the gate or
+quarantine a test to make its own commit pass.
 
 ## Known limitations
 
