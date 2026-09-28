@@ -92,6 +92,14 @@ import {
   type RunManifest,
   type RunExecutionSummary,
   type RunnerExecutionEnvelope,
+  BLOCKING_VERDICTS,
+  decideStrictness,
+  loadQuarantines,
+  QUARANTINE_DIR,
+  resolveStrictnessMode,
+  strictnessSummaryLine,
+  withoutQuarantinedBindings,
+  type LoadedQuarantine,
   type TestCatalog,
   type TracedTestInput,
 } from '@gate-forge/core';
@@ -128,7 +136,7 @@ import {
   SUPERVISED_INVOCATION,
   type PlannedRow,
 } from '../execution.js';
-import { evaluateRun, type EvaluateInput } from '../evaluate.js';
+import { evaluateRun, scopeBlocking, type EvaluateInput } from '../evaluate.js';
 import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
 import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
 import { CACHE_EXCLUSIONS_GUARANTEE, loadCacheExclusions } from '../cache-exclusions.js';
@@ -142,7 +150,7 @@ import {
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
 import { mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
-import { runPipeline } from '../pipeline.js';
+import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { loadReceiptFor, tryReuseReceipt } from '../receipts.js';
 import { computeEvaluationScope } from '../scope.js';
 import { computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
@@ -993,11 +1001,98 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
  *   supervision/evidence failure, 2 config/usage.
  * @throws fail-closed errors (exit 2) from config/plugin/pipeline layers.
  */
+/**
+ * Projects every EXPIRED owner quarantine into a blocking finding that
+ * names the test and its expiry (plan 20260925_2013 Phase 2). An expired
+ * quarantine is not silently ignored: it is a stale escape hatch, and
+ * the required test is back in the run.
+ *
+ * Args:
+ *   expired: the expired partition of the loaded quarantine population.
+ *
+ * Returns:
+ *   BlockingEntry[]: one typed `QUARANTINE_EXPIRED` finding per expiry,
+ *   sorted by test key (the loader's order).
+ */
+export function expiredQuarantineBlocking(
+  expired: readonly LoadedQuarantine[],
+): BlockingEntry[] {
+  return expired.map((entry) => ({
+    kind: 'finding' as const,
+    resourceId: null,
+    name: entry.quarantine.testKey,
+    detail:
+      `quarantine of '${entry.quarantine.testKey}' expired at ${entry.quarantine.expiresAt} ` +
+      `(file ${QUARANTINE_DIR}/${entry.file}) — it is ignored and the test is required again; ` +
+      'renew it with an owner approval or delete it',
+    location: null,
+    cause: 'QUARANTINE_EXPIRED' as const,
+    nextAction: CAUSE_NEXT_ACTIONS.QUARANTINE_EXPIRED,
+  }));
+}
+
+/**
+ * The `<file>#<title path>` instance identities of every quarantined
+ * catalog row — the form both the runner-outcomes document and the
+ * witness session trace report.
+ *
+ * Args:
+ *   catalog: the current test catalog (null when discovery failed).
+ *   quarantinedKeys: logical keys the owner quarantined.
+ *
+ * Returns:
+ *   Set<string>: instance identities of quarantined tests.
+ */
+function quarantinedInstanceKeys(
+  catalog: TestCatalog | null,
+  quarantinedKeys: ReadonlySet<string>,
+): Set<string> {
+  const keys = new Set<string>();
+  if (catalog === null || quarantinedKeys.size === 0) return keys;
+  for (const entry of catalog.entries) {
+    if (!quarantinedKeys.has(entry.logicalKey)) continue;
+    keys.add(`${entry.file}#${entry.titlePath.join('>')}`);
+  }
+  return keys;
+}
+
+/**
+ * The framework test ids (`parameterIdentity`) of every quarantined
+ * catalog row: the identity claims and evidence records carry, so the
+ * evaluator can discard that test's proof before any verifier sees it.
+ *
+ * Args:
+ *   catalog: the current test catalog.
+ *   quarantinedKeys: logical keys the owner quarantined.
+ *
+ * Returns:
+ *   Set<string>: framework ids belonging to quarantined tests (empty
+ *   ids are skipped — a row without a framework id claims nothing).
+ */
+function quarantinedFrameworkIds(
+  catalog: TestCatalog,
+  quarantinedKeys: ReadonlySet<string>,
+): Set<string> {
+  const ids = new Set<string>();
+  if (quarantinedKeys.size === 0) return ids;
+  for (const entry of catalog.entries) {
+    const identity = entry.parameterIdentity;
+    if (identity === null || identity.length === 0) continue;
+    if (quarantinedKeys.has(entry.logicalKey)) ids.add(identity);
+  }
+  return ids;
+}
+
 async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): Promise<number> {
   const { out, format, witnessUrl, runTimeoutMs } = options;
   const runtimeReuseDigest = options.runtimeReuseDigest;
   const runtimeReuseMounts = options.runtimeReuseMounts ?? [];
   const config = loadConfigAt(io.cwd);
+  // Owner-chosen strictness (plan 20260925_2013 Phase 1). Absent key =
+  // `strict` = today's exact behavior; the decision below only ever
+  // maps an ALREADY-COMPUTED strict result onto the owner's exit code,
+  // never changes what was executed or graded.
+  const gateMode = resolveStrictnessMode(config);
   const docsExclusions = loadDocsExclusions(io.cwd, config);
   const cacheExclusions = loadCacheExclusions(io.cwd, config);
   const stateDir = resolveStateDir(io.cwd, out);
@@ -1033,6 +1128,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       ? { changedFilesOverride: options.fixedChangedFiles }
       : {}),
   });
+  // Owner quarantine (plan 20260925_2013 Phase 2): loaded against the
+  // INJECTED run clock, never the wall clock. ACTIVE quarantines remove
+  // their test from the REQUIRED set and its evidence is discarded;
+  // EXPIRED ones are ignored and each BLOCKS, naming the test.
+  const quarantines = loadQuarantines(join(io.cwd, ...QUARANTINE_DIR.split('/')), { now: pipeline.now });
+  const quarantinedKeys = new Set<string>(quarantines.active.map((entry) => entry.quarantine.testKey));
   const providerChangedFiles = options.fixedChangedFiles ?? pipeline.changedFiles;
   // The scoped slice's changed set: exactly what the resolved provider
   // reported for THIS tree (the pipeline already ran it — one resolution,
@@ -1187,6 +1288,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   let observeObligations: string[] = [];
   let fullPlannedCount = 0;
   let affectedTestCount = 0;
+  // Framework ids whose claims and records must never grade (owner
+  // quarantine); empty when nothing is quarantined.
+  let excludedTestIds: readonly string[] = [];
   if (catalog !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -1199,17 +1303,26 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       nativeInstances,
     });
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
-    claimInventory = mapped.claimInventory;
-    const fullPlannedRows = planExpectedSet(catalog);
+    // Quarantined tests prove nothing: their declarations and their
+    // coverage bindings leave the mapping surface BEFORE planning, so an
+    // obligation only they covered becomes uncovered and stays `missing`.
+    const gradedResolution = withoutQuarantinedBindings(mapped.resolution, quarantinedKeys);
+    excludedTestIds = [...quarantinedFrameworkIds(catalog, quarantinedKeys)].sort();
+    claimInventory = mapped.claimInventory.filter(
+      (claim) => !excludedTestIds.includes(claim.testId),
+    );
+    const fullPlannedRows = planExpectedSet(catalog).filter(
+      (row) => !quarantinedKeys.has(row.planned.logicalKey),
+    );
     fullPlannedCount = fullPlannedRows.length;
     plannedRows = fullPlannedRows;
-    injections = claimInjectionsFor(mapped.resolution, catalog);
-    mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
+    injections = claimInjectionsFor(gradedResolution, catalog);
+    mappedCoverage = mappedCoverageFrom(gradedResolution, pipeline.policy.obligations, pipeline.graph);
     serverE2eObligations = serverE2eObligationIds(mapped.resolution);
     observeObligations = observeObligationIds(mapped.resolution);
     const affectedPlan = planScopedExpectedSet({
       catalog,
-      resolution: mapped.resolution,
+      resolution: gradedResolution,
       obligations: pipeline.policy.obligations,
       graph: pipeline.graph,
       changedFiles: providerChangedFiles,
@@ -1217,7 +1330,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     });
     affectedTestCount = affectedPlan.plannedRows.length;
     if (options.scope === 'changed') {
-      plannedRows = affectedPlan.plannedRows;
+      plannedRows = affectedPlan.plannedRows.filter(
+        (row) => !quarantinedKeys.has(row.planned.logicalKey),
+      );
       coveredFingerprints = affectedPlan.coveredFingerprints;
       scopeBlockers = affectedPlan.unclaimed.map((entry): BlockingEntry => ({
         kind: 'finding',
@@ -1974,8 +2089,26 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       return 1;
     }
   }
+  // Quarantined instances still RUN (the suite is executed whole) but
+  // they are no longer REQUIRED, so their outcome and their session
+  // trace are recorded as INFORMATION ONLY: leaving them in would make
+  // supervision report them as unexpected extra executions.
+  const quarantinedInstances = quarantinedInstanceKeys(catalog, quarantinedKeys);
+  const rawOutcomesDoc = readRunnerOutcomes(join(stateDir, 'runner-outcomes.json'));
   const outcomesDoc =
-    readRunnerOutcomes(join(stateDir, 'runner-outcomes.json'));
+    quarantinedInstances.size === 0 || rawOutcomesDoc === null
+      ? rawOutcomesDoc
+      : {
+          ...rawOutcomesDoc,
+          outcomes: rawOutcomesDoc.outcomes.filter(
+            (row) => !quarantinedInstances.has(`${row.file}#${row.titlePath.join('>')}`),
+          ),
+        };
+  if (sessionTrace !== null && quarantinedInstances.size > 0) {
+    sessionTrace = sessionTrace.filter(
+      (test) => !quarantinedInstances.has(`${test.file}#${test.titlePath.join('>')}`),
+    );
+  }
   const sealed = sealExecutionResult({
     runId: manifest.runId,
     invocationId,
@@ -2057,10 +2190,14 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     cause: 'RUN_INCOMPLETE' as const,
     nextAction: CAUSE_NEXT_ACTIONS['RUN_INCOMPLETE'],
   }));
+  // An expired quarantine is ignored AND blocking: the owner let this
+  // flake run long enough that nobody renewed it, so the required test
+  // is back in the run and the stale escape hatch must be visible.
   const repositoryBlocking: BlockingEntry[] = [
     ...pipeline.policy.blocking,
     ...mappingBlockers,
     ...inventoryBlocking,
+    ...expiredQuarantineBlocking(quarantines.expired),
   ];
   const evaluationInput: EvaluateInput = {
     cwd: io.cwd,
@@ -2093,6 +2230,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // mode stays unscoped (changedFiles: null), byte-identical.
     changedFiles: scopeChangedFiles,
     claimInventory,
+    ...(excludedTestIds.length === 0 ? {} : { excludedTestIds }),
     witnessVerifierKey,
     witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
     witnessAttestation: liveAttestation,
@@ -2111,6 +2249,39 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     },
   };
   const evaluated = evaluateRun(evaluationInput);
+  // Owner-chosen strictness: the mapping from the strict decision to the
+  // effective exit code. `changed` reuses the run's own provider diff and
+  // the evaluator's own attribution rule — an unknown change fails closed.
+  const strictExit = runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
+  const blockingTotal =
+    evaluated.verdicts.filter((verdict) => BLOCKING_VERDICTS.includes(verdict.verdict)).length +
+    evaluated.blocking.length;
+  const changedFileSet = new Set(providerChangedFiles);
+  const strictness = decideStrictness({
+    mode: gateMode,
+    strictExitCode: strictExit,
+    blockingTotal,
+    ...(gateMode === 'changed'
+      ? {
+          changed: {
+            active: true,
+            blockingInScope:
+              evaluated.verdicts.filter(
+                (verdict) =>
+                  BLOCKING_VERDICTS.includes(verdict.verdict) &&
+                  (sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog).get(
+                    verdict.obligation.resourceId,
+                  ) ?? []).some((file) => changedFileSet.has(file)),
+              ).length +
+              scopeBlocking(
+                evaluated.blocking,
+                changedFileSet,
+                sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog),
+              ).length,
+          },
+        }
+      : {}),
+  });
   const repositoryEvaluation = evaluateRun({
     ...evaluationInput,
     blocking: repositoryBlocking,
@@ -2172,7 +2343,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           },
         }),
   };
-  const report = renderRun(evaluated.verdicts, {
+  // Report-side strictness + quarantine (plan 20260925_2013 Phase 3):
+  // ADDITIVE only. A repository that never softened its gate and never
+  // quarantined a test gets exactly the document it got before.
+  const renderedReport = renderRun(evaluated.verdicts, {
     format,
     blocking: evaluated.blocking,
     waiverCounts: evaluated.waiverCounts,
@@ -2184,6 +2358,42 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     diagnosticContext,
     ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
   });
+  const report =
+    format === 'text'
+      ? `${renderedReport}\n${strictnessSummaryLine(strictness)}${
+          quarantines.active.length === 0
+            ? ''
+            : `\nquarantined: ${String(quarantines.active.length)} (expires ${quarantines.active
+                .map((entry) => `${entry.quarantine.testKey} @ ${entry.quarantine.expiresAt}`)
+                .join(', ')})`
+        }`
+      : format === 'json'
+        ? canonicalJson({
+            ...(JSON.parse(renderedReport) as Record<string, unknown>),
+            ...(gateMode === 'strict'
+              ? {}
+              : {
+                  strictness: {
+                    mode: strictness.mode,
+                    wouldBlock: strictness.wouldBlock,
+                    blockingInScope: strictness.blockingInScope,
+                    blockingTotal: strictness.blockingTotal,
+                  },
+                }),
+            ...(quarantines.active.length === 0
+              ? {}
+              : {
+                  quarantine: {
+                    count: quarantines.active.length,
+                    tests: quarantines.active.map((entry) => ({
+                      testKey: entry.quarantine.testKey,
+                      expiresAt: entry.quarantine.expiresAt,
+                      owner: entry.quarantine.owner,
+                    })),
+                  },
+                }),
+          } as unknown as JsonValue)
+        : renderedReport;
   writeLine(io.stdout, report);
   writeReport(
     stateDir,
@@ -2203,9 +2413,22 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
 
   // 10. Only authoritative gate mode invalidates a previous receipt on
   // failure. Result-only reporting never creates, replaces, or clears one.
-  const gateCode = runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
+  // Owner-chosen strictness decides the exit code, never the evaluation:
+  // a softened run still reports everything and, when it hides a block,
+  // says so out loud. Setup/integrity failures above (drift, an
+  // unresolvable input digest) are NOT softened — a run that could not
+  // be evaluated honestly has nothing to report.
+  const gateCode = strictness.exitCode;
+  const softened = strictness.exitCode !== strictness.strictExitCode;
   if (gateCode !== 0 || !sealed.result.complete || changedInputs || snapshotUnavailable || expectedDigest === null) {
-    if (!options.resultOnly) clearGateReceipt(stateDir);
+    if (strictness.strictExitCode !== 0 && !options.resultOnly && !softened) clearGateReceipt(stateDir);
+    if (softened) {
+      writeLine(
+        io.stderr,
+        `test-gates: ${strictnessSummaryLine(strictness)} — the gate exits 0 in mode '${strictness.mode}', ` +
+          `strict mode would exit ${String(strictness.strictExitCode)}`,
+      );
+    }
     return gateCode === 0 ? 1 : gateCode;
   }
   // The result-only selection uses either a private temporary state dir or

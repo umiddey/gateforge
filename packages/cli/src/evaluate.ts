@@ -97,6 +97,15 @@ export interface EvaluateInput {
    */
   claimInventory?: readonly Claim[];
   /**
+   * Framework test ids whose evidence may never be used (plan
+   * 20260925_2013 Phase 2, owner quarantine). A quarantined test proves
+   * nothing: its claims are dropped and its evidence records are
+   * discarded before grading, so an obligation only it covered stays
+   * `missing` — the quarantine forgives nothing. Unknown ids here are
+   * harmless (nothing to drop); this is a restriction, never a grant.
+   */
+  excludedTestIds?: readonly string[];
+  /**
    * Coverage facts derived from resolved test mappings (plan §3.6,
    * Phase 3): browser-e2e-declared bindings for CRUD-contract
    * obligations, joined to their inventory tables. Feeds the coverage
@@ -469,7 +478,27 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     requireInvocationId: input.evidenceContext?.requireInvocationId,
     changedInputs: input.evidenceContext?.changedInputs,
   });
-  const records = authorized.records;
+  // Owner quarantine (plan 20260925_2013 Phase 2): a quarantined test's
+  // records are discarded HERE — before any verifier sees them — so its
+  // evidence cannot satisfy anything, not even through a claim it shares.
+  const excludedTestIds = new Set(input.excludedTestIds ?? []);
+  const records =
+    excludedTestIds.size === 0
+      ? authorized.records
+      : authorized.records.filter((record) => {
+          const testId = (record as { testId?: string }).testId;
+          return testId === undefined || !excludedTestIds.has(testId);
+        });
+  // Same rule on the declaration side: a quarantined test declares
+  // nothing. Without this, its records could still reach a claim some
+  // other test made for the same obligation.
+  const effectiveClaims =
+    excludedTestIds.size === 0
+      ? claims
+      : claims.filter((claim) => {
+          const testId = (claim as { testId?: string }).testId;
+          return testId === undefined || !excludedTestIds.has(testId);
+        });
 
   // Complete runtime route inventory (plan §9, D2): derived from the
   // graph only — every applicable `http.endpoint` resource, including
@@ -497,7 +526,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   const verdicts: ObligationVerdict[] = [];
   for (const obligation of scoped) {
     const entries = evaluateObligations([obligation], {
-      claims,
+      claims: effectiveClaims,
       records,
       waivers: waiverLoad.waivers,
       classification: classifications.get(obligation.resourceId) ?? null,

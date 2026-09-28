@@ -910,6 +910,7 @@ export {
   resolveTestMappings,
   mappingSuggestions,
   mappingGradingClaims,
+  withoutQuarantinedBindings,
 } from './mapping/resolve.js';
 /** Inferred mapping-resolver types. */
 export type {
