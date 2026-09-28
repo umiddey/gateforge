@@ -31,7 +31,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import {
   DetectorOutputSchema,
   canonicalJson,
@@ -88,6 +88,8 @@ export interface InterpreterIdentity {
   version: string;
   /** Digest over the sorted site-packages entries (name, mtime, size). */
   packagesDigest: string;
+  /** Digest of the entry script bytes when argv[0] is a python entry script (e.g. a venv `pytest`). */
+  entryScriptDigest?: string;
 }
 
 /** Everything one plugin's cached result depends on. */
@@ -228,11 +230,64 @@ export function interpreterIdentity(
 ): InterpreterIdentity | null {
   const resolved = resolveExecutable(interpreter, env);
   if (resolved === null) return null;
-  const memoHit = INTERPRETER_IDENTITY_CACHE.get(resolved);
-  if (memoHit !== undefined) return memoHit;
-  const identity = probeInterpreter(resolved, env);
-  INTERPRETER_IDENTITY_CACHE.set(resolved, identity);
-  return identity;
+  const target = pythonTargetOf(resolved, env);
+  if (target === null) return null;
+  let base = INTERPRETER_IDENTITY_CACHE.get(target.python);
+  if (base === undefined) {
+    base = probeInterpreter(target.python, env);
+    INTERPRETER_IDENTITY_CACHE.set(target.python, base);
+  }
+  if (base === null) return null;
+  return target.entryScriptDigest === undefined ? base : { ...base, entryScriptDigest: target.entryScriptDigest };
+}
+
+/** Matches python interpreter basenames: python, python3, python3.12. */
+const PYTHON_BASENAME = /^python(\d+(\.\d+)*)?$/;
+
+/**
+ * Finds the python interpreter behind a command WITHOUT executing it.
+ * A python binary (or python-named shim) is probed directly. Any other
+ * program is only accepted when it is a python entry script: its shebang
+ * (or pip's `/bin/sh` + `'''exec' "<python>"` long-path form) names a
+ * python interpreter; the script's own bytes then join the key. Anything
+ * else is uncacheable, because running an unknown program with `-c` can
+ * do real work (a `pytest` entry script treats `-c` as a config file and
+ * collects the whole suite).
+ *
+ * Args:
+ *   resolved: absolute path of argv[0].
+ *   env: process environment for PATH resolution of `env`-style shebangs.
+ *
+ * Returns:
+ *   { python, entryScriptDigest? } | null: interpreter to probe, or null.
+ */
+function pythonTargetOf(
+  resolved: string,
+  env: NodeJS.ProcessEnv,
+): { python: string; entryScriptDigest?: string } | null {
+  if (PYTHON_BASENAME.test(basename(resolved))) return { python: resolved };
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(resolved);
+  } catch {
+    return null;
+  }
+  if (bytes.length > 1024 * 1024 || bytes[0] !== 0x23 || bytes[1] !== 0x21) return null;
+  const lines = bytes.subarray(0, 4096).toString('utf8').split('\n');
+  const shebang = (lines[0] ?? '').slice(2).trim().split(/\s+/);
+  let program = shebang[0] ?? '';
+  if (basename(program) === 'env') {
+    program = shebang.slice(1).find((token) => !token.startsWith('-')) ?? '';
+  }
+  if (!PYTHON_BASENAME.test(basename(program))) {
+    const execLine = /^'''exec' "([^"]+)" "\$0" "\$@"/.exec(lines[1] ?? '');
+    if (!['sh', 'bash'].includes(basename(program)) || execLine === null) return null;
+    program = execLine[1] ?? '';
+    if (!PYTHON_BASENAME.test(basename(program))) return null;
+  }
+  const python = resolveExecutable(program, env);
+  if (python === null) return null;
+  return { python, entryScriptDigest: sha256Hex(bytes) };
 }
 
 /**
