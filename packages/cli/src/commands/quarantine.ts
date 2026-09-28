@@ -146,8 +146,20 @@ export async function quarantineCommand(io: Io, argv: readonly string[]): Promis
 
   // The key must name a test the catalog ACTUALLY reports: a quarantine
   // for a typo would silently never apply, which is worse than an error.
-  const discovered = await discoverTestCatalog({ cwd: io.cwd, config });
-  const catalogKeys = discovered.catalog.entries.map((entry) => entry.logicalKey);
+  let catalogKeys: string[];
+  try {
+    const discovered = await discoverTestCatalog({ cwd: io.cwd, config });
+    catalogKeys = discovered.catalog.entries.map((entry) => entry.logicalKey);
+  } catch (error) {
+    // Fail closed with the OWN action: a quarantine may only name a test
+    // the catalog actually reports, so an unresolvable inventory is a
+    // setup problem the owner must fix first.
+    throw new UsageError(
+      `quarantine: the test catalog could not be enumerated (${
+        (error as Error).message.split('\n')[0] ?? 'unknown'
+      }); fix the runner setup (gateforge tests discover) before quarantining a test`,
+    );
+  }
   if (!catalogKeys.includes(testKey)) {
     const suggestions = closeMatches(catalogKeys, testKey);
     throw new UsageError(
