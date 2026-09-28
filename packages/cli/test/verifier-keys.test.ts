@@ -7,6 +7,7 @@ import {
   readdirSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,6 +103,21 @@ describe('verifier key-ring source', () => {
 
       chmodSync(keyFile, 0o640);
       expect(() => resolveVerifierKeyring(repo.root, env)).toThrow(/owner-only/);
+    });
+  });
+  it('distinguishes an unreadable verifier key from a missing key and keeps exit 2', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const keyFile = join(externalRoot(), 'unreadable.json');
+      writeFileSync(
+        keyFile,
+        `${JSON.stringify({ schemaVersion: 1, activeKeyId: 'key-unreadable', keys: { 'key-unreadable': 'secret' } })}\n`,
+        { mode: 0o000 },
+      );
+      chmodSync(keyFile, 0o000);
+      const result = await runCli(repo, ['check'], { [VERIFIER_KEY_FILE_ENV]: keyFile });
+      expect(result.code).toBe(2);
+      expect(result.stderr).toMatch(/verifier key exists at .*not readable by uid \d+ \(owner uid \d+\).*fix ownership/);
     });
   });
 

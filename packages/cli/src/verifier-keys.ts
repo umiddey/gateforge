@@ -285,6 +285,15 @@ function openSecureFile(path: string): number {
     return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     if (error instanceof UsageError) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EACCES' || code === 'EPERM') {
+      const info = lstatSync(path);
+      const currentUid = typeof process.getuid === 'function' ? process.getuid() : 'unknown';
+      throw new UsageError(
+        `verifier key exists at '${path}' but is not readable by uid ${String(currentUid)} ` +
+          `(owner uid ${String(info.uid)}) — rerun the suite as this user or fix ownership`,
+      );
+    }
     throw new UsageError(`cannot open verifier key file '${path}': ${(error as Error).message}`);
   }
 }
@@ -303,7 +312,10 @@ function assertSecureFileInfo(info: { isFile(): boolean; mode: number; uid: numb
   if (info.nlink !== 1) throw new UsageError(`verifier key file '${path}' must not have other hard links`);
   const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
   if (currentUid !== null && info.uid !== currentUid) {
-    throw new UsageError(`verifier key file '${path}' must be owned by the current user`);
+    throw new UsageError(
+      `verifier key exists at '${path}' but is not readable by uid ${String(currentUid)} ` +
+        `(owner uid ${String(info.uid)}) — rerun the suite as this user or fix ownership`,
+    );
   }
 }
 
