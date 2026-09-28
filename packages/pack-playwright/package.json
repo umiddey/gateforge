@@ -27,6 +27,10 @@
       "types": "./dist/fixture/fixture.d.ts",
       "import": "./dist/fixture/fixture.js"
     },
+    "./vitest": {
+      "types": "./dist/vitest/index.d.ts",
+      "import": "./dist/vitest/index.js"
+    },
     "./witness": {
       "types": "./dist/witness/server.d.ts",
       "import": "./dist/witness/server.js"

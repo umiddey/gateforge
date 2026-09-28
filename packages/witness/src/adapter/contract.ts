@@ -144,6 +144,13 @@ export interface RunnerRawResults {
   /** The runner process exit status (null when it never started). */
   processExit: number | null;
   /**
+   * The working directory the report's file paths are relative to, when
+   * the runner reports ABSOLUTE paths (some JSON reporters do). Absent
+   * means the report's paths are already repo-relative — or that the
+   * adapter attributes nothing, rather than guessing a base.
+   */
+  cwd?: string;
+  /**
    * The runner's structured report: native JSON, JUnit XML, or the
    * witness-facing outcomes document. Never terminal output.
    */
