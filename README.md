@@ -16,6 +16,30 @@ obligation, and which evidence is missing or invalid.
 - [Upgrade from 0.6 to 0.7](packages/cli/guides/UPGRADE-0.6-to-0.7.md)
 - [Changelog](CHANGELOG.md)
 
+## Pick a goal, not a wall of flags
+
+`gateforge init` asks ONE question — what should Gateforge do for you — and
+maps the answer to settings:
+
+| Goal | Meaning | Writes |
+| --- | --- | --- |
+| `light` | show me code nothing has proven yet, block nothing | `mode: warn` |
+| `normal` | block a commit that adds untested endpoints or models (about a second) | `mode: changed`, pre-commit hook, CI job |
+| `strict` | every push needs a real test run Gateforge watches (the witness) plus a receipt, the signed record of that run | `mode: strict`, staged gate, pre-push receipt check, CI job |
+
+```sh
+gateforge init --explain-presets   # print this table
+gateforge init --preset normal     # or: light, or strict
+```
+
+In a terminal, `gateforge init` asks the goal question instead. With no
+terminal and no `--preset` (an AI agent or CI), it writes `light` only and
+prints that a human must choose: Gateforge never guesses `normal` or `strict`
+for someone who is not there. Existing flags (`--blocking`, `--strict-e2e`,
+`--pre-commit`, `--witnessed`, `--mode`) keep working exactly as before and
+win over a preset. Re-running `init` never rewrites an existing
+`.gateforge.yml`; to change the goal later, edit the `mode:` key.
+
 The core flow:
 
 ```text

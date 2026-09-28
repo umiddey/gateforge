@@ -388,13 +388,14 @@ describe('gateforge init', () => {
     });
   });
 
-  it('without --blocking it writes no enforcement files and prints the tip', async () => {
+  it('without a preset or --blocking it writes no enforcement files and prints the tip', async () => {
     await withTempRepo({}, async (repo) => {
       const { code, stdout } = await runCli(repo, ['init']);
       expect(code).toBe(0);
       expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(false);
       expect(existsSync(repo.path('.pre-commit-config.yaml'))).toBe(false);
-      expect(stdout).toContain('--blocking');
+      // The tip now names the goal, not the legacy --blocking flag.
+      expect(stdout).toContain('--preset normal|strict');
     });
   });
 

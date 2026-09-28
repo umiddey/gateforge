@@ -25,13 +25,49 @@ Use the project-local `gateforge` binary from your npm script or add `node_modul
 
 **If not:** align every direct `@gate-forge/*` package to `0.7.1`, then install again. Do not work around the compatibility error.
 
-## 2. Initialize the repository
+## 2. Pick a goal
+
+Decide what Gateforge should do for you, then say so once:
+
+```sh
+gateforge init --explain-presets   # read what each goal writes
+gateforge init --preset normal     # or: light, or strict
+```
+
+Or run `gateforge init` in a terminal and answer the one question it asks.
+
+| Goal | What you get | What it writes |
+| --- | --- | --- |
+| `light` | untested code is listed, nothing blocks | `mode: warn` |
+| `normal` | a commit that adds untested endpoints or models is refused (about a second, no test run) | `mode: changed`, pre-commit hook, CI job |
+| `strict` | every push needs a real test run Gateforge watches (the *witness*) plus a *receipt*, the signed record of that run | `mode: strict`, staged gate, pre-push receipt check, CI job |
+
+An *obligation* is one thing your policies say must be proven (for example
+"this endpoint really stores what it receives"). A preset only chooses how
+hard the gate blocks; it never waives an obligation and never hides code
+from the scan.
+
+An AI agent or CI run with no terminal and no `--preset` writes `light` only
+and prints the line `a human must choose the preset: ...`. Gateforge will not
+guess `normal` or `strict` for someone who is not there.
+
+**You should see:** the goal you asked for, followed by a summary of what was
+written and an `undo:` command.
+
+**If not:** run `gateforge init --explain-presets`. To change the goal later,
+edit the `mode:` key in `.gateforge.yml` (see
+[Choose how strict the gate is](#choose-how-strict-the-gate-is)); re-running
+`init` never rewrites an existing config.
+
+## 3. Initialize the repository
 
 ```sh
 gateforge init
 ```
 
-Gateforge scans the repository and prints recommended packs. By default, it writes:
+Gateforge scans the repository and prints recommended packs, then applies the
+goal you chose in step 2 (`--preset`, or the answer to the goal question).
+It writes:
 
 - `.gateforge.yml`
 - `.gateforge/policies.yml`
@@ -42,11 +78,12 @@ Gateforge scans the repository and prints recommended packs. By default, it writ
 
 It also creates `.gateforge/adapters/` and `.gateforge/waivers/`. It preserves existing files. A chosen documentation exclusion adds `.gateforge/docs-exclusions.yml`.
 
-**You should see:** a scan summary, recommended packages, and a `skeleton ready` message.
+**You should see:** a scan summary, recommended packages, the goal summary
+with its `undo:` line, and a `skeleton ready` message.
 
 **If not:** read the first error. Fix invalid or missing project configuration, install a recommended pack, then run `gateforge init` again. Existing files are not replaced by a normal rerun.
 
-## 3. Find existing tests and suggestions
+## 4. Find existing tests and suggestions
 
 First inventory the test suite:
 
@@ -66,7 +103,7 @@ Discovery writes a derived catalog under `.gateforge/test-gates/`. Suggestions a
 
 **If not:** fix Playwright installation, configuration, or test enumeration first. Do not treat an empty or failed inventory as proof that no tests exist. If a test does not fit, the suggestion report explains what is missing.
 
-## 4. Declare which existing tests cover claims
+## 5. Declare which existing tests cover claims
 
 Use either a Playwright annotation or the tracked map file. Declarations tell the gate which test is relevant; they are not proof by themselves.
 
@@ -97,7 +134,7 @@ gateforge tests mark \
 
 **If not:** rerun discovery, copy the exact test key and obligation ID, and resolve any mapping contradiction. Do not use a declaration to silence a blocker.
 
-## 5. Prepare a verifier key and the app
+## 6. Prepare a verifier key and the app
 
 Keep the key outside the repository and run-state folder:
 
@@ -113,7 +150,7 @@ The command prints a key ID, not the secret. Set the app URL and any session sta
 
 **If not:** create the parent directory, check file permissions, and keep the key file outside `.gateforge/test-gates/` and the repository.
 
-## 6. Run the supervised tests
+## 7. Run the supervised tests
 
 ```sh
 gateforge test-gates --changed
@@ -125,7 +162,7 @@ Gateforge supervises the full relevant mapped suite and writes an authenticated 
 
 **If not:** use the first typed blocker. Check the changed-file base, mapping, app readiness, seed data, and verifier key. A test declaration or a plain passing test run is not a receipt.
 
-## 7. Check the changed code
+## 8. Check the changed code
 
 ```sh
 gateforge check --changed --require-e2e
@@ -157,11 +194,16 @@ gateforge check --candidate-commit <full-commit-sha> --require-e2e
 Add `--changed` to evaluate only that commit's first-parent diff. The command
 uses an isolated checkout of the immutable commit tree.
 
-## 8. Install the blocking hook and CI wiring
+## 9. Install the blocking hook and CI wiring
 
 ```sh
 gateforge init --blocking
 ```
+
+`gateforge init --preset strict` does the same wiring plus the strict E2E
+enforcement block, and `--preset normal` writes the fast static pre-commit
+lane plus the CI job without the receipt lane. The explicit flags below keep
+working exactly as before and always win over a preset.
 
 This installs a static pre-commit lane and (for a new config) a pre-push
 receipt lane, then adds strict CI wiring. Review the output and generated files:
