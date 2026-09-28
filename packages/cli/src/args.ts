@@ -41,6 +41,7 @@ const BOOLEAN_FLAGS: Record<string, true> = {
   'result-only': true,
   timing: true,
   'no-cache': true,
+  'explain-presets': true,
 };
 
 /**

@@ -28,6 +28,7 @@ import {
   serializeBaseline,
   strictCapabilityGaps,
 } from '@gate-forge/core';
+import type { StrictnessMode } from '@gate-forge/core';
 import {
   DEFAULT_PLANES_CONFIG,
   PLANES_CONFIG_PATH,
@@ -69,10 +70,22 @@ import {
   renderCacheExclusions,
   validateRequestedCacheFiles,
 } from '../cache-exclusions.js';
+import {
+  HUMAN_MUST_CHOOSE_PRESET_LINE,
+  INIT_PRESETS,
+  isInitPresetName,
+  parseGoalAnswer,
+  renderGoalQuestion,
+  renderPresetTable,
+  renderPresetSummary,
+  type InitPresetName,
+  type InitPresetSettings,
+} from './init-presets.js';
 export const INIT_USAGE =
-  '[--no-scan] [--proof overlay|observe] [--blocking] [--pre-commit] [--mode changed|staged] ' +
-  '[--witnessed staged|full] [--ci] [--no-ci] [--docs-exclude <folder,...> [--confirm-doc-exclusions]] ' +
-  '[--cache-exclude <file,...> [--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--behavior]';
+  '[--preset light|normal|strict] [--explain-presets] [--no-scan] [--proof overlay|observe] [--blocking] ' +
+  '[--pre-commit] [--mode changed|staged] [--witnessed staged|full] [--ci] [--no-ci] ' +
+  '[--docs-exclude <folder,...> [--confirm-doc-exclusions]] [--cache-exclude <file,...> ' +
+  '[--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--behavior]';
 
 /** Template for the complete-behavior owner document (plan §4.1). */
 export const BEHAVIOR_TEMPLATE = `\
@@ -339,7 +352,13 @@ volatileFields:
 function configTemplate(
   languages: readonly string[],
   pluginIds: readonly string[],
-  options: { strictE2E?: boolean; enforcement?: boolean; historyRetentionDays?: number | 'off' } = {},
+  /** `strictnessMode` writes the owner-owned `mode:` key; undefined writes NO key, which is today's byte-identical config. */
+  options: {
+    strictE2E?: boolean;
+    enforcement?: boolean;
+    historyRetentionDays?: number | 'off';
+    strictnessMode?: StrictnessMode;
+  } = {},
 ): string {
   const enforcementBlock =
     options.enforcement === true
@@ -352,6 +371,17 @@ enforcement:
   receiptStage: pre-push
 `
       : '';
+  // The owner-owned strictness key. Only written when a preset named it:
+  // without a preset the config stays byte-identical to today's, and an
+  // ABSENT key means `strict` (the frozen behavior).
+  const strictnessBlock =
+    options.strictnessMode === undefined
+      ? ''
+      : `# How hard the gate blocks: strict = block everything, changed = block
+# only the debt this change touches, warn = report everything and block
+# nothing. This softens the GATE, never the evidence.
+mode: ${options.strictnessMode}
+`;
   const historyBlock =
     options.historyRetentionDays === undefined
       ? ''
@@ -391,7 +421,7 @@ witness:
   maxDurationSeconds: 5
 clock:
   mode: system
-${historyBlock}${enforcementBlock}\
+${historyBlock}${strictnessBlock}${enforcementBlock}\
 `;
 }
 
@@ -540,6 +570,65 @@ async function resolveRecommended(io: Io, options: Readonly<Record<string, unkno
   } finally {
     rl.close();
   }
+}
+/**
+ * Resolves the goal `init` should set up. Three paths, in order:
+ *
+ * 1. `--preset light|normal|strict` — an agent or CI run picks the goal
+ *    explicitly.
+ * 2. A real terminal — ONE question ("What should Gateforge do for
+ *    you?") with three choices, each explained in one line.
+ * 3. No terminal and no `--preset` — light only, plus a line saying a
+ *    human must choose. Gateforge never guesses normal or strict for
+ *    someone who is not there: guessing strict blocks a team, guessing
+ *    normal pretends a gate nobody asked for.
+ *
+ * A run that already carries explicit enforcement flags (`--blocking`,
+ * `--strict-e2e`, …) has chosen for itself: no preset is applied and the
+ * generated config keeps today's exact bytes.
+ *
+ * Args:
+ *   io: process context (prompt + informational output).
+ *   options: parsed init flags.
+ *   enforcementFlagGiven (boolean): true when an enforcement flag was
+ *     passed and therefore wins over any preset.
+ *
+ * Returns:
+ *   Promise<{ name: InitPresetName; settings: InitPresetSettings } | null>:
+ *   the applied goal, or null when the run kept today's behavior.
+ */
+async function resolveGoal(
+  io: Io,
+  options: Readonly<Record<string, unknown>>,
+  enforcementFlagGiven: boolean,
+): Promise<{ name: InitPresetName; settings: InitPresetSettings } | null> {
+  const explicit = options['preset'];
+  if (explicit !== undefined && isInitPresetName(explicit)) {
+    if (!enforcementFlagGiven) return { name: explicit, settings: INIT_PRESETS[explicit] };
+    writeLine(
+      io.stdout,
+      `note: --preset ${explicit} is ignored because an enforcement flag decides the wiring; the preset's meaning: ${INIT_PRESETS[explicit].explanation}`,
+    );
+    return null;
+  }
+  if (enforcementFlagGiven) return null;
+  const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
+  if (!interactive) {
+    writeLine(io.stdout, 'no terminal: writing the light preset (report everything, block nothing)');
+    writeLine(io.stdout, HUMAN_MUST_CHOOSE_PRESET_LINE);
+    return { name: 'light', settings: INIT_PRESETS.light };
+  }
+  writeLine(io.stdout, renderGoalQuestion());
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let name: InitPresetName;
+  try {
+    name = parseGoalAnswer(await rl.question(' '));
+  } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : String(error));
+  } finally {
+    rl.close();
+  }
+  return { name, settings: INIT_PRESETS[name] };
 }
 /**
  * Asks (TTY only) whether gateforge should be a blocking gate. Flags win:
@@ -810,6 +899,8 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   rejectUnknownFlags(
     options,
     [
+      'preset',
+      'explain-presets',
       'languages',
       'plugins',
       'accept-recommended',
@@ -834,6 +925,22 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     ],
     INIT_USAGE,
   );
+  // --explain-presets prints the ONE mapping table and exits: it must
+  // never scan, prompt or write, so an agent can read what a preset
+  // means before choosing one.
+  if (options['explain-presets'] === true) {
+    writeLine(io.stdout, renderPresetTable());
+    return 0;
+  }
+  if (typeof options['explain-presets'] !== 'boolean' && options['explain-presets'] !== undefined) {
+    throw new UsageError("flag '--explain-presets' must be a boolean flag");
+  }
+  const presetValue = options['preset'];
+  if (presetValue !== undefined && !isInitPresetName(presetValue)) {
+    throw new UsageError(
+      `flag '--preset' must be 'light', 'normal' or 'strict' (got '${String(presetValue)}')`,
+    );
+  }
   // --proof validation BEFORE any writes: the selected proof path
   // (overlay default, observe reuses the existing suite).
   const proofValue = options['proof'];
@@ -883,10 +990,25 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   if (explicitLanguages !== null && explicitLanguages.length === 0) {
     throw new UsageError(`flag '--languages' requires at least one language`);
   }
-  const strictE2E = options['strict-e2e'] === true;
   if (typeof options['strict-e2e'] !== 'boolean' && options['strict-e2e'] !== undefined) {
-    throw new UsageError(`flag '--strict-e2e' must be a boolean flag`);
+    throw new UsageError("flag '--strict-e2e' must be a boolean flag");
   }
+  // Goal resolution (plan Phase 1/2): --preset wins, then the one goal
+  // question in a terminal, then light with a loud note. A run that
+  // already carries explicit enforcement flags has chosen for itself, so
+  // no preset is applied and today's byte-identical behavior is kept.
+  const enforcementFlagGiven =
+    options['blocking'] === true ||
+    options['no-blocking'] === true ||
+    options['pre-commit'] === true ||
+    options['no-pre-commit'] === true ||
+    options['witnessed'] !== undefined ||
+    options['mode'] !== undefined ||
+    options['ci'] === true ||
+    options['no-ci'] === true ||
+    options['strict-e2e'] === true;
+  const goal = await resolveGoal(io, options, enforcementFlagGiven);
+  const strictE2E = goal !== null ? goal.settings.strictE2E : options['strict-e2e'] === true;
 
   // Strict-setup preflight (plan Phase 0 item 4): BEFORE anything is
   // written — a strict setup demanding an unavailable proof channel
@@ -918,6 +1040,9 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   }
 
   const cwd = io.cwd;
+  // Whether `.gateforge.yml` was already there BEFORE this run: the
+  // preset summary must tell the truth about what changed.
+  const existedConfigAtStart = existsSync(join(io.cwd, '.gateforge.yml'));
   const historyRetentionDays = existsSync(join(cwd, '.gateforge.yml')) ? undefined : await resolveHistoryRetention(io);
   const languages = scan.languages;
   const pluginIds = recommended;
@@ -929,6 +1054,9 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       options['pre-commit'] === true ||
       (options['witnessed'] === 'staged' || options['witnessed'] === 'full'),
     historyRetentionDays,
+    // A preset names the owner-owned strictness key; without one the key
+    // stays absent, which means `strict` (today's frozen behavior).
+    strictnessMode: goal?.settings.strictnessMode,
   };
   const generatedDraftConfig = (): ReturnType<typeof loadConfig> =>
     parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });
@@ -1196,16 +1324,25 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   if (witnessedValue !== undefined && modeValue !== undefined) {
     throw new UsageError("init: --witnessed selects the pre-commit execution mode and cannot be combined with '--mode'");
   }
-  const blocking = await resolveBlocking(io, options);
-  const preCommit = options['pre-commit'] === true || blocking || witnessedValue !== undefined;
-  const ci = options['ci'] === true || blocking;
+  // The goal decides the wiring; explicit flags already short-circuited
+  // goal resolution above, so nothing here can contradict a flag. When
+  // there is no goal, today's granular behavior is unchanged.
+  const blocking = goal !== null ? goal.settings.wiring === 'blocking' : await resolveBlocking(io, options);
+  const preCommit =
+    options['pre-commit'] === true ||
+    blocking ||
+    witnessedValue !== undefined ||
+    (goal !== null && goal.settings.wiring === 'pre-commit');
+  const ci = options['ci'] === true || blocking || (goal !== null && goal.settings.ci);
   const receiptStage = preCommit ? loadConfig(join(cwd, '.gateforge.yml')).enforcement?.receiptStage : undefined;
   const mode: 'changed' | 'staged' =
     typeof modeValue === 'string'
       ? (modeValue as 'changed' | 'staged')
-      : blocking
-        ? 'staged'
-        : 'changed';
+      : goal !== null
+        ? goal.settings.mode
+        : blocking
+          ? 'staged'
+          : 'changed';
   if (preCommit) {
     const hookDir = join(gateforgeDir, 'hooks');
     mkdirSync(hookDir, { recursive: true });
@@ -1290,6 +1427,18 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       writeLine(io.stdout, `${pushHook.status}: ${pushHook.detail}`);
     }
     writeServerProtectionInstructions(io);
+  }
+  // A preset can ask for the CI job without a local hook (`normal`):
+  // the server check is then the only place the gate runs, which is a
+  // real choice, not a fallback.
+  if (ci && !preCommit) {
+    writeSharedGitlabCiTemplate(io, 'strict');
+  }
+  // What the goal wrote, in plain words, plus the command that undoes it.
+  if (goal !== null) {
+    for (const line of renderPresetSummary(goal.name, existedConfigAtStart)) {
+      writeLine(io.stdout, line);
+    }
   }
   writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');
   return 0;
