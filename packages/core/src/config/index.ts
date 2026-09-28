@@ -225,6 +225,90 @@ export const DiagnosticsConfigSchema = z
   });
 
 /** Inferred diagnostics-section shape. */
+/** Inferred diagnostics-section shape. */
+/**
+ * One declared column copy that must survive a rename.
+ */
+export const AlembicColumnCopySchema = z
+  .object({
+    /** Column present at the previous head. */
+    from: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+    /** Column that must carry the same fingerprint after upgrade. */
+    to: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  })
+  .strict();
+
+/** One owner-declared table whose rows must survive upgrade. */
+export const AlembicSeedTableSchema = z
+  .object({
+    /** Table name. */
+    name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+    /** Columns whose fingerprints must be stable when they exist on both sides. */
+    columns: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).min(1),
+    /** Optional rename copies. Absent means no rename mapping. */
+    copies: z.array(AlembicColumnCopySchema).optional(),
+  })
+  .strict();
+
+/**
+ * One named Alembic chain. Absent `alembic` config means the pack is off.
+ */
+export const AlembicChainSchema = z
+  .object({
+    /** Stable chain name. No dots or colons (resource id segment). */
+    name: z.string().regex(/^[A-Za-z0-9_-]+$/),
+    /** Repo-relative versions directory. */
+    migrations: z.string().min(1),
+    /** Model globs. A change here without a migration blocks. */
+    models: z.array(z.string().min(1)).min(1),
+    /** Importable module that owns the metadata. Defaults from the first model path. */
+    modelsModule: z.string().min(1).optional(),
+    /** Attribute path of the MetaData object. Defaults to `Base.metadata`. */
+    metadata: z.string().min(1).optional(),
+    /** Repo-relative alembic.ini, recorded as an input. Defaults to `alembic.ini`. */
+    alembicIni: z.string().min(1).optional(),
+  })
+  .strict();
+
+/**
+ * Opt-in Alembic migration obligations. Absent means a repository behaves
+ * exactly as it did before this key existed.
+ */
+export const AlembicConfigSchema = z
+  .object({
+    /** Named chains. One is enough. */
+    chains: z.array(AlembicChainSchema).min(1),
+    /**
+     * Trusted admin URL. The engine creates `gf_tmp_<id>` in this server
+     * and drops it. Never taken from the test environment.
+     */
+    scratch: z
+      .object({
+        adminUrl: z.string().min(1),
+      })
+      .strict(),
+    /** Optional data-preservation seed and declared tables. */
+    seed: z
+      .object({
+        path: z.string().min(1),
+        tables: z.array(AlembicSeedTableSchema).min(1),
+      })
+      .strict()
+      .optional(),
+    /** Owner-pinned revisions that may skip downgrade. Visible in reports. */
+    irreversible: z.array(z.string().min(1)).default([]),
+    /** When set, lineage and roundtrip also run on the merge with this ref. */
+    merge: z
+      .object({
+        targetRef: z.string().min(1),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+/** Inferred Alembic config. */
+export type AlembicConfig = z.infer<typeof AlembicConfigSchema>;
 export type DiagnosticsConfig = z.infer<typeof DiagnosticsConfigSchema>;
 
 /**
@@ -365,6 +449,12 @@ export const GateforgeConfigSchema = z
       })
       .strict()
       .optional(),
+    /**
+     * Opt-in Alembic migration obligations. ABSENT = feature off. A
+     * repository without this key generates no migration obligations
+     * and sees no other behavior change.
+     */
+    alembic: AlembicConfigSchema.optional(),
   })
   .strict();
 

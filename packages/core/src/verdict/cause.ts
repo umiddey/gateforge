@@ -111,6 +111,23 @@ export function causeForVerdict(params: {
   reason: string | null;
 }): VerdictCause {
   if (CLEAN_VERDICTS.has(params.verdict)) return { cause: null, nextAction: null };
+  if (params.contract.startsWith('alembic:')) {
+    const reason = params.reason ?? '';
+    const codes = [
+      'MIGRATION_MISSING',
+      'MIGRATION_LINEAGE_BROKEN',
+      'MIGRATION_DOWNGRADE_NOOP',
+      'MIGRATION_DRIFT',
+      'MIGRATION_DATA_LOST',
+      'MIGRATION_CONFLICT',
+      'MIGRATION_SCRATCH_UNSAFE',
+      'MIGRATION_ROUNDTRIP_FAILED',
+    ] as const;
+    for (const code of codes) {
+      if (reason.includes(code)) return nextActionFor(code);
+    }
+    return nextActionFor('MIGRATION_ROUNDTRIP_FAILED');
+  }
   const capability = capabilityFor(params.contract);
   const implemented = capability?.contracts.includes(params.contract) ?? false;
   if (capability === null || capability.availability.status === 'unavailable' || !implemented) {

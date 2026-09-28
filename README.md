@@ -71,6 +71,7 @@ Gateforge connects existing journeys to obligations, then checks witness evidenc
 | [`packages/http-contract`](packages/http-contract) | `@gate-forge/http-contract` — canonical HTTP contract facts, typed block codes, deterministic frontend-call ↔ server-route join engine |
 | [`packages/pack-sqlalchemy`](packages/pack-sqlalchemy) | `@gate-forge/pack-sqlalchemy` — Python SQLAlchemy detector plugin + TS registration + classification workflow |
 | [`packages/pack-fastapi`](packages/pack-fastapi) | `@gate-forge/pack-fastapi` — FastAPI server-route detector (Python AST over GPP/3) |
+| [`packages/pack-alembic`](packages/pack-alembic) | `@gate-forge/pack-alembic` — opt-in Alembic migration obligations (lineage, disposable-database roundtrip, data preservation) |
 | [`packages/pack-http`](packages/pack-http) | `@gate-forge/pack-http` — TS route-registration detector (Express/Fastify/Hono/NestJS) + bounded frontend API-client dataflow |
 | [`packages/pack-playwright`](packages/pack-playwright) | `@gate-forge/pack-playwright` — witness service, attestation proxy, trusted evidence fixture, reporter, test discovery (static + native reconciliation + pytest adapter), supervised runner |
 | [`packages/pack-auth`](packages/pack-auth) | `@gate-forge/pack-auth` — auth contract pack (role/tenant/forged-token obligations) + NestJS/Express/Fastify/Hono detector |

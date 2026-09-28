@@ -638,6 +638,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
     blocking: pipeline.policy.blocking,
     stateDir,
     now: pipeline.now,
+    engineAlembicRecords: pipeline.engineAlembicRecords,
     changedFiles: null,
     witnessVerifierKey,
     witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
@@ -1331,6 +1332,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       blocking: [...pipeline.policy.blocking, ...mappingBlockers, ...inventoryBlocking, ...scopeBlockers],
       stateDir,
       now: pipeline.now,
+      engineAlembicRecords: pipeline.engineAlembicRecords,
       // Scoped reuse re-grades exactly the sealed slice (the reuse
       // contract above already pinned scope + covered set); full reuse
       // stays unscoped. A scoped run without the flag never happens.
@@ -1576,6 +1578,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       ],
       stateDir,
       now: pipeline.now,
+      engineAlembicRecords: pipeline.engineAlembicRecords,
       changedFiles: scopeChangedFiles,
       claimInventory,
       witnessVerifierKey,
@@ -2087,6 +2090,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     ],
     stateDir,
     now: pipeline.now,
+    engineAlembicRecords: pipeline.engineAlembicRecords,
     // Scoped evaluation (Goal 2): the gate grades the affected slice —
     // the same join `planScopedExpectedSet` planned from, so the graded
     // obligations are exactly the covered set the receipt seals. Full

@@ -16,6 +16,7 @@
     "packages/pack-fastapi",
     "packages/pack-http",
     "packages/pack-playwright",
+    "packages/pack-alembic",
     "packages/pack-sqlalchemy",
     "packages/pack-task",
     "packages/pack-validation",

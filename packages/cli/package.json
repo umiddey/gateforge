@@ -34,6 +34,7 @@
     "@gate-forge/core": "^0.7.1",
     "@gate-forge/http-contract": "^0.7.1",
     "@gate-forge/pack-fastapi": "^0.7.1",
+    "@gate-forge/pack-alembic": "^0.7.1",
     "@gate-forge/pack-http": "^0.7.1",
     "@gate-forge/pack-playwright": "^0.7.1",
     "@gate-forge/pack-sqlalchemy": "^0.7.1",

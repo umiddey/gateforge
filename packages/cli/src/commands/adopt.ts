@@ -137,6 +137,7 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
     blocking: pipeline.policy.blocking,
     stateDir,
     now: pipeline.now,
+    engineAlembicRecords: pipeline.engineAlembicRecords,
     changedFiles: null,
     baseline: null,
   });

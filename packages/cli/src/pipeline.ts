@@ -50,6 +50,7 @@ import {
   type RunManifest,
   type LifecycleDerivationReportEntry,
 } from '@gate-forge/core';
+import { compileAlembic } from '@gate-forge/pack-alembic';
 import { staticAdapterFieldsFromSource } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.js';
@@ -126,6 +127,17 @@ export interface PipelineResult {
   timings: PipelineTimings;
   /** Plugin cache accounting for this run (0/0 when disabled). */
   cache: CacheCounts;
+  /** Engine-issued Alembic records. Empty when the pack is not enabled. */
+  engineAlembicRecords: readonly {
+    obligationId: string;
+    kind: string;
+    trust?: string;
+    origin?: string;
+    payload?: unknown;
+    recordId?: string;
+  }[];
+  /** Owner-visible Alembic notes, including pinned irreversible revisions. */
+  alembicNotices: readonly string[];
 }
 
 /** Coarse pipeline step durations in milliseconds (`check --timing`). */
@@ -538,9 +550,37 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     options.changedFilesOverride !== undefined
       ? normalizeChangedFiles([...options.changedFilesOverride])
       : providerFor(provider, cwd, env).changedFiles();
+  const runId = options.runId ?? randomUUID();
+  let engineAlembicRecords: PipelineResult['engineAlembicRecords'] = [];
+  let alembicNotices: string[] = [];
+  if (config.alembic !== undefined) {
+    const compiled = await compileAlembic({
+      cwd,
+      alembic: config.alembic,
+      changedFiles,
+      now,
+      runId,
+    });
+    const obligationIds = new Set(policy.obligations.map((item) => item.id));
+    const mergedObligations = [...policy.obligations];
+    for (const item of compiled.obligations) {
+      if (obligationIds.has(item.id)) continue;
+      obligationIds.add(item.id);
+      mergedObligations.push(item);
+    }
+    policy = {
+      ...policy,
+      obligations: mergedObligations.sort((a, b) => compareStrings(a.id, b.id)),
+      blocking: [...policy.blocking, ...compiled.blocking].sort(
+        (a, b) => compareStrings(a.kind, b.kind) || compareStrings(a.resourceId ?? '', b.resourceId ?? ''),
+      ),
+    };
+    engineAlembicRecords = compiled.records;
+    alembicNotices = compiled.notices;
+  }
   const manifest = RunManifestSchema.parse({
     schemaVersion: 1,
-    runId: options.runId ?? randomUUID(),
+    runId,
     startedAt: now,
     gitSha: headSha(cwd),
     provider,
@@ -562,6 +602,8 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     behaviorCatalog,
     timings: { pluginsMs, totalMs: performance.now() - pipelineStartedAtMs },
     cache: pluginCacheCounts,
+    engineAlembicRecords,
+    alembicNotices,
   };
 }
 
