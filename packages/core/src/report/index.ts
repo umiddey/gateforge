@@ -26,6 +26,7 @@ import type { BlockingEntry } from '../policy/index.js';
 import type { RunManifest } from '../schemas/run-manifest.js';
 import type { Verdict } from '../schemas/verdict.js';
 import { BLOCKING_VERDICTS, type ObligationVerdict } from '../verdict/index.js';
+import { humanMessage } from './human-message.js';
 
 /** The official SARIF 2.1.0 (errata 01) JSON schema location. */
 const SARIF_SCHEMA_URI =
@@ -97,6 +98,15 @@ export interface DiagnosticContext {
   };
 }
 
+/** Engine installation identity shown in human and machine reports. */
+export interface EngineMetadata {
+  /** Engine package version. */
+  version: string;
+  /** Registry source or local package path. */
+  source: string;
+  /** Whether CI must install a published version to use this code. */
+  unpublished: boolean;
+}
 /** Options for {@link renderRun}. */
 export interface RenderRunOptions {
   /** Output format. */
@@ -111,6 +121,8 @@ export interface RenderRunOptions {
   run?: RunManifest;
   /** Tool version stamped into SARIF `tool.driver.version`. */
   toolVersion?: string;
+  /** Engine installation identity shown in the report. */
+  engine?: EngineMetadata;
   /**
    * Effective evaluation scope (plan §12.4); included in json/SARIF and
    * summarized in text when the scope expanded. Defaults to the full
@@ -288,6 +300,13 @@ function jsonReport(
     // the scope expanded. Output-only — never part of the snapshot digest.
     scope: { mode: scope.mode, expandedBecause: [...scope.expandedBecause] },
     verdicts: entries.map((entry) => {
+      const message = humanMessage({
+        id: entry.obligation.resourceId,
+        cause: entry.cause,
+        nextAction: entry.nextAction,
+        reason: entry.reason,
+        type: entry.verdict,
+      });
       const record: Record<string, unknown> = {
         obligationId: entry.obligation.id,
         resourceId: entry.obligation.resourceId,
@@ -295,20 +314,28 @@ function jsonReport(
         policyId: entry.obligation.policyId,
         verdict: entry.verdict,
         reason: entry.reason,
-        // Stable plan §5.4 cause + next action (ADR 0005): null when the
-        // verdict is clean or no honest mapping exists yet.
         cause: entry.cause ?? null,
         nextAction: entry.nextAction ?? null,
         recordIds: entry.recordIds,
         fingerprint: fingerprintObligation(entry.obligation),
         trustTier: entry.trustTier,
+        message,
       };
       if (entry.detector !== undefined && entry.detector !== null) {
         record['detector'] = entry.detector;
       }
       return record;
     }),
-    blocking,
+    blocking: blocking.map((entry) => ({
+      ...entry,
+      message: humanMessage({
+        id: entry.resourceId ?? entry.name ?? undefined,
+        cause: entry.cause,
+        nextAction: entry.nextAction,
+        detail: entry.detail,
+        type: entry.kind,
+      }),
+    })),
   };
   if (options.advisories !== undefined && options.advisories.length > 0) {
     report['advisories'] = options.advisories;
@@ -328,6 +355,7 @@ function jsonReport(
   }
   if (options.execution !== undefined) report['execution'] = options.execution;
   if (options.diagnosticContext !== undefined) report['diagnosticContext'] = options.diagnosticContext;
+  if (options.engine !== undefined) report['engine'] = options.engine;
   return report;
 }
 
@@ -470,6 +498,10 @@ function textReport(
     `gateforge run: ${entries.length} obligation(s) — ` +
       `${counts.satisfied} satisfied, ${counts.waived} waived, ${blockingCount} blocking`,
   );
+  if (options.engine !== undefined) {
+    lines.push(`engine: ${options.engine.version} from ${options.engine.source}`);
+    if (options.engine.unpublished) lines.push('unpublished engine: CI will not have this code');
+  }
   const scope = options.scope;
   if (scope !== undefined && scope.expandedBecause.length > 0) {
     lines.push(
@@ -568,6 +600,13 @@ function textReport(
     lines.push(`  policy: ${entry.obligation.policyId}`);
     lines.push(`  obligation: ${entry.obligation.id}`);
     lines.push(`  fingerprint: ${fingerprintObligation(entry.obligation)}`);
+    lines.push(`  message: ${humanMessage({
+      id: entry.obligation.resourceId,
+      cause: entry.cause,
+      nextAction: entry.nextAction,
+      reason: entry.reason,
+      type: entry.verdict,
+    })}`);
     lines.push(`  evidence gap: ${entry.reason ?? '<none>'}`);
     if (entry.cause !== undefined && entry.cause !== null) {
       lines.push(`  cause: ${entry.cause}`);
@@ -582,11 +621,15 @@ function textReport(
     lines.push('advisories (non-blocking):');
     for (const entry of options.advisories) {
       const where = entry.location !== null ? ` at ${entry.location.file}:${entry.location.line}` : '';
-      const cause =
-        entry.cause !== undefined && entry.cause !== null
-          ? ` (cause: ${entry.cause} → ${entry.nextAction ?? 'no action available'})`
-          : '';
-      lines.push(`  ${entry.detail}${where}${cause}`);
+      lines.push(
+        `  ${humanMessage({
+          id: entry.resourceId ?? entry.name ?? undefined,
+          cause: entry.cause,
+          nextAction: entry.nextAction,
+          detail: entry.detail,
+          type: entry.kind,
+        })}${where}`,
+      );
     }
   }
   if (blocking.length > 0) {
@@ -598,7 +641,15 @@ function textReport(
         entry.cause !== undefined && entry.cause !== null
           ? ` (cause: ${entry.cause} → ${entry.nextAction ?? 'no action available'})`
           : '';
-      lines.push(`  [${entry.kind}] ${entry.resourceId ?? entry.name ?? '<unnamed>'} — ${entry.detail}${where}${cause}`);
+      lines.push(
+        `  ${humanMessage({
+          id: entry.resourceId ?? entry.name ?? undefined,
+          cause: entry.cause,
+          nextAction: entry.nextAction,
+          detail: entry.detail,
+          type: entry.kind,
+        })}${where}`,
+      );
     }
   }
   if (options.classificationTraces !== undefined) {

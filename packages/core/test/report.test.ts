@@ -11,6 +11,7 @@ import {
   renderRun,
   runExitCode,
   CAUSE_NEXT_ACTIONS,
+  humanMessage,
   type BlockingEntry,
   type Obligation,
   type ObligationVerdict,
@@ -124,7 +125,10 @@ describe('renderRun — json format', () => {
       blockingEntries: 1,
     });
     expect(report.waiverCounts).toEqual(WDIOR_COUNTS);
-    expect(report.blocking).toEqual(BLOCKING);
+    expect(report.blocking[0]).toMatchObject({
+      ...BLOCKING[0],
+      message: expect.stringContaining('[UNCLASSIFIED]'),
+    });
     const missing = report.verdicts.find((v: { obligationId: string }) =>
       v.obligationId === accounts.id,
     );
@@ -154,7 +158,10 @@ describe('renderRun — json format', () => {
       cause: 'EVIDENCE_VALUE_MISMATCH',
       reason: `invalid: evidence gap for ${accounts.id}`,
     });
-    expect(report.blocking).toEqual(BLOCKING);
+    expect(report.blocking[0]).toMatchObject({
+      ...BLOCKING[0],
+      message: expect.stringContaining('[UNCLASSIFIED]'),
+    });
   });
 
   it('includes the run manifest when provided', () => {
@@ -169,6 +176,14 @@ describe('renderRun — json format', () => {
     } as const satisfies RunManifest;
     const report = JSON.parse(renderRun([entry(accounts, 'missing')], { format: 'json', run }));
     expect(report.run).toEqual(run);
+  });
+  it('includes engine identity in JSON and warns about an unpublished install in text', () => {
+    const engine = { version: '0.7.1', source: 'local path /workspace/gateforge', unpublished: true };
+    const json = JSON.parse(renderRun([entry(accounts, 'missing')], { format: 'json', engine }));
+    expect(json.engine).toEqual(engine);
+    const text = renderRun([entry(accounts, 'missing')], { format: 'text', engine });
+    expect(text).toContain('engine: 0.7.1 from local path /workspace/gateforge');
+    expect(text).toContain('unpublished engine: CI will not have this code');
   });
 });
 
@@ -349,7 +364,7 @@ describe('renderRun — text trace (invariant 8)', () => {
     const verdicts = [entry(accounts, 'invalid', { recordIds: ['b'.repeat(64)] })];
     const text = renderRun(verdicts, { format: 'text', blocking: BLOCKING });
     expect(text).toContain('blocking entries (unclassified/unresolved/findings/stale references):');
-    expect(text).toContain('[unclassified] tenant.widgets — no classification entry');
+    expect(text).toContain('no classification entry. Run `gateforge explain tenant.widgets`. [UNCLASSIFIED]');
     expect(text).toContain(`records: ${'b'.repeat(64)}`);
     expect(text).toContain('exit code: 1');
   });
@@ -401,6 +416,18 @@ describe('runExitCode — contract 4 mapping', () => {
   });
 });
 
+describe('humanMessage', () => {
+  it('places the plain explanation first, a runnable command next, and the code last', () => {
+    expect(
+      humanMessage({
+        cause: 'TEST_MAPPING_MISSING',
+        detail: 'Resource widgets need a classification',
+        id: 'tenant.widgets',
+        nextAction: CAUSE_NEXT_ACTIONS.TEST_MAPPING_MISSING,
+      }),
+    ).toBe('Resource widgets need a classification. Run `gateforge tests suggest`. [TEST_MAPPING_MISSING]');
+  });
+});
 describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR 0005)', () => {
   const caused = entry(accounts, 'missing', {
     reason: "no claim declares 'tenant.accounts:crud:update'",
@@ -418,6 +445,14 @@ describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR
     expect(mapped?.nextAction).toBe(caused.nextAction);
     expect(clean?.cause).toBeNull();
     expect(clean?.nextAction).toBeNull();
+  });
+  it('adds the same human message to JSON verdict records', () => {
+    const report = JSON.parse(renderRun([caused], { format: 'json' })) as {
+      verdicts: Array<{ obligationId: string; message?: string }>;
+    };
+    expect(report.verdicts[0]?.message).toBe(
+      "no claim declares 'tenant.accounts:crud:update'. Run `gateforge tests suggest`. [TEST_MAPPING_MISSING]",
+    );
   });
 
   it('sarif properties carry cause and nextAction', () => {
@@ -464,10 +499,12 @@ describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR
     expect(notification?.properties['cause']).toBe('CRUD_COVERAGE_MISSING');
     expect(notification?.properties['nextAction']).toContain('owner disposition');
     const text = renderRun([], { format: 'text', blocking: [coverageEntry] });
-    expect(text).toContain('(cause: CRUD_COVERAGE_MISSING → Connect/mark existing journeys');
-    // Entries without a mapping render exactly as before.
+    expect(text).toContain(
+      "coverage policy: table 'accounts' has no mapped browser-e2e 'delete' coverage and no owner disposition. " +
+        'Run `gateforge explain accounts`. [CRUD_COVERAGE_MISSING]',
+    );
     const plain = renderRun([], { format: 'text', blocking: BLOCKING });
-    expect(plain).toContain('[unclassified] tenant.widgets — no classification entry\n');
+    expect(plain).toContain('no classification entry. Run `gateforge explain tenant.widgets`. [UNCLASSIFIED]');
     expect(plain).not.toContain('(cause:');
   });
 });

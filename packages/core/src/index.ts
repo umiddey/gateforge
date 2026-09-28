@@ -1068,6 +1068,8 @@ export { adoptClassificationBlocked, shrinkClassificationBlocked } from './basel
  * waiver counts). Deterministic; identical inputs serialize identically.
  */
 export { renderRun } from './report/index.js';
+export { humanMessage } from './report/human-message.js';
+export type { HumanMessageEntry } from './report/human-message.js';
 
 /** Exit codes (contract 4): 0 clean/waived, 1 unresolved, 2 config. */
 export { runExitCode } from './report/index.js';
@@ -1077,6 +1079,7 @@ export type { RunExitCode } from './report/index.js';
 export type { WaiverCounts } from './report/index.js';
 /** Options for renderRun (format, blocking entries, counts, manifest). */
 export type { RenderRunOptions } from './report/index.js';
+export type { EngineMetadata } from './report/index.js';
 /** Effective evaluation scope carried by run reports (plan §12.4). */
 export type { ScopeMetadata } from './report/index.js';
 /** Measured supervised work and repository debt carried by run reports. */
