@@ -131,9 +131,10 @@ export async function mintCompleteRunReceipt(
     executionBoundaryProfile?: string;
     claimInventory?: readonly Claim[];
     verdictSummary?: { total: number; satisfied: number; waived: number; blocking: number };
+    docsExclusions?: readonly string[];
   },
 ): Promise<MintedReceipt> {
-  const actualDigest = await currentInputDigest(repo);
+  const actualDigest = await currentInputDigest(repo, options.docsExclusions ?? []);
   // digestOverride simulates stale/different-bytes receipts: every bound
   // digest (execution result + receipt) consistently names OTHER bytes
   // while all signatures stay valid — exactly the E13 stale candidate.
@@ -205,7 +206,7 @@ export async function mintCompleteRunReceipt(
   const treeSnapshot =
     mintGitDir === null
       ? null
-      : computeCandidateTreeSnapshot(mintGitDir, repo.root, process.env, stateDir, 'record');
+      : computeCandidateTreeSnapshot(mintGitDir, repo.root, process.env, stateDir, 'record', [], options.docsExclusions ?? [], []);
   const candidateTreeId = treeSnapshot?.treeId ?? null;
   const receipt = issueGateReceipt({
     verifierKey: options.verifierKey,

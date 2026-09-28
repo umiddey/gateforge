@@ -173,11 +173,17 @@ function candidateTreeMismatchSummary(
 type VerifiedCandidateFastPath = {
   receipt: GateReceipt;
   treeMatches: boolean;
+  /** The tree identity the receipt was compared against (filtered when exclusions exist). */
+  expectedTreeId: string | null;
 };
 
 /**
  * Returns an authenticated receipt for a candidate base, distinguishing a
- * matching tree from an authenticated stale-tree binding.
+ * matching tree from an authenticated stale-tree binding. With owner-approved
+ * docs/cache exclusions the comparison uses the FILTERED snapshot identity
+ * (the same one the full gate seals): the raw candidate tree carries excluded
+ * bytes the receipt deliberately ignores, so an exact raw-tree match is
+ * impossible and the filtered tree id decides instead.
  *
  * Args:
  *   io: process context.
@@ -203,9 +209,9 @@ function verifiedCandidateFastPathReceipt(
     const receiptDocument = readStateDocument(resolveStateDir(io.cwd), 'receipt.json');
     const parsed = GateReceiptSchema.safeParse(receiptDocument);
     if (!parsed.success || config.enforcement?.receiptStage === undefined) return null;
-    if (loadDocsExclusions(checkoutDir, config).length > 0 || loadCacheExclusions(checkoutDir, config).length > 0) {
-      return null;
-    }
+    const docsExclusions = loadDocsExclusions(checkoutDir, config);
+    const cacheExclusions = loadCacheExclusions(checkoutDir, config);
+    const hasOwnerExclusions = docsExclusions.length > 0 || cacheExclusions.length > 0;
     const receipt = parsed.data;
     const currentEngine = engineIdentity();
     const currentPolicyDigest = trustedPolicyDigestForConfig(checkoutDir, config);
@@ -215,10 +221,12 @@ function verifiedCandidateFastPathReceipt(
       candidateCwd: checkoutDir,
       candidateConfig: config,
     });
+    // Owner exclusions raise the ownership bar exactly like the full gate:
+    // without the external pin the exclusions (and this fast path) fail closed.
     const policyGate = evaluateApprovedPolicy(
       resolution,
       currentPolicyDigest,
-      config.enforcement.strictE2E === true,
+      config.enforcement.strictE2E === true || hasOwnerExclusions,
     );
     if (
       policyGate.status !== 'enforced' ||
@@ -264,7 +272,28 @@ function verifiedCandidateFastPathReceipt(
     if (verified.status !== 'ok') return null;
     const approvedBinding = assertReceiptApprovedPolicy(verified.receipt, policyGate.approved);
     if (!approvedBinding.ok) return null;
-    return { receipt: verified.receipt, treeMatches: verified.receipt.candidateTreeId === candidate.treeId };
+    // Currency check: the receipt binds the tree identity the full gate would
+    // have sealed. With exclusions that is the FILTERED tree of the checkout
+    // (docs/cache bytes excluded), recomputed here from the candidate bytes.
+    let expectedTreeId: string | null = candidate.treeId;
+    if (hasOwnerExclusions) {
+      const gitDir = resolveGitDir(checkoutDir, io.env);
+      expectedTreeId =
+        gitDir === null
+          ? null
+          : computeCandidateTreeSnapshot(
+              gitDir,
+              checkoutDir,
+              io.env,
+              resolveStateDir(checkoutDir),
+              'record',
+              [],
+              docsExclusions,
+              cacheExclusions,
+            ).treeId;
+    }
+    if (expectedTreeId === null) return null;
+    return { receipt: verified.receipt, treeMatches: verified.receipt.candidateTreeId === expectedTreeId, expectedTreeId };
   } catch {
     return null;
   }
@@ -582,9 +611,7 @@ async function stagedCheckCommand(
     if (
       options.candidateCommitSha !== undefined &&
       options.requireE2E &&
-      options.format !== 'sarif' &&
-      docsExclusions.length === 0 &&
-      cacheExclusions.length === 0
+      options.format !== 'sarif'
     ) {
       const fastPathReceipt = verifiedCandidateFastPathReceipt(io, checkoutDir, frozen, {
         approvedPolicyDigest: options.approvedPolicyDigest,
@@ -598,7 +625,16 @@ async function stagedCheckCommand(
           const snapshot =
             sealedEntries === null || gitDir === null
               ? null
-              : computeCandidateTreeSnapshot(gitDir, checkoutDir, io.env, resolveStateDir(checkoutDir), 'record');
+              : computeCandidateTreeSnapshot(
+                  gitDir,
+                  checkoutDir,
+                  io.env,
+                  resolveStateDir(checkoutDir),
+                  'record',
+                  [],
+                  docsExclusions,
+                  cacheExclusions,
+                );
           const treeDiff =
             sealedEntries === null || snapshot === null
               ? ''
@@ -608,7 +644,7 @@ async function stagedCheckCommand(
             cause: 'EVIDENCE_STALE',
             detail:
               `require-e2e: authenticated receipt is bound to candidate tree ${fastPathReceipt.receipt.candidateTreeId ?? '<unavailable>'}, ` +
-              `not ${frozen.treeId}.${treeDiff}`,
+              `not ${fastPathReceipt.expectedTreeId ?? '<unavailable>'}.${treeDiff}`,
             nextAction,
           });
           releaseStagedCandidate(frozen);
@@ -619,7 +655,7 @@ async function stagedCheckCommand(
           renderFastPathReceipt(
             options.format === 'json' ? 'json' : 'text',
             fastPathReceipt.receipt,
-            frozen.treeId,
+            fastPathReceipt.expectedTreeId ?? frozen.treeId,
           ),
         );
         releaseStagedCandidate(frozen);

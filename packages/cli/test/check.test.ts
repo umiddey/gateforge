@@ -236,6 +236,161 @@ describe('gateforge check', () => {
     }
   });
 
+  it('verifies a matching receipt via the fast path when approved docs exclusions exist', async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-docs-fast-path-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const marker = join(markerDir, 'detector-ran');
+        repo.writeFiles({
+          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gitignore': '.gateforge/test-gates/\n',
+          '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - "docs"\n',
+          'docs/architecture.md': '# Architecture notes\n',
+          'plugin.mjs':
+            `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
+            `writeFileSync(${JSON.stringify(marker)}, 'detector ran');\n`,
+        });
+        repo.stage();
+        repo.commit('sealed candidate with docs exclusion');
+        const candidateSha = repo.headSha();
+        expect(candidateSha).not.toBeNull();
+        const parentResult = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+        const config = loadConfig(repo.path('.gateforge.yml'));
+        const approvedDigest = trustedPolicyDigestForConfig(repo.root, config);
+        await mintCompleteRunReceipt(repo, {
+          verifierKey: 'docs-fast-path-key',
+          parentSha: parentResult.status === 0 ? parentResult.stdout.trim() : null,
+          approvedPolicyDigest: approvedDigest,
+          docsExclusions: ['docs'],
+        });
+        rmSync(marker, { force: true });
+        const startedAt = performance.now();
+        const result = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha ?? '', '--require-e2e', '--format', 'json'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'docs-fast-path-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+            CI: undefined,
+          },
+        );
+        const elapsedMs = performance.now() - startedAt;
+        expect(result.code, result.stdout).toBe(0);
+        expect((JSON.parse(result.stdout) as { fastPath?: boolean }).fastPath).toBe(true);
+        expect(elapsedMs).toBeLessThan(2_000);
+        expect(existsSync(marker), result.stdout).toBe(false);
+      });
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('still accepts a docs-only edit after sealing when the exclusion is approved', async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-docs-edit-fast-path-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const marker = join(markerDir, 'detector-ran');
+        repo.writeFiles({
+          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gitignore': '.gateforge/test-gates/\n',
+          '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - "docs"\n',
+          'docs/architecture.md': '# Architecture notes\n',
+          'plugin.mjs':
+            `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
+            `writeFileSync(${JSON.stringify(marker)}, 'detector ran');\n`,
+        });
+        repo.stage();
+        repo.commit('sealed base');
+        const sealedSha = repo.headSha();
+        expect(sealedSha).not.toBeNull();
+        const sealedParent = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+        const config = loadConfig(repo.path('.gateforge.yml'));
+        const approvedDigest = trustedPolicyDigestForConfig(repo.root, config);
+        await mintCompleteRunReceipt(repo, {
+          verifierKey: 'docs-edit-key',
+          parentSha: sealedParent.status === 0 ? sealedParent.stdout.trim() : null,
+          approvedPolicyDigest: approvedDigest,
+          docsExclusions: ['docs'],
+        });
+        repo.writeFiles({ 'docs/new-note.md': '# A later docs-only edit\n' });
+        repo.stage();
+        const candidateSha = repo.commit('docs only change');
+        rmSync(marker, { force: true });
+        const startedAt = performance.now();
+        const result = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha, '--require-e2e', '--format', 'json'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'docs-edit-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+            CI: undefined,
+          },
+        );
+        expect(result.code, result.stdout).toBe(0);
+        expect((JSON.parse(result.stdout) as { fastPath?: boolean }).fastPath).toBe(true);
+        expect(performance.now() - startedAt).toBeLessThan(2_000);
+        expect(existsSync(marker), result.stdout).toBe(false);
+      });
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('fails fast naming the file for a code edit when a docs exclusion is approved', async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-code-edit-fast-path-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const marker = join(markerDir, 'detector-ran');
+        repo.writeFiles({
+          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gitignore': '.gateforge/test-gates/\n',
+          '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - "docs"\n',
+          'docs/architecture.md': '# Architecture notes\n',
+          'plugin.mjs':
+            `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
+            `writeFileSync(${JSON.stringify(marker)}, 'detector ran');\n`,
+        });
+        repo.stage();
+        repo.commit('sealed base');
+        const sealedSha = repo.headSha();
+        expect(sealedSha).not.toBeNull();
+        const sealedParent = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+        const config = loadConfig(repo.path('.gateforge.yml'));
+        const approvedDigest = trustedPolicyDigestForConfig(repo.root, config);
+        await mintCompleteRunReceipt(repo, {
+          verifierKey: 'code-edit-key',
+          parentSha: sealedParent.status === 0 ? sealedParent.stdout.trim() : null,
+          approvedPolicyDigest: approvedDigest,
+          docsExclusions: ['docs'],
+        });
+        repo.writeFiles({ 'src/accounts.txt': 'accounts changed after sealing\n' });
+        repo.stage();
+        const candidateSha = repo.commit('code change after sealing');
+        rmSync(marker, { force: true });
+        const startedAt = performance.now();
+        const result = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha, '--require-e2e'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'code-edit-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+            CI: undefined,
+          },
+        );
+        expect(result.code, result.stdout).toBe(1);
+        expect(result.stdout).toContain('EVIDENCE_STALE');
+        expect(result.stdout).toContain('src/accounts.txt');
+        expect(performance.now() - startedAt).toBeLessThan(2_000);
+        expect(existsSync(marker), result.stdout).toBe(false);
+      });
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it('warns when a server route is reached only by statically matched mocks', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo, {
