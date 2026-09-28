@@ -23,6 +23,7 @@ import { testGatesCommand } from './commands/test-gates.js';
 import { preCommitCommand } from './commands/pre-commit.js';
 import { baselineCommand } from './commands/baseline.js';
 import { waiveCommand } from './commands/waive.js';
+import { quarantineCommand } from './commands/quarantine.js';
 import { classifyCommand } from './commands/classify.js';
 import { explainCommand } from './commands/explain.js';
 import { testsCommand } from './commands/tests.js';
@@ -77,6 +78,9 @@ commands:
   waive <resourceId:contract>            write an expiring, owner-approved waiver for one obligation
         --owner N --approver N           (GF-15: all fields mandatory; justification URL required;
         --justification-url U --expires D  no --force — renewal is a hand-edit of the written file)
+  quarantine <testKey>                  write an expiring, owner-approved flaky-test quarantine
+        --owner N --approver N           (never proof, never blocking; at most 14 days; no --force;
+        --reason "T" --expires D         an expired quarantine BLOCKS until renewed or deleted)
   --version                              print the version
   --help                                 show this help
 
@@ -150,6 +154,8 @@ export async function main(
       return runWithExitCodes(io, () => Promise.resolve(baselineCommand(io, rest)));
     case 'waive':
       return runWithExitCodes(io, () => waiveCommand(io, rest));
+    case 'quarantine':
+      return runWithExitCodes(io, () => quarantineCommand(io, rest));
     default:
       return runWithExitCodes(io, async () => {
         // parseArgs validates flag syntax; unknown commands are usage errors.

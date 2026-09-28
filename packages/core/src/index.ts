@@ -223,6 +223,34 @@ export type { Waiver } from './schemas/waiver.js';
 export type { WaiverScope } from './schemas/waiver.js';
 
 /**
+ * Flaky-test quarantine (plan 20260925_2013 Phase 2): one owner-approved,
+ * always-expiring removal of a test from the required set. Never proof,
+ * never blocking, and an obligation only it covered stays `missing`.
+ */
+export { QuarantineSchema } from './schemas/quarantine.js';
+/** Inferred quarantine type. */
+export type { Quarantine } from './schemas/quarantine.js';
+
+/**
+ * Owner-chosen gate strictness (plan 20260925_2013 Phase 1): the optional
+ * `mode` key (`strict` default = today's behavior, `changed`, `warn`) and
+ * the pure gate decision derived from it.
+ */
+export {
+  DEFAULT_STRICTNESS_MODE,
+  decideStrictness,
+  resolveStrictnessMode,
+  strictnessSummaryLine,
+  StrictnessModeSchema,
+} from './strictness.js';
+/** Strictness decision types (mode, effective exit code, honest debt view). */
+export type {
+  ChangedBlockingScope,
+  StrictnessDecision,
+  StrictnessMode,
+} from './strictness.js';
+
+/**
  * Baseline (pin #3): `.gateforge/baselines/obligations.json` —
  * `{schemaVersion, fingerprints}` with a sorted, duplicate-free list.
  */
@@ -1000,6 +1028,29 @@ export { loadWaivers } from './waivers/index.js';
  * a hand-edit (there is deliberately no overwrite).
  */
 export { serializeWaiver, writeWaiver } from './waivers/index.js';
+
+/**
+ * Quarantine directory loader (plan 20260925_2013 Phase 2): reads
+ * `.gateforge/quarantine/*.yml` against the INJECTED clock and fails
+ * closed on a missing attribution field, a duplicate test key, or a
+ * duration beyond the documented 14-day ceiling.
+ */
+export {
+  loadQuarantines,
+  QUARANTINE_DIR,
+  QUARANTINE_MAX_DAYS,
+  QUARANTINE_MAX_DURATION_MS,
+  GateforgeQuarantineError,
+  serializeQuarantine,
+  writeQuarantine,
+} from './quarantine/index.js';
+/** Quarantine loader types (problems, loaded records, load partitions). */
+export type {
+  LoadedQuarantine,
+  QuarantineLoadOptions,
+  QuarantineLoadResult,
+  QuarantineProblem,
+} from './quarantine/index.js';
 
 /** Fail-closed waiver-configuration error; carries every problem found. */
 export { GateforgeWaiverError } from './waivers/index.js';

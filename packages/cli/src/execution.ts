@@ -47,6 +47,7 @@ import {
   type TestCatalog,
   type TracedTestInput,
 } from '@gate-forge/core';
+import { QUARANTINE_DIR } from '@gate-forge/core';
 import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';
@@ -102,6 +103,7 @@ export function computeTrustedPolicyDigest(
     sidecar: string;
     adaptersDir: string;
     waiverFiles: readonly string[];
+    quarantineFiles?: readonly string[];
     pluginModules: readonly string[];
   },
 ): string {
@@ -151,6 +153,15 @@ export function computeTrustedPolicyDigest(
   const waiverEntries = configPaths.waiverFiles
     .map((path) => entry(path, path, true))
     .sort((a, b) => a.name.localeCompare(b.name));
+  // Flaky-test quarantines (plan 20260925_2013 Phase 2) remove tests from
+  // the REQUIRED set, so their bytes belong to the pinned revision exactly
+  // like waiver bytes do: an agent-authored quarantine is a policy change
+  // and cannot authorize its own weaker run. A repository with no
+  // quarantine directory contributes NO entries, so the digest of a repo
+  // that never adopted quarantine is byte-identical to before.
+  const quarantineEntries = (configPaths.quarantineFiles ?? [])
+    .map((path) => entry(path, path, true))
+    .sort((a, b) => a.name.localeCompare(b.name));
   const pluginEntries = configPaths.pluginModules.map((module) => entry(module, module, true));
   const behaviorEntry =
     configPaths.behaviorPolicy === undefined || configPaths.behaviorPolicy === null
@@ -181,6 +192,7 @@ export function computeTrustedPolicyDigest(
     entry('.gateforge/test-map.yml', configPaths.sidecar, false),
     ...adapterEntries,
     ...waiverEntries,
+    ...quarantineEntries,
     ...pluginEntries,
   ]);
 }
@@ -216,6 +228,17 @@ export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfi
   } catch {
     // Absent waivers dir: no waiver inputs (deterministic absence).
   }
+  const quarantineFiles: string[] = [];
+  const quarantineDir = join(cwd, ...QUARANTINE_DIR.split('/'));
+  try {
+    for (const item of readdirSync(quarantineDir, { withFileTypes: true })) {
+      if (item.isFile() && item.name.endsWith('.yml')) {
+        quarantineFiles.push(`${QUARANTINE_DIR}/${item.name}`);
+      }
+    }
+  } catch {
+    // Absent quarantine dir: no quarantine inputs (deterministic absence).
+  }
   const pluginModules: string[] = [];
   for (const plugin of config.plugins) {
     const module = plugin.module;
@@ -233,6 +256,7 @@ export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfi
     sidecar: TEST_MAP_RELATIVE,
     adaptersDir: config.adapters,
     waiverFiles: [...new Set(waiverFiles)].sort(),
+    quarantineFiles: [...new Set(quarantineFiles)].sort(),
     pluginModules: [...new Set(pluginModules)].sort(),
   });
 }

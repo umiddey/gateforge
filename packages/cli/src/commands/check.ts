@@ -25,6 +25,9 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import {
   BLOCKING_VERDICTS,
+  decideStrictness,
+  resolveStrictnessMode,
+  strictnessSummaryLine,
   CAUSE_NEXT_ACTIONS,
   canonicalJson,
   engineBundleDigestOf,
@@ -56,7 +59,7 @@ import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
-import { obligationFingerprint, evaluateRun } from '../evaluate.js';
+import { obligationFingerprint, evaluateRun, scopeBlocking } from '../evaluate.js';
 import { annotationMapSyncAdvisories, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
@@ -847,6 +850,16 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // fails closed. Legacy v1 `recordIdsMac` never authorizes, even when
   // it verifies.
   const config = loadConfigAt(io.cwd);
+  // Owner-chosen strictness (plan 20260925_2013 Phase 1). A missing key
+  // resolves to `strict`, which is byte-for-byte today's behavior: the
+  // decision below is a pure mapping of an ALREADY-COMPUTED strict
+  // result, so no mode can change what was evaluated, only what the
+  // process returns. `changed` needs the diff machinery, so it reuses
+  // the `--changed` path (provider + scope expansion) for its decision
+  // while the full debt still reaches the report.
+  const gateMode = resolveStrictnessMode(config);
+  const gateModeChanged = gateMode === 'changed' && !diffScoped && fixedChangedFiles === undefined;
+  const scopeAwareRun = diffScoped || gateModeChanged;
   const docsExclusions = loadDocsExclusions(io.cwd, config);
   const cacheExclusions = loadCacheExclusions(io.cwd, config);
   const hasOwnerExclusions = docsExclusions.length > 0 || cacheExclusions.length > 0;
@@ -873,7 +886,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   const providerIdentity: ChangedProvider =
     fixedChangedFiles !== undefined
       ? 'local-staged'
-      : diffScoped
+      : scopeAwareRun
         ? resolveProvider(config.changed.provider, io.cwd, io.env).provider
         : 'all-files';
   const stateDir = resolveStateDir(io.cwd);
@@ -1022,7 +1035,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   let scopeDecision: ScopeDecision = { mode: 'all', changedFiles: [], expandedBecause: [], unmappedFiles: [] };
   let mismatchBlocking: BlockingEntry[] = [];
   let scopeDiscoveryTimings: DiscoveryTimings | undefined;
-  if (diffScoped) {
+  if (scopeAwareRun) {
     // Phase 4 expansion inputs (E15): test inventory is loaded only when
     // test infrastructure exists (playwright config or mapping sidecar);
     // repositories without either keep the exact historical behavior.
@@ -1232,7 +1245,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     // One effective scope (§12.2), decided before grading: an expanded
     // (gate-defining) diff evaluates everything — obligations AND
     // blockers — exactly like the unrestricted run.
-    changedFiles: scopeDecision.mode === 'all' ? null : scopeDecision.changedFiles,
+    // Only an EXPLICIT `--changed` narrows what gets graded. `mode:
+    // changed` reuses the same scope computation for its DECISION while
+    // the full debt stays in the report — that is the whole difference
+    // between the two.
+    changedFiles: diffScoped && scopeDecision.mode !== 'all' ? scopeDecision.changedFiles : null,
     claimInventory,
     mappedCoverage,
     witnessVerifierKey,
@@ -1524,10 +1541,16 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   }
 
   const inScopeSourcePaths =
-    scopeDecision.mode === 'changed'
+    diffScoped && scopeDecision.mode === 'changed'
       ? sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog)
       : null;
   const changedSourcePaths = new Set(scopeDecision.changedFiles);
+  // Scope metadata stays exactly as a non-diff run reports it unless the
+  // caller actually asked for `--changed`.
+  const reportScope = {
+    mode: diffScoped ? scopeDecision.mode : ('all' as const),
+    expandedBecause: diffScoped ? scopeDecision.expandedBecause : [],
+  };
   const reportVerdicts =
     inScopeSourcePaths === null
       ? evaluated.verdicts
@@ -1557,9 +1580,9 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     toolVersion: VERSION,
     engine: engineIdentity(),
     lifecycleDerivation: pipeline.lifecycleDerivation,
-    scope: { mode: scopeDecision.mode, expandedBecause: scopeDecision.expandedBecause },
+    scope: reportScope,
     diagnosticContext: {
-      scope: scopeDecision.mode === 'changed' ? 'changed' : 'full',
+      scope: reportScope.mode === 'changed' ? 'changed' : 'full',
       candidateTreeId: diagnosticCandidateTreeId,
       inputDigest: expectedDigest,
       evidenceState: diagnosticEvidenceState,
@@ -1635,6 +1658,67 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       report = `${report}\ncache: ${String(cacheCounts.hits)} hit(s), ${String(cacheCounts.misses)} miss(es)`;
     }
   }
+  // Owner-chosen strictness (plan 20260925_2013 Phase 1): the decision
+  // is a pure mapping of the strict result that was ALREADY computed, so
+  // no mode can change what was evaluated. Exit 2 (config/usage) keeps
+  // its meaning; only the debt exit 1 is ever softened.
+  const strictExit = runExitCode({ verdicts: evaluated.verdicts, blocking: evaluatedBlocking });
+  const blockingTotal =
+    evaluated.verdicts.filter((verdict) => BLOCKING_VERDICTS.includes(verdict.verdict)).length +
+    evaluatedBlocking.length;
+  const sourcePaths = sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog);
+  const decision = decideStrictness({
+    mode: gateMode,
+    strictExitCode: strictExit,
+    blockingTotal,
+    // An expanded scope (a gate-defining input changed) is full scope:
+    // the change owns all of the debt, exactly like `--changed` says.
+    ...(gateMode === 'changed'
+      ? {
+          changed: {
+            active: true,
+            blockingInScope:
+              scopeDecision.mode === 'changed'
+                ? evaluated.verdicts.filter(
+                    (verdict) =>
+                      BLOCKING_VERDICTS.includes(verdict.verdict) &&
+                      (sourcePaths.get(verdict.obligation.resourceId) ?? []).some((file) =>
+                        changedSourcePaths.has(file),
+                      ),
+                  ).length +
+                  scopeBlocking(evaluatedBlocking, changedSourcePaths, sourcePaths).length
+                : blockingTotal,
+          },
+        }
+      : {}),
+  });
+  if (decision.wouldBlock && decision.exitCode !== decision.strictExitCode) {
+    // The softened decision is announced on stderr too: a CI log that
+    // only keeps stdout must not read as "nothing was wrong".
+    writeLine(
+      io.stderr,
+      `check: ${strictnessSummaryLine(decision)} — the gate exits 0 in mode '${decision.mode}', ` +
+        `strict mode would exit ${String(decision.strictExitCode)}`,
+    );
+  }
+  if (format === 'json') {
+    if (gateMode !== 'strict') {
+      const document = JSON.parse(report) as Record<string, JsonValue>;
+      report = canonicalJson({
+        ...document,
+        strictness: {
+          mode: decision.mode,
+          wouldBlock: decision.wouldBlock,
+          blockingInScope: decision.blockingInScope,
+          blockingTotal: decision.blockingTotal,
+        },
+      });
+    }
+  } else if (format === 'text') {
+    // Text only: SARIF must stay machine-parseable JSON, and the json
+    // document carries the structured `strictness` block above.
+    report = `${report}\n${strictnessSummaryLine(decision)}`;
+  }
   if (format === 'text') {
     // Plan phase 7: the endpoint inventory rides the text report —
     // totals, unmatched calls, unconsumed routes, and ambiguous joins
@@ -1650,5 +1734,5 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     );
   }
   writeLine(io.stdout, report);
-  return runExitCode({ verdicts: evaluated.verdicts, blocking: evaluatedBlocking });
+  return decision.exitCode;
 }

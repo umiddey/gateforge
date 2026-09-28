@@ -80,6 +80,7 @@ export const CauseCodeSchema = z.enum([
   'ENFORCEMENT_BOUNDARY_UNVERIFIED',
   'RUNTIME_PREPARATION_FAILED',
   'RUNTIME_READINESS_FAILED',
+  'QUARANTINE_EXPIRED',
 ]);
 
 /** Inferred cause-code union. */
@@ -137,6 +138,8 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   RUNTIME_PREPARATION_FAILED:
     'Repair the tracked `runtime.prepare` command (its failure log is under run state `runtime/`) — ' +
     'the candidate runtime must build or install before the gate can execute',
+  QUARANTINE_EXPIRED:
+    'Owner: renew or delete the expired quarantine (`gateforge quarantine <testKey> --owner --approver --reason --expires`); an expired quarantine blocks',
   RUNTIME_READINESS_FAILED:
     'Repair the tracked `runtime.services` command or readiness probe — the candidate ' +
     'runtime must become ready before evidence is trusted',

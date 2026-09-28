@@ -147,6 +147,36 @@ export interface ResolveMappingsInput {
   behaviorCatalog?: BehaviorCatalog | null;
 }
 
+/**
+ * Drops every binding whose test is owner-quarantined (plan
+ * 20260925_2013 Phase 2). A quarantined test proves nothing, so its
+ * coverage claim disappears from the mapping surface: an obligation it
+ * alone covered becomes uncovered and therefore stays `missing`. The
+ * problems list is preserved verbatim — a quarantine never hides a
+ * mapping problem.
+ *
+ * Args:
+ *   resolution: the resolved mappings of this run.
+ *   quarantinedKeys: logical test keys the owner quarantined.
+ *
+ * Returns:
+ *   ResolvedMappings: the same document without quarantined bindings,
+ *   with the same deterministic per-obligation ordering.
+ */
+export function withoutQuarantinedBindings(
+  resolution: ResolvedMappings,
+  quarantinedKeys: ReadonlySet<string>,
+): ResolvedMappings {
+  if (quarantinedKeys.size === 0) return resolution;
+  return {
+    obligations: resolution.obligations.map((obligation) => ({
+      obligationId: obligation.obligationId,
+      bindings: obligation.bindings.filter((binding) => !quarantinedKeys.has(binding.logicalKey)),
+    })),
+    problems: resolution.problems,
+  };
+}
+
 /** Sort rank of binding origins (declared first, hints last). */
 const ORIGIN_RANK: Readonly<Record<MappingOrigin, number>> = Object.freeze({
   native: 0,

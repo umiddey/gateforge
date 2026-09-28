@@ -12,6 +12,7 @@ import { parse as parseYaml } from 'yaml';
 import { SchemaVersionField, TransportSchema } from '../schemas/common.js';
 import { CoveragePolicySchema } from '../schemas/coverage-policy.js';
 import { z } from 'zod';
+import { StrictnessModeSchema } from '../strictness.js';
 
 /**
  * A plugin entry in `.gateforge.yml`. Unlike a run-manifest plugin
@@ -305,6 +306,18 @@ export const GateforgeConfigSchema = z
           });
         }
       }),
+    /**
+     * Owner-chosen gate strictness (plan 20260925_2013 Phase 1):
+     * `strict` (today's behavior, also the default when this key is
+     * absent), `changed` (block only on debt this change touches), or
+     * `warn` (evaluate and report everything, exit 0). It changes the
+     * GATE, never the evidence: counts, verdicts and cause codes are
+     * identical in every mode, and the active mode is printed in every
+     * report. Security-sensitive: the key lives in `.gateforge.yml`, so
+     * it is inside the trusted policy digest — an agent cannot soften
+     * the gate without the owner repinning the policy revision.
+     */
+    mode: StrictnessModeSchema.optional(),
     /**
      * Enforcement modes (plan 2026-09-13 §3.3/§3.4, ADR 0005 D1/D4).
      * ABSENT = feature off (standard mode, strict E2E off) so existing

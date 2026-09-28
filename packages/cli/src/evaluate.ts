@@ -231,8 +231,21 @@ export interface EvaluateResult {
   } | null;
 }
 
-/** Keeps only blocking entries plausibly tied to a changed file. */
-function scopeBlocking(
+/**
+ * Keeps only blocking entries plausibly tied to a changed file. Exported
+ * so the `mode: changed` gate decision can reuse the EXACT same
+ * attribution rule the evaluator grades with — a second, looser copy
+ * would let the gate hide debt the report shows.
+ *
+ * Args:
+ *   blocking: the blocking entries the evaluator produced.
+ *   changed: the resolved changed-file set.
+ *   multiSources: the join-aware source map (backend + frontend calls).
+ *
+ * Returns:
+ *   BlockingEntry[]: the entries a change can be held responsible for.
+ */
+export function scopeBlocking(
   blocking: readonly BlockingEntry[],
   changed: ReadonlySet<string>,
   multiSources: Map<string, string[]>,

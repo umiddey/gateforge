@@ -42,7 +42,9 @@ import {
   allCapabilities,
   canonicalJson,
   policyWeakenedCandidate,
+  resolveStrictnessMode,
   type JsonValue,
+  type StrictnessMode,
 } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
@@ -537,12 +539,14 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
   // 0. Config (all later checks degrade honestly when it fails).
   let mode: 'standard' | 'managed' = 'standard';
   let strictE2E = false;
+  let strictnessMode: StrictnessMode = 'strict';
   let configOk = true;
   let configDetail = 'no .gateforge.yml — gateforge is not initialized in this repository';
   try {
     const config = loadConfigAt(io.cwd);
     mode = config.enforcement?.mode ?? 'standard';
     strictE2E = config.enforcement?.strictE2E === true;
+    strictnessMode = resolveStrictnessMode(config);
     configOk = true;
     configDetail = `.gateforge.yml loaded (mode ${mode}, strictE2E ${String(strictE2E)})`;
   } catch (error) {
@@ -550,6 +554,20 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     configDetail = `.gateforge.yml could not be loaded: ${(error as Error).message.split('\n')[0] ?? 'unknown'}`;
   }
   checks.push({ id: 'config', status: configOk ? 'ok' : 'fail', detail: configDetail });
+
+  // Gate strictness (plan 20260925_2013 Phase 1): a softened gate is not
+  // a failure — it is an owner decision that must stay LOUD forever, so
+  // it is never `ok` while it is not strict.
+  checks.push({
+    id: 'strictness-mode',
+    status: strictnessMode === 'strict' ? 'ok' : 'warn',
+    detail:
+      strictnessMode === 'strict'
+        ? `gate strictness: strict (the default; every unresolved obligation blocks)`
+        : `gate strictness: ${strictnessMode} — the gate does NOT block everything it finds; ` +
+          "in 'warn' it exits 0 with wouldBlock, in 'changed' it blocks only debt this change touches. " +
+          'Set mode: strict (or remove the key) to restore full blocking.',
+  });
 
   const keyExposure = verifierKeyExposure(io.cwd, io.env);
   const keyExposureDetail =

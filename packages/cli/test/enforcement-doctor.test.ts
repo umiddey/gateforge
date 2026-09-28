@@ -61,6 +61,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'runner',
         'server-protection',
         'snapshot',
+        'strictness-mode',
         'trusted-binary-policy',
         'verifier-key-location',
       ]);
