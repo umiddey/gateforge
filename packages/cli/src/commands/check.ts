@@ -26,6 +26,8 @@ import { performance } from 'node:perf_hooks';
 import {
   BLOCKING_VERDICTS,
   decideStrictness,
+  loadQuarantines,
+  QUARANTINE_DIR,
   resolveStrictnessMode,
   strictnessSummaryLine,
   CAUSE_NEXT_ACTIONS,
@@ -925,6 +927,14 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     ...(fixedChangedFiles !== undefined ? { changedFilesOverride: fixedChangedFiles } : {}),
     pluginCache: cacheControl,
   });
+  // Owner quarantine population (plan 20260925_2013 Phase 3): check is
+  // the debt view, so an owner-quarantined test is reported here too —
+  // loaded against the INJECTED run clock, never the wall clock. It is
+  // only reported when the population exists, so a repository that never
+  // quarantined anything gets exactly the document it had before.
+  const quarantines = loadQuarantines(join(io.cwd, ...QUARANTINE_DIR.split('/')), {
+    now: pipeline.now,
+  });
   if (diffScoped && format === 'text') {
     const base =
       providerIdentity === 'github-pr'
@@ -1701,23 +1711,47 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         `strict mode would exit ${String(decision.strictExitCode)}`,
     );
   }
+  const quarantineLine =
+    quarantines.active.length === 0
+      ? ''
+      : `quarantined: ${String(quarantines.active.length)} (expires ${quarantines.active
+          .map((entry) => `${entry.quarantine.testKey} @ ${entry.quarantine.expiresAt}`)
+          .join(', ')})`;
   if (format === 'json') {
-    if (gateMode !== 'strict') {
+    if (gateMode !== 'strict' || quarantines.active.length > 0) {
       const document = JSON.parse(report) as Record<string, JsonValue>;
       report = canonicalJson({
         ...document,
-        strictness: {
-          mode: decision.mode,
-          wouldBlock: decision.wouldBlock,
-          blockingInScope: decision.blockingInScope,
-          blockingTotal: decision.blockingTotal,
-        },
+        ...(gateMode === 'strict'
+          ? {}
+          : {
+              strictness: {
+                mode: decision.mode,
+                wouldBlock: decision.wouldBlock,
+                blockingInScope: decision.blockingInScope,
+                blockingTotal: decision.blockingTotal,
+              },
+            }),
+        ...(quarantines.active.length === 0
+          ? {}
+          : {
+              quarantine: {
+                count: quarantines.active.length,
+                tests: quarantines.active.map((entry) => ({
+                  testKey: entry.quarantine.testKey,
+                  expiresAt: entry.quarantine.expiresAt,
+                  owner: entry.quarantine.owner,
+                })),
+              },
+            }),
       });
     }
   } else if (format === 'text') {
     // Text only: SARIF must stay machine-parseable JSON, and the json
-    // document carries the structured `strictness` block above.
-    report = `${report}\n${strictnessSummaryLine(decision)}`;
+    // document carries the structured blocks above.
+    report = `${report}\n${strictnessSummaryLine(decision)}${
+      quarantineLine === '' ? '' : `\n${quarantineLine}`
+    }`;
   }
   if (format === 'text') {
     // Plan phase 7: the endpoint inventory rides the text report —

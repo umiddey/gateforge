@@ -327,3 +327,33 @@ describe('quarantine and the default config', () => {
     });
   });
 });
+
+describe('check reports the quarantine population', () => {
+  it('lists owner-quarantined tests and stays unchanged without any', async () => {
+    await withTempRepo({}, async (repo) => {
+      installQuarantinableFixture(repo);
+      const empty = await runCli(repo, ['check', '--format', 'json']);
+      expect((JSON.parse(empty.stdout) as Record<string, unknown>)['quarantine']).toBeUndefined();
+      repo.writeFiles({
+        '.gateforge/quarantine/accounts.yml': [
+          'schemaVersion: 1',
+          `testKey: ${TEST_KEY}`,
+          'owner: team-accounts',
+          'approver: lead@example.invalid',
+          'reason: flaky in CI',
+          'expiresAt: "2026-01-08T00:00:00.000Z"',
+          '',
+        ].join('\n'),
+      });
+      const result = await runCli(repo, ['check', '--format', 'json']);
+      expect(result.code).toBe(1);
+      const report = JSON.parse(result.stdout) as {
+        quarantine: { count: number; tests: Array<{ testKey: string; expiresAt: string }> };
+      };
+      expect(report.quarantine.count).toBe(1);
+      expect(report.quarantine.tests[0]?.testKey).toBe(TEST_KEY);
+      const text = await runCli(repo, ['check']);
+      expect(text.stdout).toContain('quarantined: 1 (expires');
+    });
+  });
+});
