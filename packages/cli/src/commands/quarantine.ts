@@ -38,7 +38,8 @@ export const QUARANTINE_USAGE =
   'usage: gateforge quarantine <testKey> --owner <name> --approver <name>\n' +
   '       --reason "why it is flaky" --expires <ISO-date|datetime>\n' +
   `       Writes ONE owner-approved quarantine (all four fields mandatory) for the test the\n` +
-  '       catalog reports under <testKey> (`<file>#<title path>`). It REMOVES that test from the\n' +
+  '       catalog reports under <testKey> (`<runner>:<project>:<file>:<title path>`, as printed\n' +
+  '       by `gateforge tests discover`). It REMOVES that test from the\n' +
   `       required set for at most ${String(QUARANTINE_MAX_DAYS)} days. --expires accepts an ISO date\n` +
   '       (normalized to UTC midnight) or a full ISO datetime; it must be in the future and no\n' +
   `       further than ${String(QUARANTINE_MAX_DAYS)} days out.\n` +
