@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { scanLineage } from '../src/execute.js';
 
-const root = '/repo';
-const pythonPath = [join(root, 'packages/pack-alembic/python')];
+const pythonPath = [fileURLToPath(new URL('../python/', import.meta.url))];
 
 describe('Alembic AST lineage scanner', () => {
   it('reads annotated revision constants and tuple parents without importing scripts', () => {
