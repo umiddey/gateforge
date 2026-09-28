@@ -712,6 +712,10 @@ export interface IssueGateReceiptInput {
   engine?: { version: string; source: string; unpublished: boolean };
   /** Configured stage for receipt enforcement, omitted for legacy configs. */
   receiptStage?: 'pre-push' | 'pre-commit' | 'ci';
+  /** Parent full-receipt commit carried into this receipt, when applicable. */
+  carriedFrom?: string;
+  /** Digest of the authenticated parent receipt carried forward. */
+  parentReceiptDigest?: string;
   /** Normalized invocation. */
   invocation: string;
   /** Selection digest. */
@@ -820,6 +824,8 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
     // Receipt engine identity is additive; legacy receipts remain valid.
     ...(input.engine !== undefined ? { engine: input.engine } : {}),
     ...(input.receiptStage !== undefined ? { receiptStage: input.receiptStage } : {}),
+    ...(input.carriedFrom !== undefined ? { carriedFrom: input.carriedFrom } : {}),
+    ...(input.parentReceiptDigest !== undefined ? { parentReceiptDigest: input.parentReceiptDigest } : {}),
     ...(scoped ? { scope: 'changed' as const, coveredObligationFingerprints: covered } : {}),
     // Additive scope binding (opt-in scoped supervised runs): present
     // ONLY for changed-scope seals, so every earlier receipt stays

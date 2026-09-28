@@ -3,7 +3,8 @@
  * passes, GF-23 claimed-records degradation at the CLI boundary,
  * config-error exit 2, `--changed` scoping, and GF-09 provider parity.
  */
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -18,6 +19,7 @@ import {
   OBLIGATION_ORDERS,
   PLUGIN_SOURCE,
   pythonPluginBlock,
+  referenceDetectorPath,
   runCli,
   writeV2Manifest,
   type CliResult,
@@ -103,14 +105,25 @@ describe('gateforge check', () => {
       await withTempRepo({}, async (repo) => {
         installFixture(repo);
         const marker = join(markerDir, 'detector-ran');
+        const detectorRelativePath = '.gateforge/fast-path-detector.py';
+        const detectorSource = [
+          'from pathlib import Path',
+          'import runpy',
+          `Path(${JSON.stringify(marker)}).write_text('detector ran')`,
+          `runpy.run_path(${JSON.stringify(referenceDetectorPath())}, run_name='__main__')`,
+        ].join('\n');
+        const subprocessPlugin = pythonPluginBlock().replace(
+          JSON.stringify(referenceDetectorPath()),
+          JSON.stringify(detectorRelativePath),
+        );
         repo.writeFiles({
-          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gateforge.yml': `${configYml({
+            include: "['fixtures/**/*.gfx']",
+            plugins: subprocessPlugin,
+          })}\nenforcement:\n  receiptStage: pre-push\n`,
           '.gitignore': '.gateforge/test-gates/\n',
-          '.gateforge/waivers/accounts.json': waiverJson('tenant.accounts'),
-          '.gateforge/waivers/orders.json': waiverJson('tenant.orders'),
-          'plugin.mjs':
-            `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
-            `writeFileSync(${JSON.stringify(marker)}, 'detector ran');\n`,
+          'fixtures/resource.gfx': 'unresolved fixture resource\n',
+          [detectorRelativePath]: detectorSource,
         });
         repo.stage();
         repo.commit('sealed candidate');
@@ -126,6 +139,7 @@ describe('gateforge check', () => {
         });
         rmSync(marker, { force: true });
 
+        const startedAt = performance.now();
         const result = await runCli(
           repo,
           ['check', '--candidate-commit', candidateSha ?? '', '--require-e2e', '--format', 'json'],
@@ -134,14 +148,43 @@ describe('gateforge check', () => {
             GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
           },
         );
+        const elapsedMs = performance.now() - startedAt;
         expect(result.code, result.stdout).toBe(0);
         expect((JSON.parse(result.stdout) as { fastPath?: boolean }).fastPath).toBe(true);
+        expect(elapsedMs).toBeLessThan(2_000);
+        expect(existsSync(marker)).toBe(false);
+
+        rmSync(marker, { force: true });
+        const wrongKey = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha ?? '', '--require-e2e', '--format', 'json'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'different-fast-path-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+          },
+        );
+        expect(wrongKey.code).not.toBe(0);
+        expect((JSON.parse(wrongKey.stdout) as { fastPath?: boolean }).fastPath).not.toBe(true);
+        expect(existsSync(marker)).toBe(true);
+        rmSync(marker, { force: true });
+        const wrongPolicyDigest = 'f'.repeat(64);
+        expect(wrongPolicyDigest).not.toBe(approvedDigest);
+        const wrongPin = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha ?? '', '--require-e2e', '--format', 'json'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'fast-path-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: wrongPolicyDigest,
+          },
+        );
+        expect(wrongPin.code).not.toBe(0);
+        expect(wrongPin.stdout).not.toContain('"fastPath":true');
         expect(existsSync(marker)).toBe(false);
       });
     } finally {
       rmSync(markerDir, { recursive: true, force: true });
     }
-  });
+  }, 120_000);
 
   it('fails fast on an authenticated receipt for a different candidate tree', async () => {
     const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-stale-fast-path-'));
@@ -172,6 +215,7 @@ describe('gateforge check', () => {
           approvedPolicyDigest: approvedDigest,
         });
         rmSync(marker, { force: true });
+        const startedAt = performance.now();
 
         const result = await runCli(
           repo,
@@ -182,6 +226,7 @@ describe('gateforge check', () => {
           },
         );
         expect(result.code, result.stdout).toBe(1);
+        expect(performance.now() - startedAt).toBeLessThan(2_000);
         expect(result.stdout).toContain('EVIDENCE_STALE');
         expect(result.stdout).toContain('src/accounts.txt');
         expect(existsSync(marker), result.stdout).toBe(false);

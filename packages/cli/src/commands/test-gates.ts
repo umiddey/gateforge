@@ -55,7 +55,7 @@
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
@@ -68,6 +68,7 @@ import {
   EMPTY_BEHAVIOR_CATALOG_DIGEST,
   engineBundleDigestOf,
   EvidenceRecordSchema,
+  GateReceiptSchema,
   executionBoundaryDigestOf,
   LOCAL_UNISOLATED_BOUNDARY,
   isWitnessedRecord,
@@ -83,6 +84,7 @@ import {
   type BlockingEntry,
   type ExecutionResult,
   type GateforgeConfig,
+  type GateReceipt,
   type Claim,
   type JsonValue,
   type ObligationVerdict,
@@ -96,6 +98,7 @@ import {
   buildWitnessedPytestChildEnv,
   diffNativePlaywrightTests,
   discoverTestCatalog,
+  findPlaywrightConfig,
   listNativePlaywrightTests,
   PlaywrightAdapter,
   readRunnerOutcomes,
@@ -139,8 +142,9 @@ import {
 } from '../input-snapshot.js';
 import { mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline } from '../pipeline.js';
-import { tryReuseReceipt } from '../receipts.js';
-import { computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir } from '../candidate-tree.js';
+import { loadReceiptFor, tryReuseReceipt } from '../receipts.js';
+import { computeEvaluationScope } from '../scope.js';
+import { computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
 import { resolveProvider } from '../providers.js';
 import { engineIdentity } from '../engine-identity.js';
@@ -149,6 +153,7 @@ import {
   clearGateReceipt,
   httpRoutesView,
   readJsonArray,
+  readStateDocument,
   resolveStateDir,
   stateObligations,
   writeClaimInjections,
@@ -723,6 +728,116 @@ export interface SupervisedOptions {
   runtimeReuseCheck?: () => string | null;
 }
 
+interface VerifiedCarryForwardParent {
+  receipt: GateReceipt;
+  receiptDigest: string;
+  treeId: string;
+}
+
+/**
+ * Resolves the exact merge-base commit from a supported CI diff provider.
+ *
+ * Args:
+ *   io: process context with CI provider environment.
+ *   provider: configured changed-file provider identity.
+ *
+ * Returns:
+ *   string | null: verified 40-character base commit, or null when unavailable.
+ */
+function resolveCarryForwardBaseSha(
+  io: Io,
+  provider: 'github-pr' | 'gitlab-mr' | 'local-staged' | 'all-files',
+): string | null {
+  if (provider === 'gitlab-mr') {
+    const sha = io.env['CI_MERGE_REQUEST_DIFF_BASE_SHA']?.trim() ?? '';
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  }
+  if (provider !== 'github-pr') return null;
+  const baseRef = io.env['GITHUB_BASE_REF']?.trim() ?? '';
+  if (baseRef.length === 0 || baseRef.startsWith('-') || /[\\s\\0]/.test(baseRef)) return null;
+  const result = spawnSync('git', ['--no-replace-objects', 'merge-base', 'HEAD', baseRef], {
+    cwd: io.cwd,
+    env: sanitizedAuthorityEnv(io.env),
+    encoding: 'utf8',
+  });
+  const sha = (result.stdout ?? '').trim();
+  return result.error === undefined && result.status === 0 && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+}
+
+/**
+ * Authenticates a clean full-scope receipt for the exact merge-base commit.
+ *
+ * Args:
+ *   input: candidate policy, external pin, key ring, state directory, and merge base.
+ *
+ * Returns:
+ *   VerifiedCarryForwardParent | null: verified uncarried root receipt, or null to keep current behavior.
+ */
+function verifiedCarryForwardParent(input: {
+  io: Io;
+  config: GateforgeConfig;
+  stateDir: string;
+  verifierKeyring: VerifierKeyring | null;
+  baseSha: string;
+  trustedPolicyDigest: string;
+  approvedPolicyDigest: string;
+  executionBoundaryDigest: string;
+}): VerifiedCarryForwardParent | null {
+  try {
+    if (input.verifierKeyring === null) return null;
+    const parsed = GateReceiptSchema.safeParse(readStateDocument(input.stateDir, 'receipt.json'));
+    if (!parsed.success) return null;
+    const receipt = parsed.data;
+    const treeResult = spawnSync('git', ['rev-parse', '--verify', `${input.baseSha}^{tree}`], {
+      cwd: input.io.cwd,
+      env: sanitizedAuthorityEnv(input.io.env),
+      encoding: 'utf8',
+    });
+    const treeId = (treeResult.stdout ?? '').trim();
+    if (
+      treeResult.error !== undefined ||
+      treeResult.status !== 0 ||
+      !/^[0-9a-f]{40}$/.test(treeId) ||
+      receipt.gitSha !== input.baseSha ||
+      receipt.candidateTreeId !== treeId ||
+      receipt.verifierKeyId !== input.verifierKeyring.active.keyId ||
+      receipt.trustedPolicyDigest !== input.trustedPolicyDigest ||
+      receipt.approvedPolicyDigest !== input.approvedPolicyDigest ||
+      receipt.receiptStage !== input.config.enforcement?.receiptStage ||
+      receipt.carriedFrom !== undefined ||
+      receipt.parentReceiptDigest !== undefined ||
+      (receipt.scope !== undefined && receipt.scope !== 'full') ||
+      receipt.engine === undefined ||
+      receipt.engine.version !== engineIdentity().version ||
+      receipt.engine.source !== engineIdentity().source ||
+      receipt.engine.unpublished !== engineIdentity().unpublished ||
+      receipt.engineBundleDigest !== engineBundleDigestOf(VERSION, input.trustedPolicyDigest) ||
+      receipt.targetArtifactDigest !== targetArtifactDigestOf(treeId) ||
+      receipt.verdictSummary.blocking !== 0 ||
+      receipt.verdictSummary.satisfied + receipt.verdictSummary.waived !== receipt.verdictSummary.total
+    ) {
+      return null;
+    }
+    const loaded = loadReceiptFor(input.stateDir, input.verifierKeyring, {
+      inputDigest: receipt.inputDigest,
+      trustedPolicyDigest: input.trustedPolicyDigest,
+      candidateTreeId: treeId,
+      executionBoundaryDigest: input.executionBoundaryDigest,
+      scope: 'full',
+    });
+    if (loaded.status !== 'ok') return null;
+    const approved = assertReceiptApprovedPolicy(loaded.receipt, input.approvedPolicyDigest);
+    if (!approved.ok) return null;
+    return {
+      receipt: loaded.receipt,
+      receiptDigest: sha256Canonical(loaded.receipt as unknown as Record<string, never>),
+      treeId,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The supervised `--changed` path (plan Phase 4, ADR 0005 D2/D3):
  * resolve catalog + mappings → fix the expected set → prepare the
@@ -1151,6 +1266,145 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // slice receipt over nothing is ever minted, and the previous receipt
   // is invalidated (E07 discipline).
   if (options.scope === 'changed' && plannedRows.length === 0) {
+    const baseSha = resolveCarryForwardBaseSha(io, providerIdentity);
+    const carryParent =
+      !options.resultOnly &&
+      expectedDigest !== null &&
+      frozenTreeId !== null &&
+      approvedPolicyDigest !== null &&
+      baseSha !== null
+        ? verifiedCarryForwardParent({
+            io,
+            config,
+            stateDir,
+            verifierKeyring,
+            baseSha,
+            trustedPolicyDigest: trustedPolicy,
+            approvedPolicyDigest,
+            executionBoundaryDigest,
+          })
+        : null;
+    const playwrightConfig = findPlaywrightConfig(io.cwd);
+    const scopeDecision =
+      catalog === null
+        ? null
+        : computeEvaluationScope({
+            config,
+            changedFiles: providerChangedFiles,
+            testFiles: catalog.entries.map((entry) => entry.file),
+            runnerConfigs: playwrightConfig === null ? [] : [playwrightConfig],
+            mappingSidecar: existsSync(join(io.cwd, ...TEST_MAP_RELATIVE.split('/'))),
+            knownSourceFiles: pipeline.graph.resources.map((resource) => resource.source),
+            strictE2E: false,
+          });
+    const behaviorBindings = behaviorReceiptBindings(pipeline.behaviorCatalog);
+    const scannedEveryChangedFile =
+      providerChangedFiles.length > 0 &&
+      config.plugins.length > 0 &&
+      pipeline.contributions.length === config.plugins.length &&
+      providerChangedFiles.every((path) =>
+        pipeline.contributions.every((contribution) => contribution.scannedPaths?.includes(path) === true),
+      );
+    const carryIsSafe =
+      carryParent !== null &&
+      expectedDigest !== null &&
+      frozenTreeId !== null &&
+      pipeline.manifest.gitSha !== null &&
+      catalog?.inventoryComplete === true &&
+      discoveryError === null &&
+      scopeDecision?.mode === 'changed' &&
+      scopeDecision.expandedBecause.length === 0 &&
+      scopeDecision.unmappedFiles.length === 0 &&
+      coveredFingerprints.length === 0 &&
+      affectedTestCount === 0 &&
+      scopeBlockers.length === 0 &&
+      mappingBlockers.length === 0 &&
+      inventoryBlocking.length === 0 &&
+      pipeline.policy.blocking.length === 0 &&
+      (config.diagnostics?.suites.length ?? 0) === 0 &&
+      pipeline.policy.obligations.length === carryParent.receipt.verdictSummary.total &&
+      carryParent.receipt.behaviorCatalogDigest === behaviorBindings.behaviorCatalogDigest &&
+      carryParent.receipt.requiredCaseSetDigest === behaviorBindings.requiredCaseSetDigest &&
+      scannedEveryChangedFile;
+    const activeVerifierKeyring = verifierKeyring;
+    if (
+      carryIsSafe &&
+      activeVerifierKeyring !== null &&
+      baseSha !== null &&
+      pipeline.manifest.gitSha !== null &&
+      freezeGitDir !== null &&
+      carryParent !== null &&
+      expectedDigest !== null &&
+      frozenTreeId !== null
+    ) {
+      const candidateSnapshot = computeCandidateTreeSnapshot(
+        freezeGitDir,
+        io.cwd,
+        io.env,
+        stateDir,
+        'record',
+        runtimeReuseMounts,
+        docsExclusions,
+        cacheExclusions,
+      );
+      if (candidateSnapshot.treeId === frozenTreeId) {
+        const carried = issueGateReceipt({
+          verifierKey: activeVerifierKeyring.active.key,
+          verifierKeyId: activeVerifierKeyring.active.keyId,
+          runId: carryParent.receipt.runId,
+          invocationId: carryParent.receipt.invocationId,
+          inputDigest: expectedDigest,
+          gitSha: pipeline.manifest.gitSha,
+          parentSha: baseSha,
+          trustedPolicyDigest: trustedPolicy,
+          approvedPolicyDigest,
+          receiptStage: config.enforcement?.receiptStage,
+          engine: engineIdentity(),
+          carriedFrom: baseSha,
+          parentReceiptDigest: carryParent.receiptDigest,
+          invocation: carryParent.receipt.invocation,
+          selectionDigest: carryParent.receipt.selectionDigest,
+          catalogDigest: carryParent.receipt.catalogDigest,
+          executionResultDigest: carryParent.receipt.executionResultDigest,
+          evidenceAttestationDigest: carryParent.receipt.evidenceAttestationDigest,
+          candidateTreeId: frozenTreeId,
+          behaviorCatalogDigest: behaviorBindings.behaviorCatalogDigest,
+          requiredCaseSetDigest: behaviorBindings.requiredCaseSetDigest,
+          caseExecutionDigest: carryParent.receipt.caseExecutionDigest,
+          engineBundleDigest: engineBundleDigestOf(VERSION, trustedPolicy),
+          executionBoundaryDigest,
+          targetArtifactDigest: targetArtifactDigestOf(frozenTreeId),
+          verdictSummary: carryParent.receipt.verdictSummary,
+          issuedAt: pipeline.now,
+        });
+        const carryReport = canonicalJson({
+          schemaVersion: 1,
+          carriedForward: true,
+          carriedFrom: baseSha,
+          parentReceiptDigest: carryParent.receiptDigest,
+          receiptId: carried.receiptId,
+          candidateTreeId: frozenTreeId,
+          inputDigest: expectedDigest,
+          scope: 'changed',
+          changedFiles: [...providerChangedFiles],
+          testsPerformedThisInvocation: 0,
+          summary: carryParent.receipt.verdictSummary,
+          evidenceState: 'receipt-carried-forward',
+          engine: { ...engineIdentity() },
+        });
+        writeGateReceipt(stateDir, carried);
+        writeCandidateTreeEntries(stateDir, candidateSnapshot.entries);
+        writeReport(stateDir, carryReport);
+        writeLine(
+          io.stdout,
+          format === 'json'
+            ? carryReport
+            : `receipt ${carried.receiptId} carried forward from ${baseSha}; 0 tests run; full parent receipt and complete changed-file scan verified`,
+        );
+        writeLine(io.stderr, `receipt ${carried.receiptId} carried forward; 0 tests performed this invocation`);
+        return 0;
+      }
+    }
     if (!options.resultOnly) clearGateReceipt(stateDir);
     const emptySliceBlocking: BlockingEntry[] =
       inventoryBlocking.length > 0

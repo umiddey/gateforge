@@ -8,8 +8,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { RunManifestSchema, withTempRepo, fingerprint } from '@gate-forge/core';
-import { fixtureFingerprint, installFixture, runCli } from './helpers.js';
+import { GateReceiptSchema, RunManifestSchema, loadConfig, withTempRepo, fingerprint } from '@gate-forge/core';
+import { configYml, fixtureFingerprint, installFixture, runCli } from './helpers.js';
+import { trustedPolicyDigestForConfig } from '../src/execution.js';
+import { mintCompleteRunReceipt } from './gate-receipts.js';
 
 /** A stub suite: reports one claimed ui.action record for the target. */
 const SUITE_SOURCE = `import { writeFileSync, mkdirSync } from 'node:fs';
@@ -91,6 +93,158 @@ describe('gateforge test-gates', () => {
       expect(stdout).toContain('"schemaVersion":1');
     });
   });
+
+  it('carries a verified base receipt across a completely scanned empty slice', async () => {
+    await withTempRepo({}, async (repo) => {
+      const verifierKey = 'carry-forward-test-key';
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+        '.gitignore': '.gateforge/test-gates/\n',
+        'src/logs.txt': '# base log constant\n',
+      });
+      repo.commitFiles({}, 'base');
+      const baseSha = repo.headSha();
+      expect(baseSha).not.toBeNull();
+      const baseParent = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+      const config = loadConfig(repo.path('.gateforge.yml'));
+      const approvedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
+      await mintCompleteRunReceipt(repo, {
+        verifierKey,
+        parentSha: baseParent.status === 0 ? baseParent.stdout.trim() : null,
+        approvedPolicyDigest,
+        verdictSummary: { total: 2, satisfied: 0, waived: 2, blocking: 0 },
+      });
+      repo.commitFiles({ 'src/logs.txt': '# updated log constant\n' }, 'inert log update');
+      const candidateSha = repo.headSha();
+      expect(candidateSha).not.toBeNull();
+      const env = {
+        GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey,
+        GATEFORGE_APPROVED_POLICY_DIGEST: approvedPolicyDigest,
+        CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha ?? '',
+      };
+
+      const carried = await runCli(
+        repo,
+        ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'],
+        env,
+      );
+      expect(carried.code, `${carried.stdout}\n${carried.stderr}`).toBe(0);
+      const carryReport = JSON.parse(carried.stdout) as {
+        carriedForward?: boolean;
+        carriedFrom?: string;
+        parentReceiptDigest?: string;
+        testsPerformedThisInvocation?: number;
+      };
+      expect(carryReport).toMatchObject({
+        carriedForward: true,
+        carriedFrom: baseSha,
+        testsPerformedThisInvocation: 0,
+      });
+      expect(carryReport.parentReceiptDigest).toMatch(/^[0-9a-f]{64}$/);
+
+      const stateDir = repo.path('.gateforge/test-gates');
+      const receipt = GateReceiptSchema.parse(JSON.parse(readFileSync(join(stateDir, 'receipt.json'), 'utf8')));
+      expect(receipt.carriedFrom).toBe(baseSha);
+      expect(receipt.parentReceiptDigest).toBe(carryReport.parentReceiptDigest);
+
+      const checked = await runCli(
+        repo,
+        ['check', '--changed', '--candidate-commit', candidateSha ?? '', '--require-e2e', '--format', 'json'],
+        env,
+      );
+      expect(checked.code, checked.stdout).toBe(0);
+      expect((JSON.parse(checked.stdout) as { fastPath?: boolean }).fastPath).toBe(true);
+    });
+  }, 120_000);
+  it('refuses carry-forward for a different verifier key or a gate configuration diff', async () => {
+    await withTempRepo({}, async (repo) => {
+      const verifierKey = 'carry-forward-binding-key';
+      const approvedVerifierKey = 'different-verifier-key';
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+        '.gitignore': '.gateforge/test-gates/\n',
+        'src/logs.txt': '# base log constant\n',
+      });
+      repo.commitFiles({}, 'base');
+      const baseSha = repo.headSha();
+      const config = loadConfig(repo.path('.gateforge.yml'));
+      const approvedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
+      const baseParent = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+      await mintCompleteRunReceipt(repo, {
+        verifierKey,
+        parentSha: baseParent.status === 0 ? baseParent.stdout.trim() : null,
+        approvedPolicyDigest,
+        verdictSummary: { total: 2, satisfied: 0, waived: 2, blocking: 0 },
+      });
+      const env = {
+        GATEFORGE_WITNESS_VERIFIER_KEY: approvedVerifierKey,
+        GATEFORGE_APPROVED_POLICY_DIGEST: approvedPolicyDigest,
+        CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha ?? '',
+      };
+
+      repo.commitFiles({ 'src/logs.txt': '# inert change\n' }, 'inert log change');
+      const wrongKey = await runCli(
+        repo,
+        ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'],
+        env,
+      );
+      expect(wrongKey.code).not.toBe(0);
+      const configBaseSha = repo.headSha();
+      await mintCompleteRunReceipt(repo, {
+        verifierKey,
+        parentSha: baseSha,
+        approvedPolicyDigest,
+        verdictSummary: { total: 2, satisfied: 0, waived: 2, blocking: 0 },
+      });
+
+      repo.writeFiles({
+        '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n# configuration file changed\n`,
+      });
+      repo.commitFiles({}, 'gate configuration diff');
+      const gateConfigDiff = await runCli(
+        repo,
+        ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'],
+        {
+          ...env,
+          GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey,
+          CI_MERGE_REQUEST_DIFF_BASE_SHA: configBaseSha ?? '',
+        },
+      );
+      expect(gateConfigDiff.code).not.toBe(0);
+
+    });
+    await withTempRepo({}, async (repo) => {
+      const verifierKey = 'carry-forward-missing-parent-key';
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+        '.gitignore': '.gateforge/test-gates/\n',
+        'src/logs.txt': '# base log constant\n',
+      });
+      repo.commitFiles({}, 'base without a receipt');
+      const baseSha = repo.headSha();
+      const approvedPolicyDigest = trustedPolicyDigestForConfig(
+        repo.root,
+        loadConfig(repo.path('.gateforge.yml')),
+      );
+      repo.commitFiles({ 'src/logs.txt': '# inert change\n' }, 'inert log change');
+      const result = await runCli(
+        repo,
+        ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'],
+        {
+          GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey,
+          GATEFORGE_APPROVED_POLICY_DIGEST: approvedPolicyDigest,
+          CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha ?? '',
+        },
+      );
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('no receipt was sealed');
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 120_000);
+
 
   it('runs the suite with the ambient env and evaluates its claims/records (GF-23)', async () => {
     await withTempRepo({}, async (repo) => {

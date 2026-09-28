@@ -40,11 +40,31 @@ describe('gateforge enforce', () => {
       expect(initTemplate.slice(initStart, initTemplate.indexOf(installEnd))).toBe(
         enforceTemplate.slice(enforceStart, enforceTemplate.indexOf(installEnd)),
       );
+      const strictCi = parseYaml(initTemplate) as {
+        'gateforge:e2e-gate': {
+          rules: Array<{ if: string }>;
+          artifacts: { paths: string[] };
+          script: string[];
+        };
+      };
+      expect(strictCi['gateforge:e2e-gate'].rules).toEqual([
+        { if: '$CI_PIPELINE_SOURCE == "merge_request_event"' },
+        { if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH' },
+      ]);
+      expect(strictCi['gateforge:e2e-gate'].artifacts.paths).toContain(
+        '.gateforge/test-gates/execution-result.json',
+      );
+      expect(strictCi['gateforge:e2e-gate'].script.join('\n')).toContain(
+        'run_gateforge test-gates --changed --scope changed',
+      );
       expect(enforceTemplate).toContain('run_gateforge check --changed');
-      expect(initTemplate).toContain('run_gateforge test-gates --changed');
+      expect(initTemplate).toContain('run_gateforge test-gates --changed --scope changed');
+      expect(initTemplate).toContain('CI_MERGE_REQUEST_DIFF_BASE_SHA');
+      expect(initTemplate).toContain('execution-result.json');
+      expect(initTemplate).toContain('CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH');
       expect(enforceTemplate).not.toContain('summary.satisfied');
     });
-  });
+  }, 120_000);
 
   it.skipIf(process.platform === 'win32')('installs root and declared nested packages from lockfiles', async () => {
     await withTempRepo({}, async (repo) => {
@@ -186,7 +206,13 @@ describe('gateforge enforce', () => {
       expect(readFileSync(repo.path('.github/workflows/gateforge.yml'), 'utf8')).toContain(
         'gateforge check --changed --candidate-commit "$GITHUB_SHA" --require-e2e',
       );
+      const workflow = readFileSync(repo.path('.github/workflows/gateforge.yml'), 'utf8');
+      expect(parseYaml(workflow)).toBeDefined();
+      expect(workflow).toContain('gateforge test-gates --changed --scope changed');
+      expect(workflow).toContain('actions/download-artifact@v4');
+      expect(workflow).toContain('actions/upload-artifact@v4');
+      expect(workflow).toContain('actions: read');
       expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(false);
     });
-  });
+  }, 120_000);
 });

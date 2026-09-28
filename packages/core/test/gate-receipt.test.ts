@@ -83,6 +83,18 @@ describe('gate receipt issuance round-trip', () => {
   it('the produced document parses against the strict v2 schema', () => {
     expect(GateReceiptSchema.safeParse(signed()).success).toBe(true);
   });
+
+  it('accepts authenticated carry-forward bindings only as a pair', () => {
+    const carried = signed({
+      carriedFrom: 'a'.repeat(40),
+      parentReceiptDigest: 'b'.repeat(64),
+    });
+    expect(GateReceiptSchema.safeParse(carried).success).toBe(true);
+    const missingDigest = { ...carried, parentReceiptDigest: undefined };
+    expect(GateReceiptSchema.safeParse(missingDigest).success).toBe(false);
+    const missingParent = { ...carried, carriedFrom: undefined };
+    expect(GateReceiptSchema.safeParse(missingParent).success).toBe(false);
+  });
 });
 
 describe('gate receipt fail-closed rejections', () => {

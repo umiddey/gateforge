@@ -183,6 +183,10 @@ export const GateReceiptSchema = z
       .optional(),
     /** Additive stage that the installation configured for receipt enforcement. */
     receiptStage: z.enum(['pre-push', 'pre-commit', 'ci']).optional(),
+    /** Commit sha of the full-scope receipt carried into this candidate. */
+    carriedFrom: z.string().regex(/^[0-9a-f]{40}$/, 'carriedFrom must be a 40-char lowercase sha1 hex').optional(),
+    /** Digest of the authenticated parent receipt whose proof was carried. */
+    parentReceiptDigest: z.string().regex(HEX64, 'parentReceiptDigest must be 64-char lowercase hex').optional(),
     /** 64-hex digest binding the approved engine/policy bundle version. */
     engineBundleDigest: z.string().regex(HEX64, 'engineBundleDigest must be 64-char lowercase hex'),
     /**
@@ -212,6 +216,13 @@ export const GateReceiptSchema = z
   })
   .strict()
   .superRefine((receipt, ctx) => {
+    if ((receipt.carriedFrom === undefined) !== (receipt.parentReceiptDigest === undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['parentReceiptDigest'],
+        message: 'carriedFrom and parentReceiptDigest must be present together',
+      });
+    }
     // Scope/coverage coherence (fail closed): the covered set exists only
     // for changed-scope receipts, and a changed-scope receipt without one
     // would claim authority over an unnamed slice. Ordering/duplication

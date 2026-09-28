@@ -38,6 +38,7 @@ import {
 import { engineIdentity } from '../src/engine-identity.js';
 import { VERSION } from '../src/commands/common.js';
 import { TEST_MAP_RELATIVE } from '../src/mapping.js';
+import { environmentVerifierKeyId } from '../src/verifier-keys.js';
 import { resolveStateDir, writeCandidateTreeEntries, writeExecutionResult, writeGateReceipt } from '../src/state.js';
 import { currentInputDigest, FIXED_AT } from './helpers.js';
 
@@ -113,12 +114,9 @@ export interface MintedReceipt {  /** The workspace/candidate input digest the r
  *
  * Args:
  *   repo: fixture repository (gateforge config + sources committed).
- *   options: verifierKey (signing authority), an optional parentSha
- *     override (defaults to the repo HEAD; pass a sha to simulate a
- *     overridden digest, so the receipt no longer matches the repo), and
- *     approvedPolicyDigest (the additive v1 approved-policy binding —
- *     omitted when not provided, matching pre-pin receipts). Optional
- *     claimInventory is sealed to test receipt-backed check declarations.
+ *   options: signing key, optional parentSha/digest override/policy pin,
+ *     claim inventory, execution boundary, and verdict summary for a
+ *     carry-forward parent fixture.
  *
  * Returns:
  *   Promise<MintedReceipt>: the minted binding values.
@@ -132,6 +130,7 @@ export async function mintCompleteRunReceipt(
     approvedPolicyDigest?: string;
     executionBoundaryProfile?: string;
     claimInventory?: readonly Claim[];
+    verdictSummary?: { total: number; satisfied: number; waived: number; blocking: number };
   },
 ): Promise<MintedReceipt> {
   const actualDigest = await currentInputDigest(repo);
@@ -210,6 +209,7 @@ export async function mintCompleteRunReceipt(
   const candidateTreeId = treeSnapshot?.treeId ?? null;
   const receipt = issueGateReceipt({
     verifierKey: options.verifierKey,
+    verifierKeyId: environmentVerifierKeyId(options.verifierKey),
     runId,
     invocationId,
     inputDigest,
@@ -231,7 +231,7 @@ export async function mintCompleteRunReceipt(
     executionBoundaryDigest: executionBoundaryDigestOf(options.executionBoundaryProfile ?? LOCAL_UNISOLATED_BOUNDARY),
     engineBundleDigest: engineBundleDigestOf(VERSION, trustedPolicyDigest),
     targetArtifactDigest: targetArtifactDigestOf(candidateTreeId),
-    verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
+    verdictSummary: options.verdictSummary ?? { total: 0, satisfied: 0, waived: 0, blocking: 0 },
     issuedAt: FIXED_AT,
   });
   writeExecutionResult(stateDir, sealed.result);
