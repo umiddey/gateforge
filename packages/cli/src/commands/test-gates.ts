@@ -2358,10 +2358,28 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     diagnosticContext,
     ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
   });
-  /** The json report plus this run's strictness/quarantine blocks. */
+  /**
+   * The persisted json document: the same report shape stdout shows for a
+   * json run, plus this run's strictness/quarantine blocks. Rendered
+   * independently of `format` because the text run's rendered report is
+   * text, not json.
+   */
   const jsonReportDocument = (): string =>
     canonicalJson({
-      ...(JSON.parse(renderedReport) as Record<string, unknown>),
+      ...(JSON.parse(
+        renderRun(evaluated.verdicts, {
+          format: 'json',
+          blocking: evaluated.blocking,
+          waiverCounts: evaluated.waiverCounts,
+          run: manifest,
+          toolVersion: VERSION,
+          engine: engineIdentity(),
+          lifecycleDerivation: pipeline.lifecycleDerivation,
+          execution: executionSummary,
+          diagnosticContext,
+          ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
+        }),
+      ) as Record<string, unknown>),
       ...(gateMode === 'strict'
         ? {}
         : {
