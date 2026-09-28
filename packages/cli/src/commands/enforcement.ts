@@ -99,39 +99,42 @@ function probe(cwd: string, env: NodeJS.ProcessEnv, args: readonly string[]): st
 }
 
 /**
- * Hashes copied workspace files while excluding Git metadata.
+ * Hashes the files the input snapshot would see (tracked + untracked non-ignored).
  *
  * Args:
- *   root: isolated hook-check checkout.
+ *   root: isolated hook-check checkout (a Git repository).
+ *   env: environment for the Git inventory call.
  *
  * Returns:
  *   Map<string, string>: relative file paths mapped to content or symlink digests.
  */
-function snapshotHookWorkspace(root: string): Map<string, string> {
+function snapshotHookWorkspace(root: string, env: NodeJS.ProcessEnv): Map<string, string> {
   const files = new Map<string, string>();
-  /**
-   * Adds one directory's files and links to the content snapshot.
-   *
-   * Args:
-   *   directory: directory to enumerate recursively.
-   *
-   * Returns:
-   *   void: adds relative path digests to the enclosing snapshot.
-   */
-  const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name === '.git') continue;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        visit(path);
-      } else if (entry.isFile()) {
-        files.set(relative(root, path).split(sep).join('/'), createHash('sha256').update(readFileSync(path)).digest('hex'));
-      } else if (entry.isSymbolicLink()) {
-        files.set(relative(root, path).split(sep).join('/'), createHash('sha256').update(readlinkSync(path)).digest('hex'));
-      }
+  const listed = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+    cwd: root,
+    env,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (listed.error !== undefined || listed.status !== 0) {
+    throw new Error(`git inventory failed: ${(listed.stderr ?? listed.error?.message ?? '').trim()}`);
+  }
+  for (const path of listed.stdout.split('\0')) {
+    if (path === '') continue;
+    const absolute = join(root, ...path.split('/'));
+    let stat;
+    try {
+      stat = lstatSync(absolute);
+    } catch {
+      files.set(path, 'deleted');
+      continue;
     }
-  };
-  visit(root);
+    if (stat.isSymbolicLink()) {
+      files.set(path, createHash('sha256').update(readlinkSync(absolute)).digest('hex'));
+    } else if (stat.isFile()) {
+      files.set(path, createHash('sha256').update(readFileSync(absolute)).digest('hex'));
+    }
+  }
   return files;
 }
 
@@ -169,17 +172,21 @@ function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv): { status: 
   const scratchRoot = mkdtempSync(join(tmpdir(), 'gateforge-hook-doctor-'));
   const checkout = join(scratchRoot, 'checkout');
   const excluded = new Set(['.git', 'node_modules', 'dist', 'coverage', '.venv']);
-  const pathEnv = env['PATH'] ?? process.env['PATH'] ?? '';
+  // Hooks run with the invoking user's HOME/XDG so installed interpreters
+  // (e.g. uv-managed Pythons) and the existing pre-commit cache are found,
+  // exactly as on a real commit. Only the checkout is isolated.
+  const passthrough = ['PATH', 'HOME', 'LANG', 'PRE_COMMIT_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME'];
   const safeEnv: NodeJS.ProcessEnv = {
-    PATH: pathEnv,
-    HOME: scratchRoot,
     TMPDIR: scratchRoot,
-    LANG: env['LANG'] ?? 'C.UTF-8',
-    PRE_COMMIT_HOME: join(scratchRoot, 'cache'),
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_TERMINAL_PROMPT: '0',
   };
+  for (const name of passthrough) {
+    const value = env[name] ?? process.env[name];
+    if (value !== undefined) safeEnv[name] = value;
+  }
+  safeEnv['LANG'] ??= 'C.UTF-8';
   try {
     cpSync(cwd, checkout, {
       recursive: true,
@@ -207,7 +214,7 @@ function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv): { status: 
     const mutations = new Set<string>();
     const failures: string[] = [];
     for (let pass = 0; pass < 2; pass += 1) {
-      const before = snapshotHookWorkspace(checkout);
+      const before = snapshotHookWorkspace(checkout, safeEnv);
       const result = spawnSync('pre-commit', ['run', '--all-files'], {
         cwd: checkout,
         env: safeEnv,
@@ -218,12 +225,12 @@ function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv): { status: 
       if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
         return { status: 'warn', detail: 'pre-commit is unavailable; hook mutation behavior was not checked' };
       }
-      const after = snapshotHookWorkspace(checkout);
+      const after = snapshotHookWorkspace(checkout, safeEnv);
       for (const path of new Set([...before.keys(), ...after.keys()])) {
         if (before.get(path) !== after.get(path)) mutations.add(path);
       }
       if (result.error !== undefined || result.status !== 0) {
-        failures.push(`run ${pass + 1}: ${(result.stderr || result.stdout || result.error?.message || `exit ${String(result.status)}`).trim()}`);
+        failures.push(`run ${pass + 1}: ${lastLines(result.stderr || result.stdout || result.error?.message || `exit ${String(result.status)}`, 3)}`);
       }
     }
     if (mutations.size > 0) {
@@ -233,16 +240,58 @@ function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv): { status: 
           : '; put gateforge-check first so later file-mutating hooks cannot invalidate its receipt';
       return {
         status: 'warn',
-        detail: `pre-commit hooks modified workspace files on repeated runs: ${[...mutations].sort().join(', ')}${recommendation}`,
+        detail: `pre-commit hooks modified workspace files on repeated runs: ${summarizePaths([...mutations].sort(), 5)}${recommendation}`,
       };
     }
     if (failures.length > 0) {
-      return { status: 'warn', detail: `pre-commit hooks did not complete cleanly twice: ${failures.join('; ')}` };
+      return {
+        status: 'warn',
+        detail:
+          `pre-commit hooks did not complete cleanly in an isolated copy (without ${[...excluded].filter((name) => name !== '.git').join(', ')}), ` +
+          `so file changes by hooks were not checked; hooks that need those folders fail there. ` +
+          `Run \`pre-commit run --all-files\` in the repository to see the full error. Last lines: ${failures.join('; ')}`,
+      };
     }
     return { status: 'ok', detail: 'pre-commit hooks ran twice without workspace file mutations' };
+  } catch (error) {
+    return { status: 'warn', detail: `hook mutation behavior was not checked: ${(error as Error).message}` };
   } finally {
     rmSync(scratchRoot, { recursive: true, force: true });
   }
+}
+
+/**
+ * Keeps the last non-empty lines of a command's output for a one-line summary.
+ *
+ * Args:
+ *   text: raw command output.
+ *   count: number of trailing non-empty lines to keep.
+ *
+ * Returns:
+ *   string: the kept lines joined with " | ".
+ */
+function lastLines(text: string, count: number): string {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+    .slice(-count)
+    .join(' | ');
+}
+
+/**
+ * Lists the first few paths and counts the remainder.
+ *
+ * Args:
+ *   paths: sorted relative paths.
+ *   limit: maximum number of paths to name.
+ *
+ * Returns:
+ *   string: e.g. "a, b, c and 4 more".
+ */
+function summarizePaths(paths: readonly string[], limit: number): string {
+  const named = paths.slice(0, limit).join(', ');
+  return paths.length > limit ? `${named} and ${String(paths.length - limit)} more` : named;
 }
 
 /**

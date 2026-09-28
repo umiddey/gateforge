@@ -6,7 +6,7 @@
  * agent-writable is reported as NOT active. Exit is 0 whenever the
  * doctor runs (diagnostic), `--json` is deterministic.
  */
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { withTempRepo } from '@gate-forge/core';
 import { installFixture, runCli } from './helpers.js';
@@ -116,6 +116,88 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(mutation.status).toBe('warn');
       expect(mutation.detail).toContain('mutation-marker.txt');
       expect(mutation.detail).toContain('gateforge-check first');
+    });
+  });
+
+  it('ignores hook writes to git-ignored cache files because they never enter the input snapshot', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.pre-commit-config.yaml': ['repos:', '  - repo: local', '    hooks:', '      - id: lint', '        name: lint', '        entry: true', '        language: system', ''].join('\n'),
+        'mockbin/pre-commit': '#!/bin/sh\nmkdir -p .lint_cache && printf "*\\n" > .lint_cache/.gitignore && date +%N >> .lint_cache/state\n',
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      });
+      const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
+      expect(mutation.status).toBe('ok');
+    });
+  });
+
+  it('lists at most five changed files and counts the rest', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.pre-commit-config.yaml': ['repos:', '  - repo: local', '    hooks:', '      - id: lint', '        name: lint', '        entry: true', '        language: system', ''].join('\n'),
+        'mockbin/pre-commit': '#!/bin/sh\nfor i in 1 2 3 4 5 6 7 8; do date +%N >> "generated-$i.txt"; done\n',
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      });
+      const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
+      expect(mutation.status).toBe('warn');
+      expect(mutation.detail).toContain('generated-1.txt');
+      expect(mutation.detail).toContain('and 3 more');
+      expect(mutation.detail).not.toContain('generated-8.txt');
+    });
+  });
+
+  it('runs hooks with the invoking user home so installed interpreters and hook caches are found', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const home = repo.path('fake-home');
+      const dataHome = repo.path('fake-home/.local/share');
+      mkdirSync(dataHome, { recursive: true });
+      repo.writeFiles({
+        '.pre-commit-config.yaml': ['repos:', '  - repo: local', '    hooks:', '      - id: lint', '        name: lint', '        entry: true', '        language: system', ''].join('\n'),
+        'mockbin/pre-commit': [
+          '#!/bin/sh',
+          `[ "$HOME" = "${home}" ] && [ "$XDG_DATA_HOME" = "${dataHome}" ] && exit 0`,
+          'i=0; while [ $i -lt 40 ]; do echo "noise line $i: interpreter not found"; i=$((i+1)); done >&2',
+          'exit 1',
+          '',
+        ].join('\n'),
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+        HOME: home,
+        XDG_DATA_HOME: dataHome,
+      });
+      const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
+      expect(result.code).toBe(0);
+      expect(mutation.status).toBe('ok');
+    });
+  });
+
+  it('summarizes failing hook runs in a few lines instead of the full log', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.pre-commit-config.yaml': ['repos:', '  - repo: local', '    hooks:', '      - id: lint', '        name: lint', '        entry: true', '        language: system', ''].join('\n'),
+        'mockbin/pre-commit': '#!/bin/sh\ni=0; while [ $i -lt 40 ]; do echo "noise line $i"; i=$((i+1)); done >&2\nexit 1\n',
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      });
+      const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
+      expect(mutation.status).toBe('warn');
+      expect(mutation.detail).toContain('noise line 39');
+      expect(mutation.detail).not.toContain('noise line 10');
+      expect(mutation.detail).toContain('pre-commit run --all-files');
     });
   });
 
