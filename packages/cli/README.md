@@ -199,7 +199,9 @@ not change test verdicts.
 
 Each `verifyPersistence` adapter call is timed in
 `<run-state>/diagnostics/adapter-timing.jsonl`; calls over two seconds also
-print a warning. The diagnostic does not alter the receipt or verdict.
+print a warning. Timed-out tests report the observed app/runner time separately
+from their summed witness-adapter time. These diagnostics do not alter the
+receipt or verdict.
 
 Run history is opt-in through `.gateforge.yml` `history`; when configured,
 retention defaults to 14 days and is capped at 90. Set `retentionDays: off`
@@ -306,8 +308,9 @@ same suites, their results are displayed separately without changing the E2E
 exit decision.
 
 When enabled, the supervised run writes `diagnostics/host-load.json` at start,
-every 30 seconds, and at completion. Free disk below 5% at start emits a
-warning; load and disk data are diagnostic only.
+every 30 seconds, and at completion. Failed tests completed while load exceeds
+1.5× CPU count get a note with the nearest preceding sample. Free disk below
+5% at start emits a warning; load and disk data are diagnostic only.
 
 ## Enforcement
 
@@ -446,6 +449,10 @@ the agent's own boundary provides NO managed guarantee.
 hook activation, runner/browser readiness, capability availability, trusted
 binary/policy ownership, snapshot mode, and — in managed mode — an
 agent-writable authoritative Git directory is a `fail`, never a pass.
+When `.pre-commit-config.yaml` exists, the doctor runs its hooks twice in a
+temporary checkout, reports files they modify, and recommends placing
+`gateforge-check` before mutating hooks. Hook commands still run with the
+caller’s system permissions; review them as you would any local command.
 
 ### Owner-operated systemd deployment recipe
 

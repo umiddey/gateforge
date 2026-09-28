@@ -52,7 +52,7 @@
  * construction; a missing drain leaves no sessions open, and the
  * witness rejects every submission fail-closed.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { canonicalOf } from '../json.js';
 import type { Classification, HttpRouteCandidate } from '@gate-forge/core';
@@ -279,11 +279,60 @@ export class GateforgeReporter {
   }
 
   /** Collects claims + test identity + the outcome row at test end (synchronous). */
-  onTestEnd(test: ReporterTest, result: { status: string; workerIndex?: number; retry?: number }): void {
-    // Phase 4: capture the outcome row for trusted runner supervision
-    // (every test, claimed or not — the expected set includes them all).
+  onTestEnd(
+    test: ReporterTest,
+    result: { status: string; workerIndex?: number; retry?: number; duration?: number },
+  ): void {
     const titlePath = this.titlePathOf(test);
     const file = this.repoRelativeOf(test);
+    const finishedAt = new Date().toISOString();
+    if (this.resolved.stateDir !== null && typeof result.duration === 'number') {
+      const diagnosticsDir = join(this.resolved.stateDir, 'diagnostics');
+      mkdirSync(diagnosticsDir, { recursive: true });
+      appendFileSync(
+        join(diagnosticsDir, 'test-timing.jsonl'),
+        `${JSON.stringify({
+          testId: test.id,
+          file: file ?? '',
+          titlePath,
+          status: result.status,
+          durationMs: result.duration,
+          finishedAt,
+        })}\n`,
+        'utf8',
+      );
+    }
+    if (
+      result.status === 'timedOut' &&
+      typeof result.duration === 'number' &&
+      this.resolved.stateDir !== null
+    ) {
+      const timingPath = join(this.resolved.stateDir, 'diagnostics', 'adapter-timing.jsonl');
+      let witnessDurationMs = 0;
+      if (existsSync(timingPath)) {
+        for (const line of readFileSync(timingPath, 'utf8').split(/\r?\n/).filter(Boolean)) {
+          try {
+            const timing = JSON.parse(line) as { testId?: unknown; runId?: unknown; durationMs?: unknown };
+            if (
+              timing.testId === test.id &&
+              timing.runId === this.resolved.runId &&
+              typeof timing.durationMs === 'number'
+            ) {
+              witnessDurationMs += timing.durationMs;
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+      const appDurationMs = Math.max(0, result.duration - witnessDurationMs);
+      console.warn(
+        `[gateforge] timeout split for ${test.id}: app/runner ${appDurationMs}ms, ` +
+          `witness adapter ${witnessDurationMs}ms`,
+      );
+    }
+    // Phase 4: capture the outcome row for trusted runner supervision
+    // (every test, claimed or not — the expected set includes them all).
     this.runnerOutcomes.push({
       testId: test.id,
       ...(file !== null ? { file } : { file: '' }),

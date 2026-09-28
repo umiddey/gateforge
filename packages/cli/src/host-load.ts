@@ -11,6 +11,40 @@ export interface HostLoadSample {
   freeDiskPercent: number;
 }
 
+
+export interface HostLoadTestTiming {
+  file: string;
+  titlePath: string[];
+  status: string;
+  finishedAt: string;
+}
+
+/**
+ * Adds a diagnostic note for failed tests whose nearest prior sample is high load.
+ *
+ * Args:
+ *   samples: timestamped host load measurements for the supervised run.
+ *   tests: timestamped runner outcomes from the same run.
+ *
+ * Returns:
+ *   string[]: high-load notes for failed tests only.
+ */
+export function hostLoadFailureNotices(
+  samples: readonly HostLoadSample[],
+  tests: readonly HostLoadTestTiming[],
+): string[] {
+  return tests.flatMap((test) => {
+    if (test.status !== 'failed' && test.status !== 'timedOut') return [];
+    const failedAt = Date.parse(test.finishedAt);
+    const sample = samples
+      .filter((candidate) => Date.parse(candidate.timestamp) <= failedAt)
+      .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))[0];
+    if (sample === undefined) return [];
+    const load = sample.loadAverage[0] ?? 0;
+    if (load <= sample.cpuCount * 1.5) return [];
+    return [`${test.file} > ${test.titlePath.join(' > ')}: load ${load.toFixed(1)} on ${sample.cpuCount} CPUs`];
+  });
+}
 export interface HostLoadCollector {
   stop: () => HostLoadSample[];
 }

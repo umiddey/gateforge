@@ -11,7 +11,7 @@
  */
 import { cpSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { CAUSE_NEXT_ACTIONS } from '@gate-forge/core';
+import { CAUSE_NEXT_ACTIONS, ExecutionResultSchema } from '@gate-forge/core';
 import { parseArgs, stringFlag } from '../args.js';
 import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
@@ -27,7 +27,7 @@ import {
   runtimeChildEnv,
   type RunningRuntime,
 } from '../runtime.js';
-import { probeHealth } from '../run-reliability.js';
+import { postRunHealthNotices, probeHealth } from '../run-reliability.js';
 import { digestRuntimeReuseMounts, type RuntimeReuseMount } from '../runtime-reuse.js';
 import {
   assertRuntimeReuseOwnerApproval,
@@ -196,7 +196,14 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
         runtimeChildEnv(runtimeDoc.envAllowlist ?? [], io.env, {}),
       );
       if (healthFailure !== null) {
-        writeLine(io.stderr, `fixture ${healthFailure.name} was down at end of run: ${healthFailure.reason}`);
+        const executionState = readStateDocument(candidateStateDir, 'execution-result.json');
+        const execution = executionState === null ? null : ExecutionResultSchema.safeParse(executionState);
+        const failedTests = execution?.success === true
+          ? execution.data.outcomes.filter((outcome) => outcome.status === 'failed')
+          : [];
+        for (const notice of postRunHealthNotices(healthFailure, failedTests)) {
+          writeLine(io.stderr, notice);
+        }
       }
     }
 

@@ -55,6 +55,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'config',
         'enforcement-mode',
         'hook',
+        'hook-mutation',
         'managed-guarantee',
         'observer',
         'runner',
@@ -81,6 +82,40 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(checkById(report, 'runner').status).toBe('fail');
       expect(checkById(report, 'snapshot').status).toBe('ok');
       expect(report.ready).toBe(false);
+    });
+  });
+
+  it('detects file mutations from repeated pre-commit hook runs and recommends gate ordering', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.pre-commit-config.yaml': [
+          'repos:',
+          '  - repo: local',
+          '    hooks:',
+          '      - id: formatter',
+          '        name: formatter',
+          '        entry: ./tools/formatter',
+          '        language: system',
+          '      - id: gateforge-check',
+          '        name: gateforge-check',
+          '        entry: gateforge check --require-e2e',
+          '        language: system',
+          '',
+        ].join('\n'),
+        'mockbin/pre-commit': '#!/bin/sh\nprintf x >> mutation-marker.txt\n',
+        'mutation-marker.txt': 'start\n',
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      });
+      const report = parseDoctor(result.stdout);
+      const mutation = checkById(report, 'hook-mutation');
+      expect(result.code).toBe(0);
+      expect(mutation.status).toBe('warn');
+      expect(mutation.detail).toContain('mutation-marker.txt');
+      expect(mutation.detail).toContain('gateforge-check first');
     });
   });
 

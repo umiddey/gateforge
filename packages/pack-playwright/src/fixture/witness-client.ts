@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  ENV_RUN_ID,
   ENV_RUN_TOKEN,
   ENV_STATE_DIR,
   ENV_WITNESS_URL,
@@ -47,22 +48,29 @@ export class WitnessRequestError extends Error {
  *
  * Args:
  *   durationMs: elapsed wall time for the witness persistence request.
+ *   testId: runner-issued test identity associated with the call.
  *   stateDir: Gateforge run-state directory, if a supervised run is active.
  *
  * Returns:
  *   void: writes one JSONL row when run diagnostics are available.
  */
-function recordPersistenceTiming(durationMs: number, stateDir: string | undefined): void {
+function recordPersistenceTiming(durationMs: number, testId: string, stateDir: string | undefined): void {
   if (stateDir === undefined || stateDir.length === 0) return;
   const diagnosticsDir = join(stateDir, 'diagnostics');
   mkdirSync(diagnosticsDir, { recursive: true });
   appendFileSync(
     join(diagnosticsDir, 'adapter-timing.jsonl'),
-    `${JSON.stringify({ timestamp: new Date().toISOString(), operation: 'verifyPersistence', durationMs })}\n`,
+    `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      operation: 'verifyPersistence',
+      runId: process.env[ENV_RUN_ID] ?? null,
+      testId,
+      durationMs,
+    })}\n`,
     'utf8',
   );
   if (durationMs > 2_000) {
-    process.stderr.write(`Gateforge witness adapter verifyPersistence took ${durationMs}ms\n`);
+    process.stderr.write(`Gateforge witness adapter verifyPersistence took ${durationMs}ms for ${testId}\n`);
   }
 }
 
@@ -257,7 +265,11 @@ export class WitnessClient {
     try {
       return await this.request<PersistenceResponse>('/witness/persistence', request);
     } finally {
-      recordPersistenceTiming(Math.round(performance.now() - startedAt), process.env[ENV_STATE_DIR]);
+      recordPersistenceTiming(
+        Math.round(performance.now() - startedAt),
+        request.testId,
+        process.env[ENV_STATE_DIR],
+      );
     }
   }
 

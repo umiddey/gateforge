@@ -19,10 +19,23 @@
  *   external broker is reported `warn`/`not configured` unless an
  *   operator-provided probe says otherwise.
  */
-import { accessSync, constants as fsConstants, existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  accessSync,
+  constants as fsConstants,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  readdirSync,
+  rmSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, relative, resolve, sep } from 'node:path';
 import { BehaviorPolicySchema } from '@gate-forge/core';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -83,6 +96,153 @@ function probe(cwd: string, env: NodeJS.ProcessEnv, args: readonly string[]): st
   const result = spawnSync('git', [...args], { cwd, env, encoding: 'utf8' });
   if (result.error !== undefined || result.status !== 0) return null;
   return (result.stdout ?? '').trim();
+}
+
+/**
+ * Hashes copied workspace files while excluding Git metadata.
+ *
+ * Args:
+ *   root: isolated hook-check checkout.
+ *
+ * Returns:
+ *   Map<string, string>: relative file paths mapped to content or symlink digests.
+ */
+function snapshotHookWorkspace(root: string): Map<string, string> {
+  const files = new Map<string, string>();
+  /**
+   * Adds one directory's files and links to the content snapshot.
+   *
+   * Args:
+   *   directory: directory to enumerate recursively.
+   *
+   * Returns:
+   *   void: adds relative path digests to the enclosing snapshot.
+   */
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === '.git') continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(path);
+      } else if (entry.isFile()) {
+        files.set(relative(root, path).split(sep).join('/'), createHash('sha256').update(readFileSync(path)).digest('hex'));
+      } else if (entry.isSymbolicLink()) {
+        files.set(relative(root, path).split(sep).join('/'), createHash('sha256').update(readlinkSync(path)).digest('hex'));
+      }
+    }
+  };
+  visit(root);
+  return files;
+}
+
+/**
+ * Runs configured pre-commit hooks twice in a disposable checkout and reports workspace writes.
+ *
+ * Args:
+ *   cwd: owner repository whose hook configuration will be copied.
+ *   env: caller environment used only to locate the hook runner.
+ *
+ * Returns:
+ *   { status, detail }: advisory hook-mutation doctor result.
+ */
+function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv): { status: DoctorStatus; detail: string } {
+  const configPath = join(cwd, '.pre-commit-config.yaml');
+  if (!existsSync(configPath)) {
+    return { status: 'warn', detail: 'no .pre-commit-config.yaml; hook mutation behavior was not checked' };
+  }
+  let hookIds: string[] = [];
+  try {
+    const config = parseYaml(readFileSync(configPath, 'utf8')) as { repos?: unknown };
+    const repos = Array.isArray(config?.repos) ? config.repos : [];
+    hookIds = repos.flatMap((repo) => {
+      if (typeof repo !== 'object' || repo === null || !('hooks' in repo) || !Array.isArray(repo.hooks)) return [];
+      return repo.hooks.flatMap((hook: unknown) =>
+        typeof hook === 'object' && hook !== null && 'id' in hook && typeof hook.id === 'string'
+          ? [hook.id]
+          : [],
+      );
+    });
+  } catch (error) {
+    return { status: 'warn', detail: `pre-commit configuration could not be parsed: ${(error as Error).message}` };
+  }
+
+  const scratchRoot = mkdtempSync(join(tmpdir(), 'gateforge-hook-doctor-'));
+  const checkout = join(scratchRoot, 'checkout');
+  const excluded = new Set(['.git', 'node_modules', 'dist', 'coverage', '.venv']);
+  const pathEnv = env['PATH'] ?? process.env['PATH'] ?? '';
+  const safeEnv: NodeJS.ProcessEnv = {
+    PATH: pathEnv,
+    HOME: scratchRoot,
+    TMPDIR: scratchRoot,
+    LANG: env['LANG'] ?? 'C.UTF-8',
+    PRE_COMMIT_HOME: join(scratchRoot, 'cache'),
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+  try {
+    cpSync(cwd, checkout, {
+      recursive: true,
+      filter: (source) => {
+        const path = relative(cwd, source);
+        if (path === '') return true;
+        if (path.split(sep).some((segment) => excluded.has(segment))) return false;
+        try {
+          return !lstatSync(source).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    for (const args of [
+      ['init', '--quiet'],
+      ['add', '--all'],
+      ['-c', 'user.name=Gateforge Doctor', '-c', 'user.email=doctor@localhost', 'commit', '--quiet', '-m', 'hook doctor snapshot'],
+    ]) {
+      const initialized = spawnSync('git', args, { cwd: checkout, env: safeEnv, encoding: 'utf8' });
+      if (initialized.error !== undefined || initialized.status !== 0) {
+        return { status: 'warn', detail: `isolated hook checkout could not be prepared: ${(initialized.stderr ?? initialized.error?.message ?? '').trim()}` };
+      }
+    }
+    const mutations = new Set<string>();
+    const failures: string[] = [];
+    for (let pass = 0; pass < 2; pass += 1) {
+      const before = snapshotHookWorkspace(checkout);
+      const result = spawnSync('pre-commit', ['run', '--all-files'], {
+        cwd: checkout,
+        env: safeEnv,
+        encoding: 'utf8',
+        timeout: 120_000,
+        maxBuffer: 5 * 1024 * 1024,
+      });
+      if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+        return { status: 'warn', detail: 'pre-commit is unavailable; hook mutation behavior was not checked' };
+      }
+      const after = snapshotHookWorkspace(checkout);
+      for (const path of new Set([...before.keys(), ...after.keys()])) {
+        if (before.get(path) !== after.get(path)) mutations.add(path);
+      }
+      if (result.error !== undefined || result.status !== 0) {
+        failures.push(`run ${pass + 1}: ${(result.stderr || result.stdout || result.error?.message || `exit ${String(result.status)}`).trim()}`);
+      }
+    }
+    if (mutations.size > 0) {
+      const recommendation =
+        hookIds[0] === 'gateforge-check'
+          ? ''
+          : '; put gateforge-check first so later file-mutating hooks cannot invalidate its receipt';
+      return {
+        status: 'warn',
+        detail: `pre-commit hooks modified workspace files on repeated runs: ${[...mutations].sort().join(', ')}${recommendation}`,
+      };
+    }
+    if (failures.length > 0) {
+      return { status: 'warn', detail: `pre-commit hooks did not complete cleanly twice: ${failures.join('; ')}` };
+    }
+    return { status: 'ok', detail: 'pre-commit hooks ran twice without workspace file mutations' };
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -364,6 +524,8 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     status: hook.verifyOk ? 'ok' : hook.marker ? 'fail' : 'warn',
     detail: hook.detail,
   });
+  const hookMutation = precommitMutationCheck(io.cwd, io.env);
+  checks.push({ id: 'hook-mutation', ...hookMutation });
   const ciWired = hasWiredCi(io.cwd);
   checks.push({
     id: 'ci',

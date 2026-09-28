@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { captureServiceLogs, probeHealth, runHarnessSetup, runHarnessTeardown, runPreflightCommands } from '../src/run-reliability.js';
+import { captureServiceLogs, postRunHealthNotices, probeHealth, runHarnessSetup, runHarnessTeardown, runPreflightCommands } from '../src/run-reliability.js';
 
 const roots: string[] = [];
 
@@ -56,6 +56,18 @@ describe('run reliability preflight and health', () => {
     );
     expect(result).toMatchObject({ name: 'fixture-startup', healthy: false });
     expect(result?.reason).toContain('pattern');
+  });
+  it('labels every failed test when a fixture is unhealthy at run end', () => {
+    expect(postRunHealthNotices(
+      { name: 'database', healthy: false, reason: 'TCP connection failed for 127.0.0.1:5432' },
+      [
+        { file: 'tests/accounts.spec.ts', titlePath: ['accounts', 'creates row'] },
+        { file: 'tests/orders.spec.ts', titlePath: ['orders', 'loads row'] },
+      ],
+    )).toEqual([
+      'tests/accounts.spec.ts > accounts > creates row: fixture database was down at end of run: TCP connection failed for 127.0.0.1:5432',
+      'tests/orders.spec.ts > orders > loads row: fixture database was down at end of run: TCP connection failed for 127.0.0.1:5432',
+    ]);
   });
 
   it('stops at a failing seed with its last output lines and permits teardown', async () => {

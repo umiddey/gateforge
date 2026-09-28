@@ -55,7 +55,7 @@
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
@@ -179,7 +179,7 @@ import {
   VERSION,
 } from './common.js';
 import { resolveVerifierKeyring, type VerifierKeyring } from '../verifier-keys.js';
-import { startHostLoadSampler, type HostLoadCollector } from '../host-load.js';
+import { hostLoadFailureNotices, startHostLoadSampler, type HostLoadCollector, type HostLoadSample, type HostLoadTestTiming } from '../host-load.js';
 import {
   captureServiceLogs,
   runHarnessSetup,
@@ -861,6 +861,10 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   const startedAtMs = Date.now();
   const historyStateDir = resolveStateDir(io.cwd, options.out);
   pruneRunHistory(join(historyStateDir, 'history'), config.history?.retentionDays);
+  const diagnosticsDir = join(historyStateDir, 'diagnostics');
+  mkdirSync(diagnosticsDir, { recursive: true });
+  writeFileSync(join(diagnosticsDir, 'adapter-timing.jsonl'), '', 'utf8');
+  writeFileSync(join(diagnosticsDir, 'test-timing.jsonl'), '', 'utf8');
   const setupFailure = await runHarnessSetup(config.harness, io.cwd, io.env);
   if (setupFailure !== null) {
     writeLine(
@@ -889,6 +893,30 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let teardownFailure: HarnessFailure | null = null;
   try {
     runCode = await runSupervisedTestGatesInner(io, options);
+    if (config.diagnostics?.hostLoad === true) {
+      const loadPath = join(diagnosticsDir, 'host-load.json');
+      const timingPath = join(diagnosticsDir, 'test-timing.jsonl');
+      if (existsSync(loadPath) && existsSync(timingPath)) {
+        try {
+          const load = JSON.parse(readFileSync(loadPath, 'utf8')) as { samples: HostLoadSample[] };
+          const tests = readFileSync(timingPath, 'utf8')
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .flatMap((line) => {
+              try {
+                return [JSON.parse(line) as HostLoadTestTiming];
+              } catch {
+                return [];
+              }
+            });
+          for (const notice of hostLoadFailureNotices(load.samples, tests)) {
+            writeLine(io.stderr, notice);
+          }
+        } catch (error) {
+          writeLine(io.stderr, `warning: host-load failure annotations could not be read: ${(error as Error).message}`);
+        }
+      }
+    }
   } finally {
     if (runCode !== 0) {
       try {

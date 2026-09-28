@@ -215,6 +215,25 @@ export async function probeHealth(
   return null;
 }
 
+/**
+ * Formats the advisory for failed tests when a fixture is unhealthy at run end.
+ *
+ * Args:
+ *   failure: post-run fixture health result.
+ *   failedTests: failed test identities from the trusted execution record.
+ *
+ * Returns:
+ *   string[]: one hint per failed test, or a run-level hint when none failed.
+ */
+export function postRunHealthNotices(
+  failure: HealthFailure,
+  failedTests: readonly { file: string; titlePath: readonly string[] }[],
+): string[] {
+  const message = `fixture ${failure.name} was down at end of run: ${failure.reason}`;
+  if (failedTests.length === 0) return [message];
+  return failedTests.map((test) => `${test.file} > ${test.titlePath.join(' > ')}: ${message}`);
+}
+
 /** Writes a service-log tail artifact using the declared log snippets.
  *
  * Args:
