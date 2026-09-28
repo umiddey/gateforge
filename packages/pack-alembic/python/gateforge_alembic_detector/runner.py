@@ -393,7 +393,8 @@ def run(payload: dict[str, Any]) -> dict[str, Any]:
             cause = "MIGRATION_SCRATCH_UNSAFE"
         elif "target database is not up to date" in lowered or "new upgrade operations" in lowered:
             cause = "MIGRATION_DRIFT"
-        return _fail(cause, text_err.splitlines()[-1][:500])
+        details = [line.strip() for line in text_err.splitlines() if line.strip()]
+        return _fail(cause, (details[-1] if details else type(err).__name__)[:500])
 
 
 def main() -> int:
