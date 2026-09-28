@@ -168,8 +168,11 @@ function candidateTreeMismatchSummary(
 
   let postSealHint = '';
   try {
+    // Filesystem mtimes advance in coarse clock ticks (milliseconds), so a
+    // quick edit right after sealing can carry the receipt's exact mtime;
+    // a tie therefore counts as "after the seal".
     const receiptTime = lstatSync(join(stateDir, 'receipt.json')).mtimeMs;
-    const allChangedAfterSeal = changes.every(({ path }) => lstatSync(join(workspace, path)).mtimeMs > receiptTime);
+    const allChangedAfterSeal = changes.every(({ path }) => lstatSync(join(workspace, path)).mtimeMs >= receiptTime);
     if (allChangedAfterSeal) {
       postSealHint =
         ' these paths changed after the run was sealed — often another pre-commit hook or a build step; ' +

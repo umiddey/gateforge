@@ -7,7 +7,7 @@
  * integrity check, failure-after-evidence blocking a later check, and
  * exact cache reuse on identical authenticated inputs only.
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -502,6 +502,28 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
       expect(result.code).toBe(1);
       expect(result.stdout).toContain('changed "ignored-after-seal.env"');
       expect(result.stdout).toContain('ignored by git but part of the tested tree');
+      expect(result.stdout).toContain('these paths changed after the run was sealed');
+    });
+  });
+
+  it('still names post-seal changes when the edit lands in the same filesystem timestamp tick as the seal', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      repo.writeFiles({
+        '.gitignore': 'ignored-after-seal.env\n',
+        'ignored-after-seal.env': 'before the witnessed run\n',
+      });
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest);
+      repo.writeFiles({ 'ignored-after-seal.env': 'changed after the witnessed run\n' });
+      // Coarse filesystem clocks give the seal and a quick follow-up edit
+      // the SAME mtime; pin both to one whole second to make that exact.
+      const sameTick = Math.floor(statSync(repo.path('.gateforge/test-gates/receipt.json')).mtimeMs / 1000);
+      utimesSync(repo.path('.gateforge/test-gates/receipt.json'), sameTick, sameTick);
+      utimesSync(repo.path('ignored-after-seal.env'), sameTick, sameTick);
+
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
       expect(result.stdout).toContain('these paths changed after the run was sealed');
     });
   });
