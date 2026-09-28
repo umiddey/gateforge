@@ -339,7 +339,7 @@ volatileFields:
 function configTemplate(
   languages: readonly string[],
   pluginIds: readonly string[],
-  options: { strictE2E?: boolean; enforcement?: boolean } = {},
+  options: { strictE2E?: boolean; enforcement?: boolean; historyRetentionDays?: number | 'off' } = {},
 ): string {
   const enforcementBlock =
     options.enforcement === true
@@ -352,6 +352,10 @@ enforcement:
   receiptStage: pre-push
 `
       : '';
+  const historyBlock =
+    options.historyRetentionDays === undefined
+      ? ''
+      : `history:\n  retentionDays: ${String(options.historyRetentionDays)}\n`;
   return `\
 # gateforge project configuration (schemaVersion 1)
 schemaVersion: 1
@@ -387,7 +391,7 @@ witness:
   maxDurationSeconds: 5
 clock:
   mode: system
-${enforcementBlock}\
+${historyBlock}${enforcementBlock}\
 `;
 }
 
@@ -553,6 +557,29 @@ async function resolveBlocking(io: Io, options: Readonly<Record<string, unknown>
   try {
     const answer = (await rl.question('Enforce gateforge as a blocking gate (pre-commit + CI wiring)? [y/N] ')).trim().toLowerCase();
     return answer === 'y' || answer === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
+/** Asks how long to retain supervised run history in a new interactive setup.
+ *
+ * Args:
+ *   io: process context used for the prompt and informational output.
+ *
+ * Returns:
+ *   Promise<number | 'off' | undefined>: selected retention; undefined leaves the feature off.
+ */
+async function resolveHistoryRetention(io: Io): Promise<number | 'off' | undefined> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question('Keep supervised run history? [14 days/off] (default 14): ')).trim().toLowerCase();
+    if (answer === '') return 14;
+    if (answer === 'off') return 'off';
+    const days = Number(answer);
+    if (Number.isInteger(days) && days >= 1 && days <= 90) return days;
+    throw new UsageError("init: history retention must be an integer from 1 to 90, or 'off'");
   } finally {
     rl.close();
   }
@@ -891,6 +918,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   }
 
   const cwd = io.cwd;
+  const historyRetentionDays = existsSync(join(cwd, '.gateforge.yml')) ? undefined : await resolveHistoryRetention(io);
   const languages = scan.languages;
   const pluginIds = recommended;
   const configOptions = {
@@ -900,6 +928,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       options['blocking'] === true ||
       options['pre-commit'] === true ||
       (options['witnessed'] === 'staged' || options['witnessed'] === 'full'),
+    historyRetentionDays,
   };
   const generatedDraftConfig = (): ReturnType<typeof loadConfig> =>
     parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });

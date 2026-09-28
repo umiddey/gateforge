@@ -121,6 +121,14 @@ prepare:
   command: npm ci --offline     # or pnpm/bun/uv — frozen install, build steps
   reuse: [node_modules]         # dependency dirs EXPLICITLY allowed to link from the user repo
   timeoutSeconds: 600
+  preflight:                   # optional cheap checks before prepare
+    - { name: lint, command: npm run lint, timeoutSeconds: 60 }
+health:                         # optional probes before/after the suite
+  - { name: database, tcp: '127.0.0.1:5432', timeoutSeconds: 5 }
+  - name: worker-startup
+    logAbsent:
+      command: ./tools/recent-worker-logs.sh
+      pattern: 'worker startup failed'
 services:                       # candidate-owned app/database/worker processes
   - id: app
     command: node server.js --port ${service:app:port}
@@ -139,6 +147,14 @@ Contract highlights:
   execution timeouts are bounded; stdout/stderr are captured to
   `<run-state>/runtime/<id>.log`; teardown happens on success, failure,
   timeout, and interruption (SIGINT/SIGTERM kill the whole groups).
+- `prepare.preflight` checks run in order before `prepare`; the first
+  non-zero exit blocks preparation with `PREFLIGHT_FAILED <name>` and the
+  command's last 30 output lines.
+- `health` supports one `tcp`, `http`, `command`, or `logAbsent` probe per
+  entry. `logAbsent` runs its declared log command after startup and blocks
+  when the configured regex is found. A failed startup probe blocks with
+  `FIXTURE_UNHEALTHY <name>`; the post-run probe is advisory and does not
+  change test verdicts. HTTPS uses normal certificate verification.
 - Every `prepare.reuse` tree is constrained to a normalized repository-relative
   path. Its reachable dependency bytes are hashed into the authenticated
   input identity, so changing an ignored reused dependency invalidates the
@@ -153,6 +169,43 @@ Contract highlights:
 - ABSENT document = no bridge, no services (fail closed): discovery that
   needs installed dependencies blocks honestly instead of silently reusing
   the worktree's environment.
+
+## Harness and run history
+
+The optional `.gateforge.yml` `harness` section declares `up`, `reset`,
+`seed`, `health`, and `down` shell commands. Supervised runs invoke configured
+setup commands in that order before the suite; the first failure blocks the
+suite, prints its last 30 output lines, and still attempts `down`. Gateforge
+executes these commands but does not manage containers or other infrastructure.
+Absent `harness` preserves current behavior.
+
+```yaml
+harness:
+  up: ./tools/test-up.sh
+  reset: ./tools/test-reset.sh
+  seed: ./tools/test-seed.sh
+  health: ./tools/test-health.sh
+  down: ./tools/test-down.sh
+  serviceLogs:
+    command: docker compose logs --no-color --tail ${lines} ${service}
+    services: [database, worker]
+    lines: 100
+```
+
+On a failed supervised run, `serviceLogs` runs the declared log command for
+each service and saves the configured tail to
+`<run-state>/diagnostics/service-logs.txt`. Log capture is advisory and does
+not change test verdicts.
+
+Each `verifyPersistence` adapter call is timed in
+`<run-state>/diagnostics/adapter-timing.jsonl`; calls over two seconds also
+print a warning. The diagnostic does not alter the receipt or verdict.
+
+Run history is opt-in through `.gateforge.yml` `history`; when configured,
+retention defaults to 14 days and is capped at 90. Set `retentionDays: off`
+to disable it. History is stored beneath the ignored test-gates state and is
+not receipt input. Query it with `gateforge history [--test TEXT] [--failed]
+[--since ISO-8601]`.
 
 ## Existing-test reuse (`gateforge tests`)
 
@@ -237,6 +290,7 @@ diagnostics:
       argv: [python, -m, pytest]
       testPaths: [tests]
       timeoutMs: 600000
+  hostLoad: true              # opt-in: sample load average, CPU count, and disk space
 ```
 
 `gateforge tests diagnose` runs each configured suite once against the
@@ -250,6 +304,10 @@ and are never merged into E2E pass counts — 100 passing pytest tests do not
 clear one missing browser obligation. When the supervised run executes the
 same suites, their results are displayed separately without changing the E2E
 exit decision.
+
+When enabled, the supervised run writes `diagnostics/host-load.json` at start,
+every 30 seconds, and at completion. Free disk below 5% at start emits a
+warning; load and disk data are diagnostic only.
 
 ## Enforcement
 

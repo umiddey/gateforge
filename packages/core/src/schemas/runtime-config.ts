@@ -141,9 +141,30 @@ export const RuntimeConfigSchema = z
          */
         reuse: z.array(RuntimeReusePathSchema).optional(),
         timeoutSeconds: z.number().int().min(1).max(3600).optional(),
+        preflight: z.array(z.object({
+          name: z.string().min(1),
+          command: z.string().min(1),
+          timeoutSeconds: z.number().int().min(1).max(3600).optional(),
+        }).strict()).optional(),
       })
       .strict()
       .optional(),
+    health: z.array(z.object({
+      name: z.string().min(1),
+      tcp: z.string().min(1).optional(),
+      http: z.string().url().optional(),
+      command: z.string().min(1).optional(),
+      logAbsent: z.object({
+        command: z.string().min(1),
+        pattern: z.string().min(1),
+      }).strict().optional(),
+      tls: z.boolean().optional(),
+      timeoutSeconds: z.number().int().min(1).max(3600).optional(),
+    }).strict().superRefine((probe, ctx) => {
+      const kinds = [probe.tcp !== undefined, probe.http !== undefined, probe.command !== undefined, probe.logAbsent !== undefined].filter(Boolean).length;
+      if (kinds !== 1) ctx.addIssue({ code: 'custom', path: ['tcp'], message: "health requires exactly one of 'tcp', 'http', 'command', or 'logAbsent'" });
+      if (probe.tls === true && probe.http === undefined) ctx.addIssue({ code: 'custom', path: ['tls'], message: "'tls' requires an 'http' health probe" });
+    })).optional(),
     /** Candidate-owned services to start, probe, and clean up. */
     services: z.array(RuntimeServiceSchema).optional(),
     /** Operator environment variable names allowed through to commands/services. */

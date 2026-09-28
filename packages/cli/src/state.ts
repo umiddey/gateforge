@@ -147,6 +147,8 @@ export interface TestGatesEnv {
   GATEFORGE_OBLIGATIONS: string;
   /** Witness-service URL; null until G6 wires the loopback service. */
   GATEFORGE_WITNESS_URL: string | null;
+  /** Frontend build mode when exposed by standard build environment variables. */
+  frontendBuildMode?: string;
 }
 
 /** Reads an optional JSON array state file; absent → [], invalid → error. */
@@ -237,13 +239,19 @@ export function writeEnv(
   manifest: RunManifest,
   witnessUrl: string | null,
   runToken?: string,
+  operatorEnv: NodeJS.ProcessEnv = process.env,
 ): TestGatesEnv {
+  const configuredBuildMode =
+    operatorEnv['VITE_MODE']?.trim() || operatorEnv['NODE_ENV']?.trim();
   const record: TestGatesEnv = {
     GATEFORGE_RUN_ID: manifest.runId,
     GATEFORGE_RUN_TOKEN: runToken ?? randomUUID(),
     GATEFORGE_STATE_DIR: stateDir,
     GATEFORGE_OBLIGATIONS: join(stateDir, 'obligations.json'),
     GATEFORGE_WITNESS_URL: witnessUrl,
+    ...(configuredBuildMode === undefined || configuredBuildMode.length === 0
+      ? {}
+      : { frontendBuildMode: configuredBuildMode }),
   };
   writeStateFile(stateDir, 'env.json', record as unknown as JsonValue);
   return record;

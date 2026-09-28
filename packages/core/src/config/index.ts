@@ -202,6 +202,8 @@ export const DiagnosticsConfigSchema = z
   .object({
     /** Explicitly registered diagnostic suites. */
     suites: z.array(DiagnosticSuiteSchema),
+    /** Opt-in host load and disk sampling for supervised runs. */
+    hostLoad: z.boolean().optional(),
   })
   .strict()
   .superRefine((diagnostics, ctx) => {
@@ -340,6 +342,29 @@ export const GateforgeConfigSchema = z
      * authenticated input snapshot.
      */
     runtime: z.string().min(1).optional(),
+    /** Owner-declared test environment lifecycle commands; absent means off. */
+    harness: z
+      .object({
+        up: z.string().min(1).optional(),
+        reset: z.string().min(1).optional(),
+        seed: z.string().min(1).optional(),
+        health: z.string().min(1).optional(),
+        down: z.string().min(1).optional(),
+        serviceLogs: z.object({
+          command: z.string().min(1),
+          services: z.array(z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/)).min(1),
+          lines: z.number().int().min(1).max(1000).default(100),
+        }).strict().optional(),
+      })
+      .strict()
+      .optional(),
+    /** Local run-history retention; absent or 'off' disables history. */
+    history: z
+      .object({
+        retentionDays: z.union([z.literal('off'), z.number().int().min(1).max(90)]).default(14),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

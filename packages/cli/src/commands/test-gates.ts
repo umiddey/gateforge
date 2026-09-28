@@ -69,6 +69,7 @@ import {
   engineBundleDigestOf,
   EvidenceRecordSchema,
   GateReceiptSchema,
+  ExecutionResultSchema,
   executionBoundaryDigestOf,
   LOCAL_UNISOLATED_BOUNDARY,
   isWitnessedRecord,
@@ -178,6 +179,14 @@ import {
   VERSION,
 } from './common.js';
 import { resolveVerifierKeyring, type VerifierKeyring } from '../verifier-keys.js';
+import { startHostLoadSampler, type HostLoadCollector } from '../host-load.js';
+import {
+  captureServiceLogs,
+  runHarnessSetup,
+  runHarnessTeardown,
+  type HarnessFailure,
+} from '../run-reliability.js';
+import { pruneRunHistory, recordRunHistory } from '../history.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
@@ -533,7 +542,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
   // The effective-classification view (plan phase 5): derived from this
   // run's signals, for verifier-side consumers only — never engine input.
   writeClassificationsView(stateDir, pipeline.classificationsView);
-  const envRecord = writeEnv(stateDir, manifest, witnessUrl ?? null, runToken);
+  const envRecord = writeEnv(stateDir, manifest, witnessUrl ?? null, runToken, io.env);
 
   let suiteFailed = false;
   if (suite !== undefined) {
@@ -838,6 +847,103 @@ function verifiedCarryForwardParent(input: {
   }
 }
 
+/** Runs configured harness setup and teardown around one supervised suite.
+ *
+ * Args:
+ *   io: process context.
+ *   options: parsed supervised-run flags.
+ *
+ * Returns:
+ *   Promise<number>: the suite result, or 1 when harness setup/teardown fails.
+ */
+export async function runSupervisedTestGates(io: Io, options: SupervisedOptions): Promise<number> {
+  const config = loadConfigAt(io.cwd);
+  const startedAtMs = Date.now();
+  const historyStateDir = resolveStateDir(io.cwd, options.out);
+  pruneRunHistory(join(historyStateDir, 'history'), config.history?.retentionDays);
+  const setupFailure = await runHarnessSetup(config.harness, io.cwd, io.env);
+  if (setupFailure !== null) {
+    writeLine(
+      io.stderr,
+      `HARNESS_FAILED ${setupFailure.step}: command exited ${String(setupFailure.exitCode)}\n${setupFailure.output}`,
+    );
+    const teardownFailure = await runHarnessTeardown(config.harness, io.cwd, io.env);
+    if (teardownFailure !== null) {
+      writeLine(io.stderr, `HARNESS_FAILED down: command exited ${String(teardownFailure.exitCode)}\n${teardownFailure.output}`);
+    }
+    recordRunHistory(
+      historyStateDir,
+      config.history?.retentionDays,
+      {
+        runId: randomUUID(),
+        finishedAt: new Date().toISOString(),
+        status: 'failed',
+        testCount: 0,
+        failedCount: 0,
+      },
+      [],
+    );
+    return 1;
+  }
+  let runCode = 1;
+  let teardownFailure: HarnessFailure | null = null;
+  try {
+    runCode = await runSupervisedTestGatesInner(io, options);
+  } finally {
+    if (runCode !== 0) {
+      try {
+        const artifact = await captureServiceLogs(
+          config.harness?.serviceLogs,
+          historyStateDir,
+          io.cwd,
+          io.env,
+        );
+        if (artifact !== null) writeLine(io.stderr, `service logs saved: ${artifact}`);
+      } catch (error) {
+        writeLine(io.stderr, `warning: service logs could not be captured: ${(error as Error).message}`);
+      }
+    }
+    teardownFailure = await runHarnessTeardown(config.harness, io.cwd, io.env);
+    if (teardownFailure !== null) {
+      writeLine(io.stderr, `HARNESS_FAILED down: command exited ${String(teardownFailure.exitCode)}\n${teardownFailure.output}`);
+    }
+  }
+  const effectiveRunCode = teardownFailure !== null && runCode === 0 ? 1 : runCode;
+  let executionHistory: ExecutionResult | null = null;
+  const executionPath = join(historyStateDir, 'execution-result.json');
+  if (existsSync(executionPath)) {
+    try {
+      const parsed = ExecutionResultSchema.safeParse(JSON.parse(readFileSync(executionPath, 'utf8')));
+      if (parsed.success && Date.parse(parsed.data.startedAt) >= startedAtMs) executionHistory = parsed.data;
+    } catch (error) {
+      writeLine(io.stderr, `warning: run history could not read execution outcomes: ${(error as Error).message}`);
+    }
+  }
+  const latestOutcomes = new Map<string, ExecutionResult['outcomes'][number]>();
+  for (const outcome of executionHistory?.outcomes ?? []) {
+    const previous = latestOutcomes.get(outcome.logicalKey);
+    if (previous === undefined || outcome.attempt >= previous.attempt) latestOutcomes.set(outcome.logicalKey, outcome);
+  }
+  const historyTests = [...latestOutcomes.values()].map((outcome) => ({
+    logicalKey: outcome.logicalKey,
+    status: outcome.status,
+  }));
+  const failedCount = historyTests.filter((test) => test.status === 'failed').length;
+  recordRunHistory(
+    historyStateDir,
+    config.history?.retentionDays,
+    {
+      runId: executionHistory?.runId ?? randomUUID(),
+      finishedAt: new Date().toISOString(),
+      status: effectiveRunCode === 0 ? 'passed' : 'failed',
+      testCount: executionHistory?.planned.length ?? 0,
+      failedCount,
+    },
+    historyTests,
+  );
+  return effectiveRunCode;
+}
+
 /**
  * The supervised `--changed` path (plan Phase 4, ADR 0005 D2/D3):
  * resolve catalog + mappings → fix the expected set → prepare the
@@ -859,7 +965,7 @@ function verifiedCarryForwardParent(input: {
  *   supervision/evidence failure, 2 config/usage.
  * @throws fail-closed errors (exit 2) from config/plugin/pipeline layers.
  */
-export async function runSupervisedTestGates(io: Io, options: SupervisedOptions): Promise<number> {
+async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): Promise<number> {
   const { out, format, witnessUrl, runTimeoutMs } = options;
   const runtimeReuseDigest = options.runtimeReuseDigest;
   const runtimeReuseMounts = options.runtimeReuseMounts ?? [];
@@ -1570,7 +1676,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   writeObligations(stateDir, stateObligations(pipeline.policy.obligations, pipeline.graph));
   writeHttpRoutesView(stateDir, httpRoutes);
   writeClassificationsView(stateDir, pipeline.classificationsView);
-  const envRecord = writeEnv(stateDir, manifest, effectiveWitnessUrl ?? null, runToken);
+  const envRecord = writeEnv(stateDir, manifest, effectiveWitnessUrl ?? null, runToken, io.env);
   writeClaimInjections(stateDir, injections);
 
   // 4.5 Supervisor credentials are REQUIRED in supervised mode (review
@@ -1738,6 +1844,10 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let witnessedBlocking: BlockingEntry[] = [];
   const executionStartedAt = performance.now();
   let executionDurationMs: number | null = null;
+  const hostLoadCollector: HostLoadCollector | null =
+    config.diagnostics?.hostLoad === true
+      ? startHostLoadSampler(stateDir, (message) => writeLine(io.stderr, `warning: ${message}`))
+      : null;
   try {
     // 6.5 WITNESSED pytest participants run INSIDE the supervised window
     // (server-witnessed persistence channel, GAP 2 fix): the drain is
@@ -1812,6 +1922,11 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       // witness appends its attested manifest envelope at shutdown, so
       // the durable evidence channel is sealed before evaluation.
       await stopWitnessProcess(spawnedWitness);
+    }
+    try {
+      hostLoadCollector?.stop();
+    } catch (error) {
+      writeLine(io.stderr, `warning: host-load diagnostics could not be written: ${(error as Error).message}`);
     }
     executionDurationMs = Math.max(0, Math.round(performance.now() - executionStartedAt));
   }

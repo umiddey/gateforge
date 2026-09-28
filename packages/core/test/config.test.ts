@@ -6,6 +6,7 @@ import {
   GateforgeConfigError,
   loadConfig,
   parseConfig,
+  RuntimeConfigSchema,
 } from '../src/index.js';
 import { parse as parseYaml } from 'yaml';
 
@@ -100,6 +101,45 @@ clock:
     const config = parseConfig({ ...validConfig, behaviorPolicy: '.gateforge/behavior.yml' });
     expect(config.behaviorPolicy).toBe('.gateforge/behavior.yml');
     expect(() => parseConfig({ ...validConfig, behaviorPolicy: '' })).toThrow(GateforgeConfigError);
+  });
+  it('accepts optional harness commands and bounded history retention', () => {
+    const config = parseConfig({
+      ...validConfig,
+      harness: {
+        up: 'tools/up.sh',
+        reset: 'tools/reset.sh',
+        seed: 'tools/seed.sh',
+        health: 'tools/health.sh',
+        down: 'tools/down.sh',
+        serviceLogs: { command: 'docker compose logs --tail ${lines} ${service}', services: ['db', 'worker'] },
+      },
+      history: {},
+    });
+    expect(config.harness?.seed).toBe('tools/seed.sh');
+    expect(config.history?.retentionDays).toBe(14);
+  });
+
+  it('validates absent-log health probes as one runtime probe kind', () => {
+    const runtime = RuntimeConfigSchema.parse({
+      schemaVersion: 1,
+      health: [{
+        name: 'worker-startup',
+        logAbsent: { command: './tools/recent-worker-logs.sh', pattern: 'worker startup failed' },
+      }],
+    });
+    expect(runtime.health?.[0]?.logAbsent?.pattern).toBe('worker startup failed');
+    expect(RuntimeConfigSchema.safeParse({
+      schemaVersion: 1,
+      health: [{
+        name: 'ambiguous',
+        tcp: '127.0.0.1:5432',
+        logAbsent: { command: './tools/logs.sh', pattern: 'failed' },
+      }],
+    }).success).toBe(false);
+  });
+
+  it('rejects history retention above ninety days', () => {
+    expect(() => parseConfig({ ...validConfig, history: { retentionDays: 91 } })).toThrow(GateforgeConfigError);
   });
 
   it('rejects schemaVersion drift with the never-migrated message', () => {

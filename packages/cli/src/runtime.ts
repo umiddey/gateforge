@@ -56,6 +56,8 @@ import {
   type RuntimeReuseMount,
   validateRuntimeReuseMounts,
 } from './runtime-reuse.js';
+import { runPreflightCommands } from './run-reliability.js';
+import { probeHealth } from './run-reliability.js';
 
 /** Operator env vars always available to preparation commands and services. */
 const RUNTIME_ENV_BASE = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'SHELL', 'TMPDIR'] as const;
@@ -222,7 +224,7 @@ export function loadRuntimeConfigAt(cwd: string, runtimePath: string | undefined
  * Returns:
  *   NodeJS.ProcessEnv: the child environment.
  */
-function runtimeChildEnv(
+export function runtimeChildEnv(
   allowlist: readonly string[],
   ioEnv: NodeJS.ProcessEnv,
   injected: Record<string, string>,
@@ -663,6 +665,17 @@ export async function prepareRuntime(
   const reuseMounts = (runtime.prepare?.reuse ?? [])
     .map((path) => runtimeReuseMount(sourceRoot, checkoutRoot, path))
     .filter((mount): mount is RuntimeReuseMount => mount !== null);
+  const preflightFailure = await runPreflightCommands(
+    runtime.prepare?.preflight ?? [],
+    checkoutRoot,
+    runtimeChildEnv(runtime.envAllowlist ?? [], io.env, {}),
+  );
+  if (preflightFailure !== null) {
+    throw new RuntimeBlockError(
+      'RUNTIME_PREPARATION_FAILED',
+      `PREFLIGHT_FAILED ${preflightFailure.name}: command failed (exit ${String(preflightFailure.exitCode)})\n${preflightFailure.output}`,
+    );
+  }
   assertCandidateSymlinksSafe(checkoutRoot, reuseMounts);
   await runPrepareCommand(checkoutRoot, runtime, io, join(logDir, 'prepare.log'));
   // Bind the bytes that the witnessed runtime will actually execute. A
@@ -777,6 +790,17 @@ export async function startRuntimeServices(
         targetBaseUrl = baseUrl;
         targetFingerprint = substitute(service.fingerprint as string, ports);
       }
+    }
+    const healthFailure = await probeHealth(
+      runtime.health ?? [],
+      checkoutRoot,
+      runtimeChildEnv(runtime.envAllowlist ?? [], io.env, {}),
+    );
+    if (healthFailure !== null) {
+      throw new RuntimeBlockError(
+        'RUNTIME_READINESS_FAILED',
+        `FIXTURE_UNHEALTHY ${healthFailure.name}: ${healthFailure.reason}`,
+      );
     }
     return { targetBaseUrl, targetFingerprint, stop };
   } catch (error) {

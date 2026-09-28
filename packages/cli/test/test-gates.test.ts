@@ -43,7 +43,7 @@ describe('gateforge test-gates', () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       repo.commitFiles({}, 'base');
-      const { code, stdout } = await runCli(repo, ['test-gates', '--format', 'json']);
+      const { code, stdout } = await runCli(repo, ['test-gates', '--format', 'json'], { NODE_ENV: 'development' });
       expect(code).toBe(1); // no claims → obligations missing
 
       const stateDir = repo.path('.gateforge/test-gates');
@@ -83,6 +83,7 @@ describe('gateforge test-gates', () => {
       expect(env['GATEFORGE_STATE_DIR']).toBe(stateDir);
       expect(env['GATEFORGE_OBLIGATIONS']).toBe(join(stateDir, 'obligations.json'));
       expect(env['GATEFORGE_WITNESS_URL']).toBeNull();
+      expect(env['frontendBuildMode']).toBe('development');
 
       // report.json is the canonical json-format report.
       const report = JSON.parse(readFileSync(join(stateDir, 'report.json'), 'utf8')) as {
@@ -91,6 +92,24 @@ describe('gateforge test-gates', () => {
       expect(report.summary.blocking).toBe(2);
       // stdout carried the passed format (json).
       expect(stdout).toContain('"schemaVersion":1');
+    });
+  });
+
+  it('blocks before the suite when harness seed fails and still runs teardown', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const teardownMarker = repo.path('teardown-ran');
+      repo.writeFiles({
+        '.gateforge.yml': `${configYml()}\nharness:\n  up: 'exit 0'\n  reset: 'exit 0'\n  seed: "printf 'seed failed visibly\\\\n'; exit 7"\n  health: 'exit 99'\n  down: ${JSON.stringify(`touch ${teardownMarker}`)}\n`,
+      });
+      repo.commitFiles({}, 'base');
+
+      const result = await runCli(repo, ['test-gates', '--changed', '--format', 'json']);
+      expect(result.code).toBe(1);
+      expect(result.stderr, JSON.stringify(result)).toContain('HARNESS_FAILED seed');
+      expect(result.stderr, JSON.stringify(result)).toContain('seed failed visibly');
+      expect(existsSync(teardownMarker)).toBe(true);
+      expect(existsSync(repo.path('.gateforge/test-gates/manifest.json'))).toBe(false);
     });
   });
 

@@ -169,6 +169,22 @@ For an authoritative slice, run `gateforge test-gates --changed --scope changed`
 
 **Example:** Use a unique name such as `profile-${randomToken}`, wait for the form's data request, then enter only adapter-supported fields.
 
+## Maintain test data with features
+
+Keep shared seed data small: logins, one base tenant, and required roles. Store its seed script in the repository and configure it as `harness.seed`, which runs after migrations. Avoid large SQL dumps that must be rewritten for every schema change.
+
+Tests own the rest of their data. Each test creates only the rows it needs and uses a unique token in names or keys; do not depend on shared rows left by another test.
+
+Carry each feature, its tests, and any base-seed change together in the same merge request. This keeps seed maintenance alongside the schema and behavior it supports.
+
+Local runs and CI should invoke the same configured `harness` commands and seed script. Because configured harness scripts are part of the input snapshot, changing one invalidates prior evidence.
+
+## Run cheap checks before the suite
+
+Put fast checks such as formatting, lint, and import checks in `prepare.preflight`. They run before preparation and the suite. Prefer checks that do not write to the workspace; any input drift still prevents a reliable receipt.
+
+Run suite containers as the invoking user, avoid swapping mounted `.env` files or creating temporary workspace symlinks during the run, and warm or disable caches before sealing evidence.
+
 ## Reusable run script
 
 Replace the reset and seed comments with durable commands for your disposable stack. The seed must come from this checkout. `test-gates` starts and supervises the witness for the run.

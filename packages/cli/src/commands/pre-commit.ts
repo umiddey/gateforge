@@ -24,8 +24,10 @@ import {
   prepareRuntime,
   startRuntimeServices,
   stopRuntimeChildren,
+  runtimeChildEnv,
   type RunningRuntime,
 } from '../runtime.js';
+import { probeHealth } from '../run-reliability.js';
 import { digestRuntimeReuseMounts, type RuntimeReuseMount } from '../runtime-reuse.js';
 import {
   assertRuntimeReuseOwnerApproval,
@@ -187,6 +189,16 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
       runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
       verifierKeyring,
     });
+    if (runtimeDoc !== null && runtimeDoc.health !== undefined) {
+      const healthFailure = await probeHealth(
+        runtimeDoc.health,
+        checkoutDir,
+        runtimeChildEnv(runtimeDoc.envAllowlist ?? [], io.env, {}),
+      );
+      if (healthFailure !== null) {
+        writeLine(io.stderr, `fixture ${healthFailure.name} was down at end of run: ${healthFailure.reason}`);
+      }
+    }
 
     const checkCode =
       runCode === 0
