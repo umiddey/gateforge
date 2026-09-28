@@ -74,6 +74,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge key create|import-env|rotate|retire --file <path> --confirm` | Owner-only key ceremony. Creates an external key ring, imports an existing environment key, rotates the active key while retaining old keys, or retires an inactive key. The secret is never printed. See verifier-key trust notes. | 0/2 |
 | `gateforge pre-commit --scope staged\|full` | The witnessed commit gate: freezes the Git index, materializes it into a scratch checkout, prepares the candidate's staged runtime (`.gateforge/runtime.yml` — below), runs the supervised witness gate INSIDE that checkout (`staged`: only tests mapped to obligations affected by the staged paths, `EVIDENCE_SCOPE_INCOMPLETE` blocks an unmapped affected obligation; `full`: the complete relevant mapped suite), validates the fresh receipt against the same checkout, rechecks the original index/HEAD/MERGE_HEAD, and copies only Gateforge audit artifacts (run state incl. runtime logs) back. Runtime preparation/readiness failures are typed (`RUNTIME_PREPARATION_FAILED` / `RUNTIME_READINESS_FAILED`); child process groups are cleaned up on every exit path. Install via `gateforge init --blocking --witnessed staged\|full`. | 0/1/2 |
 | `gateforge enforcement doctor [--json]` | Honest enforcement diagnostics: config, hook presence + ACTIVATION, runner readiness, observer capability, trusted binary/policy ownership, snapshot mode, and the standard/managed boundary. Detecting a hook NEVER counts as managed protection. Diagnostic only: exit 0 whenever it runs. | 0/2 |
+| `gateforge enforce [--ci github|gitlab]` | Add blocking wiring to an initialized repository. The provider defaults to GitLab unless GitHub is the only detected CI provider; the explicit flag selects GitHub Actions or GitLab CI. | 0/2 |
 | `gateforge baseline update <fp...>` | Shrink the baseline to a strict subset (invariant 4). | 0/2 |
 | `gateforge baseline diff <before> <after>` | Compare adopted obligations by ID without printing fingerprints. | 0/2 |
 
@@ -270,10 +271,12 @@ check:
   with a foreign hook manager. The hook runs `gateforge check --staged
   --require-e2e`; a missing engine blocks (fail closed). Idempotent — an
   existing gateforge-owned hook is verified, never rewritten.
-- The same `init --blocking` run writes `.gateforge/ci/gitlab-gateforge.yml`
-  plus the `.gitlab-ci.yml` include — the SERVER-side strict gate (pinned
-  engine, `test-gates --changed` receipt seal, `check --changed
-  --require-e2e`), with the required server-side settings documented in the
+  By default, `init --blocking` writes `.gateforge/ci/gitlab-gateforge.yml`
+  plus the `.gitlab-ci.yml` include. `gateforge enforce --ci github` writes
+  `.github/workflows/gateforge.yml` instead. The generated GitHub workflow
+  installs the pinned CLI and runs `test-gates --changed`, then
+  `check --changed --require-e2e`, with its verifier key and policy pin read
+  from protected repository secrets.
   template header:
   "Pipelines must succeed" (skipped ≠ successful), protected branches
   excluding the agent role from direct pushes, and an organization-controlled

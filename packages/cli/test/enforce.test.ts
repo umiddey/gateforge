@@ -163,4 +163,16 @@ describe('gateforge enforce', () => {
       expect(existsSync(repo.path('.pre-commit-config.yaml'))).toBe(false);
     });
   });
+  it('selects the GitHub Actions template explicitly', async () => {
+    await withTempRepo({}, async (repo) => {
+      expect((await runCli(repo, ['init'])).code).toBe(0);
+      const enforced = await runCli(repo, ['enforce', '--ci', 'github']);
+      expect(enforced.code).toBe(0);
+      expect(existsSync(repo.path('.github/workflows/gateforge.yml'))).toBe(true);
+      expect(readFileSync(repo.path('.github/workflows/gateforge.yml'), 'utf8')).toContain(
+        'gateforge check --changed --require-e2e',
+      );
+      expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(false);
+    });
+  });
 });
