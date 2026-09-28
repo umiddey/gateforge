@@ -440,6 +440,51 @@ export function normalizeRepoModule(module: string): string | null {
 }
 
 /**
+ * Expands a configured Alembic versions directory into its migration files.
+ *
+ * The chain config names a DIRECTORY; the snapshot digests files, so the
+ * directory is walked and every file below it is declared instead. A
+ * missing or unreadable directory contributes nothing here — the
+ * compiler reports the broken chain itself.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *   directory: repo-relative versions directory.
+ *
+ * Returns:
+ *   string[]: repo-relative posix file paths, codepoint-sorted.
+ */
+export function migrationInputFiles(cwd: string, directory: string): string[] {
+  const prefix = directory.replace(/\\/g, '/').replace(/\/+$/, '');
+  const found: string[] = [];
+  const walk = (dir: string, segments: readonly string[]): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    entries.sort(compareStrings);
+    for (const entry of entries) {
+      const relativePath = [...segments, entry].join('/');
+      let stat;
+      try {
+        stat = lstatSync(join(dir, entry));
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory()) {
+        walk(join(dir, entry), [...segments, entry]);
+      } else {
+        found.push(relativePath);
+      }
+    }
+  };
+  walk(join(cwd, directory), []);
+  return found.map((path) => toPosix(`${prefix}/${path}`)).sort(compareStrings);
+}
+
+/**
  * Collects the DECLARED source/configuration inputs: configured scan
  * inputs (even gitignored) + explicit config/adapter/waiver/plugin/
  * manifest inputs. Only this set can trigger an unsafe `--out` overlap:
@@ -481,7 +526,7 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
       ? []
       : [
           ...config.alembic.chains.flatMap((chain) => [
-            chain.migrations,
+            ...migrationInputFiles(cwd, chain.migrations),
             chain.alembicIni ?? 'alembic.ini',
             ...chain.models,
           ]),

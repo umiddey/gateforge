@@ -56,3 +56,5 @@ Cause codes (all additive): `MIGRATION_MISSING`, `MIGRATION_LINEAGE_BROKEN`, `MI
 | failure injected right after the scratch database is created | `MIGRATION_ROUNDTRIP_FAILED`, database dropped |
 
 The suite also asserts that only the `gf_tmp_<id>` name recorded during the run is dropped: a similarly named existing database and the configured application database both survive with their data.
+
+`packages/cli/test/alembic-first-run.test.ts` proves the setup flow end to end: it copies `examples/alembic` into a fresh repository, runs `gateforge init`, writes the printed opt-in block verbatim (with the trusted admin URL filled in), and runs `check` and `next`. Without the block the run compiles no obligation at all; with it the engine witnesses the chain on a disposable database and the honest example produces no migration finding. Editing the model afterwards makes `check` and `next` report `MIGRATION_DRIFT`. It is skipped, with a printed reason, unless `GATEFORGE_ALEMBIC_TEST_ADMIN_URL` is set, and it needs `python3` to carry Alembic, SQLAlchemy, and a PostgreSQL driver because the engine runs `python3` exactly as production does.
