@@ -34,7 +34,7 @@ import { resolveRepoPath } from './pipeline.js';
 export function resolveAdoptedBaseline(
   cwd: string,
   baselinesPath: string,
-): { fingerprints: ReadonlySet<string>; classificationBlocked?: ReadonlySet<string> } | null {
+): { fingerprints: ReadonlySet<string>; classificationBlocked?: ReadonlySet<string>; adoptedAt: string } | null {
   const baselinePath = resolveRepoPath(cwd, baselinesPath);
   const adoption = loadAdoptionRecord(join(dirname(baselinePath), ADOPTION_RECORD_FILENAME));
   if (adoption === null) return null;
@@ -44,5 +44,6 @@ export function resolveAdoptedBaseline(
       adoption.classificationBlocked !== undefined
         ? new Set(adoption.classificationBlocked)
         : undefined,
+    adoptedAt: adoption.adoptedAt,
   };
 }

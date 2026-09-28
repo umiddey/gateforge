@@ -25,7 +25,7 @@ import {
   sealExecutionResult,
   SUPERVISED_INVOCATION,
 } from '../src/execution.js';
-import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
+import { computeCandidateTreeSnapshot, resolveGitDir } from '../src/candidate-tree.js';
 import {
   caseExecutionDigestOf,
   EMPTY_BEHAVIOR_CATALOG_DIGEST,
@@ -37,7 +37,7 @@ import {
 } from '@gate-forge/core';
 import { VERSION } from '../src/commands/common.js';
 import { TEST_MAP_RELATIVE } from '../src/mapping.js';
-import { resolveStateDir, writeExecutionResult, writeGateReceipt } from '../src/state.js';
+import { resolveStateDir, writeCandidateTreeEntries, writeExecutionResult, writeGateReceipt } from '../src/state.js';
 import { currentInputDigest, FIXED_AT } from './helpers.js';
 
 /** The supervised catalog row the minted complete run reports. */
@@ -202,8 +202,11 @@ export async function mintCompleteRunReceipt(
   // the engine bundle, the local boundary, and the source-tree artifact.
   const mintGitDir = resolveGitDir(repo.root, process.env);
   const stateDir = resolveStateDir(repo.root);
-  const candidateTreeId =
-    mintGitDir === null ? null : computeCandidateTreeId(mintGitDir, repo.root, process.env, stateDir, 'record');
+  const treeSnapshot =
+    mintGitDir === null
+      ? null
+      : computeCandidateTreeSnapshot(mintGitDir, repo.root, process.env, stateDir, 'record');
+  const candidateTreeId = treeSnapshot?.treeId ?? null;
   const receipt = issueGateReceipt({
     verifierKey: options.verifierKey,
     runId,
@@ -230,6 +233,7 @@ export async function mintCompleteRunReceipt(
   });
   writeExecutionResult(stateDir, sealed.result);
   writeGateReceipt(stateDir, receipt);
+  writeCandidateTreeEntries(stateDir, treeSnapshot?.entries ?? []);
   return {
     inputDigest,
     trustedPolicyDigest,

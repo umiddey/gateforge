@@ -220,6 +220,7 @@ export interface EvaluateResult {
   baselined: {
     obligations: number;
     blockingEntries: number;
+    neverWitnessed: number;
     /**
      * Blocking entries waived via the adopted classification set.
      * Undefined when the receipt carries NO classification layer at all
@@ -405,7 +406,7 @@ export function applyStrictE2E(verdicts: readonly ObligationVerdict[]): Obligati
       ...entry,
       verdict: 'missing' as const,
       reason: `strict E2E mode: ${entry.reason ?? 'waived'} — a waiver is not proof and cannot ` +
-        'authorize the change (plan §3.3); the obligation still requires its own witnessed evidence',
+        'authorize the change; the obligation still requires its own witnessed evidence',
       cause,
       nextAction: CAUSE_NEXT_ACTIONS[cause],
     };
@@ -579,6 +580,7 @@ function applyBaseline(
   baselined: {
     obligations: number;
     blockingEntries: number;
+    neverWitnessed: number;
     classificationBlocked: number | undefined;
   } | null;
 } {
@@ -594,10 +596,12 @@ function applyBaseline(
     return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
   }
   let obligations = 0;
+  let neverWitnessed = 0;
   const verdicts = run.verdicts.map((entry) => {
     if (!BLOCKING_VERDICTS.includes(entry.verdict)) return entry;
     if (!fingerprints.has(obligationFingerprint(entry.obligation))) return entry;
     obligations += 1;
+    if (entry.trustTier !== 'witnessed') neverWitnessed += 1;
     return {
       ...entry,
       verdict: 'waived' as const,
@@ -625,6 +629,7 @@ function applyBaseline(
     baselined: {
       obligations,
       blockingEntries,
+      neverWitnessed,
       classificationBlocked: classificationProvided ? waivedClassifications.size : undefined,
     },
   };

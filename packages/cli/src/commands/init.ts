@@ -75,7 +75,7 @@ export const INIT_USAGE =
 
 /** Template for the complete-behavior owner document (plan §4.1). */
 export const BEHAVIOR_TEMPLATE = `\
-# Complete-behavior owner document (plan §4.1).
+# Complete-behavior owner document.
 # Presence of this file enables the complete-behavior profile: every
 # discovered endpoint must have an approved declaration (cases or an
 # owner disposition). There is no warnOnly or silent fallback.
@@ -184,7 +184,7 @@ function sourceIncludePatterns(languages: readonly string[]): string[] {
  * action, or test produced the exchange.
  */
 export const TRANSPORT_ONLY_POLICY_EXAMPLE = `\
-# Transport-only endpoint policy (plan §8 / D1).
+# Transport-only endpoint policy.
 # Each obligation proves only that the witness observed a matching HTTP
 # exchange in the bound run ("witness observed an HTTP exchange");
 # test attribution is suite-claimed ("suite-claimed"), never proven

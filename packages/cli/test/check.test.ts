@@ -44,9 +44,11 @@ function parseReport(report: string): {
     recordIds: string[];
     policyId: string;
     fingerprint: string;
+    inScopeBecause?: string[];
   }>;
   blocking: Array<{ kind: string; detail?: string }>;
   run: { provider: string };
+  engine: { version: string; source: string; unpublished: boolean };
 } {
   return JSON.parse(report);
 }
@@ -491,8 +493,12 @@ describe('gateforge check', () => {
       expect(code).toBe(1);
       const report = parseReport(stdout);
       expect(report.run.provider).toBe('local-staged');
+      expect(report.engine.version).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(report.engine.source).toMatch(/^(registry|local path )/);
+      expect(typeof report.engine.unpublished).toBe('boolean');
       // Only the changed resource's obligation is in scope.
       expect(report.verdicts.map((v) => v.obligationId)).toEqual([OBLIGATION_ORDERS]);
+      expect(report.verdicts[0]?.inScopeBecause).toEqual(['src/orders.txt']);
       expect(report.summary.blocking).toBe(1);
 
       // The unrestricted check still sees both obligations.

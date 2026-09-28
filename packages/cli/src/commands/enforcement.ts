@@ -41,6 +41,7 @@ import { inspectCommitHook } from '../git-hooks.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { resolveStateDir } from '../state.js';
 import { describeApprovedPolicyResolution, resolveApprovedPolicyDigest } from '../trusted-policy.js';
+import { engineIdentity, type EngineIdentity } from '../engine-identity.js';
 
 export const ENFORCEMENT_USAGE = 'usage: gateforge enforcement doctor [--json]';
 
@@ -63,6 +64,8 @@ export interface DoctorReport {
   mode: 'standard' | 'managed';
   /** Whether strict E2E mode is enabled in config. */
   strictE2E: boolean;
+  /** Engine installation that produced this diagnostic. */
+  engine: EngineIdentity;
   /** Per-check results in stable id order. */
   checks: DoctorCheck[];
   /** True when no check has status `fail`. */
@@ -347,6 +350,7 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
   return {
     mode,
     strictE2E,
+    engine: engineIdentity(),
     checks: [...checks].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
     ready: checks.every((check) => check.status !== 'fail'),
   };
@@ -380,6 +384,8 @@ export async function enforcementCommand(io: Io, argv: readonly string[]): Promi
     return 0;
   }
   writeLine(io.stdout, `gateforge enforcement doctor (mode ${report.mode}, strictE2E ${String(report.strictE2E)})`);
+  writeLine(io.stdout, `engine: ${report.engine.version} from ${report.engine.source}`);
+  if (report.engine.unpublished) writeLine(io.stdout, 'unpublished engine: CI will not have this code');
   for (const check of report.checks) {
     writeLine(io.stdout, `  [${check.status.toUpperCase()}] ${check.id}: ${check.detail}`);
   }

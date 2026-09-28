@@ -310,8 +310,7 @@ class Account(Base):
       expect(existsSync(marker)).toBe(false);
       const contradiction = pipeline.policy.blocking.find((entry) => entry.detail.includes('description'));
       expect(contradiction).toMatchObject({ kind: 'classification', resourceId: 'tenant.accounts' });
-      expect(contradiction?.detail).toContain("missing from adapter 'tenant.accounts' fields projection");
-      expect(contradiction?.detail).toContain('description');
+      expect(contradiction?.detail).toContain("field description is not exposed by adapter 'tenant.accounts' (fields: id, name)");
     });
   });
   it('reports a stale exact-resource rule instead of silently dropping it', async () => {

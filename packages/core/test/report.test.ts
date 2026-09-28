@@ -17,6 +17,7 @@ import {
   type ObligationVerdict,
   type RunManifest,
   type Verdict,
+  type RunExecutionSummary,
 } from '../src/index.js';
 
 const LIFECYCLE = {
@@ -135,6 +136,13 @@ describe('renderRun — json format', () => {
     expect(missing.fingerprint).toBe(fpFor(accounts));
     expect(missing.recordIds).toEqual([]);
   });
+  it('shows the changed paths that brought a verdict into scope', () => {
+    const scoped = entry(accounts, 'missing', { inScopeBecause: ['src/accounts.ts'] });
+    const json = JSON.parse(renderRun([scoped], { format: 'json' }));
+    expect(json.verdicts[0]).toMatchObject({ inScopeBecause: ['src/accounts.ts'] });
+    const text = renderRun([scoped], { format: 'text' });
+    expect(text).toContain('in scope because: src/accounts.ts');
+  });
 
   it('attaches bounded run provenance to blocking predicates', () => {
     const provenance = {
@@ -164,6 +172,25 @@ describe('renderRun — json format', () => {
     });
   });
 
+  it('labels a selected result as partial and leaves the receipt explicitly unsealed', () => {
+    const execution: RunExecutionSummary = {
+      scope: 'changed',
+      mode: 'executed',
+      testsPerformedThisInvocation: 4,
+      selectedTests: { selected: 4, passed: 4, failed: 0, skipped: 0, expectedFailures: 0 },
+      selectedClaims: { selected: 26, satisfied: 26, blocking: 0, blockingEntries: 0, waived: 0 },
+      repositoryDebt: { obligations: 30, blocking: 4, blockingEntries: 0, unclaimed: 2 },
+    };
+    const verdicts = [entry(accounts, 'satisfied')];
+    const text = renderRun(verdicts, { format: 'text', execution, outcome: 'partial-selection' });
+    expect(text.endsWith(
+      'Tests: 4 passed.\nClaims: 26 satisfied.\nReceipt: not sealed — partial selection (expected)\n',
+    )).toBe(true);
+    const json = JSON.parse(
+      renderRun(verdicts, { format: 'json', execution, outcome: 'partial-selection' }),
+    );
+    expect(json.outcome).toBe('partial-selection');
+  });
   it('includes the run manifest when provided', () => {
     const run = {
       schemaVersion: 1,
@@ -585,5 +612,28 @@ describe('renderRun — Python cache exclusion visibility', () => {
       'Python cache exclusions: files=src/__pycache__/accounts.cpython-313.pyc approvalStatus=matched',
     );
     expect(text).toContain(diagnosticContext.cacheExclusions.approvalDigest);
+  });
+});
+describe('renderRun — adopted-baseline age', () => {
+  it('reports adoption age and never-witnessed obligations additively', () => {
+    const baseline = {
+      obligations: 2,
+      blockingEntries: 0,
+      adoptedAt: '2026-09-01T00:00:00.000Z',
+      ageDays: 16,
+      neverWitnessed: 1,
+    };
+    const json = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'json', baseline }),
+    ) as { summary: Record<string, unknown> };
+    expect(json.summary).toMatchObject({
+      baselinedObligations: 2,
+      adoptedBaselineAt: baseline.adoptedAt,
+      adoptedBaselineAgeDays: 16,
+      neverWitnessedBaselinedObligations: 1,
+    });
+
+    const text = renderRun([entry(accounts, 'satisfied')], { format: 'text', baseline });
+    expect(text).toContain('age: 16 day(s); never witnessed: 1');
   });
 });

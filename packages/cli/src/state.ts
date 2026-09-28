@@ -43,6 +43,7 @@ import {
 } from '@gate-forge/core';
 import type { InputSnapshot } from './input-snapshot.js';
 import { UsageError } from './errors.js';
+import type { CandidateTreeEntry } from './candidate-tree.js';
 
 /** Default run-state directory, repo-root-relative. */
 export const DEFAULT_STATE_DIR = '.gateforge/test-gates';
@@ -307,6 +308,49 @@ export function writeExecutionResult(stateDir: string, result: unknown): void {
 /** Persists the authenticated gate receipt. */
 export function writeGateReceipt(stateDir: string, receipt: unknown): void {
   writeStateFile(stateDir, 'receipt.json', receipt as JsonValue);
+}
+
+/**
+ * Persists the entries included in the sealed candidate tree.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   entries: sorted tree entries bound by the sealed receipt.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeCandidateTreeEntries(stateDir: string, entries: readonly CandidateTreeEntry[]): void {
+  writeStateFile(stateDir, 'candidate-tree.json', entries as unknown as JsonValue);
+}
+
+/**
+ * Reads the saved candidate-tree entries for mismatch diagnostics.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   CandidateTreeEntry[] | null: validated entries, or null when absent or malformed.
+ */
+export function readCandidateTreeEntries(stateDir: string): CandidateTreeEntry[] | null {
+  const document = readStateDocument(stateDir, 'candidate-tree.json');
+  if (!Array.isArray(document)) return null;
+  const entries: CandidateTreeEntry[] = [];
+  for (const value of document) {
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      typeof value.mode !== 'string' ||
+      typeof value.sha !== 'string' ||
+      !/^[0-9a-f]{40}$/.test(value.sha) ||
+      typeof value.path !== 'string'
+    ) {
+      return null;
+    }
+    entries.push({ mode: value.mode, sha: value.sha, path: value.path });
+  }
+  return entries;
 }
 
 /**

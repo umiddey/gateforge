@@ -18,7 +18,9 @@
  * annotations are compared with generated sidecar entries but are not direct
  * check bindings; raw `claims.json` is never a declaration source.
  */
-import { cpSync, existsSync, mkdirSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 import {
   CAUSE_NEXT_ACTIONS,
   engineBundleDigestOf,
@@ -75,7 +77,7 @@ import {
   StagedCandidateBlockError,
   type StagedCandidate,
 } from '../staged-candidate.js';
-import { httpRoutesView, resolveStateDir } from '../state.js';
+import { httpRoutesView, readCandidateTreeEntries, resolveStateDir } from '../state.js';
 import {
   assertReceiptApprovedPolicy,
   evaluateApprovedPolicy,
@@ -84,9 +86,76 @@ import {
 import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERSION } from './common.js';
 import { resolveVerifierKeyring, type VerifierKeyring } from '../verifier-keys.js';
 import { renderEndpointInventory } from '../endpoint-report.js';
-import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
+import { computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
 import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
 import { CACHE_EXCLUSIONS_GUARANTEE, loadCacheExclusions } from '../cache-exclusions.js';
+import { engineIdentity } from '../engine-identity.js';
+
+/**
+ * Compares sealed candidate entries with the current tree and explains the files behind a mismatch.
+ *
+ * Args:
+ *   sealed: entries persisted with the receipt.
+ *   current: entries from the current candidate-tree walk.
+ *   workspace: absolute repository root.
+ *   stateDir: absolute run-state directory containing the receipt.
+ *   env: sanitized process environment for Git ignore checks.
+ *
+ * Returns:
+ *   string: actionable file-level mismatch details, or an empty string when unavailable or unchanged.
+ */
+function candidateTreeMismatchSummary(
+  sealed: readonly { mode: string; sha: string; path: string }[],
+  current: readonly { mode: string; sha: string; path: string }[],
+  workspace: string,
+  stateDir: string,
+  env: NodeJS.ProcessEnv,
+): string {
+  const sealedByPath = new Map(sealed.map((entry) => [entry.path, entry]));
+  const currentByPath = new Map(current.map((entry) => [entry.path, entry]));
+  const changes: Array<{ kind: 'added' | 'removed' | 'changed'; path: string }> = [];
+  for (const [path, entry] of currentByPath) {
+    const before = sealedByPath.get(path);
+    if (before === undefined) changes.push({ kind: 'added', path });
+    else if (before.mode !== entry.mode || before.sha !== entry.sha) changes.push({ kind: 'changed', path });
+  }
+  for (const path of sealedByPath.keys()) {
+    if (!currentByPath.has(path)) changes.push({ kind: 'removed', path });
+  }
+  changes.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  if (changes.length === 0) return '';
+
+  const lines = changes.slice(0, 20).map(({ kind, path }) => {
+    const ignored = spawnSync('git', ['--no-replace-objects', 'check-ignore', '--quiet', '--', path], {
+      cwd: workspace,
+      env: sanitizedAuthorityEnv(env),
+      stdio: 'ignore',
+    }).status === 0;
+    return `  ${kind} ${JSON.stringify(path)}${ignored ? ' (ignored by git but part of the tested tree)' : ''}`;
+  });
+  if (changes.length > lines.length) lines.push(`  ... ${changes.length - lines.length} additional path changes`);
+
+  let postSealHint = '';
+  try {
+    const receiptTime = lstatSync(join(stateDir, 'receipt.json')).mtimeMs;
+    const allChangedAfterSeal = changes.every(({ path }) => lstatSync(join(workspace, path)).mtimeMs > receiptTime);
+    if (allChangedAfterSeal) {
+      postSealHint =
+        ' these paths changed after the run was sealed — often another pre-commit hook or a build step; ' +
+        'run those before the suite or make them non-mutating.';
+    }
+  } catch {
+    // Missing paths or receipt timestamps cannot support a post-seal claim.
+  }
+
+  const docsOnly = changes.every(({ path }) =>
+    /^(?:docs?|guides?)\//i.test(path) || /\.(?:md|mdx|rst|txt)$/i.test(path),
+  );
+  const docsHint = docsOnly
+    ? ' Only documentation paths changed; if these are approved documentation folders, run `gateforge init --docs-exclude <folders>`.'
+    : '';
+  return ` candidate tree files:\n${lines.join('\n')}${postSealHint}${docsHint}`;
+}
 
 export const CHECK_USAGE =
   'usage: gateforge check [--changed] [--staged] [--require-e2e] [--format text|json|sarif]\n' +
@@ -432,6 +501,18 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     stateDir,
     ...(fixedChangedFiles !== undefined ? { changedFilesOverride: fixedChangedFiles } : {}),
   });
+  if (diffScoped && format === 'text') {
+    const base =
+      providerIdentity === 'github-pr'
+        ? io.env['GITHUB_BASE_REF'] ?? '<missing GITHUB_BASE_REF>'
+        : providerIdentity === 'gitlab-mr'
+          ? io.env['CI_MERGE_REQUEST_DIFF_BASE_SHA'] ?? '<missing merge-request base>'
+          : 'staged index vs HEAD';
+    writeLine(
+      io.stdout,
+      `changed files: ${pipeline.changedFiles.length} (${providerIdentity}, ${base})`,
+    );
+  }
 
   if (options.runtimeReuseCheck !== undefined) {
     let currentReuseDigest: string | null;
@@ -659,6 +740,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
   }
 
+  const adoptedBaseline = resolveAdoptedBaseline(io.cwd, config.baselines);
   const evaluated = evaluateRun({
     cwd: io.cwd,
     config,
@@ -680,7 +762,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     mappedCoverage,
     witnessVerifierKey,
     witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
-    baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
+    baseline: adoptedBaseline,
     evidenceContext: {
       expectedInputDigest: expectedDigest,
       snapshotUnavailable,
@@ -688,6 +770,22 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       changedInputs,
     },
   });
+  const baselineReport =
+    adoptedBaseline === null
+      ? undefined
+      : {
+          obligations: evaluated.baselined?.obligations ?? 0,
+          blockingEntries: evaluated.baselined?.blockingEntries ?? 0,
+          ...(evaluated.baselined?.classificationBlocked !== undefined
+            ? { classificationBlocked: evaluated.baselined.classificationBlocked }
+            : {}),
+          adoptedAt: adoptedBaseline.adoptedAt,
+          ageDays: Math.max(
+            0,
+            Math.floor((Date.parse(pipeline.now) - Date.parse(adoptedBaseline.adoptedAt)) / 86_400_000),
+          ),
+          neverWitnessed: evaluated.baselined?.neverWitnessed ?? 0,
+        };
 
   // `--require-e2e` (plan Phase 4 item 5, ADR 0005 D3): the strict
   // saved-state gate. Without a valid, non-stale receipt for the CURRENT
@@ -775,21 +873,21 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         ];
       } else {
         const gitDir = resolveGitDir(io.cwd, io.env);
+        const candidateTreeSnapshot =
+          gitDir === null
+            ? null
+            : computeCandidateTreeSnapshot(
+                gitDir,
+                io.cwd,
+                io.env,
+                stateDir,
+                'record',
+                runtimeReuseMounts,
+                docsExclusions,
+                cacheExclusions,
+              );
         const candidateTreeId =
-          options.fixedCandidateTreeId !== undefined
-            ? options.fixedCandidateTreeId
-            : gitDir === null
-              ? null
-              : computeCandidateTreeId(
-                  gitDir,
-                  io.cwd,
-                  io.env,
-                  stateDir,
-                  'record',
-                  runtimeReuseMounts,
-                  docsExclusions,
-                  cacheExclusions,
-                );
+          options.fixedCandidateTreeId ?? candidateTreeSnapshot?.treeId ?? null;
         diagnosticCandidateTreeId = candidateTreeId;
         const load = loadReceiptFor(
           stateDir,
@@ -846,10 +944,23 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
               changedPaths.length > 0
                 ? ` changed inputs: ${changedPaths.join(', ')}.`
                 : ' the saved input inventory is unavailable or the change is in gate context rather than file bytes.';
+            const sealedTreeEntries = readCandidateTreeEntries(stateDir);
+            const treeDiff =
+              load.detail.toLowerCase().includes('candidate tree') &&
+              candidateTreeSnapshot !== null &&
+              sealedTreeEntries !== null
+                ? candidateTreeMismatchSummary(
+                    sealedTreeEntries,
+                    candidateTreeSnapshot.entries,
+                    io.cwd,
+                    stateDir,
+                    io.env,
+                  )
+                : '';
             const revalidation = 'gateforge test-gates --changed --scope full --run-timeout-min 5';
             receiptBlocking = receiptBlocking.map((entry) => ({
               ...entry,
-              detail: `${entry.detail}${changedSummary}`,
+              detail: `${entry.detail}${changedSummary}${treeDiff}`,
               nextAction: `Run \`${revalidation}\` to test the full configured scope within five minutes.`,
             }));
           }
@@ -858,15 +969,32 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     }
   }
 
+  const inScopeSourcePaths =
+    scopeDecision.mode === 'changed'
+      ? sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog)
+      : null;
+  const changedSourcePaths = new Set(scopeDecision.changedFiles);
+  const reportVerdicts =
+    inScopeSourcePaths === null
+      ? evaluated.verdicts
+      : evaluated.verdicts.map((verdict) => ({
+          ...verdict,
+          inScopeBecause: [
+            ...new Set(inScopeSourcePaths.get(verdict.obligation.resourceId) ?? []),
+          ]
+            .filter((file) => changedSourcePaths.has(file))
+            .sort(),
+        }));
   const evaluatedBlocking = [...evaluated.blocking, ...receiptBlocking];
-  const report = renderRun(evaluated.verdicts, {
+  const report = renderRun(reportVerdicts, {
     format,
     blocking: evaluatedBlocking,
     advisories: annotationAdvisories,
     waiverCounts: evaluated.waiverCounts,
-    baseline: evaluated.baselined ?? undefined,
+    baseline: baselineReport,
     run: pipeline.manifest,
     toolVersion: VERSION,
+    engine: engineIdentity(),
     lifecycleDerivation: pipeline.lifecycleDerivation,
     scope: { mode: scopeDecision.mode, expandedBecause: scopeDecision.expandedBecause },
     diagnosticContext: {

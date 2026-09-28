@@ -125,6 +125,9 @@ describe('superviseExecution: planned versus executed (ADR 0005 D2)', () => {
         (finding) => finding.cause === 'RUN_INCOMPLETE' && /never executed/.test(finding.detail) && finding.logicalKey === KEY2,
       ),
     ).toBe(true);
+    const missing = result.findings.find((finding) => finding.logicalKey === KEY2);
+    expect(missing?.detail).toContain('a selected case is missing');
+    expect(missing?.detail).not.toContain('plan §');
   });
 
   it('an executed instance outside the expected set is RUN_INCOMPLETE — no selective narrowing', () => {

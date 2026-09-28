@@ -140,9 +140,10 @@ import {
 import { mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline } from '../pipeline.js';
 import { tryReuseReceipt } from '../receipts.js';
-import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
+import { computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir } from '../candidate-tree.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
 import { resolveProvider } from '../providers.js';
+import { engineIdentity } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import {
   clearGateReceipt,
@@ -154,6 +155,7 @@ import {
   writeClassificationsView,
   writeEnv,
   writeExecutionResult,
+  writeCandidateTreeEntries,
   writeGateReceipt,
   writeHttpRoutesView,
   writeInputSnapshot,
@@ -660,6 +662,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
     waiverCounts: evaluated.waiverCounts,
     run: manifest,
     toolVersion: VERSION,
+    engine: engineIdentity(),
     lifecycleDerivation: pipeline.lifecycleDerivation,
     diagnosticContext,
   });
@@ -673,6 +676,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
       waiverCounts: evaluated.waiverCounts,
       run: manifest,
       toolVersion: VERSION,
+      engine: engineIdentity(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext,
     }),
@@ -754,14 +758,10 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // Scoped sealing (Goal 2): resolve the changed-file basis through the
   // SAME configured provider `check --changed` uses (auto → GHA/GitLab/
   // staged), and stamp the resolved identity into the run manifest so a
-  // scoped run names the diff basis it sliced from. Full mode keeps
-  // `all-files` — byte-identical to the historical run.
   const providerIdentity =
     options.fixedChangedFiles !== undefined
       ? 'local-staged'
-      : options.scope === 'changed'
-      ? resolveProvider(config.changed.provider, io.cwd, io.env).provider
-      : 'all-files';
+      : resolveProvider(config.changed.provider, io.cwd, io.env).provider;
 
   // 1. Inventory + stability + input digest (same discipline as check).
   let preFiles: SnapshotFileEntry[] | null = null;
@@ -783,6 +783,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       ? { changedFilesOverride: options.fixedChangedFiles }
       : {}),
   });
+  const providerChangedFiles = options.fixedChangedFiles ?? pipeline.changedFiles;
   // The scoped slice's changed set: exactly what the resolved provider
   // reported for THIS tree (the pipeline already ran it — one resolution,
   // one diff basis stamped in the manifest).
@@ -934,6 +935,8 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // evidence — the drain registers exactly this set pre-run and
   // finalizes passed sessions against it.
   let observeObligations: string[] = [];
+  let fullPlannedCount = 0;
+  let affectedTestCount = 0;
   if (catalog !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -947,28 +950,26 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     });
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
     claimInventory = mapped.claimInventory;
-    plannedRows = planExpectedSet(catalog);
+    const fullPlannedRows = planExpectedSet(catalog);
+    fullPlannedCount = fullPlannedRows.length;
+    plannedRows = fullPlannedRows;
     injections = claimInjectionsFor(mapped.resolution, catalog);
     mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
     serverE2eObligations = serverE2eObligationIds(mapped.resolution);
     observeObligations = observeObligationIds(mapped.resolution);
+    const affectedPlan = planScopedExpectedSet({
+      catalog,
+      resolution: mapped.resolution,
+      obligations: pipeline.policy.obligations,
+      graph: pipeline.graph,
+      changedFiles: providerChangedFiles,
+      behaviorCatalog: pipeline.behaviorCatalog,
+    });
+    affectedTestCount = affectedPlan.plannedRows.length;
     if (options.scope === 'changed') {
-      // The affected slice (Goal 2): changed files → resources (the same
-      // join-aware source map the diff scoping grades by) → obligations →
-      // declared-claiming tests. Unclaimed affected obligations become
-      // typed EVIDENCE_SCOPE_INCOMPLETE blockers — the gate is never
-      // silently narrowed past an obligation nothing can test.
-      const scopedPlan = planScopedExpectedSet({
-        catalog,
-        resolution: mapped.resolution,
-        obligations: pipeline.policy.obligations,
-        graph: pipeline.graph,
-        changedFiles: scopeChangedFiles ?? [],
-        behaviorCatalog: pipeline.behaviorCatalog,
-      });
-      plannedRows = scopedPlan.plannedRows;
-      coveredFingerprints = scopedPlan.coveredFingerprints;
-      scopeBlockers = scopedPlan.unclaimed.map((entry): BlockingEntry => ({
+      plannedRows = affectedPlan.plannedRows;
+      coveredFingerprints = affectedPlan.coveredFingerprints;
+      scopeBlockers = affectedPlan.unclaimed.map((entry): BlockingEntry => ({
         kind: 'finding',
         resourceId: null,
         name: entry.obligationId,
@@ -978,6 +979,14 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
         nextAction: CAUSE_NEXT_ACTIONS.EVIDENCE_SCOPE_INCOMPLETE,
       }));
     }
+  }
+  if (format === 'text') {
+    writeLine(
+      io.stdout,
+      options.scope === 'changed'
+        ? `scope: changed (${plannedRows.length} tests) — ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`
+        : `scope: full (${fullPlannedCount} mapped tests) — add --scope changed for the ${affectedTestCount} tests affected by ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`,
+    );
   }
   const inventoryBlocking: BlockingEntry[] =
     discoveryError !== null
@@ -1097,6 +1106,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       waiverCounts: evaluated.waiverCounts,
       run: { ...pipeline.manifest, invocationId, inputDigest: expectedDigest ?? undefined },
       toolVersion: VERSION,
+      engine: engineIdentity(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext: {
         scope: options.scope ?? 'full',
@@ -1152,9 +1162,11 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
               name: null,
               detail:
                 scopeBlockers.length > 0
-                  ? `changed-scope planning produced no testable slice: ${String(scopeBlockers.length)} affected obligation(s) ` +
-                    'have no declared mapping to a test the current catalog enumerates — narrower selection is never guessed'
-                  : 'changed-scope planning found no obligations affected by the changed files — a slice receipt over nothing is never sealed; run full scope',
+                  ? `no runnable slice: ${String(scopeBlockers.length)} affected obligation(s) have no declared mapping; changed files: ` +
+                    `${providerChangedFiles.length > 0 ? providerChangedFiles.join(', ') : '<none>'}. ` +
+                    'Run `gateforge test-gates --changed` for the full relevant suite.'
+                  : `0 obligations affected by: ${providerChangedFiles.length > 0 ? providerChangedFiles.join(', ') : '<no changed files>'}; ` +
+                    'run full scope, or approve documentation folders with `gateforge init --docs-exclude <folders>`',
               location: null,
               cause: 'EVIDENCE_SCOPE_INCOMPLETE',
               nextAction: CAUSE_NEXT_ACTIONS.EVIDENCE_SCOPE_INCOMPLETE,
@@ -1194,6 +1206,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       waiverCounts: evaluated.waiverCounts,
       run: { ...pipeline.manifest, invocationId, inputDigest: expectedDigest ?? undefined },
       toolVersion: VERSION,
+      engine: engineIdentity(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext: {
         scope: options.scope ?? 'full',
@@ -1753,9 +1766,11 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     waiverCounts: evaluated.waiverCounts,
     run: manifest,
     toolVersion: VERSION,
+    engine: engineIdentity(),
     lifecycleDerivation: pipeline.lifecycleDerivation,
     execution: executionSummary,
     diagnosticContext,
+    ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
   });
   writeLine(io.stdout, report);
   writeReport(
@@ -1766,9 +1781,11 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
       waiverCounts: evaluated.waiverCounts,
       run: manifest,
       toolVersion: VERSION,
+      engine: engineIdentity(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       execution: executionSummary,
       diagnosticContext,
+      ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
     }),
   );
 
@@ -1785,10 +1802,10 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   // Confirm the same candidate-tree drift check before returning a
   // descriptive pass.
   const resultGitDir = resolveGitDir(io.cwd, io.env);
-  const resultTreeId =
+  const resultTreeSnapshot =
     resultGitDir === null
       ? null
-      : computeCandidateTreeId(
+      : computeCandidateTreeSnapshot(
           resultGitDir,
           io.cwd,
           io.env,
@@ -1798,6 +1815,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
           docsExclusions,
           cacheExclusions,
         );
+  const resultTreeId = resultTreeSnapshot?.treeId ?? null;
   if (resultTreeId !== frozenTreeId) {
     writeLine(
       io.stderr,
@@ -1808,10 +1826,6 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     return 1;
   }
   if (options.resultOnly) {
-    writeLine(
-      io.stderr,
-      'selected result passed; this result is non-authoritative and did not create a gate receipt',
-    );
     return 0;
   }
   if (witnessVerifierKey === undefined) {
@@ -1876,6 +1890,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     issuedAt: pipeline.now,
   });
   writeGateReceipt(stateDir, receipt);
+  writeCandidateTreeEntries(stateDir, resultTreeSnapshot?.entries ?? []);
   writeLine(io.stderr, `receipt ${receipt.receiptId} sealed (complete run, evidence graded, inputs bound)`);
   return 0;
 }

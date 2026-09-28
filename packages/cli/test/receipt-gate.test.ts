@@ -42,11 +42,12 @@ import {
 import { loadReceiptFor, receiptGateBlocking, tryReuseReceipt } from '../src/receipts.js';
 import { testReceiptV2Bindings } from './gate-receipts.js';
 import { executedBehaviorCaseDigest } from '../src/commands/test-gates.js';
-import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
+import { computeCandidateTreeSnapshot, resolveGitDir } from '../src/candidate-tree.js';
 import {
   clearGateReceipt,
   readStateDocument,
   resolveStateDir,
+  writeCandidateTreeEntries,
   writeExecutionResult,
   writeGateReceipt,
 } from '../src/state.js';
@@ -170,8 +171,9 @@ async function sealGreenRun(
   const stateDir = resolveStateDir(repo.root);
   const trustedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
   const gitDir = resolveGitDir(repo.root, process.env);
-  const candidateTreeId =
-    gitDir === null ? null : computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+  const treeSnapshot =
+    gitDir === null ? null : computeCandidateTreeSnapshot(gitDir, repo.root, process.env, stateDir, 'record');
+  const candidateTreeId = treeSnapshot?.treeId ?? null;
   const plannedRows = [plannedRow()];
   const sealed = sealExecutionResult({
     runId: RUN_ID,
@@ -219,6 +221,7 @@ async function sealGreenRun(
     issuedAt: FIXED_AT,
   });
   writeGateReceipt(stateDir, receipt);
+  writeCandidateTreeEntries(stateDir, treeSnapshot?.entries ?? []);
   return receipt.receiptId;
 }
 
@@ -442,6 +445,25 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
       await sealGreenRun(repo, digestAfter);
       const cleared = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
       expect(cleared.code).toBe(0);
+    });
+  });
+
+  it('names a changed gitignored path after a receipt is sealed', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      repo.writeFiles({
+        '.gitignore': 'ignored-after-seal.env\n',
+        'ignored-after-seal.env': 'before the witnessed run\n',
+      });
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest);
+      repo.writeFiles({ 'ignored-after-seal.env': 'changed after the witnessed run\n' });
+
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('changed "ignored-after-seal.env"');
+      expect(result.stdout).toContain('ignored by git but part of the tested tree');
+      expect(result.stdout).toContain('these paths changed after the run was sealed');
     });
   });
 

@@ -680,9 +680,9 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
       }),
     ]);
     expect(outcome.verdict).toBe('invalid');
-    expect(outcome.reason).toContain('touches no classification-declared');
-    expect(outcome.reason).toContain('updated_at');
-    expect(outcome.reason).toContain('updateableFields');
+    expect(outcome.reason).toContain('the UI action changed only [updated_at]');
+    expect(outcome.reason).toContain('not a user-editable field');
+    expect(outcome.reason).toContain('the update test must change one of [first_name, last_name, name, status]');
   });
 
   it('update without classification-declared updateableFields fails closed', () => {

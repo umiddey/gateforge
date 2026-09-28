@@ -182,6 +182,8 @@ export interface ObligationVerdict extends VerdictOutcome {
   readonly cause?: CauseCode | null;
   /** Human next action for the cause; null when unmapped or clean. */
   readonly nextAction?: string | null;
+  /** Changed paths that brought the obligation into the current scope. */
+  readonly inScopeBecause?: string[];
 }
 
 /** Pin-#9 evaluation context. Malformed entries degrade, never crash. */
@@ -688,9 +690,15 @@ function persistencePostconditionFailure(
     }
     const qualifying = delta.filter((key) => (updateable as readonly string[]).includes(key));
     if (qualifying.length === 0) {
+      if (delta.length > 0) {
+        return (
+          `update postcondition violated: the UI action changed only [${[...delta].sort().join(', ')}], ` +
+          'which is not a user-editable field; the update test must change one of ' +
+          `[${[...updateable].sort().join(', ')}]`
+        );
+      }
       return (
-        'update postcondition violated: the engine-observed delta ' +
-        `[${[...delta].sort().join(', ')}] touches no classification-declared ` +
+        'update postcondition violated: the engine-observed delta touches no classification-declared ' +
         `updateable field (updateableFields: [${[...updateable].sort().join(', ')}])`
       );
     }

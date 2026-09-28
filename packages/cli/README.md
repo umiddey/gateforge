@@ -655,8 +655,7 @@ Adapters without this metadata keep their existing behavior.
 Presence alone, contradicted observations, missing pre-observations, or
 absent deltas grade `invalid` — even when every provenance check passes.
 
-**Layer 2 — versioned attestation binding evidence to tested inputs
-(plan §11, F2).** A witnessed record is authorized only by ONE validated
+**Layer 2 — versioned attestation binding evidence to tested inputs.** A witnessed record is authorized only by ONE validated
 v2 envelope that simultaneously matches its run id, the expected input
 digest, the required invocation identity, and its record id:
 

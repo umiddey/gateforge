@@ -277,13 +277,15 @@ function adapterProjectionBlockers(
     }
     if (missing === null) continue;
     missing.sort(compareStrings);
+    const missingFields = missing.length === 1 ? `field ${missing[0]}` : `fields [${missing.join(', ')}]`;
+    const verb = missing.length === 1 ? 'is' : 'are';
     blockers.push({
       kind: 'classification',
       resourceId: decision.resourceId,
       name: decision.name,
       detail:
-        `model updateable field(s) [${missing.join(', ')}] are missing from adapter '${adapterName}' ` +
-        `fields projection [${projectedFields.join(', ')}]`,
+        `${missingFields} ${verb} not exposed by adapter '${adapterName}' ` +
+        `(fields: ${projectedFields.length === 0 ? '<none>' : projectedFields.join(', ')})`,
       location: decision.location,
       cause: null,
       nextAction:

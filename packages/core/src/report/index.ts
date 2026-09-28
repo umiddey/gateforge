@@ -123,6 +123,8 @@ export interface RenderRunOptions {
   toolVersion?: string;
   /** Engine installation identity shown in the report. */
   engine?: EngineMetadata;
+  /** Marks non-authoritative selected-run output without changing exit codes. */
+  outcome?: 'partial-selection';
   /**
    * Effective evaluation scope (plan §12.4); included in json/SARIF and
    * summarized in text when the scope expanded. Defaults to the full
@@ -154,6 +156,9 @@ export interface RenderRunOptions {
     obligations: number;
     blockingEntries: number;
     classificationBlocked?: number;
+    adoptedAt?: string;
+    ageDays?: number;
+    neverWitnessed?: number;
   };
 }
 
@@ -293,6 +298,15 @@ function jsonReport(
             ...(options.baseline.classificationBlocked !== undefined
               ? { baselinedClassificationBlocked: options.baseline.classificationBlocked }
               : {}),
+            ...(options.baseline.adoptedAt !== undefined
+              ? { adoptedBaselineAt: options.baseline.adoptedAt }
+              : {}),
+            ...(options.baseline.ageDays !== undefined
+              ? { adoptedBaselineAgeDays: options.baseline.ageDays }
+              : {}),
+            ...(options.baseline.neverWitnessed !== undefined
+              ? { neverWitnessedBaselinedObligations: options.baseline.neverWitnessed }
+              : {}),
           }
         : {}),
     },
@@ -321,6 +335,9 @@ function jsonReport(
         trustTier: entry.trustTier,
         message,
       };
+      if (entry.inScopeBecause !== undefined) {
+        record['inScopeBecause'] = entry.inScopeBecause;
+      }
       if (entry.detector !== undefined && entry.detector !== null) {
         record['detector'] = entry.detector;
       }
@@ -356,6 +373,7 @@ function jsonReport(
   if (options.execution !== undefined) report['execution'] = options.execution;
   if (options.diagnosticContext !== undefined) report['diagnosticContext'] = options.diagnosticContext;
   if (options.engine !== undefined) report['engine'] = options.engine;
+  if (options.outcome !== undefined) report['outcome'] = options.outcome;
   return report;
 }
 
@@ -582,10 +600,13 @@ function textReport(
   }
   if (options.baseline !== undefined) {
     lines.push(
-      `baseline (adopted): ${options.baseline.obligations} obligation(s) + ` +
+      `adopted baseline: ${options.baseline.obligations} obligation(s) + ` +
         `${options.baseline.blockingEntries} blocking entry(ies)` +
         (options.baseline.classificationBlocked !== undefined
           ? ` + ${options.baseline.classificationBlocked} classification-blocked resource(s)`
+          : '') +
+        (options.baseline.ageDays !== undefined
+          ? `; age: ${options.baseline.ageDays} day(s); never witnessed: ${options.baseline.neverWitnessed ?? 0}`
           : '') +
         ` forgiven — shrink-only: resolve debt, then 'gateforge baseline update'`,
     );
@@ -607,6 +628,9 @@ function textReport(
       reason: entry.reason,
       type: entry.verdict,
     })}`);
+    if (entry.inScopeBecause !== undefined) {
+      lines.push(`  in scope because: ${entry.inScopeBecause.join(', ') || '<no changed source path>'}`);
+    }
     lines.push(`  evidence gap: ${entry.reason ?? '<none>'}`);
     if (entry.cause !== undefined && entry.cause !== null) {
       lines.push(`  cause: ${entry.cause}`);
@@ -677,5 +701,10 @@ function textReport(
   }
   lines.push('');
   lines.push(`exit code: ${runExitCode({ verdicts: entries, blocking })}`);
+  if (options.outcome === 'partial-selection' && options.execution !== undefined) {
+    lines.push(`Tests: ${options.execution.selectedTests.passed} passed.`);
+    lines.push(`Claims: ${options.execution.selectedClaims.satisfied} satisfied.`);
+    lines.push('Receipt: not sealed — partial selection (expected)');
+  }
   return `${lines.join('\n')}\n`;
 }

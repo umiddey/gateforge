@@ -22,6 +22,7 @@ interface DoctorJson {
   strictE2E: boolean;
   ready: boolean;
   checks: Array<{ id: string; status: 'ok' | 'warn' | 'fail'; detail: string }>;
+  engine: { version: string; source: string; unpublished: boolean };
 }
 
 /** Parses the doctor's deterministic JSON output. */
@@ -43,6 +44,9 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(result.code).toBe(0); // the doctor always runs (diagnostic)
       const report = parseDoctor(result.stdout);
       expect(report.mode).toBe('standard');
+      expect(report.engine.version).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(report.engine.source).toMatch(/^(registry|local path )/);
+      expect(typeof report.engine.unpublished).toBe('boolean');
       expect(report.strictE2E).toBe(false);
       expect(report.checks.map((entry) => entry.id)).toEqual([
         'behavior-profile',

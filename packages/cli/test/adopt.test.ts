@@ -51,7 +51,7 @@ const CLASSIFICATION_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
   );
 
 interface Report {
-  summary: { missing: number; waived: number; blocking: number; baselinedObligations?: number; baselinedBlockingEntries?: number; baselinedClassificationBlocked?: number };
+  summary: { missing: number; waived: number; blocking: number; baselinedObligations?: number; baselinedBlockingEntries?: number; baselinedClassificationBlocked?: number; adoptedBaselineAt?: string; adoptedBaselineAgeDays?: number; neverWitnessedBaselinedObligations?: number };
   verdicts: Array<{ verdict: string; fingerprint: string }>;
   blocking: Array<{ kind: string; resourceId: string | null; name: string | null; detail: string }>;
 }
@@ -87,7 +87,10 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
       const preReport = JSON.parse(pre.stdout) as Report;
       expect(preReport.summary.missing).toBe(2);
       expect(preReport.blocking).toHaveLength(1);
-      const entryFp = blockingEntryFingerprint(preReport.blocking[0] as never);
+      const fingerprintEntry = Object.fromEntries(
+        Object.entries(preReport.blocking[0]!).filter(([key]) => key !== 'message'),
+      );
+      const entryFp = blockingEntryFingerprint(fingerprintEntry as never);
 
       const { code, stdout } = await runCli(repo, ['adopt']);
       expect(code).toBe(0);
@@ -127,9 +130,7 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
 
       const text = await runCli(repo, ['check']);
       expect(text.code).toBe(0);
-      expect(text.stdout).toContain(
-        'baseline (adopted): 2 obligation(s) + 1 blocking entry(ies) + 0 classification-blocked resource(s) forgiven',
-      );
+      expect(text.stdout).toContain('age: 0 day(s); never witnessed: 2 forgiven');
       expect(text.stdout).toContain('exit code: 0');
 
       const json = await runCli(repo, ['check', '--format', 'json']);
@@ -139,6 +140,9 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
       expect(report.summary.missing).toBe(0);
       expect(report.summary.baselinedObligations).toBe(2);
       expect(report.summary.baselinedBlockingEntries).toBe(1);
+      expect(report.summary.adoptedBaselineAt).toBe(FIXED_AT);
+      expect(report.summary.adoptedBaselineAgeDays).toBe(0);
+      expect(report.summary.neverWitnessedBaselinedObligations).toBe(2);
       expect(report.blocking).toHaveLength(0);
       // The re-graded verdicts name the receipt (invariant 8: explain).
       expect(json.stdout).toContain('baselined: adopted as forgiven');
@@ -220,7 +224,7 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
       });
       const { code, stdout } = await runCli(repo, ['check']);
       expect(code).toBe(1); // not forgiven
-      expect(stdout).not.toContain('baseline (adopted)');
+      expect(stdout).not.toContain('adopted baseline');
     });
   });
 
@@ -299,7 +303,7 @@ describe('gateforge adopt — the classification layer (two-layer adoption)', ()
       const text = await runCli(repo, ['check']);
       expect(text.code).toBe(0);
       expect(text.stdout).toContain(
-        'baseline (adopted): 2 obligation(s) + 0 blocking entry(ies) + 1 classification-blocked resource(s) forgiven',
+        'adopted baseline: 2 obligation(s) + 0 blocking entry(ies) + 1 classification-blocked resource(s); age: 0 day(s); never witnessed: 2 forgiven',
       );
       expect(text.stdout).not.toContain('PLANE_UNRESOLVED');
     });

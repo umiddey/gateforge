@@ -1158,6 +1158,8 @@ policies:
             `selected result stdout:\n${selectedResult.stdout}\nstderr:\n${selectedResult.stderr}`,
           ).toBe(0);
           const selectedReport = JSON.parse(selectedResult.stdout) as {
+            outcome: string;
+            engine: { version: string; source: string; unpublished: boolean };
             diagnosticContext: { scope: string; authority: string };
             execution: {
               selectedTests: { selected: number; passed: number };
@@ -1165,6 +1167,10 @@ policies:
               repositoryDebt: { blocking: number; unclaimed: number };
             };
           };
+          expect(selectedReport.outcome).toBe('partial-selection');
+          expect(selectedReport.engine.version).toMatch(/^\d+\.\d+\.\d+$/);
+          expect(selectedReport.engine.source).toMatch(/^(registry|local path )/);
+          expect(typeof selectedReport.engine.unpublished).toBe('boolean');
           expect(selectedReport.diagnosticContext).toMatchObject({ scope: 'changed', authority: 'non-authoritative' });
           expect(selectedReport.execution.selectedTests).toMatchObject({ selected: 3, passed: 3 });
           expect(selectedReport.execution.selectedClaims).toMatchObject({ selected: 3, satisfied: 3, blocking: 0 });
