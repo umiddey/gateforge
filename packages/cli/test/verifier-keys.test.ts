@@ -138,6 +138,19 @@ describe('verifier key-ring source', () => {
     });
   });
 
+  it('creates and automatically discovers the owner-only XDG key ring outside the repository', async () => {
+    await withTempRepo({}, async (repo) => {
+      const xdg = externalRoot();
+      const created = await runCli(repo, ['key', 'create', '--confirm'], { XDG_CONFIG_HOME: xdg });
+      const path = join(xdg, 'gateforge', 'verifier-keyring.json');
+      expect(created.code).toBe(0);
+      expect(lstatSync(path).mode & 0o777).toBe(0o600);
+      const resolved = resolveVerifierKeyring(repo.root, { XDG_CONFIG_HOME: xdg });
+      expect(resolved?.active.keyId).toMatch(/^key-/);
+      expect(path.startsWith(repo.root)).toBe(false);
+    });
+  });
+
   it('does not pass the key or file source to a legacy suite or write either to run state', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

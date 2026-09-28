@@ -401,6 +401,28 @@ export function writeCiTemplate(io: Io, provider: 'github' | 'gitlab', mode: Git
     writeGitlabCiTemplate(io, mode);
   }
 }
+/**
+ * Prints owner-run steps for making the generated CI job mandatory.
+ *
+ * Args:
+ *   io: process context.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeServerProtectionInstructions(io: Io): void {
+  writeLine(
+    io.stdout,
+    [
+      'Server setup (review and run explicitly; Gateforge does not change branch settings):',
+      'GitHub: gh api --method PUT "repos/OWNER/REPO/branches/BRANCH/protection" --input - <<\'JSON\'',
+      '{"required_status_checks":{"strict":true,"contexts":["gateforge"]},"enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null}',
+      'JSON',
+      'GitLab: glab api --method PUT "projects/PROJECT_ID" -f only_allow_merge_if_pipeline_succeeds=true',
+      'GitLab: glab api --method POST "projects/PROJECT_ID/protected_branches" -f name=BRANCH -f push_access_level=0 -f merge_access_level=30 -f allow_force_push=false',
+    ].join('\n'),
+  );
+}
 
 /** Wires engine, local hooks, and the selected CI provider. */
 export function ensureBlockingWiring(

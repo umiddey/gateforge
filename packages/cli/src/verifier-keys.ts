@@ -7,6 +7,7 @@
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   fsyncSync,
   lstatSync,
@@ -18,7 +19,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { GateReceiptSchema, verifyGateReceipt } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { resolveGitDir } from './candidate-tree.js';
@@ -60,6 +62,18 @@ export function environmentVerifierKeyId(key: string): string {
   return `env-${createHash('sha256').update('gateforge.verifier-key-id.v1\0').update(key).digest('hex').slice(0, 24)}`;
 }
 
+/**
+ * Returns the default owner-managed key-ring path outside the repository.
+ *
+ * Args:
+ *   env: environment used to select XDG_CONFIG_HOME.
+ *
+ * Returns:
+ *   string: absolute path to the default key ring.
+ */
+export function defaultVerifierKeyringPath(env: NodeJS.ProcessEnv): string {
+  return join(env['XDG_CONFIG_HOME'] || join(homedir(), '.config'), 'gateforge', 'verifier-keyring.json');
+}
 /** Resolves the trusted key source and rejects any source inside candidate artifacts. */
 export function resolveVerifierKeyring(
   cwd: string,
@@ -67,8 +81,8 @@ export function resolveVerifierKeyring(
   additionalArtifactRoots: readonly string[] = [],
 ): VerifierKeyring | null {
   const environmentKey = env[VERIFIER_KEY_ENV];
-  const keyFile = env[VERIFIER_KEY_FILE_ENV];
-  if (typeof environmentKey === 'string' && environmentKey.length > 0 && typeof keyFile === 'string' && keyFile.length > 0) {
+  const configuredKeyFile = env[VERIFIER_KEY_FILE_ENV];
+  if (typeof environmentKey === 'string' && environmentKey.length > 0 && typeof configuredKeyFile === 'string' && configuredKeyFile.length > 0) {
     throw new UsageError(
       `set only one verifier-key source: ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV}`,
     );
@@ -77,7 +91,9 @@ export function resolveVerifierKeyring(
     const active = { keyId: environmentVerifierKeyId(environmentKey), key: environmentKey };
     return { active, keys: [active] };
   }
-  if (typeof keyFile !== 'string' || keyFile.length === 0) return null;
+  const defaultKeyFile = configuredKeyFile ?? defaultVerifierKeyringPath(env);
+  const keyFile = configuredKeyFile ?? (existsSync(defaultKeyFile) ? defaultKeyFile : undefined);
+  if (keyFile === undefined) return null;
 
   const path = resolve(cwd, keyFile);
   assertExternalVerifierKeyPath(cwd, path, env, additionalArtifactRoots);

@@ -52,6 +52,7 @@ import {
   ensureHookScript,
   engineRootFromInvocation,
   writeGitlabCiTemplate as writeSharedGitlabCiTemplate,
+  writeServerProtectionInstructions,
 } from './blocking.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import {
@@ -1234,6 +1235,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         : `blocking gate wired: active pre-commit hook (${gateArgs.join(' ')}) + .gitlab-ci.yml include. ` +
             'Honest limit: `git commit --no-verify` bypasses the local hook (ADR 0005 D1) — standard enforcement also requires the trusted server check.',
     );
+    writeServerProtectionInstructions(io);
   }
   writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');
   return 0;

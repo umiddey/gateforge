@@ -19,7 +19,7 @@
  *   external broker is reported `warn`/`not configured` unless an
  *   operator-provided probe says otherwise.
  */
-import { accessSync, constants as fsConstants, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -40,6 +40,7 @@ import { TEST_MAP_RELATIVE } from '../mapping.js';
 import { inspectCommitHook } from '../git-hooks.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { resolveStateDir } from '../state.js';
+import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { describeApprovedPolicyResolution, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import { engineIdentity, type EngineIdentity } from '../engine-identity.js';
 
@@ -82,6 +83,59 @@ function probe(cwd: string, env: NodeJS.ProcessEnv, args: readonly string[]): st
   const result = spawnSync('git', [...args], { cwd, env, encoding: 'utf8' });
   if (result.error !== undefined || result.status !== 0) return null;
   return (result.stdout ?? '').trim();
+}
+
+/**
+ * Finds repository files that could expose the active verifier key.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   env: key-source and Git environment.
+ *
+ * Returns:
+ *   object: offending relative paths and a non-secret scan status.
+ */
+function verifierKeyExposure(cwd: string, env: NodeJS.ProcessEnv): { paths: string[]; configured: boolean; scanError: boolean } {
+  let activeKey: string | undefined;
+  let configured = false;
+  let scanError = false;
+  try {
+    activeKey = resolveVerifierKeyring(cwd, env, [resolveStateDir(cwd)])?.active.key;
+    configured = activeKey !== undefined;
+  } catch {
+    scanError = true;
+  }
+  const listingArgs = [
+    ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],
+    ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+  ];
+  const listedPaths: string[] = [];
+  for (const args of listingArgs) {
+    const listed = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
+    if (listed.error !== undefined || listed.status !== 0) {
+      return { paths: [], configured, scanError: true };
+    }
+    listedPaths.push(...(listed.stdout ?? '').split('\0'));
+  }
+  const keyBytes = activeKey === undefined ? null : Buffer.from(activeKey, 'utf8');
+  const paths: string[] = [];
+  for (const relativePath of new Set(listedPaths)) {
+    if (relativePath.length === 0) continue;
+    const absolutePath = resolve(cwd, relativePath);
+    try {
+      const stat = lstatSync(absolutePath);
+      if (!stat.isFile()) continue;
+      if (relativePath.split(/[\\/]/).at(-1) === 'verifier.key') {
+        paths.push(relativePath);
+        continue;
+      }
+      if (keyBytes === null || stat.size !== keyBytes.length) continue;
+      if (readFileSync(absolutePath).equals(keyBytes)) paths.push(relativePath);
+    } catch {
+      scanError = true;
+    }
+  }
+  return { paths: [...new Set(paths)].sort(), configured, scanError };
 }
 
 /**
@@ -287,6 +341,21 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     configDetail = `.gateforge.yml could not be loaded: ${(error as Error).message.split('\n')[0] ?? 'unknown'}`;
   }
   checks.push({ id: 'config', status: configOk ? 'ok' : 'fail', detail: configDetail });
+
+  const keyExposure = verifierKeyExposure(io.cwd, io.env);
+  const keyExposureDetail =
+    keyExposure.paths.length > 0
+      ? `verifier key material found in repository/state files: ${keyExposure.paths.join(', ')}; move it to the owner-only XDG key ring with \`gateforge key create\`, then remove the exposed copies`
+      : keyExposure.scanError
+        ? 'verifier-key safety scan could not verify every source; use an external owner-only key ring and inspect repository/state files'
+        : keyExposure.configured
+          ? 'active verifier key is external; no repository/state copy found'
+          : 'no active external verifier key configured; create one with `gateforge key create --confirm` before witnessed receipt verification';
+  checks.push({
+    id: 'verifier-key-location',
+    status: keyExposure.paths.length > 0 || keyExposure.scanError || !keyExposure.configured ? 'warn' : 'ok',
+    detail: keyExposureDetail,
+  });
 
   // 1. Hook presence + ACTIVATION (never reported as managed protection).
   const hook = inspectCommitHook(io.cwd, io.env);

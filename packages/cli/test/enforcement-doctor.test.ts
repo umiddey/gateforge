@@ -6,7 +6,7 @@
  * agent-writable is reported as NOT active. Exit is 0 whenever the
  * doctor runs (diagnostic), `--json` is deterministic.
  */
-import { chmodSync, readFileSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { withTempRepo } from '@gate-forge/core';
 import { installFixture, runCli } from './helpers.js';
@@ -61,6 +61,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'server-protection',
         'snapshot',
         'trusted-binary-policy',
+        'verifier-key-location',
       ]);
       expect(checkById(report, 'config').status).toBe('ok');
       // Behavior profile not configured: ok (basic behavior only).
@@ -80,6 +81,23 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(checkById(report, 'runner').status).toBe('fail');
       expect(checkById(report, 'snapshot').status).toBe('ok');
       expect(report.ready).toBe(false);
+    });
+  });
+
+  it('warns when the active verifier key is present in repository state without exposing it', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const secret = 'doctor-active-verifier-key';
+      const exposed = repo.path('.gateforge/verifier.key');
+      writeFileSync(exposed, secret, { mode: 0o600 });
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        GATEFORGE_WITNESS_VERIFIER_KEY: secret,
+      });
+      const report = parseDoctor(result.stdout);
+      const check = checkById(report, 'verifier-key-location');
+      expect(check.status).toBe('warn');
+      expect(check.detail).toContain('.gateforge/verifier.key');
+      expect(result.stdout).not.toContain(secret);
     });
   });
   it('recognizes a wired CI template as level 2 without claiming server protection', async () => {

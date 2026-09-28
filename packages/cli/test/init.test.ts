@@ -326,6 +326,9 @@ describe('gateforge init', () => {
   it('--blocking wires the pre-commit hook, check script, and CI template', async () => {
     await withTempRepo({}, async (repo) => {
       const first = await runCli(repo, ['init', '--blocking']);
+      expect(first.stdout).toContain('Server setup (review and run explicitly');
+      expect(first.stdout).toContain('gh api --method PUT');
+      expect(first.stdout).toContain('glab api --method');
       expect(first.code).toBe(0);
       const hook = repo.path('.gateforge/hooks/gateforge-check.mjs');
       expect(existsSync(hook)).toBe(true);

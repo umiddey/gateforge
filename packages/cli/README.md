@@ -71,7 +71,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` evaluates one effective scope: only obligations/blockers tied to files the resolved diff provider reports — unless the diff touches a gate-defining input (`.gateforge.yml`, configured policy/classification paths, planes/http-clients/fastapi configs, adapters, waivers, repo-local plugin modules, dependency manifests/lockfiles, ignore controls), a test file or helper, the runner configuration, or the mapping sidecar, which expands the run to all obligations (reported as `scope` metadata with `expandedBecause` reasons). `--staged` gates the EXACT staged candidate (frozen index checkout, never the worktree; mutually exclusive with `--changed`). `--candidate-commit` gates the immutable tree of the named commit instead of the current worktree or index; combine with `--changed` to scope to that commit's first-parent diff. `--require-e2e` blocks without a valid, non-stale gate receipt (see Enforcement). `--format` default `text`. Verifier keys use `GATEFORGE_WITNESS_VERIFIER_KEY` or `GATEFORGE_WITNESS_VERIFIER_KEY_FILE` (see trust model). | 0 clean/waived, 1 unresolved, 2 config/usage |
 | `gateforge test-gates [--changed] [--scope full\|changed] [--result-only] [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | Supervised `--changed` plans and runs mapped Playwright tests through the trusted adapter, checks planned/executed completeness, and seals an authenticated receipt only after complete success. `--scope changed` limits a sealed slice to obligations affected by changed files; incomplete mappings block, and `check --require-e2e` accepts it only when it covers every currently changed obligation. `--result-only` requires `--changed --scope changed`, reports selected results plus repository debt, and has no gate authority: without an external witness it uses private temporary state; with `--witness-url` it requires `--out` + `--run-token` shared with the external witness in a separate state directory (not the configured authoritative state directory). It never creates or clears a receipt. `--suite` remains legacy and cannot combine with `--changed` or redefine strict expected cases. Verifier keys use `GATEFORGE_WITNESS_VERIFIER_KEY` or the external key ring selected by `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`. | 0/1/2 (suite failure forces 1) |
 | `gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]` | Managed-mode commit broker (MECHANISM, not deployment): snapshots the workspace bytes into a throwaway index, recomputes the input + trusted-policy digests, verifies a valid non-stale gate receipt for EXACTLY those bytes, then creates the commit via compare-and-swap `git update-ref`. Typed rejections (`ENFORCEMENT_UNTRUSTED` / `EVIDENCE_STALE` / `RUN_INCOMPLETE` / `KEY_UNKNOWN` / `BROKER_CAS_MISMATCH` / `BROKER_UNSAFE_MESSAGE`); symlinks/submodules are typed rejections. Verifier keys use either supported environment source; the key file must be outside authority, workspace, and receipt artifact roots. | 0/2 |
-| `gateforge key create|import-env|rotate|retire --file <path> --confirm` | Owner-only key ceremony. Creates an external key ring, imports an existing environment key, rotates the active key while retaining old keys, or retires an inactive key. The secret is never printed. See verifier-key trust notes. | 0/2 |
+| `gateforge key create|import-env|rotate|retire [--file <path>] --confirm` | Owner-only key ceremony. Defaults to the external XDG key ring; creates, imports, rotates, or retires keys without printing secrets. | 0/2 |
 | `gateforge pre-commit --scope staged\|full` | The witnessed commit gate: freezes the Git index, materializes it into a scratch checkout, prepares the candidate's staged runtime (`.gateforge/runtime.yml` — below), runs the supervised witness gate INSIDE that checkout (`staged`: only tests mapped to obligations affected by the staged paths, `EVIDENCE_SCOPE_INCOMPLETE` blocks an unmapped affected obligation; `full`: the complete relevant mapped suite), validates the fresh receipt against the same checkout, rechecks the original index/HEAD/MERGE_HEAD, and copies only Gateforge audit artifacts (run state incl. runtime logs) back. Runtime preparation/readiness failures are typed (`RUNTIME_PREPARATION_FAILED` / `RUNTIME_READINESS_FAILED`); child process groups are cleaned up on every exit path. Install via `gateforge init --blocking --witnessed staged\|full`. | 0/1/2 |
 | `gateforge enforcement doctor [--json]` | Reports verified enforcement `level` (0–3), hook activation, wired CI templates, and read-only GitHub/GitLab branch-protection results; missing credentials or uncertain responses remain `not verified`. A local hook never counts as server protection. Diagnostic only: exit 0 whenever it runs. | 0/2 |
 | `gateforge enforce [--ci github|gitlab]` | Add blocking wiring to an initialized repository. The provider defaults to GitLab unless GitHub is the only detected CI provider; the explicit flag selects GitHub Actions or GitLab CI. | 0/2 |
@@ -764,27 +764,27 @@ surface as explicit `evidence-context` blockers (missing vs malformed
 vs forged stay distinguished) that waivers cannot hide.
 
 The key comes from one trusted source: the protected
-`GATEFORGE_WITNESS_VERIFIER_KEY` environment variable, or an external
-owner-only key ring named by `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`.
-Do not set both. The file must be a regular file owned by the current
+`GATEFORGE_WITNESS_VERIFIER_KEY` environment variable, an external
+owner-only key ring named by `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`, or the
+default `$XDG_CONFIG_HOME/gateforge/verifier-keyring.json` (otherwise
+`~/.config/gateforge/verifier-keyring.json`) when present. Do not set both
+explicit sources. The file must be a regular file owned by the current
 user, with mode `0600` or stricter, and it must not be a symlink. Store
 it outside the candidate repository, Git directory, run state, `--out`
 directory, workspace, and receipt-artifact directory. Gateforge refuses
 unsafe paths and permissions. File mode is not supported on Windows;
 use the protected environment source there.
-
 Create and rotate keys only after an owner review:
 
 If you already use an environment key, keep it in the protected environment
 while you import it. Do not place key material in shell history or argv.
 
 ```sh
-gateforge key create --file "$HOME/.config/gateforge/keys.json" --confirm
-gateforge key import-env --file "$HOME/.config/gateforge/keys.json" --confirm
+gateforge key create --confirm
+gateforge key import-env --confirm
 unset GATEFORGE_WITNESS_VERIFIER_KEY
-export GATEFORGE_WITNESS_VERIFIER_KEY_FILE="$HOME/.config/gateforge/keys.json"
-gateforge key rotate --file "$HOME/.config/gateforge/keys.json" --confirm
-gateforge key retire --file "$HOME/.config/gateforge/keys.json" --key-id key-old-id --confirm
+gateforge key rotate --confirm
+gateforge key retire --key-id key-old-id --confirm
 ```
 
 Create the parent directory first. `key import-env` retains an existing
