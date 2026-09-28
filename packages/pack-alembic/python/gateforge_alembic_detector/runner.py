@@ -197,7 +197,7 @@ def _config(scratch_url: str, versions_dir: str, models_module: str, metadata_at
         ),
         encoding="utf-8",
     )
-    cfg = Config(str(ini))
+    cfg = Config(str(ini), stdout=sys.stderr)
     cfg.set_main_option("script_location", str(script_dir))
     cfg.set_main_option("version_locations", versions_dir)
     cfg.set_main_option("sqlalchemy.url", driver_url)
