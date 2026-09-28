@@ -988,9 +988,15 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           receiptBlocking = receiptGateBlocking(load);
           if (load.status === 'stale') {
             const changedPaths = authenticatedChangedInputs(stateDir, verifierKeyring, currentSnapshot);
+            const docsOnly = changedPaths.length > 0 && changedPaths.every((path) =>
+              /^(?:docs?|guides?)\//i.test(path) || /\.(?:md|mdx|rst|txt)$/i.test(path),
+            );
             const changedSummary =
               changedPaths.length > 0
-                ? ` changed inputs: ${changedPaths.join(', ')}.`
+                ? ` changed inputs: ${changedPaths.join(', ')}.` +
+                  (docsOnly
+                    ? ' Only documentation paths changed; if these are approved documentation folders, run `gateforge init --docs-exclude <folders>`.'
+                    : '')
                 : ' the saved input inventory is unavailable or the change is in gate context rather than file bytes.';
             const sealedTreeEntries = readCandidateTreeEntries(stateDir);
             const treeDiff =

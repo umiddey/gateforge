@@ -467,6 +467,25 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
     });
   });
 
+  it('suggests docs exclusions when documentation alone changed after a run', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      repo.writeFiles({
+        '.gitignore': 'docs/guide.md\n',
+        'docs/guide.md': 'before the witnessed run\n',
+      });
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest);
+      repo.writeFiles({ 'docs/guide.md': 'changed after the witnessed run\n' });
+
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain(
+        'Only documentation paths changed; if these are approved documentation folders, run `gateforge init --docs-exclude <folders>`.',
+      );
+    });
+  });
+
   it('reports an unreadable durable attestation with its owner instead of treating it as absent', async () => {
     await withTempRepo({}, async (repo) => {
       const stateDir = resolveStateDir(repo.root);
