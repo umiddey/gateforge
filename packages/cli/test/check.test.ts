@@ -651,11 +651,36 @@ describe('gateforge check', () => {
       expect(report.verdicts.map((v) => v.obligationId)).toEqual([OBLIGATION_ORDERS]);
       expect(report.verdicts[0]?.inScopeBecause).toEqual(['src/orders.txt']);
       expect(report.summary.blocking).toBe(1);
+      expect((JSON.parse(stdout) as { newDebt?: { count: number; obligationIds: string[] } }).newDebt).toEqual({
+        count: 1,
+        obligationIds: [OBLIGATION_ORDERS],
+      });
+      const text = await runCli(repo, ['check', '--changed']);
+      expect(text.stdout).toContain(`this change adds 1 unproven obligations: ${OBLIGATION_ORDERS}`);
 
       // The unrestricted check still sees both obligations.
       const full = await runCli(repo, ['check', '--format', 'json']);
       expect(full.code).toBe(1);
       expect(parseReport(full.stdout).verdicts).toHaveLength(2);
+    });
+  });
+
+  it('does not count adopted baseline obligations as newly introduced debt', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      expect((await runCli(repo, ['adopt'])).code).toBe(0);
+      repo.commitFiles({}, 'adopted base');
+      repo.writeFiles({ 'src/orders.txt': 'orders fixture.table\n# changed\n' });
+      repo.stage(['src/orders.txt']);
+
+      const result = await runCli(repo, ['check', '--changed', '--format', 'json']);
+      expect(result.code).toBe(0);
+      expect((JSON.parse(result.stdout) as { newDebt?: { count: number; obligationIds: string[] } }).newDebt).toEqual({
+        count: 0,
+        obligationIds: [],
+      });
+      const text = await runCli(repo, ['check', '--changed']);
+      expect(text.stdout).toContain('this change adds 0 unproven obligations: <none>');
     });
   });
 

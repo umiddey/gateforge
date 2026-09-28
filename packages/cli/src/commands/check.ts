@@ -22,6 +22,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
+  BLOCKING_VERDICTS,
   CAUSE_NEXT_ACTIONS,
   canonicalJson,
   engineBundleDigestOf,
@@ -36,6 +37,7 @@ import {
   type ChangedProvider,
   type Claim,
   type GateReceipt,
+  type JsonValue,
 } from '@gate-forge/core';
 import { discoverTestCatalog, findPlaywrightConfig, scanTestFiles } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
@@ -1353,7 +1355,14 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             .sort(),
         }));
   const evaluatedBlocking = [...evaluated.blocking, ...receiptBlocking];
-  const report = renderRun(reportVerdicts, {
+  const newDebt =
+    diffScoped
+      ? reportVerdicts
+          .filter((verdict) => BLOCKING_VERDICTS.includes(verdict.verdict))
+          .map((verdict) => verdict.obligation.id)
+          .sort()
+      : null;
+  let report = renderRun(reportVerdicts, {
     format,
     blocking: evaluatedBlocking,
     advisories: [...annotationAdvisories, ...mockedOnlyAdvisories, ...baselineDriftAdvisories],
@@ -1392,6 +1401,19 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           }),
     },
   });
+  if (newDebt !== null) {
+    if (format === 'json') {
+      const document = JSON.parse(report) as Record<string, JsonValue>;
+      report = canonicalJson({ ...document, newDebt: { count: newDebt.length, obligationIds: newDebt } });
+    } else if (format === 'text') {
+      const debtLine = humanMessage({
+        detail: `this change adds ${String(newDebt.length)} unproven obligations: ${newDebt.join(', ') || '<none>'}`,
+        type: 'new-debt',
+        nextAction: 'gateforge test-gates --changed',
+      });
+      report = `${report}\n${debtLine}`;
+    }
+  }
   if (format === 'text') {
     // Plan phase 7: the endpoint inventory rides the text report —
     // totals, unmatched calls, unconsumed routes, and ambiguous joins
