@@ -264,13 +264,13 @@ still decide whether the commit passes.
 **Standard mode** — an active local hook PLUS a mandatory trusted server
 check:
 
-- `gateforge init --blocking` installs the pre-commit hook into the resolved
-  hooks directory (`core.hooksPath` honored), verifies activation (exec bit +
-  a verified `--gateforge-verify` invocation), and writes a standalone
-  staged-gate script (`.gateforge/hooks/gateforge-staged.sh`) for consumers
-  with a foreign hook manager. The hook runs `gateforge check --staged
-  --require-e2e`; a missing engine blocks (fail closed). Idempotent — an
-  existing gateforge-owned hook is verified, never rewritten.
+- `gateforge init --blocking` installs a static pre-commit check and, for
+  new configs (`enforcement.receiptStage: pre-push`), a pre-push hook that
+  checks each pushed commit tip with `check --candidate-commit <sha>
+  --require-e2e`. The static lane does not require a receipt; the pre-push
+  lane does. Existing configs without `receiptStage` keep their previous
+  pre-commit behavior. Hook activation is verified; foreign hooks are never
+  overwritten.
   By default, `init --blocking` writes `.gateforge/ci/gitlab-gateforge.yml`
   plus the `.gitlab-ci.yml` include. `gateforge enforce --ci github` writes
   `.github/workflows/gateforge.yml` instead. Both strict templates run
@@ -278,6 +278,8 @@ check:
   `check --changed --candidate-commit "$CI_COMMIT_SHA"` (GitLab) or
   `--candidate-commit "$GITHUB_SHA"` (GitHub). The verifier key and policy
   pin come from protected CI secrets.
+  `init --blocking` prints exact GitHub/GitLab protection commands for
+  owner review; it never runs server mutations itself.
   Protect the branch, require its Gateforge pipeline to succeed (skipped jobs
   do not count), exclude agent roles from direct pushes, and use an
   organization-controlled pipeline execution policy so a candidate cannot
@@ -387,6 +389,55 @@ hook activation, runner/browser readiness, capability availability, trusted
 binary/policy ownership, snapshot mode, and — in managed mode — an
 agent-writable authoritative Git directory is a `fail`, never a pass.
 
+### Owner-operated systemd deployment recipe
+
+This is an operator deployment pattern, not an installed Gateforge service.
+Use a dedicated authority account and keep the bare authoritative repository,
+trusted config, CLI binary, and verifier key outside the agent's writable
+process boundary. Give agents write access only to unique inbox workspaces;
+allow them to request this one fixed unit, never arbitrary systemd units.
+Do not pass candidate-controlled environment variables to the service.
+
+Create an owner-only key ring and approved config as the authority account:
+
+```sh
+sudo install -d -o gateforge-authority -g gateforge-authority -m 0700 /etc/gateforge
+sudo -u gateforge-authority gateforge key create --file /etc/gateforge/verifier-keyring.json --confirm
+```
+
+Install `/etc/systemd/system/gateforge-broker@.service` (replace the
+root-owned CLI path and ref for your installation):
+
+```ini
+[Unit]
+Description=Verify and commit one Gateforge workspace
+
+[Service]
+Type=oneshot
+User=gateforge-authority
+Group=gateforge-authority
+WorkingDirectory=/srv/gateforge/authority.git
+Environment=GATEFORGE_WITNESS_VERIFIER_KEY_FILE=/etc/gateforge/verifier-keyring.json
+Environment=GATEFORGE_TRUSTED_CONFIG=/etc/gateforge/approved.yml
+ExecStart=/usr/local/bin/gateforge broker commit --workspace /srv/gateforge/inbox/%i --message "verified candidate" --ref refs/heads/main
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadOnlyPaths=/srv/gateforge/inbox
+ReadWritePaths=/srv/gateforge/authority.git
+```
+
+Provision `/srv/gateforge/authority.git`, `/srv/gateforge/inbox/<opaque-id>`,
+and `/etc/gateforge/approved.yml` with owner-controlled permissions. Restrict
+service activation to the agent role via an exact polkit rule; do not grant
+general `sudo systemctl` access. The broker verifies the workspace receipt,
+current approved policy, raw tree bytes, and compare-and-swap target ref
+before committing. A missing, stale, forged, or wrong-key receipt fails
+closed. `enforcement doctor` can verify the local boundary only; the owner
+must separately audit the service account, polkit rule, filesystem
+permissions, and immutable engine/config deployment.
+
 ## Contract capabilities
 
 What the engine can grade today (single source of truth: the core capability
@@ -424,8 +475,10 @@ start.
 
 Enforcement-relevant sections:
 
-- `enforcement:` — `mode: standard | managed` (default `standard`) and
-  `strictE2E: boolean` (default `false`); see Enforcement above.
+- `enforcement:` — `mode: standard | managed` (default `standard`),
+  `strictE2E: boolean` (default `false`), and optional
+  `receiptStage: pre-push | pre-commit | ci`. New configs choose `pre-push`;
+  omission preserves legacy behavior.
 - `coveragePolicy:` (opt-in, fail closed) — the closed-world CRUD coverage
   policy: enumerated user-facing tables (validated against the run's
   resource inventory on EVERY run — an unknown table name is a config error,

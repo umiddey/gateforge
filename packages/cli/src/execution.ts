@@ -710,6 +710,8 @@ export interface IssueGateReceiptInput {
   approvedPolicyDigest?: string | null;
   /** CLI identity that sealed the receipt (optional for legacy receipts). */
   engine?: { version: string; source: string; unpublished: boolean };
+  /** Configured stage for receipt enforcement, omitted for legacy configs. */
+  receiptStage?: 'pre-push' | 'pre-commit' | 'ci';
   /** Normalized invocation. */
   invocation: string;
   /** Selection digest. */
@@ -817,6 +819,8 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
     ...(input.approvedPolicyDigest ? { approvedPolicyDigest: input.approvedPolicyDigest } : {}),
     // Receipt engine identity is additive; legacy receipts remain valid.
     ...(input.engine !== undefined ? { engine: input.engine } : {}),
+    ...(input.receiptStage !== undefined ? { receiptStage: input.receiptStage } : {}),
+    ...(scoped ? { scope: 'changed' as const, coveredObligationFingerprints: covered } : {}),
     // Additive scope binding (opt-in scoped supervised runs): present
     // ONLY for changed-scope seals, so every earlier receipt stays
     // byte-compatible with v1 (absence reads as `full`).

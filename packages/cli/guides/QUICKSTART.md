@@ -163,15 +163,24 @@ uses an isolated checkout of the immutable commit tree.
 gateforge init --blocking
 ```
 
-This installs and verifies an active pre-commit hook and adds CI wiring. Review the output and generated files:
+This installs a static pre-commit lane and (for a new config) a pre-push
+receipt lane, then adds strict CI wiring. Review the output and generated files:
 
 - `.git/hooks/pre-commit` (or the configured Git hooks path)
+- `.git/hooks/pre-push` (verifies each pushed commit tip)
 - `.gateforge/hooks/gateforge-staged.sh`
 - `.gateforge/ci/gitlab-gateforge.yml` and `.gitlab-ci.yml` by default
 
+The pre-commit lane checks staged bytes without requiring a receipt. The
+pre-push lane runs `check --candidate-commit <sha> --require-e2e`; a missing
+or stale receipt blocks the push. Existing configs without
+`enforcement.receiptStage` retain their previous hook behavior.
+
+`init --blocking` prints GitHub and GitLab branch-protection commands for an
+owner to review and run; Gateforge never changes server settings itself.
 For GitHub Actions, use `gateforge enforce --ci github` in an initialized
 repository. It writes `.github/workflows/gateforge.yml`, which runs
-`test-gates --changed` and verifies the pushed/PR commit with
+`test-gates --changed` and verifies the exact commit with
 `check --changed --candidate-commit "$GITHUB_SHA" --require-e2e`. Configure
 the verifier key and policy pin as protected secrets. A local hook alone is
 not server enforcement.

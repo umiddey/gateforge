@@ -13,12 +13,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gate-forge/core';
-import { runCli, installFixture } from './helpers.js';
+import { GateReceiptSchema, withTempRepo, type TempRepo } from '@gate-forge/core';
+import { runCli, installFixture, fixtureFingerprint } from './helpers.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 import {
   installCommitHook,
+  installPrePushHook,
   PRE_COMMIT_HOOK_NAME,
+  PRE_PUSH_HOOK_NAME,
   probeHookExecution,
   STAGED_GATE_SCRIPT_BASENAME,
   verifyHookActivation,
@@ -263,6 +265,86 @@ describe('the hook gates real commits (end to end, real git + compiled CLI)', ()
         expect(commitCount(repo), describeCommit('authorized commit', authorized)).toBe(2);
         expect(repo.git(['log', '-1', '--format=%s']).stdout.trim()).toBe('authorized change');
         expect(repo.git(['show', 'HEAD:docs/note.md']).stdout).toBe('# notes\n');
+      });
+    },
+    120_000,
+  );
+
+  it(
+    'pre-push rejects a committed tip without a receipt and accepts that exact tip after sealing',
+    async () => {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        repo.writeFiles({
+          '.gateforge.yml': `${readFileSync(repo.path('.gateforge.yml'), 'utf8')}\nenforcement:\n  receiptStage: pre-push\n`,
+        });
+        repo.writeFiles({
+          '.gitignore': '.gateforge/test-gates/\n',
+          '.gateforge/waivers/accounts.json': JSON.stringify({
+            schemaVersion: 1,
+            owner: 'team-accounts',
+            justificationUrl: 'https://example.invalid/justification',
+            approver: 'approver@example.invalid',
+            scope: {
+              kind: 'exact',
+              resourceId: 'tenant.accounts',
+              fingerprint: fixtureFingerprint('tenant.accounts'),
+            },
+            expiresAt: '2027-01-01T00:00:00.000Z',
+          }),
+          '.gateforge/waivers/orders.json': JSON.stringify({
+            schemaVersion: 1,
+            owner: 'team-orders',
+            justificationUrl: 'https://example.invalid/justification',
+            approver: 'approver@example.invalid',
+            scope: {
+              kind: 'exact',
+              resourceId: 'tenant.orders',
+              fingerprint: fixtureFingerprint('tenant.orders'),
+            },
+            expiresAt: '2027-01-01T00:00:00.000Z',
+          }),
+        });
+        repo.stage();
+        repo.commit('base');
+        const installed = installPrePushHook(repo.root, gitEnv());
+        expect(installed.status).toBe('installed');
+        const staticHook = installCommitHook(repo.root, gitEnv(), ['check', '--staged']);
+        expect(staticHook.status).toBe('installed');
+        const laneEnv = { GATEFORGE_CLI: cliBinPath(), GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY };
+        repo.writeFiles({ 'docs/note.md': '# note\n' });
+        repo.stage();
+        const committed = realCommit(repo, 'candidate', laneEnv);
+        expect(committed.status, describeCommit('static pre-commit lane', committed)).toBe(0);
+        const remote = mkdtempSync(join(tmpdir(), 'gateforge-pre-push-remote-'));
+        try {
+          const initialized = spawnSync('git', ['init', '--bare', remote], { encoding: 'utf8' });
+          expect(initialized.status).toBe(0);
+          repo.git(['remote', 'add', 'origin', remote]);
+          const pushEnv = commitEnv({ GATEFORGE_CLI: cliBinPath(), GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY });
+          const blocked = spawnSync('git', ['push', 'origin', 'HEAD:refs/heads/main'], {
+            cwd: repo.root,
+            env: pushEnv,
+            encoding: 'utf8',
+          });
+          expect(blocked.status).not.toBe(0);
+          expect(`${blocked.stdout ?? ''}${blocked.stderr ?? ''}`).toContain('RUN_INCOMPLETE');
+          expect(spawnSync('git', ['--git-dir', remote, 'show-ref', '--verify', '--quiet', 'refs/heads/main']).status).not.toBe(0);
+
+          const minted = await mintCompleteRunReceipt(repo, { verifierKey: VERIFIER_KEY });
+          expect(GateReceiptSchema.parse(JSON.parse(readFileSync(minted.receiptPath, 'utf8'))).receiptStage).toBe('pre-push');
+          const accepted = spawnSync('git', ['push', 'origin', 'HEAD:refs/heads/main'], {
+            cwd: repo.root,
+            env: pushEnv,
+            encoding: 'utf8',
+          });
+          expect(accepted.status, `${accepted.stdout ?? ''}${accepted.stderr ?? ''}`).toBe(0);
+          expect(spawnSync('git', ['--git-dir', remote, 'rev-parse', 'refs/heads/main'], { encoding: 'utf8' }).stdout.trim()).toBe(
+            repo.headSha(),
+          );
+        } finally {
+          rmSync(remote, { recursive: true, force: true });
+        }
       });
     },
     120_000,

@@ -17,6 +17,8 @@ import { join } from 'node:path';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
+import { installPrePushHook } from '../git-hooks.js';
+import { loadConfigAt } from './common.js';
 import { ensureBlockingWiring, engineRootFromInvocation } from './blocking.js';
 
 export const ENFORCE_USAGE = 'usage: gateforge enforce [--ci github|gitlab]';
@@ -44,8 +46,19 @@ export function enforceCommand(io: Io, argv: readonly string[]): number {
   const selectedCi =
     ci ??
     (existsSync(join(io.cwd, '.github')) && !existsSync(join(io.cwd, '.gitlab-ci.yml')) ? 'github' : 'gitlab');
-  ensureBlockingWiring(io, engineRootFromInvocation(), ['check', '--changed'], 'check', selectedCi);
-  // The selected provider template was written by the shared wiring helper.
-  writeLine(io.stdout, `blocking gate wired: pre-commit (gateforge check --changed) + ${selectedCi} CI`);
+  const receiptStage = loadConfigAt(io.cwd).enforcement?.receiptStage;
+  const gateArgs = receiptStage === 'pre-commit' ? ['check', '--changed', '--require-e2e'] : ['check', '--changed'];
+  ensureBlockingWiring(io, engineRootFromInvocation(), gateArgs, 'check', selectedCi);
+  if (receiptStage === 'pre-push') {
+    const outcome = installPrePushHook(io.cwd, io.env);
+    if (outcome.status === 'conflict' || outcome.status === 'incomplete') {
+      throw new UsageError(`${outcome.detail}\nRequired action:\n${outcome.action}`);
+    }
+    writeLine(io.stdout, `${outcome.status}: ${outcome.detail}`);
+  }
+  writeLine(
+    io.stdout,
+    `blocking gate wired: ${receiptStage === 'pre-push' ? 'pre-push receipt lane' : 'pre-commit static lane'} + ${selectedCi} CI`,
+  );
   return 0;
 }

@@ -46,7 +46,7 @@ import { languageDefaultPlugins, recommendPlugins, renderScanBlock, scanRepo } f
 import { rejectUnknownFlags } from './common.js';
 import { expandIncludePaths, type ExpandError } from '../glob.js';
 import { inferPlanesConfig } from '../planes-inference.js';
-import { hasGateforgeMarker, installCommitHook, writeStandaloneGateScript } from '../git-hooks.js';
+import { hasGateforgeMarker, installCommitHook, installPrePushHook, writeStandaloneGateScript } from '../git-hooks.js';
 import {
   appendPreCommitHook,
   ensureHookScript,
@@ -337,16 +337,14 @@ volatileFields:
 }
 /** Builds the `.gateforge.yml` document for the requested languages. */
 function configTemplate(languages: readonly string[], pluginIds: readonly string[], options: { strictE2E?: boolean } = {}): string {
-  const enforcementBlock =
-    options.strictE2E === true
-      ? `# Enforcement: standard mode combines the local hook with a mandatory
+  const enforcementBlock = `# Enforcement: standard mode combines the local hook with a mandatory
 # trusted server check. strictE2E makes waived/baselined in-scope E2E
 # obligations NOT proof (they block with ENFORCEMENT_UNTRUSTED).
 enforcement:
   mode: standard
-  strictE2E: true
-`
-      : '';
+  strictE2E: ${String(options.strictE2E === true)}
+  receiptStage: pre-push
+`;
   return `\
 # gateforge project configuration (schemaVersion 1)
 schemaVersion: 1
@@ -1157,6 +1155,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   const blocking = await resolveBlocking(io, options);
   const preCommit = options['pre-commit'] === true || blocking || witnessedValue !== undefined;
   const ci = options['ci'] === true || blocking;
+  const receiptStage = preCommit ? loadConfig(join(cwd, '.gateforge.yml')).enforcement?.receiptStage : undefined;
   const mode: 'changed' | 'staged' =
     typeof modeValue === 'string'
       ? (modeValue as 'changed' | 'staged')
@@ -1175,8 +1174,12 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         : witnessedValue === 'full'
           ? ['pre-commit', '--scope', 'full']
           : mode === 'staged'
-            ? ['check', '--staged', '--require-e2e']
-            : ['check', '--changed'];
+            ? receiptStage === 'pre-push' || receiptStage === 'ci'
+              ? ['check', '--staged']
+              : ['check', '--staged', '--require-e2e']
+            : receiptStage === 'pre-commit'
+              ? ['check', '--changed', '--require-e2e']
+              : ['check', '--changed'];
     ensureHookScript(io, engineRootFromInvocation(), gateArgs);
     // The ACTIVE hook (plan Phase 5 item 1): install into the resolved
     // hooks directory AND verify activation — never merely write a
@@ -1235,6 +1238,13 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         : `blocking gate wired: active pre-commit hook (${gateArgs.join(' ')}) + .gitlab-ci.yml include. ` +
             'Honest limit: `git commit --no-verify` bypasses the local hook (ADR 0005 D1) — standard enforcement also requires the trusted server check.',
     );
+    if (receiptStage === 'pre-push') {
+      const pushHook = installPrePushHook(cwd, io.env);
+      if (pushHook.status === 'conflict' || pushHook.status === 'incomplete') {
+        throw new UsageError(`${pushHook.detail}\nRequired action:\n${pushHook.action}`);
+      }
+      writeLine(io.stdout, `${pushHook.status}: ${pushHook.detail}`);
+    }
     writeServerProtectionInstructions(io);
   }
   writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');

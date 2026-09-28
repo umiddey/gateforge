@@ -216,6 +216,7 @@ export async function mintCompleteRunReceipt(
     parentSha,
     trustedPolicyDigest,
     ...(options.approvedPolicyDigest !== undefined ? { approvedPolicyDigest: options.approvedPolicyDigest } : {}),
+    receiptStage: config.enforcement?.receiptStage,
     invocation: SUPERVISED_INVOCATION,
     selectionDigest: selectionDigestOf(selection),
     catalogDigest: sha256Canonical(catalog as unknown as Record<string, never>),

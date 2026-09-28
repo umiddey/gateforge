@@ -181,6 +181,8 @@ export const GateReceiptSchema = z
       })
       .strict()
       .optional(),
+    /** Additive stage that the installation configured for receipt enforcement. */
+    receiptStage: z.enum(['pre-push', 'pre-commit', 'ci']).optional(),
     /** 64-hex digest binding the approved engine/policy bundle version. */
     engineBundleDigest: z.string().regex(HEX64, 'engineBundleDigest must be 64-char lowercase hex'),
     /**

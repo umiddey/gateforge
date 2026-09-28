@@ -332,6 +332,13 @@ describe('gateforge init', () => {
       expect(first.code).toBe(0);
       const hook = repo.path('.gateforge/hooks/gateforge-check.mjs');
       expect(existsSync(hook)).toBe(true);
+      const preCommitHook = readFileSync(repo.path('.git/hooks/pre-commit'), 'utf8');
+      const prePushHook = readFileSync(repo.path('.git/hooks/pre-push'), 'utf8');
+      expect(preCommitHook).toContain('check --staged');
+      expect(preCommitHook).not.toContain('--require-e2e');
+      expect(prePushHook).toContain('--candidate-commit');
+      expect(prePushHook).toContain('--require-e2e');
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toContain('receiptStage: pre-push');
       const precommit = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8');
       expect(precommit).toContain('gateforge-check');
       // The appended block must be VALID YAML — a text-only append that

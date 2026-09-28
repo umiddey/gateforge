@@ -126,6 +126,11 @@ export const EnforcementConfigSchema = z
       .string()
       .regex(/^[0-9a-f]{64}$/, 'approvedPolicyDigest must be 64-char lowercase hex')
       .optional(),
+    /**
+     * Stage that requires a sealed E2E receipt. Omission preserves the
+     * behavior of existing configurations.
+     */
+    receiptStage: z.enum(['pre-push', 'pre-commit', 'ci']).optional(),
   })
   .strict();
 

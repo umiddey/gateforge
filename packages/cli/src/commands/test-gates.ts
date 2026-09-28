@@ -1873,6 +1873,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
     parentSha: frozenParentSha,
     trustedPolicyDigest: trustedPolicy,
     approvedPolicyDigest,
+    receiptStage: config.enforcement?.receiptStage,
     engine: engineIdentity(),
     invocation: SUPERVISED_INVOCATION,
     selectionDigest,

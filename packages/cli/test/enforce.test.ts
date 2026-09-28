@@ -155,6 +155,20 @@ describe('gateforge enforce', () => {
     });
   });
 
+  it('preserves legacy pre-commit wiring when an existing config omits receiptStage', async () => {
+    await withTempRepo({}, async (repo) => {
+      expect((await runCli(repo, ['init'])).code).toBe(0);
+      const configPath = repo.path('.gateforge.yml');
+      writeFileSync(configPath, readFileSync(configPath, 'utf8').replace('  receiptStage: pre-push\n', ''));
+      const enforced = await runCli(repo, ['enforce']);
+      expect(enforced.code).toBe(0);
+      expect(existsSync(repo.path('.git/hooks/pre-push'))).toBe(false);
+      expect(readFileSync(repo.path('.gateforge/hooks/gateforge-check.mjs'), 'utf8')).toContain(
+        'const args = ["check","--changed"]',
+      );
+    });
+  });
+
   it('refuses to run without a gateforge config', async () => {
     await withTempRepo({}, async (repo) => {
       const { code, stderr } = await runCli(repo, ['enforce']);
@@ -170,7 +184,7 @@ describe('gateforge enforce', () => {
       expect(enforced.code).toBe(0);
       expect(existsSync(repo.path('.github/workflows/gateforge.yml'))).toBe(true);
       expect(readFileSync(repo.path('.github/workflows/gateforge.yml'), 'utf8')).toContain(
-        'gateforge check --changed --require-e2e',
+        'gateforge check --changed --candidate-commit "$GITHUB_SHA" --require-e2e',
       );
       expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(false);
     });
