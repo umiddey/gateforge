@@ -196,7 +196,12 @@ describe('httpRoutesView: complete deterministic inventory from the graph', () =
         {
           id: 'tenant.a',
           kind: 'http.endpoint',
-          attributes: { method: 'POST', canonicalPath: '/a/{}' },
+          attributes: {
+            method: 'POST',
+            canonicalPath: '/a/{}',
+            linkedResourceName: 'accounts',
+            capabilities: ['crud-update'],
+          },
         },
         // A route with no consumer and no obligation is still carried.
         {
@@ -211,10 +216,17 @@ describe('httpRoutesView: complete deterministic inventory from the graph', () =
       ],
     };
     expect(httpRoutesView(graph as never)).toEqual([
-      { resourceId: 'tenant.a', method: 'POST', canonicalPath: '/a/{}' },
+      {
+        resourceId: 'tenant.a',
+        method: 'POST',
+        canonicalPath: '/a/{}',
+        linkedResourceName: 'accounts',
+        capabilities: ['crud-update'],
+      },
       { resourceId: 'tenant.b', method: 'GET', canonicalPath: '/b' },
       { resourceId: 'tenant.broken', method: '', canonicalPath: '' },
       { resourceId: 'tenant.unconsumed', method: 'GET', canonicalPath: '/quiet' },
+
     ]);
   });
 });

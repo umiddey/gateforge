@@ -77,10 +77,16 @@ export function httpRoutesView(graph: ResourceGraph): HttpRouteCandidate[] {
     if (resource.id === null || resource.kind !== 'http.endpoint') continue;
     const method = resource.attributes['method'];
     const canonicalPath = resource.attributes['canonicalPath'];
+    const linkedResourceName = resource.attributes['linkedResourceName'];
+    const capabilities = resource.attributes['capabilities'];
     routes.push({
       resourceId: resource.id,
       method: typeof method === 'string' ? method : '',
       canonicalPath: typeof canonicalPath === 'string' ? canonicalPath : '',
+      ...(typeof linkedResourceName === 'string' ? { linkedResourceName } : {}),
+      ...(Array.isArray(capabilities)
+        ? { capabilities: capabilities.filter((value): value is string => typeof value === 'string') }
+        : {}),
     });
   }
   routes.sort((a, b) => compareStrings(a.resourceId, b.resourceId));

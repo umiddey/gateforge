@@ -773,10 +773,66 @@ function evaluateClaimEvidence(
   return verifier({ claim, obligation, evidence, primaryKey, resource, httpRoutes });
 }
 
+/**
+ * Adds an unreachable-UI hint only when a complete host route inventory
+ * contains no update-capable endpoint linked to the obligation resource.
+ *
+ * Args:
+ *   outcome: the persistence grader result.
+ *   operation: the obligation operation.
+ *   resource: the host-derived graph resource, when available.
+ *   httpRoutes: the complete host-derived endpoint inventory.
+ *
+ * Returns:
+ *   ClaimOutcome: the unchanged result or one with the route hint appended.
+ */
+function addMissingUpdateRouteHint(
+  outcome: ClaimOutcome,
+  operation: 'create' | 'read' | 'update' | 'delete',
+  resource: { kind: string; attributes: Record<string, unknown> } | null | undefined,
+  httpRoutes: readonly HttpRouteCandidate[] | null | undefined,
+): ClaimOutcome {
+  if (
+    operation !== 'update' ||
+    resource === null ||
+    resource === undefined ||
+    httpRoutes === null ||
+    httpRoutes === undefined ||
+    !('reason' in outcome) ||
+    !outcome.reason.includes('the UI action changed only')
+  ) {
+    return outcome;
+  }
+  const resourceName = resource.attributes['resourceName'];
+  if (typeof resourceName !== 'string') return outcome;
+  const hasUpdateRoute = httpRoutes.some(
+    (route) =>
+      route.linkedResourceName === resourceName &&
+      route.capabilities?.includes('crud-update') === true,
+  );
+  return hasUpdateRoute
+    ? outcome
+    : {
+        ...outcome,
+        reason:
+          `${outcome.reason}; no observed UI request writes these fields — ` +
+          'the feature may be unreachable from the UI',
+      };
+}
+
 // Built-in registrations: persistence/crud semantics stay owned by this
 // module; pack namespaces register through './pack-verifiers.js'.
 registerContractVerifier('crud', (input) => crudClaimVerifier(input));
-registerContractVerifier('persistence', (input) => persistenceClaimVerifier(input.claim, input.evidence, input.obligation, input.primaryKey));
+registerContractVerifier('persistence', (input) =>
+  persistenceClaimVerifier(
+    input.claim,
+    input.evidence,
+    input.obligation,
+    input.primaryKey,
+    input.resource,
+    input.httpRoutes,
+  ),
+);
 registerPackVerifiers();
 
 /**
@@ -894,6 +950,8 @@ function persistenceClaimVerifier(
   evidence: Array<{ record: RecordLike; trust: TrustTier }>,
   obligation: Obligation,
   primaryKey: readonly string[],
+  resource: { kind: string; attributes: Record<string, unknown> } | null | undefined,
+  httpRoutes: readonly HttpRouteCandidate[] | null | undefined,
 ): ClaimOutcome {
   const requiredOp = persistenceOperation(obligation.contract);
   if (requiredOp === null) {
@@ -1032,13 +1090,14 @@ function persistenceClaimVerifier(
   // upgrades a bare browser missing to invalid (the witness DID observe
   // state; the claim declared the operation and lied) — server first,
   // then observe. Otherwise the browser outcome stands verbatim.
+  let outcome: ClaimOutcome = browser;
   if (browser.status === 'missing') {
     const sharp = serverFailure ?? observeFailure;
     if (sharp !== null) {
-      return { status: 'invalid', reason: `${sharp} (obligation '${obligation.id}')` };
+      outcome = { status: 'invalid', reason: `${sharp} (obligation '${obligation.id}')` };
     }
   }
-  return browser;
+  return addMissingUpdateRouteHint(outcome, requiredOp, resource, httpRoutes);
 }
 
 /**

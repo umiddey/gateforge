@@ -421,7 +421,13 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
     archiveFields: undefined,
   } as const;
 
-  function claimOutcome(contract: string, lifecycle: unknown, records: unknown[], httpRoutes?: unknown) {
+  function claimOutcome(
+    contract: string,
+    lifecycle: unknown,
+    records: unknown[],
+    httpRoutes?: unknown,
+    resource?: unknown,
+  ) {
     const target = makeObligation({
       resourceId: 'tenant.accounts',
       contract,
@@ -458,6 +464,7 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
       waivers: [],
       classification,
       ...(httpRoutes !== undefined ? { httpRoutes: httpRoutes as never } : {}),
+      ...(resource !== undefined ? { resource: resource as never } : {}),
       now: NOW,
     });
   }
@@ -684,6 +691,58 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
     expect(outcome.reason).toContain('not a user-editable field');
     expect(outcome.reason).toContain('the update test must change one of [first_name, last_name, name, status]');
   });
+  it('explains when the complete route inventory has no UI update route for the resource', () => {
+    const outcome = claimOutcome(
+      'persistence:update',
+      LIFECYCLE,
+      [
+        witnessedAction({ payload: { operation: 'update', entityId: 'acc-1' } }),
+        witnessedPersistence({
+          payload: {
+            entityId: 'acc-1',
+            found: true,
+            fields: { name: 'Old Name', updated_at: 'new' },
+            before: { found: true, fields: { name: 'Old Name', updated_at: 'old' } },
+          },
+        }),
+      ],
+      [],
+      { kind: 'sqlalchemy.table', attributes: { resourceName: 'accounts' } },
+    );
+    expect(outcome.reason).toContain('the UI action changed only [updated_at]');
+    expect(outcome.reason).toContain('no observed UI request writes these fields');
+    expect(outcome.reason).toContain('the feature may be unreachable from the UI');
+  });
+  it('does not call an update route absent when a linked route declares updates', () => {
+    const outcome = claimOutcome(
+      'persistence:update',
+      LIFECYCLE,
+      [
+        witnessedAction({ payload: { operation: 'update', entityId: 'acc-1' } }),
+        witnessedPersistence({
+          payload: {
+            entityId: 'acc-1',
+            found: true,
+            fields: { name: 'Old Name', updated_at: 'new' },
+            before: { found: true, fields: { name: 'Old Name', updated_at: 'old' } },
+          },
+        }),
+      ],
+      [
+        {
+          resourceId: 'http.endpoint:PUT /accounts/{}',
+          method: 'PUT',
+          canonicalPath: '/accounts/{}',
+          linkedResourceName: 'accounts',
+          capabilities: ['crud-update'],
+        },
+      ],
+      { kind: 'sqlalchemy.table', attributes: { resourceName: 'accounts' } },
+    );
+    expect(outcome.reason).not.toContain('no observed UI request writes these fields');
+  });
+
+
 
   it('update without classification-declared updateableFields fails closed', () => {
     const action = witnessedAction({ payload: { operation: 'update', entityId: 'acc-1' } });

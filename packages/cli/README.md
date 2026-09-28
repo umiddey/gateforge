@@ -681,6 +681,12 @@ Adapters without this metadata keep their existing behavior.
 Presence alone, contradicted observations, missing pre-observations, or
 absent deltas grade `invalid` — even when every provenance check passes.
 
+
+When the complete endpoint inventory contains no update-capable route linked
+to the resource, the failure also says that no observed UI request writes the
+fields and the feature may be unreachable from the UI. This is diagnostic only;
+it does not change the verdict.
+
 **Layer 2 — versioned attestation binding evidence to tested inputs.** A witnessed record is authorized only by ONE validated
 v2 envelope that simultaneously matches its run id, the expected input
 digest, the required invocation identity, and its record id:

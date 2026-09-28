@@ -36,6 +36,10 @@ export interface HttpRouteCandidate {
   method: string;
   /** Compiled canonical path shape (e.g. `/accounts/{}`). */
   canonicalPath: string;
+  /** Linked business resource name from the host-derived endpoint graph. */
+  linkedResourceName?: string;
+  /** Detector-derived CRUD capabilities declared for this route. */
+  capabilities?: readonly string[];
 }
 
 /** Lenient record view (same shape the verdict engine reads). */
