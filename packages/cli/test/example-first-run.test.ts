@@ -1,0 +1,44 @@
+import { cpSync, mkdirSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import { withTempRepo } from '@gate-forge/core';
+import { runCli } from './helpers.js';
+
+const EXAMPLE_ROOT = fileURLToPath(new URL('../../../example/', import.meta.url));
+const WORKSPACE_NODE_MODULES = join(EXAMPLE_ROOT, '..', 'node_modules');
+
+describe('example first run', () => {
+  it('initializes, checks, and navigates a fresh copy without blocking', async () => {
+    await withTempRepo({}, async (repo) => {
+      cpSync(EXAMPLE_ROOT, repo.root, {
+        recursive: true,
+        filter: (source) => {
+          const path = relative(EXAMPLE_ROOT, source);
+          return path === '' || (!path.split(sep).includes('.git') && !path.split(sep).includes('node_modules'));
+        },
+      });
+      const behaviorModules = repo.path('behavior/node_modules');
+      mkdirSync(join(behaviorModules, '@gate-forge'), { recursive: true });
+      const packages = [
+        [join(EXAMPLE_ROOT, '..', 'packages', 'pack-playwright'), join(behaviorModules, '@gate-forge', 'pack-playwright')],
+        [join(EXAMPLE_ROOT, '..', 'packages', 'core'), join(behaviorModules, '@gate-forge', 'core')],
+        ...['playwright', 'playwright-core', 'typescript', 'yaml', 'zod'].map((name) => [
+          join(WORKSPACE_NODE_MODULES, name),
+          join(behaviorModules, name),
+        ]),
+      ];
+      for (const [source, destination] of packages) {
+        cpSync(source as string, destination as string, { recursive: true, dereference: true });
+      }
+      const init = await runCli(repo, ['init', '--no-ci', '--no-blocking']);
+      expect(init.code).toBe(0);
+      const check = await runCli(repo, ['check']);
+      expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
+      expect(check.stdout).toContain('gateforge run: 0 obligation(s) — 0 satisfied, 0 waived, 0 blocking');
+      const next = await runCli(repo, ['next']);
+      expect(next.code, `${next.stdout}\n${next.stderr}`).toBe(0);
+      expect(next.stdout).toContain('next: none — clean');
+    });
+  });
+});

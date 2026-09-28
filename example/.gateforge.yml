@@ -1,0 +1,41 @@
+# gateforge project configuration (schemaVersion 1)
+schemaVersion: 1
+project:
+  # Languages detectors should run for (your detector packs decide).
+  languages:
+    - javascript
+  paths:
+    # Globs scanned by every detector; results drive obligations.
+    include:
+      - '**/*.js'
+      - '**/*.jsx'
+      - '**/*.mjs'
+      - '**/*.cjs'
+    exclude:
+      - '**/node_modules/**'
+      - '**/.venv/**'
+      - '**/venv/**'
+      - '**/__pycache__/**'
+      - '**/.pytest_cache/**'
+      - '**/.mypy_cache/**'
+      - '**/dist/**'
+      - '**/build/**'
+      - 'behavior/scripts/**'
+# Detector plugins. Bundled detectors are preconfigured for the selected
+# languages and are loaded from their trusted package entry points.
+plugins:
+  - id: gateforge.pack-http
+    version: '0.1.0'
+    transport: in-process
+    module: '@gate-forge/pack-http'
+policies: .gateforge/policies.yml
+classificationPolicy: .gateforge/classification-policy.yml
+adapters: .gateforge/adapters
+waivers: .gateforge/waivers
+baselines: .gateforge/baselines/obligations.json
+changed:
+  provider: auto
+witness:
+  maxDurationSeconds: 5
+clock:
+  mode: system

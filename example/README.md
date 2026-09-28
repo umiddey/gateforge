@@ -12,6 +12,29 @@ and a read-only JSON API (trusted-adapter surface).
   `clock` is a function whose return value is passed to `new Date()`
   (defaults to the system clock). Timestamps are ISO-8601 strings.
 
+## Gateforge first run
+
+Run these commands from `example/`. The checked-in `.gateforge/planes.json` and `.gateforge/endpoints.json` make the sample's route classification and endpoint behavior explicit; the verification script is excluded from product-source scanning.
+
+```sh
+gateforge init --no-ci --no-blocking
+gateforge check
+gateforge next
+```
+
+The scan recommends `gateforge.pack-http`. The check reports 10 endpoint routes and:
+
+```text
+gateforge run: 0 obligation(s) — 0 satisfied, 0 waived, 0 blocking
+exit code: 0
+```
+
+One non-blocking test-map advisory remains for the standalone UI journey; this in-memory app has no persistence adapter for that persistence claim. Navigation is:
+
+```text
+next: none — clean
+```
+
 ## Run
 
 ```sh
