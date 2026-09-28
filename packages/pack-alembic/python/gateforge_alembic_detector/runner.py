@@ -309,7 +309,14 @@ def _fingerprints(url: str, tables: list[dict[str, Any]]) -> dict[str, Any]:
     with engine.connect() as connection:
         for table in tables:
             name = str(table["name"])
-            columns = [str(column) for column in table["columns"]]
+            columns = list(
+                dict.fromkeys(
+                    [
+                        *(str(column) for column in table["columns"]),
+                        *(str(copy["to"]) for copy in table.get("copies", [])),
+                    ]
+                )
+            )
             count = connection.execute(text(f"SELECT count(*) FROM {_ident(name)}")).scalar_one()
             column_hashes: dict[str, str | None] = {}
             existing = {

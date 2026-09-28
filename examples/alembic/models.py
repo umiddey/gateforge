@@ -14,7 +14,7 @@ class Invoice(Base):
     __tablename__ = "invoices"
 
     id = Column(String, primary_key=True)
-    customer_name = Column(String, nullable=False)
+    client_name = Column(String, nullable=False)
     total_amount = Column(Integer, nullable=False)
     status = Column(String, nullable=False, default="draft")
     notes = Column(Text, nullable=True)

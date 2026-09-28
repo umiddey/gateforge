@@ -405,7 +405,9 @@ export function executePreservation(options: {
         detail: `table '${table.name}' row count changed from ${String(left.count)} to ${String(right.count)}`,
       };
     }
+    const renamedColumns = new Set((table.copies ?? []).map((copy) => copy.from));
     for (const column of table.columns) {
+      if (renamedColumns.has(column)) continue;
       if (left.columns[column] !== null && left.columns[column] !== right.columns[column]) {
         return {
           ok: false,
@@ -619,6 +621,7 @@ async function runChainDatabase(options: {
   }
 
   let created: { name: string; url: string } | null = null;
+  let cleanup = (): void => undefined;
   try {
     created = createScratchDatabase(options.adminUrl);
     if (!isScratchDatabaseName(created.name)) {
@@ -627,11 +630,10 @@ async function runChainDatabase(options: {
     options.afterCreate?.(created.name);
     let cwd = options.cwd;
     let versionsDir = options.paths.versionsDir;
-    let cleanup = (): void => undefined;
     if (options.mergeRef !== undefined) {
       const merged = mergeTargetWorktree(options.cwd, options.mergeRef);
       cleanup = merged.cleanup;
-      if (merged.status !== 0 && merged.stderr.includes('worktree')) {
+      if (merged.status !== 0) {
         fail(ALEMBIC_MERGE_CLEAN, 'MIGRATION_CONFLICT', merged.stderr || 'cannot merge target ref', null);
         return { blocking, notices, records };
       }
@@ -647,7 +649,6 @@ async function runChainDatabase(options: {
           `merge result has revisions ${named || mergedLineage.heads.join(', ')}`,
           mergedLineage.migrations[0]?.relPath ?? null,
         );
-        cleanup();
         return { blocking, notices, records };
       }
       cwd = merged.dir;
@@ -675,7 +676,6 @@ async function runChainDatabase(options: {
           payload: { contract: ALEMBIC_MERGE_CLEAN, passed: true, cause: null, detail: 'merge result round-tripped' },
         });
       }
-      cleanup();
     }
     const round = executeRoundtrip({
       cwd: options.cwd,
@@ -709,27 +709,51 @@ async function runChainDatabase(options: {
       if (previous === undefined) {
         fail(ALEMBIC_DATA_PRESERVED, 'MIGRATION_DATA_LOST', 'seed requires a previous head to load rows before upgrade', null);
       } else {
-        const seedSql = readFileSync(join(options.cwd, options.seed.path), 'utf8');
-        const preserved = executePreservation({
-          cwd: options.cwd,
-          versionsDir: options.paths.versionsDir,
-          modelsModule: options.paths.modelsModule,
-          metadataAttr: options.paths.metadataAttr,
-          scratchUrl: created.url,
-          previousRevision: previous,
-          seedSql,
-          tables: options.seed.tables,
-          python: options.python,
-          extraPythonPath: options.extraPythonPath,
-        });
-        if (!preserved.ok) {
-          const cause = (preserved.cause as NonNullable<BlockingEntry['cause']>) ?? 'MIGRATION_DATA_LOST';
-          fail(ALEMBIC_DATA_PRESERVED, cause, preserved.detail ?? 'data was not preserved', options.seed.path);
+        const reset = runPython(
+          options.cwd,
+          {
+            command: 'alembic',
+            action: 'downgrade',
+            revision: 'base',
+            scratchUrl: created.url,
+            versionsDir: options.paths.versionsDir,
+            modelsModule: options.paths.modelsModule,
+            metadataAttr: options.paths.metadataAttr,
+            pythonPath: [options.cwd, ...(options.extraPythonPath ?? [])],
+          },
+          options.python,
+          options.extraPythonPath,
+        );
+        if (!reset.ok) {
+          fail(
+            ALEMBIC_DATA_PRESERVED,
+            (reset.cause as NonNullable<BlockingEntry['cause']>) ?? 'MIGRATION_DATA_LOST',
+            reset.detail || 'cannot reset scratch database to base before data preservation',
+            null,
+          );
         } else {
-          records.push({
-            obligationId: `${options.resourceId}:${ALEMBIC_DATA_PRESERVED}`,
-            payload: { contract: ALEMBIC_DATA_PRESERVED, passed: true, cause: null, detail: 'declared rows survived upgrade' },
+          const seedSql = readFileSync(join(options.cwd, options.seed.path), 'utf8');
+          const preserved = executePreservation({
+            cwd: options.cwd,
+            versionsDir: options.paths.versionsDir,
+            modelsModule: options.paths.modelsModule,
+            metadataAttr: options.paths.metadataAttr,
+            scratchUrl: created.url,
+            previousRevision: previous,
+            seedSql,
+            tables: options.seed.tables,
+            python: options.python,
+            extraPythonPath: options.extraPythonPath,
           });
+          if (!preserved.ok) {
+            const cause = (preserved.cause as NonNullable<BlockingEntry['cause']>) ?? 'MIGRATION_DATA_LOST';
+            fail(ALEMBIC_DATA_PRESERVED, cause, preserved.detail || 'data was not preserved', options.seed.path);
+          } else {
+            records.push({
+              obligationId: `${options.resourceId}:${ALEMBIC_DATA_PRESERVED}`,
+              payload: { contract: ALEMBIC_DATA_PRESERVED, passed: true, cause: null, detail: 'declared rows survived upgrade' },
+            });
+          }
         }
       }
     }
@@ -740,6 +764,7 @@ async function runChainDatabase(options: {
     const cause = error instanceof ScratchUnsafeError ? 'MIGRATION_SCRATCH_UNSAFE' : 'MIGRATION_ROUNDTRIP_FAILED';
     fail(ALEMBIC_ROUNDTRIP_VERIFIED, cause, detail, null);
   } finally {
+    cleanup();
     if (created !== null) {
       try {
         dropScratchDatabase(options.adminUrl, created.name);
