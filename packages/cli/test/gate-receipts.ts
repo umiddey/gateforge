@@ -35,6 +35,7 @@ import {
   requiredCaseSetDigestOf,
   targetArtifactDigestOf,
 } from '@gate-forge/core';
+import { engineIdentity } from '../src/engine-identity.js';
 import { VERSION } from '../src/commands/common.js';
 import { TEST_MAP_RELATIVE } from '../src/mapping.js';
 import { resolveStateDir, writeCandidateTreeEntries, writeExecutionResult, writeGateReceipt } from '../src/state.js';
@@ -217,6 +218,7 @@ export async function mintCompleteRunReceipt(
     trustedPolicyDigest,
     ...(options.approvedPolicyDigest !== undefined ? { approvedPolicyDigest: options.approvedPolicyDigest } : {}),
     receiptStage: config.enforcement?.receiptStage,
+    engine: engineIdentity(),
     invocation: SUPERVISED_INVOCATION,
     selectionDigest: selectionDigestOf(selection),
     catalogDigest: sha256Canonical(catalog as unknown as Record<string, never>),

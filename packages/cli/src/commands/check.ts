@@ -23,8 +23,10 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   CAUSE_NEXT_ACTIONS,
+  canonicalJson,
   engineBundleDigestOf,
   executionBoundaryDigestOf,
+  GateReceiptSchema,
   humanMessage,
   LOCAL_UNISOLATED_BOUNDARY,
   renderRun,
@@ -33,6 +35,7 @@ import {
   type CauseCode,
   type ChangedProvider,
   type Claim,
+  type GateReceipt,
 } from '@gate-forge/core';
 import { discoverTestCatalog, findPlaywrightConfig, scanTestFiles } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
@@ -79,7 +82,7 @@ import {
   StagedCandidateBlockError,
   type StagedCandidate,
 } from '../staged-candidate.js';
-import { httpRoutesView, readCandidateTreeEntries, resolveStateDir } from '../state.js';
+import { httpRoutesView, readCandidateTreeEntries, readStateDocument, resolveStateDir } from '../state.js';
 import {
   assertReceiptApprovedPolicy,
   evaluateApprovedPolicy,
@@ -151,12 +154,153 @@ function candidateTreeMismatchSummary(
   }
 
   const docsOnly = changes.every(({ path }) =>
-    /^(?:docs?|guides?)\//i.test(path) || /\.(?:md|mdx|rst|txt)$/i.test(path),
+    /^(?:docs?|guides?)\//i.test(path) || /\.(?:md|mdx|rst)$/i.test(path),
   );
   const docsHint = docsOnly
     ? ' Only documentation paths changed; if these are approved documentation folders, run `gateforge init --docs-exclude <folders>`.'
     : '';
   return ` candidate tree files:\n${lines.join('\n')}${postSealHint}${docsHint}`;
+}
+
+type VerifiedCandidateFastPath = {
+  receipt: GateReceipt;
+  treeMatches: boolean;
+};
+
+/**
+ * Returns an authenticated receipt for a candidate base, distinguishing a
+ * matching tree from an authenticated stale-tree binding.
+ *
+ * Args:
+ *   io: process context.
+ *   checkoutDir: isolated checkout of the immutable candidate.
+ *   candidate: frozen commit identity and tree.
+ *   options: receipt key and optional policy pin.
+ *
+ * Returns:
+ *   VerifiedCandidateFastPath | null: authenticated clean receipt, or null
+ *   to use the full path.
+ */
+function verifiedCandidateFastPathReceipt(
+  io: Io,
+  checkoutDir: string,
+  candidate: StagedCandidate,
+  options: {
+    approvedPolicyDigest?: string;
+    verifierKeyring: VerifierKeyring | null;
+  },
+): VerifiedCandidateFastPath | null {
+  try {
+    const config = loadConfigAt(checkoutDir);
+    const receiptDocument = readStateDocument(resolveStateDir(io.cwd), 'receipt.json');
+    const parsed = GateReceiptSchema.safeParse(receiptDocument);
+    if (!parsed.success || config.enforcement?.receiptStage === undefined) return null;
+    if (loadDocsExclusions(checkoutDir, config).length > 0 || loadCacheExclusions(checkoutDir, config).length > 0) {
+      return null;
+    }
+    const receipt = parsed.data;
+    const currentEngine = engineIdentity();
+    const currentPolicyDigest = trustedPolicyDigestForConfig(checkoutDir, config);
+    const resolution = resolveApprovedPolicyDigest({
+      flag: options.approvedPolicyDigest,
+      env: io.env,
+      candidateCwd: checkoutDir,
+      candidateConfig: config,
+    });
+    const policyGate = evaluateApprovedPolicy(
+      resolution,
+      currentPolicyDigest,
+      config.enforcement.strictE2E === true,
+    );
+    if (
+      policyGate.status !== 'enforced' ||
+      receipt.trustedPolicyDigest !== currentPolicyDigest ||
+      receipt.engine === undefined ||
+      receipt.engine.version !== currentEngine.version ||
+      receipt.engine.source !== currentEngine.source ||
+      receipt.engine.unpublished !== currentEngine.unpublished ||
+      receipt.engineBundleDigest !== engineBundleDigestOf(currentEngine.version, currentPolicyDigest) ||
+      receipt.receiptStage !== config.enforcement.receiptStage ||
+      receipt.verdictSummary.blocking !== 0 ||
+      (receipt.scope !== undefined && receipt.scope !== 'full')
+    ) {
+      return null;
+    }
+    const firstParent = candidate.parentShas[0] ?? null;
+    let priorParent: string | null = null;
+    if (firstParent !== null) {
+      const parentResult = spawnSync('git', ['rev-parse', '--verify', `${firstParent}^`], {
+        cwd: io.cwd,
+        env: sanitizedAuthorityEnv(io.env),
+        encoding: 'utf8',
+      });
+      const value = (parentResult.stdout ?? '').trim();
+      if (parentResult.error === undefined && parentResult.status === 0 && /^[0-9a-f]{40}$/.test(value)) {
+        priorParent = value;
+      }
+    }
+    const baseMatches =
+      (receipt.gitSha === candidate.headSha && receipt.parentSha === firstParent) ||
+      (receipt.gitSha === firstParent && receipt.parentSha === priorParent);
+    if (!baseMatches) return null;
+
+    const currentBoundary = executionBoundaryDigestOf(
+      io.env['GATEFORGE_AUTHORITY_BOUNDARY']?.trim() || LOCAL_UNISOLATED_BOUNDARY,
+    );
+    const verified = loadReceiptFor(resolveStateDir(io.cwd), options.verifierKeyring, {
+      inputDigest: receipt.inputDigest,
+      trustedPolicyDigest: currentPolicyDigest,
+      executionBoundaryDigest: currentBoundary,
+      scope: 'full',
+    });
+    if (verified.status !== 'ok') return null;
+    const approvedBinding = assertReceiptApprovedPolicy(verified.receipt, policyGate.approved);
+    if (!approvedBinding.ok) return null;
+    return { receipt: verified.receipt, treeMatches: verified.receipt.candidateTreeId === candidate.treeId };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Renders the signed summary used when discovery is safely skipped.
+ *
+ * Args:
+ *   format: text or JSON output requested by the caller.
+ *   receipt: authenticated full-scope receipt.
+ *   candidateTreeId: frozen candidate tree identity.
+ *
+ * Returns:
+ *   string: auditable fast-path result.
+ */
+function renderFastPathReceipt(
+  format: 'text' | 'json',
+  receipt: GateReceipt,
+  candidateTreeId: string,
+): string {
+  const diagnosticContext = {
+    scope: 'full',
+    candidateTreeId,
+    inputDigest: receipt.inputDigest,
+    evidenceState: 'receipt-verified-fast-path',
+    authority: 'authoritative',
+  };
+  if (format === 'json') {
+    return canonicalJson({
+      fastPath: true,
+      receiptStage: receipt.receiptStage ?? null,
+      engine: receipt.engine ?? null,
+      summary: receipt.verdictSummary,
+      blocking: [],
+      diagnosticContext,
+    });
+  }
+  const summary = receipt.verdictSummary;
+  return [
+    `gateforge run: ${String(summary.total)} obligation(s) — ${String(summary.satisfied)} satisfied, ${String(summary.waived)} waived, 0 blocking`,
+    'receipt: verified for the exact candidate tree; discovery and test execution were not started (fast path)',
+    `diagnostic context: scope=full candidateTreeId=${candidateTreeId} inputDigest=${receipt.inputDigest} evidence=receipt-verified-fast-path authority=authoritative`,
+  ].join('\n');
 }
 
 /**
@@ -420,6 +564,53 @@ async function stagedCheckCommand(
     if (policyGate.status === 'blocked') {
       releaseStagedCandidate(frozen);
       return renderStagedBlock(io, policyGate.cause, policyGate.detail, policyGate.nextAction);
+    }
+    if (
+      options.candidateCommitSha !== undefined &&
+      options.requireE2E &&
+      options.format !== 'sarif' &&
+      docsExclusions.length === 0 &&
+      cacheExclusions.length === 0
+    ) {
+      const fastPathReceipt = verifiedCandidateFastPathReceipt(io, checkoutDir, frozen, {
+        approvedPolicyDigest: options.approvedPolicyDigest,
+        verifierKeyring: options.verifierKeyring,
+      });
+      if (fastPathReceipt !== null) {
+        if (!fastPathReceipt.treeMatches) {
+          const stateDir = resolveStateDir(io.cwd);
+          const sealedEntries = readCandidateTreeEntries(stateDir);
+          const gitDir = resolveGitDir(checkoutDir, io.env);
+          const snapshot =
+            sealedEntries === null || gitDir === null
+              ? null
+              : computeCandidateTreeSnapshot(gitDir, checkoutDir, io.env, resolveStateDir(checkoutDir), 'record');
+          const treeDiff =
+            sealedEntries === null || snapshot === null
+              ? ''
+              : candidateTreeMismatchSummary(sealedEntries, snapshot.entries, checkoutDir, stateDir, io.env);
+          const nextAction = CAUSE_NEXT_ACTIONS.EVIDENCE_STALE;
+          const detail = humanMessage({
+            cause: 'EVIDENCE_STALE',
+            detail:
+              `require-e2e: authenticated receipt is bound to candidate tree ${fastPathReceipt.receipt.candidateTreeId ?? '<unavailable>'}, ` +
+              `not ${frozen.treeId}.${treeDiff}`,
+            nextAction,
+          });
+          releaseStagedCandidate(frozen);
+          return renderStagedBlock(io, 'EVIDENCE_STALE', detail, nextAction);
+        }
+        writeLine(
+          io.stdout,
+          renderFastPathReceipt(
+            options.format === 'json' ? 'json' : 'text',
+            fastPathReceipt.receipt,
+            frozen.treeId,
+          ),
+        );
+        releaseStagedCandidate(frozen);
+        return 0;
+      }
     }
     const runtimeDoc = loadRuntimeConfigAt(checkoutDir, checkoutConfig.runtime);
     if (runtimeDoc !== null) {
