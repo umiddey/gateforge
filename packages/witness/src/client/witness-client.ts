@@ -325,7 +325,7 @@ export class WitnessClient {
     return this.request<BehaviorPrincipalResponse>('/behavior/principal', request);
   }
 
-  	/** GET /records — the issued ledger for this run. */
+  /** GET /records — the issued ledger for this run. */
 	async listRecords(): Promise<{ records: IssuedLedgerRecord[] }> {
 		const controller = new AbortController();
 		const timer = setTimeout(() => controller.abort(), this.timeoutMs);
