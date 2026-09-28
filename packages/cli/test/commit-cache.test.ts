@@ -185,6 +185,7 @@ describe('commit-time check reuse (plan 20260928_1430)', () => {
         expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(1);
         expect(countSpawns(fixture.detectorCounter)).toBe(1);
         expect(countSpawns(fixture.collectorCounter)).toBe(1);
+        repo.writeFiles({ '.gitignore': '.gateforge/test-gates/\n.venv/\n', '.venv/ignored.py': 'ignored = True\n' });
         expect(first.stdout).toContain('"timing":');
         expect(second.stdout).toContain('"timing":');
         expect(second.stdout).toContain('"cache":{"hits":2,"misses":0}');

@@ -16,21 +16,22 @@
  *   format mismatch — all degrade to running the work again.
  * - The cache lives under the EXCLUDED run-state directory, never enters
  *   the input digest, and is never used as evidence.
- * - `GATEFORGE_NO_CACHE=1` (or `--no-cache`, or a CI environment) forces
- *   a full scan: no reads, no writes.
+ *   `GATEFORGE_NO_CACHE=1` (or `--no-cache`, or a recognized CI provider)
+ *   forces a full scan: no reads, no writes.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  mkdirSync,
-  readFileSync,
   readdirSync,
+  mkdirSync,
+  lstatSync,
+  readFileSync,
   renameSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import {
   DetectorOutputSchema,
   canonicalJson,
@@ -87,6 +88,8 @@ export interface InterpreterIdentity {
   version: string;
   /** Digest over the sorted site-packages entries (name, mtime, size). */
   packagesDigest: string;
+  /** Digest of the entry script bytes when argv[0] is a python entry script (e.g. a venv `pytest`). */
+  entryScriptDigest?: string;
 }
 
 /** Everything one plugin's cached result depends on. */
@@ -133,15 +136,16 @@ interface PluginCacheEntry {
  *
  * Returns:
  *   CacheControl: disabled when `--no-cache`, `GATEFORGE_NO_CACHE` is set,
- *   or a CI environment is detected (CI always runs a full scan).
+ *   or a recognized CI-provider marker is present.
  */
 export function resolveCacheControl(
   env: NodeJS.ProcessEnv,
   stateDir: string,
   noCacheFlag: boolean,
 ): CacheControl {
-  const ciDetected =
-    env['CI'] === 'true' || env['CI'] === '1' || env['GITHUB_ACTIONS'] === 'true';
+  const ciDetected = [
+    'GITHUB_ACTIONS', 'GITLAB_CI', 'BUILDKITE', 'CIRCLECI', 'JENKINS_URL', 'TF_BUILD',
+  ].some((name) => Boolean(env[name]));
   const noCacheEnv = env['GATEFORGE_NO_CACHE'] === '1' || env['GATEFORGE_NO_CACHE'] === 'true';
   return { stateDir: resolve(stateDir), disabled: noCacheFlag || noCacheEnv || ciDetected };
 }
@@ -226,11 +230,64 @@ export function interpreterIdentity(
 ): InterpreterIdentity | null {
   const resolved = resolveExecutable(interpreter, env);
   if (resolved === null) return null;
-  const memoHit = INTERPRETER_IDENTITY_CACHE.get(resolved);
-  if (memoHit !== undefined) return memoHit;
-  const identity = probeInterpreter(resolved, env);
-  INTERPRETER_IDENTITY_CACHE.set(resolved, identity);
-  return identity;
+  const target = pythonTargetOf(resolved, env);
+  if (target === null) return null;
+  let base = INTERPRETER_IDENTITY_CACHE.get(target.python);
+  if (base === undefined) {
+    base = probeInterpreter(target.python, env);
+    INTERPRETER_IDENTITY_CACHE.set(target.python, base);
+  }
+  if (base === null) return null;
+  return target.entryScriptDigest === undefined ? base : { ...base, entryScriptDigest: target.entryScriptDigest };
+}
+
+/** Matches python interpreter basenames: python, python3, python3.12. */
+const PYTHON_BASENAME = /^python(\d+(\.\d+)*)?$/;
+
+/**
+ * Finds the python interpreter behind a command WITHOUT executing it.
+ * A python binary (or python-named shim) is probed directly. Any other
+ * program is only accepted when it is a python entry script: its shebang
+ * (or pip's `/bin/sh` + `'''exec' "<python>"` long-path form) names a
+ * python interpreter; the script's own bytes then join the key. Anything
+ * else is uncacheable, because running an unknown program with `-c` can
+ * do real work (a `pytest` entry script treats `-c` as a config file and
+ * collects the whole suite).
+ *
+ * Args:
+ *   resolved: absolute path of argv[0].
+ *   env: process environment for PATH resolution of `env`-style shebangs.
+ *
+ * Returns:
+ *   { python, entryScriptDigest? } | null: interpreter to probe, or null.
+ */
+function pythonTargetOf(
+  resolved: string,
+  env: NodeJS.ProcessEnv,
+): { python: string; entryScriptDigest?: string } | null {
+  if (PYTHON_BASENAME.test(basename(resolved))) return { python: resolved };
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(resolved);
+  } catch {
+    return null;
+  }
+  if (bytes.length > 1024 * 1024 || bytes[0] !== 0x23 || bytes[1] !== 0x21) return null;
+  const lines = bytes.subarray(0, 4096).toString('utf8').split('\n');
+  const shebang = (lines[0] ?? '').slice(2).trim().split(/\s+/);
+  let program = shebang[0] ?? '';
+  if (basename(program) === 'env') {
+    program = shebang.slice(1).find((token) => !token.startsWith('-')) ?? '';
+  }
+  if (!PYTHON_BASENAME.test(basename(program))) {
+    const execLine = /^'''exec' "([^"]+)" "\$0" "\$@"/.exec(lines[1] ?? '');
+    if (!['sh', 'bash'].includes(basename(program)) || execLine === null) return null;
+    program = execLine[1] ?? '';
+    if (!PYTHON_BASENAME.test(basename(program))) return null;
+  }
+  const python = resolveExecutable(program, env);
+  if (python === null) return null;
+  return { python, entryScriptDigest: sha256Hex(bytes) };
 }
 
 /**
@@ -805,58 +862,47 @@ export function writePytestCache(stateDir: string, key: string, result: unknown)
 }
 
 /**
- * Digests every Python and pytest-config file in the repository for the
- * collection cache key. Skips `.git` and explicitly excluded run-state
- * directories; any unreadable input returns null and forces collection.
+ * Digests Python and pytest-config files from Git's tracked and nonignored
+ * untracked inventory, excluding run-state directories.
  *
  * Args:
- *   cwd: absolute repo root.
- *   stateDirs: absolute run-state directories to exclude from the digest.
+ *   cwd: absolute repository root.
+ *   stateDirs: absolute run-state directories to exclude.
  *
  * Returns:
- *   string | null: hexadecimal digest, or null when an input is unreadable.
+ *   string | null: digest, or null when inventory or an input is unreadable.
  */
 export function digestPytestInputs(cwd: string, ...stateDirs: string[]): string | null {
   const root = resolve(cwd);
   const stateRoots = stateDirs.map((directory) => resolve(directory));
-  const configBasenames = new Set(['pytest.ini', 'pyproject.toml', 'setup.cfg', 'tox.ini']);
+  let inventory: string[];
+  try {
+    const bytes = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+      cwd: root,
+      encoding: 'buffer',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    inventory = bytes.toString('utf8').split('\0').filter(Boolean);
+  } catch {
+    return null;
+  }
   const parts: string[] = [];
-  const walk = (directory: string, relative: string): boolean => {
-    let entries;
+  for (const name of inventory) {
+    const absolute = resolve(root, name);
+    if (!absolute.startsWith(`${root}${sep}`)) return null;
+    if (stateRoots.some((stateRoot) => absolute === stateRoot || absolute.startsWith(`${stateRoot}${sep}`))) continue;
+    const basename = name.slice(name.lastIndexOf('/') + 1);
+    if (!basename.endsWith('.py') && PYTEST_CONFIG_BASENAMES[basename] !== true) continue;
+    let stat;
     try {
-      entries = readdirSync(directory, { withFileTypes: true });
+      stat = lstatSync(absolute);
     } catch {
-      return false;
+      return null;
     }
-    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-      const childAbsolute = join(directory, entry.name);
-      if (entry.isSymbolicLink()) {
-        if (entry.name.endsWith('.py') || PYTEST_CONFIG_BASENAMES[entry.name] === true) return false;
-        continue;
-      }
-      const childRelative = relative === '' ? entry.name : `${relative}/${entry.name}`;
-      if (entry.isDirectory()) {
-        if (entry.name === '.git') continue;
-        if (
-          stateRoots.some(
-            (stateRoot) =>
-              childAbsolute === stateRoot || childAbsolute.startsWith(`${stateRoot}${sep}`),
-          )
-        ) {
-          continue;
-        }
-        if (!walk(childAbsolute, childRelative)) return false;
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      const isPython = entry.name.endsWith('.py');
-      const isConfig = PYTEST_CONFIG_BASENAMES[entry.name] === true;
-      if (!isPython && !isConfig) continue;
-      const digest = fileDigest(childAbsolute, childRelative);
-      if (digest === null) return false;
-      parts.push(digest);
-    }
-    return true;
-  };
-  return walk(root, '') ? sha256Hex(parts.join('\n')) : null;
+    if (stat.isSymbolicLink()) return null;
+    const digest = fileDigest(absolute, name);
+    if (digest === null) return null;
+    parts.push(digest);
+  }
+  return sha256Hex(parts.sort().join('\n'));
 }
