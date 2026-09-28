@@ -99,6 +99,15 @@ export interface RunnerContractHost {
    */
   readonly project: string | null;
   /**
+   * The scenario FILE + TITLE PATH identity the runner natively
+   * collects, when the runner's own naming cannot be the suite default
+   * (`e2e/contract.spec.ts` › `contract` — a pytest module, for
+   * example, cannot live at a `.ts` path). The host owns the runner's
+   * own naming for exactly the same reason {@link project} is
+   * host-owned; every assertion is unchanged.
+   */
+  readonly scenario?: Partial<Pick<ContractScenario, 'file' | 'titlePath'>>;
+  /**
    * Materializes a project whose suite produces `scenario`.
    *
    * Args:
@@ -191,6 +200,15 @@ function identityOfTest(test: RunnerTestIdentity): string {
 /** The identity key a scenario's planned test is joined on. */
 function identityOfScenario(scenario: ContractScenario): string {
   return `${scenario.project ?? '-'}\u0000${scenario.file}\u0000${scenario.titlePath.join('>')}`;
+}
+
+/**
+ * The canonical scenario for one kind, with the host's own scenario
+ * naming when it declared one (runner-native file/title path; see
+ * {@link RunnerContractHost.scenario}).
+ */
+function scenarioFor(host: RunnerContractHost, kind: ContractScenarioKind): ContractScenario {
+  return contractScenario(kind, { project: host.project, ...(host.scenario ?? {}) });
 }
 
 /** The planned instance for a scenario (the expected set, fixed pre-run). */
@@ -303,7 +321,7 @@ async function checkEnumeration(
   host: RunnerContractHost,
   fail: (name: string, detail: string) => void,
 ): Promise<void> {
-  const scenario = contractScenario('pass', { project: host.project });
+  const scenario = scenarioFor(host, 'pass');
   const root = await host.materialize(scenario);
   let enumeration;
   try {
@@ -338,7 +356,7 @@ async function checkEnumeration(
     }
   }
 
-  const emptyRoot = await host.materialize(contractScenario('zero', { project: host.project }));
+  const emptyRoot = await host.materialize(scenarioFor(host, 'zero'));
   let empty;
   try {
     empty = await adapter.enumerate(emptyRoot);
@@ -452,7 +470,7 @@ async function checkExecute(
   fail: (name: string, detail: string) => void,
 ): Promise<void> {
   const name = 'execute-runs-a-suite';
-  const scenario = contractScenario('pass', { project: host.project });
+  const scenario = scenarioFor(host, 'pass');
   const root = await host.materialize(scenario);
   const request = host.executeRequest(root, scenario);
   let envelope: RunnerExecutionEnvelope;
@@ -499,7 +517,7 @@ async function checkScenario(
   fail: (name: string, detail: string) => void,
 ): Promise<void> {
   const name = `scenario-${kind}`;
-  const scenario = contractScenario(kind, { project: host.project });
+  const scenario = scenarioFor(host, kind);
   const root = await host.materialize(scenario);
   let observation: ContractObservation;
   try {

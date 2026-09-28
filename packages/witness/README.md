@@ -53,12 +53,18 @@ It checks that the adapter:
 
 ## Adapters
 
+The runner-neutral parts live here: the `RunnerAdapter` contract, the
+session tagging types, and the conformance suite. Each adapter
+implementation lives beside the runner machinery it drives (the shared
+collection/report/spool code the supervised run already uses), which is
+why the Playwright adapter has always lived in `@gate-forge/pack-playwright`:
+
 | Runner | Where | Tag channel |
 | --- | --- | --- |
 | Playwright | `@gate-forge/pack-playwright` (`discovery/playwright-runner-adapter.ts`) | session proxy |
-| Cypress | this package (`adapter/cypress.ts`) | session proxy |
-| pytest + httpx | this package (`adapter/pytest-httpx.ts`) | session proxy |
-| Jest/Vitest + supertest | this package (`adapter/vitest-supertest.ts`) | session proxy |
+| Cypress | `@gate-forge/pack-playwright` (`discovery/cypress-runner-adapter.ts`) | session proxy |
+| pytest + httpx | `@gate-forge/pack-playwright` (`discovery/pytest-runner-adapter.ts` + `python/gateforge_pytest_plugin.py`) | session proxy |
+| Jest/Vitest + supertest | `@gate-forge/pack-playwright` (`discovery/vitest-runner-adapter.ts`) | session proxy |
 
 An in-process test client (supertest, FastAPI `TestClient`) calls the app
 without going through the proxy. The adapters REFUSE that mode with a typed
