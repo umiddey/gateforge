@@ -14,12 +14,37 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./package.json": "./package.json",
     "./adapter": {
       "types": "./dist/adapter/index.d.ts",
       "import": "./dist/adapter/index.js",
       "default": "./dist/adapter/index.js"
-    }
+    },
+    "./client": {
+      "types": "./dist/client/witness-client.d.ts",
+      "import": "./dist/client/witness-client.js",
+      "default": "./dist/client/witness-client.js"
+    },
+    "./constants": {
+      "types": "./dist/constants.d.ts",
+      "import": "./dist/constants.js",
+      "default": "./dist/constants.js"
+    },
+    "./json": {
+      "types": "./dist/json.d.ts",
+      "import": "./dist/json.js",
+      "default": "./dist/json.js"
+    },
+    "./surface": {
+      "types": "./dist/surface.d.ts",
+      "import": "./dist/surface.js",
+      "default": "./dist/surface.js"
+    },
+    "./witness/*": {
+      "types": "./dist/witness/*.d.ts",
+      "import": "./dist/witness/*.js",
+      "default": "./dist/witness/*.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "README.md",
@@ -31,7 +56,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.7.1"
+    "@gate-forge/core": "^0.7.1",
+    "yaml": "^2.8.1"
   },
   "peerDependencies": {
     "playwright": ">=1.40.0"
