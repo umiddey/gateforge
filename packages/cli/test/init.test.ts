@@ -375,7 +375,10 @@ describe('gateforge init', () => {
       const gateJob = parsed['gateforge:e2e-gate'] ?? {};
       expect(gateJob['allow_failure']).toBeUndefined();
       expect(gateJob['when']).toBeUndefined();
-      expect(gateJob['rules']).toEqual([{ if: '$CI_PIPELINE_SOURCE == "merge_request_event"' }]);
+      expect(gateJob['rules']).toEqual([
+        { if: '$CI_PIPELINE_SOURCE == "merge_request_event"' },
+        { if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH' },
+      ]);
       // idempotent: second run must not duplicate the hook entry
       const again = await runCli(repo, ['init', '--blocking']);
       expect(again.code).toBe(0);

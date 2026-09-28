@@ -135,7 +135,7 @@ export function assertExternalVerifierKeyPath(
   return absolutePath;
 }
 
-/** Verifies a receipt with the identified key or any retained key for older receipts. */
+/** Verifies the identified key, trusted key aliases, or retained keys for legacy receipts. */
 export function verifyGateReceiptWithKeyring(
   keyring: VerifierKeyring,
   candidate: unknown,
@@ -147,6 +147,10 @@ export function verifyGateReceiptWithKeyring(
   if (receiptKeyId !== undefined) {
     const selected = keyring.keys.find((entry) => entry.keyId === receiptKeyId);
     if (selected === undefined) {
+      for (const entry of keyring.keys) {
+        const result = verifyGateReceipt(entry.key, candidate, expected);
+        if (result.ok || result.rejection !== 'mac-fail') return result;
+      }
       return {
         ok: false,
         rejection: 'key-unknown',
@@ -159,7 +163,7 @@ export function verifyGateReceiptWithKeyring(
       : {
           ok: false,
           rejection: 'key-mismatch',
-          detail: `KEY_MISMATCH: verifier key '${receiptKeyId}' does not authenticate this receipt`,
+          detail: `KEY_MISMATCH: verifier key '${receiptKeyId}' does not authenticate this receipt (MAC check failed)`,
         };
   }
 

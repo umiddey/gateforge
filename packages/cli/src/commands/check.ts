@@ -1227,7 +1227,9 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
                 cacheExclusions,
               );
         const candidateTreeId =
-          options.fixedCandidateTreeId ?? candidateTreeSnapshot?.treeId ?? null;
+          docsExclusions.length > 0 || cacheExclusions.length > 0
+            ? (candidateTreeSnapshot?.treeId ?? null)
+            : (options.fixedCandidateTreeId ?? candidateTreeSnapshot?.treeId ?? null);
         diagnosticCandidateTreeId = candidateTreeId;
         const load = loadReceiptFor(
           stateDir,

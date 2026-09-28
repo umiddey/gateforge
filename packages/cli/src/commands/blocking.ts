@@ -317,7 +317,6 @@ jobs:
  * Returns:
  *   void.
  */
- 
 export function writeGithubActionsTemplate(io: Io): void {
   const dir = join(io.cwd, '.github', 'workflows');
   mkdirSync(dir, { recursive: true });

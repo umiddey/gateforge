@@ -336,15 +336,22 @@ volatileFields:
 `;
 }
 /** Builds the `.gateforge.yml` document for the requested languages. */
-function configTemplate(languages: readonly string[], pluginIds: readonly string[], options: { strictE2E?: boolean } = {}): string {
-  const enforcementBlock = `# Enforcement: standard mode combines the local hook with a mandatory
+function configTemplate(
+  languages: readonly string[],
+  pluginIds: readonly string[],
+  options: { strictE2E?: boolean; enforcement?: boolean } = {},
+): string {
+  const enforcementBlock =
+    options.enforcement === true
+      ? `# Enforcement: standard mode combines the local hook with a mandatory
 # trusted server check. strictE2E makes waived/baselined in-scope E2E
 # obligations NOT proof (they block with ENFORCEMENT_UNTRUSTED).
 enforcement:
   mode: standard
   strictE2E: ${String(options.strictE2E === true)}
   receiptStage: pre-push
-`;
+`
+      : '';
   return `\
 # gateforge project configuration (schemaVersion 1)
 schemaVersion: 1
@@ -886,8 +893,16 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   const cwd = io.cwd;
   const languages = scan.languages;
   const pluginIds = recommended;
+  const configOptions = {
+    strictE2E,
+    enforcement:
+      strictE2E ||
+      options['blocking'] === true ||
+      options['pre-commit'] === true ||
+      (options['witnessed'] === 'staged' || options['witnessed'] === 'full'),
+  };
   const generatedDraftConfig = (): ReturnType<typeof loadConfig> =>
-    parseConfig(parseYaml(configTemplate(languages, pluginIds, { strictE2E })), { file: '.gateforge.yml' });
+    parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });
   let draftConfig: ReturnType<typeof loadConfig>;
   if (existsSync(join(cwd, '.gateforge.yml'))) {
     try {
@@ -920,8 +935,8 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         // Self-check the template against the pinned schema before
         // writing anything (a broken template must fail here, not in
         // every later command).
-        parseConfig(parseYaml(configTemplate(languages, pluginIds, { strictE2E })), { file: '.gateforge.yml' });
-        writeFileSync(join(cwd, '.gateforge.yml'), configTemplate(languages, pluginIds, { strictE2E }), 'utf8');
+        parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });
+        writeFileSync(join(cwd, '.gateforge.yml'), configTemplate(languages, pluginIds, configOptions), 'utf8');
       },
     },
     {
@@ -1039,7 +1054,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         path: join(cwd, '.gateforge.yml'),
         label: 'config (with behaviorPolicy)',
         write: () => {
-          const text = configTemplate(languages, pluginIds, { strictE2E });
+          const text = configTemplate(languages, pluginIds, configOptions);
           const withBehavior = text.replace(
             /^policies:/m,
             'behaviorPolicy: .gateforge/behavior.yml\npolicies:',
