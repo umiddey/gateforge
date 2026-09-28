@@ -20,8 +20,14 @@ describe('example first run', () => {
       });
       const behaviorModules = repo.path('behavior/node_modules');
       mkdirSync(join(behaviorModules, '@gate-forge'), { recursive: true });
+      // The physical-package check: a real consumer install materializes
+      // pack-playwright's whole dependency closure, so this list has to
+      // as well. `witness` is the runner-neutral package the witness
+      // service moved into — omitting it is exactly the broken-install
+      // shape this fixture exists to catch.
       const packages = [
         [join(EXAMPLE_ROOT, '..', 'packages', 'pack-playwright'), join(behaviorModules, '@gate-forge', 'pack-playwright')],
+        [join(EXAMPLE_ROOT, '..', 'packages', 'witness'), join(behaviorModules, '@gate-forge', 'witness')],
         [join(EXAMPLE_ROOT, '..', 'packages', 'core'), join(behaviorModules, '@gate-forge', 'core')],
         ...['playwright', 'playwright-core', 'typescript', 'yaml', 'zod'].map((name) => [
           join(WORKSPACE_NODE_MODULES, name),

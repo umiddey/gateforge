@@ -57,6 +57,8 @@ import {
   ENV_WITNESS_VERIFIER_KEY,
 } from '../constants.js';
 import type { WitnessHandle } from './types.js';
+import type { EngineBrowserLauncher } from './browser.js';
+import { createRequire } from 'node:module';
 
 /** One-line usage (the header comment above is the long form). */
 export const WITNESS_BIN_USAGE =
@@ -197,5 +199,35 @@ export async function main(
     adapterReadAuthorization:
       flagOrEnv(flags, 'adapter-read-authorization', env['GATEFORGE_ADAPTER_READ_AUTHORIZATION']) ?? null,
     verifierKey,
+    engineBrowserLauncher: resolveEngineBrowserLauncher(),
   });
+}
+
+/**
+ * Resolves the engine-browser launcher for a SPAWNED witness.
+ *
+ * The library surface is runner-neutral: `startWitness` takes a
+ * launcher and never assumes one. This is the process entry point, and
+ * a `gateforge-witness` process started by a Playwright user's
+ * `test-gates` must launch that user's pinned Chromium exactly as
+ * before — the ENGINE-BROWSER proof channel is a Playwright journey,
+ * and losing it would be a silent downgrade of what a run can prove.
+ *
+ * The resolution is the same CONSUMER-FIRST one the supervised run uses
+ * for the Playwright CLI: the consumer's own installed `playwright`,
+ * not the engine's. When no Playwright is resolvable the witness still
+ * starts and serves every other surface; an engine-browser action then
+ * fails closed with a typed cause instead of a crash.
+ *
+ * Returns:
+ *   EngineBrowserLauncher | undefined: the launcher, or undefined when
+ *   no Playwright is resolvable on the module path.
+ */
+function resolveEngineBrowserLauncher(): EngineBrowserLauncher | undefined {
+  try {
+    const consumerRequire = createRequire(import.meta.url);
+    return consumerRequire('playwright').chromium as EngineBrowserLauncher;
+  } catch {
+    return undefined;
+  }
 }
