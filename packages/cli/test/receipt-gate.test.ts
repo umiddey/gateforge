@@ -165,7 +165,12 @@ const EMPTY_CATALOG: TestCatalog = {
 async function sealGreenRun(
   repo: TempRepo,
   inputDigest: string,
-  options: { verifierKey?: string; verifierKeyId?: string; claimInventory?: readonly Claim[] } = {},
+  options: {
+    verifierKey?: string;
+    verifierKeyId?: string;
+    claimInventory?: readonly Claim[];
+    engine?: { version: string; source: string; unpublished: boolean };
+  } = {},
 ): Promise<string> {
   const config = loadConfig(join(repo.root, '.gateforge.yml'));
   const stateDir = resolveStateDir(repo.root);
@@ -215,11 +220,12 @@ async function sealGreenRun(
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: null,
     ...testReceiptV2Bindings(trustedPolicyDigest),
+    ...(options.engine === undefined ? {} : { engine: options.engine }),
     candidateTreeId,
     targetArtifactDigest: targetArtifactDigestOf(candidateTreeId),
     verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
     issuedAt: FIXED_AT,
-  });
+  } as Parameters<typeof issueGateReceipt>[0]);
   writeGateReceipt(stateDir, receipt);
   writeCandidateTreeEntries(stateDir, treeSnapshot?.entries ?? []);
   return receipt.receiptId;
@@ -328,6 +334,19 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
       expect(result.code).toBe(0);
       expect(result.stdout).not.toMatch(/EVIDENCE_STALE|RUN_INCOMPLETE|ENFORCEMENT_UNTRUSTED/);
       expect(receiptId).toMatch(/^[0-9a-f-]{36}$/);
+    });
+  });
+  it('blocks a validly signed receipt sealed by a different engine version', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest, {
+        engine: { version: '0.0.0', source: 'registry', unpublished: false },
+      });
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain("receipt engine version '0.0.0' differs from installed version");
+      expect(result.stdout).toContain('ENFORCEMENT_UNTRUSTED');
     });
   });
   it('uses only claim inventory sealed for the current input digest', async () => {

@@ -25,6 +25,7 @@ import {
   CAUSE_NEXT_ACTIONS,
   engineBundleDigestOf,
   executionBoundaryDigestOf,
+  humanMessage,
   LOCAL_UNISOLATED_BOUNDARY,
   renderRun,
   runExitCode,
@@ -1055,11 +1056,34 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         );
         diagnosticEvidenceState = load.status === 'ok' ? 'receipt-verified' : `receipt-${load.status}`;
         if (load.status === 'ok') {
+          if (
+            load.receipt.engine !== undefined &&
+            load.receipt.engine.version !== engineIdentity().version
+          ) {
+            const detail =
+              `require-e2e: receipt engine version '${load.receipt.engine.version}' differs from ` +
+              `installed version '${engineIdentity().version}'`;
+            receiptBlocking = [
+              {
+                kind: 'finding',
+                resourceId: null,
+                name: null,
+                detail: humanMessage({
+                  cause: 'ENFORCEMENT_UNTRUSTED',
+                  detail,
+                  nextAction: 'gateforge test-gates --changed',
+                }),
+                location: null,
+                cause: 'ENFORCEMENT_UNTRUSTED',
+                nextAction: 'gateforge test-gates --changed',
+              },
+            ];
+          }
           // A provisioned pin binds the receipt too: a receipt sealed
           // under a since-revoked/different approved revision is a typed
           // reject, and under a pin the binding must be present. When the
           // binding decides, the coverage check below is skipped.
-          if (gate.status === 'enforced') {
+          if (receiptBlocking.length === 0 && gate.status === 'enforced') {
             const binding = assertReceiptApprovedPolicy(load.receipt, gate.approved);
             if (!binding.ok) {
               receiptBlocking = [

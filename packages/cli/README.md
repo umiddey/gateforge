@@ -68,7 +68,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, `New test needed`. | 0/2 (unknown key → 2) |
 | `gateforge tests diagnose [--suite <name>] [--json]` | Run the configured pytest diagnostic suites once per suite, isolated (own process, `GATEFORGE_*` stripped, finite timeout). Advisory: exit 0 completed run (≥1 pass, no unexpected failures), 1 test failures, 2 unavailable/incomplete (collection error, timeout, missing interpreter, interruption, zero tests, or only skipped/xfail). Never E2E proof. | 0/1/2 |
 | `gateforge obligations [--json]` | Evaluate policies against the automatically classified graph and dump obligations, blocking entries, and claim assessments. | 0/1/2 |
-| `gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` evaluates the resolved diff scope; gate-defining changes expand to all obligations. `--staged` gates the frozen index candidate. `--candidate-commit` gates the immutable tree of the named commit rather than the current worktree or index; combine with `--changed` to scope to that commit's first-parent diff. `--require-e2e` requires an authenticated, non-stale receipt. | 0 clean/waived, 1 unresolved, 2 config/usage |
+| `gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--changed` evaluates one effective scope: only obligations/blockers tied to files the resolved diff provider reports — unless the diff touches a gate-defining input (`.gateforge.yml`, configured policy/classification paths, planes/http-clients/fastapi configs, adapters, waivers, repo-local plugin modules, dependency manifests/lockfiles, ignore controls), a test file or helper, the runner configuration, or the mapping sidecar, which expands the run to all obligations (reported as `scope` metadata with `expandedBecause` reasons). `--staged` gates the EXACT staged candidate (frozen index checkout, never the worktree; mutually exclusive with `--changed`). `--candidate-commit` gates the immutable tree of the named commit instead of the current worktree or index; combine with `--changed` to scope to that commit's first-parent diff. `--require-e2e` blocks without a valid, non-stale gate receipt (see Enforcement). `--format` default `text`. Verifier keys use `GATEFORGE_WITNESS_VERIFIER_KEY` or `GATEFORGE_WITNESS_VERIFIER_KEY_FILE` (see trust model). | 0 clean/waived, 1 unresolved, 2 config/usage |
 | `gateforge test-gates [--changed] [--scope full\|changed] [--result-only] [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | Supervised `--changed` plans and runs mapped Playwright tests through the trusted adapter, checks planned/executed completeness, and seals an authenticated receipt only after complete success. `--scope changed` limits a sealed slice to obligations affected by changed files; incomplete mappings block, and `check --require-e2e` accepts it only when it covers every currently changed obligation. `--result-only` requires `--changed --scope changed`, reports selected results plus repository debt, and has no gate authority: without an external witness it uses private temporary state; with `--witness-url` it requires `--out` + `--run-token` shared with the external witness in a separate state directory (not the configured authoritative state directory). It never creates or clears a receipt. `--suite` remains legacy and cannot combine with `--changed` or redefine strict expected cases. Verifier keys use `GATEFORGE_WITNESS_VERIFIER_KEY` or the external key ring selected by `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`. | 0/1/2 (suite failure forces 1) |
 | `gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]` | Managed-mode commit broker (MECHANISM, not deployment): snapshots the workspace bytes into a throwaway index, recomputes the input + trusted-policy digests, verifies a valid non-stale gate receipt for EXACTLY those bytes, then creates the commit via compare-and-swap `git update-ref`. Typed rejections (`ENFORCEMENT_UNTRUSTED` / `EVIDENCE_STALE` / `RUN_INCOMPLETE` / `KEY_UNKNOWN` / `BROKER_CAS_MISMATCH` / `BROKER_UNSAFE_MESSAGE`); symlinks/submodules are typed rejections. Verifier keys use either supported environment source; the key file must be outside authority, workspace, and receipt artifact roots. | 0/2 |
 | `gateforge key create|import-env|rotate|retire --file <path> --confirm` | Owner-only key ceremony. Creates an external key ring, imports an existing environment key, rotates the active key while retaining old keys, or retires an inactive key. The secret is never printed. See verifier-key trust notes. | 0/2 |
@@ -277,13 +277,13 @@ check:
   installs the pinned CLI and runs `test-gates --changed`, then
   `check --changed --require-e2e`, with its verifier key and policy pin read
   from protected repository secrets.
-  template header:
-  "Pipelines must succeed" (skipped ≠ successful), protected branches
-  excluding the agent role from direct pushes, and an organization-controlled
-  pipeline execution policy so a candidate cannot delete the gate job. THE
-  HONEST LIMIT: `--no-verify`, an alternate `core.hooksPath`, direct
-  plumbing, or an unrelated clone bypass any local hook — keeping bypassed
-  commits out of protected history is the server's job, not the hook's.
+  Protect the branch, require its Gateforge pipeline to succeed (skipped jobs
+  do not count), exclude agent roles from direct pushes, and use an
+  organization-controlled pipeline execution policy so a candidate cannot
+  remove the gate job. THE HONEST LIMIT: `--no-verify`, an alternate
+  `core.hooksPath`, direct plumbing, or an unrelated clone bypass any local
+  hook — keeping bypassed commits out of protected history is the server's
+  job, not the hook's.
 - The CI template checks that the installed `@gate-forge/cli` version equals
   the version that generated it. Add that exact version as a root
   `devDependency`. The template uses a package-manager lockfile when present;
@@ -320,6 +320,12 @@ the current input digest and trusted policy digest:
 - receipt for different bytes/inputs → `EVIDENCE_STALE` (rerun for the
   exact candidate);
 - forged/tampered receipt → `ENFORCEMENT_UNTRUSTED`.
+
+Receipts sealed by newer Gateforge versions add the `engine` identity
+(`version`, `source`, and `unpublished`) inside the authenticated envelope.
+When present, `check --require-e2e` requires the installed CLI version to
+match the version that sealed the receipt. Legacy receipts without `engine`
+continue to verify as before.
 
 `test-gates --changed` seals a receipt only after planned-vs-executed
 completeness, evidence grading, and a successful runner exit: zero selected

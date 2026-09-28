@@ -133,6 +133,10 @@ gateforge check --changed --require-e2e
 
 This checks the changed scope and requires a current receipt for the exact inputs. Do not edit files between the witnessed run and this check; changed bytes make the receipt stale.
 
+New receipt JSON includes an authenticated `engine` identity. If present,
+`check --require-e2e` blocks when the installed CLI version differs; older
+receipts without this additive key retain their existing behavior.
+
 **You should see:** a clean report for the changed scope.
 
 **If not:** ask Gateforge for one next action:

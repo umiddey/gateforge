@@ -708,6 +708,8 @@ export interface IssueGateReceiptInput {
    * verification under a provisioned pin.
    */
   approvedPolicyDigest?: string | null;
+  /** CLI identity that sealed the receipt (optional for legacy receipts). */
+  engine?: { version: string; source: string; unpublished: boolean };
   /** Normalized invocation. */
   invocation: string;
   /** Selection digest. */
@@ -813,10 +815,11 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
     // included ONLY when strict enforcement provisioned a pin, so
     // receipts sealed without one stay byte-compatible with v1.
     ...(input.approvedPolicyDigest ? { approvedPolicyDigest: input.approvedPolicyDigest } : {}),
+    // Receipt engine identity is additive; legacy receipts remain valid.
+    ...(input.engine !== undefined ? { engine: input.engine } : {}),
     // Additive scope binding (opt-in scoped supervised runs): present
     // ONLY for changed-scope seals, so every earlier receipt stays
     // byte-compatible with v1 (absence reads as `full`).
-    ...(scoped ? { scope: 'changed' as const, coveredObligationFingerprints: covered } : {}),
     invocation: input.invocation,
     selectionDigest: input.selectionDigest,
     catalogDigest: input.catalogDigest,

@@ -169,9 +169,19 @@ export const GateReceiptSchema = z
      */
     caseExecutionDigest: z.string().regex(HEX64, 'caseExecutionDigest must be 64-char lowercase hex'),
     /**
-     * 64-hex digest binding the approved engine/policy bundle version
-     * (engine version + trusted policy digest).
+     * ADDITIVE engine identity for comparing the installed CLI version
+     * with the version that sealed this receipt. Optional so receipts
+     * issued before this field retain their existing verification behavior.
      */
+    engine: z
+      .object({
+        version: z.string().min(1),
+        source: z.string().min(1),
+        unpublished: z.boolean(),
+      })
+      .strict()
+      .optional(),
+    /** 64-hex digest binding the approved engine/policy bundle version. */
     engineBundleDigest: z.string().regex(HEX64, 'engineBundleDigest must be 64-char lowercase hex'),
     /**
      * 64-hex digest binding the controller-issued record of the active
