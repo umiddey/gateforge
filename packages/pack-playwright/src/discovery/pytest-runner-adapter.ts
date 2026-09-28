@@ -86,6 +86,12 @@ export interface PytestRunnerAdapterOptions {
    * falls back to the ambient `GATEFORGE_WITNESS_URL`/`GATEFORGE_RUN_TOKEN`.
    */
   witness?: { url?: string; token?: string };
+  /**
+   * The app base URL the observation proxy fronts (crosses as
+   * `GATEFORGE_APP_BASE_URL` so tests can address the app; the session
+   * proxy rewrites it). Absent falls back to the ambient variable.
+   */
+  appBaseUrl?: string;
 }
 
 /**
@@ -253,7 +259,7 @@ export class PytestRunnerAdapter implements RunnerAdapter<JunitDocument | null> 
           [ENV_RUN_TOKEN]: this.options.witness?.token ?? process.env[ENV_RUN_TOKEN] ?? '',
           [ENV_STATE_DIR]: request.stateDir,
           [ENV_RUN_ID]: request.runId,
-          [ENV_APP_BASE_URL]: process.env[ENV_APP_BASE_URL] ?? '',
+          [ENV_APP_BASE_URL]: this.options.appBaseUrl ?? process.env[ENV_APP_BASE_URL] ?? '',
         },
         process.env,
         pluginDir,
