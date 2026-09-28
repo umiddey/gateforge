@@ -7,7 +7,7 @@
  * integrity check, failure-after-evidence blocking a later check, and
  * exact cache reuse on identical authenticated inputs only.
  */
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -445,6 +445,19 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
     });
   });
 
+  it('reports an unreadable durable attestation with its owner instead of treating it as absent', async () => {
+    await withTempRepo({}, async (repo) => {
+      const stateDir = resolveStateDir(repo.root);
+      mkdirSync(stateDir, { recursive: true });
+      const manifestPath = join(stateDir, 'manifest.json');
+      writeFileSync(manifestPath, '{"attestation":"signed"}\n', { mode: 0o000 });
+      chmodSync(manifestPath, 0o000);
+
+      expect(() => readStateDocument(stateDir, 'manifest.json')).toThrow(
+        /state file exists at .*not readable by uid \d+ \(owner uid \d+\).*fix ownership/,
+      );
+    });
+  });
   it('a forged mac is a typed ENFORCEMENT_UNTRUSTED rejection', async () => {
     await withTempRepo({}, async (repo) => {
       installReceiptFixture(repo);

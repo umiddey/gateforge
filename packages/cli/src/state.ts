@@ -28,7 +28,7 @@
  * state file that exists but is not valid JSON is a usage error (exit 2),
  * never a silent skip.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -269,7 +269,16 @@ export function readStateDocument(stateDir: string, name: string): unknown | nul
   try {
     raw = readFileSync(path, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    if (code === 'EACCES' || code === 'EPERM') {
+      const info = lstatSync(path);
+      const currentUid = typeof process.getuid === 'function' ? process.getuid() : 'unknown';
+      throw new UsageError(
+        `state file exists at '${path}' but is not readable by uid ${String(currentUid)} ` +
+          `(owner uid ${String(info.uid)}) — rerun the suite as this user or fix ownership`,
+      );
+    }
     throw new UsageError(`cannot read '${path}': ${(error as Error).message}`);
   }
   try {
