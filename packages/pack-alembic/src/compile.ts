@@ -321,8 +321,8 @@ export function executeRoundtrip(options: {
   if (!checked.ok) {
     return {
       ok: false,
-      cause: checked.cause === 'MIGRATION_DRIFT' ? 'MIGRATION_DRIFT' : 'MIGRATION_DRIFT',
-      detail: checked.detail ?? 'alembic check failed',
+      cause: checked.cause ?? 'MIGRATION_ROUNDTRIP_FAILED',
+      detail: checked.detail || 'alembic check failed',
     };
   }
   return { ok: true, snapshot: before.snapshot };

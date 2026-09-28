@@ -132,10 +132,16 @@ export function runPython(
     maxBuffer: 10 * 1024 * 1024,
   });
   if (result.status !== 0 && (result.stdout ?? '').trim() === '') {
+    const detail =
+      result.error?.message ??
+      (result.stderr ?? '').trim().split('\n').filter(Boolean).at(-1) ??
+      (result.signal === null
+        ? `Alembic runner exited with status ${String(result.status)} without a result`
+        : `Alembic runner terminated by ${result.signal}`);
     return {
       ok: false,
       cause: 'MIGRATION_ROUNDTRIP_FAILED',
-      detail: (result.stderr ?? 'alembic runner failed').trim().split('\n').slice(-1)[0] ?? 'alembic runner failed',
+      detail,
     };
   }
   try {
