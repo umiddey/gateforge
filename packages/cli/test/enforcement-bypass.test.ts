@@ -23,9 +23,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
-import { currentInputDigest, installFixture, runCli } from './helpers.js';
+import { currentInputDigest, fixtureFingerprint, installFixture, runCli } from './helpers.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 import { installCommitHook, HOOK_MARKER_BEGIN } from '../src/git-hooks.js';
+
+/** Creates one valid fixture waiver for the CI candidate smoke test.
+ *
+ * Args:
+ *   resourceId: exact fixture resource identity.
+ *
+ * Returns:
+ *   string: schema-valid waiver JSON.
+ */
+function waiverJson(resourceId: string): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    owner: `team-${resourceId.split('.')[1]}`,
+    justificationUrl: 'https://example.invalid/justification',
+    approver: 'approver@example.invalid',
+    scope: { kind: 'exact', resourceId, fingerprint: fixtureFingerprint(resourceId) },
+    expiresAt: '2027-01-01T00:00:00.000Z',
+  });
+}
 
 describe('phase 0: the bypass story, recorded honestly', () => {
   it('a --no-verify commit succeeds locally even with the gateforge hook installed', async () => {
@@ -61,11 +80,11 @@ describe('phase 0: the bypass story, recorded honestly', () => {
       expect(
         repo.git(['-c', 'core.hooksPath=/nonexistent-gateforge-bypass', 'commit', '-m', 'bypass']).status,
       ).toBe(0);
-      // Level 2: the CI-side re-verification of the exact tree fails closed.
-      const ci = await runCli(repo, ['check', '--require-e2e']);
+      const candidateCommit = repo.headSha();
+      const ci = await runCli(repo, ['check', '--candidate-commit', candidateCommit ?? '', '--require-e2e']);
       expect(ci.code).toBe(1);
       expect(ci.stdout).toContain('RUN_INCOMPLETE');
-    });
+  });
   });
 
   it('the CI command blocks with EVIDENCE_STALE when only a stale receipt exists', async () => {
@@ -81,11 +100,35 @@ describe('phase 0: the bypass story, recorded honestly', () => {
       expect(
         repo.git(['-c', 'core.hooksPath=/nonexistent-gateforge-bypass', 'commit', '-m', 'bypass']).status,
       ).toBe(0);
-      const ci = await runCli(repo, ['check', '--require-e2e'], {
-        GATEFORGE_WITNESS_VERIFIER_KEY: 'k'.repeat(32),
-      });
+      const candidateCommit = repo.headSha();
+      const ci = await runCli(
+        repo,
+        ['check', '--candidate-commit', candidateCommit ?? '', '--require-e2e'],
+        { GATEFORGE_WITNESS_VERIFIER_KEY: 'k'.repeat(32) },
+      );
       expect(ci.code).toBe(1);
       expect(ci.stdout).toContain('EVIDENCE_STALE');
+  });
+  });
+  it('the same CI candidate-commit check accepts a gated commit with its valid receipt', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gitignore': '.gateforge/test-gates/\n',
+        '.gateforge/waivers/accounts.json': waiverJson('tenant.accounts'),
+        '.gateforge/waivers/orders.json': waiverJson('tenant.orders'),
+      });
+      repo.stage();
+      repo.commit('gated candidate');
+      const candidateCommit = repo.headSha();
+      expect(candidateCommit).not.toBeNull();
+      await mintCompleteRunReceipt(repo, { verifierKey: 'k'.repeat(32) });
+      const ci = await runCli(
+        repo,
+        ['check', '--candidate-commit', candidateCommit ?? '', '--require-e2e'],
+        { GATEFORGE_WITNESS_VERIFIER_KEY: 'k'.repeat(32) },
+      );
+      expect(ci.code, ci.stdout).toBe(0);
     });
   });
 
