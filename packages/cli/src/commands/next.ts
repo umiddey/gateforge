@@ -174,6 +174,54 @@ function rankBlockers(blocking: readonly BlockingEntry[], verdicts: readonly Obl
 }
 
 /**
+ * Quotes one shell argument so generated commands can be copied safely.
+ *
+ * Args:
+ *   value: the argument text.
+ *
+ * Returns:
+ *   string: a POSIX single-quoted argument.
+ */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Builds owner-directed advice for an endpoint with no resolved plane.
+ *
+ * Args:
+ *   routeName: canonical method and path shown to the user.
+ *   resourceName: detector identity used by the owner-only policy edit.
+ *   source: router source file used by the plane writer.
+ *
+ * Returns:
+ *   string[]: ordered question, runnable commands, and exact policy edit.
+ */
+function unresolvedRouteGuidance(
+  routeName: string,
+  resourceName: string,
+  source: string,
+): string[] {
+  const choices = ['tenant', 'master', 'global'] as const;
+  const commands = choices.map((plane) => {
+    const reason = `Owner review confirms the ${plane} plane for ${routeName}.`;
+    return `gateforge classify plane ${shellQuote(source)} ${plane} --reason ${shellQuote(reason)} --confirm`;
+  });
+  return [
+    `question: ${routeName} — is this route used by real users, and which data plane owns its records?`,
+    'This edits a classification input; re-approve any approved policy pin before strict gates run.',
+    'Choose only the command for the boundary confirmed by the owner:',
+    ...commands.flatMap((command) => [command, '[CODE]']),
+    'Owner-only alternative: only if this route is genuinely internal, edit `.gateforge/classification-policy.yml` under `internalRules`:',
+    '  - match:',
+    '      resourceKind: http.endpoint',
+    `      resourceName: ${JSON.stringify(resourceName)}`,
+    '    reason: "<owner-written reason and evidence for treating this route as internal>"',
+    '[CODE]',
+    'An internal rule is certificate-checked; it is not an override.',
+  ];
+}
+/**
  * Runs the `gateforge next` subcommand.
  *
  * Args:
@@ -399,6 +447,27 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     return 0;
   }
   const first = candidates[0] as NextCandidate;
+  const unresolvedRoute = pipeline.classification.decisions.find(
+    (decision) =>
+      decision.name === first.id &&
+      decision.kind === 'http.endpoint' &&
+      decision.classification === null &&
+      decision.blocks.some((block) => block.code === 'PLANE_UNRESOLVED'),
+  );
+  const routeResource =
+    unresolvedRoute === undefined
+      ? undefined
+      : pipeline.graph.resources.find((resource) => resource.name === unresolvedRoute.name);
+  const method = routeResource?.attributes['method'];
+  const path = routeResource?.attributes['canonicalPath'];
+  const routeName =
+    typeof method === 'string' && typeof path === 'string'
+      ? `${method} ${path}`
+      : unresolvedRoute?.name;
+  const routeGuidance =
+    unresolvedRoute === undefined || routeName === undefined
+      ? null
+      : unresolvedRouteGuidance(routeName, unresolvedRoute.name, unresolvedRoute.source);
   const guide = ENVIRONMENT_GUIDES[first.cause as CauseCode] ?? null;
   if (asJson) {
     writeLine(
@@ -410,6 +479,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         do: first.do,
         remainingBlocking: candidates.length - 1,
         guide,
+        ...(routeGuidance === null ? {} : { guidance: routeGuidance }),
       }),
     );
   } else {
@@ -417,7 +487,12 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     writeLine(io.stdout, `cause: ${first.cause}`);
     writeLine(io.stdout, `why: ${first.why}`);
     if (guide !== null) writeLine(io.stdout, `guide: ${guide}`);
-    writeLine(io.stdout, `do: ${first.do}`);
+    if (routeGuidance === null) {
+      writeLine(io.stdout, `do: ${first.do}`);
+    } else {
+      writeLine(io.stdout, 'do: confirm the route owner and run only the matching plane command below');
+      for (const line of routeGuidance) writeLine(io.stdout, line);
+    }
   }
   return 1;
 }

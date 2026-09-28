@@ -45,9 +45,9 @@ never rewrite existing journeys, never `tests mark` as proof.
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
 | `gateforge init [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--strict-e2e] [--docs-exclude <folder,...>] [--confirm-doc-exclusions]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence policy, transport-only HTTP policy for consumed endpoints, overlay proof), and write the standard Gateforge scaffold. Idempotent — never overwrites existing files unless `--confirm-doc-exclusions` approves an exclusion update. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--strict-e2e` writes the `enforcement` block and refuses unavailable required proof channels. | 0/1/2 |
-| `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking`). Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
+| `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking` and route-specific `guidance` when relevant). For an endpoint with no plane, ask which boundary owns its data and show the owner-reviewed choices; internality remains owner-only. Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
-| `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. Snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
+| `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. `classify plane` previews or explicitly appends an owner-reviewed endpoint plane rule to the existing `.gateforge/planes.json`; snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
 | `gateforge explain <resourceId> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. | 0/1/2 |
 | `gateforge tests discover [--json] [--pytest]` | Inventory existing tests into the derived run-state catalog: static analysis reconciled with native Playwright enumeration (`--list`). Unresolved wrappers, parse errors, and inventory gaps are DATA (never an empty catalog — failed native enumeration is exit 2). `--pytest` additionally collects the configured diagnostic suites' node ids (`--collect-only`). | 0/2 |
 | `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`). When Playwright reports load errors and enumerates no tests, report one `TEST_INVENTORY_INCOMPLETE` with the error count and first error instead of stale-mapping fan-out; the action is to install the missing dependency and rerun Gateforge. An inspection surface, NOT a gate: exit 0 even with blocking problems. | 0/2 |
@@ -471,6 +471,31 @@ Absence of `.gateforge/planes.json` is normal and byte-identical to not
 having this channel; a malformed document (bad JSON, unknown keys, a rule
 without `plane`/`reason`, an absolute or `..`-escaping `match`) fails the
 run closed at startup (exit 2).
+
+### Review an endpoint plane
+
+When `next` cannot resolve a route's plane, it asks which data boundary owns
+the route and prints one command for each supported choice. Run only the
+choice the owner has reviewed. `classify plane` accepts one repo-relative
+router source path, one plane, and a non-empty reason:
+
+```sh
+gateforge classify plane 'src/routes.js' tenant \
+  --reason 'Owner review confirms tenant-owned records for this route.'
+```
+
+The default is a dry run: it prints the exact config diff and does not write.
+Add `--confirm` to append the rule to an **existing**
+`.gateforge/planes.json`. The command never creates another trust file,
+replaces a rule, or writes an internality declaration; conflicting rules
+must be resolved by editing the owner-reviewed config. This file is a
+classification input, so changing it changes the trusted-policy digest; an
+approved policy pin must be re-approved before strict gates run.
+
+The alternative in `next` is owner-only: use the existing
+`.gateforge/classification-policy.yml` `internalRules` declaration only when
+the route is genuinely internal. Internal rules still require the existing
+internality certificate; they are not overrides.
 
 ## Endpoint capability rules (`.gateforge/endpoints.json`)
 

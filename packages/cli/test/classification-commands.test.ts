@@ -15,6 +15,83 @@ describe('automatic classification commands', () => {
     });
   });
 
+  it('previews and explicitly appends a reviewed plane rule without replacing existing rules', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const existing = { match: 'src/accounts.txt', plane: 'tenant', reason: 'Existing reviewed rule.' };
+      repo.writeFiles({ '.gateforge/planes.json': JSON.stringify({ rules: [existing] }) });
+      const args = [
+        'classify',
+        'plane',
+        'src/new-route.js',
+        'master',
+        '--reason',
+        'This route serves operator-managed records.',
+      ];
+
+      const preview = await runCli(repo, args);
+      expect(preview.code).toBe(0);
+      expect(preview.stdout).toContain('"match": "src/new-route.js"');
+      expect(preview.stdout).toContain('owner-reviewed classification input');
+      expect(preview.stdout).toContain('approved policy pin is in use');
+      expect(preview.stdout).toContain('rerun this command with --confirm');
+      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
+        rules: [existing],
+      });
+
+      const confirmed = await runCli(repo, [...args, '--confirm']);
+      expect(confirmed.code).toBe(0);
+      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
+        rules: [
+          existing,
+          {
+            match: 'src/new-route.js',
+            plane: 'master',
+            reason: 'This route serves operator-managed records.',
+          },
+        ],
+      });
+    });
+  });
+
+  it('does not create a new plane trust file', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const result = await runCli(repo, [
+        'classify',
+        'plane',
+        'src/new-route.js',
+        'master',
+        '--reason',
+        'Owner-confirmed isolation boundary.',
+        '--confirm',
+      ]);
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('.gateforge/planes.json');
+      expect(existsSync(repo.path('.gateforge/planes.json'))).toBe(false);
+    });
+  });
+  it('refuses a plane rule that conflicts with an existing matching declaration', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const existing = { match: 'src/**', plane: 'tenant', reason: 'Owner-reviewed tenant data.' };
+      repo.writeFiles({ '.gateforge/planes.json': JSON.stringify({ rules: [existing] }) });
+      const result = await runCli(repo, [
+        'classify',
+        'plane',
+        'src/new-route.js',
+        'master',
+        '--reason',
+        'Owner-reviewed operator data.',
+        '--confirm',
+      ]);
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('will not add a conflicting rule');
+      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
+        rules: [existing],
+      });
+    });
+  });
   it('explain exposes the decision trace and generated obligation', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

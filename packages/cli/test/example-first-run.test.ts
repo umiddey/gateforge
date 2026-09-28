@@ -39,6 +39,41 @@ describe('example first run', () => {
       const next = await runCli(repo, ['next']);
       expect(next.code, `${next.stdout}\n${next.stderr}`).toBe(0);
       expect(next.stdout).toContain('next: none — clean');
+      repo.writeFiles({ '.gateforge/planes.json': '{"rules":[]}\n' });
+      const unresolved = await runCli(repo, ['next']);
+      expect(unresolved.code).toBe(1);
+      expect(unresolved.stdout).toContain('which data plane owns its records?');
+      expect(unresolved.stdout).toContain(
+        "gateforge classify plane 'behavior/server.js' tenant --reason 'Owner review confirms the tenant plane for GET /admin/accounts.' --confirm",
+      );
+      expect(unresolved.stdout).toContain(
+        "gateforge classify plane 'behavior/server.js' master --reason 'Owner review confirms the master plane for GET /admin/accounts.' --confirm",
+      );
+      expect(unresolved.stdout).toContain(
+        "gateforge classify plane 'behavior/server.js' global --reason 'Owner review confirms the global plane for GET /admin/accounts.' --confirm",
+      );
+      expect(unresolved.stdout).toContain('Owner-only alternative');
+      expect(unresolved.stdout).toContain('.gateforge/classification-policy.yml');
+      expect(unresolved.stdout).toContain('internal rule is certificate-checked');
+      const unresolvedJson = await runCli(repo, ['next', '--json']);
+      expect(unresolvedJson.code).toBe(1);
+      const parsed = JSON.parse(unresolvedJson.stdout) as { guidance: string[] };
+      expect(parsed.guidance).toContain(
+        "gateforge classify plane 'behavior/server.js' tenant --reason 'Owner review confirms the tenant plane for GET /admin/accounts.' --confirm",
+      );
+      const writer = await runCli(repo, [
+        'classify',
+        'plane',
+        'behavior/server.js',
+        'tenant',
+        '--reason',
+        'Owner review confirms the tenant plane for GET /admin/accounts.',
+        '--confirm',
+      ]);
+      expect(writer.code, `${writer.stdout}\n${writer.stderr}`).toBe(0);
+      const resolved = await runCli(repo, ['next']);
+      expect(resolved.code, `${resolved.stdout}\n${resolved.stderr}`).toBe(0);
+      expect(resolved.stdout).toContain('next: none — clean');
     });
   });
 });
