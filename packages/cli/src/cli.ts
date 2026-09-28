@@ -53,9 +53,9 @@ commands:
   tests explain --test K [--json]        requirements/mapping/next action for one existing test
   tests diagnose [--suite N] [--json]    run the configured pytest diagnostic suites (advisory; exit 0/1/2)
   obligations [--json]                   evaluate policies and dump obligations
-  check [--changed] [--staged]           run the full gate and report (F: text|json|sarif). --staged gates the
-        [--require-e2e] [--format F]     EXACT staged candidate (frozen index checkout, never the worktree);
-                                         --require-e2e blocks without a valid, non-stale gate receipt
+  check [--changed] [--staged] [--candidate-commit SHA] run the gate against all files, the exact frozen
+        index, or the selected immutable commit tree; --changed narrows the selected candidate's diff;
+        [--require-e2e] [--format F] require a valid receipt and select text|json|sarif output
   next [--changed] [--json]              print the ONE blocking next action (navigation, not the gate)
   test-gates [--changed] [--suite CMD]   supervised E2E run over the obligations (--changed) or the
         [--out DIR] [--format F]         legacy suite escape hatch; seals a gate receipt on complete success

@@ -70,6 +70,7 @@ import {
 } from '../scope.js';
 import {
   assertRuntimeReuseOwnerApproval,
+  freezeCommitCandidate,
   freezeStagedCandidate,
   materializeStagedCandidate,
   recheckStagedCandidate,
@@ -230,7 +231,7 @@ function mockedOnlyEndpointAdvisories(
 }
 
 export const CHECK_USAGE =
-  'usage: gateforge check [--changed] [--staged] [--require-e2e] [--format text|json|sarif]\n' +
+  'usage: gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--format text|json|sarif]\n' +
   '       [--approved-policy-digest <hex64>]\n' +
   '       verifier key: GATEFORGE_WITNESS_VERIFIER_KEY or GATEFORGE_WITNESS_VERIFIER_KEY_FILE\n' +
   '       approved policy digest: the OWNER-APPROVED policy revision pin. Never sourced from\n' +
@@ -291,7 +292,7 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
     writeLine(io.stdout, CHECK_USAGE);
     return 0;
   }
-  rejectUnknownFlags(options, ['changed', 'staged', 'require-e2e', 'format', 'approved-policy-digest', 'help'], CHECK_USAGE);
+  rejectUnknownFlags(options, ['changed', 'staged', 'candidate-commit', 'require-e2e', 'format', 'approved-policy-digest', 'help'], CHECK_USAGE);
   if (options['staged'] === true && options['changed'] === true) {
     throw new UsageError('check: --staged already scopes the run to the staged candidate; --changed cannot be combined');
   }
@@ -299,8 +300,22 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
   const requireE2E = options['require-e2e'] === true;
   const approvedPolicyDigest = stringFlag(options, 'approved-policy-digest');
   const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [resolveStateDir(io.cwd)]);
+  const candidateCommitSha = stringFlag(options, 'candidate-commit');
+  if (options['staged'] === true && candidateCommitSha !== undefined) {
+    throw new UsageError('check: --candidate-commit cannot be combined with --staged');
+  }
+  if (candidateCommitSha !== undefined) {
+    return stagedCheckCommand(io, {
+      candidateCommitSha,
+      diffScoped: options['changed'] === true,
+      requireE2E,
+      format,
+      approvedPolicyDigest,
+      verifierKeyring,
+    });
+  }
   if (options['staged'] === true) {
-    return stagedCheckCommand(io, { requireE2E, format, approvedPolicyDigest, verifierKeyring });
+    return stagedCheckCommand(io, { diffScoped: true, requireE2E, format, approvedPolicyDigest, verifierKeyring });
   }
   return runCheckGate(io, {
     diffScoped: options['changed'] === true,
@@ -337,6 +352,8 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
 async function stagedCheckCommand(
   io: Io,
   options: {
+    candidateCommitSha?: string;
+    diffScoped: boolean;
     requireE2E: boolean;
     format: 'text' | 'json' | 'sarif';
     approvedPolicyDigest?: string;
@@ -345,7 +362,10 @@ async function stagedCheckCommand(
 ): Promise<number> {
   let frozen: StagedCandidate;
   try {
-    frozen = freezeStagedCandidate(io.cwd, io.env);
+    frozen =
+      options.candidateCommitSha === undefined
+        ? freezeStagedCandidate(io.cwd, io.env)
+        : freezeCommitCandidate(io.cwd, io.env, options.candidateCommitSha);
   } catch (error) {
     if (error instanceof StagedCandidateBlockError) {
       return renderStagedBlock(io, error.causeCode, error.message, error.nextAction);
@@ -370,7 +390,7 @@ async function stagedCheckCommand(
     for (const dir of [checkoutConfig.adapters, checkoutConfig.waivers]) {
       const userDir = resolveRepoPath(io.cwd, dir);
       const checkoutPath = resolveRepoPath(checkoutDir, dir);
-      if (existsSync(userDir) && !existsSync(checkoutPath)) {
+      if (options.candidateCommitSha === undefined && existsSync(userDir) && !existsSync(checkoutPath)) {
         mkdirSync(checkoutPath, { recursive: true });
       }
     }
@@ -434,25 +454,27 @@ async function stagedCheckCommand(
       cpSync(userState, resolveStateDir(checkoutDir), { recursive: true });
     }
     const code = await runCheckGate({ ...io, cwd: checkoutDir }, {
-      diffScoped: true,
+      diffScoped: options.diffScoped,
       requireE2E: options.requireE2E,
       format: options.format,
       approvedPolicyDigest: options.approvedPolicyDigest,
       verifierKeyring: options.verifierKeyring,
-      fixedChangedFiles: frozen.changedPaths,
+      fixedCandidateTreeId: frozen.treeId,
+      ...(options.diffScoped ? { fixedChangedFiles: frozen.changedPaths } : {}),
       runtimeReuseDigest,
       runtimeReuseMounts,
       runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
     });
-    // Re-check BEFORE authorizing: different bytes never pass.
-    const recheck = recheckStagedCandidate(io.cwd, io.env, frozen);
-    if (!recheck.ok) {
-      return renderStagedBlock(
-        io,
-        'ENFORCEMENT_UNTRUSTED',
-        recheck.detail,
-        'Re-run the gate for the current staged candidate.',
-      );
+    if (options.candidateCommitSha === undefined) {
+      const recheck = recheckStagedCandidate(io.cwd, io.env, frozen);
+      if (!recheck.ok) {
+        return renderStagedBlock(
+          io,
+          'ENFORCEMENT_UNTRUSTED',
+          recheck.detail,
+          'Re-run the gate for the current staged candidate.',
+        );
+      }
     }
     return code;
   } catch (error) {

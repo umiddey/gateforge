@@ -143,6 +143,16 @@ gateforge next
 
 Follow its `do:` line, then run the check again. See [Test environment](TEST-ENVIRONMENT.md) if the block is caused by setup or test state.
 
+To verify a specific commit tree (for example, the tip of a pushed ref)
+instead of the current worktree or index:
+
+```sh
+gateforge check --candidate-commit <full-commit-sha> --require-e2e
+```
+
+Add `--changed` to evaluate only that commit's first-parent diff. The command
+uses an isolated checkout of the immutable commit tree.
+
 ## 8. Install the blocking hook and CI wiring
 
 ```sh

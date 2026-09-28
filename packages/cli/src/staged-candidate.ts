@@ -434,6 +434,63 @@ export function freezeStagedCandidate(cwd: string, env: NodeJS.ProcessEnv): Stag
 }
 
 /**
+ * Freezes a commit object as a candidate without consulting the index or
+ * changing repository state.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   env: process environment.
+ *   commitSha: full lowercase commit SHA requested by the caller.
+ *
+ * Returns:
+ *   StagedCandidate: immutable commit tree, parents, and changed paths.
+ *
+ * Throws:
+ *   StagedCandidateBlockError: unsupported symlink or submodule.
+ *   UsageError: invalid or unavailable commit object.
+ */
+export function freezeCommitCandidate(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  commitSha: string,
+): StagedCandidate {
+  if (!/^[0-9a-f]{40}$/.test(commitSha)) {
+    throw new UsageError('candidate commit must be a full 40-character lowercase commit SHA');
+  }
+  const resolved = git(cwd, env, { args: ['rev-parse', '--verify', '--end-of-options', `${commitSha}^{commit}`] }).stdout.trim();
+  if (resolved !== commitSha) throw new UsageError('candidate commit does not resolve to the requested commit');
+  const scratchDir = mkdtempSync(join(tmpdir(), 'gateforge-commit-'));
+  try {
+    const treeId = git(cwd, env, { args: ['rev-parse', `${commitSha}^{tree}`] }).stdout.trim();
+    const parentLine = git(cwd, env, { args: ['rev-list', '--parents', '-n', '1', commitSha] }).stdout.trim();
+    const parentShas = parentLine.split(' ').slice(1);
+    const baseTree = parentShas[0] === undefined ? EMPTY_TREE_ID : `${parentShas[0]}^{tree}`;
+    const changed = parseNameStatus(
+      git(cwd, env, { args: ['diff', '--name-status', '-z', '-M', baseTree, `${commitSha}^{tree}`] }).stdout,
+    );
+    const approvedReusePaths = committedReusePaths(cwd, env, parentShas[0] ?? null);
+    assertSupportedTree(cwd, env, treeId, approvedReusePaths);
+    const changedPaths = normalizeChangedFiles(
+      changed.flatMap((change) => (change.oldPath !== undefined ? [change.oldPath, change.path] : [change.path])),
+    );
+    return {
+      treeId,
+      headSha: commitSha,
+      mergeHeadSha: null,
+      parentShas,
+      changed,
+      changedPaths,
+      scratchDir,
+      checkoutDir: null,
+      approvedReusePaths,
+    };
+  } catch (error) {
+    rmSync(scratchDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/**
  * Materializes an isolated checkout of the frozen tree (plan Phase 5
  * item 3): `git read-tree` + `git checkout-index` into a scratch
  * directory, then a throwaway Git repository is initialized inside it so

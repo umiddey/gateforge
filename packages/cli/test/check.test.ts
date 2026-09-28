@@ -77,6 +77,20 @@ describe('gateforge check', () => {
       expect(report.run.provider).toBe('all-files');
     });
   });
+  it('checks the requested commit tree instead of later worktree bytes', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.commitFiles({}, 'candidate base');
+      const candidateSha = repo.headSha();
+      expect(candidateSha).not.toBeNull();
+      const candidateTree = repo.git(['rev-parse', `${candidateSha}^{tree}`]).stdout.trim();
+      repo.writeFiles({ 'src/accounts.txt': 'changed after candidate\n' });
+      const result = await runCli(repo, ['check', '--candidate-commit', candidateSha ?? '', '--format', 'json']);
+      expect(result.code).toBe(1);
+      const report = JSON.parse(result.stdout) as { diagnosticContext: { candidateTreeId: string | null } };
+      expect(report.diagnosticContext.candidateTreeId).toBe(candidateTree);
+    });
+  });
 
   it('warns when a server route is reached only by statically matched mocks', async () => {
     await withTempRepo({}, async (repo) => {
