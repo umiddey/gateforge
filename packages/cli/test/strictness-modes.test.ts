@@ -243,4 +243,3 @@ describe('strictness on a copy of the example project', () => {
     }, 120_000);
   }
 });
-
