@@ -202,6 +202,7 @@ describe('static discovery', () => {
     // duplicate keys, crash) the catalog.
     expect(result.unresolved).toHaveLength(0);
     expect(result.entries.map((entry) => entry.title)).toEqual(['real test stays visible']);
+    expect(result.entries[0]?.facts.pageRouteTargets).toEqual(['**/api/**']);
   });
 
   it('merges duplicate unresolved rows (same file, same placeholder title) into one typed row', async () => {

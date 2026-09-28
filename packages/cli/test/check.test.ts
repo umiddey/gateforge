@@ -78,6 +78,44 @@ describe('gateforge check', () => {
     });
   });
 
+  it('warns when a server route is reached only by statically matched mocks', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo, {
+        include: "['src/**/*.txt', 'src/**/*.js', 'tests/**/*.spec.js']",
+        plugins:
+          "  - id: fixture.plugin\n    version: '1.0.0'\n    transport: in-process\n    module: ./plugin.mjs\n" +
+          "  - id: gateforge.pack-http\n    version: '0.1.0'\n    transport: in-process\n    module: '@gate-forge/pack-http'",
+      });
+      repo.writeFiles({
+        'src/server.js':
+          "import express from 'express';\nconst app = express();\napp.get('/api/accounts', (_req, res) => res.json([]));\n",
+        'tests/mock.spec.js': [
+          "import { test } from '@playwright/test';",
+          "test('mocks the account route', async ({ page }) => {",
+          "  await page.route('**/api/accounts', (route) => route.fulfill({ status: 200 }));",
+          "  await page.goto('http://app.test');",
+          '});',
+          '',
+        ].join('\n'),
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [{ match: 'src/server.js', plane: 'tenant', reason: 'The fixture route is tenant-scoped.' }],
+        }),
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [{ match: 'src/server.js', paths: ['/api/accounts'], method: 'GET', capability: 'crud-read', reason: 'The route reads account records.' }],
+        }),
+      });
+
+      const result = await runCli(repo, ['check']);
+      const advisoryStart = result.stdout.indexOf('advisories (non-blocking):');
+      const blockingStart = result.stdout.indexOf('blocking entries');
+      expect(advisoryStart).toBeGreaterThanOrEqual(0);
+      expect(result.stdout.slice(advisoryStart, blockingStart)).toContain(
+        'only mocked tests reach GET /api/accounts',
+      );
+      expect(result.stdout.slice(blockingStart)).not.toContain('only mocked tests reach GET /api/accounts');
+    });
+  });
+
   it('green path: every obligation waived → exit 0, waived verdicts', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

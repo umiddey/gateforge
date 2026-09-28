@@ -67,6 +67,8 @@ export interface StaticTestFacts {
   signatureParams: string[];
   /** `page.route(...)` (or any `<x>.route(`) inside the test body. */
   pageRoute: Location | null;
+  /** Literal URL patterns passed to `page.route(...)`, when statically known. */
+  pageRouteTargets?: string[];
   /** fetch/axios call inside the test body. */
   httpClientCall: Location | null;
   /** fetch/axios call anywhere in the file (app-boundary import hint). */
@@ -962,6 +964,39 @@ function findPageRoute(node: ts.Node, source: ts.SourceFile, file: string): Loca
   return found;
 }
 
+/**
+ * Collects literal URL patterns intercepted by `page.route` in one test.
+ *
+ * Args:
+ *   node: the test callback subtree.
+ *
+ * Returns:
+ *   string[]: unique, sorted static route patterns.
+ */
+function pageRouteTargets(node: ts.Node): string[] {
+  const targets = new Set<string>();
+  const visit = (current: ts.Node): void => {
+    if (
+      ts.isCallExpression(current) &&
+      ts.isPropertyAccessExpression(current.expression) &&
+      current.expression.name.text === 'route' &&
+      ts.isIdentifier(current.expression.expression)
+    ) {
+      const target = current.arguments[0];
+      if (
+        target !== undefined &&
+        ts.isStringLiteralLike(target) &&
+        target.text.length > 0
+      ) {
+        targets.add(target.text);
+      }
+    }
+    ts.forEachChild(current, visit);
+  };
+  visit(node);
+  return [...targets].sort();
+}
+
 /** Whether the subtree calls fetch/axios (the app's HTTP boundary). */
 function findHttpClientCall(node: ts.Node, source: ts.SourceFile, file: string): Location | null {
   let found: Location | null = null;
@@ -1626,6 +1661,7 @@ function buildEntry(input: {
   }
   let pageRoute: Location | null = null;
   let httpClientCall: Location | null = null;
+  const interceptedTargets = callback === undefined ? [] : pageRouteTargets(callback);
   if (callback !== undefined) {
     pageRoute = findPageRoute(callback, source, file);
     httpClientCall = findHttpClientCall(callback, source, file);
@@ -1640,6 +1676,7 @@ function buildEntry(input: {
     facts: {
       signatureParams: params,
       pageRoute,
+      ...(interceptedTargets.length > 0 ? { pageRouteTargets: interceptedTargets } : {}),
       httpClientCall,
       fileHttpClientCall: input.fileHttpClient,
       fileMockImport: input.fileMock,

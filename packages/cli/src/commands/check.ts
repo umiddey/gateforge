@@ -157,6 +157,78 @@ function candidateTreeMismatchSummary(
   return ` candidate tree files:\n${lines.join('\n')}${postSealHint}${docsHint}`;
 }
 
+/**
+ * Finds endpoints whose only statically matched tests intercept their route.
+ *
+ * Args:
+ *   endpoints: compiled endpoint identities.
+ *   tests: statically discovered tests and their route-interception facts.
+ *
+ * Returns:
+ *   BlockingEntry[]: non-blocking report entries for mocked-only routes.
+ */
+function mockedOnlyEndpointAdvisories(
+  endpoints: readonly { method: string; canonicalPath: string; identity: string }[],
+  tests: readonly {
+    file: string;
+    title: string;
+    facts: {
+      pageRoute: { file: string; line: number; col: number } | null;
+      pageRouteTargets?: readonly string[];
+    };
+  }[],
+): BlockingEntry[] {
+  /**
+   * Compiles a Playwright-style route glob for a full-path comparison.
+   *
+   * Args:
+   *   pattern: statically discovered route glob.
+   *
+   * Returns:
+   *   RegExp: matcher for one candidate URL or canonical path.
+   */
+  const routeRegex = (pattern: string): RegExp => {
+    /**
+     * Escapes ordinary glob text for use in the route regular expression.
+     *
+     * Args:
+     *   value: text between wildcard markers.
+     *
+     * Returns:
+     *   string: escaped regular-expression source.
+     */
+    const escape = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(
+      `^${pattern
+        .split('**')
+        .map((part) => part.split('*').map(escape).join('[^/]*'))
+        .join('.*')}$`,
+    );
+  };
+  const entries: BlockingEntry[] = [];
+  for (const endpoint of endpoints) {
+    const targetPath = endpoint.canonicalPath;
+    const matchingTests = tests.filter((test) =>
+      (test.facts.pageRouteTargets ?? []).some((pattern) => {
+        const matches = routeRegex(pattern);
+        return matches.test(targetPath) || matches.test(`http://gateforge.invalid${targetPath}`);
+      }),
+    );
+    if (matchingTests.length === 0 || matchingTests.some((test) => test.facts.pageRoute === null)) continue;
+    const testNames = matchingTests.map((test) => `${test.file} (${test.title})`).sort();
+    entries.push({
+      kind: 'finding',
+      resourceId: null,
+      name: null,
+      detail: `only mocked tests reach ${endpoint.method} ${targetPath}: ${testNames.join(', ')}`,
+      location: null,
+      cause: null,
+      nextAction: 'Add a witnessed test that reaches the server instead of intercepting this route.',
+    });
+  }
+  return entries;
+}
+
 export const CHECK_USAGE =
   'usage: gateforge check [--changed] [--staged] [--require-e2e] [--format text|json|sarif]\n' +
   '       [--approved-policy-digest <hex64>]\n' +
@@ -721,6 +793,10 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     );
   }
   const annotationAdvisories = annotationMapSyncAdvisories(annotationScan, currentTestMap);
+  const mockedOnlyAdvisories = mockedOnlyEndpointAdvisories(
+    pipeline.endpointInventory.endpoints,
+    annotationScan.entries,
+  );
   let claimInventory: Claim[] = claimBindings;
   let mappingBlockers: BlockingEntry[] = [];
   let mappedCoverage: MappedCoverage[] = [];
@@ -1043,7 +1119,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   const report = renderRun(reportVerdicts, {
     format,
     blocking: evaluatedBlocking,
-    advisories: [...annotationAdvisories, ...baselineDriftAdvisories],
+    advisories: [...annotationAdvisories, ...mockedOnlyAdvisories, ...baselineDriftAdvisories],
     waiverCounts: evaluated.waiverCounts,
     baseline: baselineReport,
     run: pipeline.manifest,
