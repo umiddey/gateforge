@@ -48,6 +48,7 @@
   },
   "dependencies": {
     "@gate-forge/core": "^0.7.1",
+    "@gate-forge/witness": "^0.7.1",
     "playwright": "1.58.2",
     "typescript": "^5.9.2",
     "yaml": "^2.8.1"

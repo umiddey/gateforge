@@ -231,6 +231,34 @@ export async function executeSupervisedPlaywright(
         'supervised run (absent = crash, kill, or lost contact; an incomplete run never reports success)',
     );
   }
+  return parseOutcomesDocument(document, outcome.code);
+}
+
+/**
+ * Maps one validated runner-outcomes document onto the structured
+ * outcome envelope. Shared by the supervised run and the runner-adapter
+ * contract's `parseResults` (plan 2026-09-25 phase 0) so BOTH read the
+ * runner's report through exactly one mapping — a second copy is how a
+ * supervised run and a contract run start disagreeing about what a
+ * green run looks like.
+ *
+ * Reporter data is INPUT here, never signature authority: `complete` is
+ * the adapter's honest read of runner status, runner-level errors, shard
+ * completeness, retry attempts, and the process exit, and supervision
+ * (`@gate-forge/core`) still compares the outcomes against the expected
+ * set fixed before the run.
+ *
+ * Args:
+ *   document: the validated runner-outcomes document.
+ *   processExit: the runner process exit status (null when it never ran).
+ *
+ * Returns:
+ *   RunnerExecutionEnvelope: the structured outcome envelope.
+ */
+export function parseOutcomesDocument(
+  document: RunnerOutcomesDocument,
+  processExit: number | null,
+): RunnerExecutionEnvelope {
   const runnerErrorsFailed = document.runnerErrors.length > 0;
   const fixtureOutcome: 'passed' | 'failed' | 'unknown' =
     document.runStatus === 'passed' && !runnerErrorsFailed
@@ -249,14 +277,22 @@ export async function executeSupervisedPlaywright(
   }));
   const maxAttempt = outcomes.reduce((max, row) => Math.max(max, row.attempt), 1);
   const retriesDetected = maxAttempt > 1;
+  // A row the reporter could not identify belongs to NO test. The
+  // reporter always writes the runner's own test id, so this only fires
+  // for a report whose per-test identity never reached it — and then
+  // the run is incomplete rather than partially attributed (the same
+  // rule the witness applies to traffic that bypassed every session
+  // channel).
+  const unattributed = outcomes.filter((row) => row.frameworkId === '').length;
   const complete =
+    unattributed === 0 &&
     document.runStatus === 'passed' &&
     !runnerErrorsFailed &&
     shardComplete &&
     !retriesDetected &&
-    outcome.code === 0;
+    processExit === 0;
   return {
-    processExit: outcome.code,
+    processExit,
     complete,
     outcomes,
     fixtureOutcome,
@@ -271,17 +307,52 @@ export async function executeSupervisedPlaywright(
       ? {}
       : {
           incompleteDetail:
-            document.runStatus !== 'passed'
-              ? `runner reported final status '${String(document.runStatus ?? 'unknown')}'`
-              : runnerErrorsFailed
-                ? `runner-level errors observed: ${document.runnerErrors[0] ?? ''}`
-                : !shardComplete
-                  ? `shard run incomplete (${String(document.shard?.total ?? '?')} shards declared)`
-                  : outcome.code !== 0
-                    ? `runner exited with status ${String(outcome.code)}`
-                    : 'supervised run incomplete',
+            unattributed > 0
+              ? `${String(unattributed)} outcome row(s) carried no runner test id — untagged results are never attributed to a test`
+              : document.runStatus !== 'passed'
+                ? `runner reported final status '${String(document.runStatus ?? 'unknown')}'`
+                : runnerErrorsFailed
+                  ? `runner-level errors observed: ${document.runnerErrors[0] ?? ''}`
+                  : !shardComplete
+                    ? `shard run incomplete (${String(document.shard?.total ?? '?')} shards declared)`
+                    : processExit !== 0
+                      ? `runner exited with status ${String(processExit)}`
+                      : 'supervised run incomplete',
         }),
   };
+}
+
+/**
+ * Parses a runner-outcomes document supplied as TEXT: the
+ * runner-adapter contract's `parseResults` surface, so a caller can
+ * grade a report the adapter did not spawn.
+ *
+ * Args:
+ *   raw: the outcomes document JSON text.
+ *   processExit: the runner process exit status.
+ *
+ * Returns:
+ *   RunnerExecutionEnvelope: the envelope, or a typed incomplete one
+ *   when the document is unreadable (fail closed).
+ */
+export function parseOutcomesText(raw: string, processExit: number | null): RunnerExecutionEnvelope {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return incomplete(
+      processExit,
+      `runner outcomes are not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const validated = validateOutcomesDocument(parsed);
+  if (validated === null) {
+    return incomplete(
+      processExit,
+      'runner outcomes are missing or malformed — a malformed report is never read as a green run',
+    );
+  }
+  return parseOutcomesDocument(validated, processExit);
 }
 
 /**
@@ -337,14 +408,31 @@ function readOutcomesDocument(path: string): RunnerOutcomesDocument | null {
   } catch {
     return null;
   }
-  let document: unknown;
+  let parsed: unknown;
   try {
-    document = JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch {
     return null;
   }
-  if (typeof document !== 'object' || document === null || Array.isArray(document)) return null;
-  const doc = document as Record<string, unknown>;
+  return validateOutcomesDocument(parsed);
+}
+
+/**
+ * Structurally validates an already-parsed runner-outcomes value.
+ * Split out of the reader so the runner-adapter contract can grade a
+ * report TEXT it was handed — with no file on disk — through the SAME
+ * validation the supervised run applies.
+ *
+ * Args:
+ *   value: the parsed JSON value.
+ *
+ * Returns:
+ *   RunnerOutcomesDocument | null: the validated document, or null when
+ *   the shape is wrong (fail closed — never a partial read).
+ */
+export function validateOutcomesDocument(value: unknown): RunnerOutcomesDocument | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const doc = value as Record<string, unknown>;
   if (doc['schemaVersion'] !== 1 || !Array.isArray(doc['outcomes'])) return null;
   const outcomes: RunnerOutcomesDocument['outcomes'] = [];
   for (const entry of doc['outcomes']) {

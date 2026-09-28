@@ -15,6 +15,7 @@
     "packages/pack-auth",
     "packages/pack-fastapi",
     "packages/pack-http",
+    "packages/witness",
     "packages/pack-playwright",
     "packages/pack-alembic",
     "packages/pack-sqlalchemy",
