@@ -38,6 +38,14 @@ function countSpawns(counterPath: string): number {
   }
 }
 
+/** The counting collector: one spawn line per invocation + a fixed node id. */
+function countingCollectorScript(collectorCounter: string): string {
+  return [
+    `open(${JSON.stringify(collectorCounter)}, 'a').write('spawn\\n')`,
+    `print('tests/test_cache.py::test_covers_cache')`,
+  ].join('\n');
+}
+
 /**
  * Installs the reuse fixture: the standard fixture project with its
  * in-process plugin replaced by a COUNTING subprocess python detector,
@@ -56,7 +64,6 @@ function countSpawns(counterPath: string): number {
 function installCountingFixture(repo: TempRepo, counterDir: string): CountingFixture {
   const detectorCounter = join(counterDir, 'detector-counts');
   const collectorCounter = join(counterDir, 'collector-counts');
-  const counterDirLiteral = JSON.stringify(counterDir);
   const detectorRelativePath = '.gateforge/counting-detector.py';
   const detectorSource = [
     'from pathlib import Path',
@@ -68,10 +75,6 @@ function installCountingFixture(repo: TempRepo, counterDir: string): CountingFix
     JSON.stringify(referenceDetectorPath()),
     JSON.stringify(detectorRelativePath),
   );
-  const collectorSource = [
-    `open(${JSON.stringify(collectorCounter)}, 'a').write('spawn\\n')`,
-    `print('tests/test_cache.py::test_covers_cache')`,
-  ].join('\n');
   repo.writeFiles({
     '.gateforge.yml': `${configYml({ plugins: subprocessPlugin })}diagnostics:
   suites:
@@ -83,7 +86,7 @@ function installCountingFixture(repo: TempRepo, counterDir: string): CountingFix
       timeoutMs: 15000
 `,
     '.gitignore': '.gateforge/test-gates/\n',
-    '.gateforge/counting-collector.py': collectorSource,
+    '.gateforge/counting-collector.py': countingCollectorScript(collectorCounter),
     [detectorRelativePath]: detectorSource,
     '.gateforge/test-map.yml': [
       'schemaVersion: 1',
@@ -168,27 +171,33 @@ describe('commit-time check reuse (plan 20260928_1430)', () => {
         const fixture = installCountingFixture(repo, counterDir);
         repo.stage();
         repo.commit('candidate');
-        const first = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        const first = await runCli(repo, ['check', '--changed', '--timing', '--format', 'json'], { CI: undefined });
         expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(1);
         expect(countSpawns(fixture.detectorCounter)).toBe(1);
-        expect(first.stdout).toContain('"cache":{"hits":0,"misses":1}');
+        expect(first.stdout).toContain('"cache":{"hits":0,"misses":2}');
 
         // Identical inputs: the second commit-time run must reuse the
-        // cached detector result, and its report must equal the fresh one
-        // (modulo the per-run manifest run id, which is a fresh UUID).
-        const second = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        // cached detector AND pytest collection results, and its report
+        // must equal the fresh one (modulo the per-run manifest run id,
+        // which is a fresh UUID).
+        const second = await runCli(repo, ['check', '--changed', '--timing', '--format', 'json'], { CI: undefined });
         expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(1);
         expect(countSpawns(fixture.detectorCounter)).toBe(1);
-        expect(second.stdout).toContain('"cache":{"hits":1,"misses":0}');
+        expect(countSpawns(fixture.collectorCounter)).toBe(1);
+        expect(first.stdout).toContain('"timing":');
+        expect(second.stdout).toContain('"timing":');
+        expect(second.stdout).toContain('"cache":{"hits":2,"misses":0}');
         const stripRunId = (report: string): unknown => {
           const document = JSON.parse(report) as {
             run?: { runId?: string };
             cache?: { hits: number; misses: number };
+            timing?: { detectorsMs: number; collectionMs: number; tsScanMs: number; planningMs: number; totalMs: number };
           };
           if (document.run !== undefined) delete document.run.runId;
-          // The cache counts are SUPPOSED to differ (0/1 fresh vs 1/0
-          // reused); everything else must be byte-identical results.
+          // Cache accounting and timings vary by run; verdict and all
+          // other consumer-visible results must remain identical.
           delete document.cache;
+          delete document.timing;
           return document;
         };
         expect(stripRunId(second.stdout)).toStrictEqual(stripRunId(first.stdout));
@@ -259,12 +268,71 @@ describe('commit-time check reuse (plan 20260928_1430)', () => {
         const first = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
         expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(1);
         expect(countSpawns(fixture.detectorCounter)).toBe(1);
+        expect(countSpawns(fixture.collectorCounter)).toBe(1);
         repo.writeFiles({ 'src/accounts.txt': 'accounts fixture.table # touched\n' });
         repo.stage();
         const second = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
         expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(1);
         expect(countSpawns(fixture.detectorCounter)).toBe(2);
-        expect(second.stdout).toContain('"cache":{"hits":0,"misses":1}');
+        expect(countSpawns(fixture.collectorCounter)).toBe(1);
+        expect(second.stdout).toContain('"cache":{"hits":1,"misses":1}');
+      });
+    } finally {
+      rmSync(counterDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('recollects pytest when any python byte changes even with unchanged sources', async () => {
+    const counterDir = mkdtempSync(join(tmpdir(), 'gateforge-cache-py-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const fixture = installCountingFixture(repo, counterDir);
+        repo.stage();
+        repo.commit('candidate');
+        const first = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(1);
+        expect(countSpawns(fixture.collectorCounter)).toBe(1);
+
+        // Any .py byte (here: the suite's own collector script) invalidates
+        // the collection cache — app code can change test ids.
+        repo.writeFiles({
+          '.gateforge/counting-collector.py': `${countingCollectorScript(fixture.collectorCounter)}\n# touched\n`,
+        });
+        repo.stage();
+        repo.commit('touch a python byte');
+        const second = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(1);
+        expect(countSpawns(fixture.collectorCounter)).toBe(2);
+        expect(second.stdout).toContain('"cache":{"hits":1,"misses":1}');
+      });
+    } finally {
+      rmSync(counterDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('invalidates subprocess detector and pytest caches when detector source bytes change', async () => {
+    const counterDir = mkdtempSync(join(tmpdir(), 'gateforge-cache-detector-source-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const fixture = installCountingFixture(repo, counterDir);
+        repo.stage();
+        repo.commit('candidate');
+        const first = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(1);
+        expect(countSpawns(fixture.detectorCounter)).toBe(1);
+        expect(countSpawns(fixture.collectorCounter)).toBe(1);
+
+        const detectorScript = readFileSync(join(repo.root, '.gateforge/counting-detector.py'), 'utf8');
+        repo.writeFiles({ '.gateforge/counting-detector.py': `${detectorScript}# source byte changed\n` });
+        repo.stage();
+        repo.commit('change detector source');
+        const second = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
+        expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(1);
+        expect(countSpawns(fixture.detectorCounter)).toBe(2);
+        expect(countSpawns(fixture.collectorCounter)).toBe(2);
+        expect(second.stdout).toContain('"cache":{"hits":0,"misses":2}');
       });
     } finally {
       rmSync(counterDir, { recursive: true, force: true });
@@ -293,15 +361,19 @@ describe('commit-time check reuse (plan 20260928_1430)', () => {
 
         // Corrupt entries: any doubt is a miss, never a wrong reuse.
         const cacheDir = join(repo.root, '.gateforge', 'test-gates', 'cache', 'plugin');
-        const entries = readdirSync(cacheDir);
-        expect(entries.length).toBeGreaterThan(0);
-        for (const entry of entries) {
-          writeFileSync(join(cacheDir, entry), '{ not json');
+        const pytestCacheDir = join(repo.root, '.gateforge', 'test-gates', 'cache', 'pytest');
+        for (const dir of [cacheDir, pytestCacheDir]) {
+          const entries = readdirSync(dir);
+          expect(entries.length).toBeGreaterThan(0);
+          for (const entry of entries) {
+            writeFileSync(join(dir, entry), '{ not json');
+          }
         }
         const corrupted = await runCli(repo, ['check', '--changed', '--format', 'json'], { CI: undefined });
         expect(corrupted.code, `${corrupted.stdout}\n${corrupted.stderr}`).toBe(1);
         expect(countSpawns(fixture.detectorCounter)).toBe(3);
-        expect(corrupted.stdout).toContain('"cache":{"hits":0,"misses":1}');
+        expect(countSpawns(fixture.collectorCounter)).toBe(3);
+        expect(corrupted.stdout).toContain('"cache":{"hits":0,"misses":2}');
       });
     } finally {
       rmSync(counterDir, { recursive: true, force: true });

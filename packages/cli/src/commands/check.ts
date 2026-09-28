@@ -20,6 +20,7 @@
  */
 import { cpSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import {
@@ -44,7 +45,10 @@ import {
   discoverTestCatalog,
   findPlaywrightConfig,
   scanTestFiles,
+  untrustedEnv,
+  type DiscoverOptions,
   type DiscoveryTimings,
+  type PytestCollectionResult,
 } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
@@ -65,7 +69,15 @@ import {
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
 import { runPipeline, resolveRepoPath, sourcesByResourceId } from '../pipeline.js';
-import { resolveCacheControl, type CacheCounts } from '../run-cache.js';
+import {
+  digestPytestInputs,
+  interpreterIdentity,
+  pytestCacheKey,
+  readPytestCache,
+  resolveCacheControl,
+  type CacheCounts,
+  writePytestCache,
+} from '../run-cache.js';
 import { RuntimeBlockError, loadRuntimeConfigAt, prepareRuntime } from '../runtime.js';
 import { digestRuntimeReuseMounts, type RuntimeReuseMount } from '../runtime-reuse.js';
 import {
@@ -774,6 +786,41 @@ function renderStagedBlock(io: Io, cause: CauseCode, detail: string, nextAction:
 }
 
 /**
+ * Validates persisted pytest collection data before it can bypass a child run.
+ *
+ * Args:
+ *   value: parsed cache payload.
+ *
+ * Returns:
+ *   boolean: true only for a complete collection result with valid fields.
+ */
+function isPytestCollectionResult(value: unknown): value is PytestCollectionResult {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  if (
+    (result['status'] !== 'discovered' && result['status'] !== 'unavailable') ||
+    typeof result['detail'] !== 'string' ||
+    !Array.isArray(result['cases']) ||
+    !Array.isArray(result['collectionErrors']) ||
+    (result['exitCode'] !== null && typeof result['exitCode'] !== 'number')
+  ) {
+    return false;
+  }
+  return (
+    result['cases'].every((testCase: unknown) => {
+      if (typeof testCase !== 'object' || testCase === null || Array.isArray(testCase)) return false;
+      const row = testCase as Record<string, unknown>;
+      return (
+        typeof row['nodeId'] === 'string' &&
+        typeof row['file'] === 'string' &&
+        Array.isArray(row['titlePath']) &&
+        row['titlePath'].every((title: unknown) => typeof title === 'string')
+      );
+    }) && result['collectionErrors'].every((error: unknown) => typeof error === 'string')
+  );
+}
+
+/**
  * The gate body shared by `check`, `check --changed`, and the Phase 5
  * `check --staged` candidate run (via a scratch checkout cwd).
  *
@@ -1098,6 +1145,58 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   let mappingBlockers: BlockingEntry[] = [];
   let mappedCoverage: MappedCoverage[] = [];
   let mappingDiscoveryTimings: DiscoveryTimings | undefined;
+  const pytestCacheCounts: CacheCounts = { hits: 0, misses: 0 };
+  const pytestCollection: NonNullable<DiscoverOptions['pytestCollection']> = async (
+    suite,
+    suiteCwd,
+    collectorArgv,
+    collect,
+  ) => {
+      if (cacheControl.disabled) return collect();
+      const inputDigest = digestPytestInputs(io.cwd, stateDir, cacheControl.stateDir);
+      const collectorEnv = { ...untrustedEnv(io.env), PYTHONDONTWRITEBYTECODE: '1' };
+      const collectorInterpreter = interpreterIdentity(collectorArgv[0] ?? '', collectorEnv);
+      if (inputDigest === null || collectorInterpreter === null) {
+        pytestCacheCounts.misses += 1;
+        return collect();
+      }
+      const environmentDigest = createHash('sha256')
+        .update(JSON.stringify(Object.entries(collectorEnv).sort(([a], [b]) => a.localeCompare(b))))
+        .digest('hex');
+      const key = pytestCacheKey(
+        {
+          name: suite.name,
+          cwd: suiteCwd,
+          argv: suite.argv,
+          collectorArgv,
+          testPaths: suite.testPaths,
+          timeoutMs: suite.timeoutMs,
+        },
+        inputDigest,
+        collectorInterpreter,
+        environmentDigest,
+      );
+      let cached: unknown | null = null;
+      try {
+        cached = readPytestCache(cacheControl.stateDir, key);
+      } catch {
+        cached = null;
+      }
+      if (isPytestCollectionResult(cached)) {
+        pytestCacheCounts.hits += 1;
+        return cached;
+      }
+      pytestCacheCounts.misses += 1;
+      const result = await collect();
+      if (result.status === 'discovered' && result.exitCode === 0) {
+        try {
+          writePytestCache(cacheControl.stateDir, key, result);
+        } catch {
+          // Storage failure costs only a future miss; collection is authoritative.
+        }
+      }
+      return result;
+    };
   if (currentTestMap !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -1105,6 +1204,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       obligations: pipeline.policy.obligations,
       claimBindings,
       behaviorCatalog: pipeline.behaviorCatalog,
+      pytestCollection,
     });
     mappingDiscoveryTimings = mapped.discoveryTimings;
     claimInventory = mapped.claimInventory;
@@ -1525,8 +1625,8 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     // many detector/pytest results were reused vs recomputed. Never an
     // input to any verdict.
     const cacheCounts: CacheCounts = {
-      hits: pipeline.cache.hits,
-      misses: pipeline.cache.misses,
+      hits: pipeline.cache.hits + pytestCacheCounts.hits,
+      misses: pipeline.cache.misses + pytestCacheCounts.misses,
     };
     if (format === 'json') {
       const document = JSON.parse(report) as Record<string, JsonValue>;

@@ -40,6 +40,7 @@ import {
   discoverTestCatalog,
   scanTestFiles,
   TestDiscoveryError,
+  type DiscoverOptions,
   type DiscoveryTimings,
   type NativeInstance,
   type StaticScanResult,
@@ -297,6 +298,8 @@ export interface MappingResolutionOptions {
   priorRunHints?: readonly { logicalKey: string; obligationId: string }[];
   /** Compiled behavior catalog when complete-behavior is enabled. */
   behaviorCatalog?: BehaviorCatalog | null;
+  /** Optional collection wrapper used by the commit-check cache. */
+  pytestCollection?: DiscoverOptions['pytestCollection'];
 }
 
 /** One resolution over a real repository. */
@@ -361,7 +364,12 @@ export async function resolveRepositoryMappings(
       // that exists. Collection failure stays honest data (the pytest
       // runner summary turns `unavailable`); `tests discover` alone keeps
       // its explicit `--pytest` opt-in.
-      const discovered = await discoverTestCatalog({ cwd: options.cwd, config: options.config, collectPytest: true });
+      const discovered = await discoverTestCatalog({
+        cwd: options.cwd,
+        config: options.config,
+        collectPytest: true,
+        pytestCollection: options.pytestCollection,
+      });
       catalog = discovered.catalog;
       discoveredClaims = discovered.nativeClaims;
       nativeErrors = [...discovered.nativeErrors];

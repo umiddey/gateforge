@@ -30,6 +30,7 @@ import {
   canonicalJson,
   ClaimSchema,
   type Claim,
+  type DiagnosticSuite,
   type JsonValue,
   deriveLogicalKey,
   TestCatalogSchema,
@@ -45,8 +46,10 @@ import {
 import { inferTestKind } from './inference.js';
 import {
   collectPytestSuite,
+  pytestCollectArgv,
   repoRelative,
 } from './pytest-adapter.js';
+import type { PytestCollectionResult } from './pytest-adapter.js';
 import {
   fileDigest,
   listNativePlaywrightTests,
@@ -77,6 +80,17 @@ export interface DiscoverOptions {
    * fix, server-witnessed channel).
    */
   collectPytest?: boolean;
+  /**
+   * Optional wrapper around pytest collection. Gateforge's CLI uses this
+   * boundary to cache the exact collected result without coupling this
+   * discovery package to CLI run-state storage.
+   */
+  pytestCollection?: (
+    suite: DiagnosticSuite,
+    cwd: string,
+    argv: readonly string[],
+    collect: () => Promise<PytestCollectionResult>,
+  ) => Promise<PytestCollectionResult>;
   /** Native playwright `--list` timeout (default 60s). */
   playwrightTimeoutMs?: number;
 }
@@ -162,7 +176,12 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
     const pytestCollectStartedAtMs = performance.now();
     for (const suite of suites) {
       if (options.collectPytest === true) {
-        const collection = await collectPytestSuite(suite, join(cwd, suite.cwd));
+        const suiteCwd = join(cwd, suite.cwd);
+        const collect = () => collectPytestSuite(suite, suiteCwd);
+        const collection =
+          options.pytestCollection === undefined
+            ? await collect()
+            : await options.pytestCollection(suite, suiteCwd, pytestCollectArgv(suite), collect);
         runnerSummaries.push({
           runner: 'pytest',
           name: suite.name,

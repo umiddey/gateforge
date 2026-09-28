@@ -37,6 +37,7 @@ import {
   type DetectorOutput,
   type JsonValue,
 } from '@gate-forge/core';
+import { VERSION } from './commands/common.js';
 
 /** Cache entry format version; a mismatch is a miss (never a parse of foreign bytes). */
 export const PLUGIN_CACHE_FORMAT_VERSION = 1;
@@ -90,7 +91,7 @@ export interface InterpreterIdentity {
 
 /** Everything one plugin's cached result depends on. */
 export interface PluginCacheIdentity {
-  /** Plugin id, version, transport, and its configured command/module. */
+  /** Plugin id/version/config and Gateforge engine version. */
   plugin: {
     id: string;
     version: string;
@@ -98,7 +99,11 @@ export interface PluginCacheIdentity {
     command?: readonly string[];
     module?: string;
   };
-  /** Digest of the plugin module's bytes (file or whole package tree); null = uncacheable. */
+  /** Gateforge engine version, invalidating cache on engine upgrades. */
+  engineVersion: string;
+  /** Import-resolution environment inherited by Python children. */
+  pythonEnvironment: Pick<NodeJS.ProcessEnv, 'PYTHONPATH' | 'PYTHONHOME' | 'VIRTUAL_ENV'>;
+  /** Digest of plugin source bytes (file or package tree); null = uncacheable. */
   moduleBytesDigest: string | null;
   /** Digest over the sorted scanned input bytes; null = uncacheable. */
   inputsDigest: string | null;
@@ -415,6 +420,68 @@ export function digestPathListInputs(cwd: string, paths: readonly string[]): str
 }
 
 /**
+ * Resolves and digests subprocess plugin source using its configured Python.
+ * Script invocations and `-m` imports are supported; unknown forms are
+ * uncacheable rather than reusing results without source identity.
+ *
+ * Args:
+ *   command: configured subprocess argv.
+ *   cwd: repository root used by the plugin process.
+ *   env: inherited environment used for import resolution.
+ *
+ * Returns:
+ *   string | null: source digest, or null when source resolution fails.
+ */
+function subprocessModuleBytesDigestOf(
+  command: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const python = command[0];
+  const mode = command[1];
+  if (python === undefined || mode === undefined) return null;
+  if (mode === '-m') {
+    const moduleName = command[2];
+    const resolved = resolveExecutable(python, env);
+    if (moduleName === undefined || resolved === null) return null;
+    const probe = [
+      'import importlib.util, json',
+      `spec = importlib.util.find_spec(${JSON.stringify(moduleName)})`,
+      "print(json.dumps({'origin': None if spec is None else spec.origin, 'locations': [] if spec is None or spec.submodule_search_locations is None else list(spec.submodule_search_locations)}))",
+    ].join('; ');
+    const result = spawnSync(resolved, ['-c', probe], {
+      cwd,
+      env: { ...env, PYTHONDONTWRITEBYTECODE: '1' },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    if (result.error !== undefined || result.status !== 0) return null;
+    try {
+      const found = JSON.parse(result.stdout) as { origin?: unknown; locations?: unknown };
+      if (Array.isArray(found.locations) && found.locations.length > 0) {
+        const digests = found.locations.map((location) =>
+          typeof location === 'string' ? digestTree(location) : null,
+        );
+        return digests.every((digest): digest is string => digest !== null)
+          ? sha256Hex(digests.join('\n'))
+          : null;
+      }
+      if (typeof found.origin === 'string' && found.origin !== 'built-in' && found.origin !== 'frozen') {
+        const stat = statSync(found.origin);
+        return stat.isDirectory()
+          ? digestTree(found.origin)
+          : fileDigest(found.origin, `python-module:${moduleName}`);
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  if (mode.startsWith('-')) return null;
+  return fileDigest(resolve(cwd, mode), `python-script:${mode}`);
+}
+
+/**
  * Builds the full cache identity for one plugin run, or null when ANY
  * component cannot be established (then the plugin must run fresh).
  *
@@ -438,6 +505,7 @@ export function pluginCacheIdentity(
   inputsDigest: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
+  engineVersion = VERSION,
 ): PluginCacheIdentity | null {
   let interpreter: PluginCacheIdentity['interpreter'];
   if (plugin.transport === 'subprocess') {
@@ -458,7 +526,9 @@ export function pluginCacheIdentity(
   const moduleBytesDigest =
     plugin.transport === 'in-process' && plugin.module !== undefined
       ? moduleBytesDigestOf(plugin.module, cwd)
-      : '';
+      : plugin.transport === 'subprocess'
+        ? subprocessModuleBytesDigestOf(plugin.command ?? [], cwd, env)
+        : null;
   if (moduleBytesDigest === null) return null;
   return {
     plugin: {
@@ -467,6 +537,12 @@ export function pluginCacheIdentity(
       transport: plugin.transport,
       ...(plugin.command !== undefined ? { command: plugin.command } : {}),
       ...(plugin.module !== undefined ? { module: plugin.module } : {}),
+    },
+    engineVersion,
+    pythonEnvironment: {
+      PYTHONPATH: env['PYTHONPATH'],
+      PYTHONHOME: env['PYTHONHOME'],
+      VIRTUAL_ENV: env['VIRTUAL_ENV'],
     },
     moduleBytesDigest,
     inputsDigest,
@@ -628,30 +704,35 @@ export function writePluginCache(stateDir: string, key: string, result: Detector
  * Computes the pytest collection cache key for one suite (Phase 3 domain).
  *
  * Args:
- *   suite: suite name, argv, cwd, testPaths, and timeout.
- *   pythonFilesDigest: digest over all python/config bytes of the repo.
- *   interpreter: the suite interpreter identity (null = uncacheable).
+ *   suite: configured suite and the exact collector argv.
+ *   pythonFilesDigest: digest over all Python and pytest configuration bytes.
+ *   interpreter: collector interpreter identity (null = uncacheable).
+ *   environmentDigest: digest over the collector's effective environment.
  *
  * Returns:
- *   string: 64-char lowercase hex cache key.
+ *   string: 64-character lowercase hexadecimal cache key.
  */
 export function pytestCacheKey(
   suite: {
     name: string;
     cwd: string;
     argv: readonly string[];
+    collectorArgv: readonly string[];
     testPaths: readonly string[];
     timeoutMs: number;
   },
   pythonFilesDigest: string,
-  interpreter: InterpreterIdentity | null,
+  interpreter: InterpreterIdentity,
+  environmentDigest: string,
+  engineVersion = VERSION,
 ): string {
-  // canonicalJson takes JsonValue; the payload is a closed internal shape.
   const payload = {
     domain: 'gateforge.pytest-cache.v1',
+    engineVersion,
     suite,
     pythonFilesDigest,
     interpreter,
+    environmentDigest,
   } as unknown as JsonValue;
   return sha256Hex(canonicalJson(payload));
 }
@@ -724,23 +805,20 @@ export function writePytestCache(stateDir: string, key: string, result: unknown)
 }
 
 /**
- * Digests every python and pytest-config file of a repository for the
- * pytest collection cache key. Walks the repo (skipping `.git`,
- * `node_modules`, and the run-state directory) collecting `*.py` bytes
- * plus pytest config documents anywhere (`pytest.ini`, `pyproject.toml`,
- * `setup.cfg`, `tox.ini`, `conftest.py`). ANY unreadable input → null
- * (fail closed, collection runs fresh).
+ * Digests every Python and pytest-config file in the repository for the
+ * collection cache key. Skips `.git` and explicitly excluded run-state
+ * directories; any unreadable input returns null and forces collection.
  *
  * Args:
  *   cwd: absolute repo root.
- *   stateDir: absolute run-state directory to skip.
+ *   stateDirs: absolute run-state directories to exclude from the digest.
  *
  * Returns:
- *   string | null: hex digest, or null when a walked input is unreadable.
+ *   string | null: hexadecimal digest, or null when an input is unreadable.
  */
-export function digestPytestInputs(cwd: string, stateDir: string): string | null {
+export function digestPytestInputs(cwd: string, ...stateDirs: string[]): string | null {
   const root = resolve(cwd);
-  const statePrefix = resolve(stateDir) + sep;
+  const stateRoots = stateDirs.map((directory) => resolve(directory));
   const configBasenames = new Set(['pytest.ini', 'pyproject.toml', 'setup.cfg', 'tox.ini']);
   const parts: string[] = [];
   const walk = (directory: string, relative: string): boolean => {
@@ -751,12 +829,22 @@ export function digestPytestInputs(cwd: string, stateDir: string): string | null
       return false;
     }
     for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-      if (entry.isSymbolicLink()) continue;
-      const childRelative = relative === '' ? entry.name : `${relative}/${entry.name}`;
       const childAbsolute = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        if (entry.name.endsWith('.py') || PYTEST_CONFIG_BASENAMES[entry.name] === true) return false;
+        continue;
+      }
+      const childRelative = relative === '' ? entry.name : `${relative}/${entry.name}`;
       if (entry.isDirectory()) {
-        if (entry.name === '.git' || entry.name === 'node_modules') continue;
-        if (childAbsolute === resolve(stateDir) || childAbsolute.startsWith(statePrefix)) continue;
+        if (entry.name === '.git') continue;
+        if (
+          stateRoots.some(
+            (stateRoot) =>
+              childAbsolute === stateRoot || childAbsolute.startsWith(`${stateRoot}${sep}`),
+          )
+        ) {
+          continue;
+        }
         if (!walk(childAbsolute, childRelative)) return false;
         continue;
       }
