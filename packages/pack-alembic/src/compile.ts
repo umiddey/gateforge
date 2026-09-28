@@ -628,8 +628,9 @@ async function runChainDatabase(options: {
       throw new ScratchUnsafeError(`refusing database name '${created.name}'`);
     }
     options.afterCreate?.(created.name);
-    let cwd = options.cwd;
-    let versionsDir = options.paths.versionsDir;
+    let dataCwd = options.cwd;
+    let dataVersionsDir = options.paths.versionsDir;
+    let dataLineage = options.lineage;
     if (options.mergeRef !== undefined) {
       const merged = mergeTargetWorktree(options.cwd, options.mergeRef);
       cleanup = merged.cleanup;
@@ -651,11 +652,12 @@ async function runChainDatabase(options: {
         );
         return { blocking, notices, records };
       }
-      cwd = merged.dir;
-      versionsDir = join(merged.dir, options.paths.relativeDir);
+      dataCwd = merged.dir;
+      dataVersionsDir = join(merged.dir, options.paths.relativeDir);
+      dataLineage = mergedLineage;
       const round = executeRoundtrip({
-        cwd,
-        versionsDir,
+        cwd: merged.dir,
+        versionsDir: dataVersionsDir,
         modelsModule: options.paths.modelsModule,
         metadataAttr: options.paths.metadataAttr,
         scratchUrl: created.url,
@@ -703,23 +705,23 @@ async function runChainDatabase(options: {
       });
     }
     if (options.seed !== undefined) {
-      const head = options.lineage.heads[0];
-      const headMigration = options.lineage.migrations.find((item) => item.revision === head);
+      const head = dataLineage.heads[0];
+      const headMigration = dataLineage.migrations.find((item) => item.revision === head);
       const previous = headMigration?.downRevisions[0];
       if (previous === undefined) {
         fail(ALEMBIC_DATA_PRESERVED, 'MIGRATION_DATA_LOST', 'seed requires a previous head to load rows before upgrade', null);
       } else {
         const reset = runPython(
-          options.cwd,
+          dataCwd,
           {
             command: 'alembic',
             action: 'downgrade',
             revision: 'base',
             scratchUrl: created.url,
-            versionsDir: options.paths.versionsDir,
+            versionsDir: dataVersionsDir,
             modelsModule: options.paths.modelsModule,
             metadataAttr: options.paths.metadataAttr,
-            pythonPath: [options.cwd, ...(options.extraPythonPath ?? [])],
+            pythonPath: [dataCwd, ...(options.extraPythonPath ?? [])],
           },
           options.python,
           options.extraPythonPath,
@@ -732,10 +734,10 @@ async function runChainDatabase(options: {
             null,
           );
         } else {
-          const seedSql = readFileSync(join(options.cwd, options.seed.path), 'utf8');
+          const seedSql = readFileSync(join(dataCwd, options.seed.path), 'utf8');
           const preserved = executePreservation({
-            cwd: options.cwd,
-            versionsDir: options.paths.versionsDir,
+            cwd: dataCwd,
+            versionsDir: dataVersionsDir,
             modelsModule: options.paths.modelsModule,
             metadataAttr: options.paths.metadataAttr,
             scratchUrl: created.url,
@@ -757,8 +759,6 @@ async function runChainDatabase(options: {
         }
       }
     }
-    void cwd;
-    void versionsDir;
   } catch (error) {
     const detail = error instanceof Error ? error.message : 'scratch database failed';
     const cause = error instanceof ScratchUnsafeError ? 'MIGRATION_SCRATCH_UNSAFE' : 'MIGRATION_ROUNDTRIP_FAILED';

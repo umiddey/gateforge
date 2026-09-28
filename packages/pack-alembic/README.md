@@ -38,3 +38,21 @@ alembic:
 The migration runner requires Alembic, SQLAlchemy, and a PostgreSQL driver (`psycopg` or `psycopg2`) in its Python environment. It does not import the project's `env.py`. The runner snapshots tables, columns, constraints, indexes, enums, and sequences, excluding `alembic_version`. With `seed`, it compares row counts and declared column fingerprints across the migration. A configured merge target is tested in a temporary Git worktree.
 
 Cause codes (all additive): `MIGRATION_MISSING`, `MIGRATION_LINEAGE_BROKEN`, `MIGRATION_DOWNGRADE_NOOP`, `MIGRATION_DRIFT`, `MIGRATION_ROUNDTRIP_FAILED`, `MIGRATION_DATA_LOST`, `MIGRATION_CONFLICT`, `MIGRATION_SCRATCH_UNSAFE`.
+
+## Failure matrix
+
+`test/scanner.test.ts` covers the static cases without a database: duplicate revision ids, dangling parents, and multiple heads, all read with Python AST only.
+
+`test/postgres.e2e.test.ts` covers the engine-run cases on a disposable PostgreSQL instance. It is skipped, with a printed reason, unless `GATEFORGE_ALEMBIC_TEST_ADMIN_URL` is set to an admin URL of a throwaway instance (for example a CI `postgres` service container). `GATEFORGE_ALEMBIC_TEST_PYTHON` optionally selects an interpreter that already has Alembic, SQLAlchemy, and a PostgreSQL driver; it defaults to `python3`.
+
+| Case | Cause code |
+| --- | --- |
+| model changed with no migration in the same change | `MIGRATION_MISSING` |
+| `downgrade()` is empty or incomplete | `MIGRATION_DOWNGRADE_NOOP` |
+| migration chain does not match the models | `MIGRATION_DRIFT` |
+| destructive rename after the seed is loaded | `MIGRATION_DATA_LOST` |
+| two branches alter the same table, merge result keeps two heads | `MIGRATION_CONFLICT` |
+| merge revision breaks a seeded row on the merge result | `MIGRATION_DATA_LOST` |
+| failure injected right after the scratch database is created | `MIGRATION_ROUNDTRIP_FAILED`, database dropped |
+
+The suite also asserts that only the `gf_tmp_<id>` name recorded during the run is dropped: a similarly named existing database and the configured application database both survive with their data.
