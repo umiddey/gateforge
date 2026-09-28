@@ -251,10 +251,9 @@ export function evaluatePolicies(input: PolicyEvaluationInput): PolicyEvaluation
         name: resource.name,
         detail:
           `resource '${resource.id ?? resource.name}' has no effective classification ` +
-          '(the classifier blocked it definitionally); run ' +
-          `'gateforge explain ${resource.id ?? resource.name}' for the typed ` +
-          'reason and its in-code resolution',
+          '(the classifier blocked it definitionally)',
         location: resource.location,
+        nextAction: 'gateforge classify --json',
       });
       continue;
     }

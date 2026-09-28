@@ -236,6 +236,7 @@ export function classifierBlocking(
         name: decision.name,
         detail: `[${block.code}] ${block.detail}`,
         location: block.locations[0] ?? fallback,
+        nextAction: 'gateforge classify --json',
       });
     }
   }
@@ -246,6 +247,7 @@ export function classifierBlocking(
       name: null,
       detail: `[${stale.code}] ${stale.detail}`,
       location: stale.locations[0] ?? null,
+      nextAction: 'gateforge classify --json',
     });
   }
   for (const invalid of result.invalidSignals) {
@@ -255,6 +257,7 @@ export function classifierBlocking(
       name: null,
       detail: `[${invalid.code}] ${invalid.detail}`,
       location: invalid.locations[0] ?? null,
+      nextAction: 'gateforge classify --json',
     });
   }
   for (const unauthorized of result.unauthorizedSuppressive) {
@@ -264,6 +267,7 @@ export function classifierBlocking(
       name: null,
       detail: `[${unauthorized.code}] ${unauthorized.detail}`,
       location: unauthorized.locations[0] ?? null,
+      nextAction: 'gateforge classify --json',
     });
   }
   return entries;

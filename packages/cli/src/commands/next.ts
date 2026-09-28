@@ -83,7 +83,7 @@ function rankCause(cause: CauseCode | null | undefined, kind: string): number {
       return 1;
     // Complete-behavior setup/declaration problems block before any
     // test-generation advice: an owner document gap is not something a
-    // test can fix (plan §5 — rank configuration first).
+    // test can fix.
     case 'ENDPOINT_BEHAVIOR_MISSING':
     case 'BEHAVIOR_REFERENCE_STALE':
     case 'BEHAVIOR_CASE_UNMAPPED':
@@ -142,7 +142,11 @@ function rankBlockers(blocking: readonly BlockingEntry[], verdicts: readonly Obl
       why: entry.detail,
       do:
         entry.nextAction ??
-        (cause !== null ? CAUSE_NEXT_ACTIONS[cause] : 'Run `gateforge check` for the full report and resolve this blocker.'),
+        (cause !== null
+          ? CAUSE_NEXT_ACTIONS[cause]
+          : entry.resourceId !== null && entry.resourceId !== undefined
+            ? `gateforge explain ${entry.resourceId}`
+            : 'gateforge discover --json'),
       rank: rankCause(cause, entry.kind),
     });
   }

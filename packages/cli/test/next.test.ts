@@ -178,4 +178,75 @@ describe('gateforge next: behavior ranking (plan §5)', () => {
       expect(stdout).not.toContain('tests/e2e/gateforge');
     });
   });
+  it('never recommends rerunning check for a classifier-blocked resource', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ 'src/mystery.txt': 'mystery fixture.table\n' });
+      const pluginPath = join(repo.root, 'plugin.mjs');
+      const plugin = readFileSync(pluginPath, 'utf8').replace(
+        "signal('plane', 'tenant');",
+        "if (name !== 'mystery') signal('plane', 'tenant');",
+      );
+      repo.writeFiles({ 'plugin.mjs': plugin });
+
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      expect(stdout).toContain('cause: BLOCKING_FINDING');
+      expect(stdout).not.toContain('Run `gateforge check`');
+      const action = stdout.match(/^do: (.+)$/m)?.[1] ?? '';
+      expect(action.startsWith('gateforge ') || action.includes('exact file')).toBe(true);
+    });
+  });
+
+  it('keeps the original JSON report contract fields and cause vocabulary', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const { code, stdout } = await runCli(repo, ['check', '--format', 'json']);
+      expect(code).toBe(1);
+      const report = JSON.parse(stdout) as {
+        schemaVersion: number;
+        summary: Record<string, number>;
+        verdicts: Array<Record<string, unknown>>;
+        blocking: Array<Record<string, unknown>>;
+      };
+      expect(Object.keys(report).filter((key) => key !== 'engine').sort()).toEqual([
+        'blocking',
+        'diagnosticContext',
+        'run',
+        'schemaVersion',
+        'scope',
+        'summary',
+        'verdicts',
+        'waiverCounts',
+      ]);
+      expect(Object.keys(report.summary).sort()).toEqual([
+        'blocking',
+        'blockingEntries',
+        'invalid',
+        'missing',
+        'obligations',
+        'satisfied',
+        'stale',
+        'unclassified',
+        'unresolved',
+        'waived',
+      ]);
+      expect(Object.keys(report.verdicts[0] ?? {}).filter((key) => key !== 'message').sort()).toEqual([
+        'cause',
+        'contract',
+        'detector',
+        'fingerprint',
+        'nextAction',
+        'obligationId',
+        'policyId',
+        'reason',
+        'recordIds',
+        'resourceId',
+        'trustTier',
+        'verdict',
+      ]);
+      expect(report.verdicts.every((item) => item.cause === 'TEST_MAPPING_MISSING')).toBe(true);
+      expect(report.blocking).toEqual([]);
+    });
+  });
 });
