@@ -533,6 +533,8 @@ describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', ()
       expect(skill).toContain('tests/e2e/**');
       expect(skill).toContain('VERIFIER_UNSUPPORTED');
       expect(skill).toContain('coveragePolicy');
+      expect(skill).toContain('packages/cli/guides/TEST-ENVIRONMENT.md');
+      expect(skill).toContain('packages/cli/guides/QUICKSTART.md');
       const overlay = readFileSync(repo.path('tests/e2e/gateforge/README.md'), 'utf8');
       expect(overlay).toContain('tests/e2e/gateforge/<resource>.<op>.spec.js');
       // User edits survive a second run.

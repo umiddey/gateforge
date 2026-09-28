@@ -442,7 +442,11 @@ You are gated by Gateforge. Work one blocking item at a time.
 2. Read the single \`next:\` block: \`cause\`, \`why\`, and exactly one \`do:\` line.
 3. Do the single \`do:\` line. Stop. Re-run \`gateforge next\`.
 
-\`next\` prints ONE action — never a dump. Mapping is intent, not proof.
+
+## Setup guides
+
+- Environment rules: \`packages/cli/guides/TEST-ENVIRONMENT.md\`.
+- Quickstart: \`packages/cli/guides/QUICKSTART.md\`.
 
 ## Proof lives in the overlay
 

@@ -12,7 +12,7 @@
 
 ## Reset and seed before every run
 
-**Rule:** Reset to a known baseline before every run. Restore a baseline dump or run a seed script from the same checkout being tested.
+**Rule:** Reset to a known clean state before every run. Restore a clean-state dump or run a seed script from the same checkout being tested.
 
 **Why:** Old data makes outcomes depend on run order or another developer's test.
 
@@ -177,7 +177,7 @@ Replace the reset and seed comments with durable commands for your disposable st
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reset the disposable database from a baseline dump or reset script.
+# Reset the disposable database from a clean-state dump or reset script.
 # <your reset command>
 
 # Seed it from this checkout.

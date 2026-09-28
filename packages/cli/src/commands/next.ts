@@ -56,6 +56,12 @@ import { loadCacheExclusions } from '../cache-exclusions.js';
 
 export const NEXT_USAGE = 'usage: gateforge next [--changed] [--json]';
 
+const ENVIRONMENT_GUIDES: Partial<Record<CauseCode, string>> = {
+  EVIDENCE_STALE: 'packages/cli/guides/TEST-ENVIRONMENT.md#keep-the-repository-unchanged-during-a-run',
+  ENFORCEMENT_UNTRUSTED: 'packages/cli/guides/TEST-ENVIRONMENT.md#run-containers-as-your-user',
+  RUN_INCOMPLETE: 'packages/cli/guides/TEST-ENVIRONMENT.md#register-the-same-tests-in-every-mode',
+};
+
 /**
  * One ranked navigation candidate: a blocking entry or a blocking
  * verdict, normalized to the `next/cause/why/do` surface.
@@ -393,6 +399,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     return 0;
   }
   const first = candidates[0] as NextCandidate;
+  const guide = ENVIRONMENT_GUIDES[first.cause as CauseCode] ?? null;
   if (asJson) {
     writeLine(
       io.stdout,
@@ -402,12 +409,14 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         why: first.why,
         do: first.do,
         remainingBlocking: candidates.length - 1,
+        guide,
       }),
     );
   } else {
     writeLine(io.stdout, `next: ${first.id}`);
     writeLine(io.stdout, `cause: ${first.cause}`);
     writeLine(io.stdout, `why: ${first.why}`);
+    if (guide !== null) writeLine(io.stdout, `guide: ${guide}`);
     writeLine(io.stdout, `do: ${first.do}`);
   }
   return 1;
