@@ -24,6 +24,7 @@ import { createHash } from 'node:crypto';
 import {
   readdirSync,
   mkdirSync,
+  lstatSync,
   readFileSync,
   renameSync,
   statSync,
@@ -142,7 +143,7 @@ export function resolveCacheControl(
 ): CacheControl {
   const ciDetected = [
     'GITHUB_ACTIONS', 'GITLAB_CI', 'BUILDKITE', 'CIRCLECI', 'JENKINS_URL', 'TF_BUILD',
-  ].some((name) => env[name] === 'true' || env[name] === '1');
+  ].some((name) => Boolean(env[name]));
   const noCacheEnv = env['GATEFORGE_NO_CACHE'] === '1' || env['GATEFORGE_NO_CACHE'] === 'true';
   return { stateDir: resolve(stateDir), disabled: noCacheFlag || noCacheEnv || ciDetected };
 }
@@ -819,12 +820,6 @@ export function writePytestCache(stateDir: string, key: string, result: unknown)
 export function digestPytestInputs(cwd: string, ...stateDirs: string[]): string | null {
   const root = resolve(cwd);
   const stateRoots = stateDirs.map((directory) => resolve(directory));
-  const configBasenames: Record<string, true> = {
-    'pytest.ini': true,
-    'pyproject.toml': true,
-    'setup.cfg': true,
-    'tox.ini': true,
-  };
   let inventory: string[];
   try {
     const bytes = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
@@ -842,7 +837,14 @@ export function digestPytestInputs(cwd: string, ...stateDirs: string[]): string 
     if (!absolute.startsWith(`${root}${sep}`)) return null;
     if (stateRoots.some((stateRoot) => absolute === stateRoot || absolute.startsWith(`${stateRoot}${sep}`))) continue;
     const basename = name.slice(name.lastIndexOf('/') + 1);
-    if (!basename.endsWith('.py') && configBasenames[basename] !== true) continue;
+    if (!basename.endsWith('.py') && PYTEST_CONFIG_BASENAMES[basename] !== true) continue;
+    let stat;
+    try {
+      stat = lstatSync(absolute);
+    } catch {
+      return null;
+    }
+    if (stat.isSymbolicLink()) return null;
     const digest = fileDigest(absolute, name);
     if (digest === null) return null;
     parts.push(digest);

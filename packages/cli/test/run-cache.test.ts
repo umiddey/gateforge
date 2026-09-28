@@ -74,7 +74,9 @@ describe('pytest input inventory and cache policy', () => {
 
   it('disables caching only on recognized CI providers, not bare CI=true', () => {
     expect(resolveCacheControl({ CI: 'true' }, '/tmp/cache', false).disabled).toBe(false);
-    expect(resolveCacheControl({ GITHUB_ACTIONS: 'true' }, '/tmp/cache', false).disabled).toBe(true);
+    for (const name of ['GITHUB_ACTIONS', 'GITLAB_CI', 'BUILDKITE', 'CIRCLECI', 'JENKINS_URL', 'TF_BUILD']) {
+      expect(resolveCacheControl({ [name]: 'provider-value' }, '/tmp/cache', false).disabled).toBe(true);
+    }
   });
 });
 

@@ -33,6 +33,28 @@ import {
   runCli,
   withTempRepo,
 } from './helpers.js';
+
+/**
+ * Reads every regular file under run state, including nested cache entries.
+ *
+ * Args:
+ *   directory: absolute run-state directory to inspect.
+ *
+ * Returns:
+ *   string: concatenated text contents of all regular files.
+ */
+function readStateText(directory: string): string {
+  return readdirSync(directory, { withFileTypes: true })
+    .map((entry) => {
+      const path = join(directory, entry.name);
+      return entry.isDirectory()
+        ? readStateText(path)
+        : entry.isFile()
+          ? readFileSync(path, 'utf8')
+          : '';
+    })
+    .join('\n');
+}
 import {
   trustedPolicyDigestForConfig,
   issueGateReceipt,
@@ -417,9 +439,7 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
           expect(`${verified.stdout}\n${verified.stderr}`).not.toContain(keyFile);
         }
         const stateDir = resolveStateDir(repo.root);
-        const stateText = readdirSync(stateDir)
-          .map((name) => readFileSync(join(stateDir, name)))
-          .join('\n');
+        const stateText = readStateText(stateDir);
         expect(stateText).not.toContain(KEY);
         expect(stateText).not.toContain(keyFile);
 
