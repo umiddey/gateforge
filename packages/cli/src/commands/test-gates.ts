@@ -102,6 +102,7 @@ import {
   strictnessSummaryLine,
   withoutQuarantinedBindings,
   type LoadedQuarantine,
+  type Obligation,
   type TestCatalog,
   type TracedTestInput,
 } from '@gate-forge/core';
@@ -163,7 +164,9 @@ import {
 } from '../input-snapshot.js';
 import { findRunnerConfigPath, mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
-import { loadReceiptFor, tryReuseReceipt } from '../receipts.js';
+import { loadReceiptFor, receiptScope, tryReuseReceipt } from '../receipts.js';
+import { classifyResealChange, type ResealChangeClassification } from '../reseal.js';
+import { obligationFingerprint } from '../evaluate.js';
 import { computeEvaluationScope } from '../scope.js';
 import { computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
@@ -887,6 +890,8 @@ interface VerifiedCarryForwardParent {
   receipt: GateReceipt;
   receiptDigest: string;
   treeId: string;
+  /** The parent's own complete execution result (its attested outcomes). */
+  execution: ExecutionResult;
 }
 
 /**
@@ -987,12 +992,131 @@ function verifiedCarryForwardParent(input: {
       receipt: loaded.receipt,
       receiptDigest: sha256Canonical(loaded.receipt as unknown as Record<string, never>),
       treeId,
+      execution: loaded.executionResult,
     };
   } catch {
     return null;
   }
 }
 
+/** The sealed parent a re-seal carries from, plus what it proved. */
+export interface ResealPlan {
+  /** How Gateforge itself classified the sealed change set. */
+  classification: ResealChangeClassification;
+  /** Digest of the verified parent receipt this run re-seals from. */
+  parentDigest: string;
+  /** The parent receipt's sealed candidate tree. */
+  parentTreeId: string;
+  /** The commit the parent receipt sealed (its `carriedFrom`). */
+  parentSha: string;
+  /** Test files whose tests this run re-runs. */
+  affectedFiles: string[];
+  /** How many parent outcomes this run carries unchanged. */
+  carriedTests: number;
+}
+
+/**
+ * Decides the test-only re-seal: may this `--scope changed` run re-run
+ * exactly the tests the sealed change set can affect and re-seal from
+ * the verified parent receipt?
+ *
+ * Every rule is checked by Gateforge itself, never by the candidate:
+ * the change set is diffed from the two sealed trees, the paths are
+ * classified from the runner's own catalog, the parent's outcomes must
+ * be clean for every test outside the affected set, and a vanished test
+ * must be explained by a changed file. Any doubt returns one plain
+ * reason line, and the caller then runs exactly as it did before.
+ *
+ * Args:
+ *   input: the sealed parent, the frozen tree, the catalog, the current
+ *     obligations, and the repository coordinates.
+ *
+ * Returns:
+ *   the re-seal plan, or the single reason it is refused (both null
+ *   when no parent receipt exists at all, which keeps a run without a
+ *   parent byte-identical to before).
+ */
+export function decideTestOnlyReseal(input: {
+  io: Io;
+  gitDir: string;
+  parent: {
+    receipt: GateReceipt;
+    receiptDigest: string;
+    treeId: string;
+    execution: ExecutionResult;
+  } | null;
+  currentTreeId: string;
+  catalog: TestCatalog;
+  obligations: readonly Obligation[];
+  enabled: boolean;
+}): { plan: ResealPlan | null; reason: string | null } {
+  const parent = input.parent;
+  if (parent === null) return { plan: null, reason: null };
+  if (!input.enabled) {
+    return {
+      plan: null,
+      reason: 'the re-seal path is off (strict mode or `enforcement.reseal: false`) → full run',
+    };
+  }
+  if (receiptScope(parent.receipt) !== 'full') {
+    return { plan: null, reason: 'the previous receipt sealed a slice, not a whole-suite run → full run' };
+  }
+  if (parent.receipt.verdictSummary.total !== input.obligations.length) {
+    return {
+      plan: null,
+      reason:
+        `the previous receipt graded ${String(parent.receipt.verdictSummary.total)} obligation(s) ` +
+        `while this candidate declares ${String(input.obligations.length)} → full run`,
+    };
+  }
+  const classification = classifyResealChange({
+    gitDir: input.gitDir,
+    env: input.io.env,
+    cwd: input.io.cwd,
+    parentTreeId: parent.treeId,
+    currentTreeId: input.currentTreeId,
+    testFiles: [...new Set(input.catalog.entries.map((entry) => entry.file))],
+  });
+  if (!classification.eligible) {
+    return { plan: null, reason: classification.reason };
+  }
+  const affectedFiles = new Set(classification.affectedTestFiles);
+  const catalogKeys = new Set(input.catalog.entries.map((entry) => entry.logicalKey));
+  const affectedKeys = new Set(
+    input.catalog.entries.filter((entry) => affectedFiles.has(entry.file)).map((entry) => entry.logicalKey),
+  );
+  const changedFiles = new Set(classification.changedPaths);
+  for (const planned of parent.execution.planned) {
+    if (catalogKeys.has(planned.logicalKey) || changedFiles.has(planned.file)) continue;
+    return {
+      plan: null,
+      reason: `the previous receipt's test ${planned.logicalKey} no longer exists and no changed file explains it → full run`,
+    };
+  }
+  const statusByKey = new Map(parent.execution.outcomes.map((outcome) => [outcome.logicalKey, outcome.status]));
+  for (const planned of parent.execution.planned) {
+    if (affectedKeys.has(planned.logicalKey) || !catalogKeys.has(planned.logicalKey)) continue;
+    if (statusByKey.get(planned.logicalKey) !== 'passed') {
+      return {
+        plan: null,
+        reason: `the previous receipt's test ${planned.logicalKey} did not pass outside the affected set → full run`,
+      };
+    }
+  }
+  return {
+    plan: {
+      classification,
+      parentDigest: parent.receiptDigest,
+      parentTreeId: parent.treeId,
+      parentSha: parent.receipt.gitSha ?? '',
+      affectedFiles: classification.affectedTestFiles,
+      carriedTests: parent.execution.planned.filter(
+        (planned) => catalogKeys.has(planned.logicalKey) && !affectedKeys.has(planned.logicalKey),
+      ).length,
+    },
+    reason: null,
+  };
+}
 /** Runs configured harness setup and teardown around one supervised suite.
  *
  * Args:
@@ -1578,6 +1702,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // The claimed files' slice (changed scope) a non-Playwright runner
   // plans from — empty in full scope and for `playwright`.
   let affectedRequiredFiles: readonly string[] = [];
+  // The verified parent a test-only re-seal carries from, or null when
+  // this run is not a re-seal (every other run is unchanged).
+  let reSealPlan: ResealPlan | null = null;
   // Framework ids whose claims and records must never grade (owner
   // quarantine); empty when nothing is quarantined.
   let excludedTestIds: readonly string[] = [];
@@ -1624,19 +1751,75 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     affectedTestCount = affectedPlan.plannedRows.length;
     affectedRequiredFiles = affectedPlan.requiredFiles;
     if (options.scope === 'changed') {
-      plannedRows = affectedPlan.plannedRows.filter(
-        (row) => !quarantinedKeys.has(row.planned.logicalKey),
-      );
-      coveredFingerprints = affectedPlan.coveredFingerprints;
-      scopeBlockers = affectedPlan.unclaimed.map((entry): BlockingEntry => ({
-        kind: 'finding',
-        resourceId: null,
-        name: entry.obligationId,
-        detail: entry.detail,
-        location: null,
-        cause: 'EVIDENCE_SCOPE_INCOMPLETE',
-        nextAction: CAUSE_NEXT_ACTIONS.EVIDENCE_SCOPE_INCOMPLETE,
-      }));
+      // Test-only re-seal (plan phase 2). A parent receipt and a frozen
+      // tree are the only inputs; everything else — the change set, the
+      // classification, the carried outcomes — Gateforge recomputes
+      // itself. A refused re-seal prints ONE plain reason line and the
+      // run continues through the unchanged path below.
+      const reSealBaseSha = resolveCarryForwardBaseSha(io, providerIdentity);
+      const reSeal =
+        options.testSelectors === undefined &&
+        !options.resultOnly &&
+        freezeGitDir !== null &&
+        frozenTreeId !== null &&
+        expectedDigest !== null &&
+        approvedPolicyDigest !== null &&
+        reSealBaseSha !== null &&
+        catalog.inventoryComplete
+          ? decideTestOnlyReseal({
+              io,
+              gitDir: freezeGitDir,
+              parent: verifiedCarryForwardParent({
+                io,
+                config,
+                stateDir,
+                verifierKeyring,
+                baseSha: reSealBaseSha,
+                trustedPolicyDigest: trustedPolicy,
+                approvedPolicyDigest,
+                executionBoundaryDigest,
+              }),
+              currentTreeId: frozenTreeId,
+              catalog,
+              obligations: pipeline.policy.obligations,
+              enabled: gateMode !== 'strict' && config.enforcement?.reseal !== false,
+            })
+          : { plan: null, reason: null };
+      if (reSeal.reason !== null) writeLine(io.stderr, `test-gates: ${reSeal.reason}`);
+      reSealPlan = reSeal.plan;
+      if (reSeal.plan !== null) {
+        const affected = new Set(reSeal.plan.affectedFiles);
+        plannedRows = fullPlannedRows.filter(
+          (row) => affected.has(row.planned.file) && !quarantinedKeys.has(row.planned.logicalKey),
+        );
+        // The sealed parent proved every obligation in the repository;
+        // this run re-proves the ones its re-run tests declare. The
+        // covered set is that union, so a consumer's own diff-scoped
+        // check still decides what the receipt covers.
+        coveredFingerprints = [
+          ...new Set(pipeline.policy.obligations.map((obligation) => obligationFingerprint(obligation))),
+        ].sort();
+        affectedRequiredFiles = reSeal.plan.affectedFiles;
+        // A test-only change cannot open an obligation through app
+        // sources, so the changed-scope "no testable slice" blockers
+        // (the mapping gap this path exists to route around) do not
+        // apply: the parent receipt already covered them.
+        scopeBlockers = [];
+      } else {
+        plannedRows = affectedPlan.plannedRows.filter(
+          (row) => !quarantinedKeys.has(row.planned.logicalKey),
+        );
+        coveredFingerprints = affectedPlan.coveredFingerprints;
+        scopeBlockers = affectedPlan.unclaimed.map((entry): BlockingEntry => ({
+          kind: 'finding',
+          resourceId: null,
+          name: entry.obligationId,
+          detail: entry.detail,
+          location: null,
+          cause: 'EVIDENCE_SCOPE_INCOMPLETE',
+          nextAction: CAUSE_NEXT_ACTIONS.EVIDENCE_SCOPE_INCOMPLETE,
+        }));
+      }
     }
   }
   // Runner-agnostic expected set (plan 2026-09-25): a NON-Playwright
@@ -1682,9 +1865,14 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // and sidecar-derived claims). Both are the same current inventory
   // the verdict engine grades against; the union is the graded set of a
   // named run. A test that declares nothing contributes nothing.
+  // A test-only re-seal grades exactly what its re-run tests declare:
+  // every other obligation keeps the parent receipt's attested outcome,
+  // which is digest-bound through `resealedFrom`.
+  const gradedTestIds: string[] | null =
+    namedTestIds ?? (reSealPlan === null ? null : plannedRows.map((row) => row.planned.logicalKey));
   const namedObligationIds: string[] | null = (() => {
-    if (namedTestIds === null) return null;
-    const selected = new Set(namedTestIds);
+    if (gradedTestIds === null) return null;
+    const selected = new Set(gradedTestIds);
     // A claim names the declaring test the way its runner does: a
     // sidecar row carries the logical key, a native Playwright
     // annotation the framework id. The selected entries' own framework
@@ -2797,7 +2985,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // the same join `planScopedExpectedSet` planned from, so the graded
     // obligations are exactly the covered set the receipt seals. Full
     // mode stays unscoped (changedFiles: null), byte-identical.
-    changedFiles: scopeChangedFiles,
+    // A re-seal grades the obligations its re-run tests declare (the
+    // `namedObligationIds` above); diff scoping is the empty-slice
+    // planner's axis and means nothing over a test-only change.
+    changedFiles: reSealPlan === null ? scopeChangedFiles : null,
     // Named grading: the graded set is what the selected tests
     // declare. Absent for every other run, which then grades the whole
     // repository exactly as before.
@@ -3119,6 +3310,21 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     ...(options.scope === 'changed'
       ? { scope: 'changed' as const, coveredObligationFingerprints: coveredFingerprints }
       : {}),
+    // Test-only re-seal bindings (additive): the parent this run
+    // re-sealed from, how many outcomes it carried, how many tests it
+    // re-ran, and the change set Gateforge itself computed. CI
+    // recomputes every one of them from the two sealed trees.
+    ...(reSealPlan === null
+      ? {}
+      : {
+          carriedFrom: reSealPlan.parentSha,
+          parentReceiptDigest: reSealPlan.parentDigest,
+          resealedFrom: reSealPlan.parentDigest,
+          changeClass: 'test-only' as const,
+          carriedTests: reSealPlan.carriedTests,
+          rerunTests: plannedRows.length,
+          changedPaths: reSealPlan.classification.changedPaths,
+        }),
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: liveAttestation === null ? null : sha256Canonical(liveAttestation as unknown as Record<string, never>),
     candidateTreeId,
@@ -3144,6 +3350,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   writeGateReceipt(stateDir, receipt);
   writeCandidateTreeEntries(stateDir, resultTreeSnapshot?.entries ?? []);
   writeLine(io.stderr, `receipt ${receipt.receiptId} sealed (complete run, evidence graded, inputs bound)`);
+  if (reSealPlan !== null) {
+    writeLine(
+      io.stderr,
+      `only test files changed: re-ran ${String(plannedRows.length)} test(s), kept ${String(reSealPlan.carriedTests)} from the previous receipt`,
+    );
+  }
   return 0;
 }
 
