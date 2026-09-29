@@ -145,7 +145,7 @@ a narrower selection is never guessed:
 
 ```sh
 $ gateforge test-gates --test 'session proxy' --result-only
-gateforge: the selector 'session proxy' matches 2 planned tests — pick one exact logical key. Run `gateforge discover --json`. [TEST_SELECTOR_AMBIGUOUS]
+gateforge: the selector 'session proxy' matches 2 planned tests — pick one exact logical key. Run `gateforge tests discover --json`. [TEST_SELECTOR_AMBIGUOUS]
 candidate logical keys:
   - tests/green.test.mjs#creates account through the session proxy
   - tests/second.test.mjs#creates the billing account through the session proxy

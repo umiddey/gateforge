@@ -25,6 +25,24 @@ const ROWS = [
   { logicalKey: 'vitest:tests/billing.test.mjs:invoices the account' },
 ];
 
+/**
+ * The message one unresolvable selector fails closed with.
+ *
+ * Args:
+ *   selector: the selector as the operator typed it.
+ *
+ * Returns:
+ *   string: the thrown error message (empty when it did not throw).
+ */
+function selectorErrorMessage(selector: string): string {
+  try {
+    resolveTestSelectors([selector], ROWS);
+    return '';
+  } catch (error) {
+    return (error as Error).message;
+  }
+}
+
 describe('test selector resolution', () => {
   it('resolves an exact logical key and a unique substring to the same key', () => {
     expect(resolveTestSelectors(['vitest:tests/uc-53.test.mjs:creates the account'], ROWS)).toEqual([
@@ -53,6 +71,15 @@ describe('test selector resolution', () => {
     expect(() => resolveTestSelectors(['the account'], ROWS)).toThrow(/uc-53/);
     expect(() => resolveTestSelectors(['the account'], ROWS)).toThrow(/uc-51/);
     expect(() => resolveTestSelectors(['the account'], ROWS)).toThrow(/billing/);
+  });
+
+  it('points an unresolved selector at the command that LISTS test logical keys', () => {
+    // `gateforge discover --json` dumps the resource graph, not the test
+    // inventory: the next action must name the command that actually
+    // prints every logical key a selector can resolve to.
+    expect(selectorErrorMessage('uc-99')).toContain('gateforge tests discover --json');
+    expect(selectorErrorMessage('uc-99')).not.toContain('`gateforge discover --json`');
+    expect(selectorErrorMessage('the account')).toContain('gateforge tests discover --json');
   });
 
   it('resolves one bad selector even when the others are exact', () => {

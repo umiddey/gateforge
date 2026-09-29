@@ -800,6 +800,14 @@ export interface NamedTestSelection {
 const SELECTOR_CANDIDATE_LIMIT = 20;
 
 /**
+ * Next action of an unresolvable `--test` selector. `tests discover
+ * --json` prints the derived catalog — the ONLY surface that lists
+ * every test logical key a selector can resolve to (`discover --json`
+ * dumps the resource graph instead, which never names a test).
+ */
+const SELECTOR_NEXT_ACTION = 'gateforge tests discover --json';
+
+/**
  * Renders the candidate logical keys for an unresolved `--test`
  * selector. Never guess a selection: the operator gets the exact keys
  * to pick from.
@@ -853,6 +861,7 @@ export function resolveTestSelectors(
       throw new UsageError(
         humanMessage({
           detail: `no planned test matches the selector '${selector}' — nothing ran`,
+          nextAction: SELECTOR_NEXT_ACTION,
           type: 'test-selector-unknown',
         }) +
           (keys.length === 0
@@ -864,6 +873,7 @@ export function resolveTestSelectors(
       throw new UsageError(
         humanMessage({
           detail: `the selector '${selector}' matches ${String(candidates.length)} planned tests — pick one exact logical key`,
+          nextAction: SELECTOR_NEXT_ACTION,
           type: 'test-selector-ambiguous',
         }) + `\ncandidate logical keys:\n${selectorCandidates(candidates)}`,
       );
