@@ -27,6 +27,7 @@
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { canonicalOf } from '../json.js';
+import { failureDiagnosisOf, type SerializedFailure } from '../diagnosis.js';
 import { claimInjectionsFor } from '../runner-claims.js';
 import { vitestWorkerSlot } from './worker-slot.js';
 
@@ -105,6 +106,9 @@ interface SpoolEvent {
   readonly project: string | null;
   readonly outcome?: string;
   readonly attempt?: number;
+  /** testEnd only, non-passing only: the additive failure diagnosis. */
+  readonly errorMessage?: string;
+  readonly stackFrames?: string[];
 }
 
 /** The reconciliation identity of one test. */
@@ -220,6 +224,10 @@ export default class GateforgeVitestReporter {
       project: null,
       outcome,
       attempt: retryCount + 1,
+      // Additive diagnosis for a non-passing test: the CI progress
+      // stream and the failures artifact are the only readers, and the
+      // CLI screens the message before printing or writing it.
+      ...(outcome === 'passed' ? {} : (failureDiagnosisOf(result?.errors as SerializedFailure[] | undefined) ?? {})),
     });
   }
 

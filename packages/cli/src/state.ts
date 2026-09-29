@@ -415,6 +415,48 @@ export function clearRunRecord(stateDir: string): void {
 }
 
 /**
+ * Persists the Gateforge-owned failing-test diagnosis artifact.
+ *
+ * A failed witnessed test used to ship nothing but an ARIA snapshot:
+ * the runner's message and stack lived in the runner log, which the CI
+ * job keeps private precisely because it carries secrets. This file is
+ * the screened alternative — the first error line and a short
+ * `file:line` stack per failure, already passed through the credential
+ * guard, never a request or response body. It is written only when the
+ * progress stream is on, so a local run leaves the state directory
+ * exactly as it found it.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   runId: the run that produced the failures.
+ *   failures: the guarded failure records, in the order the run saw them.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeTestFailures(
+  stateDir: string,
+  runId: string,
+  failures: readonly {
+    logicalKey: string;
+    title: string;
+    message: string;
+    stackFrames: string[];
+  }[],
+): void {
+  writeStateFile(stateDir, 'failures.json', {
+    schemaVersion: 1,
+    runId,
+    failures: failures.map((failure) => ({
+      logicalKey: failure.logicalKey,
+      title: failure.title,
+      message: failure.message,
+      stackFrames: [...failure.stackFrames],
+    })),
+  } as unknown as JsonValue);
+}
+
+/**
  * Persists the entries included in the sealed candidate tree.
  *
  * Args:

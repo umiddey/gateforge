@@ -34,7 +34,7 @@ export type ProgressTarget =
 export type ProgressScope = 'full' | 'changed' | 'named';
 
 /** The outcome vocabulary every runner adapter normalizes to. */
-export type ProgressOutcome = 'passed' | 'failed' | 'skipped' | 'fixme' | 'other';
+export type ProgressOutcome = 'passed' | 'failed' | 'skipped';
 
 /** One finished test, as the drain observed it. */
 export interface ProgressTestOutcome {
@@ -242,7 +242,7 @@ export class ProgressStream {
     if (outcome.outcome === 'passed') {
       this.passed += 1;
       this.line(`gateforge: ✓ ${counter} ${displayTitle(outcome.title)}`);
-    } else if (outcome.outcome === 'skipped' || outcome.outcome === 'fixme') {
+    } else if (outcome.outcome === 'skipped') {
       this.skipped += 1;
       this.line(`gateforge: – ${counter} ${displayTitle(outcome.title)} (skipped)`);
     } else {
