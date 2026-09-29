@@ -1,3 +1,103 @@
+
+/**
+ * The two adapter advisories a run reports, neither of which blocks:
+ *
+ * - ADAPTER_CANNOT_WITNESS: a create obligation whose adapter can
+ *   neither list the collection nor bind a natural key. The engine
+ *   cannot prove such a create — a row that is absent from a partial
+ *   or missing list proves nothing (E4). A finding, not a new blocking
+ *   default: the obligation still fails on its own evidence.
+ * - ADAPTER_VOLATILE_FIELD_SKIPPED: the exact-value echo skipped a
+ *   field the adapter DECLARES server-computed (E18a). The owner must
+ *   see every skip, so it is reported rather than silently honoured.
+ *
+ * Args:
+ *   cwd: repo root (the adapters directory lives under it).
+ *   pipeline: the completed pipeline run.
+ *   verdicts: the evaluated verdicts (for the volatile skips).
+ *
+ * Returns:
+ *   Promise<BlockingEntry[]>: non-blocking report entries, sorted.
+ */
+async function adapterAdvisories(
+  cwd: string,
+  pipeline: PipelineResult,
+  verdicts: readonly ObligationVerdict[],
+  stateDir: string,
+): Promise<BlockingEntry[]> {
+  const entries: BlockingEntry[] = [];
+  const adaptersDir = join(cwd, '.gateforge/adapters');
+  const reports = await auditAdapters(adaptersDir);
+  const byName = new Map(reports.map((report) => [report.name, report]));
+
+  for (const verdict of verdicts) {
+    if (verdict.verdict === 'satisfied') continue;
+    if (verdict.obligation.contract !== 'persistence:create') continue;
+    const resourceId = verdict.obligation.resourceId;
+    const report = byName.get(resourceId);
+    if (report === undefined || !report.ok) continue;
+    if (report.declares.list || report.declares.naturalKey) continue;
+    if (verdict.reason !== null && !verdict.reason.includes('no witnessed')) continue;
+    entries.push({
+      kind: 'finding',
+      resourceId,
+      name: null,
+      detail:
+        `create for '${resourceId}' cannot be witnessed by adapter '${report.name}': it can neither ` +
+        'list the collection nor bind a natural key, so a created row could never be shown to have ' +
+        'been absent before and present after (a partial list proves nothing)',
+      location: null,
+      cause: 'ADAPTER_CANNOT_WITNESS',
+      nextAction: CAUSE_NEXT_ACTIONS.ADAPTER_CANNOT_WITNESS,
+    });
+  }
+
+  // The run's own witnessed records, as sealed: a declared skip is read
+  // from the evidence itself, never from a suite-declared expectation.
+  const byId = new Map<string, Record<string, unknown>>();
+  try {
+    const raw: unknown = JSON.parse(readFileSync(join(stateDir, 'records.json'), 'utf8'));
+    if (Array.isArray(raw)) {
+      for (const record of raw) {
+        if (typeof record !== 'object' || record === null) continue;
+        const id = (record as { recordId?: unknown }).recordId;
+        if (typeof id === 'string') byId.set(id, record as Record<string, unknown>);
+      }
+    }
+  } catch {
+    // No sealed records (a static run): nothing to report a skip about.
+  }
+  for (const verdict of verdicts) {
+    if (verdict.verdict !== 'satisfied') continue;
+    const used = verdict.recordIds.map((id) => byId.get(id) ?? null);
+    const actions = used.filter((record) => record !== null && record['kind'] === 'ui.action');
+    if (actions.length === 0) continue;
+    const skipped: string[] = [];
+    for (const record of used) {
+      if (record === null) continue;
+      for (const action of actions) {
+        for (const skip of volatileEchoSkips(action as never, record as never)) {
+          if (!skipped.includes(skip.field)) skipped.push(skip.field);
+        }
+      }
+    }
+    if (skipped.length === 0) continue;
+    entries.push({
+      kind: 'finding',
+      resourceId: verdict.obligation.resourceId,
+      name: null,
+      detail:
+        `the exact-value echo skipped ${skipped.length} field(s) the adapter declares ` +
+        `server-computed: ${skipped.sort().join(', ')} — the entered values were not compared with the ` +
+        'persisted state, and the engine-observed values are what the app stored',
+      location: null,
+      cause: 'ADAPTER_VOLATILE_FIELD_SKIPPED',
+      nextAction: CAUSE_NEXT_ACTIONS.ADAPTER_VOLATILE_FIELD_SKIPPED,
+    });
+  }
+  return entries;
+}
+
 /**
  * `gateforge check`: the full gate — discover → obligations → claims →
  * verdicts → report, with exit codes per architecture contract 4
@@ -18,7 +118,7 @@
  * annotations are compared with generated sidecar entries but are not direct
  * check bindings; raw `claims.json` is never a declaration source.
  */
-import { cpSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -32,6 +132,7 @@ import {
   strictnessSummaryLine,
   CAUSE_NEXT_ACTIONS,
   canonicalJson,
+  volatileEchoSkips,
   engineBundleDigestOf,
   executionBoundaryDigestOf,
   GateReceiptSchema,
@@ -45,6 +146,7 @@ import {
   type Claim,
   type GateReceipt,
   type JsonValue,
+  type ObligationVerdict,
 } from '@gate-forge/core';
 import {
   discoverTestCatalog,
@@ -62,6 +164,7 @@ import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { obligationFingerprint, evaluateRun, scopeBlocking } from '../evaluate.js';
+import { auditAdapters } from '../adapter-audit.js';
 import { annotationMapSyncAdvisories, findRunnerConfigPath, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
@@ -73,7 +176,7 @@ import {
   type InputSnapshot,
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
-import { runPipeline, resolveRepoPath, sourcesByResourceId } from '../pipeline.js';
+import { runPipeline, resolveRepoPath, sourcesByResourceId, type PipelineResult } from '../pipeline.js';
 import {
   digestPytestInputs,
   interpreterIdentity,
@@ -1622,10 +1725,21 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           .map((verdict) => verdict.obligation.id)
           .sort()
       : null;
+  const adapterFindings = await adapterAdvisories(
+    io.cwd,
+    pipeline,
+    evaluated.verdicts,
+    stateDir,
+  );
   let report = renderRun(reportVerdicts, {
     format,
     blocking: evaluatedBlocking,
-    advisories: [...annotationAdvisories, ...mockedOnlyAdvisories, ...baselineDriftAdvisories],
+    advisories: [
+      ...annotationAdvisories,
+      ...mockedOnlyAdvisories,
+      ...baselineDriftAdvisories,
+      ...adapterFindings,
+    ],
     waiverCounts: evaluated.waiverCounts,
     baseline: baselineReport,
     run: pipeline.manifest,

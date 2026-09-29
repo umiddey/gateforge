@@ -39,6 +39,7 @@ import { join, relative, resolve, sep } from 'node:path';
 import { BehaviorPolicySchema } from '@gate-forge/core';
 import type { GateforgeConfig } from '@gate-forge/core';
 import { parse as parseYaml } from 'yaml';
+import { auditAdapters } from '../adapter-audit.js';
 import {
   allCapabilities,
   canonicalJson,
@@ -801,6 +802,32 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     observerDetail += '; no external witness configured (the supervised run spawns a loopback witness)';
   }
   checks.push({ id: 'observer', status: 'ok', detail: observerDetail });
+
+  // 3a. Evidence adapters: the connect-your-project half, as one line.
+  // Diagnostic only — a missing or invalid adapter is the gate's own
+  // business, and it already blocks there.
+  try {
+    const config = loadConfigAt(io.cwd);
+    const reports = await auditAdapters(join(io.cwd, config.adapters ?? '.gateforge/adapters'));
+    const invalid = reports.filter((report) => !report.ok);
+    checks.push({
+      id: 'adapters',
+      status: invalid.length === 0 ? 'ok' : 'warn',
+      detail:
+        reports.length === 0
+          ? 'no evidence adapter yet — `gateforge adapters scaffold` writes a starting point per business resource'
+          : `${String(reports.length)} evidence adapter(s) in ${config.adapters ?? '.gateforge/adapters'}` +
+            (invalid.length === 0
+              ? '; all satisfy the contract'
+              : `; ${String(invalid.length)} invalid (${invalid.map((report) => report.name).join(', ')}) — the witness refuses to start`),
+    });
+  } catch (error) {
+    checks.push({
+      id: 'adapters',
+      status: 'warn',
+      detail: `evidence adapters could not be audited: ${(error as Error).message.split('\n')[0] ?? 'unknown'}`,
+    });
+  }
 
   // 3b. Complete-behavior readiness (plan 2026-09-19 Phase 9 item 3):
   // when `behaviorPolicy` is configured the doctor reports the profile's

@@ -50,6 +50,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(typeof report.engine.unpublished).toBe('boolean');
       expect(report.strictE2E).toBe(false);
       expect(report.checks.map((entry) => entry.id)).toEqual([
+        'adapters',
         'behavior-profile',
         'ci',
         'config',

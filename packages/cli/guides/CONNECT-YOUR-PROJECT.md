@@ -1,0 +1,276 @@
+# Connect your project
+
+From an empty repository to a green gate, in the order that actually
+unblocks you. Every command here is yours to run; every step is work on
+YOUR side of the boundary. Gateforge never edits your app, your tests, or
+your policies to make a gate pass.
+
+Read this end to end once. After that, `gateforge next` always prints the
+ONE next action.
+
+---
+
+## 1. What you need
+
+| Your stack | Detector pack (installed by `init`) | Runner | What you write |
+| --- | --- | --- | --- |
+| Python + SQLAlchemy | `gateforge.pack-sqlalchemy` | any | models, evidence adapters |
+| Python + FastAPI | `gateforge.pack-fastapi` | any | routes, evidence adapters |
+| JavaScript/TypeScript + Express, Fastify, Nest | `gateforge.pack-http` | playwright or your own | routes, evidence adapters |
+| HTTP clients (OpenAPI/GraphQL consumers) | `gateforge.pack-http` | any | — |
+| Alembic migrations | `gateforge.pack-alembic` | any | revisions |
+| Auth surfaces | `gateforge.pack-auth` | any | — |
+
+`gateforge init` scans the repo, prints the recommended pack list, and
+writes `.gateforge.yml`. Add or remove a pack later by editing the
+`plugins:` list — that file is yours; an agent must not weaken it.
+
+**Your own detector or runner?** Both are public plugin surfaces: a
+detector is a module exporting `discover(paths)` (see
+`packages/plugin-protocol`), and a runner is an adapter implementing the
+runner contract from `@gate-forge/witness/adapter` (see
+`packages/cli/guides/RUNNER-NEUTRAL-EVIDENCE.md`). Write one when no
+bundled pack understands your framework; you never have to change
+Gateforge to add one.
+
+## 2. `gateforge init`
+
+```bash
+npx gateforge init --blocking
+```
+
+It writes `.gateforge.yml`, `.gateforge/policies.yml`, the classification
+policy, the `GATEFORGE.md` agent loop, and the adapter/waiver skeleton,
+then wires the pre-commit hook and CI. Re-run it any time; it is
+idempotent and never overwrites a file you edited.
+
+Exit code 2 means a configuration problem, not a code problem: the
+message names the file and the key.
+
+## 3. A test environment the gate may trust
+
+The witness reads the app you point it at. That app must be **isolated
+and reproducible** — a shared developer database makes every persistence
+verdict a guess.
+
+- Run the app on loopback, on a disposable database, seeded per run.
+- Reset it before each run (`docker compose down -v && docker compose up -d`,
+  `alembic reset`, or your test-data script).
+- Keep the login state: either no auth, or a seeded account whose
+  credentials live in your CI secret store — never in the repository.
+- Present an environment marker: your app must answer
+  `x-gateforge-env-fingerprint: <value>` on every route the adapters
+  read. Export the same value as `GATEFORGE_TARGET_FINGERPRINT` in the
+  environment that runs the gate. The witness refuses evidence from a
+  different environment than the UI under test (GF-13).
+
+Full rules, including what never belongs in a test environment:
+`TEST-ENVIRONMENT.md`.
+
+## 4. Runner
+
+By default the supervised run drives Playwright. If your suite already
+exists in another runner, declare it once:
+
+```yaml
+# .gateforge.yml
+runner: vitest        # playwright (default) | pytest | vitest | cypress
+```
+
+Then implement the runner adapter contract (one function that reports
+what the test did, through the witness) — the guide is
+`RUNNER-NEUTRAL-EVIDENCE.md`. Gateforge drives your existing tests; it
+never asks you to rewrite them.
+
+## 5. Evidence adapters
+
+An adapter is the small reviewed module that lets the **witness** look
+up one row itself, GET-only, from its own process. It is the only place
+where "the database says so" enters the gate, so it is reviewed like
+code.
+
+### 5a. Generate the starting points
+
+```bash
+export GATEFORGE_TARGET_FINGERPRINT=my-app-loopback-v1
+npx gateforge adapters scaffold
+npx gateforge adapters scaffold --dry-run    # print the plan, write nothing
+```
+
+For every business resource that has no adapter, this writes
+`.gateforge/adapters/<resourceId>.mjs` from what Gateforge already
+knows: the classified identity, the delete semantics, the updateable
+fields, and the GET routes the compiler found.
+
+- It **never overwrites** an existing adapter.
+- Every guess is listed in the file's own header comment. Read it.
+- Anything it will not guess is printed under **needs you**, with the
+  reason: no read route, a composite key, no collection route (a create
+  cannot be witnessed without one), a path no schema or handler evidence
+  links to the resource, or an unknown target fingerprint.
+
+A generated adapter is a **starting point, not proof**. The gate grades
+it exactly like a hand-written one.
+
+### 5b. Review, and finish the hand-written part
+
+The generated module is deliberately short; the kit
+(`@gate-forge/witness/adapter-kit`) does the rest:
+
+```js
+import { defineHttpAdapter } from '@gate-forge/witness/adapter-kit';
+
+export default defineHttpAdapter({
+  resourceId: 'tenant.accounts',
+  readPath: (id) => `/api/accounts/${encodeURIComponent(id)}`, // {id} also works
+  itemWrapper: 'account',        // when the body wraps the entity
+  listPath: '/api/accounts',     // needed to witness a create
+  collectionKey: 'accounts',
+  paging: { kind: 'page', pageSize: 100, maxPages: 50 },
+  fields: ['id', 'first_name', 'status'],
+  deletion: 'archive',           // or 'hard'
+  environmentFingerprint: 'my-app-loopback-v1',
+});
+```
+
+What the kit guarantees, so you do not have to re-derive it:
+
+- **Paging is bounded and honest.** A walk that hits its cap with rows
+  still unread fails with `result truncated` instead of returning a
+  partial list — a partial list makes a created row look absent.
+  Declare `paging: { kind: 'cursor' | 'page' | 'offset' }` to match
+  your API.
+- **Server-computed fields are declared, not hidden.** If the server
+  rewrites a field the journey also typed (a derived label, a slug),
+  declare it:
+  ```js
+  fields: ['title', 'slug'],
+  volatileFields: ['slug'],
+  ```
+  The engine skips the exact-value echo for that field and **reports the
+  skip** in the run's advisories. Drop the declaration if the app should
+  store what was entered.
+- **Redirects fail closed.** A read that only works through a 307/302
+  throws with the `Location` it answered with. Point the path at the one
+  your app really serves.
+- **Logins stay in the witness environment.** Name the variables; never
+  inline a credential:
+  ```js
+  auth: {
+    kind: 'cookie-login',
+    seats: { admin: {
+      loginPath: '/api/admin/login',
+      credentials: {
+        username: 'GATEFORGE_ADAPTER_ADMIN_USER',
+        password: 'GATEFORGE_ADAPTER_ADMIN_PASSWORD',
+      },
+    } },
+    seat: 'admin',
+  },
+  ```
+  The kit performs one login POST (the same request a browser performs)
+  and then only GETs, re-logging in once on a 401. Set the variables in
+  the environment that runs the gate; they never go into the repo, into
+  argv, into a report, or into the suite.
+- **Fan-out collections** (members only reachable per parent) use
+  `listCollection(readAll)`, which composes several paged reads.
+
+Adapters are read-only by construction. If your app has state only the
+database can answer, the frozen contract has a `probeServer` channel —
+see the adapter interface doc in `@gate-forge/witness`.
+
+### 5c. Check them
+
+```bash
+npx gateforge adapters check                       # load + validate every adapter
+npx gateforge adapters check --probe \
+    --base-url http://127.0.0.1:8000               # the app running: one GET each
+npx gateforge enforcement doctor                   # the same audit as one summary line
+```
+
+`--probe` issues exactly one read-only GET per adapter and tells you
+what actually happened: `ok`, `absent` (404), `auth` (401/403),
+`fingerprint-mismatch` (GF-13), or `failed` (including a redirect-only
+path). `adapters check` also lists the resources that still have no
+adapter.
+
+## 6. Test map
+
+Intent is declared, proof is not:
+
+```bash
+npx gateforge tests discover            # inventory what already exists
+npx gateforge tests suggest             # where existing tests may already cover
+npx gateforge tests mark --test <key> --kind browser-e2e \
+    --obligation tenant.accounts:persistence:read --reason "..."
+```
+
+Marking a test never satisfies an obligation; it only says which existing
+test is *about* it. New proof goes in `tests/e2e/gateforge/`.
+
+## 7. First run
+
+```bash
+npx gateforge check --changed --scope changed
+```
+
+Read the report. Every blocking entry names a cause, a why, and exactly
+one `do:` line. `npx gateforge next` prints the single next action when
+you want it by itself.
+
+## 8. Hooks and CI
+
+`gateforge init --blocking` wires the pre-commit hook and a CI workflow:
+
+- **pre-commit** freezes the Git index, runs the gate against exactly
+  those bytes, and only then lets the commit through.
+- **CI** runs the same gate on the merge candidate, plus the supervised
+  E2E run when the policy demands receipts.
+
+For a quick re-check of one obligation while you work:
+
+```bash
+npx gateforge test-gates --test "creates an account" --result-only
+```
+
+## 9. What is your work, and what is Gateforge's
+
+| Yours | Gateforge's |
+| --- | --- |
+| Your models, routes, and the JSON they serve | Classifying every resource and generating obligations |
+| Reviewing (or writing) each evidence adapter | Loading, validating, and running adapters witness-side |
+| A test environment that is isolated and seeded | Running the browser, the proxy, and the witness for you |
+| Writing overlay proof in `tests/e2e/gateforge/` | Grading evidence and sealing a receipt for the exact bytes |
+| Deciding policies, waivers, and baselines | Refusing to weaken any of them on its own |
+
+## 10. The ten things that cost the first integration the most
+
+1. **No isolated test environment.** Evidence read from a developer's
+   database is a guess; reset and seed per run.
+2. **No environment marker.** Without `x-gateforge-env-fingerprint` the
+   witness cannot attest which environment it read.
+3. **A collection read that only returns page 1.** Creates then look
+   absent. Declare your paging, and read the `result truncated` error as
+   the real bug it is.
+4. **A collection key nobody declared.** `collectionKey` (or the
+   generated `firstArrayOf`) tells the kit where the rows live.
+5. **No list route at all.** Without one, a create cannot be witnessed
+   (`ADAPTER_CANNOT_WITNESS`). Add the read endpoint, or bind a natural
+   key with `identity: 'natural-key'`.
+6. **Credentials in the repository.** They belong in the witness
+   environment; the gate greps its own report for them.
+7. **A field the server rewrites.** Declare it `volatileFields`, or fix
+   the mutation path.
+8. **A path that only works through a redirect.** Read paths must be
+   the paths the app really serves.
+9. **Rewriting existing journeys into the overlay.** Map them
+   (`tests mark`) and add thin overlay proof only where none exists.
+10. **Treating a green `check` as a receipt.** `check` is the static
+    gate; a receipt comes from a witnessed `test-gates` run over the
+    exact candidate bytes.
+
+---
+
+Next: `QUICKSTART.md` for the shortest path, `TEST-ENVIRONMENT.md` for
+the environment rules, `RUNNER-NEUTRAL-EVIDENCE.md` for a non-Playwright
+runner, and `UPGRADE-0.6-to-0.7.md` when you move versions.
