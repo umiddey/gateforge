@@ -169,7 +169,7 @@ import {
 } from '../input-snapshot.js';
 import { findRunnerConfigPath, mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
-import { loadReceiptFor, receiptScope, tryReuseReceipt } from '../receipts.js';
+import { loadReceiptFor, receiptScope, tryReuseReceipt, type ReceiptLoad } from '../receipts.js';
 import { carryDiffIsWithinScope, classifyResealChange, type ResealChangeClassification } from '../reseal.js';
 import {
   clearResealChain,
@@ -938,15 +938,64 @@ function resolveCarryForwardBaseSha(
 }
 
 /**
- * Authenticates a clean full-scope receipt for the exact merge-base commit.
+ * The outcome of verifying one parent document: the verified parent, or
+ * the FIRST binding that failed, named in plain words.
+ *
+ * A refused re-seal must be visible, so every verifier reports why. The
+ * null-returning shape the plain carry-forward path uses is derived from
+ * it and never sees a reason.
+ */
+type ParentVerification<T> = { parent: T; reason: null } | { parent: null; reason: string };
+
+/**
+ * Builds a refusal naming the first binding that failed.
  *
  * Args:
- *   input: candidate policy, external pin, key ring, state directory, and merge base.
+ *   reason: plain words — no cause code, no digest.
  *
  * Returns:
- *   VerifiedCarryForwardParent | null: verified uncarried root receipt, or null to keep current behavior.
+ *   ParentVerification: the refusal.
  */
-function verifiedCarryForwardParent(input: {
+function refuse<T>(reason: string): ParentVerification<T> {
+  return { parent: null, reason };
+}
+
+/**
+ * Shortens a commit for a human-facing line.
+ *
+ * Args:
+ *   sha: a commit, or null when none is known.
+ *
+ * Returns:
+ *   string: the 7-character prefix, or words when there is no commit.
+ */
+function shortSha(sha: string | null | undefined): string {
+  const trimmed = (sha ?? '').trim();
+  return /^[0-9a-f]{7,40}$/.test(trimmed) ? trimmed.slice(0, 7) : 'an unknown commit';
+}
+
+/**
+ * Whether the run state holds a document under this name at all — the
+ * difference between "the previous run cannot be re-sealed" (something
+ * to explain) and "there is no previous run" (nothing to say).
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   name: the state document's file name.
+ *
+ * Returns:
+ *   boolean: true when the document exists and parses as JSON.
+ */
+function hasStateDocument(stateDir: string, name: string): boolean {
+  try {
+    return readStateDocument(stateDir, name) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** The repository coordinates the plain carry-forward parent is held to. */
+interface CarryForwardParentInput {
   io: Io;
   config: GateforgeConfig;
   stateDir: string;
@@ -960,11 +1009,23 @@ function verifiedCarryForwardParent(input: {
   /** Owner-approved exclusions that are never inside a candidate tree. */
   docsExclusions: readonly string[];
   cacheExclusions: readonly string[];
-}): VerifiedCarryForwardParent | null {
+}
+
+/**
+ * Authenticates a clean full-scope receipt for the exact merge-base commit.
+ *
+ * Args:
+ *   input: candidate policy, external pin, key ring, state directory, and merge base.
+ *
+ * Returns:
+ *   ParentVerification: the verified uncarried root receipt, or the first
+ *   binding that failed in plain words.
+ */
+function verifyCarryForwardParent(input: CarryForwardParentInput): ParentVerification<VerifiedCarryForwardParent> {
   try {
-    if (input.verifierKeyring === null) return null;
+    if (input.verifierKeyring === null) return refuse('no verifier key is available to authenticate it');
     const parsed = GateReceiptSchema.safeParse(readStateDocument(input.stateDir, 'receipt.json'));
-    if (!parsed.success) return null;
+    if (!parsed.success) return refuse('it is not a gate receipt Gateforge can read');
     const receipt = parsed.data;
     // The sealed candidate is a WORKSPACE tree (it carries the repo's
     // untracked and gitignored bytes too), so it is never equal to the
@@ -984,28 +1045,45 @@ function verifiedCarryForwardParent(input: {
         input.cacheExclusions,
       )
     ) {
-      return null;
+      return refuse(
+        `its sealed tree is not the tree of commit ${shortSha(input.baseSha)} (uncommitted changes were tested)`,
+      );
     }
+    if (receipt.gitSha !== input.baseSha) {
+      return refuse(
+        `it was sealed at commit ${shortSha(receipt.gitSha)}, the merge base is ${shortSha(input.baseSha)}`,
+      );
+    }
+    if (receipt.verifierKeyId !== input.verifierKeyring.active.keyId) {
+      return refuse('it was signed with a different verifier key');
+    }
+    if (receipt.trustedPolicyDigest !== input.trustedPolicyDigest) return refuse('the trusted policy changed');
+    if (receipt.approvedPolicyDigest !== input.approvedPolicyDigest) return refuse('the approved policy changed');
+    if (receipt.receiptStage !== input.config.enforcement?.receiptStage) return refuse('the receipt stage changed');
     if (
-      receipt.gitSha !== input.baseSha ||
-      receipt.candidateTreeId !== treeId ||
-      receipt.verifierKeyId !== input.verifierKeyring.active.keyId ||
-      receipt.trustedPolicyDigest !== input.trustedPolicyDigest ||
-      receipt.approvedPolicyDigest !== input.approvedPolicyDigest ||
-      receipt.receiptStage !== input.config.enforcement?.receiptStage ||
       receipt.carriedFrom !== undefined ||
       receipt.parentReceiptDigest !== undefined ||
-      (receipt.scope !== undefined && receipt.scope !== 'full') ||
+      (receipt.scope !== undefined && receipt.scope !== 'full')
+    ) {
+      return refuse('a carried or sliced run never re-seals');
+    }
+    if (
       receipt.engine === undefined ||
       receipt.engine.version !== engineIdentity().version ||
       receipt.engine.source !== engineIdentity().source ||
       receipt.engine.unpublished !== engineIdentity().unpublished ||
-      receipt.engineBundleDigest !== engineBundleDigestOf(VERSION, input.trustedPolicyDigest) ||
-      receipt.targetArtifactDigest !== targetArtifactDigestOf(treeId) ||
+      receipt.engineBundleDigest !== engineBundleDigestOf(VERSION, input.trustedPolicyDigest)
+    ) {
+      return refuse('the engine changed');
+    }
+    if (receipt.targetArtifactDigest !== targetArtifactDigestOf(treeId)) {
+      return refuse('its sealed target artifact is not the tree it names');
+    }
+    if (
       receipt.verdictSummary.blocking !== 0 ||
       receipt.verdictSummary.satisfied + receipt.verdictSummary.waived !== receipt.verdictSummary.total
     ) {
-      return null;
+      return refuse('it was not a clean run');
     }
     const loaded = loadReceiptFor(input.stateDir, input.verifierKeyring, {
       inputDigest: receipt.inputDigest,
@@ -1014,18 +1092,53 @@ function verifiedCarryForwardParent(input: {
       executionBoundaryDigest: input.executionBoundaryDigest,
       scope: 'full',
     });
-    if (loaded.status !== 'ok') return null;
+    if (loaded.status !== 'ok') return refuse(receiptLoadRefusal(loaded.status));
     const approved = assertReceiptApprovedPolicy(loaded.receipt, input.approvedPolicyDigest);
-    if (!approved.ok) return null;
+    if (!approved.ok) return refuse('the approved policy changed');
     return {
-      receipt: loaded.receipt,
-      receiptDigest: sha256Canonical(loaded.receipt as unknown as Record<string, never>),
-      treeId,
-      execution: loaded.executionResult,
+      parent: {
+        receipt: loaded.receipt,
+        receiptDigest: sha256Canonical(loaded.receipt as unknown as Record<string, never>),
+        treeId,
+        execution: loaded.executionResult,
+      },
+      reason: null,
     };
   } catch {
-    return null;
+    return refuse('it could not be read');
   }
+}
+
+/**
+ * Names, in plain words, why a stored gate receipt no longer loads.
+ *
+ * Args:
+ *   status: the receipt loader's own verdict.
+ *
+ * Returns:
+ *   string: the first binding that failed, in words.
+ */
+function receiptLoadRefusal(status: ReceiptLoad['status']): string {
+  if (status === 'execution-mismatch') return 'its execution result was replaced by a later run';
+  if (status === 'unverified' || status === 'unknown-key' || status === 'key-mismatch') {
+    return 'its signature does not verify with this keyring';
+  }
+  if (status === 'malformed') return 'it is not a gate receipt Gateforge can read';
+  if (status === 'stale') return 'it is bound to a different run than this one';
+  return 'it does not describe a whole-suite run of this repository';
+}
+
+/**
+ * Authenticates a clean full-scope receipt for the exact merge-base commit.
+ *
+ * Args:
+ *   input: candidate policy, external pin, key ring, state directory, and merge base.
+ *
+ * Returns:
+ *   VerifiedCarryForwardParent | null: verified uncarried root receipt, or null to keep current behavior.
+ */
+function verifiedCarryForwardParent(input: CarryForwardParentInput): VerifiedCarryForwardParent | null {
+  return verifyCarryForwardParent(input).parent;
 }
 
 /** The sealed parent a re-seal carries from, and what it proved. */
@@ -1090,14 +1203,16 @@ export interface ResealParentCoordinates {
  *   input: the same coordinates a receipt parent is verified against.
  *
  * Returns:
- *   ResealParent | null: the verified run-record parent, or null.
+ *   ParentVerification: the verified run-record parent, or the first
+ *   binding that failed in plain words.
  */
-function verifiedRunRecordParent(input: ResealParentCoordinates): ResealParent | null {
+function verifyRunRecordParent(input: ResealParentCoordinates): ParentVerification<ResealParent> {
   try {
-    if (input.verifierKeyring === null) return null;
+    if (input.verifierKeyring === null) return refuse('no verifier key is available to authenticate it');
     const document = readStateDocument(input.stateDir, 'run-record.json');
+    if (document === null) return refuse('the previous run left no run record');
     const verified = verifyRunRecord(input.verifierKeyring.active.key, document);
-    if (!verified.ok) return null;
+    if (!verified.ok) return refuse('its signature does not verify with this keyring');
     const record = verified.record;
     const treeId = record.candidateTreeId;
     if (
@@ -1112,20 +1227,28 @@ function verifiedRunRecordParent(input: ResealParentCoordinates): ResealParent |
         input.cacheExclusions,
       )
     ) {
-      return null;
+      return refuse(
+        `its sealed tree is not the tree of commit ${shortSha(input.baseSha)} (uncommitted changes were tested)`,
+      );
     }
-    if (
-      record.gitSha !== input.baseSha ||
-      record.verifierKeyId !== input.verifierKeyring.active.keyId ||
-      record.trustedPolicyDigest !== input.trustedPolicyDigest ||
-      record.approvedPolicyDigest !== input.approvedPolicyDigest ||
-      record.engineBundleDigest !== engineBundleDigestOf(VERSION, input.trustedPolicyDigest) ||
-      record.executionBoundaryDigest !== input.executionBoundaryDigest
-    ) {
-      return null;
+    if (record.gitSha !== input.baseSha) {
+      return refuse(
+        `it was sealed at commit ${shortSha(record.gitSha)}, the merge base is ${shortSha(input.baseSha)}`,
+      );
+    }
+    if (record.verifierKeyId !== input.verifierKeyring.active.keyId) {
+      return refuse('it was signed with a different verifier key');
+    }
+    if (record.trustedPolicyDigest !== input.trustedPolicyDigest) return refuse('the trusted policy changed');
+    if (record.approvedPolicyDigest !== input.approvedPolicyDigest) return refuse('the approved policy changed');
+    if (record.engineBundleDigest !== engineBundleDigestOf(VERSION, input.trustedPolicyDigest)) {
+      return refuse('the engine changed');
+    }
+    if (record.executionBoundaryDigest !== input.executionBoundaryDigest) {
+      return refuse('the execution boundary changed');
     }
     const execution = ExecutionResultSchema.safeParse(readStateDocument(input.stateDir, 'execution-result.json'));
-    if (!execution.success) return null;
+    if (!execution.success) return refuse('its execution result was replaced by a later run');
     const result = execution.data as ExecutionResult;
     // The record is only a parent for the run it actually describes:
     // the execution result must be the one it names, carry the whole
@@ -1137,19 +1260,22 @@ function verifiedRunRecordParent(input: ResealParentCoordinates): ResealParent |
       result.outcomes.filter((outcome) => outcome.status === 'passed').length !== record.passedTests ||
       testOutcomesDigestOf(result.outcomes) !== record.testOutcomesDigest
     ) {
-      return null;
+      return refuse('its execution result was replaced by a later run');
     }
     return {
-      kind: 'run-record',
-      digest: sha256Canonical(record as unknown as Record<string, never>),
-      receipt: null,
-      record,
-      treeId,
-      sha: record.gitSha,
-      execution: result,
+      parent: {
+        kind: 'run-record',
+        digest: sha256Canonical(record as unknown as Record<string, never>),
+        receipt: null,
+        record,
+        treeId,
+        sha: record.gitSha,
+        execution: result,
+      },
+      reason: null,
     };
   } catch {
-    return null;
+    return refuse('it could not be read');
   }
 }
 
@@ -1164,23 +1290,31 @@ function verifiedRunRecordParent(input: ResealParentCoordinates): ResealParent |
  *   input: the repository coordinates both verifiers are held to.
  *
  * Returns:
- *   ResealParent | null: the verified parent, or null when neither
- *   document qualifies (the run then proceeds exactly as before).
+ *   ParentVerification: the verified parent, or — when neither document
+ *   qualifies — the first failed binding of the document the run state
+ *   actually holds, so the refusal is never silent.
  */
-function resolveResealParent(input: ResealParentCoordinates): ResealParent | null {
-  const receiptParent = verifiedCarryForwardParent(input);
-  if (receiptParent !== null) {
+function resolveResealParent(input: ResealParentCoordinates): ParentVerification<ResealParent> {
+  const receiptParent = verifyCarryForwardParent(input);
+  if (receiptParent.parent !== null) {
     return {
-      kind: 'receipt',
-      digest: receiptParent.receiptDigest,
-      receipt: receiptParent.receipt,
-      record: null,
-      treeId: receiptParent.treeId,
-      sha: receiptParent.receipt.gitSha ?? '',
-      execution: receiptParent.execution,
+      parent: {
+        kind: 'receipt',
+        digest: receiptParent.parent.receiptDigest,
+        receipt: receiptParent.parent.receipt,
+        record: null,
+        treeId: receiptParent.parent.treeId,
+        sha: receiptParent.parent.receipt.gitSha ?? '',
+        execution: receiptParent.parent.execution,
+      },
+      reason: null,
     };
   }
-  return verifiedRunRecordParent(input);
+  const recordParent = verifyRunRecordParent(input);
+  if (recordParent.parent !== null) return recordParent;
+  // Neither qualifies. A run record IS the previous run when one is
+  // there; a receipt only speaks for it when no record was left.
+  return hasStateDocument(input.stateDir, 'run-record.json') ? recordParent : receiptParent;
 }
 
 /** The sealed parent a re-seal carries from, plus what it proved. */
@@ -1976,29 +2110,40 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       // recomputes itself. A refused re-seal prints ONE plain reason
       // line and the run continues through the unchanged path below.
       const reSealBaseSha = resolveCarryForwardBaseSha(io, providerIdentity);
-      const reSealParentCandidate: ResealParent | null =
-        options.testSelectors === undefined &&
-        !options.resultOnly &&
-        freezeGitDir !== null &&
-        frozenTreeId !== null &&
-        expectedDigest !== null &&
-        approvedPolicyDigest !== null &&
-        reSealBaseSha !== null &&
-        catalog.inventoryComplete
+      // The first binding this run itself cannot offer a parent for, in
+      // the same plain words a rejected parent document gets. null means
+      // every precondition holds and the parent must be looked up.
+      const reSealPrecondition: string | null =
+        options.testSelectors !== undefined || options.resultOnly
+          ? 'a named/result-only run never re-seals'
+          : freezeGitDir === null || frozenTreeId === null
+            ? 'this run froze no candidate tree'
+            : expectedDigest === null
+              ? 'this run pinned no input digest'
+              : approvedPolicyDigest === null
+                ? 'this run pinned no owner-approved policy'
+                : reSealBaseSha === null
+                  ? 'no merge-base commit is known (set CI_MERGE_REQUEST_DIFF_BASE_SHA or GITHUB_BASE_REF)'
+                  : catalog.inventoryComplete
+                    ? null
+                    : 'the test inventory is incomplete';
+      const reSealParentLookup: ParentVerification<ResealParent> =
+        reSealPrecondition === null
           ? resolveResealParent({
               io,
               config,
               stateDir,
               verifierKeyring,
-              baseSha: reSealBaseSha,
+              baseSha: reSealBaseSha as string,
               gitDir: freezeGitDir as string,
               docsExclusions,
               cacheExclusions,
               trustedPolicyDigest: trustedPolicy,
-              approvedPolicyDigest,
+              approvedPolicyDigest: approvedPolicyDigest as string,
               executionBoundaryDigest,
             })
-          : null;
+          : { parent: null, reason: reSealPrecondition };
+      const reSealParentCandidate = reSealParentLookup.parent;
       // A chain of consecutive re-seals is bounded: past the bound the
       // carried evidence has drifted too far to recompute honestly, so
       // this run takes the full path instead (one plain reason line).
@@ -2021,6 +2166,22 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               enabled: config.enforcement?.reseal === true,
             });
       if (reSeal.reason !== null) writeLine(io.stderr, `test-gates: ${reSeal.reason}`);
+      // A parent document the run state holds but cannot be re-sealed
+      // from is a refusal the consumer must SEE: the run continues on
+      // the ordinary changed-scope path, which looks identical to a run
+      // that never had a parent. With the path off, or with no parent
+      // document at all, nothing is printed and the run is byte-identical
+      // to before.
+      else if (
+        config.enforcement?.reseal === true &&
+        reSealParentLookup.reason !== null &&
+        (hasStateDocument(stateDir, 'receipt.json') || hasStateDocument(stateDir, 'run-record.json'))
+      ) {
+        writeLine(
+          io.stderr,
+          `test-gates: the previous run cannot be re-sealed from: ${reSealParentLookup.reason} → changed-scope run`,
+        );
+      }
       reSealPlan = reSeal.plan;
       if (reSeal.plan !== null) reSealParent = reSealParentCandidate;
       if (reSeal.plan !== null) {

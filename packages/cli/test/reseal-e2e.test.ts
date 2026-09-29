@@ -9,7 +9,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sha256Canonical, withTempRepo } from '@gate-forge/core';
+import { sha256Canonical, withTempRepo, type TempRepo } from '@gate-forge/core';
 import { runCli } from './helpers.js';
 import {
   changeOneSpecAndReseal,
@@ -162,4 +162,68 @@ describe('test-only re-seal from a RUN RECORD (a failed parent run)', () => {
       expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
     });
   }, 180_000);
+});
+
+describe('one plain reason line when a re-seal parent cannot be used', () => {
+  // The consumer's case: the previous run tested bytes the merge-base
+  // commit does not contain (an uncommitted edit), so its sealed tree is
+  // not the tree of that commit. That refusal is correct — and it must
+  // be visible, not a silent fall-through to the changed-scope path.
+  const UNCOMMITTED = { 'e2e/orders.spec.mjs': `${SPECS['e2e/orders.spec.mjs'] as string}// edited, never committed\n` };
+
+  async function fixAndRunChanged(
+    repo: TempRepo,
+    gateConfig: string,
+  ): Promise<{ stderr: string; stdout: string; code: number; baseSha: string }> {
+    const env = await installAndRunFailingParent(repo, gateConfig, { uncommittedChanges: UNCOMMITTED });
+    repo.commitFiles(
+      { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
+      'fix the race in the one failing spec',
+    );
+    const run = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+    return { ...run, stderr: run.stderr.split(repo.root).join('<repo>'), baseSha: env['CI_MERGE_REQUEST_DIFF_BASE_SHA'] as string };
+  }
+
+  it('names the uncommitted tree when the previous run tested uncommitted changes', async () => {
+    await withTempRepo({}, async (repo) => {
+      const run = await fixAndRunChanged(repo, 'mode: changed\nenforcement:\n  reseal: true\n');
+      const line = `test-gates: the previous run cannot be re-sealed from: its sealed tree is not the tree of commit ${run.baseSha.slice(0, 7)} (uncommitted changes were tested) → changed-scope run`;
+      expect(run.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'))).toEqual([line]);
+      expect(run.stderr).not.toContain('only test files changed');
+      expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 180_000);
+
+  it('names a replaced execution result', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      // A later run replaced the execution result the record binds: the
+      // record no longer describes the evidence beside it.
+      const path = join(repo.root, '.gateforge/test-gates/execution-result.json');
+      const replaced = JSON.parse(readFileSync(path, 'utf8')) as { outcomes: Array<{ status: string }> };
+      for (const outcome of replaced.outcomes) if (outcome.status === 'failed') outcome.status = 'passed';
+      writeFileSync(path, `${JSON.stringify(replaced, null, 2)}\n`, 'utf8');
+      repo.commitFiles(
+        { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
+        'fix the race in the one failing spec',
+      );
+
+      const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(resealed.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'))).toEqual([
+        'test-gates: the previous run cannot be re-sealed from: its execution result was replaced by a later run → changed-scope run',
+      ]);
+      expect(resealed.stderr).not.toContain('only test files changed');
+    });
+  }, 180_000);
+
+  it('prints nothing when the re-seal path is off, byte for byte', async () => {
+    const on = await withTempRepo({}, (repo) => fixAndRunChanged(repo, 'mode: changed\nenforcement:\n  reseal: true\n'));
+    const off = await withTempRepo({}, (repo) => fixAndRunChanged(repo, 'mode: changed\nenforcement:\n  reseal: false\n'));
+    const lines = on.stderr.split('\n');
+    const reasonLine = lines.findIndex((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'));
+    expect(reasonLine).toBeGreaterThan(-1);
+    // The opted-in run differs from the opted-out one by EXACTLY that one
+    // line — nothing else about the run changes.
+    expect(lines.filter((_, index) => index !== reasonLine).join('\n')).toBe(off.stderr);
+  }, 300_000);
 });

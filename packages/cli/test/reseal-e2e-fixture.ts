@@ -179,6 +179,9 @@ export async function installAndSealParent(
  * Args:
  *   repo: the temporary repository to build.
  *   gateConfig: the gate-mode + enforcement header the fixture declares.
+ *   options.uncommittedChanges: files edited AFTER the base commit and
+ *     BEFORE the run, so the run seals a tree the merge-base commit does
+ *     not contain — the consumer's uncommitted-change case.
  *
  * Returns:
  *   ResealEnv: the environment the later runs and the check share.
@@ -186,6 +189,7 @@ export async function installAndSealParent(
 export async function installAndRunFailingParent(
   repo: TempRepo,
   gateConfig = `mode: changed\nenforcement:\n  reseal: true\n`,
+  { uncommittedChanges = {} }: { uncommittedChanges?: Record<string, string> } = {},
 ): Promise<ResealEnv> {
   installFixture(repo);
   repo.writeFiles({
@@ -200,6 +204,7 @@ export async function installAndRunFailingParent(
     '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
   });
   repo.commitFiles({}, 'base');
+  if (Object.keys(uncommittedChanges).length > 0) repo.writeFiles(uncommittedChanges);
   const baseSha = repo.headSha() as string;
   const config = loadConfig(repo.path('.gateforge.yml'));
   const env = {

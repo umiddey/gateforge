@@ -356,6 +356,32 @@ the previous receipt sealed a slice, not a whole-suite run → full run
 the previous receipt graded 561 obligation(s) while this candidate declares 563 → full run
 ```
 
+
+**When the previous run cannot be the parent.** A parent is only usable
+when it is bound to this run: the same merge-base commit, the same
+approved policy, engine bundle and execution boundary, an intact
+signature, and a sealed tree that really is the tree of that commit.
+When the run state holds such a document and no parent qualifies, the run
+says so in **one plain line** naming the first binding that failed,
+instead of falling through to the changed-scope path in silence (which
+looks exactly like a run that never had a parent):
+
+```text
+test-gates: the previous run cannot be re-sealed from: its sealed tree is not the tree of commit 9c8a3b7 (uncommitted changes were tested) → changed-scope run
+```
+
+So commit everything the run tests: a run over uncommitted changes can
+never be a re-seal parent. The other bindings read the same way — `it
+was sealed at commit 1a2b3c4, the merge base is 5d6e7f8`, `the approved
+policy changed`, `the engine changed`, `the execution boundary changed`,
+`its execution result was replaced by a later run`, `its signature does
+not verify with this keyring`, `no merge-base commit is known (set
+CI_MERGE_REQUEST_DIFF_BASE_SHA or GITHUB_BASE_REF)`, `the test inventory
+is incomplete`, `a named/result-only run never re-seals` — and each is
+followed by `→ changed-scope run`. With the path off, or when the run
+state holds no parent document at all, nothing is printed and the run is
+byte-identical to before.
+
 **At most five in a row.** Each re-seal carries its parent, so the
 evidence can be walked back at most five hops before it has drifted too
 far to recompute honestly. The sixth consecutive re-seal takes the full
