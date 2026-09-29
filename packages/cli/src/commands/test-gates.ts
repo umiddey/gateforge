@@ -1951,6 +1951,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     mappedCoverage = mappedCoverageFrom(gradedResolution, pipeline.policy.obligations, pipeline.graph);
     serverE2eObligations = serverE2eObligationIds(mapped.resolution);
     observeObligations = observeObligationIds(mapped.resolution);
+    // Adopted baseline debt (E62): the changed-scope planner must agree
+    // with this run's own grading, which waives exactly the obligations
+    // the ADOPTED baseline forgives (`applyBaseline`). Strict E2E
+    // re-grades every waiver back to blocking, so there the planner
+    // forgives nothing and an unmapped affected obligation still blocks.
+    const scopeBaseline =
+      config.enforcement?.strictE2E === true ? null : resolveAdoptedBaseline(io.cwd, config.baselines);
     const affectedPlan = planScopedExpectedSet({
       catalog,
       resolution: gradedResolution,
@@ -1958,6 +1965,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       graph: pipeline.graph,
       changedFiles: providerChangedFiles,
       behaviorCatalog: pipeline.behaviorCatalog,
+      ...(scopeBaseline !== null ? { forgivenFingerprints: scopeBaseline.fingerprints } : {}),
     });
     affectedTestCount = affectedPlan.plannedRows.length;
     affectedRequiredFiles = affectedPlan.requiredFiles;
@@ -2047,6 +2055,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           cause: 'EVIDENCE_SCOPE_INCOMPLETE',
           nextAction: CAUSE_NEXT_ACTIONS.EVIDENCE_SCOPE_INCOMPLETE,
         }));
+        if (affectedPlan.adopted.length > 0) {
+          writeLine(
+            io.stderr,
+            `test-gates: ${String(affectedPlan.adopted.length)} affected obligation(s) have no declared ` +
+              'mapping and are forgiven by the adopted baseline; they stay uncovered by this slice',
+          );
+        }
       }
     }
   }

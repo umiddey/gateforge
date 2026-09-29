@@ -28,7 +28,7 @@ const TITLES: Record<string, string> = {
 };
 
 /** A contract-valid adapter: the witness the run spawns validates it. */
-const ADAPTER = [
+export const ADAPTER = [
   'export default {',
   '  read: async () => null,',
   '  normalize: (body) => ({ entityId: body.id, fields: {} }),',

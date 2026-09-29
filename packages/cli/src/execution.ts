@@ -436,6 +436,13 @@ export function planScopedExpectedSet(input: {
   graph: ResourceGraph;
   changedFiles: readonly string[];
   behaviorCatalog?: BehaviorCatalog | null;
+  /**
+   * The pin-#2 fingerprints this run's grading forgives — the ADOPTED
+   * baseline, supplied only when `evaluateRun` would really waive them
+   * (strict E2E supplies none: there a waiver is not proof). An affected
+   * obligation in this set stays uncovered instead of blocking.
+   */
+  forgivenFingerprints?: ReadonlySet<string>;
 }): {
   plannedRows: PlannedRow[];
   affected: Obligation[];
@@ -449,6 +456,14 @@ export function planScopedExpectedSet(input: {
    * catalog rows {@link planExpectedSet} filters.
    */
   requiredFiles: string[];
+  /**
+   * Affected obligations with no testable claim that the run's own
+   * grading forgives through the ADOPTED baseline (additive, E62): they
+   * are NOT blockers, and they stay in the sealed covered set so a
+   * consumer's own `check --require-e2e` still demands exactly what the
+   * full path grades.
+   */
+  adopted: Array<{ obligationId: string; detail: string }>;
 } {
   const changed = new Set(input.changedFiles);
   const sources = sourcesByResourceId(input.graph, input.behaviorCatalog);
@@ -491,6 +506,8 @@ export function planScopedExpectedSet(input: {
   const requiredFiles = new Set<string>();
   const claimedObligations = new Set<string>();
   const unclaimed: Array<{ obligationId: string; detail: string }> = [];
+  const adopted: Array<{ obligationId: string; detail: string }> = [];
+  const forgiven = input.forgivenFingerprints;
   for (const obligation of affected) {
     const bindings = bindingsByObligation.get(obligation.id) ?? [];
     let testable = false;
@@ -507,15 +524,32 @@ export function planScopedExpectedSet(input: {
     }
     if (testable) {
       claimedObligations.add(obligation.id);
-    } else {
-      unclaimed.push({
+      continue;
+    }
+    // Adopted debt (E62): an affected obligation with no testable claim
+    // whose fingerprint the ADOPTED baseline forgives is not a blocker.
+    // The same run's grading waives exactly these obligations
+    // (`applyBaseline`), so the full path runs green over the very debt
+    // that used to block the narrow one — the two paths must agree. A
+    // fingerprint the baseline never adopted still blocks (shrink-only,
+    // fail closed), and strict E2E passes no set at all: there a waiver
+    // is not proof and the blocker must stand.
+    if (forgiven !== undefined && forgiven.has(obligationFingerprint(obligation))) {
+      adopted.push({
         obligationId: obligation.id,
         detail:
-          `changed-scope planning: obligation '${obligation.id}' is affected by the changed files but ` +
-          'no declared mapping (sidecar entry or native annotation) resolves to a test the current ' +
-          'catalog still enumerates — narrower selection is never guessed; map a test or run full scope',
+          `changed-scope planning: obligation '${obligation.id}' is affected by the changed files, has no ` +
+          'declared mapping, and is forgiven by the adopted baseline — it stays uncovered by this slice',
       });
+      continue;
     }
+    unclaimed.push({
+      obligationId: obligation.id,
+      detail:
+        `changed-scope planning: obligation '${obligation.id}' is affected by the changed files but ` +
+        'no declared mapping (sidecar entry or native annotation) resolves to a test the current ' +
+        'catalog still enumerates — narrower selection is never guessed; map a test or run full scope',
+    });
   }
   const plannedRows = planExpectedSet(input.catalog).filter((row) => requiredFiles.has(row.planned.file));
   const coveredFingerprints = [
@@ -526,6 +560,7 @@ export function planScopedExpectedSet(input: {
     affected,
     coveredFingerprints,
     unclaimed,
+    adopted,
     requiredFiles: [...requiredFiles].sort(compareStrings),
   };
 }
