@@ -25,6 +25,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join, posix, relative, resolve } from 'node:path';
+import picomatch from 'picomatch';
 import { sanitizedAuthorityEnv } from './candidate-tree.js';
 import { UsageError } from './errors.js';
 
@@ -303,6 +304,200 @@ function resolutionCandidates(
   ];
 }
 
+/**
+ * A setup/dependency stage of the runner: a test file that runs BEFORE
+ * the tests depending on it (a Playwright project named in another
+ * project's `dependencies`, or a file the setup naming conventions
+ * claim). Changing one changes every dependent test without any import
+ * edge, so it can never be carried.
+ */
+interface SetupStage {
+  /** Catalog test files a dependency/setup project owns. */
+  files: string[];
+  /**
+   * True when a runner config declares a dependency project whose test
+   * files cannot be resolved from the config's own bytes. Every changed
+   * test file is then a possible setup file (fail closed).
+   */
+  unresolved: boolean;
+}
+
+/** Runner config file names, checked at the repository root. */
+const RUNNER_CONFIG_NAMES = [
+  'playwright.config.ts',
+  'playwright.config.mts',
+  'playwright.config.cts',
+  'playwright.config.js',
+  'playwright.config.mjs',
+  'playwright.config.cjs',
+  'vitest.config.ts',
+  'vitest.config.js',
+  'cypress.config.ts',
+  'cypress.config.js',
+] as const;
+
+/**
+ * True for a test file the setup naming conventions claim: the
+ * extension-stripped basename ends in `setup` (`auth.setup.ts`,
+ * `global-setup.ts`, `e2e/setup.ts`) and is not itself a spec/test
+ * file, whose name says nothing about the stage it runs in.
+ */
+function isSetupByConvention(path: string): boolean {
+  const base = path.slice(path.lastIndexOf('/') + 1);
+  const dot = base.lastIndexOf('.');
+  const stem = (dot <= 0 ? base : base.slice(0, dot)).toLowerCase();
+  if (/(?:^|[.\-_])(?:spec|test)$/.test(stem)) return false;
+  return /(?:^|[.\-_])(?:global[-_])?setup$/.test(stem);
+}
+
+/** Splits a brace-delimited array/object literal into its top-level items. */
+function splitTopLevel(text: string): string[] {
+  const items: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let quote: string | null = null;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote !== null) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '{' || char === '[') depth += 1;
+    else if (char === '}' || char === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        items.push(text.slice(start, index + 1).trim());
+        start = index + 1;
+      }
+    } else if (char === ',' && depth === 0) {
+      // Between top-level items: the item was already closed and pushed.
+      start = index + 1;
+    }
+  }
+  const tail = text.slice(start).trim();
+  if (tail.length > 0) items.push(tail);
+  return items;
+}
+
+/**
+ * The string values of already-split items, or null when any item is
+ * not a plain quoted literal (a computed value fails closed).
+ */
+function stringLiterals(items: readonly string[]): string[] | null {
+  const values: string[] = [];
+  for (const item of items) {
+    const value = /^['"`]([^'"`]+)['"`]$/.exec(item)?.[1];
+    if (value === undefined) return null;
+    values.push(value);
+  }
+  return values;
+}
+
+/** Reads the runner config's own bytes from the sealed tree. */
+function runnerConfigText(gitDir: string, env: NodeJS.ProcessEnv, treeId: string): string | null {
+  for (const name of RUNNER_CONFIG_NAMES) {
+    const text = run(gitDir, env, ['cat-file', 'blob', `${treeId}:${name}`]);
+    if (text !== null) return text;
+  }
+  return null;
+}
+
+/**
+ * Resolves the setup/dependency stage from the runner config's own
+ * bytes: every project another project names in `dependencies` owns
+ * the test files its `testMatch` selects. A `dependencies` value that
+ * is not a literal list of project names leaves the stage unresolved,
+ * which fails the whole re-seal closed rather than guessing.
+ *
+ * Args:
+ *   gitDir: the absolute git dir holding the tree object.
+ *   env: the process environment (Git redirectors are stripped).
+ *   treeId: the sealed candidate tree.
+ *   testFiles: repository-relative paths the runner catalog enumerates.
+ *
+ * Returns:
+ *   SetupStage: the setup test files, or `unresolved` when the config
+ *   declares a dependency stage the bytes do not pin down.
+ */
+function setupStage(
+  gitDir: string,
+  env: NodeJS.ProcessEnv,
+  treeId: string,
+  testFiles: readonly string[],
+): SetupStage {
+  const files = new Set(testFiles.filter((file) => isSetupByConvention(file)));
+  const config = runnerConfigText(gitDir, env, treeId);
+  // No `dependencies` token anywhere means no dependency stage the
+  // config declares; a token we cannot resolve fails closed below.
+  if (config === null || !/\bdependencies\b/.test(config)) return { files: [...files], unresolved: false };
+  const projectsAt = config.indexOf('projects');
+  if (projectsAt < 0) return { files: [...files], unresolved: true };
+  const arrayAt = config.indexOf('[', projectsAt);
+  if (arrayAt < 0) return { files: [...files], unresolved: true };
+  let depth = 0;
+  let end = -1;
+  for (let index = arrayAt; index < config.length; index += 1) {
+    const char = config[index];
+    if (char === '[') depth += 1;
+    else if (char === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        end = index;
+        break;
+      }
+    }
+  }
+  if (end < 0) return { files: [...files], unresolved: true };
+  const projectLiterals = splitTopLevel(config.slice(arrayAt + 1, end)).filter(
+    (literal) => literal.startsWith('{'),
+  );
+  if (projectLiterals.length === 0) return { files: [...files], unresolved: true };
+  const byName = new Map<string, string>();
+  let anyDependency = false;
+  for (const literal of projectLiterals) {
+    const name = /\bname\s*:\s*['"`]([^'"`]+)['"`]/.exec(literal)?.[1];
+    if (name === undefined) return { files: [...files], unresolved: true };
+    byName.set(name, literal);
+    if (/\bdependencies\s*:/.test(literal)) anyDependency = true;
+  }
+  if (!anyDependency) return { files: [...files], unresolved: false };
+  for (const literal of projectLiterals) {
+    const declared = /\bdependencies\s*:\s*\[([^\]]*)\]/.exec(literal);
+    if (declared === null || declared[1] === undefined) {
+      if (/\bdependencies\s*:/.test(literal)) return { files: [...files], unresolved: true };
+      continue;
+    }
+    const names = stringLiterals(splitTopLevel(declared[1]));
+    if (names === null) return { files: [...files], unresolved: true };
+    for (const name of names) {
+      const project = byName.get(name);
+      if (project === undefined) return { files: [...files], unresolved: true };
+      const testDir = /\btestDir\s*:\s*['"`]([^'"`]+)['"`]/.exec(project)?.[1];
+      if (project.includes('testDir') && testDir === undefined) {
+        return { files: [...files], unresolved: true };
+      }
+      const match = /\btestMatch\s*:\s*(['"`][^'"`]+['"`]|\[[^\]]*\])/.exec(project);
+      if (match === null || match[1] === undefined) return { files: [...files], unresolved: true };
+      const literal = match[1];
+      const patterns =
+        literal.startsWith('[') ? stringLiterals(splitTopLevel(literal.slice(1, -1))) : stringLiterals([literal]);
+      if (patterns === null) return { files: [...files], unresolved: true };
+      const prefix = testDir === undefined ? '' : `${posix.normalize(testDir)}/`;
+      for (const pattern of patterns) {
+        const matches = picomatch(prefix + pattern, { dot: true });
+        for (const file of testFiles) {
+          if (matches(file)) files.add(file);
+        }
+      }
+    }
+  }
+  return { files: [...files].sort(), unresolved: false };
+}
+
 /** Every directory the catalog's test files live in or under. */
 function testRoots(testFiles: readonly string[]): string[] {
   return [...new Set(testFiles.map((file) => posix.dirname(file)))].filter((dir) => dir.length > 0).sort();
@@ -362,6 +557,24 @@ export function classifyResealChange(input: {
   for (const entry of changed) {
     if (entry.status === 'D' && !testFileSet.has(entry.path)) {
       return refuse(`app file deleted: ${entry.path} → full run`);
+    }
+  }
+  // A setup/dependency test file changes every dependent test without an
+  // import edge, so it can never be carried. A config whose dependency
+  // project the bytes do not pin down makes every changed test file a
+  // possible setup file.
+  const stage = setupStage(input.gitDir, input.env, input.currentTreeId, input.testFiles);
+  if (stage.unresolved) {
+    const first = testFiles[0];
+    if (first !== undefined) {
+      return refuse(
+        `setup test changed: ${first} (the runner config declares a dependency project whose tests cannot be resolved) → full run`,
+      );
+    }
+  } else {
+    const setup = testFiles.find((file) => stage.files.includes(file));
+    if (setup !== undefined) {
+      return refuse(`setup test changed: ${setup} → full run`);
     }
   }
   const candidates = changed.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);

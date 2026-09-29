@@ -38,7 +38,12 @@ function treeOf(repo: { root: string }): string {
   return tree as string;
 }
 
-function classify(repo: { root: string }, parentTreeId: string, currentTreeId: string) {
+function classify(
+  repo: { root: string },
+  parentTreeId: string,
+  currentTreeId: string,
+  testFiles: readonly string[] = TEST_FILES,
+) {
   const gitDir = resolveGitDir(repo.root, process.env);
   return classifyResealChange({
     gitDir: gitDir as string,
@@ -46,7 +51,7 @@ function classify(repo: { root: string }, parentTreeId: string, currentTreeId: s
     cwd: repo.root,
     parentTreeId,
     currentTreeId,
-    testFiles: TEST_FILES,
+    testFiles,
   });
 }
 
@@ -271,6 +276,76 @@ describe('test-only re-seal change classification', () => {
       const classification = classify(repo, '0'.repeat(40), tree);
       expect(classification.eligible).toBe(false);
       expect(classification.reason).toContain('the sealed trees could not be diffed');
+    });
+  });
+
+  it('refuses a changed test file a runner project depends on (setup stage)', async () => {
+    await withTempRepo({}, async (repo) => {
+      const files = {
+        ...BASE_FILES,
+        'e2e/auth.setup.ts': "import { test } from '@playwright/test';\ntest('auth state', async () => {});\n",
+        'playwright.config.ts': [
+          "import { defineConfig } from '@playwright/test';",
+          'export default defineConfig({',
+          "  projects: [",
+          "    { name: 'setup', testMatch: '**/*.setup.ts' },",
+          "    { name: 'chromium', dependencies: ['setup'] },",
+          '  ],',
+          '});',
+          '',
+        ].join('\n'),
+      };
+      const catalog = ['e2e/accounts.spec.ts', 'e2e/orders.spec.ts', 'e2e/auth.setup.ts'];
+      repo.writeFiles(files);
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/auth.setup.ts': `${files['e2e/auth.setup.ts']}\n// a fix\n` }, 'setup fix');
+      const classification = classify(repo, parent, treeOf(repo), catalog);
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe('setup test changed: e2e/auth.setup.ts → full run');
+    });
+  });
+
+  it('refuses a changed spec the runner names as a setup file by convention', async () => {
+    await withTempRepo({}, async (repo) => {
+      const catalog = ['e2e/accounts.spec.ts', 'e2e/global-setup.ts'];
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/global-setup.ts': "import { test } from '@playwright/test';\ntest('global setup', async () => {});\n",
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles(
+        { 'e2e/global-setup.ts': "import { test } from '@playwright/test';\ntest('global setup', async () => {});\n// a fix\n" },
+        'global setup fix',
+      );
+      const classification = classify(repo, parent, treeOf(repo), catalog);
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe('setup test changed: e2e/global-setup.ts → full run');
+    });
+  });
+
+  it('refuses when the config declares a dependency project whose tests cannot be resolved', async () => {
+    await withTempRepo({}, async (repo) => {
+      const catalog = ['e2e/accounts.spec.ts', 'e2e/orders.spec.ts'];
+      repo.writeFiles({
+        ...BASE_FILES,
+        'playwright.config.ts': [
+          "import { defineConfig } from '@playwright/test';",
+          'export default defineConfig({',
+          "  projects: [{ name: 'chromium', dependencies: [setupProject] }],",
+          '});',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo), catalog);
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'setup test changed: e2e/accounts.spec.ts (the runner config declares a dependency project whose tests cannot be resolved) → full run',
+      );
     });
   });
 });

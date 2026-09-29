@@ -198,6 +198,42 @@ describe('test-only re-seal decision', () => {
     });
   });
 
+  it('refuses a changed setup test the runner project depends on', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/auth.setup.ts': "import { test } from '@playwright/test';\ntest('auth state', async () => {});\n",
+        'playwright.config.ts': [
+          "import { defineConfig } from '@playwright/test';",
+          'export default defineConfig({',
+          '  projects: [',
+          "    { name: 'setup', testMatch: '**/*.setup.ts' },",
+          "    { name: 'chromium', dependencies: ['setup'] },",
+          '  ],',
+          '});',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parentTree = treeOf(repo.root);
+      repo.commitFiles(
+        { 'e2e/auth.setup.ts': "import { test } from '@playwright/test';\ntest('auth state', async () => {});\n// a fix\n" },
+        'setup fix',
+      );
+      const decision = decideTestOnlyReseal({
+        io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
+        gitDir: resolveGitDir(repo.root, process.env) as string,
+        parent: { receipt: parentReceipt({ candidateTreeId: parentTree }), receiptDigest: 'a1'.repeat(32), treeId: parentTree, execution: parentExecution(PASSED) },
+        currentTreeId: treeOf(repo.root),
+        catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account'), entry('e2e/orders.spec.ts', 'reads an account'), entry('e2e/auth.setup.ts', 'auth state')]),
+        obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
+        enabled: true,
+      });
+      expect(decision.plan).toBeNull();
+      expect(decision.reason).toBe('setup test changed: e2e/auth.setup.ts → full run');
+    });
+  });
+
   it('refuses an app file changed beside a test file, naming the app path', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles(BASE_FILES);
