@@ -71,3 +71,30 @@ export function projectEntity(body: unknown, config: ProjectionConfig): Normaliz
   const rawId = readPath(body, idKey);
   return { entityId: rawId === undefined || rawId === null ? '' : String(rawId), fields };
 }
+
+/**
+ * A tolerant collection selector: the first array-valued property of a
+ * collection body, or the body itself when it already IS an array.
+ *
+ * A generated adapter uses it because the compiled graph knows WHICH
+ * collection route serves a resource, never the key the response wraps
+ * its rows in. It fails closed — a body with no array anywhere is an
+ * error the caller reports, not an empty list that would make every
+ * created row look absent — and every generated use is marked as a
+ * guess for the reviewer to replace with the exact key.
+ *
+ * Args:
+ *   body: the parsed collection response body.
+ *
+ * Returns:
+ *   unknown: the first array-valued property value, or the body itself
+ *   when it is an array; undefined when neither is present.
+ */
+export function firstArrayOf(body: unknown): unknown {
+  if (Array.isArray(body)) return body;
+  if (body === null || typeof body !== 'object') return undefined;
+  for (const value of Object.values(body as Record<string, unknown>)) {
+    if (Array.isArray(value)) return value;
+  }
+  return undefined;
+}

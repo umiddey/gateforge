@@ -42,6 +42,8 @@ const BOOLEAN_FLAGS: Record<string, true> = {
   timing: true,
   'no-cache': true,
   'explain-presets': true,
+  'dry-run': true,
+  probe: true,
 };
 
 /**
