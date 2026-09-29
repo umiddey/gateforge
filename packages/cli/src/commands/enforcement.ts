@@ -59,8 +59,9 @@ import { resolveStateDir } from '../state.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { describeApprovedPolicyResolution, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import { engineIdentity, type EngineIdentity } from '../engine-identity.js';
+import { buildRunPreflight, firstFailingCheck, type RunPreflightReport } from '../run-preflight.js';
 
-export const ENFORCEMENT_USAGE = 'usage: gateforge enforcement doctor [--json]';
+export const ENFORCEMENT_USAGE = 'usage: gateforge enforcement doctor [--json] [--strict-preflight]';
 
 /** Status of one doctor check. */
 export type DoctorStatus = 'ok' | 'warn' | 'fail';
@@ -89,6 +90,12 @@ export interface DoctorReport {
   checks: DoctorCheck[];
   /** True when no check has status `fail`. */
   ready: boolean;
+  /**
+   * Managed-run preconditions (managed-run plan (2026-09-29), Part B): read-only
+   * lines for everything a local witnessed run depends on. Additive —
+   * the enforcement `checks` array above is unchanged.
+   */
+  run: RunPreflightReport;
 }
 
 /**
@@ -697,6 +704,9 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
   let strictE2E = false;
   let strictnessMode: StrictnessMode = 'strict';
   let configOk = true;
+  // The managed-run preconditions are an independent, read-only
+  // section: they add no authority over the enforcement checks.
+  const run = await buildRunPreflight(io);
   let configDetail = 'no .gateforge.yml — gateforge is not initialized in this repository';
   try {
     const config = loadConfigAt(io.cwd);
@@ -959,6 +969,7 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     level,
     checks: [...checks].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
     ready: checks.every((check) => check.status !== 'fail'),
+    run,
   };
 }
 
@@ -983,11 +994,11 @@ export async function enforcementCommand(io: Io, argv: readonly string[]): Promi
     writeLine(io.stdout, ENFORCEMENT_USAGE);
     return 0;
   }
-  rejectUnknownFlags(options, ['json', 'help'], ENFORCEMENT_USAGE);
+  rejectUnknownFlags(options, ['json', 'help', 'strict-preflight'], ENFORCEMENT_USAGE);
   const report = await buildDoctorReport(io);
   if (options['json'] === true) {
     writeLine(io.stdout, canonicalJson(report as unknown as JsonValue));
-    return 0;
+    return strictExit(io, report.run, options['strict-preflight'] === true, 'json');
   }
   writeLine(io.stdout, `You are at level ${report.level}.`);
   writeLine(
@@ -1010,5 +1021,42 @@ export async function enforcementCommand(io: Io, argv: readonly string[]): Promi
     io.stdout,
     `overall: ${report.ready ? 'ready (no failing checks)' : 'NOT ready (failing checks above)'} — diagnostic only; exit 0 either way`,
   );
-  return 0;
+  writeLine(io.stdout, 'run preconditions (read-only; `gateforge run` consumes these)');
+  for (const check of report.run.checks) {
+    writeLine(io.stdout, `  [${check.status.toUpperCase()}] ${check.id}: ${check.detail}`);
+  }
+  writeLine(
+    io.stdout,
+    `run preconditions: ${report.run.ready ? 'ready' : 'NOT ready (failing preconditions above)'} — report-only; exit 0 unless --strict-preflight`,
+  );
+  return strictExit(io, report.run, options['strict-preflight'] === true, 'text');
+}
+
+/**
+ * Applies `--strict-preflight`: the default doctor is report-only and
+ * exits 0 whenever it runs, so today's behavior is byte-identical;
+ * with the flag the FIRST failing precondition ends the command with
+ * exit 1 and names the fix on stderr.
+ *
+ * Args:
+ *   io: process context.
+ *   run: the managed-run preflight section.
+ *   strict: whether `--strict-preflight` was given.
+ *   format: the printed surface, for the diagnostic wording.
+ *
+ * Returns:
+ *   number: 1 at the first failing precondition under the flag, else 0.
+ */
+function strictExit(
+  io: Io,
+  run: RunPreflightReport,
+  strict: boolean,
+  format: 'json' | 'text',
+): number {
+  if (!strict) return 0;
+  const failure = firstFailingCheck(run);
+  if (failure === null) return 0;
+  writeLine(io.stderr, `run preconditions: [FAIL] ${failure.id}: ${failure.detail}`);
+  if (format === 'json') writeLine(io.stderr, 'run preconditions: not ready (see the run section of the report above)');
+  return 1;
 }
