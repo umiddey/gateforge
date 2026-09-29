@@ -133,11 +133,39 @@ export function startSupervisorSpoolDrain(options: {
   // is the drain's own fact and never something the runner child can
   // assert for itself.
   let answeredIntents = 0;
-  const forwardWaiters: Array<() => void> = [];
+  const forwardWaiters: ForwardWaiter[] = [];
   let offset = 0;
   let intentsOffset = 0;
   let running = true;
+
   let settling: Promise<void> = Promise.resolve();
+
+/** One parked `whenIntentsForwarded` wait and the count it waits for. */
+interface ForwardWaiter {
+  /** The count this caller is waiting for. */
+  count: number;
+  /** Resolves the caller's promise and clears its timer. */
+  release: () => void;
+  /** Rejects the caller's promise and unparks it. */
+  fail: (error: Error) => void;
+}
+
+/**
+ * Releases exactly the waiters whose count the witness has now reached,
+ * leaving the rest parked. A waiter for a larger count must NOT ride
+ * out on an earlier answer: the caller is waiting for the probe of its
+ * OWN nth intent, and resolving early would let it mutate the target
+ * before that probe ran.
+ */
+const releaseReachedWaiters = (): void => {
+  const stillWaiting: ForwardWaiter[] = [];
+  for (const waiter of forwardWaiters) {
+    if (answeredIntents >= waiter.count) waiter.release();
+    else stillWaiting.push(waiter);
+  }
+  forwardWaiters.length = 0;
+  for (const waiter of stillWaiting) forwardWaiters.push(waiter);
+};
 
   const slotKey = (workerIndex: number, testId: string): string => `${String(workerIndex)}\u0000${testId}`;
 
@@ -295,7 +323,7 @@ export function startSupervisorSpoolDrain(options: {
     // The witness has now answered this intent either way, so the
     // forward-progress count advances past refusals too.
     answeredIntents += 1;
-    for (const release of forwardWaiters.splice(0)) release();
+    releaseReachedWaiters();
   };
 
   /**
@@ -312,21 +340,31 @@ export function startSupervisorSpoolDrain(options: {
   const whenIntentsForwarded = async (count: number, timeoutMs = 10_000): Promise<void> => {
     if (answeredIntents >= count) return;
     await new Promise<void>((resolveReady, rejectTimeout) => {
-      const release = (): void => {
-        clearTimeout(timer);
-        resolveReady();
+      const waiter: ForwardWaiter = {
+        count,
+        release: () => {
+          clearTimeout(timer);
+          resolveReady();
+        },
+        fail: (error: Error) => {
+          clearTimeout(timer);
+          rejectTimeout(error);
+        },
       };
       const timer = setTimeout(() => {
-        const index = forwardWaiters.indexOf(release);
+        const index = forwardWaiters.indexOf(waiter);
         if (index >= 0) forwardWaiters.splice(index, 1);
-        rejectTimeout(
+        waiter.fail(
           new Error(
             `the supervisor drain forwarded only ${String(answeredIntents)} of ${String(count)} ` +
               'persistence intents before the wait elapsed — the witness never answered them',
           ),
         );
       }, timeoutMs);
-      forwardWaiters.push(release);
+      forwardWaiters.push(waiter);
+      // An answer that landed while this waiter was being registered
+      // still resolves it — the count is re-checked, never assumed.
+      releaseReachedWaiters();
     });
   };
 

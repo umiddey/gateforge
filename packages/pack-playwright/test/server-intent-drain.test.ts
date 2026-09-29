@@ -312,4 +312,41 @@ describe('supervisor drain forwards persistence intents (server-witnessed channe
       await fixture.target.stop();
     }
   });
+
+  it('whenIntentsForwarded(count) waits for the count, not just the next answer', async () => {
+    const fixture = await startDrainFixture();
+    const intentsFile = persistenceIntentsPathFor(fixture.stateDir, fixture.runId);
+    const drain = startSupervisorSpoolDrain({
+      stateDir: fixture.stateDir,
+      runId: fixture.runId,
+      witnessUrl: fixture.witness.url,
+      runToken: TOKEN,
+      verifierKey: VERIFIER_KEY,
+      pollMs: 10,
+      serverE2eObligations: [CREATE_CLAIM],
+    });
+    try {
+      const [pre, post] = createIntents() as [PersistenceIntent, PersistenceIntent];
+      appendPersistenceIntent(intentsFile, pre);
+      // Park a wait for TWO answered intents, then let exactly ONE land.
+      const both = drain.whenIntentsForwarded(2, 5_000);
+      let bothResolved = false;
+      void both.then(() => {
+        bothResolved = true;
+      });
+      await drain.whenIntentsForwarded(1);
+      // A single answer is not the count the caller asked for. The
+      // `await` above has already drained the microtask queue, so a
+      // spurious resolution of `both` is observable here without
+      // waiting on a timer.
+      expect(bothResolved).toBe(false);
+      appendPersistenceIntent(intentsFile, post);
+      await both;
+      expect(bothResolved).toBe(true);
+    } finally {
+      await drain.stop();
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
 });
