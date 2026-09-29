@@ -260,6 +260,13 @@ export class PytestRunnerAdapter implements RunnerAdapter<JunitDocument | null> 
           [ENV_STATE_DIR]: request.stateDir,
           [ENV_RUN_ID]: request.runId,
           [ENV_APP_BASE_URL]: this.options.appBaseUrl ?? process.env[ENV_APP_BASE_URL] ?? '',
+          // The candidate workspace must stay byte-identical across the
+          // run: CPython would otherwise write `__pycache__/*.pyc` beside
+          // the collected suite AFTER the authority froze the candidate
+          // tree, and the fail-closed drift gate then refuses the whole
+          // run. Collection and the diagnostic executor already carry
+          // this; the supervised session child must too.
+          PYTHONDONTWRITEBYTECODE: '1',
         },
         process.env,
         pluginDir,
@@ -272,7 +279,6 @@ export class PytestRunnerAdapter implements RunnerAdapter<JunitDocument | null> 
         timedOut = true;
         child.kill('SIGKILL');
       }, request.timeoutMs);
-      child.stdout?.resume();
       child.stderr?.resume();
       child.once('error', (error) => {
         clearTimeout(timer);

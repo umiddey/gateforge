@@ -550,3 +550,151 @@ describe('vitest+supertest through the real CLI', () => {
     });
   }, 300_000);
 });
+
+/**
+ * The runner child's own failure text for a pytest run (the state dir is
+ * removed with the repository, so a failing gate must carry the cause).
+ *
+ * Args:
+ *   repo: the disposable repository.
+ *
+ * Returns:
+ *   string: the junit failure messages, or '' when the child passed.
+ */
+function pytestRunnerFailures(repo: TempRepo): string {
+  const root = repo.path('.gateforge/test-gates/pytest');
+  if (!existsSync(root)) return '';
+  const messages: string[] = [];
+  for (const run of readdirSync(root)) {
+    const report = join(root, run, 'report.xml');
+    if (!existsSync(report)) continue;
+    for (const match of readFileSync(report, 'utf8').matchAll(/<testcase[^>]*name="([^"]*)"[\s\S]*?<\/testcase>/g)) {
+      const body = match[0];
+      if (!body.includes('<failure')) continue;
+      messages.push(`${match[1] ?? ''}: ${(body.match(/<failure[^>]*message="([^"]*)"/)?.[1] ?? 'failed').slice(0, 2000)}`);
+    }
+  }
+  return messages.length === 0 ? '' : `runner failures:\n${messages.join('\n')}\n`;
+}
+
+/** The GREEN pytest suite: httpx through the per-test session proxy. */
+const PYTEST_GREEN = `def test_creates_account(gateforge_http):
+    response = gateforge_http.post(
+        "/api/accounts", json={"first_name": "Grace", "last_name": "Hopper"}
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["first_name"] == "Grace"
+`;
+
+/** The RED pytest suite: a direct urllib call that bypasses the proxy. */
+const PYTEST_RED = `import json
+import os
+import urllib.request
+
+
+def test_calls_app_directly():
+    request = urllib.request.Request(
+        os.environ["GATEFORGE_APP_BASE_URL"] + "/api/accounts",
+        data=json.dumps({"first_name": "Direct", "last_name": "Untagged"}).encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request) as response:
+        assert response.status == 201
+`;
+
+/**
+ * The pytest variant's `.gateforge.yml` extra block: the one configured
+ * suite the adapter composes its runs from. `witnessed: true` keeps the
+ * suite out of the advisory diagnostic window — under `runner: pytest`
+ * the adapter's supervised execution IS that suite, so a second pass
+ * would run it twice.
+ *
+ * Args:
+ *   python: the absolute interpreter of the pytest variant.
+ *
+ * Returns:
+ *   string: the YAML block appended to the shared fixture config.
+ */
+function pytestSuiteYml(python: string): string {
+  return `diagnostics:
+  suites:
+    - name: accounts-httpx
+      runner: pytest
+      cwd: .
+      argv: ["${python}", "-m", "pytest", "-p", "no:cacheprovider"]
+      testPaths: ["tests"]
+      timeoutMs: 120000
+      witnessed: true
+`;
+}
+
+describe.skipIf(PYTHON === '')('pytest+httpx through the real CLI', () => {
+  it('seals a receipt for the observed create and refuses to credit a bypassed request', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'pytest',
+        gateforgeYml('pytest', pytestSuiteYml(PYTHON)),
+        {
+          'app.cjs': APP,
+          'tests/test_green.py': PYTEST_GREEN,
+        },
+        testMapYml('pytest', 'tests/test_green.py', ['test_creates_account']),
+      );
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'pytest runner fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      const why = `${pytestRunnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`;
+      expect(gated.code, why).toBe(0);
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.summary.blocking, why).toBe(0);
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict).toBe('satisfied');
+      const sealed = JSON.parse(
+        readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'),
+      ) as { selection?: { runner?: string } };
+      expect(sealed.selection?.runner).toBe('pytest');
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(true);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+      expect(checked.stdout).toContain('receipt-verified');
+    });
+
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'pytest',
+        gateforgeYml('pytest', pytestSuiteYml(PYTHON)),
+        {
+          'app.cjs': APP,
+          'tests/test_red.py': PYTEST_RED,
+        },
+        testMapYml('pytest', 'tests/test_red.py', ['test_calls_app_directly']),
+      );
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'pytest bypass fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      expect(gated.code, `${pytestRunnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`).toBe(1);
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict).not.toBe('satisfied');
+      expect(report.summary.blocking).toBeGreaterThan(0);
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code).toBe(1);
+      expect(checked.stdout).not.toContain('"evidenceState":"receipt-verified"');
+    });
+  }, 300_000);
+});

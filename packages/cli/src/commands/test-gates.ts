@@ -1993,13 +1993,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         ...(io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== undefined && io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== ''
           ? { GATEFORGE_PROBE_DB_CONTAINER: io.env['GATEFORGE_PROBE_DB_CONTAINER'] }
           : {}),
-        // Session-proxy tag channel: the vitest and cypress adapters
-        // publish a per-test session proxy origin, so the witness must
-        // front the app with an observation proxy or every proxied
-        // request is unattributable. The Playwright path is untouched
-        // (its sessions are engine-browser scoped), so an existing
-        // repository's witness wiring stays byte-identical.
-        ...(runnerName === 'vitest' || runnerName === 'cypress'
+        // Session-proxy tag channel: the pytest, vitest and cypress
+        // adapters publish a per-test session proxy origin, so the
+        // witness must front the app with an observation proxy or every
+        // proxied request is unattributable. The Playwright path is
+        // untouched (its sessions are engine-browser scoped), so an
+        // existing repository's witness wiring stays byte-identical.
+        ...(runnerName === 'pytest' || runnerName === 'vitest' || runnerName === 'cypress'
           ? appBase !== ''
             ? { [ENV_PROXY_TARGET]: appBase }
             : {}

@@ -26,7 +26,7 @@ import {
   type ContractScenario,
   type RunnerContractHost,
 } from '@gate-forge/witness/adapter';
-import { PytestRunnerAdapter } from '../src/discovery/pytest-runner-adapter.js';
+import { PytestRunnerAdapter, pytestPluginDir } from '../src/discovery/pytest-runner-adapter.js';
 
 /** The pytest interpreter the host and the configured suites run. */
 const PYTHON = process.env['GATEFORGE_PYTEST_TEST_PYTHON'] ?? 'python3';
@@ -329,4 +329,45 @@ describe.skipIf(!PYTEST_AVAILABLE)('pytest behind the runner-adapter contract', 
     expect(envelope.outcomes).toHaveLength(1);
     expect(envelope.outcomes[0]?.attempt).toBe(2);
   });
+});
+
+describe.skipIf(!PYTEST_AVAILABLE)('the pytest plugin announces the reconciliation key as the test identity', () => {
+  it('spools testId as `<file>#<title path>` — the id sidecar claims and the record→claim join use', async () => {
+    // A record stamped with pytest's own node id (`file::test`) can never
+    // join its claim, so the obligation stays blocking however much the
+    // witness observed: the announced identity IS the join key.
+    const root = pytestProject({ [SCENARIO_FILE]: 'def test_contract():\n    pass\n' });
+    const stateDir = join(root, '.gateforge-state');
+    mkdirSync(stateDir, { recursive: true });
+    const spool = join(stateDir, 'spool', 'identity-run', 'events.jsonl');
+    const child = spawnSync(
+      PYTHON,
+      ['-m', 'pytest', '-p', 'no:cacheprovider', '-p', 'gateforge_pytest_plugin', SCENARIO_FILE],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PYTHONPATH: pytestPluginDir(),
+          PYTHONDONTWRITEBYTECODE: '1',
+          GATEFORGE_WITNESS_URL: 'http://[IP_ADDRESS]:1',
+          GATEFORGE_RUN_TOKEN: 'token',
+          GATEFORGE_STATE_DIR: stateDir,
+          GATEFORGE_RUN_ID: 'identity-run',
+          GATEFORGE_APP_BASE_URL: 'http://[IP_ADDRESS]:2',
+        },
+      },
+    );
+    const rows = readFileSync(spool, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line): Record<string, unknown> => JSON.parse(line) as Record<string, unknown>);
+    const begin = rows.find((row) => row['kind'] === 'testBegin') ?? {};
+    expect(begin['testId']).toBe('tests/test_contract.py#test_contract');
+    // pytest's own spelling rides alongside, for diagnostics only.
+    expect(begin['nodeId']).toBe('tests/test_contract.py::test_contract');
+    // The suite itself passes: this scenario asserts the announced
+    // identity, not the run outcome.
+    expect(child.status).toBe(0);
+  }, 60_000);
 });

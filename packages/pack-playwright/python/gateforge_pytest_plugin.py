@@ -306,9 +306,16 @@ def pytest_runtest_protocol(item, nextitem):
         return result
     worker = _worker_index(item.config)
     node_file, title_path, key = _identity(item)
+    # The reconciliation key IS the test identity: sidecar claims, the
+    # verifier's record→claim join, and the vitest/cypress reporters all
+    # name a test `<file>#<title path>`. The pytest node id
+    # (`file::test`) is the same test in pytest's own spelling, so a
+    # record stamped with it can never join its claim and the obligation
+    # stays blocking no matter what the witness observed.
     event = {
         "kind": "testBegin",
-        "testId": item.nodeid,
+        "testId": key,
+        "nodeId": item.nodeid,
         "workerIndex": worker,
         "file": node_file,
         "titlePath": title_path,
@@ -334,7 +341,8 @@ def pytest_runtest_protocol(item, nextitem):
         _append_event(
             {
                 "kind": "testEnd",
-                "testId": item.nodeid,
+                "testId": key,
+                "nodeId": item.nodeid,
                 "workerIndex": worker,
                 "file": node_file,
                 "titlePath": title_path,
@@ -380,8 +388,12 @@ def gateforge_session(request):
             "(GATEFORGE_WITNESS_URL / GATEFORGE_RUN_TOKEN / GATEFORGE_STATE_DIR / GATEFORGE_RUN_ID) — "
             "run under 'gateforge test-gates' or the PytestRunnerAdapter"
         )
+    # The SAME reconciliation key the lifecycle hook announced: the
+    # supervisor opened the session under that id, so resolving by pytest's
+    # own node id would never find it.
+    _node_file, _title_path, key = _identity(request.node)
     return GateforgeSession(
-        _resolve_session(request.node.nodeid, _worker_index(request.config)),
+        _resolve_session(key, _worker_index(request.config)),
         os.environ.get(APP_BASE_URL_ENV, ""),
     )
 

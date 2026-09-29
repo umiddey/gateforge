@@ -286,7 +286,9 @@ describe.skipIf(PYTHON === '')('pytest+httpx through the real engine (FastAPI ex
       expect(observed, `expected one observed record, saw ${JSON.stringify(records)}`).toBeDefined();
       expect(observed?.['trust']).toBe('witnessed');
       expect(observed?.['kind']).toBe('persistence.observed');
-      expect(observed?.['testId']).toBe('tests/test_accounts.py::test_creates_account');
+      // The reconciliation key, NOT pytest's own node id: this is the
+      // identity sidecar claims and the record→claim join use.
+      expect(observed?.['testId']).toBe(TEST_KEY);
       const payload = observed?.['payload'] as Record<string, unknown>;
       expect(payload['channel']).toBe('observe');
       expect(payload['found']).toBe(true);
