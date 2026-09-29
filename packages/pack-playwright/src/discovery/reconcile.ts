@@ -112,15 +112,24 @@ export interface NativeListResult {
 
 /**
  * The playwright CLI of the repo being scanned, else the pack's own.
- * Resolution order (consumer-first, subdirectory-first): the CONFIG
- * DIRECTORY's own install (a subdirectory project pins the playwright
- * version its config and specs load through — running any other version
- * against it dies with the two-versions-of-@playwright/test conflict),
- * then the repo root's, then the pack's own.
+ * Resolution order (consumer-first, nearest-first): the CONFIG
+ * DIRECTORY's own install and then every directory above it (a
+ * subdirectory project pins the playwright version its config and
+ * specs load through — running any other version against it dies with
+ * the two-versions-of-@playwright/test conflict), and within each
+ * directory the `@playwright/test` CLI before the bare `playwright`
+ * one (see {@link localPlaywrightCliCandidates}).
  *
  * Args:
  *   cwd: absolute repo root.
  *   configDir: config directory repo-relative (`'.'` for root-level).
+ *
+ * Returns:
+ *   string: absolute path of the CLI to invoke.
+ *
+ * Throws:
+ *   TestDiscoveryError: when neither the repo's own nor the pack's CLI
+ *   exists (a broken pack dependency, never a silent fallback).
  */
 function playwrightCliPath(cwd: string, configDir: string): string {
   // CONSUMER-FIRST resolution: a consumer repo pins its own
@@ -128,14 +137,11 @@ function playwrightCliPath(cwd: string, configDir: string): string {
   // through it). Running the pack's CLI against a consumer whose local
   // version differs dies with the two-versions-of-@playwright/test
   // conflict — so the scanned repo's own CLI wins when present
-  // (consumer migration, E22). The pack's CLI remains the fallback
-  // (fixture repos symlink the monorepo node_modules, so they resolve
-  // to the same bytes either way).
-  const searchRoots = configDir !== '.' ? [join(cwd, configDir), cwd] : [cwd];
-  for (const searchRoot of searchRoots) {
-    for (const candidate of localPlaywrightCliCandidates(searchRoot)) {
-      if (existsSync(candidate)) return candidate;
-    }
+  // (consumer migration, E22; install rehearsal F7). The pack's CLI
+  // remains the fallback (fixture repos symlink the monorepo
+  // node_modules, so they resolve to the same bytes either way).
+  for (const candidate of localPlaywrightCliCandidates(join(cwd, configDir))) {
+    if (existsSync(candidate)) return candidate;
   }
   const require = createRequire(import.meta.url);
   const pkgJson = require.resolve('playwright/package.json');
@@ -146,12 +152,34 @@ function playwrightCliPath(cwd: string, configDir: string): string {
   return cli;
 }
 
-/** The scanned repo's local playwright CLI locations, in preference order. */
+/**
+ * The scanned repo's local playwright CLI locations, in preference order.
+ *
+ * A consumer's config and specs import `@playwright/test`, so THAT
+ * package's CLI is the runner they were written for; the bare
+ * `playwright` CLI next to it is the pack's own hoisted pin and must
+ * never outrank it (running 1.58.2's CLI over a 1.62.1 project dies
+ * with the two-versions-of-@playwright/test conflict — install
+ * rehearsal F7). Directories are walked from the starting directory
+ * UPWARD, the way node resolves a module, so a subdirectory project's
+ * own install is found before the repo root's.
+ *
+ * Args:
+ *   cwd: absolute directory to start the upward walk from.
+ *
+ * Returns:
+ *   string[]: absolute CLI paths, nearest install first, the
+ *   `@playwright/test` CLI before the bare `playwright` one.
+ */
 export function localPlaywrightCliCandidates(cwd: string): string[] {
-  return [
-    join(cwd, 'node_modules', 'playwright', 'cli.js'),
-    join(cwd, 'node_modules', '@playwright', 'test', 'cli.js'),
-  ];
+  const candidates: string[] = [];
+  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+    candidates.push(join(dir, 'node_modules', '@playwright', 'test', 'cli.js'));
+    candidates.push(join(dir, 'node_modules', 'playwright', 'cli.js'));
+    const parent = dirname(dir);
+    if (parent === dir) break;
+  }
+  return candidates;
 }
 
 /**
@@ -257,6 +285,57 @@ interface ReporterDocument {
 function toRepoRelative(cwd: string, path: string): string {
   const rel = relative(cwd, resolve(cwd, path));
   return rel.split('\\').join('/');
+}
+
+/**
+ * Reads the `version` of an installed package by its directory (the
+ * `<pkg>/package.json` beside a CLI), or null when it is unreadable.
+ *
+ * Args:
+ *   packageDir: absolute directory of the installed package.
+ *
+ * Returns:
+ *   string | null: the declared version, or null when unreadable.
+ */
+function installedVersion(packageDir: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')) as { version?: unknown };
+    return typeof parsed.version === 'string' ? parsed.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Expands a runner load error that is really a playwright VERSION
+ * conflict into one sentence naming both versions and the real cause.
+ * A missing dependency is the wrong diagnosis there: nothing is
+ * missing, the two-versions-of-@playwright/test conflict is (install
+ * rehearsal F7), and the pack's pinned copy must not be what runs the
+ * consumer's project. Every other message is passed through
+ * unchanged.
+ *
+ * Args:
+ *   message: one reporter load error.
+ *   cli: absolute path of the CLI that produced it.
+ *
+ * Returns:
+ *   string: the message, with the conflict named when it is one.
+ */
+function diagnoseRunnerLoadError(message: string, cli: string): string {
+  if (!/did not expect test\(\) to be called here/.test(message)) return message;
+  const require = createRequire(import.meta.url);
+  const packDir = dirname(require.resolve('playwright/package.json'));
+  const runnerDir = dirname(cli);
+  const runnerName = basename(runnerDir) === 'test' ? `@playwright/${basename(runnerDir)}` : basename(runnerDir);
+  const runner = `${runnerName}@${installedVersion(runnerDir) ?? 'unknown version'}`;
+  const pack = `playwright@${installedVersion(packDir) ?? 'unknown version'} (the pack's pin)`;
+  return (
+    `${message} — this is the two-versions-of-@playwright/test conflict, not a missing ` +
+    `dependency: this project was enumerated with ${runner} while the pack pins ${pack}. ` +
+    "Make the project's own @playwright/test the one Gateforge runs (remove the other copy from " +
+    'node_modules), or align both to one version.'
+  );
 }
 
 /**
@@ -446,7 +525,7 @@ export async function listNativePlaywrightTests(options: {
     }
   };
   walkSuites(document.suites ?? [], [], null);
-  const errors = (document.errors ?? []).map((error) => error.message ?? String(error));
+  const errors = (document.errors ?? []).map((error) => diagnoseRunnerLoadError(error.message ?? String(error), cli));
   const configDetail = configDir !== '.' ? ` (cwd '${configDir}')` : '';
   const envDetail =
     options.wiredEnv === undefined

@@ -376,22 +376,29 @@ export function parseOutcomesText(raw: string, processExit: number | null): Runn
 }
 
 /**
- * Default runner command: the engine's own pinned playwright CLI. The
- * CLI is passed as a PLAIN absolute filesystem path — Node's process
- * entry must be a path, never a `file:` URL (a URL argument fails with
+ * Default runner command: the scanned repo's own playwright CLI when it
+ * has one, else the engine's own pinned playwright. The CLI is passed
+ * as a PLAIN absolute filesystem path — Node's process entry must be a
+ * path, never a `file:` URL (a URL argument fails with
  * MODULE_NOT_FOUND before the runner starts, which would masquerade as
  * a failed suite). A broken pack dependency surfaces as the typed
  * incomplete envelope (the argv names the path), never a hang.
+ *
+ * Args:
+ *   cwd: absolute root of the repo being run, when the caller knows it.
  *
  * Returns:
  *   readonly string[]: `[process.execPath, <playwright cli.js>]`.
  */
 export function defaultPlaywrightCommand(cwd?: string): readonly string[] {
-  // CONSUMER-FIRST resolution (consumer migration, E22): the supervised
-  // run must execute under the scanned repo's OWN playwright — its
-  // config and specs load through that version, and a mismatch dies with
-  // the two-versions-of-@playwright/test conflict. Fixture repos symlink
-  // the monorepo node_modules, so the fallback resolves identically.
+  // CONSUMER-FIRST resolution (consumer migration, E22; install
+  // rehearsal F7): the supervised run must execute under the scanned
+  // repo's OWN playwright — its config and specs load through that
+  // version, and a mismatch dies with the two-versions-of-@playwright/
+  // test conflict, not with a missing dependency. Candidate order is
+  // the nearest install first, `@playwright/test` before the bare
+  // `playwright` pin. Fixture repos symlink the monorepo node_modules,
+  // so the fallback resolves identically.
   if (cwd !== undefined) {
     for (const candidate of localPlaywrightCliCandidates(cwd)) {
       if (existsSync(candidate)) return [process.execPath, candidate];
