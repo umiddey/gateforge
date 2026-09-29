@@ -291,7 +291,6 @@ def _proxied_client(session):
     return httpx.Client(base_url=base_url, transport=_SessionProxyTransport(), timeout=30.0)
 
 
-@pytest.hookimpl(wrapper=True)
 def _failure_diagnosis(reports):
     """The additive diagnosis of one failed test, from pytest's own report.
 
@@ -324,6 +323,7 @@ def _failure_diagnosis(reports):
     return {}
 
 
+@pytest.hookimpl(wrapper=True)
 def pytest_runtest_protocol(item, nextitem):
     """Spool ``testBegin`` before, and ``testEnd`` after, one wired test.
 
