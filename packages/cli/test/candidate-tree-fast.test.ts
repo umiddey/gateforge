@@ -117,7 +117,10 @@ function counting<T>(
 }
 
 /** The message the ingestion path fails with, or the empty string. */
-function ingestionMessage(compute: typeof computeCandidateTreeIdLegacy, ...args: Parameters<typeof computeCandidateTreeIdLegacy>): string {
+function ingestionMessage(
+  compute: typeof computeCandidateTreeIdLegacy,
+  ...args: Parameters<typeof computeCandidateTreeIdLegacy>
+): string {
   try {
     compute(...args);
   } catch (error) {
@@ -217,8 +220,16 @@ describe('candidate tree ingestion computes the same id in process as it did one
       const gitDir = resolveGitDir(repo.root, process.env);
       if (gitDir === null) throw new Error('test repository has no Git directory');
       const message = (compute: typeof computeCandidateTreeId): string =>
-        ingestionMessage(compute as typeof computeCandidateTreeIdLegacy, gitDir, repo.root, process.env, null, 'reject');
-      const referenceMessage = (): string => message(computeCandidateTreeIdLegacy as typeof computeCandidateTreeId);
+        ingestionMessage(
+          compute as typeof computeCandidateTreeIdLegacy,
+          gitDir,
+          repo.root,
+          process.env,
+          null,
+          'reject',
+        );
+      const referenceMessage = (): string =>
+        message(computeCandidateTreeIdLegacy as typeof computeCandidateTreeId);
 
       writeFileSync(join(repo.root, 'plain.txt'), 'plain\n');
       symlinkSync('plain.txt', join(repo.root, 'shortcut'));
