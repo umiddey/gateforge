@@ -244,6 +244,8 @@ class ColumnFacts:
         self.foreign_keys: dict[str, str] = {}
         #: Sorted column names resembling soft-delete bookkeeping.
         self.soft_delete_candidates: list[str] = []
+        #: Every literal column name, in written order (deduplicated).
+        self.column_names: list[str] = []
 
     @property
     def has_pk_evidence(self) -> bool:
@@ -336,6 +338,8 @@ def _record_column(facts: ColumnFacts, call: ast.Call, target: str | None) -> No
             facts.foreign_keys[column_name] = reference
         if column_name in SOFT_DELETE_CANDIDATE_FIELDS:
             facts.soft_delete_candidates.append(column_name)
+        if column_name not in facts.column_names:
+            facts.column_names.append(column_name)
 
 
 def _facts_from_column_calls(calls: list[tuple[ast.Call, str | None]]) -> ColumnFacts:
@@ -1050,11 +1054,14 @@ def _attribute_facts(facts: ColumnFacts, rec: ClassRecord | None) -> dict:
         rec: The class record (None for Table() calls).
 
     Returns:
-        dict: Attribute entries (only when non-empty): ordered
+        dict: Attribute entries (only when non-empty): `columnNames`
+            (every literal column, written order), ordered
             `primaryKeyColumns`, `foreignKeyReferences` (sorted by
             column), `softDeleteCandidateFields`, and `readOnly`.
     """
     entries: dict = {}
+    if facts.column_names:
+        entries["columnNames"] = list(facts.column_names)
     if facts.has_pk_evidence:
         entries["primaryKeyColumns"] = list(facts.primary_key_columns)
     if facts.foreign_keys:

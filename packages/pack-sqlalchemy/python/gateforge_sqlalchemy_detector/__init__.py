@@ -43,7 +43,8 @@ Detector vocabulary (frozen with the pack):
   ``__gateforge_delete_semantics__``, ``__gateforge_archive_state__``,
   ``__gateforge_read_only__``; never an exposure claim (a table
   declaration proves nothing about external reachability).
-- additional table attributes: ``primaryKeyColumns``,
+- additional table attributes: ``columnNames`` (every literal column,
+  written order), ``primaryKeyColumns``,
   ``foreignKeyReferences`` (literal ``ForeignKey`` targets),
   ``softDeleteCandidateFields`` (bookkeeping-resembling column names —
   facts for reviewers, never semantics), ``readOnly``.
