@@ -368,6 +368,65 @@ in the report and in `gateforge enforcement doctor`. Both settings live
 inside the pinned trusted policy: an agent cannot soften the gate or
 quarantine a test to make its own commit pass.
 
+## Run the whole proof with one command
+
+Reproducing a witnessed proof locally used to mean hand-building every
+precondition: the verifier key, the policy pin, the interpreter paths, the
+bytecode guard, the services, the database reset, the seed, the freeze, the
+strict check. One missed precondition cost the whole run.
+
+`gateforge run` owns the generic lifecycle; your app owns the recipe:
+
+```sh
+gateforge run                      # preflight, recipe, supervised suite, strict check, teardown
+gateforge run -- --changed         # the same, with your own test-gates flags
+gateforge enforcement doctor       # every precondition as one PASS/FAIL line with its fix command
+```
+
+The order is fixed: a **strict preflight** (the first failing precondition
+ends the run before a minute is spent), then the optional recipe
+`prepare → reset → seed → services_up → healthcheck`, then the supervised
+`test-gates` with your flags, then `check --require-e2e`, then
+`services_down` — always, after success and after failure. Every step prints
+one line with its duration, and the exit code is the first failing step's own
+code (2 for a usage/config/recipe error, 1 for a preflight failure or a
+failing gate, the command's own code for a recipe step, 124 for a step
+timeout).
+
+`gateforge run` adds no authority: it only SEQUENCES commands you could run
+yourself, and every verdict still comes from the same engine. Recipe command
+output never reaches the console — it goes to a log file under
+`.gateforge/test-gates/run-recipe/`, because your commands may print secrets.
+
+The recipe is optional and lives in `.gateforge/runtime.yml` (absent = today’s
+behavior, byte for byte). It holds **paths, never secrets**:
+
+```yaml
+schemaVersion: 1
+env_files:
+  - .gateforge/test.env        # paths only; the values are never printed
+reset:
+  commands: [['./scripts/reset-db.sh']]
+  timeoutSeconds: 300
+seed:
+  commands: [['./scripts/seed.sh']]
+  retries: 1
+services_up:
+  commands: [['./scripts/start-stack.sh']]
+healthcheck:
+  commands: [['./scripts/health.sh']]
+  timeoutSeconds: 60
+  retries: 5
+services_down:
+  commands: [['./scripts/stop-stack.sh']]
+```
+
+An unknown key, a malformed step, or an inline value in `env_files` is a
+plain error with exit 2 — Gateforge never runs a half-understood recipe. See
+the [test environment guide](packages/cli/guides/TEST-ENVIRONMENT.md) for the
+full schema, the exit-code table, and how the recipe relates to the
+witnessed pre-commit staged runtime.
+
 ## Known limitations
 
 - Staged candidates containing symlinks or submodules (and unmerged index
