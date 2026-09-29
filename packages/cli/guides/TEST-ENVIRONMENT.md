@@ -255,6 +255,104 @@ filter below a spec, so the whole spec runs and the report tells you so:
 `also ran N other test(s) in the same file — not graded`. Those extra
 tests' results are dropped before grading — they are never evidence.
 
+
+## Let Gateforge drive the whole run: `gateforge run`
+
+The script above is the shape of a managed run. `gateforge run` performs it
+for you, in that order, and stops at the first failure:
+
+1. **preflight** (strict) — the managed-run preconditions, see below;
+2. **recipe** — `prepare`, `reset`, `seed`, `services_up`, `healthcheck`;
+3. **`gateforge test-gates`** — supervised, with the flags you passed
+   (`gateforge run -- --changed`);
+4. **`gateforge check --require-e2e`** — the strict receipt check;
+5. **`services_down`** — always, after success, after a failing gate, and
+   after a failing recipe step.
+
+It adds no authority: each step is an existing command with its existing
+verdict. What you gain is order, one plain line per step with its duration,
+and an exit code that names the first failing step.
+
+### Exit codes
+
+| Step | Code |
+| --- | --- |
+| usage, config, or recipe error | 2 |
+| preflight FAIL | 1 |
+| recipe step | the command's own code; 124 when the step exceeded its `timeoutSeconds`, 127 when it could not start |
+| `test-gates` | its own code (1 obligations unresolved or the suite failed, 2 config) |
+| `check --require-e2e` | its own code (1 no verifying receipt, 2 config) |
+| success | 0 |
+
+### The recipe: `.gateforge/runtime.yml`
+
+Optional and additive: with no such document, `gateforge run` starts and
+stops nothing and behaves exactly like the commands it sequences. The
+document is the same one the witnessed pre-commit staged runtime uses, with
+the `gateforge run` lifecycle keys added; a repository can declare either,
+or both.
+
+```yaml
+schemaVersion: 1
+env_files:            # paths only — never an inline value
+  - .gateforge/test.env
+prepare:
+  commands: [['./scripts/install.sh']]   # argv lists, never a shell string
+  runTimeoutSeconds: 900
+reset:
+  commands: [['./scripts/reset-db.sh']]
+  timeoutSeconds: 300
+seed:
+  commands: [['./scripts/seed.sh']]
+  retries: 1                            # extra attempts after a failure
+services_up:
+  commands: [['./scripts/start-stack.sh']]
+healthcheck:
+  commands: [['./scripts/health.sh']]
+  timeoutSeconds: 60
+  retries: 5
+services_down:
+  commands: [['./scripts/stop-stack.sh']]
+```
+
+Rules the recipe lives under:
+
+- **paths, never secrets.** `env_files` entries must be existing files; an
+  entry carrying `NAME=value` is a schema error. The values are loaded into
+  the step environment and are never printed, never logged by Gateforge, and
+  never included in a message.
+- **no shell strings.** Every command is an argv list, so nothing is
+  word-split or re-interpreted. If you need a pipeline, put it in your own
+  script.
+- **one line per step, output off the console.** Command output is appended
+  to `.gateforge/test-gates/run-recipe/<step>-log.txt`; the console only
+  receives the step line and, on failure, the log path.
+- **unknown keys fail closed.** A typo, a malformed step, or a missing env
+  file is a plain error with exit 2 — Gateforge never runs a recipe it did
+  not fully understand.
+
+## Read the preconditions before a long run
+
+`gateforge enforcement doctor` prints a `run preconditions` block: one
+read-only line per precondition with the exact fix command.
+
+| Line | What it means | Fix it with |
+| --- | --- | --- |
+| `verifier-key` | an active key resolves outside the repository (a run cannot seal a verifying receipt without one) | `gateforge key create --confirm` |
+| `approved-policy` | the owner-approved policy pin is provisioned from a trusted channel and matches this candidate | export `GATEFORGE_APPROVED_POLICY_DIGEST=<digest>` outside the candidate |
+| `runner` | the configured runner's binary resolves and reports a version | `npm install --save-dev <runner>` |
+| `interpreter` | every configured suite's `argv[0]` exists AND runs | correct `diagnostics.suites.argv[0]` (e.g. `.venv/bin/python`) |
+| `bytecode-safety` | the run cannot rewrite `__pycache__` bytes into the candidate tree | `PYTHONDONTWRITEBYTECODE=1 gateforge run`, or pre-compile outside the run |
+| `target` | the configured target base URL answers (only probed when one is configured) | start the app, then export `GATEFORGE_TARGET_BASE_URL` |
+| `app-healthcheck` | the recipe's own healthcheck passes (only when a recipe declares one) | make the app healthy, or fix the declared healthcheck |
+| `host-load` | advisory only: load average and free disk | never fails a run |
+| `candidate-tree` | the tree can be hashed; uncommitted changes are reported | commit or stash before the run |
+
+By default the doctor is report-only and still exits 0 — today's behavior is
+unchanged. `gateforge enforcement doctor --strict-preflight` exits 1 at the
+first failing precondition, which is exactly what `gateforge run` does before
+it starts.
+
 ## Reusable run script
 
 Replace the reset and seed comments with durable commands for your disposable stack. The seed must come from this checkout. `test-gates` starts and supervises the witness for the run.
