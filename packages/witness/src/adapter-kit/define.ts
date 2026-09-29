@@ -310,6 +310,22 @@ export function defineHttpAdapter(config: HttpAdapterConfig): EvidenceAdapter {
   return Object.freeze({
     resourceId: config.resourceId,
     read,
+    // Read-only introspection for `gateforge adapters check --probe`:
+    // the exact path this adapter's first read of each kind hits, so a
+    // probe can issue ONE GET itself and report the real status, the
+    // real Location, and the real environment marker. Not part of the
+    // pin-#8 contract; ignored by the witness.
+    evidencePaths: {
+      read: (id: string): string | null => (hasRead ? pathForId(id) : null),
+      list: (): string | null => {
+        if (config.listCollection !== undefined) return null;
+        if (config.listPath === undefined || config.listPath === null) return null;
+        const paging = config.paging ?? { kind: 'page' as const };
+        return typeof config.listPath === 'function'
+          ? pagedPath(config.listPath(undefined), paging, 1)
+          : pagedPath(config.listPath, paging, 1);
+      },
+    },
     ...(hasList
       ? { list: async (ctx: AdapterContext): Promise<unknown[]> => [...(await listEntities(ctx))] }
       : {}),

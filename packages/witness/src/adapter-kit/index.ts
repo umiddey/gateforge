@@ -27,7 +27,13 @@
  * every guess and lists what still needs a human.
  */
 export { defineHttpAdapter, DEFAULT_MAX_PAGES, DEFAULT_PAGE_SIZE } from './define.js';
-export { readPath, projectEntity, type NormalizedEntity, type ProjectionConfig } from './projection.js';
+export {
+  firstArrayOf,
+  readPath,
+  projectEntity,
+  type NormalizedEntity,
+  type ProjectionConfig,
+} from './projection.js';
 export {
   createSessionReader,
   KitAuthError,

@@ -27,6 +27,7 @@ import { quarantineCommand } from './commands/quarantine.js';
 import { classifyCommand } from './commands/classify.js';
 import { explainCommand } from './commands/explain.js';
 import { testsCommand } from './commands/tests.js';
+import { adaptersCommand } from './commands/adapters.js';
 
 import { enforcementCommand } from './commands/enforcement.js';
 import { brokerCommand } from './broker.js';
@@ -54,6 +55,11 @@ commands:
         --obligation ID... --reason "T"  declare an existing test in .gateforge/test-map.yml (atomic, idempotent)
   tests explain --test K [--json]        requirements/mapping/next action for one existing test
   tests diagnose [--suite N] [--json]    run the configured pytest diagnostic suites (advisory; exit 0/1/2)
+  adapters scaffold [--dry-run]          write a starting-point evidence adapter per business resource
+        [--dry-run]                      that has none (never overwrites; every guess is marked)
+  adapters check [--json]                load and validate every adapter; report the resources with none
+        [--probe --base-url URL]         with the app running: one read-only GET per adapter
+        [--probe-id ID]
   obligations [--json]                   evaluate policies and dump obligations
   history [--test TEXT] [--failed] [--since ISO]  query retained supervised run history
   check [--changed] [--staged] [--candidate-commit SHA] run the gate against all files, the exact frozen
@@ -132,6 +138,8 @@ export async function main(
       return runWithExitCodes(io, () => explainCommand(io, rest));
     case 'tests':
       return runWithExitCodes(io, () => testsCommand(io, rest));
+    case 'adapters':
+      return runWithExitCodes(io, () => adaptersCommand(io, rest));
     case 'obligations':
       return runWithExitCodes(io, () => obligationsCommand(io, rest));
     case 'check':
