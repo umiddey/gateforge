@@ -40,6 +40,7 @@ import type {
 } from '@gate-forge/witness/adapter';
 import { ENV_APP_BASE_URL, ENV_RUN_ID, ENV_RUN_TOKEN, ENV_STATE_DIR, ENV_WITNESS_URL } from '@gate-forge/witness/constants';
 import { buildWitnessedSessionRunnerEnv } from './runner-env.js';
+import { untrustedEnv } from './reconcile.js';
 
 /** Per-test session variables a runner adapter publishes to the test. */
 export const VITEST_ENV_SESSION_ID = 'GATEFORGE_SESSION_ID';
@@ -421,7 +422,17 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
     return null;
   }
 
-  /** One bounded vitest CLI invocation (stdout/stderr captured). */
+  /**
+   * One bounded vitest CLI invocation (stdout/stderr captured).
+   *
+   * ENUMERATION runs the CONSUMER's own vitest config, so the child
+   * environment is the `untrustedEnv` one: every ambient `GATEFORGE_*`
+   * name is stripped, which keeps the verifier key, the run token and
+   * the witness URL out of reach of the repository being gated. The
+   * ambient `GATEFORGE_REPORTER_FAIL_RUN` the old merge carried is
+   * stripped by the same rule, so the list child cannot be armed to
+   * fail a run it never reports.
+   */
   private spawnVitest(
     cwd: string,
     entry: { command: string; prefix: string[] },
@@ -433,7 +444,7 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
       let timedOut = false;
       const child = spawn(entry.command, [...entry.prefix, ...args], {
         cwd,
-        env: { ...process.env, GATEFORGE_REPORTER_FAIL_RUN: '' },
+        env: untrustedEnv(process.env),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       const timer = setTimeout(() => {

@@ -12,7 +12,7 @@
  * the retry from the reporter's flags document.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,7 +101,17 @@ function vitestFor(kind: ContractScenario['kind'], options: { nested?: boolean }
   return `${head}${body}\n`;
 }
 
-/** Builds a temp vitest project (gateforge config + vitest symlink). */
+/**
+ * Builds a temp vitest project (gateforge config + vitest symlink).
+ *
+ * Args:
+ *   files: repo-relative posix keys to their contents.
+ *   retry: the runner's own retry setting (a caller that needs another
+ *     config simply rewrites the file).
+ *
+ * Returns:
+ *   string: the project root.
+ */
 function vitestProject(files: Record<string, string>, retry = false): string {
   const root = tempDir('gateforge-vitest-contract-');
   mkdirSync(join(root, 'node_modules'), { recursive: true });
@@ -305,5 +315,45 @@ describe('vitest behind the runner-adapter contract', () => {
     );
     expect(merged.complete).toBe(false);
     expect(merged.retriesDetected).toBe(true);
+  });
+});
+
+describe('enumeration never leaks gate wiring into consumer test code', () => {
+  it('runs the consumer config with no GATEFORGE_* name in its environment', async () => {
+    // The consumer's vitest.config runs INSIDE the enumeration child, so
+    // whatever the child environment holds is readable (and exfiltrable)
+    // by the repository being gated. Signing material must never be there.
+    const dump = tempDir('gateforge-vitest-envdump-') + '/env.json';
+    const root = vitestProject({ [SCENARIO_FILE]: vitestFor('pass') });
+    writeTree(root, {
+      'vitest.config.mjs': [
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(dump)}, JSON.stringify(Object.fromEntries(`,
+        '  Object.entries(process.env).filter(([name]) => name.startsWith("GATEFORGE_")),',
+        '), null, 2), "utf8");',
+        "import { defineConfig } from 'vitest/config';",
+        'export default defineConfig({ test: { include: ["tests/**/*.test.mjs"] } });',
+        '',
+      ].join('\n'),
+    });
+    const previous = {
+      key: process.env['GATEFORGE_WITNESS_VERIFIER_KEY'],
+      token: process.env['GATEFORGE_RUN_TOKEN'],
+    };
+    process.env['GATEFORGE_WITNESS_VERIFIER_KEY'] = 'verifier-secret-never-in-untrusted-code';
+    process.env['GATEFORGE_RUN_TOKEN'] = 'run-token-never-in-untrusted-code';
+    let leaked: string[];
+    try {
+      const enumeration = await new VitestRunnerAdapter().enumerate(root);
+      expect(enumeration.status).toBe('discovered');
+      // The dump file is the proof the config really executed in the child.
+      leaked = existsSync(dump) ? Object.keys(JSON.parse(readFileSync(dump, 'utf8')) as object) : ['<config never ran>'];
+    } finally {
+      if (previous.key === undefined) delete process.env['GATEFORGE_WITNESS_VERIFIER_KEY'];
+      else process.env['GATEFORGE_WITNESS_VERIFIER_KEY'] = previous.key;
+      if (previous.token === undefined) delete process.env['GATEFORGE_RUN_TOKEN'];
+      else process.env['GATEFORGE_RUN_TOKEN'] = previous.token;
+    }
+    expect(leaked).toEqual([]);
   });
 });
