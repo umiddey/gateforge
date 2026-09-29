@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+import { UsageError } from './errors.js';
 import { looksLikeSecret } from './secret-guard.js';
 
 /** Where the stream writes. `null` means the stream is off. */
@@ -117,7 +118,7 @@ function elapsedLabel(ms: number): string {
  *
  * Returns:
  *   ProgressTarget | null: where to write, or null when the stream is off.
- * @throws UsageError-shaped Error naming `--progress` for an unusable target.
+ * @throws UsageError naming `--progress` for an unusable target (exit 2).
  */
 export function resolveProgressTarget(
   flag: string | undefined,
@@ -132,7 +133,7 @@ export function resolveProgressTarget(
     if (path.length > 0) return { kind: 'file', path };
   }
   if (raw === 'auto') return env['CI'] === 'true' ? { kind: 'stderr' } : null;
-  throw new Error(
+  throw new UsageError(
     `test-gates: --progress must be 'off', 'stderr', 'file:<path>', or 'auto' (got '${raw}')`,
   );
 }
