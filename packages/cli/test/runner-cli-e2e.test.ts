@@ -698,3 +698,174 @@ describe.skipIf(PYTHON === '')('pytest+httpx through the real CLI', () => {
     });
   }, 300_000);
 });
+
+/**
+ * The runner child's own failure text for a Cypress run (the state dir
+ * is removed with the repository, so a failing gate must carry the
+ * cause).
+ *
+ * Args:
+ *   repo: the disposable repository.
+ *
+ * Returns:
+ *   string: the mocha failure messages, or '' when the child passed.
+ */
+function cypressRunnerFailures(repo: TempRepo): string {
+  const root = repo.path('.gateforge/test-gates/cypress');
+  if (!existsSync(root)) return '';
+  const messages: string[] = [];
+  for (const run of readdirSync(root)) {
+    const report = join(root, run, 'report.json');
+    if (!existsSync(report)) continue;
+    const document = JSON.parse(readFileSync(report, 'utf8')) as {
+      specs?: Array<{ file?: string; tests?: Array<{ titlePath?: string[]; state?: string }> }>;
+    };
+    for (const spec of document.specs ?? []) {
+      for (const row of spec.tests ?? []) {
+        if (row.state === 'passed') continue;
+        messages.push(`${String(spec.file)}#${(row.titlePath ?? []).join('>')}: ${String(row.state)}`);
+      }
+    }
+  }
+  return messages.length === 0 ? '' : `runner failures:\n${messages.join('\n')}\n`;
+}
+
+/** The GREEN Cypress spec: `cy.request` at the app origin (the tagged channel). */
+const CYPRESS_GREEN = `describe('accounts', () => {
+  it('creates account through the session proxy', () => {
+    cy.request({
+      method: 'POST',
+      url: Cypress.env('appBaseUrl') + '/api/accounts',
+      body: { first_name: 'Grace', last_name: 'Hopper' },
+    }).its('status').should('eq', 201);
+  });
+});
+`;
+
+/**
+ * The RED Cypress spec: a raw browser `fetch` at the same origin. The
+ * runner is green, but nothing about it crosses the session proxy, so
+ * the witness credits it to nothing.
+ */
+const CYPRESS_RED = `describe('accounts', () => {
+  it('bypasses the session proxy', () => {
+    cy.window().then((win) =>
+      win
+        .fetch(Cypress.env('appBaseUrl') + '/api/accounts', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ first_name: 'Direct', last_name: 'Untagged' }),
+        })
+        .then((response) => {
+          expect(response.status).to.eq(201);
+        }),
+    );
+  });
+});
+`;
+
+/**
+ * The project's own Cypress config — an ordinary CommonJS config with
+ * no knowledge of gateforge. Whatever the run must not leave behind
+ * in the candidate (videos, screenshots, downloads) is the ADAPTER's
+ * job, not the fixture's.
+ */
+const CYPRESS_CONFIG = `module.exports = {
+  e2e: {
+    specPattern: 'cypress/e2e/**/*.cy.js',
+    retries: 0,
+    env: { appBaseUrl: process.env.GATEFORGE_APP_BASE_URL },
+  },
+};
+`;
+
+/**
+ * Makes the real Cypress CLI resolvable in the disposable project (the
+ * adapter resolves the project's own CLI first).
+ *
+ * Args:
+ *   repo: the disposable repository.
+ *
+ * Returns:
+ *   void: nothing; the project gains a `node_modules/.bin/cypress`.
+ */
+function linkCypressCli(repo: TempRepo): void {
+  mkdirSync(join(repo.root, 'node_modules', '.bin'), { recursive: true });
+  linkIfAbsent(CYPRESS_BIN, join(repo.root, 'node_modules', '.bin', 'cypress'));
+}
+
+describe.skipIf(CYPRESS_BIN === '')('cypress through the real CLI', () => {
+  it('seals a receipt for the observed create and refuses to credit a bypassed request', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'cypress',
+        gateforgeYml('cypress'),
+        {
+          'app.cjs': APP,
+          'cypress.config.cjs': CYPRESS_CONFIG,
+          'cypress/e2e/green.cy.js': CYPRESS_GREEN,
+        },
+        testMapYml('cypress', 'cypress/e2e/green.cy.js', ['accounts', 'creates account through the session proxy']),
+      );
+      linkCypressCli(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'cypress runner fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      const why = `${cypressRunnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`;
+      expect(gated.code, why).toBe(0);
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.summary.blocking, why).toBe(0);
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict).toBe('satisfied');
+      const sealed = JSON.parse(
+        readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'),
+      ) as { selection?: { runner?: string } };
+      expect(sealed.selection?.runner).toBe('cypress');
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(true);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+      expect(checked.stdout).toContain('receipt-verified');
+    });
+
+    // RED: the same obligation stays blocking when the mapped test
+    // never crossed the session proxy, even though Cypress is green.
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'cypress',
+        gateforgeYml('cypress'),
+        {
+          'app.cjs': APP,
+          'cypress.config.cjs': CYPRESS_CONFIG,
+          'cypress/e2e/red.cy.js': CYPRESS_RED,
+        },
+        testMapYml('cypress', 'cypress/e2e/red.cy.js', ['accounts', 'bypasses the session proxy']),
+      );
+      linkCypressCli(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'cypress bypass fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      expect(gated.code, `${cypressRunnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`).toBe(1);
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict).not.toBe('satisfied');
+      expect(report.summary.blocking).toBeGreaterThan(0);
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code).toBe(1);
+      expect(checked.stdout).not.toContain('"evidenceState":"receipt-verified"');
+    });
+  }, 900_000);
+});
