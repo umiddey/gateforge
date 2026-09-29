@@ -1,0 +1,552 @@
+/**
+ * Real-CLI runner e2e: `test-gates --changed` drives the CONFIGURED
+ * runner end to end — the CLI spawns the witness, fixes the expected
+ * set BEFORE the run through the runner adapter, executes the runner
+ * child, enforces planned-vs-executed completeness, seals the
+ * execution result and issues the authenticated receipt, and
+ * `check --changed --require-e2e` then verifies that receipt.
+ *
+ * Nothing is mocked: a real example app answers on loopback, the real
+ * runner (vitest, pytest+httpx, Cypress) executes real test files
+ * against it, and every byte of evidence comes from the witness.
+ *
+ * The RED case is the point of the whole surface: the runner's own
+ * green is never authority. A test that calls the app in-process or
+ * outside its session proxy produces no observed record, so the
+ * obligation stays blocking and no receipt is issued.
+ */
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer } from 'node:net';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterAll, describe, expect, it } from 'vitest';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
+import { trustedPolicyDigestForConfig } from '../src/execution.js';
+import { loadConfigAt, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
+import { runCli } from './helpers.js';
+
+/** Repo root (workspace modules the fixture links resolve from). */
+const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+/** The environment fingerprint the example app stamps and the witness attests. */
+const FINGERPRINT = 'example-v1';
+/** The one obligation every variant proves. */
+const CREATE_CLAIM = 'tenant.accounts:persistence:create';
+/** The verifier key operator-side; the runner child never sees it. */
+const VERIFIER_KEY = 'runner-cli-e2e-verifier-key';
+
+/** The absolute pytest interpreter of the pytest variant (empty = skip). */
+const PYTHON = process.env['GATEFORGE_PYTEST_TEST_PYTHON'] ?? '';
+/** The absolute Cypress CLI of the Cypress variant (empty = skip). */
+const CYPRESS_BIN = process.env['GATEFORGE_CYPRESS_TEST_BIN'] ?? '';
+
+/** Temp dirs and children removed after the suite. */
+const TEMP_DIRS: string[] = [];
+const CHILDREN: ChildProcess[] = [];
+/** Operator key directories removed after the suite. */
+const KEY_DIRS: string[] = [];
+
+afterAll(() => {
+  for (const child of CHILDREN.splice(0)) child.kill('SIGKILL');
+  for (const dir of TEMP_DIRS.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of KEY_DIRS.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+/** One fresh temp directory, removed after the suite. */
+function tempDir(prefix: string): string {
+// Polling a REAL child process on a bounded deadline is the awaited
+// condition here (the child offers no readiness signal beyond answering
+// its own route), so this is one of the deliberate real-timer waits.
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  TEMP_DIRS.push(dir);
+  return dir;
+}
+
+/** Symlinks `target` at `link` unless the link already exists. */
+function linkIfAbsent(target: string, link: string): void {
+  if (!existsSync(link)) symlinkSync(target, link, 'dir');
+}
+
+/** One OS-assigned free loopback port. */
+function freePort(): Promise<number> {
+  return new Promise((resolvePort, rejectPort) => {
+    const server = createServer();
+    server.once('error', rejectPort);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        server.close();
+        rejectPort(new Error('no free loopback port'));
+        return;
+      }
+      const { port } = address;
+      server.close(() => resolvePort(port));
+    });
+  });
+}
+
+/**
+ * Waits until the example app answers its list route.
+ *
+ * Args:
+ *   url: the app base URL.
+ *
+ * Returns:
+ *   Promise<void>: resolves once the app answers, rejects on timeout.
+ */
+async function waitForApp(url: string): Promise<void> {
+  // Polling a REAL child process on a bounded deadline is the awaited
+  // condition here (the child offers no readiness signal beyond
+  // answering its own route), so this is a deliberate real-timer wait.
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      const response = await fetch(`${url}/api/accounts`);
+      if (response.ok) return;
+    } catch {
+      // not up yet
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 50));
+  }
+  throw new Error(`the example app never answered ${url}/api/accounts`);
+}
+
+/**
+ * The fixture detector: the accounts business resource plus the
+ * compiled http.endpoint inventory the crud route attribution needs.
+ */
+const DETECTOR = `export default {
+  async discover() {
+    const routes = [
+      ['POST /accounts', 'POST', '/accounts'],
+      ['GET /accounts/{}', 'GET', '/accounts/{}'],
+    ];
+    const resources = [{
+      schemaVersion: 1,
+      id: 'accounts',
+      kind: 'fixture.entity',
+      source: 'src/accounts.js',
+      location: { file: 'src/accounts.js', line: 1, col: 0 },
+      detectorVersion: '1.0.0',
+      attributes: { resourceName: 'accounts', updateableFields: ['first_name', 'last_name', 'status'] },
+    }];
+    const classificationSignals = [
+      { schemaVersion: 1, target: { resourceName: 'accounts' }, dimension: 'plane', assertion: 'tenant', basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } },
+      { schemaVersion: 1, target: { resourceName: 'accounts' }, dimension: 'identity', assertion: ['id'], basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } },
+      { schemaVersion: 1, target: { resourceName: 'accounts' }, dimension: 'adapter-binding', assertion: 'tenant.accounts', basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } },
+      { schemaVersion: 1, target: { resourceName: 'accounts' }, dimension: 'lifecycle.create', assertion: true, basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } },
+      { schemaVersion: 1, target: { resourceName: 'accounts' }, dimension: 'delete-semantics', assertion: 'archive', basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } },
+      { schemaVersion: 1, target: { resourceName: 'accounts' }, dimension: 'archive-state', assertion: { status: 'archived' }, basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } },
+    ];
+    for (const [name, method, canonicalPath] of routes) {
+      resources.push({
+        schemaVersion: 1,
+        id: 'http.endpoint:' + name,
+        kind: 'http.endpoint',
+        source: 'src/accounts.js',
+        location: { file: 'src/accounts.js', line: 1, col: 0 },
+        detectorVersion: '1.0.0',
+        attributes: { resourceName: name, method, canonicalPath, identity: method + ' ' + canonicalPath, linkedResourceName: 'accounts' },
+      });
+      classificationSignals.push(
+        { schemaVersion: 1, target: { resourceName: name }, dimension: 'identity', assertion: ['method', 'path'], basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } },
+      );
+    }
+    return {
+      resources, unresolved: [], findings: [], classificationSignals };
+  },
+};
+`;
+
+/** Policies document: the one user-facing create contract under test. */
+const POLICIES_YML = `schemaVersion: 1
+policies:
+  - id: crud
+    when: {}
+    require: [persistence:create]
+`;
+
+/** Classification policy for the fixture's complete source scan. */
+const CLASSIFICATION_POLICY_YML = `schemaVersion: 1
+scanRoots: ['src/**']
+trustedInternalEntryPoints: []
+internalRules: []
+declarations:
+  internality: gateforge:internal
+volatileFields: []
+`;
+
+/** Reviewed evidence adapter for tenant.accounts (the witness binds it). */
+const ADAPTER = `export default {
+  async read(ctx, id) {
+    const res = await ctx.get('/api/accounts/' + encodeURIComponent(String(id)));
+    if (res.status === 404) return null;
+    if (res.status !== 200) throw new Error('adapter read failed: HTTP ' + res.status);
+    return res.json();
+  },
+  async list(ctx) {
+    const res = await ctx.get('/api/accounts');
+    if (res.status !== 200) throw new Error('adapter list failed: HTTP ' + res.status);
+    const body = await res.json();
+    return body.accounts;
+  },
+  normalize(body) {
+    return {
+      entityId: body.id,
+      fields: { first_name: body.first_name, last_name: body.last_name, status: body.status },
+    };
+  },
+  deletion: 'archive',
+  environmentFingerprint: '${FINGERPRINT}',
+  observe: {
+    create: { method: 'POST', path: '/api/accounts' },
+    read: { method: 'GET', path: '/api/accounts/{id}' },
+  },
+};
+`;
+
+/**
+ * The example backend (plain node http; the surface the observe adapter
+ * binds, stamping the attested environment fingerprint).
+ */
+const APP = `
+const http = require('node:http');
+const ACCOUNTS = new Map();
+let seq = 0;
+const server = http.createServer((req, res) => {
+  res.setHeader('x-gateforge-env-fingerprint', '${FINGERPRINT}');
+  const url = new URL(req.url, 'http://127.0.0.1');
+  if (req.method === 'POST' && url.pathname === '/api/accounts') {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      const fields = JSON.parse(body || '{}');
+      const id = 'acc-' + String(++seq);
+      const record = { id, first_name: fields.first_name ?? '', last_name: fields.last_name ?? '', status: 'active' };
+      ACCOUNTS.set(id, record);
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(record));
+    });
+    return;
+  }
+  if (req.method === 'GET' && url.pathname === '/api/accounts') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ accounts: [...ACCOUNTS.values()] }));
+    return;
+  }
+  const match = /^\\/api\\/accounts\\/([^/]+)$/.exec(url.pathname);
+  if (req.method === 'GET' && match !== null) {
+    const record = ACCOUNTS.get(decodeURIComponent(match[1]));
+    if (record === undefined) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'absent' }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(record));
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+server.listen(Number(process.env.APP_PORT), '127.0.0.1');
+`;
+
+/** One CLI config with the configured runner and the fixed clock. */
+function gateforgeYml(runner: string, extra = ''): string {
+  return `schemaVersion: 1
+project:
+  languages: [javascript]
+  paths: { include: ['src/**'], exclude: [] }
+runner: ${runner}
+plugins:
+  - id: gateforge.fixture
+    version: 1.0.0
+    transport: in-process
+    module: ./.gateforge/fixture-detector.mjs
+policies: .gateforge/policies.yml
+classificationPolicy: .gateforge/classification-policy.yml
+adapters: .gateforge/adapters
+waivers: .gateforge/waivers
+baselines: .gateforge/baselines/obligations.json
+changed: { provider: auto }
+witness: { maxDurationSeconds: 5 }
+clock: { mode: fixed, fixedAt: '2026-01-01T00:00:00.000Z' }
+${extra}`;
+}
+
+/** The sidecar binding one runner test to the create obligation. */
+function testMapYml(runner: string, file: string, titlePath: readonly string[]): string {
+  const titles = titlePath.map((title) => `        - ${title}`).join('\n');
+  return `schemaVersion: 1
+tests:
+  - key: ${file}#${titlePath.join('>')}
+    selector:
+      runner: ${runner}
+      file: ${file}
+      titlePath:
+${titles}
+    kind: observed-e2e
+    categories:
+      - persistence.create
+    claims:
+      - ${CREATE_CLAIM}
+    reason: The test creates an account through the observed HTTP route and the witness confirms persistence.
+`;
+}
+
+/**
+ * Installs the shared fixture files into a fresh temp repository.
+ *
+ * Args:
+ *   repo: the disposable repository.
+ *   runner: the configured runner name.
+ *   config: the full `.gateforge.yml` text.
+ *   files: extra repo-relative files (the app and the runner suite).
+ *   testMap: the tracked sidecar text.
+ *
+ * Returns:
+ *   void: nothing; the repository is populated on return.
+ */
+function installRepo(
+  repo: TempRepo,
+  runner: string,
+  config: string,
+  files: Record<string, string>,
+  testMap: string,
+): void {
+  void runner;
+  repo.writeFiles({
+    '.gateforge.yml': config,
+    '.gateforge/fixture-detector.mjs': DETECTOR,
+    '.gateforge/policies.yml': POLICIES_YML,
+    '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,
+    '.gateforge/adapters/tenant.accounts.mjs': ADAPTER,
+    '.gateforge/baselines/obligations.json': `${JSON.stringify({ schemaVersion: 1, fingerprints: [] }, null, 2)}\n`,
+    '.gateforge/test-map.yml': testMap,
+    'src/accounts.js': '// fixture source: the accounts resource lives here.\n',
+    'package.json': `${JSON.stringify({ type: 'module', private: true }, null, 2)}\n`,
+    '.gitignore': ['node_modules', '.gateforge/test-gates', '', ''].join('\n'),
+    ...files,
+  });
+}
+
+/** The operator key ring file (external to the candidate, as in production). */
+function provisionKeyRing(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'gateforge-runner-e2e-verifier-'));
+  KEY_DIRS.push(directory);
+  const keyFile = join(directory, 'keys.json');
+  writeFileSync(
+    keyFile,
+    `${JSON.stringify({ schemaVersion: 1, activeKeyId: 'runner-key', keys: { 'runner-key': VERIFIER_KEY } })}\n`,
+    { mode: 0o600 },
+  );
+  return keyFile;
+}
+
+/**
+ * Starts the example app on a free loopback port.
+ *
+ * Args:
+ *   port: the port the app listens on.
+ *   root: the directory holding `app.cjs`.
+ *
+ * Returns:
+ *   Promise<string>: the app base URL (already reachable).
+ */
+async function startApp(port: number, root: string): Promise<string> {
+  const child = spawn(process.execPath, [join(root, 'app.cjs')], {
+    env: { ...process.env, APP_PORT: String(port) },
+    stdio: ['ignore', 'ignore', 'ignore'],
+  });
+  CHILDREN.push(child);
+  const url = `http://127.0.0.1:${String(port)}`;
+  await waitForApp(url);
+  return url;
+}
+
+/** The JSON report shape `test-gates --changed --format json` prints. */
+interface GateReport {
+  summary: { obligations: number; blocking: number };
+  verdicts: Array<{ obligationId: string; verdict: string }>;
+  execution?: { runner?: string; complete?: boolean };
+}
+
+/**
+ * The operator environment of one gated run (external key ring, the
+ * owner-approved policy pin, and the app wiring the witness fronts).
+ *
+ * Args:
+ *   repo: the repository being gated.
+ *   keyFile: the external key ring file.
+ *   appUrl: the example app base URL.
+ *
+ * Returns:
+ *   Record<string, string>: the environment for every CLI invocation.
+ */
+function operatorEnv(repo: TempRepo, keyFile: string, appUrl: string): Record<string, string> {
+  const config = loadConfigAt(repo.root);
+  return {
+    [VERIFIER_KEY_FILE_ENV]: keyFile,
+    GATEFORGE_APP_BASE_URL: appUrl,
+    GATEFORGE_TARGET_BASE_URL: appUrl,
+    GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+    GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
+  };
+}
+
+/** The GREEN vitest suite: supertest through the per-test session proxy. */
+const VITEST_GREEN = `import { test, expect } from 'vitest';
+import request from 'supertest';
+import { gateforgeSupertest } from '@gate-forge/pack-playwright/vitest';
+
+const gate = gateforgeSupertest(request);
+
+test('creates account through the session proxy', async () => {
+  const app = process.env.GATEFORGE_APP_BASE_URL;
+  const response = await (await gate(app)).post('/api/accounts').send({ first_name: 'Grace', last_name: 'Hopper' });
+  expect(response.status).toBe(201);
+});
+`;
+
+/** The RED vitest suite: a raw supertest call that bypasses the proxy. */
+const VITEST_RED = `import { test, expect } from 'vitest';
+import request from 'supertest';
+
+test('creates account outside the session proxy', async () => {
+  const app = process.env.GATEFORGE_APP_BASE_URL;
+  const response = await request(app).post('/api/accounts').send({ first_name: 'Direct', last_name: 'Untagged' });
+  expect(response.status).toBe(201);
+});
+`;
+
+/** The vitest config the runner reads (never the consumer's own defaults). */
+const VITEST_CONFIG = `import { defineConfig } from 'vitest/config';
+export default defineConfig({
+  test: {
+    include: ['tests/**/*.test.mjs'],
+    testTimeout: 30000,
+    retry: 0,
+  },
+});
+`;
+
+/** Links the workspace modules the vitest suite imports. */
+function linkVitestModules(repo: TempRepo): void {
+  const modules = join(repo.root, 'node_modules');
+  mkdirSync(join(modules, '@gate-forge'), { recursive: true });
+  linkIfAbsent(join(ROOT, 'node_modules', 'vitest'), join(modules, 'vitest'));
+  linkIfAbsent(join(ROOT, 'node_modules', 'supertest'), join(modules, 'supertest'));
+  linkIfAbsent(join(ROOT, 'packages', 'pack-playwright'), join(modules, '@gate-forge', 'pack-playwright'));
+}
+
+/**
+ * The runner child's own failure text (the state dir is removed with the
+ * repository, so a failing gate must carry the cause in its message).
+ *
+ * Args:
+ *   repo: the disposable repository.
+ *
+ * Returns:
+ *   string: the assertion message tail, or '' when the child passed.
+ */
+function runnerFailures(repo: TempRepo): string {
+  const root = repo.path('.gateforge/test-gates/vitest');
+  if (!existsSync(root)) return '';
+  const messages: string[] = [];
+  for (const run of readdirSync(root)) {
+    const report = join(root, run, 'report.json');
+    if (!existsSync(report)) continue;
+    const document = JSON.parse(readFileSync(report, 'utf8')) as {
+      testResults?: Array<{ assertionResults?: Array<{ title?: string; status?: string; failureMessages?: string[] }> }>;
+    };
+    for (const suite of document.testResults ?? []) {
+      for (const row of suite.assertionResults ?? []) {
+        if (row.status === 'passed') continue;
+        messages.push(`${String(row.title)}: ${(row.failureMessages ?? []).join(' | ').slice(0, 2000)}`);
+      }
+    }
+  }
+  const timingPath = repo.path('.gateforge/test-gates/diagnostics/child-timing.jsonl');
+  const timing = existsSync(timingPath) ? `\nchild timing:\n${readFileSync(timingPath, 'utf8')}` : '';
+  return messages.length === 0 ? '' : `runner failures:\n${messages.join('\n')}${timing}\n`;
+}
+
+describe('vitest+supertest through the real CLI', () => {
+  it('seals a receipt for the observed create and refuses to credit a bypassed request', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'vitest',
+        gateforgeYml('vitest'),
+        {
+          'app.cjs': APP,
+          'vitest.config.mjs': VITEST_CONFIG,
+          'tests/green.test.mjs': VITEST_GREEN,
+        },
+        testMapYml('vitest', 'tests/green.test.mjs', ['creates account through the session proxy']),
+      );
+      linkVitestModules(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'vitest runner fixture']);
+      // The genuine candidate change: a comment-only edit to the
+      // resource source (the obligation still binds it).
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      const why = `${runnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`;
+      expect(gated.code, why).toBe(0);
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.summary.blocking, why).toBe(0);
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict).toBe('satisfied');
+      // The sealed execution result — not the stdout projection — is the
+      // artifact that names the runner the gate actually executed.
+      const sealed = JSON.parse(
+        readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'),
+      ) as { selection?: { runner?: string } };
+      expect(sealed.selection?.runner).toBe('vitest');
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(true);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+      expect(checked.stdout).toContain('receipt-verified');
+    });
+
+    // RED first in source order matters not: the same obligation stays
+    // blocking when the mapped test never drove the observed route.
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'vitest',
+        gateforgeYml('vitest'),
+        {
+          'app.cjs': APP,
+          'vitest.config.mjs': VITEST_CONFIG,
+          'tests/red.test.mjs': VITEST_RED,
+        },
+        testMapYml('vitest', 'tests/red.test.mjs', ['creates account outside the session proxy']),
+      );
+      linkVitestModules(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'vitest bypass fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      expect(gated.code, `test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`).toBe(1);
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict).not.toBe('satisfied');
+      expect(report.summary.blocking).toBeGreaterThan(0);
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code).toBe(1);
+      expect(checked.stdout).not.toContain('"evidenceState":"receipt-verified"');
+    });
+  }, 300_000);
+});

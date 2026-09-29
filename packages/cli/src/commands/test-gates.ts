@@ -118,7 +118,9 @@ import {
   SupervisorClient,
   TestDiscoveryError,
   VitestRunnerAdapter,
+  RUN_HEADER,
   DEFAULT_RUN_TIMEOUT_MS,
+  ENV_PROXY_TARGET,
   type ExpectedSetResponse,
   type NativeInstance,
   type NativeListResult,
@@ -1148,15 +1150,23 @@ function runnerAdapterFor(
     ...(wiring.witnessUrl !== undefined && wiring.witnessUrl !== '' ? { url: wiring.witnessUrl } : {}),
     ...(wiring.runToken !== undefined && wiring.runToken !== '' ? { token: wiring.runToken } : {}),
   };
+  // The app origin the session proxy fronts crosses INSIDE the wiring
+  // object every adapter reads (`witness.appBaseUrl`), except pytest,
+  // whose option is declared at the top level. Passing it beside the
+  // witness object (a spread) type-checks and is then SILENTLY DROPPED
+  // by the vitest and cypress adapters, which left their runner child
+  // with an empty GATEFORGE_APP_BASE_URL and every supertest/Cypress
+  // request refused as in-process.
   const appBaseUrl =
     wiring.appBaseUrl !== undefined && wiring.appBaseUrl !== '' ? { appBaseUrl: wiring.appBaseUrl } : {};
+  const sessionWiring = { ...witness, ...appBaseUrl };
   switch (runner) {
     case 'pytest':
       return new PytestRunnerAdapter({ witness, ...appBaseUrl });
     case 'vitest':
-      return new VitestRunnerAdapter({ witness, ...appBaseUrl });
+      return new VitestRunnerAdapter({ witness: sessionWiring });
     case 'cypress':
-      return new CypressRunnerAdapter({ witness, ...appBaseUrl });
+      return new CypressRunnerAdapter({ witness: sessionWiring });
     default:
       throw new UsageError(`test-gates: no runner adapter for '${runner}' (expected playwright | pytest | vitest | cypress)`);
   }
@@ -1164,6 +1174,58 @@ function runnerAdapterFor(
 
 /** Any contract adapter the supervised run can enumerate and execute. */
 type RunnerAdapterHolder = PytestRunnerAdapter | VitestRunnerAdapter | CypressRunnerAdapter;
+
+/**
+ * Writes the WITNESS-ISSUED ledger into the run's `records.json` for the
+ * non-Playwright runners.
+ *
+ * The Playwright pack's engine reporter performs this copy itself
+ * (GF-23: the evaluator only ever reads the witness ledger, never a
+ * suite-authored file). The pytest/vitest/cypress adapters have no such
+ * in-suite reporter, so without this copy the evaluator sees an empty
+ * ledger and grades EVERY obligation `missing` even when the witness
+ * stamped a record. The trusted CLI performs the identical fetch while
+ * the witness is still alive; a transport failure writes nothing (the
+ * run stays fail-closed through the verdicts) and names itself on
+ * stderr.
+ *
+ * Args:
+ *   io: the CLI IO (stderr carries the diagnostic).
+ *   stateDir: the run state directory.
+ *   witnessUrl: the running witness base URL.
+ *   runToken: the run token authenticating the ledger read.
+ *
+ * Returns:
+ *   Promise<void>: resolves once the document is written (or the fetch
+ *     failed and said so).
+ */
+async function writeWitnessLedgerDocument(
+  io: Io,
+  stateDir: string,
+  witnessUrl: string,
+  runToken: string,
+): Promise<void> {
+  try {
+    const response = await fetch(`${witnessUrl}/records`, {
+      headers: { [RUN_HEADER]: runToken },
+    });
+    if (!response.ok) {
+      writeLine(
+        io.stderr,
+        `test-gates: the witness ledger could not be read (HTTP ${String(response.status)}) — evidence stays uncredited`,
+      );
+      return;
+    }
+    const body = (await response.json()) as { records?: unknown };
+    const records = Array.isArray(body.records) ? body.records : [];
+    writeFileSync(join(stateDir, 'records.json'), `${JSON.stringify(records, null, 2)}\n`, 'utf8');
+  } catch (error) {
+    writeLine(
+      io.stderr,
+      `test-gates: the witness ledger could not be read (${(error as Error).message}) — evidence stays uncredited`,
+    );
+  }
+}
 
 async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): Promise<number> {
   const { out, format, witnessUrl, runTimeoutMs } = options;
@@ -1931,6 +1993,17 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         ...(io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== undefined && io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== ''
           ? { GATEFORGE_PROBE_DB_CONTAINER: io.env['GATEFORGE_PROBE_DB_CONTAINER'] }
           : {}),
+        // Session-proxy tag channel: the vitest and cypress adapters
+        // publish a per-test session proxy origin, so the witness must
+        // front the app with an observation proxy or every proxied
+        // request is unattributable. The Playwright path is untouched
+        // (its sessions are engine-browser scoped), so an existing
+        // repository's witness wiring stays byte-identical.
+        ...(runnerName === 'vitest' || runnerName === 'cypress'
+          ? appBase !== ''
+            ? { [ENV_PROXY_TARGET]: appBase }
+            : {}
+          : {}),
       });
     } catch (error) {
       throw new UsageError(`test-gates: the observer (witness service) could not start: ${(error as Error).message}`);
@@ -2263,6 +2336,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       sessionTrace = trace === null ? null : trace.tests;
     } catch {
       sessionTrace = null; // fail closed: a missing authority never grades success
+    }
+    if (runnerName !== 'playwright' && effectiveWitnessUrl !== undefined) {
+      await writeWitnessLedgerDocument(io, stateDir, effectiveWitnessUrl, runToken);
     }
     if (spawnedWitness !== null) {
       // Graceful stop (the same contract as the consumer teardown): the
