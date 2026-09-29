@@ -45,7 +45,8 @@ commands:
                                          .gateforge.yml + skeleton + GATEFORGE.md + overlay README
                                          (idempotent; --blocking installs AND verifies an active
                                          pre-commit hook + CI wiring)
-  enforce                                 wire the blocking pre-commit + CI gate into an initialized repo (idempotent)
+  enforce [--ci github|gitlab] [--witnessed]  wire the blocking pre-commit + CI gate into an initialized repo (idempotent);
+                                           --witnessed also writes the witnessed 'gateforge run' job template
   adopt                                   adopt enforcement: seed the baseline from current debt (the one bulk-add) + wire the gate
   discover [--json]                      run detectors and dump the resource graph
   classify [--json] [--write-snapshot P] inspect effective classifications + typed blocks

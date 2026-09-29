@@ -120,6 +120,64 @@ const PRE_COMMIT_BLOCK = `# --- gateforge (generated): blocking static gate ----
         pass_filenames: false
 `;
 
+/**
+ * The install block every generated Gateforge CI job runs first: it
+ * installs the declared Node packages from their lockfiles, resolves
+ * the pinned Gateforge, and refuses to continue on any other version.
+ * Unindented, so each job indents it into its own YAML block scalar.
+ */
+export const CI_INSTALL_SCRIPT: readonly string[] = [
+  'set -eu',
+  'set -f',
+  'install_node_package() {',
+  '  package_dir="$1"',
+  '  if [ ! -f "$package_dir/package.json" ]; then',
+  '    echo "Gateforge CI: package.json not found in $package_dir" >&2',
+  '    return 1',
+  '  fi',
+  '  if [ -f "$package_dir/pnpm-lock.yaml" ]; then',
+  '    corepack pnpm --dir "$package_dir" install --frozen-lockfile',
+  '  elif [ -f "$package_dir/yarn.lock" ]; then',
+  '    corepack yarn --cwd "$package_dir" install --frozen-lockfile',
+  '  elif [ -f "$package_dir/package-lock.json" ] || [ -f "$package_dir/npm-shrinkwrap.json" ]; then',
+  '    npm ci --prefix "$package_dir"',
+  '  else',
+  '    npm install --prefix "$package_dir"',
+  '  fi',
+  '}',
+  'install_node_package .',
+  'for package_dir in $GATEFORGE_CI_NESTED_PACKAGE_DIRS; do',
+  '  case "$package_dir" in',
+  '    /*|..|../*|*/..|*/../*) echo "Gateforge CI: nested package path must stay inside the repository: $package_dir" >&2; exit 1 ;;',
+  '  esac',
+  '  install_node_package "$package_dir"',
+  'done',
+  'run_gateforge() {',
+  '  if [ -f pnpm-lock.yaml ]; then',
+  '    corepack pnpm exec gateforge "$@"',
+  '  elif [ -f yarn.lock ]; then',
+  '    corepack yarn run gateforge "$@"',
+  '  else',
+  '    if [ ! -x node_modules/.bin/gateforge ]; then',
+  '      echo "Gateforge CI: install @gate-forge/cli as an exact root devDependency" >&2',
+  '      return 1',
+  '    fi',
+  '    node_modules/.bin/gateforge "$@"',
+  '  fi',
+  '}',
+  'actual_version=$(run_gateforge --version)',
+  'if [ "$actual_version" != "$GATEFORGE_VERSION" ]; then',
+  '  echo "Gateforge CI: expected $GATEFORGE_VERSION but installed $actual_version" >&2',
+  '  exit 1',
+  'fi',
+  'echo "Gateforge CI: using pinned Gateforge $actual_version"',
+];
+
+/** Indents a script block into a YAML block scalar body (6 spaces). */
+export function ciScriptBlock(lines: readonly string[]): string {
+  return lines.map((line) => (line.length === 0 ? '' : `      ${line}`)).join('\n');
+}
+
 export type GitlabGateMode = 'strict' | 'check';
 
 /** Renders one CI template with the gate command chosen by the wiring command. */
@@ -184,50 +242,7 @@ ${jobName}:
     GATEFORGE_CI_NESTED_PACKAGE_DIRS: ""
   script:
     - |
-      set -eu
-      set -f
-      install_node_package() {
-        package_dir="$1"
-        if [ ! -f "$package_dir/package.json" ]; then
-          echo "Gateforge CI: package.json not found in $package_dir" >&2
-          return 1
-        fi
-        if [ -f "$package_dir/pnpm-lock.yaml" ]; then
-          corepack pnpm --dir "$package_dir" install --frozen-lockfile
-        elif [ -f "$package_dir/yarn.lock" ]; then
-          corepack yarn --cwd "$package_dir" install --frozen-lockfile
-        elif [ -f "$package_dir/package-lock.json" ] || [ -f "$package_dir/npm-shrinkwrap.json" ]; then
-          npm ci --prefix "$package_dir"
-        else
-          npm install --prefix "$package_dir"
-        fi
-      }
-      install_node_package .
-      for package_dir in $GATEFORGE_CI_NESTED_PACKAGE_DIRS; do
-        case "$package_dir" in
-          /*|..|../*|*/..|*/../*) echo "Gateforge CI: nested package path must stay inside the repository: $package_dir" >&2; exit 1 ;;
-        esac
-        install_node_package "$package_dir"
-      done
-      run_gateforge() {
-        if [ -f pnpm-lock.yaml ]; then
-          corepack pnpm exec gateforge "$@"
-        elif [ -f yarn.lock ]; then
-          corepack yarn run gateforge "$@"
-        else
-          if [ ! -x node_modules/.bin/gateforge ]; then
-            echo "Gateforge CI: install @gate-forge/cli as an exact root devDependency" >&2
-            return 1
-          fi
-          node_modules/.bin/gateforge "$@"
-        fi
-      }
-      actual_version=$(run_gateforge --version)
-      if [ "$actual_version" != "$GATEFORGE_VERSION" ]; then
-        echo "Gateforge CI: expected $GATEFORGE_VERSION but installed $actual_version" >&2
-        exit 1
-      fi
-      echo "Gateforge CI: using pinned Gateforge $actual_version"
+${ciScriptBlock(CI_INSTALL_SCRIPT)}
 ${gateSteps}
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
