@@ -113,7 +113,64 @@ interface ReporterRunSummary {
   schemaVersion: 1;
   selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
   selectedClaims: { selected: number; satisfied: number; blocking: number; waived: number };
-  repositoryDebt: { obligations: number; unclaimed: number; blocking: number };
+  /**
+   * `blocking` is the LEGACY total (blocking claims + every unclaimed
+   * obligation, baselined or not) and stays exactly as it was.
+   * `baselined` and `newlyBlocking` are the two numbers an operator can
+   * act on: how much of the debt the adopted baseline already forgave,
+   * and how much is genuinely new.
+   */
+  repositoryDebt: {
+    obligations: number;
+    unclaimed: number;
+    blocking: number;
+    baselined: number;
+    newlyBlocking: number;
+  };
+}
+
+/**
+ * The scope the CLI graded, from the run-scope view it writes before the
+ * suite starts. A run that graded a SELECTION (a named test list, a
+ * changed slice) observed no repository-wide debt, so the reporter must
+ * not verdict on it.
+ */
+export type ReporterRunScope = 'full' | 'changed' | 'named';
+
+/** The CLI-written run-scope view (`<stateDir>/run-scope.json`). */
+interface RunScopeDocument {
+  readonly scope?: unknown;
+}
+
+/** The CLI-written baselined-obligation view (`<stateDir>/debt-baseline.json`). */
+interface DebtBaselineDocument {
+  readonly obligationIds?: unknown;
+}
+
+/** Reads a state-dir JSON document, or null when it is absent or unusable. */
+function readStateView(stateDir: string, name: string): unknown {
+  try {
+    return JSON.parse(readFileSync(join(stateDir, name), 'utf8')) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The scope the CLI graded for this run. Absent or unreadable means a
+ * whole-repository run, which is the only scope whose debt the reporter
+ * may judge — the conservative reading.
+ */
+function runScopeOf(stateDir: string): ReporterRunScope {
+  const scope = (readStateView(stateDir, 'run-scope.json') as RunScopeDocument | null)?.scope;
+  return scope === 'named' || scope === 'changed' ? scope : 'full';
+}
+
+/** The obligation ids the adopted baseline already forgives. */
+function baselinedObligationIds(stateDir: string): ReadonlySet<string> {
+  const ids = (readStateView(stateDir, 'debt-baseline.json') as DebtBaselineDocument | null)?.obligationIds;
+  if (!Array.isArray(ids)) return new Set();
+  return new Set(ids.filter((id): id is string => typeof id === 'string'));
 }
 
 /** The claim-injections document the orchestrating CLI writes. */
@@ -160,16 +217,32 @@ export interface ReporterSuiteLike {
  * Args:
  *   rows: the per-claim ledger rows.
  *   unclaimedObligations: count of run obligations with no claim row.
+ *   scope: the scope the CLI graded (a selection run never verdicts
+ *     repository debt it did not observe).
  *
  * Returns:
  *   string: the aggregate summary line.
  */
-export function gateSummaryLine(rows: readonly LedgerRow[], unclaimedObligations: number): string {
+export function gateSummaryLine(
+  rows: readonly LedgerRow[],
+  unclaimedObligations: number,
+  scope: ReporterRunScope = 'full',
+): string {
   const blocking = rows.filter((row) => isBlocking(row.verdict));
   const authority =
     'final gate result: the gateforge CLI (test-gates/check), never this reporter';
   if (blocking.length > 0) {
     return `GATEFORGE GATE: FAIL (${String(blocking.length)}/${String(rows.length)} claimed obligations not satisfied; ${authority})`;
+  }
+  if (unclaimedObligations > 0 && scope !== 'full') {
+    // A selection run graded its own claims and nothing else. Printing
+    // "NOT PASSED" here would state a verdict about debt the run never
+    // observed, and it would contradict the CLI exit code printed
+    // seconds later — two verdicts, one run, one of them wrong.
+    return (
+      `GATEFORGE GATE: SELECTION (${String(rows.length)} satisfied, 0 blocking; ` +
+      `repository verdict not graded here — ${authority})`
+    );
   }
   if (unclaimedObligations > 0) {
     return (
@@ -437,15 +510,16 @@ export class GateforgeReporter {
 
     const ledger = this.ledgerRows(obligations, classifications, records, now, httpRoutes);
     writeJson(stateDir, 'ledger.json', ledger);
-    const unclaimed =
+    const unclaimedIds =
       obligations === null
-        ? 0
+        ? new Set<string>()
         : new Set(
             obligations.obligations
               .filter((entry) => !this.rows.some((row) => row.claims.includes(entry.id)))
               .map((entry) => entry.id),
-          ).size;
-    const summary = this.runSummary(ledger, obligations, unclaimed);
+          );
+    const unclaimed = unclaimedIds.size;
+    const summary = this.runSummary(ledger, obligations, unclaimed, baselinedObligationIds(stateDir));
     writeJson(stateDir, 'run-summary.json', summary);
     console.log(
       `selected tests: ${String(summary.selectedTests.passed)} passed, ${String(summary.selectedTests.failed)} failed ` +
@@ -457,10 +531,11 @@ export class GateforgeReporter {
         `(selected: ${String(summary.selectedClaims.selected)}, waived: ${String(summary.selectedClaims.waived)})`,
     );
     console.log(
-      `repository debt: ${String(summary.repositoryDebt.unclaimed)} unclaimed / ` +
-        `${String(summary.repositoryDebt.obligations)} obligations (${String(summary.repositoryDebt.blocking)} blocking)`,
+      `repository debt: ${String(summary.repositoryDebt.baselined)} known (baselined), ` +
+        `${String(summary.repositoryDebt.newlyBlocking)} new blocking / ` +
+        `${String(summary.repositoryDebt.obligations)} obligations (${String(summary.repositoryDebt.unclaimed)} unclaimed)`,
     );
-    this.printLedger(ledger, unclaimed);
+    this.printLedger(ledger, unclaimed, runScopeOf(stateDir));
     this.printRegistryMismatches(obligations, records);
 
     const blocking = ledger.some((row) => isBlocking(row.verdict));
@@ -480,6 +555,7 @@ export class GateforgeReporter {
    *   ledger: selected claimed-obligation results from the real engine.
    *   obligations: the complete repository obligation registry, when valid.
    *   unclaimed: unique registered obligations without any claim row.
+   *   baselinedIds: obligation ids the adopted baseline already forgives.
    *
    * Returns:
    *   ReporterRunSummary: distinct counts for runner work, claims, and repository debt.
@@ -488,6 +564,7 @@ export class GateforgeReporter {
     ledger: readonly LedgerRow[],
     obligations: ReturnType<typeof parseObligationsDocument>,
     unclaimed: number,
+    baselinedIds: ReadonlySet<string>,
   ): ReporterRunSummary {
     const latestByTest = new Map<string, RunnerOutcomeRow>();
     for (const outcome of this.runnerOutcomes) {
@@ -502,6 +579,11 @@ export class GateforgeReporter {
     const satisfied = ledger.filter((row) => row.verdict === 'satisfied').length;
     const blockingClaims = ledger.filter((row) => isBlocking(row.verdict));
     const waived = ledger.filter((row) => row.verdict === 'waived').length;
+    const distinctBlockingClaims = new Set(blockingClaims.map((row) => row.claim)).size;
+    // The unclaimed debt splits by what the adopted baseline already
+    // forgave. Without that split the same number (192) is reported
+    // next to a gate line that says zero blockers.
+    const baselined = baselinedIds.size;
     return {
       schemaVersion: 1,
       selectedTests: { selected: outcomes.length, passed, failed, skipped, expectedFailures },
@@ -509,7 +591,11 @@ export class GateforgeReporter {
       repositoryDebt: {
         obligations: obligations?.obligations.length ?? 0,
         unclaimed,
-        blocking: new Set(blockingClaims.map((row) => row.claim)).size + unclaimed,
+        // Legacy total, unchanged: blocking claims + every unclaimed
+        // obligation, baselined or not.
+        blocking: distinctBlockingClaims + unclaimed,
+        baselined: Math.min(baselined, unclaimed),
+        newlyBlocking: distinctBlockingClaims + Math.max(0, unclaimed - baselined),
       },
     };
   }
@@ -810,7 +896,7 @@ export class GateforgeReporter {
    * obligations block; the authoritative CLI remains the only final
    * gate result.
    */
-  private printLedger(rows: LedgerRow[], unclaimedObligations: number): void {
+  private printLedger(rows: LedgerRow[], unclaimedObligations: number, scope: ReporterRunScope): void {
     const width = Math.max('CLAIMED OBLIGATION'.length, ...rows.map((row) => row.claim.length));
     console.log('\n=== GATEFORGE VERDICTS ===');
     if (rows.length === 0) {
@@ -827,7 +913,7 @@ export class GateforgeReporter {
         console.log(`           - records: ${row.recordIds.join(', ')}`);
       }
     }
-    console.log(gateSummaryLine(rows, unclaimedObligations));
+    console.log(gateSummaryLine(rows, unclaimedObligations, scope));
     console.log('==========================\n');
   }
 

@@ -93,7 +93,7 @@ import {
   type ScopedObligationRef,
 } from '../receipts.js';
 import { resealChainBlocking, retainedCarriedEvidence } from '../reseal-chain.js';
-import { resolveProvider } from '../providers.js';
+import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
 import {
   computeEvaluationScope,
   detectStagedWorkingTreeMismatches,
@@ -856,6 +856,13 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // fails closed. Legacy v1 `recordIdsMac` never authorizes, even when
   // it verifies.
   const config = loadConfigAt(io.cwd);
+  // A merge-request pipeline with no base commit would resolve `auto` to
+  // the local staged diff — zero changed files in a CI job, and a gate
+  // that fails an hour later on debt nobody changed. Refuse in seconds.
+  if (diffScoped) {
+    const refusal = mergeRequestScopePreflight(config, io.env);
+    if (refusal !== null) throw new UsageError(refusal);
+  }
   // Owner-chosen strictness (plan 20260925_2013 Phase 1). A missing key
   // resolves to `strict`, which is byte-for-byte today's behavior: the
   // decision below is a pure mapping of an ALREADY-COMPUTED strict

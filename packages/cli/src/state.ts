@@ -415,6 +415,49 @@ export function clearRunRecord(stateDir: string): void {
 }
 
 /**
+ * Persists the run-scope view the in-runner reporter reads.
+ *
+ * A reporter that graded a named test list or a changed slice observed
+ * no repository-wide debt, and must say so instead of printing a
+ * repository verdict the CLI never asked for. The view is derived run
+ * state, written before the suite starts, and read by nothing the gate
+ * trusts.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   scope: the scope this run actually grades.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeRunScopeView(stateDir: string, scope: 'full' | 'changed' | 'named'): void {
+  writeStateFile(stateDir, 'run-scope.json', { schemaVersion: 1, scope } as unknown as JsonValue);
+}
+
+/**
+ * Persists the baselined-obligation view the in-runner reporter reads.
+ *
+ * The CLI knows which obligations the adopted baseline forgives; the
+ * reporter does not, and used to fold all of them into one "blocking"
+ * number that contradicted the gate line printed seconds later. This
+ * view is that split, by obligation id — never a fingerprint and never
+ * a second baseline-loading path.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   obligationIds: sorted ids the adopted baseline forgives.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeDebtBaselineView(stateDir: string, obligationIds: readonly string[]): void {
+  writeStateFile(stateDir, 'debt-baseline.json', {
+    schemaVersion: 1,
+    obligationIds: [...obligationIds],
+  } as unknown as JsonValue);
+}
+
+/**
  * Persists the Gateforge-owned failing-test diagnosis artifact.
  *
  * A failed witnessed test used to ship nothing but an ARIA snapshot:

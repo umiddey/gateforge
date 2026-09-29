@@ -77,7 +77,22 @@ export interface RunExecutionSummary {
   testsPerformedThisInvocation: number;
   selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
   selectedClaims: { selected: number; satisfied: number; blocking: number; blockingEntries: number; waived: number };
-  repositoryDebt: { obligations: number; blocking: number; blockingEntries: number; unclaimed: number };
+  /**
+   * `blocking` is the LEGACY total and stays exactly as it has always
+   * been computed (blocking claims + repository findings) — it is
+   * marked legacy in the schema docs because it includes baselined
+   * debt. `baselined` and `newlyBlocking` are the two numbers an
+   * operator can act on: how much of the debt the adopted baseline
+   * already forgave, and how much is genuinely new.
+   */
+  repositoryDebt: {
+    obligations: number;
+    blocking: number;
+    blockingEntries: number;
+    unclaimed: number;
+    baselined: number;
+    newlyBlocking: number;
+  };
 }
 
 /** Safe identifiers that let operators compare two gate reports. */
@@ -554,8 +569,11 @@ function textReport(
         `(selected ${execution.selectedClaims.selected}; ${execution.selectedClaims.blockingEntries} blocking entries; ` +
         `${execution.selectedClaims.waived} waived)`,
     );
+    // The line never prints a bare "blocking" count that differs from
+    // the gate line: the baselined and the new debt are named apart.
     lines.push(
-      `repository debt: ${execution.repositoryDebt.blocking} blocking / ${execution.repositoryDebt.obligations} obligations ` +
+      `repository debt: ${execution.repositoryDebt.baselined} known (baselined), ` +
+        `${execution.repositoryDebt.newlyBlocking} new blocking / ${execution.repositoryDebt.obligations} obligations ` +
         `(${execution.repositoryDebt.unclaimed} unclaimed; ${execution.repositoryDebt.blockingEntries} blocking entries)`,
     );
     // A named run grades ONLY the selection it executed. Say the
