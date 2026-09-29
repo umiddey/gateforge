@@ -371,7 +371,10 @@ test-gates: the previous run cannot be re-sealed from: its sealed tree is not th
 ```
 
 So commit everything the run tests: a run over uncommitted changes can
-never be a re-seal parent. The other bindings read the same way — `it
+never be a re-seal parent. Sign every run with the same verifier key
+(`gateforge key create` once, or one `GATEFORGE_WITNESS_VERIFIER_KEY`
+secret in CI): a run signed with a one-off key reads `it was signed with
+a different verifier key` and can never be a parent either. The other bindings read the same way — `it
 was sealed at commit 1a2b3c4, the merge base is 5d6e7f8`, `the approved
 policy changed`, `the engine changed`, `the execution boundary changed`,
 `its execution result was replaced by a later run`, `its signature does
