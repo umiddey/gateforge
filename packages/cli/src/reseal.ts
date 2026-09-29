@@ -840,6 +840,12 @@ export function classifyResealChange(input: {
     }
   }
   const candidates = changed.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);
+  // A changed path outside every test root is app code whatever the
+  // import graph says, so it refuses first and by its own name: the
+  // reason a user needs is "you changed app code", not a doubt about
+  // some unrelated file's imports.
+  const appFile = candidates.find((path) => !underTestRoot(path, roots));
+  if (appFile !== undefined) return refuse(`app file changed: ${appFile}`);
   // The import graph is consulted for EVERY change set, not only for a
   // helper claim: a spec file can export a shared fixture or a
   // `test.extend`, so a changed test file affects its importers too.
@@ -910,9 +916,6 @@ export function classifyResealChange(input: {
   const affected = new Set(testFiles);
   for (const path of [...testFiles, ...candidates]) {
     const isTestFile = testFileSet.has(path);
-    if (!isTestFile && !underTestRoot(path, roots)) {
-      return refuse(`app file changed: ${path}`);
-    }
     // Importers re-run transitively: a shared fixture declared in a
     // helper OR in another spec file reaches every spec that imports it
     // (a helper of a helper counts). A changed test file needs no

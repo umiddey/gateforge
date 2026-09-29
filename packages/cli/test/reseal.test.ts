@@ -585,6 +585,24 @@ describe('test-only re-seal change classification', () => {
     });
   });
 
+  it('names a changed app file before any doubt about an unrelated import', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'backend/tests/test_modules.py': 'import importlib\n\nfor name in NAMES:\n    importlib.import_module(name)\n',
+        'backend/app/invoices.py': 'TOTAL = 1\n',
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles(
+        { 'backend/app/invoices.py': 'TOTAL = 2\n', 'e2e/accounts.spec.ts': `${SPEC}\n// with the app change\n` },
+        'app and test change',
+      );
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.reason).toBe('app file changed: backend/app/invoices.py → changed-scope run');
+    });
+  });
+
   it('reads a byte-order mark before a shebang as an encoding artifact, not a syntax error', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles({
