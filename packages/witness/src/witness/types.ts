@@ -709,6 +709,15 @@ export interface EvidenceAdapter {
   identity?: 'natural-key';
   /** Declares normalized fields the adapter projects for persistence evidence. */
   fields?: readonly string[];
+  /**
+   * Declares fields the SERVER computes on its own (a derived label, a
+   * server-side normalization, a counter). The engine skips the
+   * exact-value echo for exactly these keys and REPORTS the skip — a
+   * server-changed field is a declared fact about the app, never a
+   * silently ignored mismatch. Absent on every hand-written adapter
+   * that does not declare one (the previous behavior, unchanged).
+   */
+  volatileFields?: readonly string[];
   /** Projects the raw body onto {entityId, fields} — stamped from the RESPONSE. */
   normalize: (body: unknown) => { entityId: unknown; fields: unknown };
   /** Removal semantics the adapter's resource uses. */
