@@ -132,6 +132,16 @@ export const EnforcementConfigSchema = z
      * behavior of existing configurations.
      */
     receiptStage: z.enum(['pre-push', 'pre-commit', 'ci']).optional(),
+    /**
+     * ADDITIVE owner switch for the test-only re-seal path: after a
+     * change that touches only test code, `test-gates --changed`
+     * re-runs exactly the affected tests and re-seals a receipt that
+     * carries the rest from the verified parent receipt. ON by default
+     * in standard mode; OFF under strict mode (a strict gate only ever
+     * accepts a whole-suite seal). `false` turns it off explicitly and
+     * restores the pre-existing full-run behavior.
+     */
+    reseal: z.boolean().optional(),
   })
   .strict();
 

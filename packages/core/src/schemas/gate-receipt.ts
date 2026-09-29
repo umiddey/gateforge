@@ -187,6 +187,38 @@ export const GateReceiptSchema = z
     carriedFrom: z.string().regex(/^[0-9a-f]{40}$/, 'carriedFrom must be a 40-char lowercase sha1 hex').optional(),
     /** Digest of the authenticated parent receipt whose proof was carried. */
     parentReceiptDigest: z.string().regex(HEX64, 'parentReceiptDigest must be 64-char lowercase hex').optional(),
+    /**
+     * ADDITIVE test-only re-seal binding: the 64-hex digest of the
+     * VERIFIED parent receipt this run re-sealed from. Equal to
+     * `parentReceiptDigest` (which stays the carried-proof binding) and
+     * present only on a re-sealed receipt — a run that re-ran exactly
+     * the tests a test-only change can affect and carried the rest from
+     * the parent. The recomputation is the consumer's job: CI (and the
+     * broker) diff the two sealed trees themselves and recompute the
+     * classification, never trusting the claimed change class.
+     */
+    resealedFrom: z.string().regex(HEX64, 'resealedFrom must be 64-char lowercase hex').optional(),
+    /**
+     * ADDITIVE: how many test outcomes this receipt carries unchanged
+     * from the parent receipt (digest-bound to the parent's execution
+     * result and evidence attestation). Absent on every other seal.
+     */
+    carriedTests: z.number().int().min(0).optional(),
+    /** ADDITIVE: how many tests this invocation re-ran with fresh evidence. */
+    rerunTests: z.number().int().min(0).optional(),
+    /**
+     * ADDITIVE change classification. Only one value exists today
+     * (`test-only`); a receipt that carries it MUST carry the re-seal
+     * fields above, and a receipt without it carries none of them.
+     */
+    changeClass: z.literal('test-only').optional(),
+    /**
+     * ADDITIVE: the changed repository-relative paths Gateforge itself
+     * computed from the two sealed trees (sorted, duplicate-free) — the
+     * claim CI recomputes. A CI recomputation that differs from this
+     * list rejects the receipt (EVIDENCE_STALE).
+     */
+    changedPaths: z.array(z.string().min(1)).optional(),
     /** 64-hex digest binding the approved engine/policy bundle version. */
     engineBundleDigest: z.string().regex(HEX64, 'engineBundleDigest must be 64-char lowercase hex'),
     /**
@@ -222,6 +254,42 @@ export const GateReceiptSchema = z
         path: ['parentReceiptDigest'],
         message: 'carriedFrom and parentReceiptDigest must be present together',
       });
+    }
+    // Re-seal coherence (fail closed): the re-seal fields stand or fall
+    // together, and a `test-only` change class is a CLAIM a consumer
+    // must recompute — it never certifies itself. A receipt naming some
+    // of them is malformed, never half-believed.
+    const resealFields = [receipt.resealedFrom, receipt.carriedTests, receipt.rerunTests, receipt.changeClass] as const;
+    const presentResealFields = resealFields.filter((field) => field !== undefined).length;
+    if (presentResealFields > 0 && presentResealFields < resealFields.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resealedFrom'],
+        message: 'resealedFrom, carriedTests, rerunTests and changeClass must be present together',
+      });
+      return;
+    }
+    if (presentResealFields === resealFields.length) {
+      if (receipt.resealedFrom !== receipt.parentReceiptDigest) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['resealedFrom'],
+          message: 'resealedFrom must equal the parentReceiptDigest it re-sealed from',
+        });
+        return;
+      }
+      const paths = receipt.changedPaths ?? [];
+      const sortedPaths = [...paths].sort();
+      for (let index = 0; index < paths.length; index += 1) {
+        if (paths[index] !== sortedPaths[index]) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['changedPaths', index],
+            message: "changedPaths must be sorted; expected '" + String(sortedPaths[index]) + "' at index " + String(index),
+          });
+          return;
+        }
+      }
     }
     // Scope/coverage coherence (fail closed): the covered set exists only
     // for changed-scope receipts, and a changed-scope receipt without one
