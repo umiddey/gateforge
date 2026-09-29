@@ -12,12 +12,17 @@
  *   resources that still have none, and probes one GET per adapter
  *   against a running app.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { cpSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withTempRepo } from '@gate-forge/core';
 import { CLASSIFICATION_POLICY_YML, configYml, POLICIES_YML, runCli } from './helpers.js';
+
+/** The shipped example app (documented, transport-only demo). */
+const EXAMPLE_ROOT = fileURLToPath(new URL('../../../example/', import.meta.url));
 
 /** The marker the probe fixture app presents (GF-13). */
 const FINGERPRINT = 'fixture-loopback-v1';
@@ -229,6 +234,38 @@ describe('gateforge adapters scaffold', () => {
   });
 });
 
+describe('gateforge adapters on a fresh example project', () => {
+  it('scaffolds, checks, and leaves the gate green without touching the app', async () => {
+    await withTempRepo({}, async (repo) => {
+      cpSync(EXAMPLE_ROOT, repo.root, {
+        recursive: true,
+        filter: (source) => {
+          const path = relative(EXAMPLE_ROOT, source);
+          return path === '' || (!path.split(sep).includes('.git') && !path.split(sep).includes('node_modules'));
+        },
+      });
+      const init = await runCli(repo, ['init', '--no-ci', '--no-blocking']);
+      expect(init.code, `${init.stdout}\n${init.stderr}`).toBe(0);
+
+      // What the example app actually declares: transport-only HTTP
+      // endpoints, no business table — so there is nothing to generate,
+      // and the command must say exactly that instead of inventing one.
+      const scaffold = await runCli(repo, ['adapters', 'scaffold', '--dry-run'], {
+        GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+      });
+      expect(scaffold.code, `${scaffold.stdout}\n${scaffold.stderr}`).toBe(0);
+      expect(scaffold.stdout).toContain('adapters scaffold: 0 to write, 0 already present, 0 needing a human');
+
+      const check = await runCli(repo, ['adapters', 'check']);
+      expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
+      expect(check.stdout).toContain('0 resource(s) without one');
+
+      const gate = await runCli(repo, ['check']);
+      expect(gate.code, `${gate.stdout}\n${gate.stderr}`).toBe(0);
+    });
+  }, 180_000);
+});
+
 describe('gateforge adapters check', () => {
   it('loads the generated adapter, validates it, and probes it against a running app', async () => {
     await withTempRepo({}, async (repo) => {
@@ -262,6 +299,60 @@ describe('gateforge adapters check', () => {
       expect(check.stdout).toContain('[ok] tenant.accounts /api/accounts');
       expect(check.stdout).toContain("presents the declared fingerprint 'fixture-loopback-v1'");
       expect(check.stdout).not.toContain('[missing]');
+    });
+  });
+
+  it('keeps a seat credential out of the report and the run state', async () => {
+    const secret = 'seat-secret-value-do-not-leak';
+    await withTempRepo({}, async (repo) => {
+      install(repo, PLUGIN_WITH_ROUTES);
+      const scaffold = await runCli(repo, ['adapters', 'scaffold'], {
+        GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+      });
+      expect(scaffold.code, `${scaffold.stdout}\n${scaffold.stderr}`).toBe(0);
+      const generated = readFileSync(repo.path('.gateforge/adapters/tenant.accounts.mjs'), 'utf8');
+      // A reviewed adapter with a login seat whose credential lives only
+      // in the witness environment.
+      repo.writeFiles({
+        '.gateforge/adapters/tenant.accounts.mjs':
+          generated.replace(
+            "  collectionKey: firstArrayOf,",
+            `  collectionKey: firstArrayOf,\n` +
+              `  auth: { kind: 'cookie-login', seats: { seat: { loginPath: '/login',\n` +
+              `    credentials: { password: 'GATEFORGE_TEST_SEAT_PASSWORD' } } } },`,
+          ),
+        'node_modules/@gate-forge/witness/package.json': JSON.stringify({
+          name: '@gate-forge/witness',
+          version: '0.7.1',
+          type: 'module',
+          exports: {
+            './adapter-kit': {
+              import: new URL(
+                '../../../../packages/witness/dist/adapter-kit/index.js',
+                import.meta.url,
+              ).pathname,
+            },
+          },
+        }),
+      });
+      const check = await runCli(repo, ['adapters', 'check', '--probe', '--base-url', appUrl], {
+        GATEFORGE_TEST_SEAT_PASSWORD: secret,
+      });
+      expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
+      const state = repo.path('.gateforge');
+      const files = readdirSync(state, { recursive: true }) as string[];
+      const leaks = files.filter((entry) => {
+        const full = join(state, String(entry));
+        try {
+          return readFileSync(full, 'utf8').includes(secret);
+        } catch {
+          return false;
+        }
+      });
+      // Neither the command output nor any run-state file may carry the
+      // credential: it lives in the witness environment, nowhere else.
+      expect(leaks).toEqual([]);
+      expect(`${check.stdout}\n${check.stderr}`).not.toContain(secret);
     });
   });
 
