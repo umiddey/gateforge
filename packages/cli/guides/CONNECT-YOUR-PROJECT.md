@@ -99,15 +99,27 @@ npx gateforge adapters scaffold --dry-run    # print the plan, write nothing
 
 For every business resource that has no adapter, this writes
 `.gateforge/adapters/<resourceId>.mjs` from what Gateforge already
-knows: the classified identity, the delete semantics, the updateable
-fields, and the GET routes the compiler found.
+knows: the classified identity, the delete semantics the graph can
+prove, every column the graph declares for the table, and the GET
+routes the compiler found.
 
 - It **never overwrites** an existing adapter.
 - Every guess is listed in the file's own header comment. Read it.
+- `fields` is every declared column except the primary key (that IS
+  the id) and credential-shaped columns; the header names what it
+  left out, so adding a field back is one line.
+- `deletion` follows the graph's own soft-delete signal. When the
+  graph proves nothing but the table carries a typical soft-delete
+  column, the value is a guess and **needs you** says which column
+  raised the question.
+- A per-parent route (`/contracts/{contractId}/invoices`) is never
+  taken as the collection, and never as a by-id read of the resource:
+  when only those exist, it asks you for `listPath` instead.
 - Anything it will not guess is printed under **needs you**, with the
   reason: no read route, a composite key, no collection route (a create
   cannot be witnessed without one), a path no schema or handler evidence
-  links to the resource, or an unknown target fingerprint.
+  links to the resource, no projectable columns, or an unknown target
+  fingerprint.
 
 A generated adapter is a **starting point, not proof**. The gate grades
 it exactly like a hand-written one.
