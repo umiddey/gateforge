@@ -32,7 +32,7 @@ import {
   type TestCatalog,
   testOutcomesDigestOf,
 } from '@gate-forge/core';
-import { classifyResealChange, diffSealedTrees } from './reseal.js';
+import { classifyResealChange, diffSealedTrees, resealRefusalVerdict } from './reseal.js';
 import { readStateDocument } from './state.js';
 import { verifyGateReceiptWithKeyring, verifyRunRecordWithKeyring, type VerifierKeyring } from './verifier-keys.js';
 
@@ -399,7 +399,7 @@ export function resealChainBlocking(input: {
       testFiles: [...new Set(catalog.entries.map((entry) => entry.file))],
     });
     if (!classification.eligible) {
-      return stale(`re-sealed receipt does not recompute: ${String(classification.reason)}`);
+      return stale(`re-sealed receipt does not recompute: ${resealRefusalVerdict(classification.reason)}`);
     }
     const affected = new Set(classification.affectedTestFiles);
     const freshFiles = new Set(currentExecution.outcomes.map((outcome) => outcome.file));

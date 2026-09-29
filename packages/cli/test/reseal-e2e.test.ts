@@ -79,7 +79,7 @@ describe('test-only re-seal (real CLI, end to end)', () => {
       expect(existsSync(join(stateDir, 'run-record.json'))).toBe(false);
 
       const refused = await changeOneSpecAndReseal(repo, env, { expectReseal: false });
-      expect(refused.stderr).toContain('the re-seal path is off (`enforcement.reseal` is not true) → full run');
+      expect(refused.stderr).toContain('the re-seal path is off (`enforcement.reseal` is not true) → changed-scope run');
       expect(refused.stderr).not.toContain('only test files changed');
       // The refused re-seal falls through to the ordinary changed-scope
       // path, which seals nothing here (E07: no stale proof survives),
@@ -143,7 +143,7 @@ describe('test-only re-seal from a RUN RECORD (a failed parent run)', () => {
       repo.commitFiles({ 'e2e/orders.spec.mjs': `${SPECS['e2e/orders.spec.mjs'] as string}// touched\n` }, 'touch one spec');
       const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
       expect(resealed.stderr).toContain(
-        "the previous run's test playwright:chromium:e2e/accounts.spec.mjs:reads an account failed outside the affected set → full run",
+        "the previous run's test playwright:chromium:e2e/accounts.spec.mjs:reads an account failed outside the affected set → changed-scope run",
       );
       expect(resealed.stderr).not.toContain('only test files changed');
       expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);

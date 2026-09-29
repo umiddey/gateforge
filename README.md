@@ -89,9 +89,11 @@ gateforge test-gates --changed --scope changed
 
 Gateforge diffs the two sealed trees itself, classifies every changed path
 from the runner's catalog and the import graph (test files and test
-helpers only; importers of a changed file re-run too), and takes the full
-run with one plain reason line for anything else — app code, a deleted
-file, a setup-stage test, an unresolvable import. A whole-suite run that
+helpers only; importers of a changed file re-run too, and a dynamic
+import with a literal specifier is an ordinary edge), and otherwise falls
+back to the plain changed-scope run with one reason line — app code, a
+deleted file, a setup-stage test, a computed or unresolvable import.
+A whole-suite run that
 failed a test seals no receipt, so it leaves a MAC'd run record instead
 and the same command re-seals from it. The chain is bounded at five
 consecutive re-seals, and `check --require-e2e` and `broker commit`

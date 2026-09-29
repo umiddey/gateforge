@@ -314,25 +314,34 @@ affected tests witnessed, like any other run. Eligible:
   transitively.
 
 Everything else — app code, runner config, `package.json`, lockfiles,
-seed data, `.env`, `.gateforge/**`, generated files, docs — takes the full
-run, as does a setup or dependency-stage test file (it changes every
-dependent test without an import edge) and any import the graph cannot
-resolve. A refused re-seal prints **one plain reason line** and the run
-proceeds through the unchanged path; the lines are verbatim:
+seed data, `.env`, `.gateforge/**`, generated files, docs — is not
+eligible, and neither is a setup or dependency-stage test file (it
+changes every dependent test without an import edge) or any import the
+graph cannot resolve. A **literal** dynamic import is an ordinary
+import edge, not a computed one: `import('./x.mjs')`, `import("./x.mjs")`,
+`` import(`./x.mjs`) ``, `require('./x')`, `importlib.import_module('x')`
+and `__import__('x')` all resolve like a static import, so the file that
+loads the module is an ordinary importer. A **computed** specifier — a
+variable, a concatenation, a template with `${…}` — refuses the re-seal.
+
+A refused re-seal prints **one plain reason line** naming the path and
+the step that actually follows: the run takes the ordinary
+**changed-scope** path (the only scope in which a re-seal is attempted),
+so every line ends in `→ changed-scope run`. The lines are verbatim:
 
 ```text
-app file changed: backend/app/invoices.py → full run
-app file changed: e2e/support/fixtures.ts is imported by no test file, so it is not a test helper → full run
-app file changed: e2e/support/fixtures.ts imports the changed test helper e2e/support/api.ts → full run
-app file deleted: e2e/journeys/legacy.spec.ts → full run
-setup test changed: e2e/global-setup.spec.ts → full run
-setup test changed: e2e/accounts.spec.ts (the runner config declares a dependency project whose tests cannot be resolved) → full run
-unresolvable import: e2e/accounts.spec.ts → ./load-fixture → full run
-unresolvable import: e2e/support/api.ts loads a module through a computed specifier → full run
-the sealed trees could not be diffed (a1b2c3d → e4f5a6b) → full run
-the sealed trees are identical, so there is nothing to classify → full run
-the re-seal path is off (`enforcement.reseal` is not true) → full run
-the run state already retains 5 consecutive re-seals, the bound this path may chain to → full run
+app file changed: backend/app/invoices.py → changed-scope run
+app file changed: e2e/support/fixtures.ts is imported by no test file, so it is not a test helper → changed-scope run
+app file changed: e2e/support/fixtures.ts imports the changed test helper e2e/support/api.ts → changed-scope run
+app file deleted: e2e/journeys/legacy.spec.ts → changed-scope run
+setup test changed: e2e/global-setup.spec.ts → changed-scope run
+setup test changed: e2e/accounts.spec.ts (the runner config declares a dependency project whose tests cannot be resolved) → changed-scope run
+unresolvable import: e2e/accounts.spec.ts → ./load-fixture → changed-scope run
+unresolvable import: e2e/support/api.ts loads a module through a computed specifier → changed-scope run
+the sealed trees could not be diffed (a1b2c3d → e4f5a6b) → changed-scope run
+the sealed trees are identical, so there is nothing to classify → changed-scope run
+the re-seal path is off (`enforcement.reseal` is not true) → changed-scope run
+the run state already retains 5 consecutive re-seals, the bound this path may chain to → changed-scope run
 ```
 
 **The run that failed.** A complete whole-suite supervised run seals a
@@ -350,10 +359,10 @@ inside the affected set (the change must have touched it) and must pass
 now. Otherwise:
 
 ```text
-the previous run's test playwright:chromium:e2e/checkout.spec.ts:checks out failed outside the affected set → full run
-the previous run's test playwright:chromium:e2e/legacy.spec.ts:old journey no longer exists and no changed file explains it → full run
-the previous receipt sealed a slice, not a whole-suite run → full run
-the previous receipt graded 561 obligation(s) while this candidate declares 563 → full run
+the previous run's test playwright:chromium:e2e/checkout.spec.ts:checks out failed outside the affected set → changed-scope run
+the previous run's test playwright:chromium:e2e/legacy.spec.ts:old journey no longer exists and no changed file explains it → changed-scope run
+the previous receipt sealed a slice, not a whole-suite run → changed-scope run
+the previous receipt graded 561 obligation(s) while this candidate declares 563 → changed-scope run
 ```
 
 

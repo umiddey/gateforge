@@ -197,23 +197,72 @@ const STATIC_IMPORT_PATTERNS: readonly RegExp[] = [
   /^\s*from\s+([\w.]+)\s+import\b/gm,
   /^\s*from\s+(\.[\w.]*)\s+import\b/gm,
 ];
-const DYNAMIC_IMPORT_PATTERNS: readonly RegExp[] = [
-  /\bimport\s*\(/,
-  /\brequire\s*\(\s*(?!['"])/,
-  /\bimportlib\.import_module\s*\(/,
-  /\b__import__\s*\(/,
+/**
+ * One module-loading call form: the head that locates the call, and
+ * the same call with a single string-literal argument. A literal
+ * specifier is fixed at parse time, so the call is an ordinary import
+ * edge; anything else (a variable, a concatenation, a template with
+ * `${…}`) is computed and refuses the re-seal.
+ */
+const MODULE_CALLS: readonly { head: RegExp; literal: RegExp }[] = [
+  {
+    head: /\bimport\s*\(/g,
+    literal: /\bimport\s*\(\s*(?:(['"])([^'"\n]*)\1|`([^`$\n]*)`)\s*\)/,
+  },
+  {
+    head: /\brequire\s*\(/g,
+    literal: /\brequire\s*\(\s*(?:(['"])([^'"\n]*)\1|`([^`$\n]*)`)\s*\)/,
+  },
+  {
+    head: /\bimportlib\s*\.\s*import_module\s*\(/g,
+    literal: /\bimportlib\s*\.\s*import_module\s*\(\s*(?:(['"])([^'"\n]*)\1|`([^`$\n]*)`)\s*\)/,
+  },
+  {
+    head: /\b__import__\s*\(/g,
+    literal: /\b__import__\s*\(\s*(?:(['"])([^'"\n]*)\1|`([^`$\n]*)`)\s*\)/,
+  },
 ];
+
+/**
+ * The suffix every refusal line ends with. The re-seal path is
+ * attempted only under `--scope changed`, so the only thing a refusal
+ * ever changes is that this run takes the ordinary CHANGED-SCOPE path
+ * (three tests, `scope: changed` receipt) — never a full run.
+ */
+export const RESEAL_REFUSAL_SUFFIX = '→ changed-scope run';
+
+/** One plain reason line, ending in what this run actually does next. */
+export function resealRefusal(reason: string): string {
+  return `${reason} ${RESEAL_REFUSAL_SUFFIX}`;
+}
+
+/** The same reason without the suffix, for a recomputation verdict. */
+export function resealRefusalVerdict(reason: string | null): string {
+  return String(reason).replace(new RegExp(` ${RESEAL_REFUSAL_SUFFIX}$`), '');
+}
 
 /** Parses one file's import statements out of its bytes. */
 function parseTrackedFile(path: string, source: string): TrackedFile {
   const imports: ImportRef[] = [];
-  const patterns = extname(path) === '.py' ? STATIC_IMPORT_PATTERNS.slice(3) : STATIC_IMPORT_PATTERNS.slice(0, 3);
+  const isPython = extname(path) === '.py';
+  const patterns = isPython ? STATIC_IMPORT_PATTERNS.slice(3) : STATIC_IMPORT_PATTERNS.slice(0, 3);
   for (const pattern of patterns) {
     for (const match of source.matchAll(pattern)) {
       if (match[1] !== undefined) imports.push({ specifier: match[1] });
     }
   }
-  return { path, imports, dynamic: DYNAMIC_IMPORT_PATTERNS.some((pattern) => pattern.test(source)) };
+  // A literal argument is a normal edge; the backtick alternative
+  // excludes `$`, so an interpolated template never matches it.
+  let dynamic = false;
+  for (const call of MODULE_CALLS.slice(isPython ? 2 : 0, isPython ? 4 : 2)) {
+    for (const match of source.matchAll(call.head)) {
+      const literal = call.literal.exec(source.slice(match.index));
+      const specifier = literal?.[2] ?? literal?.[3];
+      if (literal === null || specifier === undefined) dynamic = true;
+      else imports.push({ specifier });
+    }
+  }
+  return { path, imports, dynamic };
 }
 
 /**
@@ -571,7 +620,7 @@ export function classifyResealChange(input: {
   const changedPaths = (changed ?? []).map((entry) => entry.path);
   const refuse = (reason: string): ResealChangeClassification => ({
     eligible: false,
-    reason,
+    reason: resealRefusal(reason),
     changedPaths,
     testFiles: [],
     helperFiles: [],
@@ -579,11 +628,11 @@ export function classifyResealChange(input: {
   });
   if (changed === null) {
     return refuse(
-      `the sealed trees could not be diffed (${input.parentTreeId} → ${input.currentTreeId}) → full run`,
+      `the sealed trees could not be diffed (${input.parentTreeId} → ${input.currentTreeId})`,
     );
   }
   if (changed.length === 0) {
-    return refuse('the sealed trees are identical, so there is nothing to classify → full run');
+    return refuse('the sealed trees are identical, so there is nothing to classify');
   }
   const testFileSet = new Set(input.testFiles);
   const roots = testRoots(input.testFiles);
@@ -593,7 +642,7 @@ export function classifyResealChange(input: {
   // app code by definition and its importers break at run time.
   for (const entry of changed) {
     if (entry.status === 'D' && !testFileSet.has(entry.path)) {
-      return refuse(`app file deleted: ${entry.path} → full run`);
+      return refuse(`app file deleted: ${entry.path}`);
     }
   }
   // A setup/dependency test file changes every dependent test without an
@@ -605,13 +654,13 @@ export function classifyResealChange(input: {
     const first = testFiles[0];
     if (first !== undefined) {
       return refuse(
-        `setup test changed: ${first} (the runner config declares a dependency project whose tests cannot be resolved) → full run`,
+        `setup test changed: ${first} (the runner config declares a dependency project whose tests cannot be resolved)`,
       );
     }
   } else {
     const setup = testFiles.find((file) => stage.files.includes(file));
     if (setup !== undefined) {
-      return refuse(`setup test changed: ${setup} → full run`);
+      return refuse(`setup test changed: ${setup}`);
     }
   }
   const candidates = changed.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);
@@ -621,12 +670,12 @@ export function classifyResealChange(input: {
   // Any doubt the graph cannot resolve refuses the whole re-seal.
   const sources = trackedSources(input.gitDir, input.env, input.currentTreeId);
   if (sources === null) {
-    return refuse(`the sealed tree's import graph could not be read (${input.currentTreeId}) → full run`);
+    return refuse(`the sealed tree's import graph could not be read (${input.currentTreeId})`);
   }
   const dynamicFile = sources.find((file) => file.dynamic);
   if (dynamicFile !== undefined) {
     return refuse(
-      `unresolvable import: ${dynamicFile.path} loads a module through a computed specifier → full run`,
+      `unresolvable import: ${dynamicFile.path} loads a module through a computed specifier`,
     );
   }
   const aliases = pathAliases(input.cwd);
@@ -654,7 +703,7 @@ export function classifyResealChange(input: {
         (reference) => resolutionCandidates(file.path, reference.specifier, aliases) === null,
       );
       return refuse(
-        `unresolvable import: ${file.path} → ${unresolvable?.specifier ?? '?'} → full run`,
+        `unresolvable import: ${file.path} → ${unresolvable?.specifier ?? '?'}`,
       );
     }
     for (const candidates of resolved) {
@@ -670,7 +719,7 @@ export function classifyResealChange(input: {
   for (const path of [...testFiles, ...candidates]) {
     const isTestFile = testFileSet.has(path);
     if (!isTestFile && !underTestRoot(path, roots)) {
-      return refuse(`app file changed: ${path} → full run`);
+      return refuse(`app file changed: ${path}`);
     }
     // Importers re-run transitively: a shared fixture declared in a
     // helper OR in another spec file reaches every spec that imports it
@@ -686,13 +735,13 @@ export function classifyResealChange(input: {
         if (testFileSet.has(file)) affected.add(file);
         else if (!underTestRoot(file, roots)) {
           return refuse(
-            `app file changed: ${file} imports the changed ${isTestFile ? 'test file' : 'test helper'} ${path} → full run`,
+            `app file changed: ${file} imports the changed ${isTestFile ? 'test file' : 'test helper'} ${path}`,
           );
         } else queue.push(file);
       }
     }
     if (!isTestFile && seen.size === 0) {
-      return refuse(`app file changed: ${path} is imported by no test file, so it is not a test helper → full run`);
+      return refuse(`app file changed: ${path} is imported by no test file, so it is not a test helper`);
     }
     if (!isTestFile) helperFiles.push(path);
   }

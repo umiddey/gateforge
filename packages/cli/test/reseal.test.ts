@@ -90,7 +90,7 @@ describe('test-only re-seal change classification', () => {
       );
       const classification = classify(repo, parent, treeOf(repo));
       expect(classification.eligible).toBe(false);
-      expect(classification.reason).toBe('app file changed: src/accounts.ts → full run');
+      expect(classification.reason).toBe('app file changed: src/accounts.ts → changed-scope run');
       expect(classification.affectedTestFiles).toEqual([]);
     });
   });
@@ -123,7 +123,7 @@ describe('test-only re-seal change classification', () => {
       const classification = classify(repo, parent, treeOf(repo));
       expect(classification.eligible).toBe(false);
       expect(classification.reason).toBe(
-        'unresolvable import: e2e/dynamic.spec.ts loads a module through a computed specifier → full run',
+        'unresolvable import: e2e/dynamic.spec.ts loads a module through a computed specifier → changed-scope run',
       );
     });
   });
@@ -140,7 +140,7 @@ describe('test-only re-seal change classification', () => {
       const classification = classify(repo, parent, treeOf(repo));
       expect(classification.eligible).toBe(false);
       expect(classification.reason).toBe(
-        'app file changed: src/helper-consumer.ts imports the changed test helper e2e/helper.ts → full run',
+        'app file changed: src/helper-consumer.ts imports the changed test helper e2e/helper.ts → changed-scope run',
       );
     });
   });
@@ -154,7 +154,7 @@ describe('test-only re-seal change classification', () => {
       const classification = classify(repo, parent, treeOf(repo));
       expect(classification.eligible).toBe(false);
       expect(classification.reason).toBe(
-        'app file changed: e2e/orphan.ts is imported by no test file, so it is not a test helper → full run',
+        'app file changed: e2e/orphan.ts is imported by no test file, so it is not a test helper → changed-scope run',
       );
     });
   });
@@ -202,7 +202,7 @@ describe('test-only re-seal change classification', () => {
       const classification = classify(repo, parent, treeOf(repo));
       expect(classification.eligible).toBe(false);
       expect(classification.reason).toBe(
-        'unresolvable import: e2e/dynamic.spec.ts loads a module through a computed specifier → full run',
+        'unresolvable import: e2e/dynamic.spec.ts loads a module through a computed specifier → changed-scope run',
       );
     });
   });
@@ -251,7 +251,7 @@ describe('test-only re-seal change classification', () => {
       repo.git(['rm', 'src/accounts.ts']);
       const deletedApp = classify(repo, parent, treeOf(repo));
       expect(deletedApp.eligible).toBe(false);
-      expect(deletedApp.reason).toBe('app file deleted: src/accounts.ts → full run');
+      expect(deletedApp.reason).toBe('app file deleted: src/accounts.ts → changed-scope run');
     });
   });
 
@@ -263,7 +263,7 @@ describe('test-only re-seal change classification', () => {
       const classification = classify(repo, tree, tree);
       expect(classification.eligible).toBe(false);
       expect(classification.reason).toBe(
-        'the sealed trees are identical, so there is nothing to classify → full run',
+        'the sealed trees are identical, so there is nothing to classify → changed-scope run',
       );
     });
   });
@@ -302,7 +302,7 @@ describe('test-only re-seal change classification', () => {
       repo.commitFiles({ 'e2e/auth.setup.ts': `${files['e2e/auth.setup.ts']}\n// a fix\n` }, 'setup fix');
       const classification = classify(repo, parent, treeOf(repo), catalog);
       expect(classification.eligible).toBe(false);
-      expect(classification.reason).toBe('setup test changed: e2e/auth.setup.ts → full run');
+      expect(classification.reason).toBe('setup test changed: e2e/auth.setup.ts → changed-scope run');
     });
   });
 
@@ -321,7 +321,7 @@ describe('test-only re-seal change classification', () => {
       );
       const classification = classify(repo, parent, treeOf(repo), catalog);
       expect(classification.eligible).toBe(false);
-      expect(classification.reason).toBe('setup test changed: e2e/global-setup.ts → full run');
+      expect(classification.reason).toBe('setup test changed: e2e/global-setup.ts → changed-scope run');
     });
   });
 
@@ -344,7 +344,114 @@ describe('test-only re-seal change classification', () => {
       const classification = classify(repo, parent, treeOf(repo), catalog);
       expect(classification.eligible).toBe(false);
       expect(classification.reason).toBe(
-        'setup test changed: e2e/accounts.spec.ts (the runner config declares a dependency project whose tests cannot be resolved) → full run',
+        'setup test changed: e2e/accounts.spec.ts (the runner config declares a dependency project whose tests cannot be resolved) → changed-scope run',
+      );
+    });
+  });
+
+  it('reads a literal dynamic import as an ordinary import edge', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        // The consumer shape: a tracked file loads its sibling through
+        // a LITERAL dynamic import, in each quoting form. The specifier
+        // is fixed at parse time, so the edge is an ordinary one and
+        // its importers re-run like any importer's.
+        'e2e/lazy.ts': [
+          "export const single = () => import('./helper.js');",
+          'export const double = () => import("./helper.js");',
+          'export const template = () => import(`./helper.js`);',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/helper.ts': 'export const amount = () => 5;\n' }, 'fix the helper');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(true);
+      expect(classification.helperFiles).toEqual(['e2e/helper.ts']);
+      expect(classification.affectedTestFiles).toEqual(TEST_FILES);
+    });
+  });
+
+  it('reads a literal Python importlib call as an ordinary import edge', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/pyloads.py': [
+          'import importlib',
+          'import os',
+          '',
+          'def load():',
+          "    return importlib.import_module('os').path",
+          '',
+          'def built_in():',
+          "    return __import__('os').path",
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(true);
+      expect(classification.affectedTestFiles).toEqual(['e2e/accounts.spec.ts']);
+    });
+  });
+
+  it('refuses a variable specifier, naming the file that computes it', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/computed.ts': "export const load = (name) => import(name);\n",
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'unresolvable import: e2e/computed.ts loads a module through a computed specifier → changed-scope run',
+      );
+    });
+  });
+
+  it('refuses an interpolated template specifier', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/interpolated.ts': 'export const load = (name) => import(`./${name}.js`);\n',
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'unresolvable import: e2e/interpolated.ts loads a module through a computed specifier → changed-scope run',
+      );
+    });
+  });
+
+  it('refuses a Python importlib call whose module name is computed', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/pycomputed.py': [
+          'import importlib',
+          '',
+          'def load(name):',
+          '    return importlib.import_module(name)',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'unresolvable import: e2e/pycomputed.py loads a module through a computed specifier → changed-scope run',
       );
     });
   });

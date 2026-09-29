@@ -257,7 +257,7 @@ describe('test-only re-seal decision', () => {
         enabled: true,
       });
       expect(decision.plan).toBeNull();
-      expect(decision.reason).toBe('setup test changed: e2e/auth.setup.ts → full run');
+      expect(decision.reason).toBe('setup test changed: e2e/auth.setup.ts → changed-scope run');
     });
   });
 
@@ -277,7 +277,7 @@ describe('test-only re-seal decision', () => {
         enabled: true,
       });
       expect(decision.plan).toBeNull();
-      expect(decision.reason).toBe('app file changed: src/accounts.ts → full run');
+      expect(decision.reason).toBe('app file changed: src/accounts.ts → changed-scope run');
     });
   });
 
@@ -301,7 +301,7 @@ describe('test-only re-seal decision', () => {
       });
       expect(decision.plan).toBeNull();
       expect(decision.reason).toBe(
-        `the previous receipt's test ${ORDERS_KEY} did not pass outside the affected set → full run`,
+        `the previous receipt's test ${ORDERS_KEY} did not pass outside the affected set → changed-scope run`,
       );
     });
   });
@@ -324,7 +324,7 @@ describe('test-only re-seal decision', () => {
       });
       expect(decision.plan).toBeNull();
       expect(decision.reason).toBe(
-        `the previous receipt's test ${ORDERS_KEY} no longer exists and no changed file explains it → full run`,
+        `the previous receipt's test ${ORDERS_KEY} no longer exists and no changed file explains it → changed-scope run`,
       );
     });
   });
@@ -347,7 +347,7 @@ describe('test-only re-seal decision', () => {
       const parent = receiptParent(parentTree, parentExecution(PASSED));
       expect(decideTestOnlyReseal({ ...base, parent, enabled: false })).toEqual({
         plan: null,
-        reason: 'the re-seal path is off (`enforcement.reseal` is not true) → full run',
+        reason: 'the re-seal path is off (`enforcement.reseal` is not true) → changed-scope run',
       });
       expect(
         decideTestOnlyReseal({
@@ -361,7 +361,7 @@ describe('test-only re-seal decision', () => {
             }),
           },
         }).reason,
-      ).toBe('the previous receipt sealed a slice, not a whole-suite run → full run');
+      ).toBe('the previous receipt sealed a slice, not a whole-suite run → changed-scope run');
       expect(
         decideTestOnlyReseal({
           ...base,
@@ -370,7 +370,7 @@ describe('test-only re-seal decision', () => {
             receipt: parentReceipt({ candidateTreeId: parentTree, verdictSummary: { total: 1, satisfied: 1, waived: 0, blocking: 0 } }),
           },
         }).reason,
-      ).toBe('the previous receipt graded 1 obligation(s) while this candidate declares 2 → full run');
+      ).toBe('the previous receipt graded 1 obligation(s) while this candidate declares 2 → changed-scope run');
     });
   });
 
@@ -432,7 +432,7 @@ describe('test-only re-seal decision', () => {
       });
       expect(decision.plan).toBeNull();
       expect(decision.reason).toBe(
-        `the previous run's test ${ACCOUNTS_KEY} failed outside the affected set → full run`,
+        `the previous run's test ${ACCOUNTS_KEY} failed outside the affected set → changed-scope run`,
       );
     });
   });

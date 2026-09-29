@@ -170,7 +170,13 @@ import {
 import { findRunnerConfigPath, mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { loadReceiptFor, receiptScope, tryReuseReceipt, type ReceiptLoad } from '../receipts.js';
-import { carryDiffIsWithinScope, classifyResealChange, type ResealChangeClassification } from '../reseal.js';
+import {
+  carryDiffIsWithinScope,
+  classifyResealChange,
+  RESEAL_REFUSAL_SUFFIX,
+  resealRefusal,
+  type ResealChangeClassification,
+} from '../reseal.js';
 import {
   clearResealChain,
   RESEAL_CHAIN_MAX_HOPS,
@@ -1379,19 +1385,20 @@ export function decideTestOnlyReseal(input: {
   if (!input.enabled) {
     return {
       plan: null,
-      reason: 'the re-seal path is off (`enforcement.reseal` is not true) → full run',
+      reason: resealRefusal('the re-seal path is off (`enforcement.reseal` is not true)'),
     };
   }
   if (parent.kind === 'receipt' && parent.receipt !== null) {
     if (receiptScope(parent.receipt) !== 'full') {
-      return { plan: null, reason: 'the previous receipt sealed a slice, not a whole-suite run → full run' };
+      return { plan: null, reason: resealRefusal('the previous receipt sealed a slice, not a whole-suite run') };
     }
     if (parent.receipt.verdictSummary.total !== input.obligations.length) {
       return {
         plan: null,
-        reason:
+        reason: resealRefusal(
           `the previous receipt graded ${String(parent.receipt.verdictSummary.total)} obligation(s) ` +
-          `while this candidate declares ${String(input.obligations.length)} → full run`,
+          `while this candidate declares ${String(input.obligations.length)}`,
+        ),
       };
     }
   } else if (parent.execution.planned.length === 0) {
@@ -1399,7 +1406,7 @@ export function decideTestOnlyReseal(input: {
     // describes actually planned the suite. Obligations cannot have
     // drifted under it either: the record binds the trusted policy and
     // the owner-approved policy digest this run is pinned to.
-    return { plan: null, reason: "the previous run's record planned no test, so it proves no whole-suite run → full run" };
+    return { plan: null, reason: resealRefusal("the previous run's record planned no test, so it proves no whole-suite run") };
   }
   const classification = classifyResealChange({
     gitDir: input.gitDir,
@@ -1423,9 +1430,10 @@ export function decideTestOnlyReseal(input: {
     if (catalogKeys.has(planned.logicalKey) || changedFiles.has(planned.file)) continue;
     return {
       plan: null,
-      reason:
+      reason: resealRefusal(
         `the previous ${previousRun ? 'run' : 'receipt'}'s test ${planned.logicalKey} no longer exists and ` +
-        'no changed file explains it → full run',
+        'no changed file explains it',
+      ),
     };
   }
   const statusByKey = new Map(parent.execution.outcomes.map((outcome) => [outcome.logicalKey, outcome.status]));
@@ -1438,8 +1446,8 @@ export function decideTestOnlyReseal(input: {
         // parent can only fail this rule on a doctored outcome; a run
         // record fails it the ordinary way, one test that did not pass.
         reason: previousRun
-          ? `the previous run's test ${planned.logicalKey} failed outside the affected set → full run`
-          : `the previous receipt's test ${planned.logicalKey} did not pass outside the affected set → full run`,
+          ? resealRefusal(`the previous run's test ${planned.logicalKey} failed outside the affected set`)
+          : resealRefusal(`the previous receipt's test ${planned.logicalKey} did not pass outside the affected set`),
       };
     }
   }
@@ -2152,9 +2160,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         resealChainHopCount(stateDir) >= RESEAL_CHAIN_MAX_HOPS
           ? {
               plan: null,
-              reason:
+              reason: resealRefusal(
                 `the run state already retains ${String(RESEAL_CHAIN_MAX_HOPS)} consecutive re-seals, the ` +
-                'bound this path may chain to → full run',
+                'bound this path may chain to',
+              ),
             }
           : decideTestOnlyReseal({
               io,
@@ -2179,7 +2188,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       ) {
         writeLine(
           io.stderr,
-          `test-gates: the previous run cannot be re-sealed from: ${reSealParentLookup.reason} → changed-scope run`,
+          `test-gates: the previous run cannot be re-sealed from: ${reSealParentLookup.reason} ${RESEAL_REFUSAL_SUFFIX}`,
         );
       }
       reSealPlan = reSeal.plan;
