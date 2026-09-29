@@ -800,6 +800,14 @@ export { evaluateObligation } from './verdict/index.js';
  */
 export { evaluateObligations } from './verdict/index.js';
 
+/**
+ * Declared server-computed fields (E18a): the adapter's `volatileFields`
+ * as the witness stamped them onto a persistence record, and the
+ * entered keys the exact-value echo therefore skipped. Reports surface
+ * every skip — a declared skip is never a silent one.
+ */
+export { volatileFieldsOf, volatileEchoSkips } from './verdict/index.js';
+
 /** The five gate-blocking verdicts (`satisfied`/`waived` are clean). */
 export { BLOCKING_VERDICTS } from './verdict/index.js';
 export {

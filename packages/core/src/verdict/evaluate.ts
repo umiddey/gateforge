@@ -550,7 +550,14 @@ function exactValueEchoFailure(
       `'${operation}' input against`
     );
   }
+  // Declared volatile fields (E18a): the adapter states that the server
+  // computes these keys itself, so the entered value is not expected to
+  // survive. That is a DECLARED fact about the app, never a silently
+  // ignored mismatch: every skip is reported (volatileEchoSkips) and
+  // surfaces as a report advisory.
+  const volatile = volatileFieldsOf(persistenceRecord);
   for (const key of Object.keys(entered).sort()) {
+    if (volatile.includes(key)) continue;
     const enteredValue = entered[key];
     if (!isJsonValue(enteredValue)) continue;
     const persistedValue = persisted[key];
@@ -565,6 +572,55 @@ function exactValueEchoFailure(
     }
   }
   return null;
+}
+
+/**
+ * The volatile field keys a persistence record's adapter DECLARED
+ * (adapter `volatileFields`, stamped into the record payload by the
+ * witness). An adapter that declares none behaves exactly as before:
+ * the exact-value echo applies to every entered key.
+ *
+ * Args:
+ *   record: a witnessed persistence record.
+ *
+ * Returns:
+ *   string[]: the declared keys, sorted and deduplicated.
+ */
+export function volatileFieldsOf(record: RecordLike): string[] {
+  const declared = payloadOf(record)?.['volatileFields'];
+  if (!Array.isArray(declared)) return [];
+  const seen: Record<string, true> = {};
+  for (const key of declared) {
+    if (typeof key === 'string' && key.length > 0) seen[key] = true;
+  }
+  return Object.keys(seen).sort(compareStrings);
+}
+
+/**
+ * The entered keys the echo check SKIPPED because the adapter declared
+ * them volatile, with the values the engine actually observed. The
+ * caller turns this into a visible report note — a skip is a fact the
+ * owner must see, never a quietly dropped mismatch.
+ *
+ * Args:
+ *   actionRecord: the witnessed UI-action record (entered values).
+ *   persistenceRecord: the matched persistence record (observed values).
+ *
+ * Returns:
+ *   Array<{field: string, entered: unknown, persisted: unknown}>: one
+ *   entry per declared-volatile key the journey actually entered.
+ */
+export function volatileEchoSkips(
+  actionRecord: RecordLike,
+  persistenceRecord: RecordLike,
+): Array<{ field: string; entered: unknown; persisted: unknown }> {
+  const entered = payloadOf(actionRecord)?.['fields'];
+  if (!isPlainObject(entered)) return [];
+  const persisted = payloadOf(persistenceRecord)?.['fields'];
+  const observed = isPlainObject(persisted) ? persisted : {};
+  return volatileFieldsOf(persistenceRecord)
+    .filter((field) => isJsonValue(entered[field]))
+    .map((field) => ({ field, entered: entered[field], persisted: observed[field] ?? null }));
 }
 
 /**
@@ -601,7 +657,11 @@ function observedEchoFailure(
       `'${operation}' request against`
     );
   }
+  // Same declared-volatile rule as the UI-action echo (E18a): a key the
+  // adapter declares server-computed is not expected to echo back.
+  const volatile = volatileFieldsOf(record);
   for (const key of Object.keys(observed).sort()) {
+    if (volatile.includes(key)) continue;
     const observedValue = observed[key];
     if (!isJsonValue(observedValue)) continue;
     const persistedValue = persisted[key];
