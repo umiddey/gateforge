@@ -257,6 +257,63 @@ records into the new format. Details and migration notes live in
 [`packages/cli/README.md`](packages/cli/README.md) (test-gates
 protocol + Layer 2).
 
+## Running in CI
+
+A long witnessed run used to be a blank CI screen. The runner log does
+carry the app env, the request bodies and the seed credentials, so the
+job redirects it to a private file — and then nothing distinguishes a
+healthy 45-minute run from a hung one.
+
+`gateforge test-gates` now prints a progress stream of its own:
+
+```
+gateforge: run started — 563 tests expected (runner playwright, scope full)
+gateforge: ✓ 214/563 Accounts > creates an account
+gateforge: ✘ 215/563 Accounts > archives the account — Expected: 200
+gateforge: alive — 214/563 done, 3 running, 12m04s elapsed
+gateforge: run finished — 561 passed, 1 failed, 1 skipped in 44m05s; grading…
+```
+
+It is on automatically under `CI=true` and off everywhere else, so a
+local run's output is unchanged. `--progress stderr|file:<path>|off`, and
+the `run.progress` config key, say so explicitly; an unusable target is a
+usage error, never a silently dropped stream.
+
+**Why it is safe to show.** The stream is built from witness-side facts
+only — how many tests were registered before the run, which test the
+supervisor has open, its title as declared in the committed catalog, and
+its outcome. It never reads, filters, or tails runner output, so no
+secret can reach it by construction: a filter over secret text is not
+secret-free. The one runtime value it carries is a failing test's first
+error line, and that is matched against credential shapes and REPLACED
+whole (a prefix of a secret is a secret) — the line becomes
+`(message withheld: looks like a secret)`, and a title that itself looks
+like a secret is replaced by its own digest. The stream decides nothing:
+it is not evidence, no gate reads it, and a write failure is reported
+once and then ignored.
+
+**Failing tests in CI.** A red witnessed test used to ship nothing but a
+browser snapshot. Its error message and a short `file:line` stack now
+land in `.gateforge/test-gates/failures.json`, behind the same guard, so
+a job never has to publish the runner log to explain a failure. Request
+and response bodies are never included.
+
+**Two numbers, one meaning.** Reports used to print
+`repository debt: 192 blocking` next to a gate line that said zero
+blockers: both were true and neither was actionable. `repositoryDebt`
+gained `baselined` and `newlyBlocking` beside the frozen `blocking`
+total, and the text now reads `192 known (baselined), 0 new blocking`.
+A named or changed run never verdicts debt it did not observe — the
+in-runner reporter prints `GATEFORGE GATE: SELECTION (N satisfied, 0
+blocking; repository verdict not graded here)` instead of contradicting
+the CLI's exit code.
+
+**A merge-request pipeline with no base commit** used to resolve the
+`auto` changed-file provider to the local staged diff — zero changed
+files in a CI job, and a gate that failed an hour later on debt nobody
+changed. `test-gates --scope changed` and `check --changed` now refuse in
+seconds with exit 2 and the fix.
+
 ## Gate strictness and flaky tests
 
 The gate is strict by default, and that stays the default: a config
