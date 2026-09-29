@@ -9,7 +9,7 @@
  * adapter must produce IDENTICAL evidence records for the same row, or
  * the generator would quietly change what the gate proves.
  */
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { defineHttpAdapter } from '../src/adapter-kit/index.js';
@@ -37,13 +37,13 @@ const ROWS: readonly Row[] = Array.from({ length: ROW_COUNT }, (_unused, index) 
 }));
 
 /** Serves a JSON response. */
-function sendJson(res: { writeHead: (status: number, headers: Record<string, string>) => void; end: (body: string) => void }, status: number, body: unknown, headers: Record<string, string> = {}): void {
+function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
   res.end(JSON.stringify(body));
 }
 
 /** The fixture app: paged rows, a redirect-only list, a login seat. */
-function handle(req: { url?: string; method?: string; headers: Record<string, unknown> }, res: Parameters<typeof sendJson>[0] & { setHeader: (name: string, value: string) => void }): void {
+function handle(req: IncomingMessage, res: ServerResponse): void {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   const path = url.pathname;
 
@@ -62,7 +62,7 @@ function handle(req: { url?: string; method?: string; headers: Record<string, un
     return;
   }
 
-  if (path === '/secure/rows' || path === '/secure/rows/:id'.replace(':id', '')) {
+  if (path === '/secure/rows') {
     if (req.headers['cookie'] !== 'session=abc123') {
       sendJson(res, 401, { error: 'login required' });
       return;
@@ -134,9 +134,7 @@ function makeCtx(base: string, resourceId: string): AdapterContext {
 }
 
 beforeAll(async () => {
-  server = createServer((req, res) => {
-    handle(req as never, res as never);
-  });
+  server = createServer(handle);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
 });

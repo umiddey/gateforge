@@ -8,6 +8,8 @@ export {
   evaluateObligation,
   evaluateObligations,
   parseInstant,
+  volatileEchoSkips,
+  volatileFieldsOf,
 } from './evaluate.js';
 export type {
   ObligationVerdict,

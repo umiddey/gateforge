@@ -3606,11 +3606,16 @@ async function handlePersistence(
   }
 
   // The payload IS the engine observation (hashed into the record id).
+  // Declared server-computed fields (E18a): stamped so the engine can
+  // skip the exact-value echo for exactly these keys AND report the
+  // skip. An adapter that declares none is unchanged.
+  const volatileFields = declaredVolatileFields(adapter);
   const payload: Record<string, unknown> = {
     resourceId,
     entityId: found && normalized !== null ? normalized.entityId : entityId ?? null,
     found,
     ...(found && normalized !== null ? { fields: normalized.fields } : {}),
+    ...(volatileFields.length > 0 ? { volatileFields } : {}),
     ...(before !== undefined ? { before } : {}),
     sessionId: session.sessionId,
     ...(typeof anchorId === 'string' ? { anchorId } : {}),
@@ -4511,11 +4516,13 @@ async function finalizeObserveClaim(
   } catch (error) {
     return note(error instanceof HttpError ? error.message : (error as Error).message);
   }
+  const volatileFields = declaredVolatileFields(adapter);
   const payload: Record<string, unknown> = {
     resourceId,
     entityId: read.entityId,
     found: read.found,
     ...(read.found ? { fields: read.fields ?? {} } : {}),
+    ...(volatileFields.length > 0 ? { volatileFields } : {}),
     ...(before !== undefined ? { before } : {}),
     observedFields,
     exchange: {
@@ -4923,6 +4930,23 @@ async function adapterReadContext(
  * (http(s)://…) or relative to the adapter base. Timeout is enforced by
  * aborting the underlying fetch.
  */
+/**
+ * The server-computed field keys one adapter DECLARED (E18a). Absent on
+ * every adapter that does not declare them, in which case the record
+ * carries no declaration and the exact-value echo applies unchanged.
+ *
+ * Args:
+ *   adapter: the loaded evidence adapter.
+ *
+ * Returns:
+ *   string[]: the declared keys (empty when none).
+ */
+function declaredVolatileFields(adapter: EvidenceAdapter): string[] {
+  const declared = adapter.volatileFields;
+  if (!Array.isArray(declared)) return [];
+  return declared.filter((key): key is string => typeof key === 'string' && key.length > 0);
+}
+
 async function adapterGet(
   baseUrl: string,
   timeoutMs: number,
