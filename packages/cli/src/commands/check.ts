@@ -92,6 +92,7 @@ import {
   scopedReceiptCoverageBlocking,
   type ScopedObligationRef,
 } from '../receipts.js';
+import { resealChainBlocking } from '../reseal-chain.js';
 import { resolveProvider } from '../providers.js';
 import {
   computeEvaluationScope,
@@ -1518,6 +1519,22 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             // changed-scope receipt must cover every obligation this
             // evaluation demands or the typed blocker names the gap.
             receiptBlocking = scopedReceiptCoverageBlocking(load.receipt, requiredCoverage());
+            // Re-seal recomputation (plan phase 3): a `test-only`
+            // receipt is a claim. The chain it names is authenticated
+            // with THIS keyring, the two sealed trees are re-diffed
+            // with THIS engine, the change set is re-classified and
+            // the affected set recomputed — any difference is a typed
+            // EVIDENCE_STALE naming the exact mismatch.
+            if (receiptBlocking.length === 0 && load.receipt.resealedFrom !== undefined) {
+              receiptBlocking = resealChainBlocking({
+                stateDir,
+                receipt: load.receipt,
+                verifierKeyring,
+                gitDir,
+                cwd: io.cwd,
+                env: io.env,
+              }).map((entry) => ({ ...entry, detail: `require-e2e: ${entry.detail}` }));
+            }
           }
           if (receiptBlocking.length > 0) diagnosticEvidenceState = 'receipt-verified-with-blocking-entry';
         } else {

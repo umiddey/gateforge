@@ -136,10 +136,12 @@ export const EnforcementConfigSchema = z
      * ADDITIVE owner switch for the test-only re-seal path: after a
      * change that touches only test code, `test-gates --changed`
      * re-runs exactly the affected tests and re-seals a receipt that
-     * carries the rest from the verified parent receipt. ON by default
-     * in standard mode; OFF under strict mode (a strict gate only ever
-     * accepts a whole-suite seal). `false` turns it off explicitly and
-     * restores the pre-existing full-run behavior.
+     * carries the rest from the verified parent receipt. OPT-IN in
+     * EVERY mode (strict included): only `true` enables it, so a
+     * repository that declares nothing — or declares `false` — keeps
+     * the pre-existing full-run behavior byte for byte. The consumer
+     * recomputes every re-seal from the sealed trees (design rule 8),
+     * so the switch turns on a cheaper run, never a weaker check.
      */
     reseal: z.boolean().optional(),
   })

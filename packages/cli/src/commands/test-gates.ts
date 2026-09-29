@@ -166,6 +166,12 @@ import { findRunnerConfigPath, mappingBlocking, mappedCoverageFrom, nativeInvent
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { loadReceiptFor, receiptScope, tryReuseReceipt } from '../receipts.js';
 import { carryDiffIsWithinScope, classifyResealChange, type ResealChangeClassification } from '../reseal.js';
+import {
+  clearResealChain,
+  RESEAL_CHAIN_MAX_HOPS,
+  resealChainHopCount,
+  writeResealChainHop,
+} from '../reseal-chain.js';
 import { obligationFingerprint } from '../evaluate.js';
 import { computeEvaluationScope } from '../scope.js';
 import { candidateTreeCoversCommit, computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
@@ -1071,7 +1077,7 @@ export function decideTestOnlyReseal(input: {
   if (!input.enabled) {
     return {
       plan: null,
-      reason: 'the re-seal path is off (strict mode or `enforcement.reseal: false`) → full run',
+      reason: 'the re-seal path is off (`enforcement.reseal` is not true) → full run',
     };
   }
   if (receiptScope(parent.receipt) !== 'full') {
@@ -1718,8 +1724,14 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // The claimed files' slice (changed scope) a non-Playwright runner
   // plans from — empty in full scope and for `playwright`.
   let affectedRequiredFiles: readonly string[] = [];
-  // The verified parent a test-only re-seal carries from, or null when
-  // this run is not a re-seal (every other run is unchanged).
+  // The verified parent a re-seal carries from, with the exact
+  // documents a consumer needs to recompute the re-seal (the parent
+  // receipt, its execution result, and this run's catalog). Retained
+  // next to the new receipt as MAC-bound run state.
+  let reSealParent: {
+    receipt: GateReceipt;
+    execution: ExecutionResult;
+  } | null = null;
   let reSealPlan: ResealPlan | null = null;
   // Framework ids whose claims and records must never grade (owner
   // quarantine); empty when nothing is quarantined.
@@ -1773,7 +1785,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       // itself. A refused re-seal prints ONE plain reason line and the
       // run continues through the unchanged path below.
       const reSealBaseSha = resolveCarryForwardBaseSha(io, providerIdentity);
-      const reSeal =
+      const reSealParentCandidate =
         options.testSelectors === undefined &&
         !options.resultOnly &&
         freezeGitDir !== null &&
@@ -1782,30 +1794,49 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         approvedPolicyDigest !== null &&
         reSealBaseSha !== null &&
         catalog.inventoryComplete
-          ? decideTestOnlyReseal({
+          ? verifiedCarryForwardParent({
               io,
+              config,
+              stateDir,
+              verifierKeyring,
+              baseSha: reSealBaseSha,
               gitDir: freezeGitDir,
-              parent: verifiedCarryForwardParent({
-                io,
-                config,
-                stateDir,
-                verifierKeyring,
-                baseSha: reSealBaseSha,
-                gitDir: freezeGitDir,
-                docsExclusions,
-                cacheExclusions,
-                trustedPolicyDigest: trustedPolicy,
-                approvedPolicyDigest,
-                executionBoundaryDigest,
-              }),
-              currentTreeId: frozenTreeId,
+              docsExclusions,
+              cacheExclusions,
+              trustedPolicyDigest: trustedPolicy,
+              approvedPolicyDigest,
+              executionBoundaryDigest,
+            })
+          : null;
+      // A chain of consecutive re-seals is bounded: past the bound the
+      // carried evidence has drifted too far to recompute honestly, so
+      // this run takes the full path instead (one plain reason line).
+      const reSeal =
+        reSealParentCandidate !== null &&
+        resealChainHopCount(stateDir) >= RESEAL_CHAIN_MAX_HOPS
+          ? {
+              plan: null,
+              reason:
+                `the run state already retains ${String(RESEAL_CHAIN_MAX_HOPS)} consecutive re-seals, the ` +
+                'bound this path may chain to → full run',
+            }
+          : decideTestOnlyReseal({
+              io,
+              gitDir: freezeGitDir as string,
+              parent: reSealParentCandidate,
+              currentTreeId: frozenTreeId as string,
               catalog,
               obligations: pipeline.policy.obligations,
-              enabled: gateMode !== 'strict' && config.enforcement?.reseal !== false,
-            })
-          : { plan: null, reason: null };
+              enabled: config.enforcement?.reseal === true,
+            });
       if (reSeal.reason !== null) writeLine(io.stderr, `test-gates: ${reSeal.reason}`);
       reSealPlan = reSeal.plan;
+      if (reSeal.plan !== null && reSealParentCandidate !== null) {
+        reSealParent = {
+          receipt: reSealParentCandidate.receipt,
+          execution: reSealParentCandidate.execution,
+        };
+      }
       if (reSeal.plan !== null) {
         const affected = new Set(reSeal.plan.affectedFiles);
         plannedRows = fullPlannedRows.filter(
@@ -3395,6 +3426,19 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     issuedAt: pipeline.now,
   });
   writeGateReceipt(stateDir, receipt);
+  // The re-seal chain is additive run state: a re-sealed receipt keeps
+  // its parent (receipt + execution result) and the catalog its
+  // classification used, so a consumer can recompute the re-seal with
+  // its own engine and key. Any other seal leaves no chain behind.
+  if (reSealPlan !== null && reSealParent !== null && catalog !== null) {
+    writeResealChainHop(stateDir, {
+      receipt: reSealParent.receipt,
+      execution: reSealParent.execution,
+      catalog,
+    });
+  } else {
+    clearResealChain(stateDir);
+  }
   writeCandidateTreeEntries(stateDir, resultTreeSnapshot?.entries ?? []);
   writeLine(io.stderr, `receipt ${receipt.receiptId} sealed (complete run, evidence graded, inputs bound)`);
   if (reSealPlan !== null) {

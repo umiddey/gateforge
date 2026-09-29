@@ -330,7 +330,7 @@ describe('test-only re-seal decision', () => {
       };
       expect(decideTestOnlyReseal({ ...base, parent, enabled: false })).toEqual({
         plan: null,
-        reason: 'the re-seal path is off (strict mode or `enforcement.reseal: false`) → full run',
+        reason: 'the re-seal path is off (`enforcement.reseal` is not true) → full run',
       });
       expect(
         decideTestOnlyReseal({

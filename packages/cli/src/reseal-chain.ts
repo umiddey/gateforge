@@ -1,0 +1,368 @@
+/**
+ * Re-sealed receipt verification (plan phase 3, design rule 8): a
+ * receipt that claims `changeClass: 'test-only'` is a CLAIM, and every
+ * consumer recomputes it from the sealed bytes with its OWN engine and
+ * key. Nothing here trusts a field: the retained parent chain is
+ * authenticated hop by hop, the tree difference is re-diffed, the
+ * change set is re-classified from the catalog the run itself planned
+ * from, and the affected set is recomputed and matched against the
+ * fresh outcomes. Any mismatch is `EVIDENCE_STALE` with the exact
+ * reason — a re-seal is never half-believed.
+ *
+ * The chain is retained as additive run-state files (never inside the
+ * sealed candidate tree): one hop directory per consecutive re-seal,
+ * holding the parent receipt, the parent execution result needed to
+ * verify it, and the catalog of the child tree the classification is
+ * recomputed with. Every one of those documents is authenticated by a
+ * digest the receipts already bind (`resealedFrom`,
+ * `executionResultDigest`, `catalogDigest`).
+ */
+import { mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  CAUSE_NEXT_ACTIONS,
+  ExecutionResultSchema,
+  GateReceiptSchema,
+  TestCatalogSchema,
+  executionResultDigestOf,
+  sha256Canonical,
+  type BlockingEntry,
+  type ExecutionResult,
+  type GateReceipt,
+  type TestCatalog,
+} from '@gate-forge/core';
+import { classifyResealChange, diffSealedTrees } from './reseal.js';
+import { readStateDocument } from './state.js';
+import { verifyGateReceiptWithKeyring, type VerifierKeyring } from './verifier-keys.js';
+
+/** Run-state subdirectory holding the retained re-seal chain. */
+export const RESEAL_CHAIN_DIRECTORY = 'reseal-chain';
+
+/**
+ * How many consecutive re-seals a receipt may carry. Each hop re-runs
+ * only the tests its change set can affect, so the drift a chain can
+ * accumulate is bounded; past the bound the only honest answer is a
+ * full run.
+ */
+export const RESEAL_CHAIN_MAX_HOPS = 5;
+
+/** One retained hop: the parent a re-seal carried from, plus the catalog its classification used. */
+export interface ResealChainHop {
+  /** The parent receipt document, exactly as it was issued. */
+  receipt: unknown;
+  /** The parent execution result bound by that receipt. */
+  execution: unknown;
+  /** The test catalog of the CHILD tree (the re-sealed candidate). */
+  catalog: unknown;
+}
+
+function hopFileNames(hop: number): [string, string, string] {
+  return [
+    `hop-${String(hop)}-receipt.json`,
+    `hop-${String(hop)}-execution-result.json`,
+    `hop-${String(hop)}-catalog.json`,
+  ];
+}
+
+/**
+ * Counts the consecutive re-seals already retained in the run state.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   number: the highest contiguous hop index (0 when no hop is retained).
+ */
+export function resealChainHopCount(stateDir: string): number {
+  let names: string[];
+  try {
+    names = readdirSync(join(stateDir, RESEAL_CHAIN_DIRECTORY));
+  } catch {
+    return 0;
+  }
+  let hop = 0;
+  for (;;) {
+    const [receiptName, , ] = hopFileNames(hop + 1);
+    if (!names.includes(receiptName)) return hop;
+    hop += 1;
+  }
+}
+
+/**
+ * Retains one re-seal hop, shifting every earlier hop one place back so
+ * the chain stays contiguous (hop 1 is always the immediate parent).
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   hop: the parent receipt, its execution result, and the catalog of
+ *     the tree this re-seal sealed.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeResealChainHop(stateDir: string, hop: ResealChainHop): void {
+  const directory = join(stateDir, RESEAL_CHAIN_DIRECTORY);
+  mkdirSync(directory, { recursive: true });
+  const retained = resealChainHopCount(stateDir);
+  for (let index = retained; index >= 1; index -= 1) {
+    const from = hopFileNames(index);
+    const to = hopFileNames(index + 1);
+    for (let file = 0; file < from.length; file += 1) {
+      const source = join(directory, from[file] as string);
+      try {
+        renameSync(source, join(directory, to[file] as string));
+      } catch {
+        // A missing member makes the chain unreadable, which the
+        // verifier rejects; nothing to repair here.
+      }
+    }
+  }
+  const [receiptName, executionName, catalogName] = hopFileNames(1);
+  writeFileSync(join(directory, receiptName), `${JSON.stringify(hop.receipt, null, 2)}\n`, 'utf8');
+  writeFileSync(join(directory, executionName), `${JSON.stringify(hop.execution, null, 2)}\n`, 'utf8');
+  writeFileSync(join(directory, catalogName), `${JSON.stringify(hop.catalog, null, 2)}\n`, 'utf8');
+}
+
+/**
+ * Drops every retained hop (a run that sealed an ordinary receipt has no
+ * re-seal chain, and a stale chain would be read as one).
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   void.
+ */
+export function clearResealChain(stateDir: string): void {
+  rmSync(join(stateDir, RESEAL_CHAIN_DIRECTORY), { recursive: true, force: true });
+}
+
+/** Reads the retained hops, stopping at the first missing member (fail closed). */
+function readResealChain(stateDir: string): ResealChainHop[] {
+  const hops: ResealChainHop[] = [];
+  for (let index = 1; ; index += 1) {
+    const [receiptName, executionName, catalogName] = hopFileNames(index);
+    const receipt = readStateDocument(join(stateDir, RESEAL_CHAIN_DIRECTORY), receiptName);
+    if (receipt === null) return hops;
+    const execution = readStateDocument(join(stateDir, RESEAL_CHAIN_DIRECTORY), executionName);
+    const catalog = readStateDocument(join(stateDir, RESEAL_CHAIN_DIRECTORY), catalogName);
+    if (execution === null || catalog === null) return [...hops, { receipt, execution: null, catalog: null }];
+    hops.push({ receipt, execution, catalog });
+  }
+}
+
+/**
+ * One typed `EVIDENCE_STALE` entry naming the exact mismatch; the
+ * caller prefixes it with its own surface (`require-e2e: `, `broker: `).
+ */
+function stale(detail: string): BlockingEntry[] {
+  return [
+    {
+      kind: 'finding',
+      resourceId: null,
+      name: null,
+      detail,
+      location: null,
+      cause: 'EVIDENCE_STALE',
+      nextAction: CAUSE_NEXT_ACTIONS['EVIDENCE_STALE'],
+    },
+  ];
+}
+
+function names(paths: readonly string[]): string {
+  return paths.length === 0 ? '<none>' : paths.join(', ');
+}
+
+/**
+ * Recomputes — with the consumer's own engine, keyring and object store
+ * — everything a re-sealed receipt claims, hop by hop. A receipt that
+ * is not a re-seal returns no blockers; every mismatch, missing
+ * document or unreadable parent returns one `EVIDENCE_STALE` entry
+ * naming the exact difference.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory holding receipt.json,
+ *     execution-result.json and the retained chain.
+ *   receipt: the verified receipt under inspection.
+ *   verifierKeyring: the consumer's own keyring (the parent is
+ *     authenticated with it, never with the candidate's key).
+ *   gitDir: the consumer's object store, holding both sealed trees.
+ *   cwd: the repository root (import-graph alias resolution).
+ *   env: the process environment (Git redirectors are stripped).
+ *
+ * Returns:
+ *   BlockingEntry[]: empty when the re-seal recomputes exactly, else one
+ *   typed `EVIDENCE_STALE` blocker.
+ */
+export function resealChainBlocking(input: {
+  stateDir: string;
+  receipt: GateReceipt;
+  verifierKeyring: VerifierKeyring | null;
+  gitDir: string | null;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}): BlockingEntry[] {
+  const child = input.receipt;
+  if (child.resealedFrom === undefined) return [];
+  if (input.verifierKeyring === null || input.gitDir === null) {
+    return stale(
+      'this consumer has no verifier keyring or object store, so the re-seal cannot be recomputed (fail closed)',
+    );
+  }
+  const chain = readResealChain(input.stateDir);
+  if (chain.length === 0) {
+    return stale(
+      `the re-sealed receipt names parent ${child.resealedFrom} but the run state retains no parent receipt (fail closed)`,
+    );
+  }
+  if (chain.length > RESEAL_CHAIN_MAX_HOPS) {
+    return stale(
+      `the re-sealed receipt carries ${String(chain.length)} consecutive re-seals, past the bound of ` +
+        `${String(RESEAL_CHAIN_MAX_HOPS)} — run the full suite`,
+    );
+  }
+  const childExecutionParsed = ExecutionResultSchema.safeParse(
+    readStateDocument(input.stateDir, 'execution-result.json'),
+  );
+  if (!childExecutionParsed.success) {
+    return stale('the re-sealed receipt binds no readable execution result (fail closed)');
+  }
+  const childExecution = childExecutionParsed.data as ExecutionResult;
+  if (executionResultDigestOf(childExecution) !== child.executionResultDigest) {
+    return stale('the re-sealed receipt\'s execution result no longer matches its bound digest (fail closed)');
+  }
+
+  // Walk outward: hop 1 is the immediate parent of the receipt under
+  // inspection, hop 2 the parent of that receipt, and so on.
+  let currentReceipt: GateReceipt = child;
+  let currentExecution = childExecution;
+  for (let index = 0; index < chain.length; index += 1) {
+    const hop = chain[index] as ResealChainHop;
+    if (hop.execution === null || hop.catalog === null) {
+      return stale(
+        `re-seal hop ${String(index + 1)} retains no parent execution result or catalog (fail closed)`,
+      );
+    }
+    const parentParsed = GateReceiptSchema.safeParse(hop.receipt);
+    if (!parentParsed.success) {
+      return stale(`re-seal hop ${String(index + 1)} retains a malformed parent receipt (fail closed)`);
+    }
+    const parent = parentParsed.data as GateReceipt;
+    const parentExecutionParsed = ExecutionResultSchema.safeParse(hop.execution);
+    if (!parentExecutionParsed.success) {
+      return stale(`re-seal hop ${String(index + 1)} retains a malformed parent execution result (fail closed)`);
+    }
+    const parentExecution = parentExecutionParsed.data as ExecutionResult;
+    const catalogParsed = TestCatalogSchema.safeParse(hop.catalog);
+    if (!catalogParsed.success) {
+      return stale(`re-seal hop ${String(index + 1)} retains a malformed test catalog (fail closed)`);
+    }
+    const catalog = catalogParsed.data as TestCatalog;
+
+    if (sha256Canonical(parent as unknown as Record<string, never>) !== currentReceipt.resealedFrom) {
+      return stale(
+        `re-seal hop ${String(index + 1)} names parent ${String(currentReceipt.resealedFrom)} but the retained ` +
+          `parent receipt hashes to ${sha256Canonical(parent as unknown as Record<string, never>)} (fail closed)`,
+      );
+    }
+    const authenticated = verifyGateReceiptWithKeyring(input.verifierKeyring, hop.receipt);
+    if (!authenticated.ok) {
+      return stale(
+        `re-seal hop ${String(index + 1)}'s parent receipt does not authenticate with this keyring: ` +
+          `${authenticated.detail} (fail closed)`,
+      );
+    }
+    if (executionResultDigestOf(parentExecution) !== parent.executionResultDigest) {
+      return stale(
+        `re-seal hop ${String(index + 1)}'s parent execution result does not match its receipt digest (fail closed)`,
+      );
+    }
+    if (sha256Canonical(catalog as unknown as Record<string, never>) !== currentExecution.catalogDigest) {
+      return stale(
+        `re-seal hop ${String(index + 1)}'s retained catalog does not match the catalog digest the re-seal ` +
+          'planned from (fail closed)',
+      );
+    }
+    if (parent.candidateTreeId === null || currentReceipt.candidateTreeId === null) {
+      return stale(`re-seal hop ${String(index + 1)} has no sealed candidate tree on one side (fail closed)`);
+    }
+    const changed = diffSealedTrees(
+      input.gitDir,
+      input.env,
+      parent.candidateTreeId,
+      currentReceipt.candidateTreeId,
+    );
+    if (changed === null) {
+      return stale(
+        `re-seal hop ${String(index + 1)}: the sealed trees ${parent.candidateTreeId} → ` +
+          `${currentReceipt.candidateTreeId} could not be diffed (fail closed)`,
+      );
+    }
+    const diffPaths = changed.map((entry) => entry.path).sort();
+    const claimed = [...(currentReceipt.changedPaths ?? [])].sort();
+    if (
+      diffPaths.length !== claimed.length ||
+      diffPaths.some((path, position) => path !== claimed[position])
+    ) {
+      return stale(
+        `re-sealed receipt names changed paths ${names(claimed)} but the trees differ in ${names(diffPaths)}`,
+      );
+    }
+    const classification = classifyResealChange({
+      gitDir: input.gitDir,
+      env: input.env,
+      cwd: input.cwd,
+      parentTreeId: parent.candidateTreeId,
+      currentTreeId: currentReceipt.candidateTreeId,
+      testFiles: [...new Set(catalog.entries.map((entry) => entry.file))],
+    });
+    if (!classification.eligible) {
+      return stale(`re-sealed receipt does not recompute: ${String(classification.reason)}`);
+    }
+    const affected = new Set(classification.affectedTestFiles);
+    const freshFiles = new Set(currentExecution.outcomes.map((outcome) => outcome.file));
+    const outside = [...freshFiles].filter((file) => !affected.has(file)).sort();
+    if (outside.length > 0) {
+      return stale(
+        `re-sealed receipt re-ran tests outside the recomputed affected set (${names(outside)}); ` +
+          `the affected set is ${names(classification.affectedTestFiles)}`,
+      );
+    }
+    const missing = classification.affectedTestFiles.filter((file) => !freshFiles.has(file)).sort();
+    if (missing.length > 0) {
+      return stale(
+        `re-sealed receipt carries no fresh outcome for the recomputed affected set (${names(missing)})`,
+      );
+    }
+    const failed = currentExecution.outcomes.filter((outcome) => outcome.status !== 'passed');
+    if (failed.length > 0) {
+      return stale(
+        `re-sealed receipt re-ran ${String(failed.length)} test(s) that did not pass ` +
+          `(${names(failed.map((outcome) => outcome.logicalKey))})`,
+      );
+    }
+    if (currentReceipt.rerunTests !== currentExecution.outcomes.length) {
+      return stale(
+        `re-sealed receipt claims ${String(currentReceipt.rerunTests ?? -1)} re-run test(s) but its execution ` +
+          `result holds ${String(currentExecution.outcomes.length)} outcome(s)`,
+      );
+    }
+    const carriedOutcomes = parentExecution.outcomes.filter((outcome) => !affected.has(outcome.file));
+    const parentFailures = carriedOutcomes.filter((outcome) => outcome.status !== 'passed');
+    if (parentFailures.length > 0) {
+      return stale(
+        `re-sealed receipt carries ${String(parentFailures.length)} parent outcome(s) that did not pass ` +
+          `(${names(parentFailures.map((outcome) => outcome.logicalKey))})`,
+      );
+    }
+    if (currentReceipt.carriedTests !== carriedOutcomes.length) {
+      return stale(
+        `re-sealed receipt claims ${String(currentReceipt.carriedTests ?? -1)} carried test(s) but its parent ` +
+          `holds ${String(carriedOutcomes.length)} carried outcome(s)`,
+      );
+    }
+    currentReceipt = parent;
+    currentExecution = parentExecution;
+  }
+  return [];
+}

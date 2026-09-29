@@ -56,6 +56,7 @@ import { resolveStateDir } from './state.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from './trusted-policy.js';
 import { rejectUnknownFlags, VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from './commands/common.js';
 import { resolveVerifierKeyring, verifyGateReceiptWithKeyring } from './verifier-keys.js';
+import { resealChainBlocking } from './reseal-chain.js';
 import { loadDocsExclusions } from './docs-exclusions.js';
 import { loadCacheExclusions } from './cache-exclusions.js';
 
@@ -343,6 +344,30 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
     const binding = assertReceiptApprovedPolicy(receipt, policyGate.approved);
     if (!binding.ok) {
       throw new BrokerRejection(binding.cause, `broker: ${binding.detail} (${binding.nextAction})`);
+    }
+  }
+
+  // Re-seal recomputation (plan phase 3): the authority never accepts a
+  // `test-only` claim on its word. The retained chain is authenticated
+  // with the authority's own keyring, the two sealed trees are re-diffed
+  // in the authority's own object store, the change set is
+  // re-classified and the affected set recomputed — any difference is a
+  // typed reject, never a commit.
+  if (receipt.resealedFrom !== undefined) {
+    const chainBlocking = resealChainBlocking({
+      stateDir: resolveStateDir(workspace),
+      receipt,
+      verifierKeyring,
+      gitDir: authorityGitDir,
+      cwd: workspace,
+      env: io.env,
+    });
+    if (chainBlocking.length > 0) {
+      const [first] = chainBlocking;
+      throw new BrokerRejection(
+        'EVIDENCE_STALE',
+        `broker: ${String(first?.detail ?? 'the re-seal does not recompute')} (rerun the gate for the exact candidate)`,
+      );
     }
   }
 
