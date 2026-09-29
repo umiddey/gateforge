@@ -135,6 +135,14 @@ export function startSupervisorSpoolDrain(options: {
   // same per-test pairing.
   const pendingByWorker = new Map<number, SpoolEvent[]>();
   const endedTests = new Set<string>();
+  // Every test whose BEGIN the drain saw. A runner still announces a
+  // lifecycle for the tests its own filters left unexecuted (a named run
+  // registers only the selected tests, so the witness refuses those
+  // opens, or they queue behind a busy worker slot and are dropped when
+  // it frees): their matching end has no session to close, so it is not
+  // a lifecycle conflict. An end whose begin never arrived still fails
+  // the run closed exactly as before.
+  const begunTests = new Set<string>();
   const conflicts: string[] = [];
   const intentFailures: string[] = [];
   const observeNotes: string[] = [];
@@ -181,6 +189,7 @@ const releaseReachedWaiters = (): void => {
 
   const openSessionFor = async (event: SpoolEvent): Promise<void> => {
     const workerIndex = event.workerIndex;
+    begunTests.add(event.testId);
     const existing = openByWorker.get(workerIndex);
     if (existing !== undefined && existing.testId === event.testId) return; // idempotent re-begin
     if (existing !== undefined) {
@@ -306,6 +315,12 @@ const releaseReachedWaiters = (): void => {
         await openNextPending(event.workerIndex);
         return;
       }
+      // The end of a test whose begin the drain saw but never opened a
+      // session for (the witness refused it as outside the registered
+      // expected set, or it queued behind a busy slot and was dropped):
+      // there is nothing to close and nothing to seal, so it is not a
+      // conflict. An end with NO begin at all still is.
+      if (begunTests.has(event.testId)) return;
       // An end with no matching open begin: genuine reporter events are
       // always begin/end paired. A lone end is forgery or confusion —
       // record it and fail the run closed downstream (never open or seal

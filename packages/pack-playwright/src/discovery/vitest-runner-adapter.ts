@@ -214,14 +214,17 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
   }
 
   /**
-   * Job 3: runs the SELECTED vitest files under the jest-compatible
+   * Job 3: runs the SELECTED vitest tests under the jest-compatible
    * JSON reporter plus the pack's gateforge reporter, with the
    * witnessed-session env allowlist (the run identity the reporter
    * needs to address the lifecycle spool plus the non-secret run
    * wiring — never the verifier key, never any other parent-side name).
+   * A `named-selection` run adds the anchored full-name pattern so only
+   * the named tests execute, never their file neighbours.
    *
    * Args:
-   *   request: the exact selection, run identity, and wall-clock bound.
+   *   request: the exact selection (with its mode), run identity, and
+   *     wall-clock bound.
    *
    * Returns:
    *   Promise<RunnerExecutionEnvelope>: the structured outcome envelope
@@ -233,16 +236,25 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
       return envelopeIncomplete(null, `vitest execution found no vitest CLI under ${request.cwd} — install vitest in the project`);
     }
     const files = new Set<string>();
+    const fullNames: string[] = [];
     for (const logicalKey of request.logicalKeys) {
-      const file = logicalKeyFileOf(logicalKey);
-      if (file === null) {
+      const identity = vitestIdentityKeyOf(logicalKey);
+      if (identity === null) {
         return envelopeIncomplete(
           null,
           `vitest execution cannot run '${logicalKey}': not a <file>#<title path> identity this adapter enumerated`,
         );
       }
-      files.add(file);
+      files.add(identity.file);
+      fullNames.push(identity.titlePath.join(' '));
     }
+    // A `named-selection` run executes ONLY the named tests: vitest
+    // matches `--testNamePattern` against the full name (enclosing
+    // describes + the test title), so the anchored, escaped alternation
+    // of exactly those names is the per-test narrowing. Every other mode
+    // runs the selection's files unchanged.
+    const namePattern =
+      request.mode === 'named-selection' ? `^(?:${[...new Set(fullNames)].sort().map(escapeRegExp).join('|')})$` : null;
     const reportPath = join(request.stateDir, 'vitest', request.runId, 'report.json');
     const argv = [
       'run',
@@ -251,6 +263,7 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
       `--outputFile.json=${reportPath}`,
       `--reporter=${vitestReporterModulePath()}`,
       ...NO_CACHE_FLAG,
+      ...(namePattern === null ? [] : [`--testNamePattern=${namePattern}`]),
       ...[...files].sort(),
     ];
     const child = spawn(entry.command, [...entry.prefix, ...argv], {
@@ -305,6 +318,15 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
         ...envelope,
         incompleteDetail: `vitest produced no JSON report at ${reportPath} (exit ${String(outcome.code)}) — fail closed`,
       };
+    }
+    // A `named-selection` run reports the tests vitest COLLECTED in the
+    // selected files, not the ones it executed: the name pattern keeps
+    // the unselected rows (as never-run placeholders), and a test this
+    // run never selected is never evidence, so those rows are dropped
+    // here instead of being graded as unplanned executions.
+    if (request.mode === 'named-selection') {
+      const selected = new Set(request.logicalKeys);
+      envelope = { ...envelope, outcomes: envelope.outcomes.filter((row) => selected.has(row.logicalKey)) };
     }
     // Retry evidence lives in the runner-flags document the gateforge
     // reporter seals (the JSON reporter has no retry surface).
@@ -576,13 +598,39 @@ function parseVitestReport(report: string): VitestJsonReport {
   return document as VitestJsonReport;
 }
 
-/** The file part of a logical key, or null (never a wildcard). */
-function logicalKeyFileOf(logicalKey: string): string | null {
+/**
+ * The `<file>#<title path>` identity one logical key carries, or null
+ * when the key is not the identity this adapter enumerated (never a
+ * wildcard, never a guess).
+ *
+ * Args:
+ *   logicalKey: the exact logical key of one selected test.
+ *
+ * Returns:
+ *   TestIdentityKey | null: the file and title path, or null.
+ */
+function vitestIdentityKeyOf(logicalKey: string): TestIdentityKey | null {
   const hash = logicalKey.indexOf('#');
   if (hash <= 0) return null;
   const file = logicalKey.slice(0, hash);
-  if (file === '' || logicalKey.slice(hash + 1).includes('#')) return null;
-  return file;
+  const titlePath = logicalKey.slice(hash + 1);
+  if (file === '' || titlePath === '' || titlePath.includes('#')) return null;
+  return { file, titlePath: titlePath.split('>') };
+}
+
+/**
+ * Escapes one literal test name for use inside a regular expression, so
+ * a name that contains regex metacharacters matches itself and nothing
+ * else.
+ *
+ * Args:
+ *   value: the literal title text.
+ *
+ * Returns:
+ *   string: the escaped literal.
+ */
+export function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /** Vitest exit codes, fail closed (0 passed, 1 failures). */

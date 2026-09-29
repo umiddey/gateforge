@@ -188,6 +188,7 @@ export class PlaywrightRunnerAdapter implements RunnerAdapter {
         // that does not select the enumerated projects reports outcomes
         // under different identities than the expected set was fixed
         // with, and supervision (correctly) calls them unplanned.
+        ...(request.testLocations !== undefined ? { testLocations: request.testLocations } : {}),
         ...(request.projects !== undefined ? { projects: request.projects } : {}),
         ...this.options.run,
       },

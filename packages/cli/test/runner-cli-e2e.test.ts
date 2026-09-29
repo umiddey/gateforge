@@ -1051,7 +1051,9 @@ describe.skipIf(CYPRESS_BIN === '')('cypress failure reporting through the real 
 interface NamedReport {
   outcome?: string;
   selectors?: Array<{ selector: string; logicalKeys: string[] }>;
+  blocking?: Array<{ cause: string; detail: string }>;
   execution?: {
+    testsPerformedThisInvocation?: number;
     selectedTests?: { selected: number; passed: number; failed?: number };
     selectedClaims?: { blocking: number };
   };
@@ -1198,6 +1200,59 @@ describe('a named run never touches the sealed receipt', () => {
       const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
       expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
       expect(checked.stdout).toContain('receipt-verified');
+    });
+  }, 600_000);
+});
+
+describe('a named run executes exactly the named test', () => {
+  it('runs one test of a two-test file, not the whole file', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'vitest',
+        gateforgeYml('vitest'),
+        {
+          'app.cjs': APP,
+          'vitest.config.mjs': VITEST_CONFIG,
+          'tests/first.test.mjs': VITEST_MULTI_FIRST,
+          'tests/second.test.mjs': VITEST_MULTI_SECOND,
+        },
+        testMapYmlMany('vitest', [
+          { file: 'tests/first.test.mjs', titlePath: ['creates account through the session proxy'] },
+          { file: 'tests/first.test.mjs', titlePath: ['creates a second account in the same file'] },
+          { file: 'tests/second.test.mjs', titlePath: ['creates an account from the second file'] },
+        ]),
+      );
+      linkVitestModules(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'vitest named-narrowing fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      // Both tests live in ONE file: naming either of them must execute
+      // exactly that one, never its file neighbour and never the second
+      // file's test.
+      for (const title of ['creates account through the session proxy', 'creates a second account in the same file']) {
+        const key = `tests/first.test.mjs#${title}`;
+        const named = await runCli(
+          repo,
+          ['test-gates', '--test', key, '--result-only', '--format', 'json'],
+          env,
+        );
+        const why = `${runnerFailures(repo)}named run ${title} stdout:\n${named.stdout}\nstderr:\n${named.stderr}`;
+        // Exactly one test ran: the unselected tests of the same file
+        // are neither executed nor graded, so nothing unplanned and no
+        // lifecycle conflict can appear. Whether the whole named run
+        // exits 0 is the selection-only grading contract, a separate one.
+        const report = JSON.parse(named.stdout) as NamedReport;
+        expect(report.execution?.testsPerformedThisInvocation, why).toBe(1);
+        expect(report.execution?.selectedTests?.passed, why).toBe(1);
+        expect(report.execution?.selectedTests?.selected, why).toBe(1);
+        expect(report.blocking, why).toEqual([]);
+      }
     });
   }, 600_000);
 });

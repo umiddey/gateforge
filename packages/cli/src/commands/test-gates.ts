@@ -1670,7 +1670,30 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     const named = new Set<string>();
     for (const entry of namedSelections) for (const key of entry.logicalKeys) named.add(key);
     plannedRows = plannedRows.filter((row) => named.has(row.planned.logicalKey));
+    // A test this run did not execute can never have produced evidence:
+    // its declarations leave the grading inventory together with its
+    // plan, so a named run grades the claims of the tests it ran.
+    claimInventory = claimInventory.filter((claim) => named.has(claim.testId));
   }
+
+  // Per-test narrowing (additive): a named run hands the runner the exact
+  // `file:line` of every selected test the catalog located, so a runner
+  // that can filter below file granularity executes exactly those tests
+  // and never their file neighbours. A row the catalog never located
+  // contributes nothing (the run then stays at file granularity). Empty
+  // outside a named run, which keeps every other run byte-identical.
+  const namedTestLocations: string[] =
+    namedSelections === null
+      ? []
+      : plannedRows
+          .map((row) => {
+            const entry = catalog?.entries.find(
+              (candidate) => candidate.logicalKey === row.planned.logicalKey,
+            );
+            return entry === undefined ? null : `${entry.file}:${String(entry.sourceLocation.line)}`;
+          })
+          .filter((location): location is string => location !== null)
+          .sort();
   if (format === 'text') {
     writeLine(
       io.stdout,
@@ -2218,7 +2241,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       // will report.
       const tests = (runnerEnumeration?.tests ?? [])
         .filter((test) =>
-          options.scope === 'changed'
+          options.scope === 'changed' || selection.mode === 'named-selection'
             ? plannedIdentities.has(`${test.project ?? ''}\u0000${test.file}\u0000${test.titlePath.join('>')}`)
             : true,
         )
@@ -2231,6 +2254,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       return supervisor.registerExpectedSet({ tests });
     }
     const enumeration = await listNativePlaywrightTests({ cwd: io.cwd });
+    // A named run registers the NAMED tests, for the same reason it
+    // executes them: the witness binds and the trace groups exactly the
+    // tests the report will speak about.
     // Scoped registration (Goal 2): in a `changed`-scope run the expected
     // set IS the planned slice — the witness binds and the trace groups
     // exactly the tests the seal will vouch for. Full mode registers the
@@ -2238,7 +2264,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // enumeration never lists stays out of the set and can never open a
     // session — the same completeness machinery blocks it downstream.)
     const registeredInstances =
-      options.scope === 'changed'
+      options.scope === 'changed' || selection.mode === 'named-selection'
         ? enumeration.instances.filter((instance) =>
             plannedIdentities.has(
               `${instance.project ?? ''}\u0000${instance.file}\u0000${instance.titlePath.join('>')}`,
@@ -2283,6 +2309,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         config,
         run: {
           testFiles: plannedRows.map((row) => row.planned.file),
+          // A named run executes exactly the named tests, not their
+          // whole spec files.
+          ...(namedTestLocations.length > 0 ? { testLocations: namedTestLocations } : {}),
           ...(io.env['GATEFORGE_APP_BASE_URL'] ? { appBaseUrl: io.env['GATEFORGE_APP_BASE_URL'] } : {}),
           ...(io.env['GATEFORGE_SESSION_STATE'] ? { storageState: io.env['GATEFORGE_SESSION_STATE'] } : {}),
           projects: [
@@ -2437,13 +2466,18 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       // The RunnerAdapter contract (plan 2026-09-25): the exact
       // selection, run identity, and wall-clock bound cross as data; the
       // adapter spawns the runner and reads its structured report. The
-      // verdict still comes from supervision + the witness trace.
+      // verdict still comes from supervision + the witness trace. The
+      // selection MODE travels with it: a `named-selection` run narrows
+      // to the named tests wherever the runner can, and a run without
+      // `--test` executes exactly what it always did.
       const request: RunnerExecuteRequest = {
         logicalKeys: selection.logicalKeys,
         stateDir,
         runId: manifest.runId,
         timeoutMs: runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
         cwd: io.cwd,
+        mode: selection.mode,
+        ...(selection.mode === 'named-selection' ? { testLocations: namedTestLocations } : {}),
       };
       envelope = await runnerAdapterFor(runnerName, {
         witnessUrl: effectiveWitnessUrl,
@@ -2500,6 +2534,37 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       writeLine(io.stderr, `warning: host-load diagnostics could not be written: ${(error as Error).message}`);
     }
     executionDurationMs = Math.max(0, Math.round(performance.now() - executionStartedAt));
+  }
+
+  // Cypress cannot filter below the spec without a plugin the gate
+  // refuses to trust, so a named Cypress run executes the whole spec and
+  // grades ONLY the selected tests: their outcomes and sessions are
+  // dropped (an unselected test never becomes evidence) and the operator
+  // is told exactly how many ran ungraded. Every other runner executes
+  // exactly the selection, so any extra outcome there stays unplanned and
+  // fails the run closed.
+  if (selection.mode === 'named-selection' && runnerName === 'cypress') {
+    const selected = new Set(selection.logicalKeys);
+    const ungraded = envelope.outcomes.filter((outcome) => !selected.has(outcome.logicalKey));
+    if (ungraded.length > 0) {
+      writeLine(
+        io.stderr,
+        `also ran ${String(ungraded.length)} other test(s) in the same file — not graded`,
+      );
+      envelope = {
+        ...envelope,
+        outcomes: envelope.outcomes.filter((outcome) => selected.has(outcome.logicalKey)),
+      };
+      // The witness trace rows carry file + title path, which is exactly
+      // how a `<file>#<title path>` logical key spells them.
+      const ungradedKeys = new Set(ungraded.map((outcome) => outcome.logicalKey));
+      sessionTrace =
+        sessionTrace === null
+          ? null
+          : sessionTrace.filter(
+              (traced) => !ungradedKeys.has(`${traced.file}#${traced.titlePath.join('>')}`),
+            );
+    }
   }
   if (options.runtimeReuseCheck !== undefined) {
     let currentReuseDigest: string | null;

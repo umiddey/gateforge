@@ -90,6 +90,14 @@ export interface SupervisedRunOptions {
    */
   testFiles?: readonly string[];
   /**
+   * Exact repo-relative `file:line` locations of the selected tests
+   * (the supervisor's per-TEST selection as positional arguments).
+   * Undefined = file granularity. The values come from the plan fixed
+   * before the run, never from the suite, and are passed as positional
+   * location filters — never as a suite-controlled flag.
+   */
+  testLocations?: readonly string[];
+  /**
    * Bare project names to run (identity only). Undefined = no project
    * filter. Per-project code options are never honored.
    */
@@ -120,16 +128,19 @@ export function playwrightVersion(): string {
  * Executes the configured playwright suite under trusted supervision and
  * returns the structured outcome envelope (plan Phase 4 item 1). The
  * consumer's config file is NEVER loaded (see the module doc); the run
- * uses the synthesized trusted config over the exact selected files.
+ * uses the synthesized trusted config over the exact selected files,
+ * narrowed below file granularity to the exact selected `file:line`
+ * locations when the caller supplies them.
  *
  * Args:
  *   selection: the exact logical keys the supervisor expects (data only
- *     at this layer — the run itself is the full configured suite).
+ *     at this layer — the run is driven by `options.testFiles` plus the
+ *     optional `options.testLocations`).
  *   env: run-state dir + run identity + pre-sanitized vars the child
  *     inherits (witness wiring; NEVER verifier material, NEVER state
  *     paths — the child must not locate the spool or outcomes files).
  *   options: runner command override (tests), timeout, cwd, the exact
- *     test files/projects to run, reporter entry override.
+ *     test files/locations/projects to run, reporter entry override.
  *
  * Returns:
  *   Promise<RunnerExecutionEnvelope>: the structured outcome envelope —
@@ -141,7 +152,7 @@ export async function executeSupervisedPlaywright(
   env: RunnerExecutionEnv,
   options: SupervisedRunOptions = {},
 ): Promise<RunnerExecutionEnvelope> {
-  void selection; // the run is the full configured suite; the supervisor owns the comparison
+  void selection; // the run is driven by the file/location options; the supervisor owns the comparison
   const cwd = options.cwd ?? process.cwd();
   const outcomesPath = join(env.stateDir, 'runner-outcomes.json');
   // A stale outcomes file from a previous run must never be readable as
@@ -164,9 +175,18 @@ export async function executeSupervisedPlaywright(
   });
   const baseCommand = options.command ?? defaultPlaywrightCommand(cwd);
   const isStub = options.command !== undefined;
+  const locations = [...new Set(options.testLocations ?? [])].sort();
   const argv = isStub
-    ? [...baseCommand, 'test', '--retries=0']
-    : [...baseCommand, 'test', '--config', configPath, '--retries=0', '--workers=1'];
+    ? [...baseCommand, 'test', '--retries=0', ...locations]
+    : [
+        ...baseCommand,
+        'test',
+        '--config',
+        configPath,
+        '--retries=0',
+        '--workers=1',
+        ...locations,
+      ];
   const child = spawn(argv[0] ?? '', argv.slice(1), {
     cwd,
     // ALLOWLIST ONLY (enforcement-review fix 1 + execution-authority

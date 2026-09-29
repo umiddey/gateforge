@@ -189,6 +189,20 @@ export interface RunnerExecuteRequest {
   /** Absolute repo root the runner configuration lives under. */
   cwd: string;
   /**
+   * Selection mode (additive; absent = `full-relevant-suite`, whose
+   * execution is byte-identical to before). A `named-selection` run
+   * executes ONLY the named tests: the adapter narrows below file
+   * granularity wherever its runner can, and any test it cannot
+   * exclude is reported, never silently graded.
+   */
+  mode?: 'full-relevant-suite' | 'mapped-selection' | 'named-selection';
+  /**
+   * Exact repo-relative `file:line` locations of the selected tests, as
+   * the plan fixed them before the run. Playwright executes exactly
+   * these. Undefined = file granularity.
+   */
+  testLocations?: readonly string[];
+  /**
    * The runner's own project names to run, exactly as `enumerate`
    * reported them. Part of the identity join key, so a run that does
    * not select them grades its outcomes against a different identity
