@@ -102,6 +102,16 @@ function hasInnerParam(prefix: string): boolean {
     .some((segment) => segment.startsWith(':') || segment === '{}');
 }
 
+/** Column names that usually mark a soft-deleted row, not a removed one. */
+const SOFT_DELETE_COLUMNS: Record<string, true> = {
+  is_active: true,
+  active: true,
+  archived: true,
+  archived_at: true,
+  deleted_at: true,
+  is_deleted: true,
+};
+
 /** Column-name fragments that mark a credential, never a projected field. */
 const SECRET_COLUMN_PATTERN: RegExp = /password|secret|token|hash|api[-_]?key|private[-_]?key/;
 
@@ -145,17 +155,6 @@ function projectedFields(resource: GraphResource): { fields: string[]; excluded:
   }
   return { fields, excluded };
 }
-
-
-/** Column names that usually mark a soft-deleted row, not a removed one. */
-const SOFT_DELETE_COLUMNS: Record<string, true> = {
-  is_active: true,
-  active: true,
-  archived: true,
-  archived_at: true,
-  deleted_at: true,
-  is_deleted: true,
-};
 
 /**
  * Reads column names out of one column-bearing graph attribute, in
