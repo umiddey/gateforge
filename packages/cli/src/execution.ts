@@ -624,12 +624,13 @@ export interface SealExecutionResultInput {
   runner: string;
   /**
    * Selection mode (additive, default `full-relevant-suite`): a
-   * `--scope changed` run seals `mapped-selection` — the execution
-   * result, its digest, and every receipt binding it then name the
-   * SLICE that actually ran, so a scoped receipt can never be mistaken
-   * for a whole-suite seal.
+   * `--scope changed` run seals `mapped-selection` and a hand-picked
+   * `--test` run reports `named-selection` — the execution result, its
+   * digest, and every receipt binding it then name the SLICE that
+   * actually ran, so a slice can never be mistaken for a whole-suite
+   * seal.
    */
-  mode?: 'full-relevant-suite' | 'mapped-selection';
+  mode?: 'full-relevant-suite' | 'mapped-selection' | 'named-selection';
   /** Logical keys selected. */
   logicalKeys: readonly string[];
   /** The catalog the selection was planned from. */

@@ -153,8 +153,13 @@ export const ExecutionResultSchema = z
       .object({
         /** Runner the selection executes under. */
         runner: z.string().min(1),
-        /** Selection mode; `full-relevant-suite` until narrower selection is proven safe. */
-        mode: z.enum(['full-relevant-suite', 'mapped-selection']),
+        /**
+         * Selection mode. `full-relevant-suite` is the whole relevant
+         * suite, `mapped-selection` a diff-linked slice, and
+         * `named-selection` a hand-picked `--test` list — which is only
+         * ever reported (`--result-only`), never sealed into a receipt.
+         */
+        mode: z.enum(['full-relevant-suite', 'mapped-selection', 'named-selection']),
         /** Exact logical keys the run was expected to cover (sorted). */
         logicalKeys: z.array(z.string().min(1)),
       })
@@ -271,7 +276,7 @@ export function executionResultDigestOf(result: ExecutionResult): string {
  */
 export function selectionDigestOf(selection: {
   runner: string;
-  mode: 'full-relevant-suite' | 'mapped-selection';
+  mode: 'full-relevant-suite' | 'mapped-selection' | 'named-selection';
   logicalKeys: readonly string[];
 }): string {
   return sha256Canonical({

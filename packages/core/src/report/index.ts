@@ -126,6 +126,12 @@ export interface RenderRunOptions {
   /** Marks non-authoritative selected-run output without changing exit codes. */
   outcome?: 'partial-selection';
   /**
+   * The hand-picked `--test` selectors and the planned logical keys each
+   * one resolved to (additive; present only for a named run). It reports
+   * what ran and never grants gate authority.
+   */
+  selectors?: readonly { selector: string; logicalKeys: readonly string[] }[];
+  /**
    * Effective evaluation scope (plan §12.4); included in json/SARIF and
    * summarized in text when the scope expanded. Defaults to the full
    * `all` scope when omitted.
@@ -374,6 +380,7 @@ function jsonReport(
   if (options.diagnosticContext !== undefined) report['diagnosticContext'] = options.diagnosticContext;
   if (options.engine !== undefined) report['engine'] = options.engine;
   if (options.outcome !== undefined) report['outcome'] = options.outcome;
+  if (options.selectors !== undefined) report['selectors'] = options.selectors;
   return report;
 }
 

@@ -126,3 +126,28 @@ export function stringFlag(options: Record<string, unknown>, name: string): stri
   }
   return value;
 }
+
+/**
+ * Reads a repeatable string flag as a list of values. A single
+ * occurrence yields a one-element list; an absent flag yields
+ * undefined. Blank values are dropped (an empty selector would never
+ * match anything and would silently narrow nothing).
+ *
+ * Args:
+ *   options: parsed options.
+ *   name: flag name.
+ *
+ * Returns:
+ *   string[] | undefined: the values in argv order, or undefined when
+ *   the flag is absent or carries only blank values.
+ */
+export function repeatableStringFlag(
+  options: Record<string, unknown>,
+  name: string,
+): string[] | undefined {
+  const value = options[name];
+  if (value === undefined) return undefined;
+  const raw = Array.isArray(value) ? value : [value];
+  const values = raw.map(String).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  return values.length === 0 ? undefined : values;
+}

@@ -72,6 +72,7 @@ import {
   ExecutionResultSchema,
   executionBoundaryDigestOf,
   LOCAL_UNISOLATED_BOUNDARY,
+  humanMessage,
   isWitnessedRecord,
   renderRun,
   requiredCaseSetDigestOf,
@@ -128,7 +129,7 @@ import {
   type RunnerExecuteRequest,
   type RunnerTestIdentity,
 } from '@gate-forge/pack-playwright';
-import { parseArgs, stringFlag } from '../args.js';
+import { parseArgs, repeatableStringFlag, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
@@ -208,14 +209,18 @@ import { pruneRunHistory, recordRunHistory } from '../history.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
-  '[--result-only] [--format text|json|sarif] [--witness-url <url>] [--run-token <token>] ' +
+  '[--result-only] [--test <selector>] [--format text|json|sarif] [--witness-url <url>] [--run-token <token>] ' +
   '[--run-timeout-min <minutes>] ' +
   `(verifier key via ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV})\n` +
   '       --scope changed (supervised --changed only): plan, execute, and seal only the slice of tests\n' +
   '       claiming obligations affected by the resolved changed-file set; an affected obligation with no\n' +
   '       testable declared mapping blocks (EVIDENCE_SCOPE_INCOMPLETE) — narrower selection is never guessed\n' +
-  '       --result-only (requires --changed --scope changed): report selected results without gate authority or receipt changes; ' +
-    'external witnesses require a separate --out directory and --run-token';
+  '       --result-only (requires --changed --scope changed, or --test): report selected results without gate\n' +
+  '       authority or receipt changes; external witnesses require a separate --out directory and --run-token\n' +
+  '       --test <selector> (repeatable, requires --result-only): run only the named tests, witnessed. A\n' +
+  '       selector is a logical key or a unique substring of one. A hand-picked test list never seals a\n' +
+  '       receipt, so it is refused without --result-only. An unknown or ambiguous selector exits 2 with\n' +
+  '       the candidate keys listed — a narrower selection is never guessed';
 
 /**
  * Runs the test-gates subcommand.
@@ -237,7 +242,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
   }
   rejectUnknownFlags(
     options,
-    ['suite', 'out', 'format', 'witness-url', 'run-token', 'run-timeout-min', 'changed', 'scope', 'result-only', 'help'],
+    ['suite', 'out', 'format', 'witness-url', 'run-token', 'run-timeout-min', 'changed', 'scope', 'result-only', 'test', 'help'],
     TEST_GATES_USAGE,
   );
   const compatibilityError = installedPlaywrightCompatibilityError();
@@ -272,9 +277,29 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
     }
     scope = scopeFlag;
   }
-  if (resultOnly && (!changed || scope !== 'changed' || suite !== undefined)) {
+  // --test (repeatable): the hand-picked, witnessed single-test check.
+  // Resolution against the planned rows happens later, once the plan is
+  // fixed; here we only read the raw list and guard the contract that a
+  // named run can never carry gate authority.
+  const testSelectors = repeatableStringFlag(options, 'test');
+  if (testSelectors !== undefined && !resultOnly) {
     throw new UsageError(
-      'test-gates: --result-only requires --changed --scope changed and cannot be combined with --suite',
+      'test-gates: --test requires --result-only — a hand-picked test list never seals a receipt, ' +
+        'so run the full or scoped gate to issue one',
+    );
+  }
+  if (testSelectors !== undefined && suite !== undefined) {
+    throw new UsageError(
+      'test-gates: --test runs through the supervised runner adapter and cannot be combined with --suite',
+    );
+  }
+  // A named run builds its plan from the FULL planned rows and then
+  // narrows to the named keys, so it relaxes the diff-linked
+  // `--changed --scope changed` requirement --result-only otherwise has.
+  const namedSelection = testSelectors !== undefined;
+  if (resultOnly && !namedSelection && (!changed || scope !== 'changed' || suite !== undefined)) {
+    throw new UsageError(
+      'test-gates: --result-only requires --changed --scope changed (or --test <selector>) and cannot be combined with --suite',
     );
   }
   if (resultOnly && witnessUrl === undefined && out !== undefined) {
@@ -306,7 +331,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
     }
   }
   const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [resolveStateDir(io.cwd, out)]);
-  if (changed) {
+  if (changed || namedSelection) {
     const isolatedStateDir = resultOnly && witnessUrl === undefined ? mkdtempSync(join(tmpdir(), 'gateforge-selected-result-')) : undefined;
     try {
       return await runSupervisedTestGates(io, {
@@ -317,6 +342,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
         runTimeoutMs: parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')),
         scope,
         resultOnly,
+        testSelectors,
         verifierKeyring,
       });
     } finally {
@@ -740,6 +766,12 @@ export interface SupervisedOptions {
   scope: 'full' | 'changed';
   /** Report the selected slice without writing or clearing a gate receipt. */
   resultOnly?: boolean;
+  /**
+   * Hand-picked test selectors (`--test`), resolved against the planned
+   * rows. Only ever combined with `resultOnly`: a named run reports, it
+   * never seals.
+   */
+  testSelectors?: readonly string[];
   /** Trusted key ring resolved before candidate materialization, when provided. */
   verifierKeyring?: VerifierKeyring | null;
   /** Trusted staged-candidate changed paths supplied by the pre-commit orchestrator. */
@@ -754,6 +786,90 @@ export interface SupervisedOptions {
   runtimeReuseMounts?: readonly RuntimeReuseMount[];
   /** Recomputes the external reuse digest at the end of a staged run. */
   runtimeReuseCheck?: () => string | null;
+}
+
+/** One resolved `--test` selector and the planned logical keys it named. */
+export interface NamedTestSelection {
+  /** The selector exactly as the operator typed it. */
+  selector: string;
+  /** The planned logical keys it resolved to (sorted, never empty). */
+  logicalKeys: string[];
+}
+
+/** Candidate keys listed in an unresolved-selector error are capped at this many. */
+const SELECTOR_CANDIDATE_LIMIT = 20;
+
+/**
+ * Renders the candidate logical keys for an unresolved `--test`
+ * selector. Never guess a selection: the operator gets the exact keys
+ * to pick from.
+ *
+ * Args:
+ *   keys: every planned logical key of the run.
+ *
+ * Returns:
+ *   string: the capped, sorted candidate list.
+ */
+function selectorCandidates(keys: readonly string[]): string {
+  const sorted = [...keys].sort();
+  const shown = sorted.slice(0, SELECTOR_CANDIDATE_LIMIT).map((key) => `  - ${key}`).join('\n');
+  const hidden = sorted.length - Math.min(sorted.length, SELECTOR_CANDIDATE_LIMIT);
+  return hidden > 0 ? `${shown}\n  ... and ${String(hidden)} more` : shown;
+}
+
+/**
+ * Resolves hand-picked `--test` selectors against the PLANNED rows (the
+ * expected set fixed before the run), never against raw runner output:
+ * a selector can only ever name a test the gate already planned.
+ *
+ * A selector matches an exact logical key first, then a
+ * case-insensitive substring of one. Zero matches and ambiguous
+ * substrings both fail closed (exit 2) with the candidate keys listed.
+ *
+ * Args:
+ *   selectors: the selectors as typed, in argv order.
+ *   rows: the planned rows (only their logical keys are read).
+ *
+ * Returns:
+ *   NamedTestSelection[]: one entry per selector, in argv order.
+ * @throws UsageError (exit 2) when a selector matches nothing or more
+ *   than one planned test.
+ */
+export function resolveTestSelectors(
+  selectors: readonly string[],
+  rows: readonly { logicalKey: string }[],
+): NamedTestSelection[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.logicalKey)) continue;
+    seen.add(row.logicalKey);
+    keys.push(row.logicalKey);
+  }
+  return selectors.map((selector) => {
+    const exact = keys.filter((key) => key === selector);
+    const candidates = exact.length > 0 ? exact : keys.filter((key) => key.toLowerCase().includes(selector.toLowerCase()));
+    if (candidates.length === 0) {
+      throw new UsageError(
+        humanMessage({
+          detail: `no planned test matches the selector '${selector}' — nothing ran`,
+          type: 'test-selector-unknown',
+        }) +
+          (keys.length === 0
+            ? ' (this run planned no tests)'
+            : `\ncandidate logical keys:\n${selectorCandidates(keys)}`),
+      );
+    }
+    if (candidates.length > 1) {
+      throw new UsageError(
+        humanMessage({
+          detail: `the selector '${selector}' matches ${String(candidates.length)} planned tests — pick one exact logical key`,
+          type: 'test-selector-ambiguous',
+        }) + `\ncandidate logical keys:\n${selectorCandidates(candidates)}`,
+      );
+    }
+    return { selector, logicalKeys: candidates };
+  });
 }
 
 interface VerifiedCarryForwardParent {
@@ -1529,12 +1645,30 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           : enumeratedRows;
     }
   }
+  // Named selection (`--test`): the plan is built from the FULL planned
+  // rows above and only then narrowed to the named logical keys, so the
+  // expected set is still fixed before the run. An unresolvable selector
+  // throws a UsageError (exit 2) before any witness or runner spawns.
+  const namedSelections =
+    options.testSelectors === undefined
+      ? null
+      : resolveTestSelectors(
+          options.testSelectors,
+          plannedRows.map((row) => ({ logicalKey: row.planned.logicalKey })),
+        );
+  if (namedSelections !== null) {
+    const named = new Set<string>();
+    for (const entry of namedSelections) for (const key of entry.logicalKeys) named.add(key);
+    plannedRows = plannedRows.filter((row) => named.has(row.planned.logicalKey));
+  }
   if (format === 'text') {
     writeLine(
       io.stdout,
-      options.scope === 'changed'
-        ? `scope: changed (${plannedRows.length} tests) — ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`
-        : `scope: full (${fullPlannedCount} mapped tests) — add --scope changed for the ${affectedTestCount} tests affected by ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`,
+      namedSelections !== null
+        ? `scope: named (${plannedRows.length} tests) — ${humanMessage({ detail: 'a hand-picked test list never seals a receipt', type: 'partial-selection' })}`
+        : options.scope === 'changed'
+          ? `scope: changed (${plannedRows.length} tests) — ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`
+          : `scope: full (${fullPlannedCount} mapped tests) — add --scope changed for the ${affectedTestCount} tests affected by ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`,
     );
   }
   const inventoryBlocking: BlockingEntry[] =
@@ -1581,10 +1715,14 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   const selection = {
     runner: runnerName,
     // The selection mode names the slice honestly: a scoped run seals
-    // `mapped-selection` so its execution result (and every receipt
-    // binding it) can never be mistaken for a whole-suite seal. The
-    // digest covers the mode, so full and scoped receipts never collide.
-    mode: options.scope === 'changed' ? ('mapped-selection' as const) : ('full-relevant-suite' as const),
+    // `mapped-selection` and a hand-picked run reports `named-selection`,
+    // so neither can ever be mistaken for a whole-suite seal. The digest
+    // covers the mode, so full, scoped, and named runs never collide.
+    mode: namedSelections !== null
+      ? ('named-selection' as const)
+      : options.scope === 'changed'
+        ? ('mapped-selection' as const)
+        : ('full-relevant-suite' as const),
     logicalKeys: plannedRows.map((row) => row.planned.logicalKey),
   };
   const selectionDigest = selectionDigestOf(selection);
@@ -2399,10 +2537,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // themselves honestly in the execution result and every receipt
     // binding it).
     runner: runnerName,
-    // A scoped seal names its selection mode honestly (Goal 2): the
-    // execution result — and the receipt digest that binds it — record
-    // that a mapped slice ran, never a whole relevant suite.
-    ...(options.scope === 'changed' ? { mode: 'mapped-selection' as const } : {}),
+    // A scoped or named run names its selection mode honestly (Goal 2):
+    // the execution result — and the receipt digest that binds it —
+    // record that a slice ran, never a whole relevant suite.
+    ...(selection.mode === 'full-relevant-suite' ? {} : { mode: selection.mode }),
     logicalKeys: selection.logicalKeys,
     catalog: catalog ?? EMPTY_CATALOG,
     claimInventory: nativeClaims,
@@ -2642,6 +2780,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     execution: executionSummary,
     diagnosticContext,
     ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
+    ...(namedSelections !== null ? { selectors: namedSelections } : {}),
   });
   /**
    * The persisted json document: the same report shape stdout shows for a
@@ -2663,6 +2802,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           execution: executionSummary,
           diagnosticContext,
           ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
+          ...(namedSelections !== null ? { selectors: namedSelections } : {}),
         }),
       ) as Record<string, unknown>),
       ...(gateMode === 'strict'
