@@ -172,6 +172,34 @@ describe('renderRun — json format', () => {
     });
   });
 
+  it('names baselined debt apart from new debt, in the text and in the JSON', () => {
+    // The same run reported `blocking: 192` next to a gate line saying
+    // zero blockers. The split is additive: the legacy total stays, and
+    // the two numbers an operator can act on are named.
+    const execution: RunExecutionSummary = {
+      scope: 'full',
+      mode: 'executed',
+      testsPerformedThisInvocation: 0,
+      selectedTests: { selected: 0, passed: 0, failed: 0, skipped: 0, expectedFailures: 0 },
+      selectedClaims: { selected: 0, satisfied: 0, blocking: 0, blockingEntries: 0, waived: 0 },
+      repositoryDebt: {
+        obligations: 512,
+        blocking: 192,
+        blockingEntries: 0,
+        unclaimed: 192,
+        baselined: 192,
+        newlyBlocking: 0,
+      },
+    };
+    const options = { format: 'text', execution } as unknown as Parameters<typeof renderRun>[1];
+    const text = renderRun([], options);
+    expect(text).toContain('repository debt: 192 known (baselined), 0 new blocking');
+    const json = JSON.parse(
+      renderRun([], { format: 'json', execution } as unknown as Parameters<typeof renderRun>[1]),
+    );
+    expect(json.execution.repositoryDebt).toMatchObject({ blocking: 192, baselined: 192, newlyBlocking: 0 });
+  });
+
   it('labels a selected result as partial and leaves the receipt explicitly unsealed', () => {
     const execution: RunExecutionSummary = {
       scope: 'changed',
@@ -179,7 +207,14 @@ describe('renderRun — json format', () => {
       testsPerformedThisInvocation: 4,
       selectedTests: { selected: 4, passed: 4, failed: 0, skipped: 0, expectedFailures: 0 },
       selectedClaims: { selected: 26, satisfied: 26, blocking: 0, blockingEntries: 0, waived: 0 },
-      repositoryDebt: { obligations: 30, blocking: 4, blockingEntries: 0, unclaimed: 2 },
+      repositoryDebt: {
+        obligations: 30,
+        blocking: 4,
+        blockingEntries: 0,
+        unclaimed: 2,
+        baselined: 4,
+        newlyBlocking: 0,
+      },
     };
     const verdicts = [entry(accounts, 'satisfied')];
     const text = renderRun(verdicts, { format: 'text', execution, outcome: 'partial-selection' });

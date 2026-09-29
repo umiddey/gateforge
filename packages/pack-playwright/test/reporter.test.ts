@@ -773,6 +773,30 @@ describe('aggregate honesty (plan Phase 4 item 7): the reporter is never the fin
     expect(line).not.toMatch(/GATEFORGE GATE: PASS/);
   });
 
+  it('a named or changed run never prints a verdict word it cannot own', () => {
+    // The reporter graded a SELECTION: repository debt it never
+    // observed is not its verdict, and a "NOT PASSED" there contradicts
+    // the CLI exit code the operator actually sees.
+    for (const scope of ['named', 'changed'] as const) {
+      const line = gateSummaryLine([row('satisfied')], 511, scope);
+      expect(line).not.toMatch(/GATEFORGE GATE: (NOT PASSED|PASS|FAIL)/);
+      expect(line).toMatch(/GATEFORGE GATE: SELECTION/);
+      expect(line).toMatch(/1 satisfied, 0 blocking/);
+      expect(line).toMatch(/repository verdict not graded here/);
+      expect(line).toMatch(/final gate result: the gateforge CLI \(test-gates\/check\), never this reporter/);
+    }
+  });
+
+  it('a named run still prints FAIL when one of ITS claims is not satisfied', () => {
+    const line = gateSummaryLine([row('missing')], 511, 'named');
+    expect(line).toMatch(/GATEFORGE GATE: FAIL/);
+    expect(line).not.toMatch(/NOT PASSED/);
+  });
+
+  it('a whole-repository run keeps the NOT PASSED line it has always printed', () => {
+    expect(gateSummaryLine([row('satisfied')], 511, 'full')).toMatch(/GATEFORGE GATE: NOT PASSED/);
+  });
+
   it('every summary line names the CLI as the only final gate result', () => {
     for (const line of [
       gateSummaryLine([row('satisfied')], 0),
@@ -830,6 +854,19 @@ describe('aggregate honesty (plan Phase 4 item 7): the reporter is never the fin
         });
       }
       writeFileSync(obligationsPath, `${JSON.stringify(document)}\n`);
+      // The CLI publishes the scope and the adopted-baseline split into
+      // the run state BEFORE the suite starts; the reporter reads both.
+      writeFileSync(
+        join(run.stateDir, 'run-scope.json'),
+        `${JSON.stringify({ schemaVersion: 1, scope: 'named' })}\n`,
+      );
+      writeFileSync(
+        join(run.stateDir, 'debt-baseline.json'),
+        `${JSON.stringify({
+          schemaVersion: 1,
+          obligationIds: Array.from({ length: 500 }, (_, index) => `tenant.debt-${String(index)}:persistence:create`),
+        })}\n`,
+      );
 
       const client = new WitnessClient(run.witness.url, TOKEN);
       const session = await openSupervisorSession(run.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
@@ -853,14 +890,33 @@ describe('aggregate honesty (plan Phase 4 item 7): the reporter is never the fin
       const result = JSON.parse(readFileSync(join(run.stateDir, 'run-summary.json'), 'utf8')) as {
         selectedTests: { selected: number; passed: number; failed: number };
         selectedClaims: { selected: number; satisfied: number; blocking: number };
-        repositoryDebt: { obligations: number; unclaimed: number };
+        repositoryDebt: {
+          obligations: number;
+          unclaimed: number;
+          blocking: number;
+          baselined: number;
+          newlyBlocking: number;
+        };
       };
       expect(result.selectedTests).toMatchObject({ selected: 1, passed: 1, failed: 0 });
       expect(result.selectedClaims).toMatchObject({ selected: 1, satisfied: 1, blocking: 0 });
-      expect(result.repositoryDebt).toMatchObject({ obligations: 512, unclaimed: 511 });
+      // `blocking` is the legacy total and is unchanged; the split is
+      // additive and is what the text now reports.
+      expect(result.repositoryDebt).toMatchObject({
+        obligations: 512,
+        unclaimed: 511,
+        blocking: 511,
+        baselined: 500,
+        newlyBlocking: 11,
+      });
       expect(output.join('\n')).toMatch(/selected tests: 1 passed, 0 failed/);
       expect(output.join('\n')).toMatch(/selected claims: 1 satisfied, 0 blocking/);
-      expect(output.join('\n')).toMatch(/repository debt: 511 unclaimed/);
+      expect(output.join('\n')).toMatch(
+        /repository debt: 500 known \(baselined\), 11 new blocking \/ 512 obligations \(511 unclaimed\)/,
+      );
+      // A named run never prints a repository verdict it cannot own.
+      expect(output.join('\n')).toMatch(/GATEFORGE GATE: SELECTION \(1 satisfied, 0 blocking/);
+      expect(output.join('\n')).not.toMatch(/GATEFORGE GATE: NOT PASSED/);
     } finally {
       logger.mockRestore();
       await run.witness.stop();

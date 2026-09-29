@@ -181,7 +181,7 @@ import { obligationFingerprint } from '../evaluate.js';
 import { computeEvaluationScope } from '../scope.js';
 import { candidateTreeCoversCommit, computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
-import { resolveProvider } from '../providers.js';
+import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
 import { engineIdentity } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import {
@@ -224,7 +224,7 @@ import {
 } from '../run-reliability.js';
 import { pruneRunHistory, recordRunHistory } from '../history.js';
 import { ProgressStream, resolveProgressTarget, type ProgressOutcome, type ProgressTarget } from '../progress.js';
-import { writeTestFailures } from '../state.js';
+import { writeDebtBaselineView, writeRunScopeView, writeTestFailures } from '../state.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
@@ -1350,6 +1350,14 @@ export function decideTestOnlyReseal(input: {
  */
 export async function runSupervisedTestGates(io: Io, options: SupervisedOptions): Promise<number> {
   const config = loadConfigAt(io.cwd);
+  // A merge-request pipeline with no base commit resolves the `auto`
+  // provider to the local staged diff: zero changed files, and a gate
+  // that fails an hour later on debt nobody changed. Refuse in seconds,
+  // before a harness starts or a witness is spawned.
+  if (options.scope === 'changed') {
+    const refusal = mergeRequestScopePreflight(config, io.env);
+    if (refusal !== null) throw new UsageError(refusal);
+  }
   const startedAtMs = Date.now();
   const historyStateDir = resolveStateDir(io.cwd, options.out);
   pruneRunHistory(join(historyStateDir, 'history'), config.history?.retentionDays);
@@ -1761,6 +1769,24 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       ? { changedFilesOverride: options.fixedChangedFiles }
       : {}),
   });
+  // The scope and the adopted-baseline split, published to the
+  // in-runner reporter BEFORE the suite starts: a reporter that graded
+  // a selection must not print a repository verdict, and a reporter
+  // that does not know the baseline must not fold forgiven debt into its
+  // blocking count (one number, one meaning).
+  const runScope: 'full' | 'changed' | 'named' =
+    options.testSelectors !== undefined ? 'named' : options.scope === 'changed' ? 'changed' : 'full';
+  writeRunScopeView(stateDir, runScope);
+  const adoptedBaseline = resolveAdoptedBaseline(io.cwd, config.baselines);
+  writeDebtBaselineView(
+    stateDir,
+    adoptedBaseline === null
+      ? []
+      : pipeline.policy.obligations
+          .filter((obligation) => adoptedBaseline.fingerprints.has(obligationFingerprint(obligation)))
+          .map((obligation) => obligation.id)
+          .sort(),
+  );
   // Owner quarantine (plan 20260925_2013 Phase 2): loaded against the
   // INJECTED run clock, never the wall clock. ACTIVE quarantines remove
   // their test from the REQUIRED set and its evidence is discarded;
@@ -2315,7 +2341,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       // Goal 1: the reused gate grades through the SAME adopted-baseline
       // seam as check — baselined obligations waive (loudly) instead of
       // blocking the reused evaluation.
-      baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
+      baseline: adoptedBaseline,
       mappedCoverage,
       evidenceContext: {
         expectedInputDigest: expectedDigest,
@@ -2583,7 +2609,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       claimInventory,
       witnessVerifierKey,
       witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
-      baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
+      baseline: adoptedBaseline,
       mappedCoverage,
       evidenceContext: {
         expectedInputDigest: expectedDigest,
@@ -2917,7 +2943,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   const progress = new ProgressStream({
     writer: progressTarget,
     runner: runnerName,
-    scope: namedTestIds !== null ? 'named' : options.scope === 'changed' ? 'changed' : 'full',
+    scope: runScope,
     expected: selection.logicalKeys.length,
     writeLine: (line: string) => writeLine(io.stderr, line),
     warn: (line: string) => writeLine(io.stderr, line),
@@ -3335,7 +3361,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // SAME fail-closed seam as `check` (no adoption record → nothing is
     // forgiven). Under strictE2E the evaluator still re-grades every
     // waived verdict to blocking — a waiver is not proof.
-    baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
+    baseline: adoptedBaseline,
     mappedCoverage,
     evidenceContext: {
       expectedInputDigest: expectedDigest,
@@ -3988,6 +4014,9 @@ function runExecutionSummaryOf(input: {
   const blockingRepository = input.repositoryVerdicts.filter(
     (verdict) => verdict.verdict !== 'satisfied' && verdict.verdict !== 'waived',
   ).length;
+  const baselinedRepository = input.repositoryVerdicts.filter(
+    (verdict) => verdict.verdict === 'waived' && (verdict.reason ?? '').startsWith('baselined:'),
+  ).length;
   return {
     scope: input.scope,
     mode: input.mode,
@@ -4008,9 +4037,16 @@ function runExecutionSummaryOf(input: {
     },
     repositoryDebt: {
       obligations: input.repositoryVerdicts.length,
+      // The legacy total, unchanged: blocking claims + repository
+      // findings, baselined debt included.
       blocking: blockingRepository + input.repositoryBlocking.length,
       blockingEntries: input.repositoryBlocking.length,
       unclaimed: input.unclaimed,
+      // The adopted baseline re-grades a blocking verdict to `waived`
+      // with this exact reason, so the split is read back from what the
+      // evaluator actually did rather than recomputed beside it.
+      baselined: baselinedRepository,
+      newlyBlocking: Math.max(0, blockingRepository + input.repositoryBlocking.length - baselinedRepository),
     },
   };
 }

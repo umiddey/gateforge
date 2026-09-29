@@ -19,7 +19,7 @@
  * fixture tests control GIT_* variables exactly like anything else.
  */
 import { spawnSync } from 'node:child_process';
-import { normalizeChangedFiles, type ChangedFileProvider, type ChangedProvider } from '@gate-forge/core';
+import { normalizeChangedFiles, type ChangedFileProvider, type ChangedProvider, type GateforgeConfig } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 
 /** git flags keeping invocations deterministic and config-independent. */
@@ -170,4 +170,46 @@ export function resolveProvider(
     identity = configured;
   }
   return providerFor(identity, cwd, env);
+}
+/**
+ * The CI merge-request scope preflight (the `auto` provider's silent
+ * zero-diff case).
+ *
+ * In a merge-request pipeline the `auto` provider prefers the platform
+ * diff, and falls back to the LOCAL staged diff when the platform
+ * exposes no base commit. In a CI job nothing is staged, so
+ * `--scope changed` quietly grades ZERO changed files — the whole
+ * pipeline then runs for the better part of an hour and fails on debt
+ * that was never in the change. The fix is not a better fallback but an
+ * honest refusal, in seconds, before anything is spawned.
+ *
+ * It speaks ONLY in that exact case: an explicitly configured provider
+ * is the owner's decision, a pipeline that is not a merge request has
+ * no base commit to ask for, a base commit that IS present resolves
+ * properly, and a local run is untouched.
+ *
+ * Args:
+ *   config: the trusted config (only `changed.provider` is consulted).
+ *   env: the process environment.
+ *
+ * Returns:
+ *   string | null: the refusal message, or null when the run may proceed.
+ */
+export function mergeRequestScopePreflight(
+  config: Pick<GateforgeConfig, 'changed'>,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  if (config.changed.provider !== 'auto') return null;
+  if (env['CI'] !== 'true') return null;
+  const mergeRequest =
+    (env['CI_MERGE_REQUEST_IID'] ?? '').length > 0 || env['GITHUB_EVENT_NAME'] === 'pull_request';
+  if (!mergeRequest) return null;
+  const baseAvailable =
+    (env['GITHUB_BASE_REF'] ?? '').length > 0 ||
+    (env['CI_MERGE_REQUEST_DIFF_BASE_SHA'] ?? '').length > 0;
+  if (baseAvailable) return null;
+  return (
+    'CI merge-request pipeline without a base commit: set CI_MERGE_REQUEST_DIFF_BASE_SHA (GitLab) ' +
+    'or run with --scope full — the auto scope would have checked 0 changed files'
+  );
 }

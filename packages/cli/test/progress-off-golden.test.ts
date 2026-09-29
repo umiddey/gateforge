@@ -64,3 +64,44 @@ describe('the progress stream off is byte-identical', () => {
     });
   });
 });
+
+/**
+ * The CI merge-request scope preflight at the command surface: the
+ * refusal must arrive in seconds with exit 2 and the actionable
+ * message, not after a spawned witness and a suite that graded nothing.
+ */
+describe('the CI merge-request scope preflight', () => {
+  const mergeRequestEnv = { CI: 'true', CI_MERGE_REQUEST_IID: '94' };
+
+  it('fails test-gates --scope changed in seconds, naming the fix', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const started = performance.now();
+      const result = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed'], mergeRequestEnv);
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('CI merge-request pipeline without a base commit');
+      expect(result.stderr).toContain('CI_MERGE_REQUEST_DIFF_BASE_SHA');
+      expect(performance.now() - started).toBeLessThan(5_000);
+    });
+  });
+
+  it('fails check --changed the same way', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const result = await runCli(repo, ['check', '--changed'], mergeRequestEnv);
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('CI merge-request pipeline without a base commit');
+    });
+  });
+
+  it('says nothing once the pipeline exposes a base commit', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const result = await runCli(repo, ['check', '--changed'], {
+        ...mergeRequestEnv,
+        CI_MERGE_REQUEST_DIFF_BASE_SHA: 'a'.repeat(40),
+      });
+      expect(result.stderr).not.toContain('CI merge-request pipeline without a base commit');
+    });
+  });
+});
