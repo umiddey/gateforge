@@ -102,28 +102,50 @@ function hasInnerParam(prefix: string): boolean {
     .some((segment) => segment.startsWith(':') || segment === '{}');
 }
 
+/** Column-name fragments that mark a credential, never a projected field. */
+const SECRET_COLUMN_PATTERN: RegExp = /password|secret|token|hash|api[-_]?key|private[-_]?key/;
+
+/** Attribute keys a detector may use to mark columns as non-projectable. */
+const SECRET_COLUMN_KEYS: readonly string[] = [
+  'secretColumns',
+  'secretFields',
+  'sensitiveFields',
+  'nonProjectableFields',
+];
+
 /**
- * The projected business fields a scaffolder can honestly name.
+ * The business fields a scaffolder can honestly project, and the
+ * declared columns it deliberately left out.
+ *
+ * Every column the graph declares for the table is projected — the
+ * obligations observe read-only columns and foreign keys, not only
+ * the updateable ones — except the primary key (that IS the id) and
+ * the columns that must never leave the app.
  *
  * Args:
  *   resource: the business resource.
  *
  * Returns:
- *   string[]: primary-key columns plus declared updateable fields,
- *   sorted and deduplicated.
+ *   {fields: string[], excluded: string[]}: the projected columns and
+ *   the excluded ones, each sorted and deduplicated.
  */
-function projectedFields(resource: GraphResource): string[] {
-  const primary = resource.classification?.primaryKey ?? [];
-  const updateable = resource.attributes['updateableFields'];
-  const extra = Array.isArray(updateable)
-    ? updateable.filter((field): field is string => typeof field === 'string')
-    : [];
-  const seen: Record<string, true> = {};
-  for (const field of [...primary, ...extra]) {
-    if (field.length > 0) seen[field] = true;
+function projectedFields(resource: GraphResource): { fields: string[]; excluded: string[] } {
+  const primaryKey = new Set(resource.classification?.primaryKey ?? []);
+  const declaredSecrets = new Set(
+    SECRET_COLUMN_KEYS.flatMap((key) => attributeColumns(resource.attributes[key], 'name')),
+  );
+  const fields: string[] = [];
+  const excluded: string[] = [];
+  for (const column of declaredColumns(resource)) {
+    const isPrimaryKey = primaryKey.has(column);
+    const isSecret =
+      declaredSecrets.has(column) || SECRET_COLUMN_PATTERN.test(column.toLowerCase());
+    if (isPrimaryKey || isSecret) excluded.push(column);
+    else fields.push(column);
   }
-  return Object.keys(seen).sort();
+  return { fields, excluded };
 }
+
 
 /** Column names that usually mark a soft-deleted row, not a removed one. */
 const SOFT_DELETE_COLUMNS: Record<string, true> = {
@@ -374,7 +396,13 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
 
     const readPath = byId.split.prefix + '/{id}';
     const listPath = collection.route.canonicalPath;
-    const fields = projectedFields(resource);
+    const { fields, excluded } = projectedFields(resource);
+    if (fields.length === 0) {
+      needsYou.push(
+        `the graph declares no columns for ${resource.name} beyond its primary key and secrets: add the ` +
+          'business fields the obligations grade — a response-only computed field is the human’s call',
+      );
+    }
     const deletion = target.deleteSemantics ?? (softDelete.declared.length > 0 ? 'archive' : 'hard');
     guesses.push(`readPath '${readPath}' guessed from GET ${byId.route.canonicalPath}`);
     guesses.push(`listPath '${listPath}' guessed from GET ${collection.route.canonicalPath}`);
@@ -385,7 +413,8 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
     guesses.push(
       fields.length === 0
         ? 'no fields could be derived; add the business fields the obligations grade'
-        : `fields [${fields.join(', ')}] derived from the classified primary key and updateable fields`,
+        : `fields [${fields.join(', ')}] derived from every column the compiled graph declares for ` +
+          `${resource.name} (excluded: ${excluded.join(', ')})`,
     );
     guesses.push('itemWrapper guessed as none (the response body IS the entity)');
     guesses.push(

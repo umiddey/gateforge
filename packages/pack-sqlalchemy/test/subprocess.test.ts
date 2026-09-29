@@ -325,6 +325,9 @@ describe('classification signals (plan phase 3, ADR 0003 D1)', () => {
     ]);
     expect(fkTable?.attributes['softDeleteCandidateFields']).toEqual(['deleted_at']);
     expect(fkTable?.attributes['primaryKeyColumns']).toEqual(['id']);
+    // Every literal column, written order — the complete projection a
+    // reviewer (and the adapter scaffolder) needs, not just the key.
+    expect(fkTable?.attributes['columnNames']).toEqual(['id', 'parent_id', 'deleted_at']);
     // A candidate column without a declaration emits NO delete-semantics.
     expect(signalsOf(outcome, 'delete-semantics', 'fk_tables')).toHaveLength(0);
   }, 60_000);
