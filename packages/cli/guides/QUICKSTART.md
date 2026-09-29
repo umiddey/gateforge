@@ -1,5 +1,7 @@
 # Quickstart
 
+> Connecting a second project, or the whole flow including evidence adapters, the test map, and the first green commit? Read [Connect your project](CONNECT-YOUR-PROJECT.md) first; this guide stays the shortest path.
+
 This guide takes a project from install to a blocking gate. Gateforge does not create your app, database, seed data, logins, or test services. Your team or agent provides those first. See [Test environment](TEST-ENVIRONMENT.md).
 
 You need Node.js 20 or newer and an existing Playwright suite that can run against a disposable app.

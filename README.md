@@ -11,6 +11,7 @@ obligation, and which evidence is missing or invalid.
 
 ## Start here
 
+- [Connect your project](packages/cli/guides/CONNECT-YOUR-PROJECT.md)
 - [Quickstart](packages/cli/guides/QUICKSTART.md)
 - [Test environment](packages/cli/guides/TEST-ENVIRONMENT.md)
 - [Upgrade from 0.6 to 0.7](packages/cli/guides/UPGRADE-0.6-to-0.7.md)
