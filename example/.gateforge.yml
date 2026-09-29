@@ -39,3 +39,9 @@ witness:
   maxDurationSeconds: 5
 clock:
   mode: system
+
+# The test runner the supervised gate drives: playwright (the default when
+# this key is absent), pytest, vitest or cypress. `gateforge init` writes it
+# when the scan sees exactly one non-Playwright runner; see
+# packages/cli/guides/RUNNER-NEUTRAL-EVIDENCE.md.
+# runner: vitest

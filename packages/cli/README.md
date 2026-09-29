@@ -11,6 +11,7 @@ gate, enforce the exact staged candidate, and maintain baselines.
 - [Quickstart](guides/QUICKSTART.md)
 - [Test environment](guides/TEST-ENVIRONMENT.md)
 - [Upgrade from 0.6 to 0.7](guides/UPGRADE-0.6-to-0.7.md)
+- [Runners other than Playwright](guides/RUNNER-NEUTRAL-EVIDENCE.md)
 
 Also at https://github.com/umiddey/gateforge/tree/main/packages/cli/guides.
 
@@ -563,6 +564,10 @@ Enforcement-relevant sections:
   trusted-policy act — the policy participates in the trusted policy
   revision, so an agent edit never self-approves.
 - `diagnostics.suites:` — the advisory pytest suites (see above).
+- `runner:` — the test runner the supervised gate drives:
+  `playwright` (the default when the key is absent), `pytest`, `vitest` or
+  `cypress`. `check`, `next`, `tests`, `test-gates`, `doctor` and `init`
+  all follow it. See `guides/RUNNER-NEUTRAL-EVIDENCE.md`.
 
 ## Plugin invocation
 
