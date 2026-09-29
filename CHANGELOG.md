@@ -24,6 +24,7 @@
 ### Fixed
 
 - `--scope changed` in a merge-request CI pipeline with no base commit no longer falls back to the local staged diff (zero changed files, and a failure an hour later on debt nobody changed). `test-gates --scope changed` and `check --changed` refuse in seconds with exit 2 and the fix; an explicitly configured provider, a pipeline that is not a merge request, a present base commit, and every local run are unchanged.
+- A consumer's Playwright config that prints at load time (a `dotenv`/`dotenvx` banner, a stray `console.log`) no longer breaks native test enumeration with "produced unparseable output". The JSON reporter's report is now read from the reporter's own output file — a channel stdout noise cannot corrupt — and is never guessed out of the child's output stream. When a run genuinely produces no readable report, the error says so and shows the runner's own output, instead of blaming the first stdout line.
 
 ### Fixed
 
