@@ -14,6 +14,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -23,7 +24,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { describe, expect, it } from 'vitest';
@@ -33,6 +34,9 @@ import type { RuntimeReuseMount } from '../src/runtime-reuse.js';
 
 /** Absolute path of this repository's checkout (`packages/cli/test`'s grandparent). */
 const REPOSITORY_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+
+/** Directories never copied into the repository-content comparison. */
+const SKIPPED_SNAPSHOT_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', '.gateforge', 'coverage']);
 
 /** 1.5 MB of deterministic content (a large blob, not a small one). */
 const LARGE_BLOB = Buffer.alloc(1_500_000);
@@ -318,16 +322,28 @@ describe('candidate tree ingestion computes the same id in process as it did one
     }
   });
 
-  it('computes this repository checkout to the reference tree id', { timeout: 600_000 }, () => {
-    const workspace = resolve(REPOSITORY_ROOT);
+  it('computes this repository checkout to the reference tree id', { timeout: 300_000 }, () => {
     const scratch = mkdtempSync(join(tmpdir(), 'gateforge-self-tree-'));
-    const initialized = spawnSync('git', ['init', '--quiet', '--bare', scratch], { encoding: 'utf8' });
+    // A COPY, because the two walks must see ONE workspace state: a
+    // concurrent build in this repository rewrites files while the (far
+    // slower) reference walk is still running, and two trees are only
+    // comparable when both sides hashed the same bytes. Build outputs and
+    // installed dependencies are left out — they are generated, not this
+    // repository's own source, and hashing them per file would block this
+    // worker for minutes (the reference spawns one git process per file).
+    const snapshot = join(scratch, 'checkout');
+    cpSync(resolve(REPOSITORY_ROOT), snapshot, {
+      recursive: true,
+      filter: (source) => !SKIPPED_SNAPSHOT_DIRECTORIES.has(basename(source)),
+    });
+    const store = join(scratch, 'store');
+    const initialized = spawnSync('git', ['init', '--quiet', '--bare', store], { encoding: 'utf8' });
     if (initialized.status !== 0) {
       throw new Error(`cannot create the scratch object store: ${initialized.stderr}`);
     }
     try {
-      const reference = computeCandidateTreeIdLegacy(scratch, workspace, process.env, null, 'record');
-      const fast = computeCandidateTreeId(scratch, workspace, process.env, null, 'record');
+      const reference = computeCandidateTreeIdLegacy(store, snapshot, process.env, null, 'record');
+      const fast = computeCandidateTreeId(store, snapshot, process.env, null, 'record');
       expect(fast).toBe(reference);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
