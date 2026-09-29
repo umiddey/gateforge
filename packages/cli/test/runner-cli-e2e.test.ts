@@ -16,6 +16,7 @@
  * obligation stays blocking and no receipt is issued.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1058,6 +1059,12 @@ interface NamedReport {
   verdicts: Array<{ obligationId: string; verdict: string }>;
 }
 
+/** The sealed execution result a `--result-only` run leaves in its own state dir. */
+interface NamedExecutionResult {
+  selection?: { mode?: string; logicalKeys?: string[] };
+  outcomes?: Array<{ logicalKey: string; status: string }>;
+}
+
 describe('witnessed single test through the real CLI', () => {
   it('reports the honest failure of a named test that bypasses the witness', async () => {
     const keyFile = provisionKeyRing();
@@ -1102,6 +1109,95 @@ describe('witnessed single test through the real CLI', () => {
       expect(report.summary.blocking, why).toBeGreaterThan(0);
       // A failing named run still seals nothing.
       expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 600_000);
+});
+
+describe('a named run never touches the sealed receipt', () => {
+  it('seals a full receipt, runs one named test, and leaves the receipt byte-identical', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'vitest',
+        gateforgeYml('vitest'),
+        {
+          'app.cjs': APP,
+          'vitest.config.mjs': VITEST_CONFIG,
+          'tests/green.test.mjs': VITEST_GREEN,
+          'tests/red.test.mjs': VITEST_RED,
+        },
+        testMapYmlMany('vitest', [
+          { file: 'tests/green.test.mjs', titlePath: ['creates account through the session proxy'] },
+          { file: 'tests/red.test.mjs', titlePath: ['creates account outside the session proxy'] },
+        ]),
+      );
+      linkVitestModules(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'named receipt identity fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+      const receiptPath = repo.path('.gateforge/test-gates/receipt.json');
+      const receiptDigest = (): string =>
+        createHash('sha256').update(readFileSync(receiptPath)).digest('hex');
+
+      // The authoritative seal FIRST: this is the receipt the named run
+      // must leave untouched, byte for byte.
+      const sealed = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      const sealWhy = `${runnerFailures(repo)}test-gates stdout:\n${sealed.stdout}\nstderr:\n${sealed.stderr}`;
+      expect(sealed.code, sealWhy).toBe(0);
+      expect(existsSync(receiptPath)).toBe(true);
+      const before = receiptDigest();
+
+      const greenKey = 'tests/green.test.mjs#creates account through the session proxy';
+      const named = await runCli(
+        repo,
+        ['test-gates', '--test', greenKey, '--result-only', '--format', 'json'],
+        env,
+      );
+      const why = `${runnerFailures(repo)}named run stdout:\n${named.stdout}\nstderr:\n${named.stderr}`;
+      // The named test is honest and green, so the named run reports a
+      // real pass — and it seals NOTHING.
+      expect(named.code, why).toBe(0);
+      const report = JSON.parse(named.stdout) as NamedReport;
+      expect(report.selectors, why).toEqual([{ selector: greenKey, logicalKeys: [greenKey] }]);
+      expect(report.execution?.selectedTests?.selected, why).toBe(1);
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict, why).toBe('satisfied');
+      expect(report.execution?.selectedTests?.passed, why).toBe(1);
+      expect(report.outcome, why).toBe('partial-selection');
+      // The run names its own slice: `scope: named (1 tests)` is how a
+      // hand-picked selection says out loud that it is not a whole run.
+      const namedText = await runCli(repo, ['test-gates', '--test', greenKey, '--result-only'], env);
+      expect(namedText.stdout, `named text stdout:\n${namedText.stdout}`).toContain('scope: named (1 tests)');
+      expect(namedText.stdout).toContain('a hand-picked test list never seals a receipt');
+      // The receipt is byte-identical: a named run can never replace,
+      // refresh or clear the owner's seal.
+      expect(receiptDigest(), `the named run changed the sealed receipt\n${named.stderr}`).toBe(before);
+
+      // A named run of the FAILING test shows its real verdict and
+      // still leaves the same receipt bytes.
+      const bypassKey = 'tests/red.test.mjs#creates account outside the session proxy';
+      const namedFailing = await runCli(
+        repo,
+        ['test-gates', '--test', bypassKey, '--result-only', '--format', 'json'],
+        env,
+      );
+      const failingWhy = `${runnerFailures(repo)}named failing run stdout:\n${namedFailing.stdout}\nstderr:\n${namedFailing.stderr}`;
+      expect(namedFailing.code, failingWhy).toBe(1);
+      const failingReport = JSON.parse(namedFailing.stdout) as NamedReport;
+      expect(failingReport.selectors, failingWhy).toEqual([{ selector: bypassKey, logicalKeys: [bypassKey] }]);
+      expect(
+        failingReport.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict,
+        failingWhy,
+      ).not.toBe('satisfied');
+      expect(receiptDigest(), `the failing named run changed the sealed receipt\n${namedFailing.stderr}`).toBe(before);
+
+      // And the authoritative check is unaffected by both named runs.
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+      expect(checked.stdout).toContain('receipt-verified');
     });
   }, 600_000);
 });
