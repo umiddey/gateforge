@@ -19,6 +19,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo } from '@gate-forge/core';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import {
   configYml,
@@ -116,6 +118,97 @@ describe('gate surfaces follow the configured runner', () => {
       expect(result.code, result.stdout).toBe(0);
     });
   }, 120_000);
+});
+
+describe('doctor readiness follows the configured runner', () => {
+  /** The `runner` check of the deterministic doctor JSON report. */
+  async function runnerCheck(
+    repo: { root: string },
+    env: Record<string, string | undefined> = {},
+  ): Promise<{ status: string; detail: string }> {
+    const result = await runCli(repo as never, ['enforcement', 'doctor', '--json'], env);
+    expect(result.code).toBe(0); // the doctor is a diagnostic: it always runs
+    const report = JSON.parse(result.stdout) as {
+      checks: Array<{ id: string; status: string; detail: string }>;
+    };
+    const found = report.checks.find((entry) => entry.id === 'runner');
+    expect(found, "the 'runner' check is present").toBeTruthy();
+    return found as { status: string; detail: string };
+  }
+
+  it('keeps the Playwright readiness byte-identical without a runner key', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const check = await runnerCheck(repo);
+      expect(check.status).toBe('fail');
+      expect(check.detail).toBe(
+        'playwright is not installed (no node_modules/playwright found from the repo root); ' +
+          'the supervised E2E runner cannot execute',
+      );
+    });
+  });
+
+  it('reports a missing vitest config when vitest is the configured runner', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ '.gateforge.yml': configWithRunner('vitest') });
+      const check = await runnerCheck(repo);
+      expect(check.status).toBe('fail');
+      expect(check.detail).toContain('vitest');
+      expect(check.detail).toContain('vitest.config.*');
+      expect(check.detail).not.toContain('playwright');
+    });
+  });
+
+  it('reports vitest ready once its config and package are present', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': configWithRunner('vitest'),
+        'vitest.config.ts': VITEST_CONFIG,
+        'node_modules/vitest/package.json': '{"name":"vitest","version":"3.0.0"}\n',
+      });
+      const check = await runnerCheck(repo);
+      expect(check.status).toBe('ok');
+      expect(check.detail).toContain('vitest.config.ts');
+    });
+  });
+
+  it('reports a missing pytest suite when pytest is the configured runner', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ '.gateforge.yml': configWithRunner('pytest') });
+      const check = await runnerCheck(repo);
+      expect(check.status).toBe('fail');
+      expect(check.detail).toContain('pytest');
+      expect(check.detail).toContain('suite');
+    });
+  });
+
+  it('reports pytest ready with a configured suite and a resolvable binary', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': `${configWithRunner('pytest')}diagnostics:
+  suites:
+    - name: backend
+      runner: pytest
+      cwd: .
+      argv: ['python', '-m', 'pytest']
+      testPaths: ['tests']
+      timeoutMs: 120000
+`,
+      });
+      const binDir = join(repo.root, 'fake-bin');
+      mkdirSync(binDir, { recursive: true });
+      const binary = join(binDir, 'pytest');
+      writeFileSync(binary, '#!/bin/sh\nexit 0\n');
+      chmodSync(binary, 0o755);
+      const check = await runnerCheck(repo, { PATH: binDir });
+      expect(check.status).toBe('ok');
+      expect(check.detail).toContain('backend');
+    });
+  });
 });
 
 /** A valid, unexpired waiver for one fixture obligation. */

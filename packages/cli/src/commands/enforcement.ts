@@ -37,6 +37,7 @@ import { spawnSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { BehaviorPolicySchema } from '@gate-forge/core';
+import type { GateforgeConfig } from '@gate-forge/core';
 import { parse as parseYaml } from 'yaml';
 import {
   allCapabilities,
@@ -51,7 +52,7 @@ import { trustedPolicyDigestForConfig } from '../execution.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
-import { TEST_MAP_RELATIVE } from '../mapping.js';
+import { findRunnerConfigPath, TEST_MAP_RELATIVE } from '../mapping.js';
 import { inspectCommitHook } from '../git-hooks.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { resolveStateDir } from '../state.js';
@@ -397,6 +398,161 @@ function playwrightReadiness(cwd: string): { status: DoctorStatus; detail: strin
   return { status: 'ok', detail: `playwright installed; browsers ${browsers} under '${browsersPath}'` };
 }
 
+/**
+ * Runner readiness for the CONFIGURED runner (`runner:` in
+ * `.gateforge.yml`; absent = playwright). Playwright keeps its exact
+ * historical probe, id and detail — a repository without the key sees
+ * byte-identical output. A non-Playwright runner reports the two cheap
+ * facts the supervised run needs: its own declaration (a config file at
+ * the repository root for vitest/cypress, a configured suite for pytest)
+ * and a resolvable runner package/binary. Nothing is launched.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   config: the loaded repository config.
+ *   env: the process environment (PATH resolution for pytest).
+ *
+ * Returns:
+ *   {status, detail}: ok when both facts hold, fail otherwise.
+ */
+function runnerReadiness(
+  cwd: string,
+  config: GateforgeConfig,
+  env: NodeJS.ProcessEnv,
+): { status: DoctorStatus; detail: string } {
+  if (config.runner === 'playwright') return playwrightReadiness(cwd);
+  if (config.runner === 'pytest') return pytestReadiness(cwd, config, env);
+  return nodeRunnerReadiness(cwd, config.runner);
+}
+
+/**
+ * Readiness for a node-based runner (vitest, cypress): its config file
+ * at the repository root plus its package resolvable like Node resolves
+ * it (the CLI may run from a workspace root).
+ *
+ * Args:
+ *   cwd: repository root.
+ *   runner: the configured runner name.
+ *
+ * Returns:
+ *   {status, detail}: ok when the config file and the package resolve.
+ */
+function nodeRunnerReadiness(cwd: string, runner: string): { status: DoctorStatus; detail: string } {
+  const configFile = findRunnerConfigPath(cwd, runner);
+  if (configFile === null) {
+    return {
+      status: 'fail',
+      detail:
+        `${runner} is the configured runner but no ${runner} config file was found at the repository root ` +
+        `(expected ${runner}.config.* at the repository root); the supervised E2E runner cannot execute`,
+    };
+  }
+  if (findUpwardPackage(cwd, runner) === null) {
+    return {
+      status: 'fail',
+      detail:
+        `${runner} is configured (${configFile}) but ${runner} is not installed ` +
+        `(no node_modules/${runner} found from the repo root); run \`npm install --save-dev ${runner}\` ` +
+        'before the supervised run',
+    };
+  }
+  return {
+    status: 'ok',
+    detail: `${runner} configured (${configFile}) and installed; the supervised run can execute it`,
+  };
+}
+
+/**
+ * Readiness for pytest: the owner registers the suite explicitly (there
+ * is no config file to probe) and the `pytest` executable must resolve on
+ * PATH. Fail-open to `fail` — an unresolvable runner never runs.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   config: the loaded repository config.
+ *   env: the process environment (PATH resolution).
+ *
+ * Returns:
+ *   {status, detail}: ok when a suite is configured and pytest resolves.
+ */
+function pytestReadiness(
+  cwd: string,
+  config: GateforgeConfig,
+  env: NodeJS.ProcessEnv,
+): { status: DoctorStatus; detail: string } {
+  const suites = (config.diagnostics?.suites ?? []).filter((suite) => suite.runner === 'pytest');
+  if (suites.length === 0) {
+    return {
+      status: 'fail',
+      detail:
+        'pytest is the configured runner but no pytest suite is configured in .gateforge.yml ' +
+        '(diagnostics.suites); the supervised E2E runner cannot execute',
+    };
+  }
+  const names = suites.map((suite) => suite.name).join(', ');
+  const binary = findOnPath(env['PATH'], 'pytest');
+  if (binary === null) {
+    return {
+      status: 'fail',
+      detail:
+        `pytest suite(s) configured (${names}) but no pytest executable was found on PATH; ` +
+        'install it (python -m pip install pytest) before the supervised run',
+    };
+  }
+  return {
+    status: 'ok',
+    detail: `pytest suite(s) configured (${names}) and pytest resolves at '${binary}'; the supervised run can execute it`,
+  };
+}
+
+/**
+ * Resolves `<package>/package.json` upward from the repository root the
+ * way Node resolution walks (the CLI may run from a workspace root).
+ *
+ * Args:
+ *   cwd: repository root.
+ *   packageName: the runner's npm package name.
+ *
+ * Returns:
+ *   string | null: the absolute package.json path, or null.
+ */
+function findUpwardPackage(cwd: string, packageName: string): string | null {
+  let cursor = resolve(cwd);
+  for (let depth = 0; depth < 6; depth += 1) {
+    const candidate = join(cursor, 'node_modules', packageName, 'package.json');
+    if (existsSync(candidate)) return candidate;
+    const parent = resolve(cursor, '..');
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  return null;
+}
+
+/**
+ * Resolves an executable on PATH without launching anything.
+ *
+ * Args:
+ *   pathValue: the PATH environment value.
+ *   command: the executable name.
+ *
+ * Returns:
+ *   string | null: the absolute path of the first match, or null.
+ */
+function findOnPath(pathValue: string | undefined, command: string): string | null {
+  if (pathValue === undefined || pathValue.length === 0) return null;
+  for (const entry of pathValue.split(sep)) {
+    if (entry.length === 0) continue;
+    const candidate = join(entry, command);
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // not executable here: keep scanning PATH
+    }
+  }
+  return null;
+}
+
 /** Safe directory listing (missing dir → empty). */
 function readdirSafe(dir: string): string[] {
   try {
@@ -612,8 +768,18 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     detail: protection.detail,
   });
 
-  // 2. Runner readiness (cheap probes only — nothing is launched).
-  checks.push({ id: 'runner', ...playwrightReadiness(io.cwd) });
+  // 2. Runner readiness for the CONFIGURED runner (cheap probes only —
+  //    nothing is launched; without a `runner:` key this is exactly the
+  //    historical Playwright probe).
+  checks.push({
+    id: 'runner',
+    ...(configOk
+      ? runnerReadiness(io.cwd, loadConfigAt(io.cwd), io.env)
+      : {
+          status: 'fail' as DoctorStatus,
+          detail: 'runner readiness was not checked: .gateforge.yml could not be loaded, so the configured runner is unknown',
+        }),
+  });
 
   // 3. Observer capability (Phase 0 capability registry; witness probe
   //    only when the caller wired GATEFORGE_WITNESS_URL).
