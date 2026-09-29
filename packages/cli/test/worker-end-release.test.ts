@@ -110,6 +110,7 @@ async function drainWith(
     const trace = await supervisor.executionTrace();
     const sessions = new Map<string, TracedSession[]>();
     for (const entry of trace?.tests ?? []) {
+      if (entry.testId === null) continue;
       sessions.set(
         entry.testId,
         entry.sessions.map((session) => ({ sessionId: session.sessionId, outcome: session.outcome })),
