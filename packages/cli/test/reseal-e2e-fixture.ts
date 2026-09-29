@@ -6,7 +6,7 @@
  * the product's own code; what the stub cannot do is lie about WHICH
  * files it was asked to run.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect } from 'vitest';
 import { GateReceiptSchema, loadConfig, type GateReceipt, type TempRepo } from '@gate-forge/core';
@@ -55,18 +55,19 @@ const STUB_LIST_BODY = [
   '  }));',
   '} else {',
   "  const config = readFileSync(argv[argv.indexOf('--config') + 1], 'utf8');",
-  '  const selected = JSON.parse(/testMatch: (\\[[^\\]]*\\])/.exec(config)[1]);',
-  '  const reporter = /"stateDir":"([^"]+)","runId":"([^"]+)","outcomesPath":"([^"]+)"/.exec(config);',
+  "  const selected = JSON.parse(/testMatch: (\\[[^\\]]*\\])/.exec(config)[1]);",
+  "  const reporter = /\"stateDir\":\"([^\"]+)\",\"runId\":\"([^\"]+)\",\"outcomesPath\":\"([^\"]+)\"/.exec(config);",
   "  const spool = reporter[1] + '/spool/' + reporter[2] + '/events.jsonl';",
   "  mkdirSync(spool.replace(/\\/[^/]+$/, ''), { recursive: true });",
+  '  const fails = (file) => readFileSync(file, "utf8").includes("__FAIL__");',
   '  const events = selected.flatMap((file) => [',
   "    { kind: 'testBegin', testId: file, workerIndex: 0, file, titlePath: [titles[file]], project: 'chromium' },",
-  "    { kind: 'testEnd', testId: file, workerIndex: 0, file, titlePath: [titles[file]], project: 'chromium', outcome: 'passed', attempt: 1 },",
+  "    { kind: 'testEnd', testId: file, workerIndex: 0, file, titlePath: [titles[file]], project: 'chromium', outcome: fails(file) ? 'failed' : 'passed', attempt: 1 },",
   '  ]);',
   "  writeFileSync(spool, events.map((event) => JSON.stringify(event)).join('\\n') + '\\n');",
-  '  writeFileSync(reporter[3], JSON.stringify({',
+  "  writeFileSync(reporter[3], JSON.stringify({",
   '    schemaVersion: 1,',
-  "    runStatus: 'passed',",
+  "    runStatus: selected.some(fails) ? 'failed' : 'passed',",
   '    runnerErrors: [],',
   '    shard: null,',
   '    outcomes: selected.map((file) => ({',
@@ -74,7 +75,7 @@ const STUB_LIST_BODY = [
   '      file,',
   '      titlePath: [titles[file]],',
   "      project: 'chromium',",
-  "      status: 'passed',",
+  "      status: fails(file) ? 'failed' : 'passed',",
   '      attempt: 1,',
   '      expectedFailure: false,',
   '    })),',
@@ -167,6 +168,84 @@ export async function installAndSealParent(
   const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
   expect(full.code, `${full.stdout}\n${full.stderr}`).toBe(0);
   return env;
+}
+
+/**
+ * Installs the repository and runs a whole suite in which ONE test
+ * fails — the consumer's 563/562 case. A failing test issues no gate
+ * receipt, so the run leaves no receipt behind; what it must leave is
+ * the MAC'd run record that binds the same evidence without a verdict.
+ *
+ * Args:
+ *   repo: the temporary repository to build.
+ *   gateConfig: the gate-mode + enforcement header the fixture declares.
+ *
+ * Returns:
+ *   ResealEnv: the environment the later runs and the check share.
+ */
+export async function installAndRunFailingParent(
+  repo: TempRepo,
+  gateConfig = `mode: changed\nenforcement:\n  reseal: true\n`,
+): Promise<ResealEnv> {
+  installFixture(repo);
+  repo.writeFiles({
+    ...waivers(),
+    ...SPECS,
+    'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// __FAIL__ a race in this test\n`,
+    '.gateforge/adapters/accounts.mjs': ADAPTER,
+    '.gateforge/adapters/orders.mjs': ADAPTER,
+    '.gateforge.yml': `${gateConfig}${configYml()}`,
+    'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
+    'node_modules/playwright/cli.js': STUB_CLI,
+    '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
+  });
+  repo.commitFiles({}, 'base');
+  const baseSha = repo.headSha() as string;
+  const config = loadConfig(repo.path('.gateforge.yml'));
+  const env = {
+    GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
+    GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
+    CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha,
+  };
+  const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+  expect(full.code, `${full.stdout}\n${full.stderr}`).not.toBe(0);
+  // A failing test seals no receipt (and clears an old one): there is
+  // nothing for `check --require-e2e` to accept.
+  expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+  return env;
+}
+
+/**
+ * Fixes ONLY the failing test's file and asks for the re-seal from the
+ * run record the failing run left behind.
+ *
+ * Args:
+ *   repo: the temporary repository.
+ *   env: the shared run environment.
+ *   expectReseal: false where the run must NOT re-seal.
+ *
+ * Returns:
+ *   { code, stdout, stderr }: the re-seal invocation's own result.
+ */
+export async function fixFailingSpecAndReseal(
+  repo: TempRepo,
+  env: ResealEnv,
+  { expectReseal = true }: { expectReseal?: boolean } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  repo.commitFiles(
+    { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
+    'fix the race in the one failing spec',
+  );
+  const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+  if (!expectReseal) return resealed;
+  expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
+  expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous run');
+  return resealed;
+}
+
+/** The run record the last whole-suite run left in the run state. */
+export function sealedRunRecord(repo: { root: string }): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(repo.root, '.gateforge/test-gates/run-record.json'), 'utf8'));
 }
 
 /**

@@ -989,6 +989,24 @@ export type { GateReceiptBody } from './receipt/index.js';
 export { GateReceiptSchema, ReceiptVerdictSummarySchema, ReceiptScopeSchema } from './schemas/gate-receipt.js';
 export type { ReceiptVerdictSummary, ReceiptScope } from './schemas/gate-receipt.js';
 export type { ReceiptRejection, ReceiptVerification } from './receipt/index.js';
+/**
+ * Run record (plan 2026-09-29 re-seal rule 1): the MAC'd, digest-bound
+ * record a COMPLETE whole-suite run leaves when it sealed no gate
+ * receipt because a test failed. It binds the same evidence a receipt
+ * binds and carries NO verdict; only the test-only re-seal path reads
+ * it, and only as a parent to recompute from.
+ */
+export {
+  RUN_RECORD_DOMAIN,
+  RUN_RECORD_VERSION,
+  runRecordMac,
+  verifyRunRecord,
+  testOutcomesDigestOf,
+} from './receipt/index.js';
+
+export { RunRecordSchema } from './schemas/run-record.js';
+export type { RunRecord, RunRecordBody } from './schemas/run-record.js';
+export type { RunRecordRejection, RunRecordVerification } from './receipt/index.js';
 
 /**
  * Trusted runner supervision (plan Phase 4 item 4, ADR 0005 D2): the

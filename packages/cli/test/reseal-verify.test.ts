@@ -5,13 +5,15 @@
  * every claim that does not reproduce — a forged changed-path list, a
  * missing parent, or a chain past the bound.
  */
-import { copyFileSync, existsSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { withTempRepo } from '@gate-forge/core';
 import { runCli } from './helpers.js';
 import {
   changeOneSpecAndReseal,
+  fixFailingSpecAndReseal,
+  installAndRunFailingParent,
   installAndSealParent,
   reforgeReceipt,
   sealedReceipt,
@@ -63,4 +65,37 @@ describe('re-seal recomputation in check --require-e2e', () => {
       expect(checked.stdout).toContain('carries 6 consecutive re-seals, past the bound of 5 — run the full suite');
     });
   }, 180_000);
+
+  it('rejects a re-seal from a run record whose retained parent was re-mac\'d with a foreign key', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      await fixFailingSpecAndReseal(repo, env);
+      const retained = join(repo.root, '.gateforge/test-gates/reseal-chain/hop-1-run-record.json');
+      const forged = JSON.parse(readFileSync(retained, 'utf8')) as Record<string, unknown>;
+      writeFileSync(retained, `${JSON.stringify({ ...forged, mac: 'e'.repeat(64) }, null, 2)}\n`, 'utf8');
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code).not.toBe(0);
+      expect(checked.stdout).toContain('EVIDENCE_STALE');
+      expect(checked.stdout).toContain("parent run record does not authenticate with this keyring");
+    });
+  }, 240_000);
+
+  it('rejects a re-seal whose chain claims a receipt parent but retains a run record', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo);
+      await changeOneSpecAndReseal(repo, env);
+      expect(sealedReceipt(repo).resealedFromKind).toBe('receipt');
+      // Inject a run record beside the retained receipt parent: the hop
+      // must be recomputed as what it actually holds, never as what a
+      // consumer would prefer to read.
+      const retained = join(repo.root, '.gateforge/test-gates/reseal-chain/hop-1-run-record.json');
+      writeFileSync(retained, `${JSON.stringify({ recordVersion: 1 })}\n`, 'utf8');
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code).not.toBe(0);
+      expect(checked.stdout).toContain('EVIDENCE_STALE');
+      expect(checked.stdout).toContain('claims a receipt parent but the run state retains a run-record');
+    });
+  }, 240_000);
 });

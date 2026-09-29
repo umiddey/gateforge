@@ -32,6 +32,10 @@ import {
   superviseExecution,
   trustedPolicyDigest,
   verifyGateReceipt,
+  RunRecordSchema,
+  runRecordMac,
+  verifyRunRecord,
+  type RunRecord,
   type BlockingEntry,
   type CauseCode,
   type Claim,
@@ -786,8 +790,15 @@ export interface IssueGateReceiptInput {
   carriedFrom?: string;
   /** Digest of the authenticated parent receipt carried forward. */
   parentReceiptDigest?: string;
-  /** Digest of the parent receipt this run re-sealed from (test-only). */
+  /** Digest of the parent document this run re-sealed from (test-only). */
   resealedFrom?: string;
+  /**
+   * Which kind of parent `resealedFrom` names: a verified gate receipt
+   * or a whole-suite run record. Omitted for a receipt parent (absence
+   * reads as `receipt`, so re-seals sealed before the field existed stay
+   * byte-identical).
+   */
+  resealedFromKind?: 'receipt' | 'run-record';
   /** How many parent outcomes this run carried unchanged (re-seal). */
   carriedTests?: number;
   /** How many tests this run re-executed (re-seal). */
@@ -913,6 +924,7 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
     ...(input.resealedFrom !== undefined
       ? {
           resealedFrom: input.resealedFrom,
+          ...(input.resealedFromKind !== undefined ? { resealedFromKind: input.resealedFromKind } : {}),
           carriedTests: input.carriedTests,
           rerunTests: input.rerunTests,
           changeClass: input.changeClass,
@@ -945,6 +957,111 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
   const verified = verifyGateReceipt(input.verifierKey, signed);
   if (!verified.ok) {
     throw new UsageError(`issued gate receipt failed self-verification (${verified.rejection}) — fail closed`);
+  }
+  return signed;
+}
+
+/** The full binding set of a run record (everything but the MAC). */
+export interface IssueRunRecordInput {
+  /** Witness verifier secret that authenticates the record. */
+  verifierKey: string;
+  /** Non-secret key id, when the active keyring publishes one. */
+  verifierKeyId?: string;
+  /** Run manifest identity of the run that produced the record. */
+  runId: string;
+  /** Fresh trusted invocation identity of that run. */
+  invocationId: string;
+  /** 64-hex digest of the canonical input snapshot the run tested. */
+  inputDigest: string;
+  /** Candidate HEAD sha, or null when unavailable. */
+  gitSha: string | null;
+  /** Parent commit sha, or null when unavailable. */
+  parentSha: string | null;
+  /** Trusted policy/config revision digest. */
+  trustedPolicyDigest: string;
+  /** Owner-approved policy revision the run was pinned to. */
+  approvedPolicyDigest: string;
+  /** Normalized invocation. */
+  invocation: string;
+  /** Selection digest (the expected test set, fixed pre-run). */
+  selectionDigest: string;
+  /** Catalog digest (the enumeration the selection was planned from). */
+  catalogDigest: string;
+  /** Digest of the sealed execution result. */
+  executionResultDigest: string;
+  /** Digest over the run's per-test outcomes. */
+  testOutcomesDigest: string;
+  /** How many tests the whole-suite run planned. */
+  plannedTests: number;
+  /** How many of them the run reported as passed. */
+  passedTests: number;
+  /** Evidence attestation digest, or null when the run carried none. */
+  evidenceAttestationDigest: string | null;
+  /** Immutable Git tree actually tested (or null outside a Git checkout). */
+  candidateTreeId: string | null;
+  /** Digest binding the approved engine/policy bundle version. */
+  engineBundleDigest: string;
+  /** Digest binding the controller-issued execution-profile record. */
+  executionBoundaryDigest: string;
+  /** Issuance instant (ISO-8601). */
+  issuedAt: string;
+}
+
+/**
+ * Issues the authenticated run record: the evidence a whole-suite run
+ * leaves behind when it sealed NO gate receipt because a test failed.
+ *
+ * A record is not a receipt. It carries every binding a receipt binds —
+ * execution result, attestation, candidate tree, input snapshot,
+ * approved policy, engine bundle, execution boundary, catalog, per-test
+ * outcomes — and no verdict, so nothing downstream can mistake it for
+ * proof. Its own domain tag (`gateforge.run-record.v1`) means no
+ * receipt verifier can ever accept it.
+ *
+ * Args:
+ *   input: the full binding set + verifier key.
+ *
+ * Returns:
+ *   RunRecord: the signed record.
+ *
+ * Throws:
+ *   UsageError: when the signed record fails its own schema or its own
+ *     verification (fail closed).
+ */
+export function issueRunRecord(input: IssueRunRecordInput): RunRecord {
+  const parsed = RunRecordSchema.parse({
+    schemaVersion: 1,
+    recordVersion: 1,
+    recordId: randomUUID(),
+    ...(input.verifierKeyId !== undefined ? { verifierKeyId: input.verifierKeyId } : {}),
+    runId: input.runId,
+    invocationId: input.invocationId,
+    inputDigest: input.inputDigest,
+    gitSha: input.gitSha,
+    parentSha: input.parentSha,
+    trustedPolicyDigest: input.trustedPolicyDigest,
+    approvedPolicyDigest: input.approvedPolicyDigest,
+    invocation: input.invocation,
+    selectionDigest: input.selectionDigest,
+    catalogDigest: input.catalogDigest,
+    executionResultDigest: input.executionResultDigest,
+    testOutcomesDigest: input.testOutcomesDigest,
+    plannedTests: input.plannedTests,
+    passedTests: input.passedTests,
+    evidenceAttestationDigest: input.evidenceAttestationDigest,
+    candidateTreeId: input.candidateTreeId,
+    engineBundleDigest: input.engineBundleDigest,
+    executionBoundaryDigest: input.executionBoundaryDigest,
+    issuedAt: input.issuedAt,
+    mac: RECEIPT_MAC_PLACEHOLDER,
+  });
+  const { mac: placeholder, ...body } = parsed;
+  void placeholder;
+  const signed: RunRecord = { ...parsed, mac: runRecordMac(input.verifierKey, body) };
+  // Self-check: the issued record must verify under its own authority.
+  const verified = verifyRunRecord(input.verifierKey, signed);
+  if (!verified.ok) {
+    throw new UsageError(`issued run record failed self-verification (${verified.detail}) — fail closed`);
   }
   return signed;
 }

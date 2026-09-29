@@ -21,7 +21,7 @@ import {
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { GateReceiptSchema, verifyGateReceipt } from '@gate-forge/core';
+import { GateReceiptSchema, RunRecordSchema, verifyGateReceipt, verifyRunRecord, type RunRecordVerification } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { resolveGitDir } from './candidate-tree.js';
 import { resolveStateDir } from './state.js';
@@ -53,6 +53,11 @@ export interface VerifierKeyringDocument {
 /** Result of verifying a receipt with a retained key ring. */
 export type KeyringReceiptVerification =
   | ReturnType<typeof verifyGateReceipt>
+  | { ok: false; rejection: 'key-unknown' | 'key-mismatch'; detail: string };
+
+/** Result of verifying a run record with a retained key ring. */
+export type KeyringRunRecordVerification =
+  | RunRecordVerification
   | { ok: false; rejection: 'key-unknown' | 'key-mismatch'; detail: string };
 
 const KEY_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -178,6 +183,64 @@ export function verifyGateReceiptWithKeyring(
     ok: false,
     rejection: 'key-mismatch',
     detail: `KEY_MISMATCH: no trusted verifier key authenticates this receipt${lastMacFailure === null ? '' : ' (MAC check failed)'}`,
+  };
+}
+
+/**
+ * Verifies a run record with the identified key, the trusted key
+ * aliases, or the retained keys for legacy records — the same key-ring
+ * discipline receipts get. A run record names the key that signed it,
+ * so a rotated key still authenticates an older record while an unknown
+ * key id is refused rather than probed.
+ *
+ * Args:
+ *   keyring: the consumer's own trusted key ring.
+ *   candidate: the parsed run-state document.
+ *
+ * Returns:
+ *   KeyringRunRecordVerification: the verified record or a typed reason.
+ */
+export function verifyRunRecordWithKeyring(
+  keyring: VerifierKeyring,
+  candidate: unknown,
+): KeyringRunRecordVerification {
+  const parsed = RunRecordSchema.safeParse(candidate);
+  if (!parsed.success) return verifyRunRecord(keyring.active.key, candidate);
+  const recordKeyId = parsed.data.verifierKeyId;
+  if (recordKeyId !== undefined) {
+    const selected = keyring.keys.find((entry) => entry.keyId === recordKeyId);
+    if (selected === undefined) {
+      for (const entry of keyring.keys) {
+        const result = verifyRunRecord(entry.key, candidate);
+        if (result.ok || result.rejection !== 'mac-fail') return result;
+      }
+      return {
+        ok: false,
+        rejection: 'key-unknown',
+        detail: `KEY_UNKNOWN: verifier key '${recordKeyId}' is not in the trusted key ring`,
+      };
+    }
+    const result = verifyRunRecord(selected.key, candidate);
+    return result.ok || result.rejection !== 'mac-fail'
+      ? result
+      : {
+          ok: false,
+          rejection: 'key-mismatch',
+          detail: `KEY_MISMATCH: verifier key '${recordKeyId}' does not authenticate this run record (MAC check failed)`,
+        };
+  }
+
+  let lastMacFailure: RunRecordVerification | null = null;
+  for (const entry of keyring.keys) {
+    const result = verifyRunRecord(entry.key, candidate);
+    if (result.ok) return result;
+    if (result.rejection === 'mac-fail') lastMacFailure = result;
+    else return result;
+  }
+  return {
+    ok: false,
+    rejection: 'key-mismatch',
+    detail: `KEY_MISMATCH: no trusted verifier key authenticates this run record${lastMacFailure === null ? '' : ' (MAC check failed)'}`,
   };
 }
 

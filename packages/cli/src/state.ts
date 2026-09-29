@@ -386,6 +386,35 @@ export function writeGateReceipt(stateDir: string, receipt: unknown): void {
 }
 
 /**
+ * Persists the run record of a whole-suite run that sealed no receipt.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   record: the authenticated run record.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeRunRecord(stateDir: string, record: unknown): void {
+  writeStateFile(stateDir, 'run-record.json', record as JsonValue);
+}
+
+/**
+ * Removes the retained run record. A gate receipt supersedes it (the
+ * receipt is the same evidence plus a verdict), so a sealed run never
+ * leaves a stale parent behind for the next one to re-seal from.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   void.
+ */
+export function clearRunRecord(stateDir: string): void {
+  rmSync(join(stateDir, 'run-record.json'), { force: true });
+}
+
+/**
  * Persists the entries included in the sealed candidate tree.
  *
  * Args:

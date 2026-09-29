@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { withTempRepo, GateReceiptSchema, type GateReceipt, type ExecutionResult, type TestCatalog, type TestCatalogEntry, type Obligation } from '@gate-forge/core';
 import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
-import { decideTestOnlyReseal } from '../src/commands/test-gates.js';
+import { decideTestOnlyReseal, type ResealParent } from '../src/commands/test-gates.js';
 
 const SPEC = [
   "import { test, expect } from '@playwright/test';",
@@ -135,8 +135,40 @@ function parentExecution(outcomes: Array<{ logicalKey: string; status: string }>
   } as unknown as ExecutionResult;
 }
 
+/** A verified gate-receipt parent, as the resolver hands it to the decision. */
+function receiptParent(treeId: string, execution: ExecutionResult): ResealParent {
+  const receipt = parentReceipt({ candidateTreeId: treeId });
+  return {
+    kind: 'receipt',
+    digest: 'a1'.repeat(32),
+    receipt,
+    record: null,
+    treeId,
+    sha: receipt.gitSha ?? '',
+    execution,
+  };
+}
+
 const PASSED = [
   { logicalKey: ACCOUNTS_KEY, status: 'passed' },
+  { logicalKey: ORDERS_KEY, status: 'passed' },
+];
+
+/** A verified run-record parent: the failed whole-suite run's evidence. */
+function runRecordParent(treeId: string, execution: ExecutionResult): ResealParent {
+  return {
+    kind: 'run-record',
+    digest: 'b2'.repeat(32),
+    receipt: null,
+    record: null,
+    treeId,
+    sha: '0'.repeat(40),
+    execution,
+  };
+}
+
+const ONE_FAILED = [
+  { logicalKey: ACCOUNTS_KEY, status: 'failed' },
   { logicalKey: ORDERS_KEY, status: 'passed' },
 ];
 
@@ -151,12 +183,7 @@ describe('test-only re-seal decision', () => {
       const decision = decideTestOnlyReseal({
         io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
         gitDir: resolveGitDir(repo.root, process.env) as string,
-        parent: {
-          receipt: parentReceipt({ candidateTreeId: parentTree }),
-          receiptDigest: 'a1'.repeat(32),
-          treeId: parentTree,
-          execution: parentExecution(PASSED),
-        },
+        parent: receiptParent(parentTree, parentExecution(PASSED)),
         currentTreeId: current,
         catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account'), entry('e2e/orders.spec.ts', 'reads an account')]),
         obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
@@ -186,7 +213,7 @@ describe('test-only re-seal decision', () => {
       const decision = decideTestOnlyReseal({
         io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
         gitDir: resolveGitDir(repo.root, process.env) as string,
-        parent: { receipt: parentReceipt({ candidateTreeId: parentTree }), receiptDigest: 'a1'.repeat(32), treeId: parentTree, execution: parentExecution(PASSED) },
+        parent: receiptParent(parentTree, parentExecution(PASSED)),
         currentTreeId: treeOf(repo.root),
         catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account'), entry('e2e/orders.spec.ts', 'reads an account')]),
         obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
@@ -223,7 +250,7 @@ describe('test-only re-seal decision', () => {
       const decision = decideTestOnlyReseal({
         io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
         gitDir: resolveGitDir(repo.root, process.env) as string,
-        parent: { receipt: parentReceipt({ candidateTreeId: parentTree }), receiptDigest: 'a1'.repeat(32), treeId: parentTree, execution: parentExecution(PASSED) },
+        parent: receiptParent(parentTree, parentExecution(PASSED)),
         currentTreeId: treeOf(repo.root),
         catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account'), entry('e2e/orders.spec.ts', 'reads an account'), entry('e2e/auth.setup.ts', 'auth state')]),
         obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
@@ -243,7 +270,7 @@ describe('test-only re-seal decision', () => {
       const decision = decideTestOnlyReseal({
         io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
         gitDir: resolveGitDir(repo.root, process.env) as string,
-        parent: { receipt: parentReceipt({ candidateTreeId: parentTree }), receiptDigest: 'a1'.repeat(32), treeId: parentTree, execution: parentExecution(PASSED) },
+        parent: receiptParent(parentTree, parentExecution(PASSED)),
         currentTreeId: treeOf(repo.root),
         catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account'), entry('e2e/orders.spec.ts', 'reads an account')]),
         obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
@@ -263,15 +290,10 @@ describe('test-only re-seal decision', () => {
       const decision = decideTestOnlyReseal({
         io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
         gitDir: resolveGitDir(repo.root, process.env) as string,
-        parent: {
-          receipt: parentReceipt({ candidateTreeId: parentTree }),
-          receiptDigest: 'a1'.repeat(32),
-          treeId: parentTree,
-          execution: parentExecution([
-            { logicalKey: ACCOUNTS_KEY, status: 'passed' },
-            { logicalKey: ORDERS_KEY, status: 'failed' },
-          ]),
-        },
+        parent: receiptParent(parentTree, parentExecution([
+          { logicalKey: ACCOUNTS_KEY, status: 'passed' },
+          { logicalKey: ORDERS_KEY, status: 'failed' },
+        ])),
         currentTreeId: treeOf(repo.root),
         catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account'), entry('e2e/orders.spec.ts', 'reads an account')]),
         obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
@@ -293,7 +315,7 @@ describe('test-only re-seal decision', () => {
       const decision = decideTestOnlyReseal({
         io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
         gitDir: resolveGitDir(repo.root, process.env) as string,
-        parent: { receipt: parentReceipt({ candidateTreeId: parentTree }), receiptDigest: 'a1'.repeat(32), treeId: parentTree, execution: parentExecution(PASSED) },
+        parent: receiptParent(parentTree, parentExecution(PASSED)),
         currentTreeId: treeOf(repo.root),
         // The orders spec lost every test without the file being touched.
         catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account')]),
@@ -322,12 +344,7 @@ describe('test-only re-seal decision', () => {
         obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
         enabled: true,
       };
-      const parent = {
-        receipt: parentReceipt({ candidateTreeId: parentTree }),
-        receiptDigest: 'a1'.repeat(32),
-        treeId: parentTree,
-        execution: parentExecution(PASSED),
-      };
+      const parent = receiptParent(parentTree, parentExecution(PASSED));
       expect(decideTestOnlyReseal({ ...base, parent, enabled: false })).toEqual({
         plan: null,
         reason: 'the re-seal path is off (`enforcement.reseal` is not true) → full run',
@@ -374,6 +391,49 @@ describe('test-only re-seal decision', () => {
           enabled: true,
         }),
       ).toEqual({ plan: null, reason: null });
+    });
+  });
+
+  it('accepts a run-record parent whose one failure is inside the affected set', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles(BASE_FILES);
+      repo.commitFiles({}, 'base');
+      const parentTree = treeOf(repo.root);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// the race fix\n` }, 'test fix');
+      const inside = decideTestOnlyReseal({
+        io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
+        gitDir: resolveGitDir(repo.root, process.env) as string,
+        parent: runRecordParent(parentTree, parentExecution(ONE_FAILED)),
+        currentTreeId: treeOf(repo.root),
+        catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account'), entry('e2e/orders.spec.ts', 'reads an account')]),
+        obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
+        enabled: true,
+      });
+      expect(inside.reason).toBeNull();
+      expect(inside.plan).toMatchObject({ parentKind: 'run-record', parentDigest: 'b2'.repeat(32), carriedTests: 1 });
+    });
+  });
+
+  it('refuses a run-record parent whose failure sits outside the affected set', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles(BASE_FILES);
+      repo.commitFiles({}, 'base');
+      const parentTree = treeOf(repo.root);
+      // The failed test's own file is NOT touched; another spec is.
+      repo.commitFiles({ 'e2e/orders.spec.ts': `${SPEC}\n// an unrelated touch\n` }, 'touch the other spec');
+      const decision = decideTestOnlyReseal({
+        io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
+        gitDir: resolveGitDir(repo.root, process.env) as string,
+        parent: runRecordParent(parentTree, parentExecution(ONE_FAILED)),
+        currentTreeId: treeOf(repo.root),
+        catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account'), entry('e2e/orders.spec.ts', 'reads an account')]),
+        obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
+        enabled: true,
+      });
+      expect(decision.plan).toBeNull();
+      expect(decision.reason).toBe(
+        `the previous run's test ${ACCOUNTS_KEY} failed outside the affected set → full run`,
+      );
     });
   });
 });

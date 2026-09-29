@@ -15,8 +15,10 @@
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { canonicalJson, sha256Canonical, type JsonValue } from '../canonical-json.js';
-import { GateReceiptSchema, type GateReceipt } from '../schemas/gate-receipt.js';
 import { EMPTY_BEHAVIOR_CATALOG_DIGEST } from '../policy/behavior.js';
+import { GateReceiptSchema, type GateReceipt } from '../schemas/gate-receipt.js';
+import type { ExecutedOutcome } from '../schemas/execution-result.js';
+import { RunRecordSchema, type RunRecord, type RunRecordBody } from '../schemas/run-record.js';
 
 /** Domain tag binding receipt MACs to the gate-receipt envelope format. */
 export const RECEIPT_DOMAIN = 'gateforge.receipt.v2';
@@ -143,6 +145,133 @@ export function gateReceiptMac(verifierKey: string, body: GateReceiptBody): stri
       }),
     )
     .digest('hex');
+}
+
+/**
+ * Digest over a run's per-test outcomes, in the sealed order. A run
+ * record binds it so the record can never claim a cleaner run than the
+ * execution result it names, and a consumer recomputes it from that
+ * execution result when it recomputes the re-seal.
+ *
+ * Args:
+ *   outcomes: the sealed execution result's per-test outcomes.
+ *
+ * Returns:
+ *   string: 64-char lowercase hex digest.
+ */
+export function testOutcomesDigestOf(outcomes: readonly ExecutedOutcome[]): string {
+  return sha256Canonical(outcomes as unknown as JsonValue);
+}
+
+/** Domain tag binding run-record MACs to the run-record envelope format. */
+export const RUN_RECORD_DOMAIN = 'gateforge.run-record.v1';
+
+/** The only run-record envelope version this code produces or honors. */
+export const RUN_RECORD_VERSION = 1;
+
+/**
+ * Computes the run-record MAC: HMAC-SHA256 over the GF-canonical JSON
+ * of `{domain: 'gateforge.run-record.v1', ...body}` keyed by the same
+ * witness verifier key a receipt uses. The distinct domain tag makes
+ * cross-format acceptance impossible in both directions: a run record
+ * can never verify as a gate receipt, and a receipt MAC can never
+ * verify as a run record.
+ *
+ * Args:
+ *   verifierKey: the witness verifier secret (non-empty).
+ *   body: the unsigned run-record body.
+ *
+ * Returns:
+ *   string: 64-char lowercase hex HMAC.
+ *
+ * Throws:
+ *   TypeError: when the verifier key is empty.
+ */
+export function runRecordMac(verifierKey: string, body: RunRecordBody): string {
+  if (typeof verifierKey !== 'string' || verifierKey.length === 0) {
+    throw new TypeError('runRecordMac: verifier key must be a non-empty string');
+  }
+  return createHmac('sha256', verifierKey)
+    .update(
+      canonicalJson({
+        domain: RUN_RECORD_DOMAIN,
+        ...body,
+      }),
+    )
+    .digest('hex');
+}
+
+/** Typed reasons a run-record candidate failed verification (fail closed). */
+export type RunRecordRejection = 'missing' | 'malformed' | 'mac-fail' | 'not-whole-suite';
+
+/** The verification outcome: a validated run record or a typed rejection. */
+export type RunRecordVerification =
+  | { ok: true; record: RunRecord }
+  | { ok: false; rejection: RunRecordRejection; detail: string };
+
+/**
+ * Verifies a run-record candidate end to end (fail closed): the strict
+ * schema first, then the MAC under the given verifier key. A run record
+ * authenticates EXACTLY this much and no more — it carries no gate
+ * verdict, so there is nothing here to grade, compare against a policy
+ * pin, or accept as proof for a blocked gate.
+ *
+ * Args:
+ *   verifierKey: the witness verifier secret the record must carry a MAC for.
+ *   candidate: the parsed run-state document.
+ *
+ * Returns:
+ *   RunRecordVerification: the validated record or the typed rejection.
+ */
+export function verifyRunRecord(verifierKey: string, candidate: unknown): RunRecordVerification {
+  if (candidate === undefined || candidate === null) {
+    return { ok: false, rejection: 'missing', detail: 'run record is missing' };
+  }
+  const parsed = RunRecordSchema.safeParse(candidate);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue === undefined ? '' : ` at '${issue.path.map(String).join('.')}':`;
+    return {
+      ok: false,
+      rejection: 'malformed',
+      detail: `run record is malformed${path} ${issue?.message ?? 'unknown schema error'}`,
+    };
+  }
+  const record = parsed.data as RunRecord;
+  const { mac, ...body } = record;
+  if (typeof verifierKey !== 'string' || verifierKey.length === 0) {
+    return {
+      ok: false,
+      rejection: 'mac-fail',
+      detail: 'run record cannot verify without a verifier key (fail closed)',
+    };
+  }
+  if (!MAC_PATTERN.test(mac)) {
+    return { ok: false, rejection: 'mac-fail', detail: 'run record mac is malformed' };
+  }
+  let expectedMac: Buffer;
+  let claimedMac: Buffer;
+  try {
+    expectedMac = Buffer.from(runRecordMac(verifierKey, body), 'hex');
+    claimedMac = Buffer.from(mac, 'hex');
+  } catch {
+    return { ok: false, rejection: 'mac-fail', detail: 'run record mac could not be recomputed' };
+  }
+  if (expectedMac.length !== claimedMac.length || !timingSafeEqual(expectedMac, claimedMac)) {
+    return {
+      ok: false,
+      rejection: 'mac-fail',
+      detail: 'run record signature fails; the record was forged or tampered with (fail closed)',
+    };
+  }
+  if (record.plannedTests === 0) {
+    return {
+      ok: false,
+      rejection: 'not-whole-suite',
+      detail: 'run record holds no planned test, so it proves no whole-suite run',
+    };
+  }
+  return { ok: true, record };
 }
 
 /** Typed reasons a receipt candidate failed verification (fail closed). */

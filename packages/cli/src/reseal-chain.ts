@@ -30,10 +30,11 @@ import {
   type ExecutionResult,
   type GateReceipt,
   type TestCatalog,
+  testOutcomesDigestOf,
 } from '@gate-forge/core';
 import { classifyResealChange, diffSealedTrees } from './reseal.js';
 import { readStateDocument } from './state.js';
-import { verifyGateReceiptWithKeyring, type VerifierKeyring } from './verifier-keys.js';
+import { verifyGateReceiptWithKeyring, verifyRunRecordWithKeyring, type VerifierKeyring } from './verifier-keys.js';
 
 /** Run-state subdirectory holding the retained re-seal chain. */
 export const RESEAL_CHAIN_DIRECTORY = 'reseal-chain';
@@ -48,20 +49,33 @@ export const RESEAL_CHAIN_MAX_HOPS = 5;
 
 /** One retained hop: the parent a re-seal carried from, plus the catalog its classification used. */
 export interface ResealChainHop {
-  /** The parent receipt document, exactly as it was issued. */
+  /** The parent receipt document, exactly as it was issued (null for a run-record parent). */
   receipt: unknown;
-  /** The parent execution result bound by that receipt. */
+  /** The parent run record, exactly as it was issued (null for a receipt parent). */
+  runRecord: unknown;
+  /** The parent execution result bound by that receipt or record. */
   execution: unknown;
   /** The test catalog of the CHILD tree (the re-sealed candidate). */
   catalog: unknown;
 }
 
-function hopFileNames(hop: number): [string, string, string] {
+function hopFileNames(hop: number): [string, string, string, string] {
   return [
     `hop-${String(hop)}-receipt.json`,
+    `hop-${String(hop)}-run-record.json`,
     `hop-${String(hop)}-execution-result.json`,
     `hop-${String(hop)}-catalog.json`,
   ];
+}
+
+/**
+ * True when a hop retains a run record as its parent. Only the
+ * IMMEDIATE parent of a re-seal can be a run record: the parent it
+ * produces is a gate receipt, and a receipt is the only document a
+ * later hop may carry from.
+ */
+function hopCarriesRunRecord(hop: ResealChainHop): boolean {
+  return hop.runRecord !== null && hop.runRecord !== undefined;
 }
 
 /**
@@ -82,8 +96,8 @@ export function resealChainHopCount(stateDir: string): number {
   }
   let hop = 0;
   for (;;) {
-    const [receiptName, , ] = hopFileNames(hop + 1);
-    if (!names.includes(receiptName)) return hop;
+    const [receiptName, runRecordName] = hopFileNames(hop + 1);
+    if (!names.includes(receiptName) && !names.includes(runRecordName)) return hop;
     hop += 1;
   }
 }
@@ -94,8 +108,9 @@ export function resealChainHopCount(stateDir: string): number {
  *
  * Args:
  *   stateDir: absolute run-state directory.
- *   hop: the parent receipt, its execution result, and the catalog of
- *     the tree this re-seal sealed.
+ *
+ *   hop: the parent receipt OR run record, its execution result, and
+ *     the catalog of the tree this re-seal sealed.
  *
  * Returns:
  *   void.
@@ -117,10 +132,17 @@ export function writeResealChainHop(stateDir: string, hop: ResealChainHop): void
       }
     }
   }
-  const [receiptName, executionName, catalogName] = hopFileNames(1);
+  const [receiptName, runRecordName, executionName, catalogName] = hopFileNames(1);
   writeFileSync(join(directory, receiptName), `${JSON.stringify(hop.receipt, null, 2)}\n`, 'utf8');
   writeFileSync(join(directory, executionName), `${JSON.stringify(hop.execution, null, 2)}\n`, 'utf8');
   writeFileSync(join(directory, catalogName), `${JSON.stringify(hop.catalog, null, 2)}\n`, 'utf8');
+  // A leftover run record from an earlier chain would be read as this
+  // hop's parent, so the absent member is removed rather than left.
+  if (hopCarriesRunRecord(hop)) {
+    writeFileSync(join(directory, runRecordName), `${JSON.stringify(hop.runRecord, null, 2)}\n`, 'utf8');
+  } else {
+    rmSync(join(directory, runRecordName), { force: true });
+  }
 }
 
 /**
@@ -141,13 +163,17 @@ export function clearResealChain(stateDir: string): void {
 function readResealChain(stateDir: string): ResealChainHop[] {
   const hops: ResealChainHop[] = [];
   for (let index = 1; ; index += 1) {
-    const [receiptName, executionName, catalogName] = hopFileNames(index);
-    const receipt = readStateDocument(join(stateDir, RESEAL_CHAIN_DIRECTORY), receiptName);
-    if (receipt === null) return hops;
-    const execution = readStateDocument(join(stateDir, RESEAL_CHAIN_DIRECTORY), executionName);
-    const catalog = readStateDocument(join(stateDir, RESEAL_CHAIN_DIRECTORY), catalogName);
-    if (execution === null || catalog === null) return [...hops, { receipt, execution: null, catalog: null }];
-    hops.push({ receipt, execution, catalog });
+    const [receiptName, runRecordName, executionName, catalogName] = hopFileNames(index);
+    const directory = join(stateDir, RESEAL_CHAIN_DIRECTORY);
+    const receipt = readStateDocument(directory, receiptName);
+    const runRecord = readStateDocument(directory, runRecordName);
+    if (receipt === null && runRecord === null) return hops;
+    const execution = readStateDocument(directory, executionName);
+    const catalog = readStateDocument(directory, catalogName);
+    if (execution === null || catalog === null) {
+      return [...hops, { receipt, runRecord, execution: null, catalog: null }];
+    }
+    hops.push({ receipt, runRecord, execution, catalog });
   }
 }
 
@@ -243,11 +269,6 @@ export function resealChainBlocking(input: {
         `re-seal hop ${String(index + 1)} retains no parent execution result or catalog (fail closed)`,
       );
     }
-    const parentParsed = GateReceiptSchema.safeParse(hop.receipt);
-    if (!parentParsed.success) {
-      return stale(`re-seal hop ${String(index + 1)} retains a malformed parent receipt (fail closed)`);
-    }
-    const parent = parentParsed.data as GateReceipt;
     const parentExecutionParsed = ExecutionResultSchema.safeParse(hop.execution);
     if (!parentExecutionParsed.success) {
       return stale(`re-seal hop ${String(index + 1)} retains a malformed parent execution result (fail closed)`);
@@ -259,22 +280,83 @@ export function resealChainBlocking(input: {
     }
     const catalog = catalogParsed.data as TestCatalog;
 
-    if (sha256Canonical(parent as unknown as Record<string, never>) !== currentReceipt.resealedFrom) {
+    // The parent is whatever the child CLAIMS it is, and the claim must
+    // match what the chain retains: a hop holding a run record never
+    // stands in for a receipt parent, or the reverse.
+    const hopNumber = String(index + 1);
+    const claimedKind = currentReceipt.resealedFromKind ?? 'receipt';
+    const retainedKind: 'receipt' | 'run-record' = hopCarriesRunRecord(hop) ? 'run-record' : 'receipt';
+    if (claimedKind !== retainedKind) {
       return stale(
-        `re-seal hop ${String(index + 1)} names parent ${String(currentReceipt.resealedFrom)} but the retained ` +
-          `parent receipt hashes to ${sha256Canonical(parent as unknown as Record<string, never>)} (fail closed)`,
+        `re-seal hop ${hopNumber} claims a ${claimedKind} parent but the run state retains a ${retainedKind} ` +
+          '(fail closed)',
       );
     }
-    const authenticated = verifyGateReceiptWithKeyring(input.verifierKeyring, hop.receipt);
-    if (!authenticated.ok) {
-      return stale(
-        `re-seal hop ${String(index + 1)}'s parent receipt does not authenticate with this keyring: ` +
-          `${authenticated.detail} (fail closed)`,
-      );
+    let parentDigest: string;
+    let parentTreeId: string | null;
+    let parentReceipt: GateReceipt | null = null;
+    if (retainedKind === 'run-record') {
+      // A run-record parent is recomputed exactly like a parent
+      // receipt: it must authenticate with the consumer's own keyring,
+      // it must name this very execution result and its outcomes, and
+      // its engine bundle, execution boundary and trusted policy must
+      // be the ones the re-sealed receipt itself binds.
+      const authenticatedRecord = verifyRunRecordWithKeyring(input.verifierKeyring, hop.runRecord);
+      if (!authenticatedRecord.ok) {
+        return stale(
+          `re-seal hop ${hopNumber}'s parent run record does not authenticate with this keyring: ` +
+            `${authenticatedRecord.detail} (fail closed)`,
+        );
+      }
+      const record = authenticatedRecord.record;
+      if (
+        executionResultDigestOf(parentExecution) !== record.executionResultDigest ||
+        testOutcomesDigestOf(parentExecution.outcomes) !== record.testOutcomesDigest ||
+        record.plannedTests !== parentExecution.planned.length
+      ) {
+        return stale(
+          `re-seal hop ${hopNumber}'s parent execution result does not match the run record's bound digests ` +
+            '(fail closed)',
+        );
+      }
+      if (
+        record.engineBundleDigest !== currentReceipt.engineBundleDigest ||
+        record.executionBoundaryDigest !== currentReceipt.executionBoundaryDigest ||
+        record.trustedPolicyDigest !== currentReceipt.trustedPolicyDigest
+      ) {
+        return stale(
+          `re-seal hop ${hopNumber}'s parent run record was sealed under a different engine bundle, execution ` +
+            'boundary or trusted policy than the receipt it parented (fail closed)',
+        );
+      }
+      parentDigest = sha256Canonical(record as unknown as Record<string, never>);
+      parentTreeId = record.candidateTreeId;
+    } else {
+      const parentParsed = GateReceiptSchema.safeParse(hop.receipt);
+      if (!parentParsed.success) {
+        return stale(`re-seal hop ${hopNumber} retains a malformed parent receipt (fail closed)`);
+      }
+      const parent = parentParsed.data as GateReceipt;
+      const authenticated = verifyGateReceiptWithKeyring(input.verifierKeyring, hop.receipt);
+      if (!authenticated.ok) {
+        return stale(
+          `re-seal hop ${hopNumber}'s parent receipt does not authenticate with this keyring: ` +
+            `${authenticated.detail} (fail closed)`,
+        );
+      }
+      if (executionResultDigestOf(parentExecution) !== parent.executionResultDigest) {
+        return stale(
+          `re-seal hop ${hopNumber}'s parent execution result does not match its receipt digest (fail closed)`,
+        );
+      }
+      parentReceipt = parent;
+      parentDigest = sha256Canonical(parent as unknown as Record<string, never>);
+      parentTreeId = parent.candidateTreeId;
     }
-    if (executionResultDigestOf(parentExecution) !== parent.executionResultDigest) {
+    if (parentDigest !== currentReceipt.resealedFrom) {
       return stale(
-        `re-seal hop ${String(index + 1)}'s parent execution result does not match its receipt digest (fail closed)`,
+        `re-seal hop ${hopNumber} names parent ${String(currentReceipt.resealedFrom)} but the retained ` +
+          `parent ${retainedKind} hashes to ${parentDigest} (fail closed)`,
       );
     }
     if (sha256Canonical(catalog as unknown as Record<string, never>) !== currentExecution.catalogDigest) {
@@ -283,18 +365,18 @@ export function resealChainBlocking(input: {
           'planned from (fail closed)',
       );
     }
-    if (parent.candidateTreeId === null || currentReceipt.candidateTreeId === null) {
-      return stale(`re-seal hop ${String(index + 1)} has no sealed candidate tree on one side (fail closed)`);
+    if (parentTreeId === null || currentReceipt.candidateTreeId === null) {
+      return stale(`re-seal hop ${hopNumber} has no sealed candidate tree on one side (fail closed)`);
     }
     const changed = diffSealedTrees(
       input.gitDir,
       input.env,
-      parent.candidateTreeId,
+      parentTreeId,
       currentReceipt.candidateTreeId,
     );
     if (changed === null) {
       return stale(
-        `re-seal hop ${String(index + 1)}: the sealed trees ${parent.candidateTreeId} → ` +
+        `re-seal hop ${hopNumber}: the sealed trees ${parentTreeId} → ` +
           `${currentReceipt.candidateTreeId} could not be diffed (fail closed)`,
       );
     }
@@ -312,7 +394,7 @@ export function resealChainBlocking(input: {
       gitDir: input.gitDir,
       env: input.env,
       cwd: input.cwd,
-      parentTreeId: parent.candidateTreeId,
+      parentTreeId: parentTreeId,
       currentTreeId: currentReceipt.candidateTreeId,
       testFiles: [...new Set(catalog.entries.map((entry) => entry.file))],
     });
@@ -361,7 +443,17 @@ export function resealChainBlocking(input: {
           `holds ${String(carriedOutcomes.length)} carried outcome(s)`,
       );
     }
-    currentReceipt = parent;
+    // A run record is the tail of a chain by construction: it is the
+    // only parent a re-seal can have before any receipt exists, so a
+    // retained hop beyond it is a chain that cannot be recomputed.
+    if (retainedKind === 'run-record' && index + 1 < chain.length) {
+      return stale(
+        `re-seal hop ${hopNumber} retains a run record as a parent, but the chain continues past it ` +
+          '(fail closed)',
+      );
+    }
+    if (retainedKind === 'run-record') return [];
+    if (parentReceipt !== null) currentReceipt = parentReceipt;
     currentExecution = parentExecution;
   }
   return [];

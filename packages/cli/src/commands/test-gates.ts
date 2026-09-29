@@ -90,7 +90,11 @@ import {
   type Claim,
   type JsonValue,
   type ObligationVerdict,
+  executionResultDigestOf,
+  testOutcomesDigestOf,
+  verifyRunRecord,
   type RunManifest,
+  type RunRecord,
   type ResolvedMappings,
   type RunExecutionSummary,
   type RunnerExecutionEnvelope,
@@ -142,6 +146,7 @@ import {
   planScopedExpectedSet,
   trustedPolicyDigestForConfig,
   issueGateReceipt,
+  issueRunRecord,
   parentSha,
   planExpectedSet,
   sealExecutionResult,
@@ -181,6 +186,7 @@ import { engineIdentity } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import {
   clearGateReceipt,
+  clearRunRecord,
   httpRoutesView,
   readJsonArray,
   readStateDocument,
@@ -198,6 +204,7 @@ import {
   writeObligations,
   writeLastFullRunSummary,
   writeReport,
+  writeRunRecord,
 } from '../state.js';
 import {
   loadConfigAt,
@@ -1021,15 +1028,172 @@ function verifiedCarryForwardParent(input: {
   }
 }
 
+/** The sealed parent a re-seal carries from, and what it proved. */
+export interface ResealParent {
+  /** Which kind of document the parent is: a gate receipt or a run record. */
+  kind: 'receipt' | 'run-record';
+  /** Canonical digest of the parent document (the receipt/record's own hash). */
+  digest: string;
+  /** The parent receipt, or null for a run-record parent. */
+  receipt: GateReceipt | null;
+  /** The parent run record, or null for a receipt parent. */
+  record: RunRecord | null;
+  /** The parent document's sealed candidate tree. */
+  treeId: string;
+  /** The commit the parent run/receipt sealed. */
+  sha: string;
+  /** The parent's own execution result (its attested outcomes). */
+  execution: ExecutionResult;
+}
+
+/** The repository coordinates BOTH parent verifiers are held to. */
+export interface ResealParentCoordinates {
+  /** Process context (cwd, env). */
+  io: Io;
+  /** Loaded configuration (the receipt stage binding). */
+  config: GateforgeConfig;
+  /** Absolute run-state directory holding the parent documents. */
+  stateDir: string;
+  /** The consumer's own trusted key ring. */
+  verifierKeyring: VerifierKeyring | null;
+  /** Verified merge-base commit the parent must have sealed. */
+  baseSha: string;
+  /** Trusted policy/config revision digest of this run. */
+  trustedPolicyDigest: string;
+  /** Owner-approved policy revision digest of this run. */
+  approvedPolicyDigest: string;
+  /** Execution-boundary digest of this run. */
+  executionBoundaryDigest: string;
+  /** Authority object store (the parent tree is diffed inside it). */
+  gitDir: string | null;
+  /** Owner-approved exclusions that are never inside a candidate tree. */
+  docsExclusions: readonly string[];
+  /** Owner-approved cache exclusions. */
+  cacheExclusions: readonly string[];
+}
+
+/**
+ * Authenticates the run record a FAILED whole-suite run left behind as
+ * the re-seal parent. A failing run seals no receipt (and clears the
+ * old one), so without this the exact case a test-only re-seal exists
+ * for could never re-seal.
+ *
+ * Every binding a receipt parent is held to is demanded here too — the
+ * MAC under the active key, the same merge-base commit, the same
+ * approved policy, engine bundle, execution boundary and target
+ * artifact, the same candidate-tree coverage — and the execution result
+ * must be the one the record names, with its own recomputed outcome
+ * digest. A run record is a parent, never proof: it is accepted only as
+ * the document a re-seal recomputes from.
+ *
+ * Args:
+ *   input: the same coordinates a receipt parent is verified against.
+ *
+ * Returns:
+ *   ResealParent | null: the verified run-record parent, or null.
+ */
+function verifiedRunRecordParent(input: ResealParentCoordinates): ResealParent | null {
+  try {
+    if (input.verifierKeyring === null) return null;
+    const document = readStateDocument(input.stateDir, 'run-record.json');
+    const verified = verifyRunRecord(input.verifierKeyring.active.key, document);
+    if (!verified.ok) return null;
+    const record = verified.record;
+    const treeId = record.candidateTreeId;
+    if (
+      input.gitDir === null ||
+      treeId === null ||
+      !candidateTreeCoversCommit(
+        input.gitDir,
+        input.io.env,
+        treeId,
+        `${input.baseSha}^{tree}`,
+        input.docsExclusions,
+        input.cacheExclusions,
+      )
+    ) {
+      return null;
+    }
+    if (
+      record.gitSha !== input.baseSha ||
+      record.verifierKeyId !== input.verifierKeyring.active.keyId ||
+      record.trustedPolicyDigest !== input.trustedPolicyDigest ||
+      record.approvedPolicyDigest !== input.approvedPolicyDigest ||
+      record.engineBundleDigest !== engineBundleDigestOf(VERSION, input.trustedPolicyDigest) ||
+      record.executionBoundaryDigest !== input.executionBoundaryDigest
+    ) {
+      return null;
+    }
+    const execution = ExecutionResultSchema.safeParse(readStateDocument(input.stateDir, 'execution-result.json'));
+    if (!execution.success) return null;
+    const result = execution.data as ExecutionResult;
+    // The record is only a parent for the run it actually describes:
+    // the execution result must be the one it names, carry the whole
+    // suite it planned, and grade to the outcome digest it bound.
+    if (
+      executionResultDigestOf(result) !== record.executionResultDigest ||
+      result.catalogDigest !== record.catalogDigest ||
+      result.planned.length !== record.plannedTests ||
+      result.outcomes.filter((outcome) => outcome.status === 'passed').length !== record.passedTests ||
+      testOutcomesDigestOf(result.outcomes) !== record.testOutcomesDigest
+    ) {
+      return null;
+    }
+    return {
+      kind: 'run-record',
+      digest: sha256Canonical(record as unknown as Record<string, never>),
+      receipt: null,
+      record,
+      treeId,
+      sha: record.gitSha,
+      execution: result,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves the sealed parent a re-seal may carry from, preferring the
+ * stronger document: a verified gate receipt when the last run was
+ * clean, else the run record a failed run left behind. Both are
+ * authenticated the same way, and neither is ever accepted anywhere
+ * else as proof.
+ *
+ * Args:
+ *   input: the repository coordinates both verifiers are held to.
+ *
+ * Returns:
+ *   ResealParent | null: the verified parent, or null when neither
+ *   document qualifies (the run then proceeds exactly as before).
+ */
+function resolveResealParent(input: ResealParentCoordinates): ResealParent | null {
+  const receiptParent = verifiedCarryForwardParent(input);
+  if (receiptParent !== null) {
+    return {
+      kind: 'receipt',
+      digest: receiptParent.receiptDigest,
+      receipt: receiptParent.receipt,
+      record: null,
+      treeId: receiptParent.treeId,
+      sha: receiptParent.receipt.gitSha ?? '',
+      execution: receiptParent.execution,
+    };
+  }
+  return verifiedRunRecordParent(input);
+}
+
 /** The sealed parent a re-seal carries from, plus what it proved. */
 export interface ResealPlan {
   /** How Gateforge itself classified the sealed change set. */
   classification: ResealChangeClassification;
-  /** Digest of the verified parent receipt this run re-seals from. */
+  /** Which kind of document the parent is (a receipt or a run record). */
+  parentKind: 'receipt' | 'run-record';
+  /** Digest of the verified parent document this run re-seals from. */
   parentDigest: string;
-  /** The parent receipt's sealed candidate tree. */
+  /** The parent document's sealed candidate tree. */
   parentTreeId: string;
-  /** The commit the parent receipt sealed (its `carriedFrom`). */
+  /** The commit the parent run/receipt sealed. */
   parentSha: string;
   /** Test files whose tests this run re-runs. */
   affectedFiles: string[];
@@ -1040,14 +1204,23 @@ export interface ResealPlan {
 /**
  * Decides the test-only re-seal: may this `--scope changed` run re-run
  * exactly the tests the sealed change set can affect and re-seal from
- * the verified parent receipt?
+ * the verified parent?
  *
- * Every rule is checked by Gateforge itself, never by the candidate:
- * the change set is diffed from the two sealed trees, the paths are
- * classified from the runner's own catalog, the parent's outcomes must
- * be clean for every test outside the affected set, and a vanished test
- * must be explained by a changed file. Any doubt returns one plain
- * reason line, and the caller then runs exactly as it did before.
+ * The parent is EITHER a verified gate receipt (the run was clean) or a
+ * verified run record (the run failed a test and therefore sealed no
+ * receipt — the consumer's 563/562 case). A run record is a weaker
+ * proof in exactly one way that matters: it may hold a failure. So the
+ * rule that makes it usable is that every test which did NOT pass in
+ * it must be INSIDE the affected set — the change must have touched it
+ * — and must pass in this re-run. Anything else is a full run.
+ *
+ * Every other rule is checked by Gateforge itself, never by the
+ * candidate: the change set is diffed from the two sealed trees, the
+ * paths are classified from the runner's own catalog, the parent's
+ * outcomes must be clean for every test outside the affected set, and a
+ * vanished test must be explained by a changed file. Any doubt returns
+ * one plain reason line, and the caller then runs exactly as it did
+ * before.
  *
  * Args:
  *   input: the sealed parent, the frozen tree, the catalog, the current
@@ -1055,18 +1228,13 @@ export interface ResealPlan {
  *
  * Returns:
  *   the re-seal plan, or the single reason it is refused (both null
- *   when no parent receipt exists at all, which keeps a run without a
- *   parent byte-identical to before).
+ *   when no parent exists at all, which keeps a run without a parent
+ *   byte-identical to before).
  */
 export function decideTestOnlyReseal(input: {
   io: Io;
   gitDir: string;
-  parent: {
-    receipt: GateReceipt;
-    receiptDigest: string;
-    treeId: string;
-    execution: ExecutionResult;
-  } | null;
+  parent: ResealParent | null;
   currentTreeId: string;
   catalog: TestCatalog;
   obligations: readonly Obligation[];
@@ -1080,16 +1248,24 @@ export function decideTestOnlyReseal(input: {
       reason: 'the re-seal path is off (`enforcement.reseal` is not true) → full run',
     };
   }
-  if (receiptScope(parent.receipt) !== 'full') {
-    return { plan: null, reason: 'the previous receipt sealed a slice, not a whole-suite run → full run' };
-  }
-  if (parent.receipt.verdictSummary.total !== input.obligations.length) {
-    return {
-      plan: null,
-      reason:
-        `the previous receipt graded ${String(parent.receipt.verdictSummary.total)} obligation(s) ` +
-        `while this candidate declares ${String(input.obligations.length)} → full run`,
-    };
+  if (parent.kind === 'receipt' && parent.receipt !== null) {
+    if (receiptScope(parent.receipt) !== 'full') {
+      return { plan: null, reason: 'the previous receipt sealed a slice, not a whole-suite run → full run' };
+    }
+    if (parent.receipt.verdictSummary.total !== input.obligations.length) {
+      return {
+        plan: null,
+        reason:
+          `the previous receipt graded ${String(parent.receipt.verdictSummary.total)} obligation(s) ` +
+          `while this candidate declares ${String(input.obligations.length)} → full run`,
+      };
+    }
+  } else if (parent.execution.planned.length === 0) {
+    // A run record is only a whole-suite parent when the run it
+    // describes actually planned the suite. Obligations cannot have
+    // drifted under it either: the record binds the trusted policy and
+    // the owner-approved policy digest this run is pinned to.
+    return { plan: null, reason: "the previous run's record planned no test, so it proves no whole-suite run → full run" };
   }
   const classification = classifyResealChange({
     gitDir: input.gitDir,
@@ -1108,11 +1284,14 @@ export function decideTestOnlyReseal(input: {
     input.catalog.entries.filter((entry) => affectedFiles.has(entry.file)).map((entry) => entry.logicalKey),
   );
   const changedFiles = new Set(classification.changedPaths);
+  const previousRun = parent.kind === 'run-record';
   for (const planned of parent.execution.planned) {
     if (catalogKeys.has(planned.logicalKey) || changedFiles.has(planned.file)) continue;
     return {
       plan: null,
-      reason: `the previous receipt's test ${planned.logicalKey} no longer exists and no changed file explains it → full run`,
+      reason:
+        `the previous ${previousRun ? 'run' : 'receipt'}'s test ${planned.logicalKey} no longer exists and ` +
+        'no changed file explains it → full run',
     };
   }
   const statusByKey = new Map(parent.execution.outcomes.map((outcome) => [outcome.logicalKey, outcome.status]));
@@ -1121,16 +1300,22 @@ export function decideTestOnlyReseal(input: {
     if (statusByKey.get(planned.logicalKey) !== 'passed') {
       return {
         plan: null,
-        reason: `the previous receipt's test ${planned.logicalKey} did not pass outside the affected set → full run`,
+        // A receipt only ever exists for a clean run, so a receipt
+        // parent can only fail this rule on a doctored outcome; a run
+        // record fails it the ordinary way, one test that did not pass.
+        reason: previousRun
+          ? `the previous run's test ${planned.logicalKey} failed outside the affected set → full run`
+          : `the previous receipt's test ${planned.logicalKey} did not pass outside the affected set → full run`,
       };
     }
   }
   return {
     plan: {
       classification,
-      parentDigest: parent.receiptDigest,
+      parentKind: parent.kind,
+      parentDigest: parent.digest,
       parentTreeId: parent.treeId,
-      parentSha: parent.receipt.gitSha ?? '',
+      parentSha: parent.sha,
       affectedFiles: classification.affectedTestFiles,
       carriedTests: parent.execution.planned.filter(
         (planned) => catalogKeys.has(planned.logicalKey) && !affectedKeys.has(planned.logicalKey),
@@ -1724,14 +1909,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // The claimed files' slice (changed scope) a non-Playwright runner
   // plans from — empty in full scope and for `playwright`.
   let affectedRequiredFiles: readonly string[] = [];
-  // The verified parent a re-seal carries from, with the exact
-  // documents a consumer needs to recompute the re-seal (the parent
-  // receipt, its execution result, and this run's catalog). Retained
-  // next to the new receipt as MAC-bound run state.
-  let reSealParent: {
-    receipt: GateReceipt;
-    execution: ExecutionResult;
-  } | null = null;
+  // The verified parent a re-seal carries from — a gate receipt or a
+  // run record — with the exact documents a consumer needs to
+  // recompute the re-seal (the parent document, its execution result,
+  // and this run's catalog). Retained next to the new receipt as
+  // MAC-bound run state.
+  let reSealParent: ResealParent | null = null;
   let reSealPlan: ResealPlan | null = null;
   // Framework ids whose claims and records must never grade (owner
   // quarantine); empty when nothing is quarantined.
@@ -1779,13 +1962,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     affectedTestCount = affectedPlan.plannedRows.length;
     affectedRequiredFiles = affectedPlan.requiredFiles;
     if (options.scope === 'changed') {
-      // Test-only re-seal (plan phase 2). A parent receipt and a frozen
-      // tree are the only inputs; everything else — the change set, the
-      // classification, the carried outcomes — Gateforge recomputes
-      // itself. A refused re-seal prints ONE plain reason line and the
-      // run continues through the unchanged path below.
+      // Test-only re-seal (plan phase 2). A verified parent and a
+      // frozen tree are the only inputs; everything else — the change
+      // set, the classification, the carried outcomes — Gateforge
+      // recomputes itself. A refused re-seal prints ONE plain reason
+      // line and the run continues through the unchanged path below.
       const reSealBaseSha = resolveCarryForwardBaseSha(io, providerIdentity);
-      const reSealParentCandidate =
+      const reSealParentCandidate: ResealParent | null =
         options.testSelectors === undefined &&
         !options.resultOnly &&
         freezeGitDir !== null &&
@@ -1794,13 +1977,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         approvedPolicyDigest !== null &&
         reSealBaseSha !== null &&
         catalog.inventoryComplete
-          ? verifiedCarryForwardParent({
+          ? resolveResealParent({
               io,
               config,
               stateDir,
               verifierKeyring,
               baseSha: reSealBaseSha,
-              gitDir: freezeGitDir,
+              gitDir: freezeGitDir as string,
               docsExclusions,
               cacheExclusions,
               trustedPolicyDigest: trustedPolicy,
@@ -1831,12 +2014,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
             });
       if (reSeal.reason !== null) writeLine(io.stderr, `test-gates: ${reSeal.reason}`);
       reSealPlan = reSeal.plan;
-      if (reSeal.plan !== null && reSealParentCandidate !== null) {
-        reSealParent = {
-          receipt: reSealParentCandidate.receipt,
-          execution: reSealParentCandidate.execution,
-        };
-      }
+      if (reSeal.plan !== null) reSealParent = reSealParentCandidate;
       if (reSeal.plan !== null) {
         const affected = new Set(reSeal.plan.affectedFiles);
         plannedRows = fullPlannedRows.filter(
@@ -3279,6 +3457,81 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // be evaluated honestly has nothing to report.
   const gateCode = strictness.exitCode;
   const softened = strictness.exitCode !== strictness.strictExitCode;
+  // The post-run candidate tree, computed ONCE and used by both the
+  // run record below and the drift check after the gate branch.
+  const resultGitDir = resolveGitDir(io.cwd, io.env);
+  const resultTreeSnapshot =
+    resultGitDir === null
+      ? null
+      : computeCandidateTreeSnapshot(
+          resultGitDir,
+          io.cwd,
+          io.env,
+          stateDir,
+          'record',
+          runtimeReuseMounts,
+          docsExclusions,
+          cacheExclusions,
+        );
+  const resultTreeId = resultTreeSnapshot?.treeId ?? null;
+  /**
+   * Writes the run record of a whole-suite run that sealed no gate
+   * receipt.
+   *
+   * A failing test is exactly the case a test-only re-seal exists for,
+   * and a failing run issues no receipt (it clears the old one), so
+   * without this record the path would be unusable where it matters
+   * most. The record binds the same evidence a receipt binds and NO
+   * verdict: `check`, pre-commit and the broker never read it, so a run
+   * record alone leaves every gate exactly as blocked as it was. It is
+   * written only for an authoritative whole-suite run whose evidence
+   * is honestly bound — never for a slice, a named selection, a
+   * result-only report, a drifting workspace or changed inputs.
+   */
+  const wholeSuiteRunRecord = (): void => {
+    if (
+      options.resultOnly ||
+      namedTestIds !== null ||
+      options.scope !== 'full' ||
+      witnessVerifierKey === undefined ||
+      approvedPolicyDigest === null ||
+      expectedDigest === null ||
+      snapshotUnavailable ||
+      changedInputs ||
+      resultTreeId === null ||
+      resultTreeId !== frozenTreeId ||
+      catalog === null
+    ) {
+      return;
+    }
+    writeRunRecord(
+      stateDir,
+      issueRunRecord({
+        verifierKey: witnessVerifierKey,
+        ...(verifierKeyring === null ? {} : { verifierKeyId: verifierKeyring.active.keyId }),
+        runId: manifest.runId,
+        invocationId,
+        inputDigest: expectedDigest,
+        gitSha: manifest.gitSha,
+        parentSha: frozenParentSha,
+        trustedPolicyDigest: trustedPolicy,
+        approvedPolicyDigest,
+        invocation: SUPERVISED_INVOCATION,
+        selectionDigest,
+        catalogDigest,
+        executionResultDigest: sealed.digest,
+        testOutcomesDigest: testOutcomesDigestOf(sealed.result.outcomes),
+        plannedTests: sealed.result.planned.length,
+        passedTests: sealed.result.outcomes.filter((outcome) => outcome.status === 'passed').length,
+        evidenceAttestationDigest:
+          liveAttestation === null ? null : sha256Canonical(liveAttestation as unknown as Record<string, never>),
+        candidateTreeId: resultTreeId,
+        engineBundleDigest: engineBundleDigestOf(VERSION, trustedPolicy),
+        executionBoundaryDigest,
+        issuedAt: pipeline.now,
+      }),
+    );
+  };
   if (namedTestIds !== null) {
     // A named run is a REPORT, never a gate. It exits 0 only when the
     // selection itself is honest and complete: every selected test
@@ -3298,6 +3551,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     if (!selection || !claimsProven || !runHonest) return 1;
   } else if (gateCode !== 0 || !sealed.result.complete || changedInputs || snapshotUnavailable || expectedDigest === null) {
     if (strictness.strictExitCode !== 0 && !options.resultOnly && !softened) clearGateReceipt(stateDir);
+    // The run sealed no receipt; the evidence it DID produce is
+    // retained as a run record, which only the test-only re-seal path
+    // may read. It grants nothing on its own.
+    wholeSuiteRunRecord();
     if (softened) {
       writeLine(
         io.stderr,
@@ -3312,21 +3569,6 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // reads, writes, or clears the configured authoritative receipt.
   // Confirm the same candidate-tree drift check before returning a
   // descriptive pass.
-  const resultGitDir = resolveGitDir(io.cwd, io.env);
-  const resultTreeSnapshot =
-    resultGitDir === null
-      ? null
-      : computeCandidateTreeSnapshot(
-          resultGitDir,
-          io.cwd,
-          io.env,
-          stateDir,
-          'record',
-          runtimeReuseMounts,
-          docsExclusions,
-          cacheExclusions,
-        );
-  const resultTreeId = resultTreeSnapshot?.treeId ?? null;
   if (resultTreeId !== frozenTreeId) {
     writeLine(
       io.stderr,
@@ -3389,15 +3631,18 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       ? { scope: 'changed' as const, coveredObligationFingerprints: coveredFingerprints }
       : {}),
     // Test-only re-seal bindings (additive): the parent this run
-    // re-sealed from, how many outcomes it carried, how many tests it
-    // re-ran, and the change set Gateforge itself computed. CI
-    // recomputes every one of them from the two sealed trees.
+    // re-sealed from — a gate receipt or a run record, named by
+    // `resealedFromKind` — how many outcomes it carried, how many
+    // tests it re-ran, and the change set Gateforge itself computed.
+    // CI recomputes every one of them from the two sealed trees.
     ...(reSealPlan === null
       ? {}
       : {
-          carriedFrom: reSealPlan.parentSha,
-          parentReceiptDigest: reSealPlan.parentDigest,
+          ...(reSealPlan.parentKind === 'receipt'
+            ? { carriedFrom: reSealPlan.parentSha, parentReceiptDigest: reSealPlan.parentDigest }
+            : {}),
           resealedFrom: reSealPlan.parentDigest,
+          resealedFromKind: reSealPlan.parentKind,
           changeClass: 'test-only' as const,
           carriedTests: reSealPlan.carriedTests,
           rerunTests: plannedRows.length,
@@ -3426,13 +3671,21 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     issuedAt: pipeline.now,
   });
   writeGateReceipt(stateDir, receipt);
+  // A receipt supersedes the run record of the same run: it carries the
+  // same evidence PLUS a verdict, so the record is dropped rather than
+  // left behind as a stale parent (the re-seal's own copy of the parent
+  // it consumed lives in the retained chain below).
+  clearRunRecord(stateDir);
   // The re-seal chain is additive run state: a re-sealed receipt keeps
-  // its parent (receipt + execution result) and the catalog its
-  // classification used, so a consumer can recompute the re-seal with
-  // its own engine and key. Any other seal leaves no chain behind.
+  // its parent (receipt or run record, plus its execution result) and
+  // the catalog its classification used, so a consumer can recompute
+  // the re-seal with its own engine and key. Any other seal leaves no
+  // chain behind.
   if (reSealPlan !== null && reSealParent !== null && catalog !== null) {
     writeResealChainHop(stateDir, {
-      receipt: reSealParent.receipt,
+      ...(reSealParent.receipt === null
+        ? { runRecord: reSealParent.record, receipt: null }
+        : { receipt: reSealParent.receipt, runRecord: null }),
       execution: reSealParent.execution,
       catalog,
     });
@@ -3444,7 +3697,8 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   if (reSealPlan !== null) {
     writeLine(
       io.stderr,
-      `only test files changed: re-ran ${String(plannedRows.length)} test(s), kept ${String(reSealPlan.carriedTests)} from the previous receipt`,
+      `only test files changed: re-ran ${String(plannedRows.length)} test(s), kept ${String(reSealPlan.carriedTests)} ` +
+        `from the previous ${reSealPlan.parentKind === 'run-record' ? 'run' : 'receipt'}`,
     );
   }
   return 0;

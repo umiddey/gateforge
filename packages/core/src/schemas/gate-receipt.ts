@@ -199,6 +199,17 @@ export const GateReceiptSchema = z
      */
     resealedFrom: z.string().regex(HEX64, 'resealedFrom must be 64-char lowercase hex').optional(),
     /**
+     * ADDITIVE: WHICH kind of parent document `resealedFrom` names —
+     * `receipt` (a verified gate receipt) or `run-record` (a whole-suite
+     * run record, the only parent a run that sealed no receipt can
+     * have). Absent reads as `receipt`, so every re-sealed receipt
+     * sealed before this field existed keeps verifying unchanged. A
+     * `run-record` re-seal carries NO `parentReceiptDigest` (there is no
+     * parent receipt to name) and the consumer recomputes the run
+     * record exactly like a parent receipt.
+     */
+    resealedFromKind: z.enum(['receipt', 'run-record']).optional(),
+    /**
      * ADDITIVE: how many test outcomes this receipt carries unchanged
      * from the parent receipt (digest-bound to the parent's execution
      * result and evidence attestation). Absent on every other seal.
@@ -269,8 +280,27 @@ export const GateReceiptSchema = z
       });
       return;
     }
+    if (receipt.resealedFromKind !== undefined && presentResealFields !== resealFields.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resealedFromKind'],
+        message: 'resealedFromKind is a re-seal binding and stands or falls with the re-seal fields',
+      });
+    }
     if (presentResealFields === resealFields.length) {
-      if (receipt.resealedFrom !== receipt.parentReceiptDigest) {
+      // A `run-record` parent is NOT a receipt: `resealedFrom` then
+      // names the run record's own digest and no carried-receipt binding
+      // may be claimed. A `receipt` parent keeps the identity rule.
+      if (receipt.resealedFromKind === 'run-record') {
+        if (receipt.parentReceiptDigest !== undefined || receipt.carriedFrom !== undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['parentReceiptDigest'],
+            message: 'a run-record re-seal names no parent receipt, so it carries no parentReceiptDigest',
+          });
+          return;
+        }
+      } else if (receipt.resealedFrom !== receipt.parentReceiptDigest) {
         ctx.addIssue({
           code: 'custom',
           path: ['resealedFrom'],
