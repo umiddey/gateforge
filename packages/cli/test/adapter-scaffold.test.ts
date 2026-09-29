@@ -307,6 +307,47 @@ describe('the scaffolder projects every declared column, minus the secrets', () 
     expect(declared(plan, 'fields')).toBe('[]');
     expect(plan.needsYou.join('\n')).toContain('declares no columns');
   });
+
+  it('keeps the primary key out of the projected fields when only the table declares it', () => {
+    const plan = planFor({
+      resource: table(
+        'accounts',
+        { columnNames: ['id', 'email', 'status'], primaryKeyColumns: ['id'] },
+        [],
+      ),
+      routes: [get('/api/v1/accounts'), get('/api/v1/accounts/:id')],
+      handWritten: {
+        readPath: '/api/v1/accounts/{id}',
+        listPath: '/api/v1/accounts',
+        fields: ['email', 'status'],
+        deletion: 'hard',
+      },
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('create');
+    const fields = [...(declared(plan, 'fields').matchAll(/"([^"]+)"/g))].map((match) => match[1]);
+    // The declared primary key IS the entity id, never a projected
+    // field — whichever layer of the graph declared it.
+    expect(fields).toEqual(['email', 'status']);
+  });
+
+  it('omits the exclusion clause when nothing was excluded', () => {
+    const plan = planFor({
+      resource: table('orders', { columnNames: ['label', 'total'] }, []),
+      routes: [get('/api/v1/orders'), get('/api/v1/orders/:id')],
+      handWritten: {
+        readPath: '/api/v1/orders/{id}',
+        listPath: '/api/v1/orders',
+        fields: ['label', 'total'],
+        deletion: 'hard',
+      },
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('create');
+    expect(plan.guesses.join('\n')).toContain('fields [label, total]');
+    // An empty exclusion list says nothing: the clause must not print.
+    expect(plan.guesses.join('\n')).not.toContain('excluded:');
+  });
 });
 
 /** The fixture app: the shapes the generator was measured failing on. */

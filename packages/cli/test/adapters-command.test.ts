@@ -18,14 +18,21 @@ import { fileURLToPath } from 'node:url';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { withTempRepo } from '@gate-forge/core';
-import { CLASSIFICATION_POLICY_YML, configYml, POLICIES_YML, runCli } from './helpers.js';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
+import { CLASSIFICATION_POLICY_YML, configYml, POLICIES_YML, runCli, type CliResult } from './helpers.js';
 
 /** The shipped example app (documented, transport-only demo). */
 const EXAMPLE_ROOT = fileURLToPath(new URL('../../../example/', import.meta.url));
 
 /** The marker the probe fixture app presents (GF-13). */
 const FINGERPRINT = 'fixture-loopback-v1';
+
+/** The login the seat-protected probe fixture app accepts. */
+const SEAT_USER = 'probe-seat';
+const SEAT_PASSWORD = 'probe-seat-password-do-not-leak';
+
+/** The cookie the fixture app hands out after a successful login. */
+const SEAT_COOKIE = 'probe_session=granted';
 
 /**
  * The fixture detector: one business resource with its two GET routes,
@@ -120,6 +127,85 @@ function install(repo: { writeFiles: (files: Record<string, string>) => void }, 
   });
 }
 
+/**
+ * Points the repo's `@gate-forge/witness/adapter-kit` at this
+ * worktree's built kit, so a generated module resolves in the repo.
+ *
+ * Args:
+ *   repo: the temp repo.
+ */
+function installWitnessKit(repo: { writeFiles: (files: Record<string, string>) => void }): void {
+  repo.writeFiles({
+    'node_modules/@gate-forge/witness/package.json': JSON.stringify({
+      name: '@gate-forge/witness',
+      version: '0.7.1',
+      type: 'module',
+      exports: {
+        './adapter-kit': {
+          import: new URL('../../../../packages/witness/dist/adapter-kit/index.js', import.meta.url)
+            .pathname,
+        },
+      },
+    }),
+  });
+}
+
+/**
+ * Rewrites the generated adapter into a reviewed one that reads a
+ * seat-protected collection through its own cookie-login seat.
+ *
+ * Args:
+ *   repo: the temp repo holding the generated adapter.
+ */
+function seatProtectAdapter(repo: {
+  path: (relative: string) => string;
+  writeFiles: (files: Record<string, string>) => void;
+}): void {
+  const generated = readFileSync(repo.path('.gateforge/adapters/tenant.accounts.mjs'), 'utf8');
+  repo.writeFiles({
+    '.gateforge/adapters/tenant.accounts.mjs': generated
+      .replace('readPath: "/api/accounts/{id}"', 'readPath: "/secure/accounts/{id}"')
+      .replace('listPath: "/api/accounts"', 'listPath: "/secure/accounts"')
+      .replace(
+        '  collectionKey: firstArrayOf,',
+        '  collectionKey: firstArrayOf,\n' +
+          "  auth: { kind: 'cookie-login', seats: { seat: { loginPath: '/login',\n" +
+          "    credentials: { username: 'GATEFORGE_TEST_SEAT_USER',\n" +
+          "      password: 'GATEFORGE_TEST_SEAT_PASSWORD' } } } },",
+      ),
+  });
+}
+
+/**
+ * Probes the repo's adapters with a seat environment set the way a
+ * witnessed run carries credentials: in the process environment only,
+ * never in the repo, argv, or the captured output.
+ *
+ * Args:
+ *   repo: the temp repo.
+ *   baseUrl: the running app's base URL.
+ *   seat: the seat env vars for the probe.
+ *
+ * Returns:
+ *   Promise<CliResult>: the command's result, with the env restored.
+ */
+async function probeWithSeat(
+  repo: TempRepo,
+  baseUrl: string,
+  seat: Readonly<Record<string, string>>,
+): Promise<CliResult> {
+  const previous = new Map(Object.keys(seat).map((name) => [name, process.env[name]]));
+  for (const [name, value] of Object.entries(seat)) process.env[name] = value;
+  try {
+    return await runCli(repo, ['adapters', 'check', '--probe', '--base-url', baseUrl]);
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 /** The probe fixture app. */
 let app: Server;
 /** Its loopback base URL. */
@@ -135,6 +221,34 @@ beforeAll(async () => {
       });
       res.end(JSON.stringify(body));
     };
+    if (path === '/login' && req.method === 'POST') {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, string>;
+        if (body['username'] !== SEAT_USER || body['password'] !== SEAT_PASSWORD) {
+          send(401, { ok: false });
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'x-gateforge-env-fingerprint': FINGERPRINT,
+          'set-cookie': `${SEAT_COOKIE}; HttpOnly; Path=/`,
+        });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+    // A collection only a logged-in session can read: an
+    // unauthenticated probe GET here is answered 401.
+    if (path === '/secure/accounts') {
+      if (req.headers['cookie'] !== SEAT_COOKIE) {
+        send(401, { error: 'login required' });
+        return;
+      }
+      send(200, { accounts: [{ id: 'acc-1', first_name: 'Ada', last_name: 'L', status: 'active' }] });
+      return;
+    }
     if (path === '/api/accounts') {
       send(200, { accounts: [{ id: 'acc-1', first_name: 'Ada', last_name: 'L', status: 'active' }] });
       return;
@@ -276,21 +390,7 @@ describe('gateforge adapters check', () => {
       expect(scaffold.code, `${scaffold.stdout}\n${scaffold.stderr}`).toBe(0);
       // The generated module must be loadable IN THE REPO: the kit
       // resolves from the project's installed witness package.
-      repo.writeFiles({
-        'node_modules/@gate-forge/witness/package.json': JSON.stringify({
-          name: '@gate-forge/witness',
-          version: '0.7.1',
-          type: 'module',
-          exports: {
-            './adapter-kit': {
-              import: new URL(
-                '../../../../packages/witness/dist/adapter-kit/index.js',
-                import.meta.url,
-              ).pathname,
-            },
-          },
-        }),
-      });
+      installWitnessKit(repo);
 
       const check = await runCli(repo, ['adapters', 'check', '--probe', '--base-url', appUrl]);
       expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
@@ -302,43 +402,28 @@ describe('gateforge adapters check', () => {
     });
   });
 
-  it('keeps a seat credential out of the report and the run state', async () => {
-    const secret = 'seat-secret-value-do-not-leak';
+  it('probes a seated adapter THROUGH its seat, and keeps the credential out of everything', async () => {
+    const secret = SEAT_PASSWORD;
     await withTempRepo({}, async (repo) => {
       install(repo, PLUGIN_WITH_ROUTES);
       const scaffold = await runCli(repo, ['adapters', 'scaffold'], {
         GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
       });
       expect(scaffold.code, `${scaffold.stdout}\n${scaffold.stderr}`).toBe(0);
-      const generated = readFileSync(repo.path('.gateforge/adapters/tenant.accounts.mjs'), 'utf8');
-      // A reviewed adapter with a login seat whose credential lives only
-      // in the witness environment.
-      repo.writeFiles({
-        '.gateforge/adapters/tenant.accounts.mjs':
-          generated.replace(
-            "  collectionKey: firstArrayOf,",
-            `  collectionKey: firstArrayOf,\n` +
-              `  auth: { kind: 'cookie-login', seats: { seat: { loginPath: '/login',\n` +
-              `    credentials: { password: 'GATEFORGE_TEST_SEAT_PASSWORD' } } } },`,
-          ),
-        'node_modules/@gate-forge/witness/package.json': JSON.stringify({
-          name: '@gate-forge/witness',
-          version: '0.7.1',
-          type: 'module',
-          exports: {
-            './adapter-kit': {
-              import: new URL(
-                '../../../../packages/witness/dist/adapter-kit/index.js',
-                import.meta.url,
-              ).pathname,
-            },
-          },
-        }),
-      });
-      const check = await runCli(repo, ['adapters', 'check', '--probe', '--base-url', appUrl], {
+      // A reviewed adapter whose credentials live ONLY in the witness
+      // environment, reading a collection that answers 401 to anyone
+      // not logged in.
+      seatProtectAdapter(repo);
+      installWitnessKit(repo);
+
+      const check = await probeWithSeat(repo, appUrl, {
+        GATEFORGE_TEST_SEAT_USER: SEAT_USER,
         GATEFORGE_TEST_SEAT_PASSWORD: secret,
       });
       expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
+      // The probe read through the seat, so the app answered 2xx — an
+      // unauthenticated probe GET would have reported a false 401.
+      expect(check.stdout).toContain('[ok] tenant.accounts /secure/accounts');
       const state = repo.path('.gateforge');
       const files = readdirSync(state, { recursive: true }) as string[];
       const leaks = files.filter((entry) => {
@@ -353,6 +438,51 @@ describe('gateforge adapters check', () => {
       // credential: it lives in the witness environment, nowhere else.
       expect(leaks).toEqual([]);
       expect(`${check.stdout}\n${check.stderr}`).not.toContain(secret);
+    });
+  });
+
+  it('names the witness env vars a seat needs instead of blaming the credentials', async () => {
+    await withTempRepo({}, async (repo) => {
+      install(repo, PLUGIN_WITH_ROUTES);
+      const scaffold = await runCli(repo, ['adapters', 'scaffold'], {
+        GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+      });
+      expect(scaffold.code, `${scaffold.stdout}\n${scaffold.stderr}`).toBe(0);
+      seatProtectAdapter(repo);
+      installWitnessKit(repo);
+
+      const check = await probeWithSeat(repo, appUrl, {
+        GATEFORGE_TEST_SEAT_USER: '',
+        GATEFORGE_TEST_SEAT_PASSWORD: '',
+      });
+      expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
+      expect(check.stdout).toContain('[auth] tenant.accounts');
+      expect(check.stdout).toContain(
+        "the seat 'seat' needs GATEFORGE_TEST_SEAT_USER, GATEFORGE_TEST_SEAT_PASSWORD",
+      );
+      expect(check.stdout).toContain('not probed');
+    });
+  });
+
+  it('names the login POST status when the seat credentials are rejected', async () => {
+    await withTempRepo({}, async (repo) => {
+      install(repo, PLUGIN_WITH_ROUTES);
+      const scaffold = await runCli(repo, ['adapters', 'scaffold'], {
+        GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+      });
+      expect(scaffold.code, `${scaffold.stdout}\n${scaffold.stderr}`).toBe(0);
+      seatProtectAdapter(repo);
+      installWitnessKit(repo);
+
+      // The env vars ARE set — the password in them is simply wrong.
+      const check = await probeWithSeat(repo, appUrl, {
+        GATEFORGE_TEST_SEAT_USER: SEAT_USER,
+        GATEFORGE_TEST_SEAT_PASSWORD: 'wrong-password',
+      });
+      expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
+      expect(check.stdout).toContain('[auth] tenant.accounts');
+      expect(check.stdout).toContain('login failed: POST /login -> 401');
+      expect(check.stdout).not.toContain('wrong-password');
     });
   });
 

@@ -140,17 +140,22 @@ const SECRET_COLUMN_KEYS: readonly string[] = [
  *   the excluded ones, each sorted and deduplicated.
  */
 function projectedFields(resource: GraphResource): { fields: string[]; excluded: string[] } {
-  const primaryKey = new Set(resource.classification?.primaryKey ?? []);
+  // The primary key IS the entity id, so it is never a projected
+  // field — whichever layer declared it (the classification, or the
+  // table's own primary-key facts).
+  const primaryKey = new Set([
+    ...(resource.classification?.primaryKey ?? []),
+    ...attributeColumns(resource.attributes['primaryKeyColumns'], 'name'),
+  ]);
   const declaredSecrets = new Set(
     SECRET_COLUMN_KEYS.flatMap((key) => attributeColumns(resource.attributes[key], 'name')),
   );
   const fields: string[] = [];
   const excluded: string[] = [];
   for (const column of declaredColumns(resource)) {
-    const isPrimaryKey = primaryKey.has(column);
     const isSecret =
       declaredSecrets.has(column) || SECRET_COLUMN_PATTERN.test(column.toLowerCase());
-    if (isPrimaryKey || isSecret) excluded.push(column);
+    if (primaryKey.has(column) || isSecret) excluded.push(column);
     else fields.push(column);
   }
   return { fields, excluded };
@@ -413,7 +418,8 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
       fields.length === 0
         ? 'no fields could be derived; add the business fields the obligations grade'
         : `fields [${fields.join(', ')}] derived from every column the compiled graph declares for ` +
-          `${resource.name} (excluded: ${excluded.join(', ')})`,
+          `${resource.name}` +
+          (excluded.length === 0 ? '' : ` (excluded: ${excluded.join(', ')})`),
     );
     guesses.push('itemWrapper guessed as none (the response body IS the entity)');
     guesses.push(

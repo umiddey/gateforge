@@ -206,6 +206,15 @@ what actually happened: `ok`, `absent` (404), `auth` (401/403),
 path). `adapters check` also lists the resources that still have no
 adapter.
 
+For a kit adapter the probe reads through the adapter's OWN seat —
+same login, same cookie, same one re-login on 401 — so a collection
+that only a logged-in session can read probes as `ok`, not as a 401
+your correct credentials caused. When the seat's environment
+variables are missing, the probe says which ones it needs (by name,
+never by value) and reports `not probed` instead of inventing an
+auth failure; when the app rejects the login, it names the login POST
+status.
+
 ## 6. Test map
 
 Intent is declared, proof is not:
