@@ -349,6 +349,12 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
       );
     }
   }
+  // A usage error must cost seconds, not a spawned witness and a test
+  // suite: an unusable --progress target is rejected before anything
+  // runs. (The target itself is resolved again once the trusted config
+  // is loaded, so the `run.progress` key gets the same treatment.)
+  const progressFlag = stringFlag(options, 'progress');
+  if (progressFlag !== undefined) resolveProgressTarget(progressFlag, undefined, io.env);
   const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [resolveStateDir(io.cwd, out)]);
   if (changed || namedSelection) {
     const isolatedStateDir = resultOnly && witnessUrl === undefined ? mkdtempSync(join(tmpdir(), 'gateforge-selected-result-')) : undefined;
@@ -359,7 +365,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
         witnessUrl,
         runToken: stringFlag(options, 'run-token'),
         runTimeoutMs: parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')),
-        progress: stringFlag(options, 'progress'),
+        progress: progressFlag,
         scope,
         resultOnly,
         testSelectors,
