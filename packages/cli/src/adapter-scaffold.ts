@@ -87,6 +87,22 @@ function guessComment(resourceId: string, guesses: readonly string[]): string {
 }
 
 /**
+ * Whether a route's literal prefix still carries an INNER positional
+ * segment (e.g. `/api/v1/contracts/:contractId/invoices`).
+ *
+ * Args:
+ *   prefix: the literal prefix `splitRoutePath` left behind.
+ *
+ * Returns:
+ *   boolean: true when a parameter sits before the collection name.
+ */
+function hasInnerParam(prefix: string): boolean {
+  return prefix
+    .split('/')
+    .some((segment) => segment.startsWith(':') || segment === '{}');
+}
+
+/**
  * The projected business fields a scaffolder can honestly name.
  *
  * Args:
@@ -163,29 +179,66 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
       );
     }
 
-    const reads = evidence
-      .map((route) => ({ route, split: splitRoutePath(route.canonicalPath) }))
-      .filter((entry) => entry.split.idSegments.length > 0);
-    const lists = evidence.filter((entry) => splitRoutePath(entry.canonicalPath).idSegments.length === 0);
+    // A route with an INNER parameter is scoped to a parent: it is never
+    // the complete collection of the resource, and never a by-id read of
+    // the resource itself.
+    const entries = evidence.map((route) => ({
+      route,
+      split: splitRoutePath(route.canonicalPath),
+    }));
+    const reads = entries.filter(
+      (entry) => entry.split.idSegments.length > 0 && !hasInnerParam(entry.split.prefix),
+    );
+    const collections = entries.filter(
+      (entry) => entry.split.idSegments.length === 0 && !hasInnerParam(entry.split.prefix),
+    );
+    const perParent = entries.filter((entry) => hasInnerParam(entry.split.prefix));
+    const perParentReads = perParent.filter((entry) => entry.split.idSegments.length > 0);
 
-    const byId = reads.find((entry) => entry.split.idSegments.length === 1);
+    const singleReads = reads.filter((entry) => entry.split.idSegments.length === 1);
+    const collectionFirst = collections[0];
+    // One resource's read and collection share a prefix; when both are
+    // derivable, prefer that pair over any other shape.
+    const byId =
+      singleReads.find((entry) => entry.split.prefix === collectionFirst?.split.prefix) ??
+      singleReads[0];
     const composite = reads.find((entry) => entry.split.idSegments.length > 1);
-    const collection = lists[0];
+    const collection =
+      byId === undefined
+        ? collectionFirst
+        : (collections.find((entry) => entry.split.prefix === byId.split.prefix) ?? collectionFirst);
 
     if (byId === undefined) {
-      needsYou.push(
-        composite === undefined
-          ? `no GET route serves one ${resource.name} entity: declare readPath yourself — the ` +
-            'adapter cannot read an entity without one'
-          : `the by-id route serves a COMPOSITE key ` +
-            `(${composite.split.idSegments.join(', ')}): declare readPath as a function of the ` +
-            'composite key yourself',
-      );
+      if (perParentReads.length > 0) {
+        needsYou.push(
+          `every by-id route for ${resource.name} is a per-parent route (${perParentReads
+            .map((entry) => `GET ${entry.route.canonicalPath}`)
+            .sort()
+            .join(', ')}): a per-parent read is not a by-id read of the resource — declare ` +
+            'readPath yourself',
+        );
+      } else {
+        needsYou.push(
+          composite === undefined
+            ? `no GET route serves one ${resource.name} entity: declare readPath yourself — the ` +
+              'adapter cannot read an entity without one'
+            : `the by-id route serves a COMPOSITE key ` +
+              `(${composite.split.idSegments.join(', ')}): declare readPath as a function of the ` +
+              'composite key yourself',
+        );
+      }
     }
     if (collection === undefined) {
+      const perParentCollections = perParent.filter((entry) => entry.split.idSegments.length === 0);
       needsYou.push(
-        `no GET collection route serves ${resource.name}: a create cannot be witnessed without a ` +
-          'complete collection read (ADAPTER_CANNOT_WITNESS) — declare listPath yourself',
+        perParentCollections.length > 0
+          ? `only per-parent collections serve ${resource.name} (${perParentCollections
+              .map((entry) => `GET ${entry.route.canonicalPath}`)
+              .sort()
+              .join(', ')}): a sub-collection is never the complete collection — declare ` +
+            'listPath / listCollection yourself'
+          : `no GET collection route serves ${resource.name}: a create cannot be witnessed without a ` +
+            'complete collection read (ADAPTER_CANNOT_WITNESS) — declare listPath yourself',
       );
     }
     if (input.environmentFingerprint === null) {
@@ -220,11 +273,11 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
     }
 
     const readPath = byId.split.prefix + '/{id}';
-    const listPath = collection.canonicalPath;
+    const listPath = collection.route.canonicalPath;
     const fields = projectedFields(resource);
     const deletion = target.deleteSemantics ?? 'hard';
     guesses.push(`readPath '${readPath}' guessed from GET ${byId.route.canonicalPath}`);
-    guesses.push(`listPath '${listPath}' guessed from GET ${collection.canonicalPath}`);
+    guesses.push(`listPath '${listPath}' guessed from GET ${collection.route.canonicalPath}`);
     guesses.push(
       'collectionKey guessed as the first array in the response body — replace it with the exact key',
     );
