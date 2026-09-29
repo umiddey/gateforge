@@ -76,7 +76,7 @@ async function adapterAdvisories(
     for (const record of used) {
       if (record === null) continue;
       for (const action of actions) {
-        for (const skip of volatileEchoSkips(action as never, record as never)) {
+        for (const skip of volatileEchoSkips(action, record)) {
           if (!skipped.includes(skip.field)) skipped.push(skip.field);
         }
       }

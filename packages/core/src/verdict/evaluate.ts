@@ -586,8 +586,10 @@ function exactValueEchoFailure(
  * Returns:
  *   string[]: the declared keys, sorted and deduplicated.
  */
-export function volatileFieldsOf(record: RecordLike): string[] {
-  const declared = payloadOf(record)?.['volatileFields'];
+export function volatileFieldsOf(record: unknown): string[] {
+  const entry = asRecord(record);
+  if (entry === null) return [];
+  const declared = payloadOf(entry)?.['volatileFields'];
   if (!Array.isArray(declared)) return [];
   const seen: Record<string, true> = {};
   for (const key of declared) {
@@ -611,14 +613,17 @@ export function volatileFieldsOf(record: RecordLike): string[] {
  *   entry per declared-volatile key the journey actually entered.
  */
 export function volatileEchoSkips(
-  actionRecord: RecordLike,
-  persistenceRecord: RecordLike,
+  actionRecord: unknown,
+  persistenceRecord: unknown,
 ): Array<{ field: string; entered: unknown; persisted: unknown }> {
-  const entered = payloadOf(actionRecord)?.['fields'];
+  const action = asRecord(actionRecord);
+  const persistence = asRecord(persistenceRecord);
+  if (action === null || persistence === null) return [];
+  const entered = payloadOf(action)?.['fields'];
   if (!isPlainObject(entered)) return [];
-  const persisted = payloadOf(persistenceRecord)?.['fields'];
+  const persisted = payloadOf(persistence)?.['fields'];
   const observed = isPlainObject(persisted) ? persisted : {};
-  return volatileFieldsOf(persistenceRecord)
+  return volatileFieldsOf(persistence)
     .filter((field) => isJsonValue(entered[field]))
     .map((field) => ({ field, entered: entered[field], persisted: observed[field] ?? null }));
 }
