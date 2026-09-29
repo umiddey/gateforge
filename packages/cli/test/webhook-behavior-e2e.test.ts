@@ -267,8 +267,8 @@ endpoints:
           body:
             encoding: raw
             fixture: accepted-event
-          credentialVariant: corrupted
-          signatureProfile: hmac-sha256
+          credentialVariant: valid
+          signatureProfile: hmac-sha256;forgery=signature
         expect:
           statuses: [401]
           response: []

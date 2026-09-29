@@ -15,6 +15,7 @@ export * from './run-manifest.js';
 export * from './verdict.js';
 export * from './coverage-policy.js';
 export * from './behavior-policy.js';
+export * from './signature-profile.js';
 export * from './behavior-catalog.js';
 export * from './behavior-evidence.js';
 export * from './test-catalog.js';

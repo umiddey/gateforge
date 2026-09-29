@@ -354,6 +354,13 @@ export {
   BEHAVIOR_CATALOG_DOMAIN,
   HTTP_EFFECT_VERIFIED,
   HTTP_READ_RESULT_VERIFIED,
+  BEHAVIOR_SIGNATURE_ALGORITHMS,
+  BEHAVIOR_SIGNATURE_FORGERIES,
+  BEHAVIOR_SIGNING_SECRET_HEADER,
+  DEFAULT_SIGNATURE_HEADER,
+  DEFAULT_SIGNATURE_TIMESTAMP_HEADER,
+  DEFAULT_SIGNATURE_ATTEMPT_HEADER,
+  parseBehaviorSignatureProfile,
 } from './schemas/index.js';
 export type {
   BehaviorPolicy,
@@ -366,6 +373,9 @@ export type {
   BehaviorCatalogRegistration,
   BehaviorCasePayload,
   ScopeSnapshot,
+  BehaviorSignatureProfile,
+  BehaviorSignatureAlgorithm,
+  BehaviorSignatureForgery,
 } from './schemas/index.js';
 
 /**
