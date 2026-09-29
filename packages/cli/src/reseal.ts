@@ -365,11 +365,10 @@ export function classifyResealChange(input: {
     }
   }
   const candidates = changed.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);
-  if (candidates.length === 0) {
-    return { eligible: true, reason: null, changedPaths, testFiles, helperFiles: [], affectedTestFiles: testFiles };
-  }
-  // Only a helper claim needs the import graph: a pure test-file change
-  // needs none (the catalog already named every affected test).
+  // The import graph is consulted for EVERY change set, not only for a
+  // helper claim: a spec file can export a shared fixture or a
+  // `test.extend`, so a changed test file affects its importers too.
+  // Any doubt the graph cannot resolve refuses the whole re-seal.
   const sources = trackedSources(input.gitDir, input.env, input.currentTreeId);
   if (sources === null) {
     return refuse(`the sealed tree's import graph could not be read (${input.currentTreeId}) → full run`);
@@ -381,18 +380,23 @@ export function classifyResealChange(input: {
     );
   }
   const aliases = pathAliases(input.cwd);
-  const tracked = new Set(sources.map((file) => file.path));
-  /** Resolves every declared import, or null when one cannot be read. */
-  const resolveImports = (file: TrackedFile): string[] | null => {
-    const resolved: string[] = [];
+  /** Every candidate path each import could name, or null when one cannot be read. */
+  const resolveImports = (file: TrackedFile): string[][] | null => {
+    const resolved: string[][] = [];
     for (const reference of file.imports) {
       const candidates = resolutionCandidates(file.path, reference.specifier, aliases);
       if (candidates === null) return null;
-      resolved.push(candidates.find((candidate) => tracked.has(candidate)) ?? '');
+      resolved.push(candidates);
     }
     return resolved;
   };
-  const resolvedByPath = new Map<string, string[]>();
+  /**
+   * Every file whose imports could name `target`. Keyed on ALL
+   * resolution candidates, not only the tracked one, so a DELETED test
+   * file still reaches the specs that imported it (its own path is no
+   * longer in the tree, but the importer's specifier still names it).
+   */
+  const importersOf = new Map<string, string[]>();
   for (const file of sources) {
     const resolved = resolveImports(file);
     if (resolved === null) {
@@ -403,36 +407,44 @@ export function classifyResealChange(input: {
         `unresolvable import: ${file.path} → ${unresolvable?.specifier ?? '?'} → full run`,
       );
     }
-    resolvedByPath.set(file.path, resolved.filter((target) => target.length > 0));
+    for (const candidates of resolved) {
+      for (const target of candidates) {
+        const importers = importersOf.get(target);
+        if (importers === undefined) importersOf.set(target, [file.path]);
+        else if (!importers.includes(file.path)) importers.push(file.path);
+      }
+    }
   }
   const helperFiles: string[] = [];
   const affected = new Set(testFiles);
-  for (const path of candidates) {
-    if (!underTestRoot(path, roots)) {
+  for (const path of [...testFiles, ...candidates]) {
+    const isTestFile = testFileSet.has(path);
+    if (!isTestFile && !underTestRoot(path, roots)) {
       return refuse(`app file changed: ${path} → full run`);
     }
-    // A helper is proven only when EVERY importer is test code; the
-    // importers re-run transitively (a helper of a helper counts).
+    // Importers re-run transitively: a shared fixture declared in a
+    // helper OR in another spec file reaches every spec that imports it
+    // (a helper of a helper counts). A changed test file needs no
+    // importer; a changed non-test file must be proven to be a helper.
     const seen = new Set<string>();
     const queue = [path];
     while (queue.length > 0) {
       const current = queue.shift() as string;
-      for (const file of sources) {
-        if (!seen.has(file.path) && (resolvedByPath.get(file.path) ?? []).includes(current)) {
-          seen.add(file.path);
-          if (testFileSet.has(file.path)) affected.add(file.path);
-          else if (!underTestRoot(file.path, roots)) {
-            return refuse(
-              `app file changed: ${file.path} imports the changed test helper ${path} → full run`,
-            );
-          } else queue.push(file.path);
-        }
+      for (const file of importersOf.get(current) ?? []) {
+        if (seen.has(file)) continue;
+        seen.add(file);
+        if (testFileSet.has(file)) affected.add(file);
+        else if (!underTestRoot(file, roots)) {
+          return refuse(
+            `app file changed: ${file} imports the changed ${isTestFile ? 'test file' : 'test helper'} ${path} → full run`,
+          );
+        } else queue.push(file);
       }
     }
-    if (seen.size === 0) {
+    if (!isTestFile && seen.size === 0) {
       return refuse(`app file changed: ${path} is imported by no test file, so it is not a test helper → full run`);
     }
-    helperFiles.push(path);
+    if (!isTestFile) helperFiles.push(path);
   }
   return {
     eligible: true,

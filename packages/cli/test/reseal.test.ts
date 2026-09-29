@@ -154,6 +154,79 @@ describe('test-only re-seal change classification', () => {
     });
   });
 
+  it('re-runs the importers of a changed test file, not only the file itself', async () => {
+    const shared = [
+      "import { test as base } from '@playwright/test';",
+      'export const test = base.extend({});',
+      '',
+      "test('reads an account', async () => {});",
+      '',
+    ].join('\n');
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        // A shared `test.extend` declared in a spec file the catalog
+        // enumerates: changing it changes every importing spec.
+        'e2e/accounts.spec.ts': shared,
+        'e2e/orders.spec.ts': [
+          "import { test } from './accounts.spec.js';",
+          '',
+          "test('reads an account', async () => {});",
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${shared}\n// a fix\n` }, 'shared fixture change');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(true);
+      expect(classification.testFiles).toEqual(['e2e/accounts.spec.ts']);
+      expect(classification.affectedTestFiles).toEqual(['e2e/accounts.spec.ts', 'e2e/orders.spec.ts']);
+    });
+  });
+
+  it('refuses a test-file change the graph cannot fully resolve', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/dynamic.spec.ts': "const name = 'helper';\nimport(`./${'${name}'}.js`);\n",
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix inside the test\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'unresolvable import: e2e/dynamic.spec.ts loads a module through a computed specifier → full run',
+      );
+    });
+  });
+
+  it('re-runs the importers of a deleted test file that shared its fixture', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/orders.spec.ts': [
+          "import { amount } from './accounts.spec.js';",
+          "import { test, expect } from '@playwright/test';",
+          '',
+          "test('reads an account', async () => {",
+          '  expect(amount()).toBeGreaterThan(0);',
+          '});',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.git(['rm', 'e2e/accounts.spec.ts']);
+      repo.commitFiles({}, 'drop the shared spec');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(true);
+      expect(classification.changedPaths).toEqual(['e2e/accounts.spec.ts']);
+      expect(classification.affectedTestFiles).toEqual(['e2e/accounts.spec.ts', 'e2e/orders.spec.ts']);
+    });
+  });
+
   it('classifies a deleted test file as test-only and a deleted app file as app code', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles(BASE_FILES);
