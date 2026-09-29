@@ -1663,7 +1663,7 @@ test('unrelated smoke test claims no obligation', async () => {
       expect(staged.stdout).toContain('execution: changed scope, executed; 3 test(s) run in this invocation');
       expect(staged.stdout).toContain('selected tests: 3 passed, 0 failed (selected 3; 0 skipped; 0 expected failures)');
       expect(staged.stdout).toContain('selected claims: 3 satisfied, 0 blocking');
-      expect(staged.stdout).toContain('repository debt: 0 blocking / 3 obligations');
+      expect(staged.stdout).toMatch(/repository debt: [^\n]*\b0 new blocking \/ 3 obligations/);
       expect(staged.stdout).toMatch(/diagnostic context: scope=changed candidateTreeId=[0-9a-f]{40} inputDigest=[0-9a-f]{64}/);
       const stagedReport = JSON.parse(
         readFileSync(join(repo.root, '.gateforge/test-gates/report.json'), 'utf8'),
@@ -1723,7 +1723,7 @@ test('unrelated smoke test claims no obligation', async () => {
       expect(full.stdout).toContain('execution: full scope, executed; 4 test(s) run in this invocation');
       expect(full.stdout).toContain('selected tests: 4 passed, 0 failed (selected 4; 0 skipped; 0 expected failures)');
       expect(full.stdout).toContain('selected claims: 3 satisfied, 0 blocking');
-      expect(full.stdout).toContain('repository debt: 0 blocking / 3 obligations');
+      expect(full.stdout).toMatch(/repository debt: [^\n]*\b0 new blocking \/ 3 obligations/);
       expect(full.stdout).toContain('documentation exclusions: folders=docs approvalStatus=matched');
       const fullReceipt = JSON.parse(
         readFileSync(join(repo.root, '.gateforge/test-gates/receipt.json'), 'utf8'),
