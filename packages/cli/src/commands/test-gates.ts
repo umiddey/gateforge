@@ -2713,7 +2713,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     behaviorAuthorityProfileDigest:
       pipeline.behaviorCatalog === null ? null : engineBundleDigestOf(VERSION, trustedPolicy),
     obligations: pipeline.policy.obligations,
-    // Named grading (plan 20260928_2315): a hand-picked selection never
+    // Named grading: a hand-picked selection never
     // observed the rest of the repository, so repository-wide findings
     // (policy, mapping, inventory, expired quarantine) and the scoped
     // planning gaps stay in the report but block nothing here. What

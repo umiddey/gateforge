@@ -165,7 +165,7 @@ export interface EvaluateInput {
     changedInputs?: boolean;
   };
   /**
-   * Named-run selection (plan 20260928_2315): the framework test ids a
+   * Named-run selection: the framework test ids a
    * hand-picked `--test` run executed. When present (non-null), the
    * evaluation grades ONLY the obligations those tests currently
    * declare — an obligation no selected test claims was never observed
