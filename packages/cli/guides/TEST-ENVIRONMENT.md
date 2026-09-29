@@ -321,8 +321,21 @@ graph cannot resolve. A **literal** dynamic import is an ordinary
 import edge, not a computed one: `import('./x.mjs')`, `import("./x.mjs")`,
 `` import(`./x.mjs`) ``, `require('./x')`, `importlib.import_module('x')`
 and `__import__('x')` all resolve like a static import, so the file that
-loads the module is an ordinary importer. A **computed** specifier — a
-variable, a concatenation, a template with `${…}` — refuses the re-seal.
+loads the module is an ordinary importer. Imports are read from the
+syntax tree, so an import call named in a comment or a string is never
+one. A **computed** specifier — a variable, a concatenation, a template
+with `${…}` — refuses the re-seal, wherever it sits in the repository:
+Gateforge cannot tell which file it loads, so it cannot prove the
+change reaches no other test or app code. Imports never cross the
+language boundary, so a computed Python import only matters when a
+Python file changed, and a computed JS/TS import only when a non-Python
+file changed. To re-seal in a repository that has one, write each
+module it can load as a literal import, for example a map
+`{ accounts: () => import('./tenant.accounts.mjs'), … }` instead of
+`` import(`./tenant.${table}.mjs`) ``.
+
+A file that does not parse refuses too (`… does not parse as a
+script`): an unread file cannot be shown to declare nothing computed.
 
 A refused re-seal prints **one plain reason line** naming the path and
 the step that actually follows: the run takes the ordinary

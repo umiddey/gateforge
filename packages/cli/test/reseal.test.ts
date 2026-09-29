@@ -447,7 +447,10 @@ describe('test-only re-seal change classification', () => {
       });
       repo.commitFiles({}, 'base');
       const parent = treeOf(repo);
-      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      repo.commitFiles(
+        { 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n`, 'e2e/pydata.py': 'VALUE = 1\n' },
+        'test fix plus a python file',
+      );
       const classification = classify(repo, parent, treeOf(repo));
       expect(classification.eligible).toBe(false);
       expect(classification.reason).toBe(
@@ -502,6 +505,83 @@ describe('test-only re-seal change classification', () => {
       const classification = classify(repo, parent, treeOf(repo));
       expect(classification.eligible).toBe(true);
       expect(classification.helperFiles).toEqual(['e2e/helper.ts']);
+    });
+  });
+
+  it('reads a file with non-ASCII text in full, not cut at a character count', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        // Sorted before the other sources, so its bytes sit in the middle
+        // of the object batch: a size read as characters instead of bytes
+        // pulls the next record's header into this file's text.
+        'e2e/a-notes.ts': [
+          '// Übersicht → Buchungen: Größe in Bytes, nicht in Zeichen.',
+          `// ${'→'.repeat(40)}`,
+          'export const note = 1;',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/helper.ts': 'export const amount = () => 5;\n' }, 'fix the helper');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.reason).toBeNull();
+      expect(classification.eligible).toBe(true);
+      expect(classification.helperFiles).toEqual(['e2e/helper.ts']);
+    });
+  });
+
+  it('reads a local re-export without `from` as no import at all', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/runtime.ts': ["import { amount } from './helper';", '', 'export { amount };', ''].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.reason).toBeNull();
+      expect(classification.eligible).toBe(true);
+    });
+  });
+
+  it('ignores a computed Python import when the change set holds only script files', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        // A backend test that imports every module by name: a Python
+        // import can load only Python modules, so it can hide no edge to
+        // a changed TypeScript helper.
+        'backend/tests/test_modules.py': 'import importlib\n\nfor name in NAMES:\n    importlib.import_module(name)\n',
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/helper.ts': 'export const amount = () => 6;\n' }, 'fix the helper');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.reason).toBeNull();
+      expect(classification.helperFiles).toEqual(['e2e/helper.ts']);
+    });
+  });
+
+  it('still refuses that computed Python import once a Python file is in the change set', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'backend/tests/test_modules.py': 'import importlib\n\nfor name in NAMES:\n    importlib.import_module(name)\n',
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles(
+        { 'e2e/helper.ts': 'export const amount = () => 7;\n', 'e2e/data_helper.py': 'VALUE = 7\n' },
+        'change a script helper and a python file',
+      );
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'unresolvable import: backend/tests/test_modules.py loads a module through a computed specifier → changed-scope run',
+      );
     });
   });
 
@@ -609,7 +689,10 @@ describe('test-only re-seal change classification', () => {
       });
       repo.commitFiles({}, 'base');
       const parent = treeOf(repo);
-      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      repo.commitFiles(
+        { 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n`, 'e2e/pydata.py': 'VALUE = 1\n' },
+        'test fix plus a python file',
+      );
       const classification = classify(repo, parent, treeOf(repo));
       expect(classification.eligible).toBe(false);
       expect(classification.reason).toBe(

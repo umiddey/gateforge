@@ -100,10 +100,24 @@ interface PathAlias {
   target: string;
 }
 
-function run(gitDir: string, env: NodeJS.ProcessEnv, args: readonly string[], input?: string): string | null {
+/**
+ * Runs one git plumbing command against the authority object store and
+ * returns its raw stdout bytes. Object sizes git reports are BYTE
+ * counts, so any caller that cuts output by those sizes must work on
+ * these bytes, never on a decoded string.
+ *
+ * Args:
+ *   gitDir: the absolute git dir.
+ *   env: the process environment (Git redirectors are stripped).
+ *   args: the git arguments.
+ *   input: optional stdin text.
+ *
+ * Returns:
+ *   Buffer | null: stdout bytes, or null when git exits non-zero.
+ */
+function runBytes(gitDir: string, env: NodeJS.ProcessEnv, args: readonly string[], input?: string): Buffer | null {
   const result = spawnSync('git', ['--git-dir', gitDir, '--no-replace-objects', ...args], {
     env: sanitizedAuthorityEnv(env),
-    encoding: 'utf8',
     ...(input !== undefined ? { input } : {}),
     maxBuffer: 256 * 1024 * 1024,
   });
@@ -112,6 +126,10 @@ function run(gitDir: string, env: NodeJS.ProcessEnv, args: readonly string[], in
   }
   if (result.status !== 0) return null;
   return result.stdout;
+}
+
+function run(gitDir: string, env: NodeJS.ProcessEnv, args: readonly string[], input?: string): string | null {
+  return runBytes(gitDir, env, args, input)?.toString('utf8') ?? null;
 }
 
 function extname(path: string): string {
@@ -347,8 +365,12 @@ function parseScriptFile(path: string, source: string): TrackedFile {
     imports.push({ specifier: expression.text });
   };
   const visit = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+    if (ts.isImportDeclaration(node)) {
       record(node.moduleSpecifier);
+    } else if (ts.isExportDeclaration(node)) {
+      // `export { x };` re-exports a local binding and loads nothing;
+      // only `export … from 'y'` names a module.
+      if (node.moduleSpecifier !== undefined) record(node.moduleSpecifier);
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
       record(node.moduleReference.expression);
     } else if (ts.isImportTypeNode(node)) {
@@ -405,22 +427,35 @@ function parseTrackedFile(path: string, source: string): TrackedFile {
 }
 
 /**
- * Extracts one blob's bytes from a `git cat-file --batch` transcript.
- * An absent record yields an empty string, which the import scan reads
- * as "this file declares nothing" — never as a clean file.
+ * Splits a `git cat-file --batch` transcript into the requested blobs'
+ * texts, in request order. Records are read sequentially by the BYTE
+ * sizes git reports; decoding happens per blob, after the cut, so a
+ * multi-byte character can never shift a record boundary.
+ *
+ * Args:
+ *   batch: the raw transcript bytes.
+ *   shas: the object ids that were requested, in order.
+ *
+ * Returns:
+ *   string[] | null: one decoded text per requested id, or null when
+ *   any record is missing, is not a blob, or is truncated — an unread
+ *   object is never read as "declares nothing".
  */
-function batchBlob(batch: string, sha: string): string {
-  const header = `${sha} blob `;
-  // The search lands on the record separator, so a later record's
-  // header begins one byte after it; the first record has none.
-  const separator = batch.startsWith(header) ? -1 : batch.indexOf(`\n${header}`);
-  if (separator === -1 && !batch.startsWith(header)) return '';
-  const starts = separator + 1;
-  const headerEnd = batch.indexOf('\n', starts);
-  if (headerEnd < 0) return '';
-  const size = Number.parseInt(batch.slice(starts + header.length, headerEnd).trim(), 10);
-  if (!Number.isFinite(size)) return '';
-  return batch.slice(headerEnd + 1, headerEnd + 1 + size);
+function batchBlobs(batch: Buffer, shas: readonly string[]): string[] | null {
+  const texts: string[] = [];
+  let offset = 0;
+  for (const sha of shas) {
+    const headerEnd = batch.indexOf(0x0a, offset);
+    if (headerEnd < 0) return null;
+    const [id, type, sizeText] = batch.toString('utf8', offset, headerEnd).split(' ');
+    const size = Number.parseInt(sizeText ?? '', 10);
+    if (id !== sha || type !== 'blob' || !Number.isSafeInteger(size) || size < 0) return null;
+    const bodyEnd = headerEnd + 1 + size;
+    if (bodyEnd >= batch.length || batch[bodyEnd] !== 0x0a) return null;
+    texts.push(batch.toString('utf8', headerEnd + 1, bodyEnd));
+    offset = bodyEnd + 1;
+  }
+  return texts;
 }
 
 /**
@@ -453,10 +488,12 @@ function trackedSources(gitDir: string, env: NodeJS.ProcessEnv, treeId: string):
     entries.push({ path, sha });
   }
   if (entries.length === 0) return [];
-  const batch = run(gitDir, env, ['cat-file', '--batch'], `${entries.map((entry) => entry.sha).join('\n')}\n`);
-  if (batch === null) return null;
+  const shas = entries.map((entry) => entry.sha);
+  const batch = runBytes(gitDir, env, ['cat-file', '--batch'], `${shas.join('\n')}\n`);
+  const texts = batch === null ? null : batchBlobs(batch, shas);
+  if (texts === null) return null;
   return entries
-    .map((entry) => parseTrackedFile(entry.path, batchBlob(batch, entry.sha)))
+    .map((entry, index) => parseTrackedFile(entry.path, texts[index] ?? ''))
     .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
 }
 
@@ -807,10 +844,20 @@ export function classifyResealChange(input: {
   // helper claim: a spec file can export a shared fixture or a
   // `test.extend`, so a changed test file affects its importers too.
   // Any doubt the graph cannot resolve refuses the whole re-seal.
-  const sources = trackedSources(input.gitDir, input.env, input.currentTreeId);
-  if (sources === null) {
+  const allSources = trackedSources(input.gitDir, input.env, input.currentTreeId);
+  if (allSources === null) {
     return refuse(`the sealed tree's import graph could not be read (${input.currentTreeId})`);
   }
+  // Imports never cross the language boundary: a Python import (static
+  // or computed) loads only Python modules, and a JS/TS import loads
+  // only JS/TS/data files. So a file can reach a changed path only when
+  // the change set holds a path of its own family (a changed non-Python
+  // file of any extension counts as the script family, since a script
+  // can import data files). Files of the other family can hide no edge
+  // and are left out of the graph, doubts included.
+  const pythonChanged = changedPaths.some((path) => extname(path) === '.py');
+  const scriptChanged = changedPaths.some((path) => extname(path) !== '.py');
+  const sources = allSources.filter((file) => (extname(file.path) === '.py' ? pythonChanged : scriptChanged));
   // A file whose bytes the parser rejects has NOT been shown to declare
   // nothing computed, so it refuses before the graph is read.
   const unparsableFile = sources.find((file) => file.unparsable);
