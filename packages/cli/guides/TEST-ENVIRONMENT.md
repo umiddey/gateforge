@@ -331,6 +331,53 @@ Rules the recipe lives under:
   file is a plain error with exit 2 — Gateforge never runs a recipe it did
   not fully understand.
 
+## Run that same proof in CI: the witnessed job template
+
+The same run belongs in CI, and the glue around it (job-scoped names, a
+private workspace, base-sha forwarding, verdict extraction, artifacts) is
+generic. Generate it instead of hand-writing it a second time:
+
+```sh
+gateforge enforce --ci gitlab --witnessed   # .gateforge/ci/gitlab-witnessed.yml
+gateforge enforce --ci github --witnessed   # .github/workflows/gateforge-witnessed.yml
+```
+
+The generated job is a plain file you review and edit. An existing file is
+never overwritten (`exists, leaving untouched: <path>`), and without the
+flag every generated file is byte-identical to what it always was. The
+static job keeps its own file: the witnessed lane is additive.
+
+What the job does, in order:
+
+1. installs the pinned `@gate-forge/cli` from the repository's lockfile
+   (or manifest) and refuses to continue on another version;
+2. creates a **private, job-scoped workspace** and exports
+   `GATEFORGE_CI_JOB_SCOPE`, `GATEFORGE_CI_STACK_NAME`,
+   `GATEFORGE_CI_IMAGE_NAME` and `GATEFORGE_CI_WORKSPACE`, all derived from
+   the CI job id — your recipe may use them for a compose stack or a volume,
+   and two concurrent jobs of one project can never collide;
+3. **forwards the merge-request base sha** into the environment both
+   supervised commands run in (GitLab: `CI_MERGE_REQUEST_DIFF_BASE_SHA`;
+   GitHub: the fetched base ref plus its merge base). This is the one step
+   worth checking in review: without it the `auto` scope provider falls back
+   to a local diff, which in CI selects zero changed files and quietly
+   narrows what the run grades;
+4. runs `gateforge run -- --changed --scope full`, so your recipe owns
+   reset/seed/services and the engine still owns every verdict. **Full scope
+   is the default**: narrowing the run is your edit, not the template's;
+5. reads the verdict out of `report.json` (never out of a parsed log line);
+6. uploads `report.json`, `receipt.json`, `execution-result.json` and
+   `ci-run.log` as artifacts, `when: always` / `if: always()`.
+
+You fill in two things: the recipe (`.gateforge/runtime.yml`, above) and the
+secret variables. On GitLab they are protected, masked CI variables; on
+GitHub they are the repository secrets `GATEFORGE_WITNESS_VERIFIER_KEY` and
+`GATEFORGE_APPROVED_POLICY_DIGEST`, passed as environment values on the run
+step only. The job never echoes a secret variable, and the recipe log
+(`.gateforge/test-gates/run-recipe/`) is deliberately **not** an artifact:
+your own commands may print your own secrets. Add it only if you know your
+recipe logs are clean.
+
 ## Read the preconditions before a long run
 
 `gateforge enforcement doctor` prints a `run preconditions` block: one

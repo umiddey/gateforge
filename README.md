@@ -304,6 +304,35 @@ the [test environment guide](packages/cli/guides/TEST-ENVIRONMENT.md) for the
 full schema, the exit-code table, and how the recipe relates to the
 witnessed pre-commit staged runtime.
 
+## The witnessed CI job
+
+`gateforge enforce --ci gitlab|github` writes the **static** check job.
+Add `--witnessed` and it writes the **witnessed** job next to it — the
+lane that actually seals a receipt in CI:
+
+```sh
+gateforge enforce --ci gitlab --witnessed    # .gateforge/ci/gitlab-witnessed.yml
+gateforge enforce --ci github --witnessed    # .github/workflows/gateforge-witnessed.yml
+```
+
+One job, one proof. It installs the pinned Gateforge, forwards the
+merge-request base sha into BOTH supervised commands (without it the
+scope provider falls back to a local diff and can select zero changed
+files), runs `gateforge run -- --changed --scope full` so your recipe
+owns the services, reads the verdict out of `report.json`, and uploads
+`report.json`, `receipt.json`, `execution-result.json` and the run log as
+artifacts. Job-scoped stack/image names and a private per-job workspace
+come from the CI job id, so two concurrent jobs never collide.
+
+You fill in exactly two things: the recipe (`.gateforge/runtime.yml`)
+and the secret variables (`GATEFORGE_WITNESS_VERIFIER_KEY`,
+`GATEFORGE_APPROVED_POLICY_DIGEST` as protected/masked CI variables or
+GitHub secrets). The generated files are plain YAML you review and edit
+yourself; an existing file is never overwritten, and without the flag
+every generated file is byte-identical to what it always was. No secret
+variable is ever echoed, and the recipe log is deliberately NOT an
+artifact — it may contain your app's secrets.
+
 ## Known limitations
 
 - Staged candidates containing symlinks or submodules (and unmerged index

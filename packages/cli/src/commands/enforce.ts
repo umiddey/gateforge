@@ -8,20 +8,23 @@
  *   .pre-commit-config.yaml               (gateforge-check local hook appended)
  *   .gateforge/ci/gitlab-gateforge.yml or .github/workflows/gateforge.yml
  *   provider include wiring
+ * With --witnessed it also writes the WITNESSED job template next to
+ * the static one (the managed `gateforge run` lane); without the flag
+ * every generated file is byte-identical to what it always was.
  *
  * Requires .gateforge.yml: without a compiled-obligations config the check
  * has nothing to gate on.
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Io } from '../io.js';
-import { writeLine } from '../io.js';
+import { ensureBlockingWiring, engineRootFromInvocation } from './blocking.js';
+import { writeWitnessedCiTemplate } from '../ci-witnessed-template.js';
+import { type Io, writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { installPrePushHook } from '../git-hooks.js';
 import { loadConfigAt } from './common.js';
-import { ensureBlockingWiring, engineRootFromInvocation } from './blocking.js';
 
-export const ENFORCE_USAGE = 'usage: gateforge enforce [--ci github|gitlab]';
+export const ENFORCE_USAGE = 'usage: gateforge enforce [--ci github|gitlab] [--witnessed]';
 
 /**
  * Selects CI wiring from `--ci`, repository files, or the GitLab default.
@@ -35,9 +38,18 @@ export const ENFORCE_USAGE = 'usage: gateforge enforce [--ci github|gitlab]';
  */
 export function enforceCommand(io: Io, argv: readonly string[]): number {
   let ci: 'github' | 'gitlab' | null = null;
-  if (argv.length === 2 && argv[0] === '--ci' && (argv[1] === 'github' || argv[1] === 'gitlab')) {
-    ci = argv[1];
-  } else if (argv.length !== 0) {
+  let witnessed = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] ?? '';
+    if (argument === '--witnessed') {
+      witnessed = true;
+      continue;
+    }
+    if (argument === '--ci' && (argv[index + 1] === 'github' || argv[index + 1] === 'gitlab')) {
+      ci = argv[index + 1] as 'github' | 'gitlab';
+      index += 1;
+      continue;
+    }
     throw new UsageError(`unknown arguments for enforce (${ENFORCE_USAGE}): ${argv.join(' ')}`);
   }
   if (!existsSync(join(io.cwd, '.gateforge.yml'))) {
@@ -49,6 +61,9 @@ export function enforceCommand(io: Io, argv: readonly string[]): number {
   const receiptStage = loadConfigAt(io.cwd).enforcement?.receiptStage;
   const gateArgs = receiptStage === 'pre-commit' ? ['check', '--changed', '--require-e2e'] : ['check', '--changed'];
   ensureBlockingWiring(io, engineRootFromInvocation(), gateArgs, 'check', selectedCi);
+  if (witnessed) {
+    writeWitnessedCiTemplate(io, selectedCi);
+  }
   if (receiptStage === 'pre-push') {
     const outcome = installPrePushHook(io.cwd, io.env);
     if (outcome.status === 'conflict' || outcome.status === 'incomplete') {
