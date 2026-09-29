@@ -25,15 +25,25 @@
 import { isAbsolute, relative } from 'node:path';
 import { getCurrentTest } from 'vitest/suite';
 import { humanMessage } from '@gate-forge/core';
+import { claimInjectionsFor } from '../runner-claims.js';
+import { appendSpoolEvent, spoolPathFor } from '../supervisor/spool.js';
 
 /** Env the runner child receives from the adapter's allowlist. */
 const ENV_WITNESS_URL = 'GATEFORGE_WITNESS_URL';
 const ENV_RUN_TOKEN = 'GATEFORGE_RUN_TOKEN';
 const ENV_APP_BASE_URL = 'GATEFORGE_APP_BASE_URL';
+const ENV_STATE_DIR = 'GATEFORGE_STATE_DIR';
+const ENV_RUN_ID = 'GATEFORGE_RUN_ID';
 
 const RUN_HEADER = 'x-gateforge-run';
 
-/** How long a tagged call waits for the drain to open the session. */
+/**
+ * How long a tagged call waits for the drain to open the session. The
+ * wait starts AFTER the test spooled its own begin, so it bounds the
+ * supervisor's own work (one 50ms poll plus the witness round trip),
+ * never the runner's event delivery. An unanswered resolve still fails
+ * the test loudly — never a silent untagged pass.
+ */
 const SESSION_RESOLVE_TIMEOUT_MS = 5_000;
 /** Poll cadence for the session resolve (supervisor→witness latency). */
 const SESSION_RESOLVE_POLL_MS = 50;
@@ -101,6 +111,35 @@ function currentIdentity(): CurrentIdentity | null {
   return { file, titlePath, testId: `${file}#${titlePath.join('>')}` };
 }
 
+/**
+ * Appends the running test's own `testBegin` to the run's lifecycle
+ * spool so the trusted drain can open its session without waiting for
+ * the runner's main-process reporter (see the call site). Best effort
+ * by contract: a failed append only means the reporter's own begin
+ * still has to arrive, never a crash and never a silent pass.
+ *
+ * Args:
+ *   identity: the running test's reconciliation identity.
+ *
+ * Returns:
+ *   void: nothing; the append is fire-and-forget.
+ */
+function spoolTestBegin(identity: CurrentIdentity): void {
+  const stateDir = process.env[ENV_STATE_DIR];
+  const runId = process.env[ENV_RUN_ID];
+  if (stateDir === undefined || stateDir === '' || runId === undefined || runId === '') return;
+  const claims = claimInjectionsFor(stateDir, identity.testId);
+  appendSpoolEvent(spoolPathFor(stateDir, runId), {
+    kind: 'testBegin',
+    testId: identity.testId,
+    workerIndex: 0,
+    file: identity.file,
+    titlePath: identity.titlePath,
+    project: null,
+    ...(claims.length > 0 ? { claims } : {}),
+  });
+}
+
 /** Repo-relative posix form of an absolute module path (process.cwd()). */
 function fileRelativize(path: string): string {
   const clean = path.replace(/^file:\/\//, '');
@@ -152,6 +191,17 @@ async function resolveCurrentSession(): Promise<SessionCredential> {
   }
   const cached = RESOLVED_BY_TEST_ID.get(identity.testId);
   if (cached !== undefined) return cached;
+  // The lifecycle `testBegin` the drain opens this session from is
+  // normally spooled by the pack's reporter — which runs in vitest's
+  // MAIN process, whose event delivery trails the worker by as much as
+  // the whole test (its transform and reporter work is not the test's).
+  // The running test therefore announces its OWN begin before it waits:
+  // the spool is the untrusted runner's channel either way, the drain's
+  // open is idempotent for a repeated begin of the same test, and the
+  // witness still refuses any identity outside the registered expected
+  // set — so this races the reporter, it never widens what the suite can
+  // prove.
+  spoolTestBegin(identity);
   const deadline = Date.now() + SESSION_RESOLVE_TIMEOUT_MS;
   let lastDetail = 'no answer';
   while (Date.now() < deadline) {

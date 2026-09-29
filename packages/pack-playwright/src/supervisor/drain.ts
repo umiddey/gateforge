@@ -341,8 +341,23 @@ export function startSupervisorSpoolDrain(options: {
   }
 
   const loop = (async () => {
+    // The PRE-RUN registrations (`settling`) land BEFORE the first poll:
+    // the witness refuses a session open whose observe declarations are
+    // not bound yet, and a runner child waiting on that session would see
+    // a bare "no open session" timeout instead of the real cause. A
+    // registration refusal is already recorded in `conflicts`.
+    await settling.catch(() => undefined);
     while (running) {
-      await drainOnce();
+      try {
+        await drainOnce();
+      } catch (error) {
+        // A single refused poll (a witness restart, a transient refusal)
+        // must NOT end supervision for the whole run: the refusal is
+        // recorded as a conflict — the run still fails closed downstream
+        // — and the next poll retries.
+        const message = `supervisor drain poll failed: ${(error as Error).message}`;
+        if (!conflicts.includes(message)) conflicts.push(message);
+      }
       await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
     }
   })();

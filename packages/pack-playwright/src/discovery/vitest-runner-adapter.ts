@@ -78,6 +78,12 @@ export interface VitestJsonReport {
   readonly testResults?: readonly VitestSuiteRow[];
 }
 
+/**
+ * The flag that keeps the runner's persistent result cache out of the
+ * candidate workspace (see {@link VitestRunnerAdapter.enumerate}).
+ */
+const NO_CACHE_FLAG = ['--no-cache'] as const;
+
 /** Options the Vitest runner adapter accepts. */
 export interface VitestRunnerAdapterOptions {
   /**
@@ -131,7 +137,13 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
         tests: [],
       };
     }
-    const outcome = await this.spawnVitest(cwd, entry, ['list', '--run', '--json']);
+    // `--no-cache`: vitest's persistent result cache lives INSIDE the
+    // candidate workspace (`node_modules/.vite`), so an ordinary run
+    // mutates candidate bytes after the authority froze the tree and the
+    // fail-closed drift gate then refuses the whole run. The cache buys
+    // nothing here (the run is bounded and the selection is fixed), so
+    // neither supervised child ever writes into the workspace.
+    const outcome = await this.spawnVitest(cwd, entry, ['list', '--run', '--json', ...NO_CACHE_FLAG]);
     if (outcome.timedOut) {
       return {
         status: 'unavailable',
@@ -238,6 +250,7 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
       '--reporter=json',
       `--outputFile.json=${reportPath}`,
       `--reporter=${vitestReporterModulePath()}`,
+      ...NO_CACHE_FLAG,
       ...[...files].sort(),
     ];
     const child = spawn(entry.command, [...entry.prefix, ...argv], {
