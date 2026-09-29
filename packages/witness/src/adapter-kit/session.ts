@@ -134,7 +134,6 @@ function resolveSeat(auth: HttpAdapterAuth): ResolvedSeat | null {
   return { kind: 'cookie-login', name, login };
 }
 
-
 /**
  * The credential header one GET carries, logging in first when needed.
  *
