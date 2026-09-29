@@ -14,6 +14,7 @@ import {
   selectionDigestOf,
   sha256Canonical,
   type Claim,
+  deriveLogicalKey,
   type RunnerExecutionEnvelope,
   type TempRepo,
   type TestCatalog,
@@ -47,17 +48,53 @@ export const RECEIPT_FILE = 'e2e/accounts.spec.ts';
 export const RECEIPT_TITLE = ['Accounts', 'deletes an account'];
 export const RECEIPT_KEY = 'playwright:chromium:e2e/accounts.spec.ts:Accounts>deletes an account';
 
+/**
+ * The identity one minted run reports. A non-Playwright run names its
+ * own runner, project and file — the schemas treat the runner as a
+ * string, so a pytest/vitest/cypress receipt is sealed exactly like the
+ * Playwright one (this is the runner-agnostic evidence contract).
+ */
+interface RunIdentity {
+  runner: string;
+  project: string | null;
+  file: string;
+  titlePath: readonly string[];
+  /** The runner's own framework id when it reports one (null otherwise). */
+  frameworkId: string | null;
+}
+
+/** The Playwright identity (the default, byte-identical to before). */
+const PLAYWRIGHT_IDENTITY: RunIdentity = {
+  runner: 'playwright',
+  project: 'chromium',
+  file: RECEIPT_FILE,
+  titlePath: RECEIPT_TITLE,
+  frameworkId: null,
+};
+
+/** The identity for another configured runner (e.g. `vitest`). */
+function identityOf(runner: string): RunIdentity {
+  if (runner === 'playwright') return PLAYWRIGHT_IDENTITY;
+  const file = `tests/${runner}/accounts.test.ts`;
+  return { runner, project: null, file, titlePath: RECEIPT_TITLE, frameworkId: `${runner}-test-1` };
+}
+
 /** One discovered catalog row for the minted run. */
-function catalogRow(): TestCatalogEntry {
+function catalogRow(identity: RunIdentity): TestCatalogEntry {
   return {
-    logicalKey: RECEIPT_KEY,
-    runner: 'playwright',
-    project: 'chromium',
-    file: RECEIPT_FILE,
-    titlePath: RECEIPT_TITLE,
-    title: RECEIPT_TITLE[RECEIPT_TITLE.length - 1] ?? 'case',
-    sourceLocation: { file: RECEIPT_FILE, line: 3, col: 0 },
-    parameterIdentity: null,
+    logicalKey: deriveLogicalKey({
+      runner: identity.runner,
+      project: identity.project,
+      file: identity.file,
+      titlePath: [...identity.titlePath],
+    }),
+    runner: identity.runner,
+    project: identity.project,
+    file: identity.file,
+    titlePath: [...identity.titlePath],
+    title: identity.titlePath[identity.titlePath.length - 1] ?? 'case',
+    sourceLocation: { file: identity.file, line: 3, col: 0 },
+    parameterIdentity: identity.frameworkId,
     sourceDigest: 'aa'.repeat(32),
     discoveryStatus: 'discovered',
     reconciliation: 'matched',
@@ -70,10 +107,10 @@ function catalogRow(): TestCatalogEntry {
   };
 }
 
-function completeCatalog(): TestCatalog {
+function completeCatalog(identity: RunIdentity): TestCatalog {
   return {
     schemaVersion: 1,
-    entries: [catalogRow()],
+    entries: [catalogRow(identity)],
     unresolved: [],
     parseErrors: [],
     inventoryComplete: true,
@@ -132,6 +169,8 @@ export async function mintCompleteRunReceipt(
     claimInventory?: readonly Claim[];
     verdictSummary?: { total: number; satisfied: number; waived: number; blocking: number };
     docsExclusions?: readonly string[];
+    /** The runner that sealed the run (default `playwright`). */
+    runner?: string;
   },
 ): Promise<MintedReceipt> {
   const actualDigest = await currentInputDigest(repo, options.docsExclusions ?? []);
@@ -143,35 +182,42 @@ export async function mintCompleteRunReceipt(
   const trustedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
   const runId = randomUUID();
   const invocationId = randomUUID();
-  const catalog = completeCatalog();
+  const identity = identityOf(options.runner ?? 'playwright');
+  const logicalKey = deriveLogicalKey({
+    runner: identity.runner,
+    project: identity.project,
+    file: identity.file,
+    titlePath: [...identity.titlePath],
+  });
+  const catalog = completeCatalog(identity);
   const selection = {
-    runner: 'playwright',
+    runner: identity.runner,
     mode: 'full-relevant-suite' as const,
-    logicalKeys: [RECEIPT_KEY],
+    logicalKeys: [logicalKey],
   };
   const sealed = sealExecutionResult({
     runId,
     invocationId,
     inputDigest,
     trustedPolicyDigest,
-    runner: 'playwright',
+    runner: identity.runner,
     logicalKeys: selection.logicalKeys,
     ...(options.claimInventory !== undefined ? { claimInventory: options.claimInventory } : {}),
     catalog,
     plannedRows: [
       {
         planned: {
-          logicalKey: RECEIPT_KEY,
-          project: 'chromium',
-          file: RECEIPT_FILE,
-          titlePath: [...RECEIPT_TITLE],
-          frameworkId: null,
+          logicalKey,
+          project: identity.project,
+          file: identity.file,
+          titlePath: [...identity.titlePath],
+          frameworkId: identity.frameworkId,
         },
         input: {
-          logicalKey: RECEIPT_KEY,
-          project: 'chromium',
-          file: RECEIPT_FILE,
-          titlePath: [...RECEIPT_TITLE],
+          logicalKey,
+          project: identity.project,
+          file: identity.file,
+          titlePath: [...identity.titlePath],
           blockingAnnotations: [],
         },
       },
@@ -185,9 +231,9 @@ export async function mintCompleteRunReceipt(
       outcomes: [
         {
           testId: 'spec-1',
-          file: RECEIPT_FILE,
-          titlePath: [...RECEIPT_TITLE],
-          project: 'chromium',
+          file: identity.file,
+          titlePath: [...identity.titlePath],
+          project: identity.project,
           status: 'passed',
           attempt: 1,
           expectedFailure: false,

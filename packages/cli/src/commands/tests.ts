@@ -398,9 +398,13 @@ async function suggestSubcommand(
     );
   }
 
+  // A COMPLETE enumeration failure of the CONFIGURED runner hides the
+  // suggestions (an empty inventory would read as "no candidates"
+  // instead of "the runner could not enumerate"). The runner is
+  // `config.runner` — absent means playwright, the historical behavior.
   const enumerationFailedCompletely =
     mapped.nativeErrors.length > 0 &&
-    !discovered.catalog.entries.some((entry) => entry.runner === 'playwright');
+    !discovered.catalog.entries.some((entry) => entry.runner === config.runner);
   const suggestions = enumerationFailedCompletely
     ? []
     : mappingSuggestions({

@@ -21,7 +21,6 @@ import {
 } from '@gate-forge/core';
 import {
   discoverTestCatalog,
-  findPlaywrightConfig,
   TestDiscoveryError,
   type DiscoverResult,
 } from '@gate-forge/pack-playwright';
@@ -32,6 +31,7 @@ import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { evaluateRun } from '../evaluate.js';
 import {
+  findRunnerConfigPath,
   loadOptionalTestMap,
   mappedCoverageFrom,
   mappingBlocking,
@@ -329,14 +329,14 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   let discoveryResult: DiscoverResult | undefined;
   if (diffScoped) {
     const sidecar = loadOptionalTestMap(io.cwd);
-    const runnerConfig = findPlaywrightConfig(io.cwd);
+    const runnerConfig = findRunnerConfigPath(io.cwd, config.runner);
     let testFiles: string[] = [];
     if (runnerConfig !== null) {
       try {
         const discovered = await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true });
         discoveryResult = discovered;
         testFiles = discovered.catalog.entries
-          .filter((entry) => entry.runner === 'playwright')
+          .filter((entry) => entry.runner === config.runner)
           .map((entry) => entry.file);
       } catch (error) {
         if (error instanceof TestDiscoveryError) throw new UsageError(error.message);

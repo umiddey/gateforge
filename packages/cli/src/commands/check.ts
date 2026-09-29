@@ -62,7 +62,7 @@ import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { obligationFingerprint, evaluateRun, scopeBlocking } from '../evaluate.js';
-import { annotationMapSyncAdvisories, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
+import { annotationMapSyncAdvisories, findRunnerConfigPath, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
   collectInputFiles,
@@ -1052,18 +1052,20 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   let mismatchBlocking: BlockingEntry[] = [];
   let scopeDiscoveryTimings: DiscoveryTimings | undefined;
   if (scopeAwareRun) {
-    // Phase 4 expansion inputs (E15): test inventory is loaded only when
-    // test infrastructure exists (playwright config or mapping sidecar);
-    // repositories without either keep the exact historical behavior.
+    // Phase 4 expansion inputs (E15): the test inventory is loaded only
+    // when test infrastructure exists for the CONFIGURED runner (`runner:`
+    // in `.gateforge.yml`; an absent key means playwright, so a repository
+    // without it keeps the exact historical behavior) or a mapping
+    // sidecar.
     const sidecar = loadOptionalTestMap(io.cwd);
-    const runnerConfig = findPlaywrightConfig(io.cwd);
+    const runnerConfig = findRunnerConfigPath(io.cwd, config.runner);
     let testFiles: string[] = [];
     if (runnerConfig !== null) {
       try {
         const scopeDiscovery = await discoverTestCatalog({ cwd: io.cwd, config });
         scopeDiscoveryTimings = scopeDiscovery.timings;
         testFiles = scopeDiscovery.catalog.entries
-          .filter((entry) => entry.runner === 'playwright')
+          .filter((entry) => entry.runner === config.runner)
           .map((entry) => entry.file);
       } catch {
         // Discovery problems surface on their own gates; scope expansion
