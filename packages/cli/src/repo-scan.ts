@@ -33,7 +33,7 @@ const MAX_SCAN_BYTES = 1024 * 1024;
  * Languages are a subset of `python` / `javascript` / `typescript`
  * (`python` when the repo is empty or yields no signal). Signals name
  * the bundled-detector evidence found: `sqlalchemy`, `fastapi`,
- * `playwright`, `pytest`, `http-clients`.
+ * `playwright`, `vitest`, `cypress`, `pytest`, `http-clients`.
  */
 export interface RepoScan {
   /** Detected languages, deterministically ordered. */
@@ -62,6 +62,8 @@ export function scanRepo(cwd: string): RepoScan {
   let hasSqlalchemy = false;
   let hasFastapi = false;
   let hasPlaywright = false;
+  let hasVitest = false;
+  let hasCypress = false;
   let hasPytestIni = false;
   let hasPytestToml = false;
   let hasPytestFile = false;
@@ -76,6 +78,8 @@ export function scanRepo(cwd: string): RepoScan {
       if (packageJsonHasHttpClient(join(cwd, file))) hasHttpClient = true;
     }
     if (base.startsWith('playwright.config.')) hasPlaywright = true;
+    if (base.startsWith('vitest.config.') || base.startsWith('vite.config.')) hasVitest = true;
+    if (base.startsWith('cypress.config.') || base === 'cypress.json') hasCypress = true;
     if (base === 'pytest.ini') hasPytestIni = true;
     if (base === 'pyproject.toml' && fileTextContains(join(cwd, file), '[tool.pytest')) {
       hasPytestToml = true;
@@ -114,6 +118,8 @@ export function scanRepo(cwd: string): RepoScan {
   if (hasSqlalchemy) signals.push('sqlalchemy');
   if (hasFastapi) signals.push('fastapi');
   if (hasPlaywright) signals.push('playwright');
+  if (hasVitest) signals.push('vitest');
+  if (hasCypress) signals.push('cypress');
   if (hasPytestIni || hasPytestToml || hasPytestFile) signals.push('pytest');
   if (hasHttpClient) signals.push('http-clients');
   return { languages, signals };

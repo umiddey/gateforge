@@ -349,6 +349,13 @@ volatileFields:
   - created_at
 `;
 }
+/**
+ * The runner names the repository scan can detect, in the order the scan
+ * reports its signals. `playwright` is the frozen default: it is never
+ * written into a new config.
+ */
+const DETECTABLE_RUNNERS = ['playwright', 'vitest', 'cypress', 'pytest'] as const;
+
 /** Builds the `.gateforge.yml` document for the requested languages. */
 function configTemplate(
   languages: readonly string[],
@@ -359,6 +366,8 @@ function configTemplate(
     enforcement?: boolean;
     historyRetentionDays?: number | 'off';
     strictnessMode?: StrictnessMode;
+    /** `runner` writes the owner-owned `runner:` key; undefined writes NO key (playwright is the default). */
+    runner?: string;
   } = {},
 ): string {
   const enforcementBlock =
@@ -382,6 +391,16 @@ enforcement:
 # only the debt this change touches, warn = report everything and block
 # nothing. This softens the GATE, never the evidence.
 mode: ${options.strictnessMode}
+`;
+  // The owner-owned runner key: only written when the scan detected a
+  // single non-Playwright runner. An absent key means `playwright`, the
+  // frozen default, so an existing/ambiguous setup is byte-identical.
+  const runnerBlock =
+    options.runner === undefined
+      ? ''
+      : `# The test runner the supervised gate drives. Playwright is the default when
+# this key is absent; the scan detected another runner in this repository.
+runner: ${options.runner}
 `;
   const historyBlock =
     options.historyRetentionDays === undefined
@@ -422,7 +441,7 @@ witness:
   maxDurationSeconds: 5
 clock:
   mode: system
-${historyBlock}${strictnessBlock}${enforcementBlock}\
+${runnerBlock}${historyBlock}${strictnessBlock}${enforcementBlock}\
 `;
 }
 
@@ -1044,6 +1063,22 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
           signals: noScan ? [] : scanRepo(io.cwd).signals,
         }
       : scanRepo(io.cwd);
+  // Which runner the scan saw. The `runner:` key is owner-owned, so it
+  // is written ONLY when exactly one non-Playwright runner was detected:
+  // Playwright stays the frozen default, and an ambiguous repository
+  // (Playwright + something else, or several others) keeps today's
+  // behavior plus one plain line naming the choice it left to the owner.
+  const detectedRunners = DETECTABLE_RUNNERS.filter((runner) => scan.signals.includes(runner));
+  const otherRunners = detectedRunners.filter((runner) => runner !== 'playwright');
+  const detectedRunner =
+    detectedRunners.includes('playwright') || otherRunners.length !== 1 ? undefined : otherRunners[0];
+  if (otherRunners.length > 0 && detectedRunner === undefined) {
+    writeLine(
+      io.stdout,
+      `note: other test runners detected (${otherRunners.join(', ')}); the new config keeps the default runner — ` +
+        "set `runner: <playwright|pytest|vitest|cypress>` in .gateforge.yml to pick one",
+    );
+  }
   const recommended = explicitPlugins ?? recommendPlugins(scan);
   writeLine(io.stdout, renderScanBlock(scan, recommended, proofMode));
 
@@ -1071,6 +1106,8 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     // A preset names the owner-owned strictness key; without one the key
     // stays absent, which means `strict` (today's frozen behavior).
     strictnessMode: goal?.settings.strictnessMode,
+    // The scanned runner, when it is unambiguous and not Playwright.
+    runner: detectedRunner,
   };
   const generatedDraftConfig = (): ReturnType<typeof loadConfig> =>
     parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });

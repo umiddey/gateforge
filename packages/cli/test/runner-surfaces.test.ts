@@ -19,7 +19,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo } from '@gate-forge/core';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import {
@@ -207,6 +207,53 @@ describe('doctor readiness follows the configured runner', () => {
       const check = await runnerCheck(repo, { PATH: binDir });
       expect(check.status).toBe('ok');
       expect(check.detail).toContain('backend');
+    });
+  });
+});
+
+describe('init records the detected runner on a NEW config only', () => {
+  it('writes runner: vitest when the repo has a vitest config and no playwright config', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'package.json': '{"name":"app","private":true}\n',
+        'vitest.config.ts': VITEST_CONFIG,
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code, stdout).toBe(0);
+      const written = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      expect(written).toContain('runner: vitest');
+      expect(loadConfig(repo.path('.gateforge.yml')).runner).toBe('vitest');
+    });
+  });
+
+  it('keeps the key absent for a playwright repo and names the other runners', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'package.json': '{"name":"app","private":true}\n',
+        'playwright.config.ts': "export default { testDir: 'e2e' };\n",
+        'cypress.config.ts': 'export default defineConfig({});\n',
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code).toBe(0);
+      const written = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      expect(written).not.toContain('runner:');
+      expect(loadConfig(repo.path('.gateforge.yml')).runner).toBe('playwright');
+      const lines = stdout.split('\n').filter((line) => line.includes('runner:'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('cypress');
+    });
+  });
+
+  it('leaves an existing config untouched even when another runner is detected', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        '.gateforge.yml': 'schemaVersion: 1\nproject:\n  languages: [python]\n',
+        'vitest.config.ts': VITEST_CONFIG,
+      });
+      const before = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      const { code } = await runCli(repo, ['init']);
+      expect(code).toBe(0);
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toBe(before);
     });
   });
 });
