@@ -43,6 +43,7 @@ Requires pytest >= 7 (hook wrappers) and, for ``gateforge_http``,
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -291,6 +292,38 @@ def _proxied_client(session):
 
 
 @pytest.hookimpl(wrapper=True)
+def _failure_diagnosis(reports):
+    """The additive diagnosis of one failed test, from pytest's own report.
+
+    Args:
+        reports: the stashed phase reports of one test.
+
+    Returns:
+        dict: ``errorMessage`` (the longrepr's first line) and
+        ``stackFrames`` (at most five ``file:line`` entries), or an empty
+        dict when pytest reported no usable text.
+    """
+    for report in reports:
+        longrepr = getattr(report, "longrepr", None)
+        if longrepr is None:
+            continue
+        text = str(longrepr)
+        message = text.splitlines()[0].strip() if text else ""
+        frames = []
+        for line in text.splitlines()[1:]:
+            match = re.search(r"([\w./-]+\.py):(\d+)", line)
+            if match is None:
+                continue
+            frame = "%s:%s" % (match.group(1), match.group(2))
+            if frame not in frames:
+                frames.append(frame)
+            if len(frames) == 5:
+                break
+        if message or frames:
+            return {"errorMessage": message, "stackFrames": frames}
+    return {}
+
+
 def pytest_runtest_protocol(item, nextitem):
     """Spool ``testBegin`` before, and ``testEnd`` after, one wired test.
 
@@ -338,19 +371,25 @@ def pytest_runtest_protocol(item, nextitem):
             outcome = "failed"
         else:
             outcome = "passed"
-        _append_event(
-            {
-                "kind": "testEnd",
-                "testId": key,
-                "nodeId": item.nodeid,
-                "workerIndex": worker,
-                "file": node_file,
-                "titlePath": title_path,
-                "project": None,
-                "outcome": outcome,
-                "attempt": max(1, len(call_reports)),
-            }
-        )
+        end_event = {
+            "kind": "testEnd",
+            "testId": key,
+            "nodeId": item.nodeid,
+            "workerIndex": worker,
+            "file": node_file,
+            "titlePath": title_path,
+            "project": None,
+            "outcome": outcome,
+            "attempt": max(1, len(call_reports)),
+        }
+        if outcome == "failed":
+            # Additive diagnosis for the CI progress stream and the
+            # Gateforge-owned failures artifact: pytest's own longrepr
+            # first line plus its `file:line` frames. The raw report is
+            # never copied, and the CLI screens the text before it is
+            # printed or written.
+            end_event.update(_failure_diagnosis(reports))
+        _append_event(end_event)
     return result
 
 

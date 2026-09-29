@@ -223,11 +223,13 @@ import {
   type HarnessFailure,
 } from '../run-reliability.js';
 import { pruneRunHistory, recordRunHistory } from '../history.js';
+import { ProgressStream, resolveProgressTarget, type ProgressOutcome, type ProgressTarget } from '../progress.js';
+import { writeTestFailures } from '../state.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
   '[--result-only] [--test <selector>] [--format text|json|sarif] [--witness-url <url>] [--run-token <token>] ' +
-  '[--run-timeout-min <minutes>] ' +
+  '[--run-timeout-min <minutes>] [--progress stderr|file:<path>|off|auto] ' +
   `(verifier key via ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV})\n` +
   '       --scope changed (supervised --changed only): plan, execute, and seal only the slice of tests\n' +
   '       claiming obligations affected by the resolved changed-file set; an affected obligation with no\n' +
@@ -259,7 +261,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
   }
   rejectUnknownFlags(
     options,
-    ['suite', 'out', 'format', 'witness-url', 'run-token', 'run-timeout-min', 'changed', 'scope', 'result-only', 'test', 'help'],
+    ['suite', 'out', 'format', 'witness-url', 'run-token', 'run-timeout-min', 'progress', 'changed', 'scope', 'result-only', 'test', 'help'],
     TEST_GATES_USAGE,
   );
   const compatibilityError = installedPlaywrightCompatibilityError();
@@ -357,6 +359,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
         witnessUrl,
         runToken: stringFlag(options, 'run-token'),
         runTimeoutMs: parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')),
+        progress: stringFlag(options, 'progress'),
         scope,
         resultOnly,
         testSelectors,
@@ -775,6 +778,12 @@ export interface SupervisedOptions {
   runToken: string | undefined;
   /** Whole-run wall-clock bound ms (undefined = 30-minute default). */
   runTimeoutMs: number | undefined;
+  /**
+   * `--progress` target (additive): `stderr`, `file:<path>`, `off`, or
+   * undefined for the `run.progress` config key and then the CI-aware
+   * `auto` default (stderr under CI, off locally).
+   */
+  progress?: string;
   /**
    * Evaluation scope (Goal 2): `full` (default, unchanged behavior) runs
    * the whole relevant suite and seals a whole-repo receipt; `changed`
@@ -2887,6 +2896,27 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // the server-e2e obligations with the witness and forwards the suite's
   // persistence intents (an untrusted spool) so the witness — never the
   // suite — probes the adapter and stamps the evidence.
+  // The CI progress stream (additive): every line below is a fact the
+  // supervisor already holds — the registered expected-set size, the
+  // test identity the drain sees, the catalog title, the outcome, and
+  // (for a failure) the runner's own first error line behind the
+  // credential guard. Nothing here reads, filters, or tails runner
+  // output, so the stream cannot carry a secret by construction. It is
+  // off locally, and it decides nothing: no gate reads it.
+  const progressTarget: ProgressTarget | null = resolveProgressTarget(
+    options.progress,
+    config.run?.progress,
+    io.env,
+  );
+  const progress = new ProgressStream({
+    writer: progressTarget,
+    runner: runnerName,
+    scope: namedTestIds !== null ? 'named' : options.scope === 'changed' ? 'changed' : 'full',
+    expected: selection.logicalKeys.length,
+    writeLine: (line: string) => writeLine(io.stderr, line),
+    warn: (line: string) => writeLine(io.stderr, line),
+  });
+  progress.start();
   const drain = startSupervisorSpoolDrain({
     stateDir,
     runId: manifest.runId,
@@ -2895,6 +2925,23 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     verifierKey: witnessVerifierKey,
     serverE2eObligations,
     observeObligations,
+    onTestEvent: (event) => {
+      const title = event.titlePath.join(' > ');
+      if (event.kind === 'testBegin') {
+        progress.beginTest(title);
+        return;
+      }
+      // A worker-side end carries no outcome (the runner's reporter
+      // still owes it): counting it would report a test twice.
+      if (event.outcome === undefined) return;
+      progress.endTest({
+        logicalKey: `${event.file ?? ''}#${event.titlePath.join('>')}`,
+        title,
+        outcome: progressOutcomeOf(event.outcome),
+        ...(event.errorMessage === undefined ? {} : { message: event.errorMessage }),
+        ...(event.stackFrames === undefined ? {} : { stackFrames: event.stackFrames }),
+      });
+    },
   });
   let envelope: RunnerExecutionEnvelope;
   // The witness-side execution trace (review fix 2b) — THE execution
@@ -3038,6 +3085,15 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       writeLine(io.stderr, `warning: host-load diagnostics could not be written: ${(error as Error).message}`);
     }
     executionDurationMs = Math.max(0, Math.round(performance.now() - executionStartedAt));
+  }
+  // The suite has finished: close the stream (grading follows) and keep
+  // the screened failing-test diagnosis as a Gateforge-owned artifact,
+  // so a CI job never has to publish the runner log to explain a red
+  // test. Both happen only when the stream is on — a local run with the
+  // stream off writes and prints nothing new.
+  progress.finish();
+  if (progressTarget !== null) {
+    writeTestFailures(stateDir, manifest.runId, progress.failures);
   }
 
   // Cypress cannot filter below the spec without a plugin the gate
@@ -3870,6 +3926,25 @@ function countUnclaimedObligations(stateDir: string, obligations: readonly { id:
     if (typeof obligationId === 'string') claimed.add(obligationId);
   }
   return obligations.filter((obligation) => !claimed.has(obligation.id)).length;
+}
+
+/**
+ * Normalizes one runner-reported outcome onto the stream's vocabulary.
+ *
+ * A skipped test is a skip in every runner (`skipped`, `pending`); an
+ * expected failure is still a non-passing test, and anything the
+ * vocabulary does not know is reported as a failure — never as a pass.
+ *
+ * Args:
+ *   outcome: the status the runner adapter reported.
+ *
+ * Returns:
+ *   ProgressOutcome: the outcome the progress stream counts.
+ */
+function progressOutcomeOf(outcome: string): ProgressOutcome {
+  if (outcome === 'passed') return 'passed';
+  if (outcome === 'skipped' || outcome === 'pending' || outcome === 'fixme') return 'skipped';
+  return 'failed';
 }
 
 /** Builds the report counts from trusted execution and full-scope evaluation.

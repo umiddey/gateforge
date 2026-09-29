@@ -365,6 +365,21 @@ export const GateforgeConfigSchema = z
     waivers: z.string().min(1),
     /** Path to the baseline document (`.gateforge/baselines/obligations.json`). */
     baselines: z.string().min(1),
+    /**
+     * Supervised run surfaces (additive, optional). `progress` selects
+     * the CI progress stream: `auto` (the default) writes it to stderr
+     * under CI and OFF everywhere else, so a local run's output is
+     * byte-identical to a run without this key; `off`, `stderr`, or
+     * `file:<path>` say so explicitly. The stream is never evidence and
+     * no gate reads it.
+     */
+    run: z
+      .object({
+        /** `auto` | `off` | `stderr` | `file:<path>`. */
+        progress: z.string().min(1),
+      })
+      .strict()
+      .optional(),
     /** Changed-file provider selection (architecture contract 5). */
     changed: z
       .object({

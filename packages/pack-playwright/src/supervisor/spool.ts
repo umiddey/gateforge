@@ -42,6 +42,20 @@ export interface SpoolEvent {
   attempt?: number;
   /** The mapped/annotated obligation claims declared for this test. */
   claims?: string[];
+  /**
+   * testEnd only, failures only: the runner's own first error message.
+   * Additive diagnosis for the CI progress stream and the
+   * Gateforge-owned failures artifact — the trusted side screens it
+   * against the credential shapes before it is ever printed or written,
+   * and a WORKER-side end (the outcome-less release) never carries one.
+   */
+  errorMessage?: string;
+  /**
+   * testEnd only, failures only: short `file:line` stack frames (at
+   * most five, deduplicated by the writer). Never a path outside the
+   * tested tree and never a frame's source text.
+   */
+  stackFrames?: string[];
 }
 
 /**
@@ -88,6 +102,15 @@ export function appendSpoolEvent(spoolFile: string, event: SpoolEvent): void {
             // the trace grades not-passed.
             ...(typeof event.outcome === 'string' ? { outcome: event.outcome } : {}),
             attempt: Number.isInteger(event.attempt) && (event.attempt as number) >= 1 ? event.attempt : 1,
+            // Additive diagnosis (failures only): the trusted side
+            // screens the message against the credential shapes before
+            // it is printed or written anywhere.
+            ...(typeof event.errorMessage === 'string' && event.errorMessage.length > 0
+              ? { errorMessage: event.errorMessage }
+              : {}),
+            ...(Array.isArray(event.stackFrames) && event.stackFrames.length > 0
+              ? { stackFrames: event.stackFrames.slice(0, 5).map((frame) => String(frame)) }
+              : {}),
           }
         : {}),
       ...(Array.isArray(event.claims) && event.claims.length > 0

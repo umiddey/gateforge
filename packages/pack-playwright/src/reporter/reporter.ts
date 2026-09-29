@@ -67,6 +67,7 @@ import {
   ENV_WITNESS_URL,
 } from '../constants.js';
 import { appendSpoolEvent, spoolPathFor } from '../supervisor/spool.js';
+import { failureDiagnosisOf, type SerializedFailure } from '../diagnosis.js';
 import { WitnessClient, type IssuedLedgerRecord } from '../fixture/witness-client.js';
 import { resolveWitnessUrl } from '../fixture/witness-client.js';
 import {
@@ -281,7 +282,13 @@ export class GateforgeReporter {
   /** Collects claims + test identity + the outcome row at test end (synchronous). */
   onTestEnd(
     test: ReporterTest,
-    result: { status: string; workerIndex?: number; retry?: number; duration?: number },
+    result: {
+      status: string;
+      workerIndex?: number;
+      retry?: number;
+      duration?: number;
+      errors?: SerializedFailure[];
+    },
   ): void {
     const titlePath = this.titlePathOf(test);
     const file = this.repoRelativeOf(test);
@@ -355,6 +362,10 @@ export class GateforgeReporter {
         project: this.projectOf(test),
         outcome: result.status,
         attempt: (typeof result.retry === 'number' ? result.retry : 0) + 1,
+        // Additive diagnosis for a non-passing test: the CI progress
+        // stream and the failures artifact are the only readers, and the
+        // CLI screens the message before printing or writing it.
+        ...(result.status === 'passed' ? {} : (failureDiagnosisOf(result.errors) ?? {})),
       });
     }
     // Claims: native annotations keep working unchanged; Phase 4 adds

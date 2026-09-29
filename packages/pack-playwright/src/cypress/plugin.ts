@@ -27,6 +27,7 @@
  * plain `cypress run` behaves exactly as without the pack.
  */
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { failureDiagnosisOf, type SerializedFailure } from '../diagnosis.js';
 import { dirname, join } from 'node:path';
 import { canonicalOf } from '../json.js';
 import { claimInjectionsFor } from '../runner-claims.js';
@@ -56,6 +57,8 @@ interface SpoolEvent {
   readonly project: string | null;
   readonly outcome?: string;
   readonly attempt?: number;
+  readonly errorMessage?: string;
+  readonly stackFrames?: string[];
   readonly claims?: string[];
 }
 
@@ -91,6 +94,14 @@ interface PluginEnv {
   readonly witnessUrl: string | null;
   readonly runToken: string | null;
   readonly appBaseUrl: string;
+}
+
+/** The mocha error the support file reports for a failing test. */
+function errorOf(payload: unknown): SerializedFailure[] | undefined {
+  if (typeof payload !== 'object' || payload === null || !('error' in payload)) return undefined;
+  const error = (payload as { error?: unknown }).error;
+  if (typeof error !== 'object' || error === null) return undefined;
+  return [error as SerializedFailure];
 }
 
 /** One test identity the support file reports. */
@@ -193,6 +204,10 @@ export function registerGateforgeCypressPlugin(on: PluginRegistrar): void {
         project: null,
         outcome: state === 'passed' ? 'passed' : state === 'pending' ? 'skipped' : 'failed',
         attempt: attemptOf(payload),
+        // Additive diagnosis for a non-passing test (mocha's own
+        // `err`): the CI progress stream and the failures artifact are
+        // the only readers, and the CLI screens the message first.
+        ...(state === 'passed' ? {} : (failureDiagnosisOf(errorOf(payload)) ?? {})),
       });
       return null;
     },
@@ -411,6 +426,7 @@ afterEach(function () {
     titlePath: titlePath,
     state: current.state,
     attempt: attempt,
+    error: current.err ? { message: String(current.err.message || ''), stack: String(current.err.stack || '') } : null,
   });
 });
 

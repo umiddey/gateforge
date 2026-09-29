@@ -136,6 +136,16 @@ export function startSupervisorSpoolDrain(options: {
   verifierKey: string;
   pollMs?: number;
   serverE2eObligations?: readonly string[];
+  /**
+   * Optional observer of every DRAINED lifecycle event, called before
+   * the drain acts on it. This is how the CLI's CI progress stream
+   * learns what the suite is doing without ever reading runner output:
+   * the event carries the identity, the outcome, and (additively) the
+   * runner's own error message and short stack frames. It is advisory —
+   * a throwing observer is reported and ignored, because no progress
+   * line may ever fail a run.
+   */
+  onTestEvent?: (event: SpoolEvent) => void;
   observeObligations?: readonly string[];
 }): SpoolDrainHandle {
   const client = new SupervisorClient(options.witnessUrl, options.runToken, options.verifierKey);
@@ -348,6 +358,15 @@ const releaseReachedWaiters = (): void => {
   };
 
   const handleEvent = async (event: SpoolEvent): Promise<void> => {
+    // The observer sees EVERY drained event, including the ones the
+    // lifecycle rules below ignore (a repeated worker end, an end whose
+    // begin never opened): the progress stream counts runner outcomes,
+    // not witness sessions, and must not lose a line to a drain detail.
+    try {
+      options.onTestEvent?.(event);
+    } catch (error) {
+      console.warn(`[gateforge] test event observer failed: ${(error as Error).message}`);
+    }
     if (event.kind === 'testBegin') {
       await openSessionFor(event);
       return;
