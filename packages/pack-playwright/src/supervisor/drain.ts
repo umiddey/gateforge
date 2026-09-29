@@ -71,6 +71,28 @@ export interface SpoolDrainHandle {
    * the run closed downstream.
    */
   stop: () => Promise<{ conflicts: string[]; intentFailures: string[]; observeNotes: string[] }>;
+  /**
+   * Waits until the witness has ANSWERED the first `count` drained
+   * persistence intents (refusals included — a typed refusal is an
+   * answer and lands in `intentFailures`).
+   *
+   * This is the trusted drain's own forward progress, not a runner-side
+   * signal: the supervised child only appends to the spool and can
+   * neither observe nor influence it. A caller that must not mutate the
+   * target between a `pre` intent and the state the witness probes uses
+   * this instead of a guessed sleep — once it resolves, the witness has
+   * already run (and answered) that intent's server-side probe.
+   *
+   * Args:
+   *   count: how many drained intents must have been answered.
+   *   timeoutMs: bound on the wait; the default is generous and only
+   *     fires when the witness is unreachable, never in a genuine run.
+   *
+   * Returns:
+   *   Promise<void>: resolves as soon as the count is reached; rejects
+   *     with a descriptive Error when the bound elapses first.
+   */
+  whenIntentsForwarded: (count: number, timeoutMs?: number) => Promise<void>;
 }
 
 /**
@@ -106,6 +128,12 @@ export function startSupervisorSpoolDrain(options: {
   const conflicts: string[] = [];
   const intentFailures: string[] = [];
   const observeNotes: string[] = [];
+  // Forward progress of the persistence channel, and the waiters a
+  // caller parks on it. Counted AFTER the witness answers, so the count
+  // is the drain's own fact and never something the runner child can
+  // assert for itself.
+  let answeredIntents = 0;
+  const forwardWaiters: Array<() => void> = [];
   let offset = 0;
   let intentsOffset = 0;
   let running = true;
@@ -264,6 +292,42 @@ export function startSupervisorSpoolDrain(options: {
       intentFailures.push(message);
       console.warn(`[gateforge] ${message}`);
     }
+    // The witness has now answered this intent either way, so the
+    // forward-progress count advances past refusals too.
+    answeredIntents += 1;
+    for (const release of forwardWaiters.splice(0)) release();
+  };
+
+  /**
+   * Waits until the witness has answered `count` drained intents.
+   *
+   * Args:
+   *   count: how many drained intents must have been answered.
+   *   timeoutMs: bound on the wait.
+   *
+   * Returns:
+   *   Promise<void>: resolves once the count is reached, rejects when
+   *     the bound elapses first.
+   */
+  const whenIntentsForwarded = async (count: number, timeoutMs = 10_000): Promise<void> => {
+    if (answeredIntents >= count) return;
+    await new Promise<void>((resolveReady, rejectTimeout) => {
+      const release = (): void => {
+        clearTimeout(timer);
+        resolveReady();
+      };
+      const timer = setTimeout(() => {
+        const index = forwardWaiters.indexOf(release);
+        if (index >= 0) forwardWaiters.splice(index, 1);
+        rejectTimeout(
+          new Error(
+            `the supervisor drain forwarded only ${String(answeredIntents)} of ${String(count)} ` +
+              'persistence intents before the wait elapsed — the witness never answered them',
+          ),
+        );
+      }, timeoutMs);
+      forwardWaiters.push(release);
+    });
   };
 
   const drainOnce = async (): Promise<void> => {
@@ -376,5 +440,6 @@ export function startSupervisorSpoolDrain(options: {
       await Promise.all(leftover.map((slot) => sealQuietly(slot, undefined)));
       return { conflicts: [...conflicts], intentFailures: [...intentFailures], observeNotes: [...observeNotes] };
     },
+    whenIntentsForwarded,
   };
 }
