@@ -17,8 +17,16 @@ import type {
   HttpAdapterPaging,
 } from './config.js';
 import { projectEntity, type NormalizedEntity } from './projection.js';
-import { createSessionReader, type KitGetResult, type SessionStore } from './session.js';
+import {
+  createSessionReader,
+  type KitGetResult,
+  type KitProbeResult,
+  type SessionStore,
+} from './session.js';
 import type { AdapterContext, EvidenceAdapter } from '../witness/types.js';
+
+/** The context a probe read runs under (the audit passes just a base URL). */
+export type KitProbeContext = { baseUrl: string; headers?: Record<string, string> };
 
 /** Default page cap for every bounded collection walk. */
 export const DEFAULT_MAX_PAGES = 100;
@@ -118,13 +126,14 @@ export function defineHttpAdapter(config: HttpAdapterConfig): EvidenceAdapter {
    * Reads one path through the kit transport and returns status+body.
    *
    * Args:
-   *   ctx: the witness adapter context.
+   *   ctx: the read context (the witness adapter context, or a
+   *     probe's base URL).
    *   path: absolute path to read.
    *
    * Returns:
    *   Promise<KitGetResult>: status, headers, parsed body.
    */
-  const request = (ctx: AdapterContext, path: string): Promise<KitGetResult> =>
+  const request = (ctx: KitProbeContext, path: string): Promise<KitGetResult> =>
     createSessionReader({
       ...(config.auth !== undefined ? { auth: config.auth } : {}),
       resourceId: config.resourceId,
@@ -146,6 +155,22 @@ export function defineHttpAdapter(config: HttpAdapterConfig): EvidenceAdapter {
     return (config.readPath as string).replaceAll('{id}', encodeURIComponent(id));
   };
 
+
+  /**
+   * The exact path this adapter's first collection read hits (null
+   * when it composes one itself).
+   *
+   * Returns:
+   *   string | null: the first page path, or null.
+   */
+  const firstListPath = (): string | null => {
+    if (config.listCollection !== undefined) return null;
+    if (config.listPath === undefined || config.listPath === null) return null;
+    const paging = config.paging ?? { kind: 'page' as const };
+    return typeof config.listPath === 'function'
+      ? pagedPath(config.listPath(undefined), paging, 1)
+      : pagedPath(config.listPath, paging, 1);
+  };
   /**
    * Walks one (possibly paged) collection to completion.
    *
@@ -307,25 +332,43 @@ export function defineHttpAdapter(config: HttpAdapterConfig): EvidenceAdapter {
     }
     return readAllFor(lastCtx, pathFor, options);
   };
+
+  /**
+   * Issues ONE read through this adapter's own transport — seat
+   * login, cookie/bearer, one re-login on 401, GET-only — so a probe
+   * sees exactly what a witnessed run would. Never writes.
+   *
+   * Args:
+   *   ctx: the base URL to read (headers, when the app needs them).
+   *   id: the entity id to read when there is no collection read.
+   *
+   * Returns:
+   *   Promise<KitProbeResult>: the path, status, and headers of that read.
+   * @throws KitAuthError when the seat's credentials are absent or
+   *   rejected; KitRedirectError when the read only works through a
+   *   redirect.
+   */
+  const probe = async (ctx: KitProbeContext, id?: string): Promise<KitProbeResult> => {
+    const listPath = firstListPath();
+    const path = listPath ?? pathForId(id ?? '0');
+    const result = await request(ctx, path);
+    return { path, status: result.status, headers: result.headers };
+  };
   return Object.freeze({
     resourceId: config.resourceId,
     read,
     // Read-only introspection for `gateforge adapters check --probe`:
-    // the exact path this adapter's first read of each kind hits, so a
-    // probe can issue ONE GET itself and report the real status, the
-    // real Location, and the real environment marker. Not part of the
-    // pin-#8 contract; ignored by the witness.
+    // the exact path this adapter's first read of each kind hits. Not
+    // part of the pin-#8 contract; ignored by the witness.
     evidencePaths: {
       read: (id: string): string | null => (hasRead ? pathForId(id) : null),
-      list: (): string | null => {
-        if (config.listCollection !== undefined) return null;
-        if (config.listPath === undefined || config.listPath === null) return null;
-        const paging = config.paging ?? { kind: 'page' as const };
-        return typeof config.listPath === 'function'
-          ? pagedPath(config.listPath(undefined), paging, 1)
-          : pagedPath(config.listPath, paging, 1);
-      },
+      list: (): string | null => firstListPath(),
     },
+    // Read-only introspection for `gateforge adapters check --probe`:
+    // the ONE read this adapter would issue, issued through its own
+    // seat, so the probe reports what a witnessed run would see. Not
+    // part of the pin-#8 contract; ignored by the witness.
+    probe,
     ...(hasList
       ? { list: async (ctx: AdapterContext): Promise<unknown[]> => [...(await listEntities(ctx))] }
       : {}),

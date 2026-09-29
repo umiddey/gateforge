@@ -295,13 +295,16 @@ function kitPathsOf(module: Record<string, unknown>): KitEvidencePaths | null {
 /**
  * Probes one adapter with a single GET (read-only).
  *
- * The probe issues the GET ITSELF against the path the adapter reads,
- * so it can report the real status, the real `Location` of a
- * redirect-only path, and the real environment marker (GF-13) instead
- * of what the adapter chose to report about itself. A kit adapter
- * declares that path (`evidencePaths`); a hand-written adapter is
- * probed through its own read with a recording context, so the GETs it
- * issues are observed from the outside.
+ * The probe reads exactly what a witnessed run would read, so it can
+ * report the real status, the real `Location` of a redirect-only
+ * path, and the real environment marker (GF-13) instead of what the
+ * adapter chose to report about itself. A kit adapter issues the read
+ * through its own `probe` hook — its seat, its cookies, one re-login
+ * on 401; a kit that predates the hook declares the path it reads
+ * (`evidencePaths`) and the probe issues the GET itself. A
+ * hand-written adapter is probed through its own read with a
+ * recording context, so the GETs it issues are observed from the
+ * outside.
  *
  * Args:
  *   report: the loaded adapter.
@@ -326,64 +329,120 @@ export async function probeAdapter(
     };
   }
   const paths = kitPathsOf(module);
-  const readPath = paths === null ? null : (paths.read(probeId ?? '0') ?? null);
-  const listPath = paths === null ? null : paths.list();
-  const target = listPath ?? readPath;
-  if (target !== null) {
-    return probePath(report, baseUrl, target);
-  }
   if (paths !== null) {
-    return {
-      name: report.name,
-      outcome: 'skipped',
-      path: '',
-      detail: 'adapter declares no probeable path (composed collection reads are probed by the run)',
-    };
+    const target = paths.list() ?? paths.read(probeId ?? '0');
+    if (target === null) {
+      return {
+        name: report.name,
+        outcome: 'skipped',
+        path: '',
+        detail: 'adapter declares no probeable path (composed collection reads are probed by the run)',
+      };
+    }
+    // A kit adapter reads through its own seat, so the probe must
+    // too: an unauthenticated GET would report a 401 the adapter
+    // never sees and blame credentials that are perfectly correct.
+    const probe = module['probe'];
+    return typeof probe === 'function'
+      ? probeThroughKit(report, baseUrl, probe as KitProbe, probeId)
+      : probePath(report, baseUrl, target);
   }
   return probeThroughAdapter(report, baseUrl, probeId);
 }
 
 /**
- * Issues the probe's single GET against a known path.
+ * The read-only probe hook a kit adapter exposes: it issues ONE read
+ * through the adapter's own transport, seat and all.
+ */
+interface KitProbe {
+  (ctx: { baseUrl: string }, id?: string): Promise<KitProbeResult>;
+}
+
+/** What one kit-issued read showed. */
+interface KitProbeResult {
+  path: string;
+  status: number;
+  headers: Headers;
+}
+
+/**
+ * Probes a kit adapter through its own read, and reports what the
+ * seat had to say.
  *
  * Args:
  *   report: the loaded adapter (for the declared fingerprint).
  *   baseUrl: the running app's base URL.
- *   path: the path the adapter reads.
+ *   probe: the adapter's read-only probe hook.
+ *   probeId: the entity id to read when there is no collection read.
  *
  * Returns:
- *   Promise<AdapterProbeReport>: classified status.
+ *   Promise<AdapterProbeReport>: classified outcome, or the seat's own
+ *   plain failure (never a credential).
  */
-async function probePath(
+async function probeThroughKit(
   report: AdapterFileReport,
   baseUrl: string,
-  path: string,
+  probe: KitProbe,
+  probeId?: string,
 ): Promise<AdapterProbeReport> {
-  const response = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, { redirect: 'manual' });
-  const declared = report.declares.environmentFingerprint;
-  if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get('location');
+  let observed: KitProbeResult;
+  try {
+    observed = await probe({ baseUrl }, probeId);
+  } catch (error) {
+    return kitReadFailure(report, error);
+  }
+  return classifyRead(
+    report,
+    observed.path,
+    observed.status,
+    observed.headers.get('location'),
+    observed.headers.get(ENV_FINGERPRINT_HEADER),
+  );
+}
+
+/**
+ * Classifies what one read showed. Shared by the probe's own GET and
+ * the kit's read, so both report the same status the same way.
+ *
+ * Args:
+ *   report: the loaded adapter (for the declared fingerprint).
+ *   path: the path the read hit.
+ *   status: the HTTP status the app answered.
+ *   location: the redirect target, when the app answered with one.
+ *   marker: the environment marker the app presented (GF-13).
+ *
+ * Returns:
+ *   AdapterProbeReport: the classified outcome.
+ */
+function classifyRead(
+  report: AdapterFileReport,
+  path: string,
+  status: number,
+  location: string | null,
+  marker: string | null,
+): AdapterProbeReport {
+  if (status >= 300 && status < 400) {
     return {
       name: report.name,
       outcome: 'failed',
       path,
       detail:
-        `GET ${path} answered ${String(response.status)}` +
+        `GET ${path} answered ${String(status)}` +
         `${location === null ? '' : ` -> ${location}`}; a read that only works through a ` +
         'redirect is not a stable evidence path',
     };
   }
-  if (response.status === 401 || response.status === 403) {
+  if (status === 401 || status === 403) {
     return {
       name: report.name,
       outcome: 'auth',
       path,
       detail:
-        `GET ${path} answered ${String(response.status)}; check the adapter's login seat and ` +
+        `GET ${path} answered ${String(status)}; check the adapter's login seat and ` +
         'the witness environment credentials it names',
     };
   }
-  if (response.status === 404) {
+  if (status === 404) {
     return {
       name: report.name,
       outcome: 'absent',
@@ -391,15 +450,15 @@ async function probePath(
       detail: `GET ${path} answered 404; the resource is not served at this path`,
     };
   }
-  if (response.status < 200 || response.status >= 300) {
+  if (status < 200 || status >= 300) {
     return {
       name: report.name,
       outcome: 'failed',
       path,
-      detail: `GET ${path} answered ${String(response.status)}`,
+      detail: `GET ${path} answered ${String(status)}`,
     };
   }
-  const marker = response.headers.get(ENV_FINGERPRINT_HEADER);
+  const declared = report.declares.environmentFingerprint;
   if (declared !== null && marker !== declared) {
     return {
       name: report.name,
@@ -419,6 +478,79 @@ async function probePath(
         ? 'GET answered 2xx (no environment marker presented)'
         : `GET answered 2xx and presents the declared fingerprint '${declared}'`,
   };
+}
+
+/**
+ * The facts a kit reports about a seat that could not authenticate.
+ * Read structurally: the adapter may be built against another copy
+ * of the kit, so nothing here is imported.
+ */
+interface KitAuthFailureShape {
+  /** The seat's declared name. */
+  seat: string;
+  /** Env var names it needs, or null when the login was rejected. */
+  envVars: readonly string[] | null;
+}
+
+/**
+ * Reports why the adapter's own read never got an answer: an absent
+ * credential is named by the env vars it needs, a rejected login by
+ * the login POST status, and never by a credential value.
+ *
+ * Args:
+ *   report: the loaded adapter.
+ *   error: what the kit's read threw.
+ *
+ * Returns:
+ *   AdapterProbeReport: the failure, as the probe reports it.
+ */
+function kitReadFailure(report: AdapterFileReport, error: unknown): AdapterProbeReport {
+  const thrown = error as {
+    name?: string;
+    message?: string;
+    failure?: KitAuthFailureShape;
+  };
+  const message = thrown.message?.split('\n')[0] ?? 'the adapter read failed';
+  if (thrown.name !== 'KitAuthError') {
+    return { name: report.name, outcome: 'failed', path: '', detail: message };
+  }
+  const envVars = thrown.failure?.envVars ?? null;
+  return {
+    name: report.name,
+    outcome: 'auth',
+    path: '',
+    detail:
+      envVars === null || envVars.length === 0
+        ? message
+        : `the seat '${thrown.failure?.seat ?? ''}' needs ${envVars.join(', ')} in the ` +
+          'environment — not probed',
+  };
+}
+
+/**
+ * Issues the probe's single GET against a known path.
+ *
+ * Args:
+ *   report: the loaded adapter (for the declared fingerprint).
+ *   baseUrl: the running app's base URL.
+ *   path: the path the adapter reads.
+ *
+ * Returns:
+ *   Promise<AdapterProbeReport>: classified status.
+ */
+async function probePath(
+  report: AdapterFileReport,
+  baseUrl: string,
+  path: string,
+): Promise<AdapterProbeReport> {
+  const response = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, { redirect: 'manual' });
+  return classifyRead(
+    report,
+    path,
+    response.status,
+    response.headers.get('location'),
+    response.headers.get(ENV_FINGERPRINT_HEADER),
+  );
 }
 
 /**

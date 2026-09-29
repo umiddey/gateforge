@@ -26,6 +26,8 @@ interface SeatSession {
 /** Everything one seat needs to authenticate a read. */
 interface ResolvedSeat {
   kind: 'bearer' | 'cookie-login';
+  /** The seat's declared name (what a diagnostic quotes). */
+  name: string;
   /** Bearer token seat. */
   bearer?: BearerSeat;
   /** Cookie-login seat. */
@@ -45,11 +47,40 @@ export interface KitGetResult {
   body: unknown;
 }
 
+/** What one probe read showed, as the kit's own read path saw it. */
+export interface KitProbeResult {
+  /** The exact path the read GET hit. */
+  path: string;
+  /** HTTP status of that GET. */
+  status: number;
+  /** Response headers (the environment marker lives here). */
+  headers: Headers;
+}
+
+/** The witness env vars a seat failure is about (names, never values). */
+export interface KitAuthFailure {
+  /** The seat that could not authenticate. */
+  seat: string;
+  /** Env var names the seat needs, or null when the login was rejected. */
+  envVars: readonly string[] | null;
+}
+
 /** Raised when the witness environment does not carry a credential. */
 export class KitAuthError extends Error {
-  constructor(message: string) {
+  /** Which seat failed, and which env vars it needs (null: rejected login). */
+  readonly failure: KitAuthFailure | null;
+
+  /**
+   * Builds one auth failure.
+   *
+   * Args:
+   *   message: the plain message a witnessed run shows.
+   *   failure: the structured facts a probe reports, when it has them.
+   */
+  constructor(message: string, failure: KitAuthFailure | null = null) {
     super(message);
     this.name = 'KitAuthError';
+    this.failure = failure;
   }
 }
 
@@ -92,7 +123,7 @@ function resolveSeat(auth: HttpAdapterAuth): ResolvedSeat | null {
     if (typeof bearer.tokenEnv !== 'string') {
       throw new KitAuthError(`auth seat '${name}' must declare tokenEnv (a witness env var)`);
     }
-    return { kind: 'bearer', bearer };
+    return { kind: 'bearer', name, bearer };
   }
   const login = seat as CookieLoginSeat;
   if (typeof login.loginPath !== 'string' || typeof login.credentials !== 'object') {
@@ -100,30 +131,9 @@ function resolveSeat(auth: HttpAdapterAuth): ResolvedSeat | null {
       `auth seat '${name}' must declare loginPath and credentials (field -> witness env var)`,
     );
   }
-  return { kind: 'cookie-login', login };
+  return { kind: 'cookie-login', name, login };
 }
 
-/**
- * Reads a credential from the witness environment.
- *
- * Args:
- *   envVar: the env var the adapter config names.
- *   seat: the seat label, for the diagnostic.
- *
- * Returns:
- *   string: the credential value.
- * @throws KitAuthError when the env var is unset or empty.
- */
-function credentialFrom(envVar: string, seat: string): string {
-  const value = process.env[envVar];
-  if (value === undefined || value === '') {
-    throw new KitAuthError(
-      `adapter seat '${seat}' is missing its credential: set ${envVar} in the WITNESS process ` +
-        'environment (never in the repo, argv, or the suite)',
-    );
-  }
-  return value;
-}
 
 /**
  * The credential header one GET carries, logging in first when needed.
@@ -144,31 +154,46 @@ async function credentialHeaders(
   baseUrl: string,
   sessions: SessionStore,
 ): Promise<Record<string, string>> {
-  if (seat.kind === 'bearer') {
-    const config = seat.bearer as BearerSeat;
-    const token = credentialFrom(config.tokenEnv, seatKey);
-    const scheme = config.scheme ?? 'Bearer';
-    return { authorization: `${scheme} ${token}` };
+  // Credentials are read from the witness process environment, never
+  // from the repo, argv, or the suite — and a seat that cannot be
+  // satisfied is named by its env vars, never by a bare 401 later.
+  const config: BearerSeat | CookieLoginSeat =
+    seat.kind === 'bearer' ? (seat.bearer as BearerSeat) : (seat.login as CookieLoginSeat);
+  const envVars = 'tokenEnv' in config ? [config.tokenEnv] : Object.values(config.credentials);
+  const missing = envVars.filter((name) => {
+    const value = process.env[name];
+    return value === undefined || value === '';
+  });
+  if (missing.length > 0) {
+    throw new KitAuthError(
+      `adapter seat '${seat.name}' needs ${missing.join(', ')} in the WITNESS process ` +
+        'environment (never in the repo, argv, or the suite)',
+      { seat: seat.name, envVars: missing },
+    );
   }
-  const config = seat.login as CookieLoginSeat;
+  if ('tokenEnv' in config) {
+    const scheme = config.scheme ?? 'Bearer';
+    return { authorization: `${scheme} ${String(process.env[config.tokenEnv])}` };
+  }
+  const login = config;
   const cached = sessions.get(seatKey);
   if (cached?.cookie != null) return { cookie: cached.cookie };
   const body: Record<string, string> = {};
-  for (const [field, envVar] of Object.entries(config.credentials)) {
-    body[field] = credentialFrom(envVar, seatKey);
+  for (const [field, envVar] of Object.entries(login.credentials)) {
+    body[field] = String(process.env[envVar]);
   }
-  const response = await fetch(`${baseUrl}${config.loginPath}`, {
+  const response = await fetch(`${baseUrl}${login.loginPath}`, {
     method: 'POST',
     headers: {
       accept: 'application/json',
       'content-type': 'application/json',
-      ...(config.headers ?? {}),
+      ...(login.headers ?? {}),
     },
     body: JSON.stringify(body),
   });
   if (!response.ok) {
     throw new KitAuthError(
-      `adapter seat '${seatKey}' login failed: POST ${config.loginPath} -> ${String(response.status)}`,
+      `adapter seat '${seat.name}' login failed: POST ${login.loginPath} -> ${String(response.status)}`,
     );
   }
   const cookies = typeof response.headers.getSetCookie === 'function'
@@ -180,11 +205,13 @@ async function credentialHeaders(
     .filter((pair) => pair.includes('='));
   const wanted = pairs.filter((pair) => {
     const name = pair.slice(0, pair.indexOf('='));
-    return config.cookieName === undefined || name === config.cookieName;
+    return login.cookieName === undefined || name === login.cookieName;
   });
   if (wanted.length === 0) {
     throw new KitAuthError(
-      `adapter seat '${seatKey}' login set no ${config.cookieName === undefined ? '' : `'${config.cookieName}' `}cookie`,
+      `adapter seat '${seat.name}' login set no ${
+        login.cookieName === undefined ? '' : `'${login.cookieName}' `
+      }cookie`,
     );
   }
   const cookie = wanted.join('; ');
@@ -223,7 +250,7 @@ export function createSessionReader(options: SessionReaderOptions): (path: strin
   const timeoutMs = options.timeoutMs ?? 10_000;
   const baseUrl = ctx.baseUrl.replace(/\/$/, '');
   const seat = auth === undefined || auth.kind === 'none' ? null : resolveSeat(auth);
-  const seatKey = `${baseUrl}|${(auth === undefined || auth.kind === 'none' ? '' : (auth.seat ?? ''))}`;
+  const seatKey = `${baseUrl}|${seat?.name ?? ''}`;
   // One store per kit adapter: the first read logs in, later reads
   // reuse the session until the app rejects it with 401.
   const sessions: SessionStore = options.sessions ?? new Map();

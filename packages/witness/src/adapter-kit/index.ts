@@ -27,6 +27,7 @@
  * every guess and lists what still needs a human.
  */
 export { defineHttpAdapter, DEFAULT_MAX_PAGES, DEFAULT_PAGE_SIZE } from './define.js';
+export type { KitProbeContext } from './define.js';
 export {
   firstArrayOf,
   readPath,
@@ -38,7 +39,9 @@ export {
   createSessionReader,
   KitAuthError,
   KitRedirectError,
+  type KitAuthFailure,
   type KitGetResult,
+  type KitProbeResult,
   type SessionReaderOptions,
 } from './session.js';
 export type {
