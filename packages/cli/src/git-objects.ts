@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 
 /** Git object kinds this module writes. */
-export type GitObjectType = 'blob' | 'tree';
+type GitObjectType = 'blob' | 'tree';
 
 /** Git's mode string for a subtree entry (`git mktree` accepts `040000`, git stores `40000`). */
 const TREE_MODE = '40000';
@@ -38,7 +38,7 @@ const TREE_MODE_PADDED = '040000';
  * Returns:
  *   string: 40-char lowercase sha1 hex, byte-identical to `git hash-object`.
  */
-export function hashGitObject(type: GitObjectType, payload: Buffer): string {
+function hashGitObject(type: GitObjectType, payload: Buffer): string {
   const header = Buffer.from(`${type} ${payload.length}\0`, 'utf8');
   return createHash('sha1').update(header).update(payload).digest('hex');
 }
@@ -77,7 +77,7 @@ export function serializeTreePayload(entries: readonly { mode: string; name: str
  * Returns:
  *   number: negative, zero, or positive like a comparator.
  */
-export function compareTreeEntries(a: { mode: string; name: string }, b: { mode: string; name: string }): number {
+function compareTreeEntries(a: { mode: string; name: string }, b: { mode: string; name: string }): number {
   const left = Buffer.from(a.mode === TREE_MODE_PADDED ? `${a.name}/` : a.name, 'utf8');
   const right = Buffer.from(b.mode === TREE_MODE_PADDED ? `${b.name}/` : b.name, 'utf8');
   return Buffer.compare(left, right);
