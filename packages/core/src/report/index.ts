@@ -78,10 +78,10 @@ export interface RunExecutionSummary {
   selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
   selectedClaims: { selected: number; satisfied: number; blocking: number; blockingEntries: number; waived: number };
   /**
-   * `blocking` is the LEGACY total and stays exactly as it has always
-   * been computed (blocking claims + repository findings) — it is
-   * marked legacy in the schema docs because it includes baselined
-   * debt. `baselined` and `newlyBlocking` are the two numbers an
+   * `blocking` is the LEGACY total: it stays exactly as it has always
+   * been computed (blocking claims + repository findings) and it
+   * INCLUDES baselined debt, so it is not the number the gate line
+   * reports. Read `newlyBlocking` for that. `baselined` and `newlyBlocking` are the two numbers an
    * operator can act on: how much of the debt the adopted baseline
    * already forgave, and how much is genuinely new.
    */

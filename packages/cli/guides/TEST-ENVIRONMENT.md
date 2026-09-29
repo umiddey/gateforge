@@ -131,6 +131,26 @@ changed:
 
 For a GitHub Actions pull request, set `GITHUB_BASE_REF`. For a GitLab merge request, set `CI_MERGE_REQUEST_DIFF_BASE_SHA`.
 
+**Missing base in a merge-request pipeline?** `test-gates --scope changed` and `check --changed` now stop in seconds with exit 2 and say so. Before that, `auto` fell back to the local staged diff, which in a CI job is empty: the slice graded nothing and the job failed an hour later on debt nobody changed.
+
+## Let the CI job show progress
+
+**Rule:** Leave the progress stream on (`--progress stderr`, or `file:<path>` when the job console is not writable) and do not re-print the runner log to make the screen move.
+
+**Why:** The runner log carries the app env, the request bodies and the seed credentials, so it must stay private. Gateforge's own stream is built from witness-side facts — how many tests were registered, which test is open, its catalog title, its outcome — and never from runner output, so it can be shown without screening. A filter over secret text is not secret-free; not reading the log at all is.
+
+**Example:**
+
+```bash
+gateforge test-gates --changed --progress stderr
+# or, with a job console that cannot be written to:
+gateforge test-gates --changed --progress file:.gateforge/test-gates/progress.log
+```
+
+Under `CI=true` the default is already `stderr`; locally it is off, and a local run's output is byte-identical either way. When a test fails, its error message and a short `file:line` stack land in `.gateforge/test-gates/failures.json` behind the same credential guard — publish THAT artifact, not the runner log.
+
+**Reading the numbers:** `repository debt: N known (baselined), M new blocking` names the two numbers separately. The frozen `repositoryDebt.blocking` total still includes baselined debt; `M` is what this repository has newly failed to cover.
+
 ## Keep the runner quiet
 
 **Rule:** Keep concurrent work below the machine's CPU count. Prefer a quiet runner for witnessed tests.
