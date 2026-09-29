@@ -27,6 +27,7 @@ import { quarantineCommand } from './commands/quarantine.js';
 import { classifyCommand } from './commands/classify.js';
 import { explainCommand } from './commands/explain.js';
 import { testsCommand } from './commands/tests.js';
+import { runCommand } from './commands/run.js';
 
 import { enforcementCommand } from './commands/enforcement.js';
 import { brokerCommand } from './broker.js';
@@ -81,6 +82,10 @@ commands:
   quarantine <testKey>                  write an expiring, owner-approved flaky-test quarantine
         --owner N --approver N           (never proof, never blocking; at most 14 days; no --force;
         --reason "T" --expires D         an expired quarantine BLOCKS until renewed or deleted)
+  run [--] [test-gates flags]    the whole local proof in order: doctor preflight (strict), the optional
+                                         .gateforge/runtime.yml recipe (reset/seed/up/health), the supervised
+                                         test-gates, check --require-e2e, and the recipe's teardown — one line
+                                         per step, exit code = the first failing step's own code
   --version                              print the version
   --help                                 show this help
 
@@ -140,6 +145,8 @@ export async function main(
       return runWithExitCodes(io, () => nextCommand(io, rest));
     case 'test-gates':
       return runWithExitCodes(io, () => testGatesCommand(io, rest));
+    case 'run':
+      return runWithExitCodes(io, () => Promise.resolve(runCommand(io, rest)));
     case 'history':
       return runWithExitCodes(io, () => Promise.resolve(historyCommand(io, rest)));
     case 'pre-commit':
