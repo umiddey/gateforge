@@ -441,6 +441,62 @@ export function computeCandidateTreeSnapshot(
 }
 
 /**
+ * Tests whether a sealed candidate tree covers EXACTLY the committed
+ * content of a revision: every non-excluded committed path present
+ * with the same blob. A candidate tree also carries the workspace's
+ * untracked and gitignored bytes (that is what makes it a candidate),
+ * so equality with the commit tree is the wrong test — containment of
+ * the committed bytes is the property a re-seal actually relies on,
+ * and the re-seal then diffs the WHOLE parent tree, so any extra path
+ * is classified like any other changed path.
+ *
+ * Args:
+ *   gitDir: absolute git dir of the authority object store.
+ *   env: sanitized child-process environment.
+ *   treeId: the sealed candidate tree to test.
+ *   commitish: the revision whose content must be covered (`<sha>^{tree}`).
+ *   docsExclusions: approved documentation directories (never sealed).
+ *   cacheExclusions: exact approved Python bytecode files (never sealed).
+ *
+ * Returns:
+ *   boolean: true when every committed, non-excluded path is present
+ *   with the same mode and blob; false on any mismatch or unreadable
+ *   listing (fail closed).
+ */
+export function candidateTreeCoversCommit(
+  gitDir: string,
+  env: NodeJS.ProcessEnv,
+  treeId: string,
+  commitish: string,
+  docsExclusions: readonly string[] = [],
+  cacheExclusions: readonly string[] = [],
+): boolean {
+  const listed = (rev: string): Map<string, string> | null => {
+    const result = plumbing(gitDir, env, ['ls-tree', '-r', '-z', rev]);
+    if (result.status !== 0) return null;
+    const entries = new Map<string, string>();
+    for (const record of result.stdout.split('\0')) {
+      if (record.length === 0) continue;
+      const tab = record.indexOf('\t');
+      if (tab < 0) return null;
+      const [mode, , sha] = record.slice(0, tab).split(/\s+/);
+      const path = record.slice(tab + 1);
+      if (mode === undefined || sha === undefined) return null;
+      if (docsExclusions.some((folder) => path === folder || path.startsWith(`${folder}/`))) continue;
+      if (cacheExclusions.includes(path)) continue;
+      entries.set(path, `${mode} ${sha}`);
+    }
+    return entries;
+  };
+  const committed = listed(commitish);
+  const candidate = listed(treeId);
+  if (committed === null || candidate === null) return false;
+  for (const [path, identity] of committed) {
+    if (candidate.get(path) !== identity) return false;
+  }
+  return true;
+}
+/**
  * Builds the candidate tree and avoids the snapshot allocation for id-only callers.
  *
  * Args:
@@ -512,6 +568,30 @@ function computeCandidateTree(
     docsExclusions,
     cacheExclusions,
   );
+  const treeId = buildTreeFromEntries(gitDir, env, entries);
+  return includeEntries ? { treeId, entries } : treeId;
+}
+
+/**
+ * Assembles the root tree object from flat candidate entries, building
+ * every subtree before the parent that references it.
+ *
+ * Args:
+ *   gitDir: authority object store used to write the tree objects.
+ *   env: sanitized child-process environment.
+ *   entries: candidate entries with mode, blob sha, and repo-relative path.
+ *
+ * Returns:
+ *   string: the 40-character root tree id.
+ *
+ * Throws:
+ *   UsageError: when a tree object cannot be written (fail closed).
+ */
+function buildTreeFromEntries(
+  gitDir: string,
+  env: NodeJS.ProcessEnv,
+  entries: readonly CandidateTreeEntry[],
+): string {
   // Group by parent directory; build deepest-first so every subtree id
   // exists before its parent references it (mimics `git write-tree`).
   const filesByDir = new Map<string, CandidateTreeEntry[]>();
@@ -564,5 +644,5 @@ function computeCandidateTree(
   if (kind.status !== 0 || kind.stdout.trim() !== 'tree') {
     throw new UsageError('candidate tree ingestion: pinned object is not a tree (fail closed)');
   }
-  return includeEntries ? { treeId, entries } : treeId;
+  return treeId;
 }

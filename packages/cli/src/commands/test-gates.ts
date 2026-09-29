@@ -168,7 +168,7 @@ import { loadReceiptFor, receiptScope, tryReuseReceipt } from '../receipts.js';
 import { classifyResealChange, type ResealChangeClassification } from '../reseal.js';
 import { obligationFingerprint } from '../evaluate.js';
 import { computeEvaluationScope } from '../scope.js';
-import { computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
+import { candidateTreeCoversCommit, computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
 import { resolveProvider } from '../providers.js';
 import { engineIdentity } from '../engine-identity.js';
@@ -942,22 +942,38 @@ function verifiedCarryForwardParent(input: {
   trustedPolicyDigest: string;
   approvedPolicyDigest: string;
   executionBoundaryDigest: string;
+  /** Authority object store (the parent tree is diffed inside it). */
+  gitDir: string | null;
+  /** Owner-approved exclusions that are never inside a candidate tree. */
+  docsExclusions: readonly string[];
+  cacheExclusions: readonly string[];
 }): VerifiedCarryForwardParent | null {
   try {
     if (input.verifierKeyring === null) return null;
     const parsed = GateReceiptSchema.safeParse(readStateDocument(input.stateDir, 'receipt.json'));
     if (!parsed.success) return null;
     const receipt = parsed.data;
-    const treeResult = spawnSync('git', ['rev-parse', '--verify', `${input.baseSha}^{tree}`], {
-      cwd: input.io.cwd,
-      env: sanitizedAuthorityEnv(input.io.env),
-      encoding: 'utf8',
-    });
-    const treeId = (treeResult.stdout ?? '').trim();
+    // The sealed candidate is a WORKSPACE tree (it carries the repo's
+    // untracked and gitignored bytes too), so it is never equal to the
+    // commit's tree. What must hold is that it COVERS the merge-base
+    // commit's committed content: the parent proves those exact bytes,
+    // and everything else it sealed is diffed against this run's tree.
+    const treeId = receipt.candidateTreeId;
     if (
-      treeResult.error !== undefined ||
-      treeResult.status !== 0 ||
-      !/^[0-9a-f]{40}$/.test(treeId) ||
+      input.gitDir === null ||
+      treeId === null ||
+      !candidateTreeCoversCommit(
+        input.gitDir,
+        input.io.env,
+        treeId,
+        `${input.baseSha}^{tree}`,
+        input.docsExclusions,
+        input.cacheExclusions,
+      )
+    ) {
+      return null;
+    }
+    if (
       receipt.gitSha !== input.baseSha ||
       receipt.candidateTreeId !== treeId ||
       receipt.verifierKeyId !== input.verifierKeyring.active.keyId ||
@@ -1775,6 +1791,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
                 stateDir,
                 verifierKeyring,
                 baseSha: reSealBaseSha,
+                gitDir: freezeGitDir,
+                docsExclusions,
+                cacheExclusions,
                 trustedPolicyDigest: trustedPolicy,
                 approvedPolicyDigest,
                 executionBoundaryDigest,
@@ -2129,6 +2148,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
             stateDir,
             verifierKeyring,
             baseSha,
+            gitDir: freezeGitDir,
+            docsExclusions,
+            cacheExclusions,
             trustedPolicyDigest: trustedPolicy,
             approvedPolicyDigest,
             executionBoundaryDigest,
@@ -2155,7 +2177,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       providerChangedFiles.every((path) =>
         pipeline.contributions.every((contribution) => contribution.scannedPaths?.includes(path) === true),
       );
+    // A planned re-seal is never a carry-forward: it re-runs the
+    // affected tests and seals its own receipt. `affectedTestCount`
+    // is the CHANGED-SCOPE plan's count, which a test-only change
+    // leaves at zero — exactly the case this path would swallow.
     const carryIsSafe =
+      reSealPlan === null &&
       carryParent !== null &&
       expectedDigest !== null &&
       frozenTreeId !== null &&

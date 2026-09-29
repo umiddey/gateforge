@@ -786,6 +786,16 @@ export interface IssueGateReceiptInput {
   carriedFrom?: string;
   /** Digest of the authenticated parent receipt carried forward. */
   parentReceiptDigest?: string;
+  /** Digest of the parent receipt this run re-sealed from (test-only). */
+  resealedFrom?: string;
+  /** How many parent outcomes this run carried unchanged (re-seal). */
+  carriedTests?: number;
+  /** How many tests this run re-executed (re-seal). */
+  rerunTests?: number;
+  /** The class Gateforge itself computed for the sealed change set. */
+  changeClass?: 'test-only';
+  /** The changed paths Gateforge itself diffed between the sealed trees. */
+  changedPaths?: readonly string[];
   /** Normalized invocation. */
   invocation: string;
   /** Selection digest. */
@@ -897,6 +907,18 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
     ...(input.carriedFrom !== undefined ? { carriedFrom: input.carriedFrom } : {}),
     ...(input.parentReceiptDigest !== undefined ? { parentReceiptDigest: input.parentReceiptDigest } : {}),
     ...(scoped ? { scope: 'changed' as const, coveredObligationFingerprints: covered } : {}),
+    // Additive test-only re-seal bindings: present ONLY when this run
+    // re-sealed from a verified parent, and MAC-covered like every other
+    // field. CI recomputes all of them from the two sealed trees.
+    ...(input.resealedFrom !== undefined
+      ? {
+          resealedFrom: input.resealedFrom,
+          carriedTests: input.carriedTests,
+          rerunTests: input.rerunTests,
+          changeClass: input.changeClass,
+          ...(input.changedPaths !== undefined ? { changedPaths: [...input.changedPaths] } : {}),
+        }
+      : {}),
     // Additive scope binding (opt-in scoped supervised runs): present
     // ONLY for changed-scope seals, so every earlier receipt stays
     // byte-compatible with v1 (absence reads as `full`).
