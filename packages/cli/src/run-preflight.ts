@@ -463,28 +463,29 @@ function bytecodeSafetyCheck(cwd: string, config: GateforgeConfig, env: NodeJS.P
  *   timeoutMs: probe deadline.
  *
  * Returns:
- *   RunCheck: the target precondition line.
+ *   Promise<RunCheck>: the target precondition line.
  */
-function targetCheck(url: string, timeoutMs: number): RunCheck {
+async function targetCheck(url: string, timeoutMs: number): Promise<RunCheck> {
   const started = Date.now();
-  const probe = probeProcess(
-    process.execPath,
-    [
-      '-e',
-      `fetch(${JSON.stringify(url)},{redirect:'manual',signal:AbortSignal.timeout(${String(timeoutMs)})}).then(r=>{process.exit(r.status<500?0:1)}).catch(()=>process.exit(1))`,
-    ],
-    process.cwd(),
-    process.env,
-    timeoutMs + 1_000,
-  );
-  if (probe.code === 0) {
+  // The probe runs in THIS process (no child, no shell): a reachability
+  // check must not depend on what a spawned process is allowed to do.
+  let reachable = false;
+  let note = '';
+  try {
+    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+    reachable = response.status < 500;
+    if (!reachable) note = ` (HTTP ${String(response.status)})`;
+  } catch (error) {
+    note = ` (${(error as Error).message.split('\n')[0] ?? 'unreachable'})`;
+  }
+  if (reachable) {
     return { id: 'target', status: 'ok', detail: `target '${url}' is reachable (${String(Date.now() - started)}ms)` };
   }
   return {
     id: 'target',
     status: 'fail',
     detail:
-      `target '${url}' is not reachable (exit ${String(probe.code)}); the run would test nothing — ` +
+      `target '${url}' is not reachable${note}; the run would test nothing — ` +
       'fix: start the app (recipe services_up) and export GATEFORGE_TARGET_BASE_URL to its base URL',
   };
 }
@@ -656,7 +657,7 @@ export async function buildRunPreflight(io: Io, options: RunPreflightOptions = {
   checks.push(
     baseUrl === ''
       ? { id: 'target', status: 'ok', detail: 'no target base URL configured (GATEFORGE_TARGET_BASE_URL): nothing to probe; a supervised run starts its own app' }
-      : targetCheck(baseUrl, probeTimeoutMs),
+      : await targetCheck(baseUrl, probeTimeoutMs),
   );
   checks.push(await appHealthcheckCheck(cwd, env, recipe, probeTimeoutMs));
   checks.push(hostLoadCheck(cwd));
