@@ -161,6 +161,24 @@ gateforge test-gates --changed --scope changed --result-only
 
 For an authoritative slice, run `gateforge test-gates --changed --scope changed` without `--result-only`. `gateforge test-gates --changed` alone runs the full relevant mapped suite. Then run `gateforge check --changed --require-e2e` on the same inputs.
 
+A changed file can affect obligations that have no test at all. Those
+still block the slice, one blocker each, with the reason:
+
+```text
+changed-scope planning: obligation 'tenant.orders:persistence:read' is affected by the changed files but no declared mapping (sidecar entry or native annotation) resolves to a test the current catalog still enumerates — narrower selection is never guessed; map a test or run full scope
+```
+
+When the repository adopted its existing debt with `gateforge adopt`,
+those obligations are forgiven exactly as the full run forgives them, so
+they do not block the slice — the run says so in one line instead, and
+they stay inside the sealed covered set, so `check --require-e2e` still
+demands what the full path grades. An obligation the baseline never
+adopted still blocks, and strict E2E forgives nothing at all.
+
+```text
+1 affected obligation(s) have no declared mapping and are forgiven by the adopted baseline; they stay uncovered by this slice
+```
+
 ## Write witnessed tests for observable behavior
 
 **Rule:** Read a response body only when the app itself reads it. Use a random token in unique names. Anchor only fields the configured adapter exposes. Use one update anchor per entity. Wait for the page's own requests to finish before typing into a form that refetches data.
@@ -254,6 +272,121 @@ test, so only those tests execute. Cypress has no trustworthy way to
 filter below a spec, so the whole spec runs and the report tells you so:
 `also ran N other test(s) in the same file — not graded`. Those extra
 tests' results are dropped before grading — they are never evidence.
+
+## Fix one test without a full run
+
+When a whole-suite run fails on one test, fixing that test changes the
+candidate, so the run you just paid for no longer describes it — and the
+default answer is another whole suite. If the only thing you changed is
+test code, you can re-run just the tests the change can affect and carry
+the rest forward, if you ask for it.
+
+**Rule:** turn the path on once, then use `--changed --scope changed`.
+
+```yaml
+# .gateforge.yml
+enforcement:
+  reseal: true
+```
+
+```sh
+# Fix one failing test, then:
+gateforge test-gates --changed --scope changed
+```
+
+```text
+only test files changed: re-ran 1 test(s), kept 562 from the previous receipt
+```
+
+The path is **off by default in every gate mode**, and
+`enforcement.reseal: true` turns it on in any mode, `strict` included.
+Without the key, every run behaves exactly as before.
+
+**What may be re-run.** Gateforge never takes the change set on trust. It
+diffs the two sealed trees itself, classifies every changed path from the
+runner's own catalog and the repository import graph, and re-runs the
+affected tests witnessed, like any other run. Eligible:
+
+- **test files** — paths the runner's own enumeration lists as tests;
+- **test helpers** — files under the test roots that test files import.
+  The importers re-run too: a changed spec can export a shared fixture or
+  a `test.extend`, so every spec that imports a changed file re-runs,
+  transitively.
+
+Everything else — app code, runner config, `package.json`, lockfiles,
+seed data, `.env`, `.gateforge/**`, generated files, docs — takes the full
+run, as does a setup or dependency-stage test file (it changes every
+dependent test without an import edge) and any import the graph cannot
+resolve. A refused re-seal prints **one plain reason line** and the run
+proceeds through the unchanged path; the lines are verbatim:
+
+```text
+app file changed: backend/app/invoices.py → full run
+app file changed: e2e/support/fixtures.ts is imported by no test file, so it is not a test helper → full run
+app file changed: e2e/support/fixtures.ts imports the changed test helper e2e/support/api.ts → full run
+app file deleted: e2e/journeys/legacy.spec.ts → full run
+setup test changed: e2e/global-setup.spec.ts → full run
+setup test changed: e2e/accounts.spec.ts (the runner config declares a dependency project whose tests cannot be resolved) → full run
+unresolvable import: e2e/accounts.spec.ts → ./load-fixture → full run
+unresolvable import: e2e/support/api.ts loads a module through a computed specifier → full run
+the sealed trees could not be diffed (a1b2c3d → e4f5a6b) → full run
+the sealed trees are identical, so there is nothing to classify → full run
+the re-seal path is off (`enforcement.reseal` is not true) → full run
+the run state already retains 5 consecutive re-seals, the bound this path may chain to → full run
+```
+
+**The run that failed.** A complete whole-suite supervised run seals a
+receipt only when it is clean, so the case you care about — 563 tests,
+562 passed, one failure caused by a race *in the test* — has no receipt
+to carry from. That run leaves `.gateforge/test-gates/run-record.json`
+instead: a MAC'd, digest-bound record of the execution result, the
+attestation, the candidate tree, the inputs, the policy, the engine
+bundle, the execution boundary and the per-test outcomes, with no
+verdict. It is never accepted as a receipt by `check` or the broker. Fix
+only the failing test and run the same command; the record is the parent
+and the report says `kept 562 from the previous run`. Two rules keep that
+honest: every test that did **not** pass in the recorded run must be
+inside the affected set (the change must have touched it) and must pass
+now. Otherwise:
+
+```text
+the previous run's test playwright:chromium:e2e/checkout.spec.ts:checks out failed outside the affected set → full run
+the previous run's test playwright:chromium:e2e/legacy.spec.ts:old journey no longer exists and no changed file explains it → full run
+the previous receipt sealed a slice, not a whole-suite run → full run
+the previous receipt graded 561 obligation(s) while this candidate declares 563 → full run
+```
+
+**At most five in a row.** Each re-seal carries its parent, so the
+evidence can be walked back at most five hops before it has drifted too
+far to recompute honestly. The sixth consecutive re-seal takes the full
+run and says so; `check --require-e2e` rejects a longer chain the same
+way.
+
+**CI and the broker recompute all of it.** A re-sealed receipt is never
+believed. `check --require-e2e` and `broker commit` walk the retained
+chain with their **own** keyring and object store and redo the work: the
+parent authenticates, the two sealed trees are re-diffed, the claimed
+changed paths are compared with the real diff, the change set is
+re-classified from the retained catalog, the affected set is recomputed
+and matched against the fresh outcomes, and the parent must carry
+exactly the rest. Any mismatch is a typed `EVIDENCE_STALE` with the
+exact reason, for example:
+
+```text
+the re-sealed receipt names parent 9f2c… but the run state retains no parent receipt (fail closed)
+re-seal hop 1 claims a receipt parent but the run state retains a run-record (fail closed)
+re-seal hop 1's parent receipt does not authenticate with this keyring: … (fail closed)
+the re-sealed receipt carries 6 consecutive re-seals, past the bound of 5 — run the full suite
+this consumer has no verifier keyring or object store, so the re-seal cannot be recomputed (fail closed)
+```
+
+**Residual risk.** Tests that pass or fail depending on what ran beside
+them are the honest limit of any partial re-run: a test that shares data
+or ordering with another can pass in a partial run and fail in the full
+one, or the reverse. The re-seal never claims more than the diff proves,
+but a partial run is not a substitute for a periodic full run — keep
+running the whole suite on the merge request, and use this to shorten
+the fix loop.
 
 ## Reusable run script
 

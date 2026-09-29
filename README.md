@@ -74,6 +74,31 @@ channel once mapped `--kind observed-e2e`. Never rewrite existing
 or waivers to self-approve. `GATEFORGE.md` (written by `gateforge init`)
 carries the full loop contract.
 
+## Fix a failing test without a full run
+
+Fixing one failing test changes the candidate, so the run that found it no
+longer describes it. When only test code changed, you can re-run just the
+affected tests and carry the rest, with `enforcement.reseal: true` in
+`.gateforge.yml` (off by default in every mode, on in any mode including
+`strict` when you set it):
+
+```sh
+gateforge test-gates --changed --scope changed
+# only test files changed: re-ran 1 test(s), kept 562 from the previous receipt
+```
+
+Gateforge diffs the two sealed trees itself, classifies every changed path
+from the runner's catalog and the import graph (test files and test
+helpers only; importers of a changed file re-run too), and takes the full
+run with one plain reason line for anything else — app code, a deleted
+file, a setup-stage test, an unresolvable import. A whole-suite run that
+failed a test seals no receipt, so it leaves a MAC'd run record instead
+and the same command re-seals from it. The chain is bounded at five
+consecutive re-seals, and `check --require-e2e` and `broker commit`
+recompute the whole chain with their own key before accepting it. See
+[`Fix one test without a full run`](packages/cli/guides/TEST-ENVIRONMENT.md#fix-one-test-without-a-full-run)
+for the rules, the exact reason lines, and the residual risk.
+
 ## What the gate catches that ordinary tests can miss
 
 Mocks and passing clicks can miss bugs in the real path:
