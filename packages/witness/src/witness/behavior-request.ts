@@ -8,12 +8,20 @@
  * Bounds (fail closed, never a hashed prefix):
  * - request/response bodies are capped (over-limit blocks);
  * - the origin must be loopback (plan invariant 5, GF-10);
- * - `multipart`/`raw` encodings and signature profiles need the
- *   Phase 6/8 drivers and block here;
+ * - the `multipart` encoding still needs the Phase 6 file driver and
+ *   blocks here; `raw` bodies are supported ONLY with an engine-side
+ *   signature profile (plan 2026-09-25 Phase 1), because raw bytes are
+ *   exactly what a signature covers;
  * - resolved path values cannot smuggle segments (`/` rejected).
  */
 import { createHmac, randomUUID } from 'node:crypto';
-import { sha256Canonical, type JsonValue } from '@gate-forge/core';
+import {
+  BEHAVIOR_SIGNING_SECRET_HEADER,
+  parseBehaviorSignatureProfile,
+  sha256Canonical,
+  type BehaviorSignatureProfile,
+  type JsonValue,
+} from '@gate-forge/core';
 import { assertLoopback } from './env-attestation.js';
 import type { CredentialMaterial, FixtureLease } from './fixture-provider.js';
 
@@ -124,6 +132,64 @@ function parseBody(text: string): unknown {
   }
 }
 
+/**
+ * Stamps one engine-side signature (plan 2026-09-25 Phase 1).
+ *
+ * The secret is read from the trusted lease and never leaves this
+ * function: the request carries the digest, not the key. The digest
+ * covers the EXACT bytes that go on the wire.
+ *
+ * Args:
+ *   profile: the validated signature profile.
+ *   secret: engine-side signing secret from the actor material.
+ *   bodyText: the exact request body the driver sends.
+ *   headers: request headers to stamp into (mutated in place).
+ *   declaredTimestampMs: a lease-declared stamp (a stale-delivery case),
+ *   or null to stamp the engine clock.
+ *
+ * Returns:
+ *   string: the body text to send (always the declared body).
+ *
+ * Throws:
+ *   BehaviorDriverError: the engine's own stamp is outside the declared
+ *   tolerance — always a blocking diagnostic, never proof.
+ */
+function stampSignature(
+  profile: BehaviorSignatureProfile,
+  secret: string,
+  bodyText: string,
+  headers: Record<string, string>,
+  declaredTimestampMs: number | null,
+): string {
+  const now = Date.now();
+  // The signature covers the EXACT bytes the driver sends. A declared
+  // forgery flips one nibble of the DIGEST, never the body: the engine
+  // binds submitted bytes to the declared fixture, so an altered body
+  // would be refused as evidence rather than graded.
+  let digest = createHmac('sha256', secret).update(bodyText, 'utf8').digest('hex');
+  if (profile.forgery === 'signature') {
+    // The digest is not the secret: flipping one nibble makes it a
+    // signature that cannot verify, deterministically.
+    const last = digest.length - 1;
+    digest = `${digest.slice(0, last)}${digest[last] === '0' ? '1' : '0'}`;
+  }
+  headers[profile.header] = digest;
+  if (profile.timestampHeader !== null) {
+    const stamp = declaredTimestampMs ?? now;
+    if (profile.toleranceMs !== null && Math.abs(now - stamp) > profile.toleranceMs) {
+      throw new BehaviorDriverError(
+        `declared signature timestamp is ${String(Math.abs(now - stamp))}ms from the engine clock, ` +
+          `outside the declared tolerance of ${String(profile.toleranceMs)}ms`,
+      );
+    }
+    headers[profile.timestampHeader] = String(stamp);
+  }
+  if (profile.attemptHeader !== null) {
+    headers[profile.attemptHeader] = String(profile.attempt);
+  }
+  return bodyText;
+}
+
 export interface DriveBehaviorRequestInput {
   /** Approved request action from the bound catalog. */
   action: BehaviorRequestAction;
@@ -157,8 +223,14 @@ export interface DriveBehaviorRequestInput {
  */
 export async function driveBehaviorRequest(input: DriveBehaviorRequestInput): Promise<DrivenRequest> {
   const { action, lease } = input;
-  if (action.signatureProfile !== undefined && action.signatureProfile !== 'hmac-sha256') {
-    throw new BehaviorDriverError(`unsupported signature profile '${action.signatureProfile}'`);
+  // The declared profile names what the ENGINE does with a secret it
+  // holds; an unknown algorithm or parameter fails closed here, exactly
+  // as the config schema refuses it at parse time.
+  let signature: BehaviorSignatureProfile | null = null;
+  if (action.signatureProfile !== undefined) {
+    const parsed = parseBehaviorSignatureProfile(action.signatureProfile);
+    if (parsed.ok === false) throw new BehaviorDriverError(parsed.error);
+    signature = parsed.profile;
   }
   if (action.body.encoding === 'multipart') {
     throw new BehaviorDriverError(`'multipart' bodies need the Phase 6 file driver`);
@@ -255,19 +327,26 @@ export async function driveBehaviorRequest(input: DriveBehaviorRequestInput): Pr
       for (const [name, value] of Object.entries(material.headers)) {
         // The signing secret is consumed by the driver (never sent as a
         // header); the signature is computed over the exact raw bytes.
-        if (name === 'x-gateforge-signing-secret') continue;
+        if (name === BEHAVIOR_SIGNING_SECRET_HEADER) continue;
         headers[name] = value;
       }
-      if (action.signatureProfile === 'hmac-sha256') {
-        const secret = material.headers['x-gateforge-signing-secret'];
-        if (secret === undefined) throw new BehaviorDriverError('signing profile declared but no engine-side secret is bound');
-        headers['x-signature'] = createHmac('sha256', secret).update(bodyText, 'utf8').digest('hex');
-        headers['x-webhook-timestamp'] = String(Date.now());
-        headers['x-webhook-attempt'] = '1';
+      if (signature !== null) {
+        const secret = material.headers[BEHAVIOR_SIGNING_SECRET_HEADER];
+        if (secret === undefined || secret.length === 0) {
+          throw new BehaviorDriverError('signing profile declared but no engine-side secret is bound');
+        }
+        const declared = lease.subjects['signatureTimestampMs'];
+        bodyText = stampSignature(
+          signature,
+          secret,
+          bodyText,
+          headers,
+          typeof declared === 'number' && Number.isFinite(declared) ? declared : null,
+        );
       }
     } else {
       for (const [name, value] of Object.entries(material.headers)) {
-        if (name === 'x-gateforge-signing-secret') continue;
+        if (name === BEHAVIOR_SIGNING_SECRET_HEADER) continue;
         headers[name] = value.length > 0 ? `${value.slice(0, -1)}X` : 'X';
       }
     }

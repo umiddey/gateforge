@@ -43,7 +43,12 @@ const TIMESTAMP_SKEW_MS = REPLAY_WINDOW_MS;
 /** In-memory delivery log: event_id -> { attempt, firstSeenAt, sideEffects }. */
 const deliveryLog = new Map();
 
-/** Apply the side effect for a freshly-accepted event. */
+/**
+ * Apply the side effect for a freshly-accepted event.
+ *
+ * The state is explicit: a harness that owns its own delivery log must
+ * see the row land in ITS log, not in the process-global one.
+ */
 function applySideEffect(event, state = defaultWebhookState()) {
   const prior = state.deliveryLog.get(event.event_id);
   state.deliveryLog.set(event.event_id, {
@@ -162,7 +167,7 @@ async function handleWebhook(req, res, state = defaultWebhookState()) {
   }
 
   // 7. happy path
-  applySideEffect(event);
+  applySideEffect(event, state);
   send(res, 200, { ok: true, deduplicated: false, eventId: event.event_id });
 }
 
@@ -221,6 +226,9 @@ function start(port, state = defaultWebhookState()) {
     });
   });
 }
+
+/** The real receiver, for harnesses that own their own state. */
+export { start as startWebhookServer };
 
 /** Parse CLI args. */
 function parseCli() {

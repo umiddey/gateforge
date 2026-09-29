@@ -611,6 +611,17 @@ else):
 | `http:effect-verified`, `http:read-result-verified` | AVAILABLE (behavior-case channel) — graded across the approved required cases with witness-issued `behavior.case` records; needs a compiled `behaviorPolicy` requirement set |
 | `auth:*`, `validation:*`, `task:*`, `webhook:*`, `workflow:*` | AVAILABLE (behavior-case channel) — same required-case aggregation over engine-controlled requests with independent state scopes. A repository that declares no case for the obligation stays blocking `missing`: the grader never falls back to transport evidence |
 
+
+A behavior case may declare a `signatureProfile` on its `request`
+action: an algorithm plus bounded `;key=value` parameters
+(`header`, `timestampHeader`, `toleranceMs`, `attemptHeader`,
+`attempt`, `forgery`). One parser serves both the config schema and
+the witness driver, so `hmac-sha256;forgery=signature` is understood
+identically at parse time and at run time and an unknown parameter is
+refused rather than defaulted. The signing secret is read only from
+the trusted lease; the signature always covers the exact bytes on the
+wire.
+
 Unsupported proof stays blocking. Nothing silently replaces browser proof
 with HTTP status proof.
 `gateforge init` includes the available transport-only contracts for consumed

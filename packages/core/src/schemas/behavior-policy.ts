@@ -9,6 +9,7 @@
  */
 import { z } from 'zod';
 import { ContractNameSchema, SchemaVersionField } from './common.js';
+import { parseBehaviorSignatureProfile } from './signature-profile.js';
 import { FingerprintHexSchema } from './baseline.js';
 
 /** Concrete HTTP methods a case may execute. `ANY` is never executable. */
@@ -618,6 +619,15 @@ export const PrimitiveActionSchema = z.discriminatedUnion('kind', [
       const error = pathTemplateError(action.pathTemplate);
       if (error !== null) {
         ctx.addIssue({ code: 'custom', path: ['pathTemplate'], message: error });
+      }
+      // A declared signature profile is validated HERE, at config time,
+      // with the same parser the witness driver uses at run time: a typo
+      // is a config error (exit 2), never a silent default.
+      if (action.signatureProfile !== undefined) {
+        const parsed = parseBehaviorSignatureProfile(action.signatureProfile);
+        if (parsed.ok === false) {
+          ctx.addIssue({ code: 'custom', path: ['signatureProfile'], message: parsed.error });
+        }
       }
     }),
   z
