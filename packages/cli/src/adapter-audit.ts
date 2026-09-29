@@ -196,9 +196,12 @@ export function pathIsCompiledGet(adapterPath: string, routes: readonly HttpRout
 
 /**
  * The GET routes that could serve one business resource: those the
- * engine LINKED to it, plus (clearly separated) those whose path names
+ * engine LINKED to it, plus (clearly separated) those whose path NAMES
  * it. Linkage is evidence; a name match is a candidate the scaffolder
- * marks as a guess.
+ * marks as a guess. Naming is matched per whole path segment, with `_`
+ * and `-` treated as the same separator, so a table `work_reports`
+ * still finds `/api/v1/work-reports` — but `tasks` never matches
+ * `/api/v1/tasks-archive` or `/api/v1/subtasks`.
  *
  * Args:
  *   resource: the business resource.
@@ -213,14 +216,27 @@ export function routesForResource(
 ): { linked: HttpRouteCandidate[]; candidates: HttpRouteCandidate[] } {
   const gets = routes.filter((route) => route.method === 'GET');
   const linked = gets.filter((route) => route.linkedResourceName === resource.name);
-  const name = resource.name.toLowerCase();
-  const candidates = gets.filter(
-    (route) =>
-      route.linkedResourceName !== resource.name &&
-      (route.canonicalPath.toLowerCase().includes(`/${name}`) ||
-        route.canonicalPath.toLowerCase().endsWith(name)),
-  );
+  const name = nameSegment(resource.name);
+  const candidates = gets.filter((route) => {
+    if (route.linkedResourceName === resource.name) return false;
+    return route.canonicalPath
+      .split('/')
+      .some((segment) => nameSegment(segment) === name);
+  });
   return { linked, candidates };
+}
+
+/**
+ * Normalizes one name or path segment for whole-segment name matching.
+ *
+ * Args:
+ *   value: a resource name or one path segment.
+ *
+ * Returns:
+ *   string: lowercase, with every run of `_`/`-` collapsed to `-`.
+ */
+function nameSegment(value: string): string {
+  return value.toLowerCase().replace(/[-_]+/g, '-');
 }
 
 /**
