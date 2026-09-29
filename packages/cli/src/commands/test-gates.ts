@@ -1666,9 +1666,18 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           options.testSelectors,
           plannedRows.map((row) => ({ logicalKey: row.planned.logicalKey })),
         );
+  // The selected logical keys, hoisted for the grading step below: a
+  // named run grades exactly the claims of the tests it ran.
+  const namedTestIds: string[] | null =
+    namedSelections === null
+      ? null
+      : [
+          ...new Set(
+            namedSelections.flatMap((entry) => [...entry.logicalKeys]),
+          ),
+        ].sort();
   if (namedSelections !== null) {
-    const named = new Set<string>();
-    for (const entry of namedSelections) for (const key of entry.logicalKeys) named.add(key);
+    const named = new Set(namedTestIds ?? []);
     plannedRows = plannedRows.filter((row) => named.has(row.planned.logicalKey));
     // A test this run did not execute can never have produced evidence:
     // its declarations leave the grading inventory together with its
@@ -1842,7 +1851,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       engine: engineIdentity(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext: {
-        scope: options.scope ?? 'full',
+        scope: namedTestIds !== null ? ('named' as const) : (options.scope ?? 'full'),
         candidateTreeId: frozenTreeId,
         inputDigest: expectedDigest,
         evidenceState: 'receipt-reused',
@@ -2082,7 +2091,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       engine: engineIdentity(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext: {
-        scope: options.scope ?? 'full',
+        scope: namedTestIds !== null ? ('named' as const) : (options.scope ?? 'full'),
         candidateTreeId: frozenTreeId,
         inputDigest: expectedDigest,
         evidenceState: snapshotUnavailable ? 'snapshot-unavailable' : 'not-executed',
@@ -2704,12 +2713,20 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     behaviorAuthorityProfileDigest:
       pipeline.behaviorCatalog === null ? null : engineBundleDigestOf(VERSION, trustedPolicy),
     obligations: pipeline.policy.obligations,
+    // Named grading (plan 20260928_2315): a hand-picked selection never
+    // observed the rest of the repository, so repository-wide findings
+    // (policy, mapping, inventory, expired quarantine) and the scoped
+    // planning gaps stay in the report but block nothing here. What
+    // still blocks is everything about THIS run: supervision, lifecycle,
+    // intent and the witnessed channel, plus (inside the evaluator) any
+    // entry naming a graded obligation and every evidence-context
+    // finding. A named run never forgives a broken run.
     blocking: [
-      ...repositoryBlocking,
+      ...(namedTestIds === null ? repositoryBlocking : []),
       // Scoped planning gaps (Goal 2): affected obligations no declared,
       // catalog-live claim covers. Fail closed — never diff-scoped away,
       // never waived, and they alone prevent the receipt.
-      ...scopeBlockers,
+      ...(namedTestIds === null ? scopeBlockers : []),
       ...supervisionBlocking(supervisionFindings),
       ...lifecycleBlocking,
       ...intentBlocking,
@@ -2727,6 +2744,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // obligations are exactly the covered set the receipt seals. Full
     // mode stays unscoped (changedFiles: null), byte-identical.
     changedFiles: scopeChangedFiles,
+    // Named grading: the graded set is the claims of the selected
+    // tests. Absent for every other run, which then grades the whole
+    // repository exactly as before.
+    ...(namedTestIds === null ? {} : { namedTestIds }),
     claimInventory,
     ...(excludedTestIds.length === 0 ? {} : { excludedTestIds }),
     witnessVerifierKey,
@@ -2780,15 +2801,20 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         }
       : {}),
   });
+  // The repository evaluation deliberately drops the named scope: it is
+  // the whole-repository debt a named run reports but does not grade
+  // (and never blocks on). Every other run already grades both halves
+  // identically, so this is a no-op outside a named run.
   const repositoryEvaluation = evaluateRun({
     ...evaluationInput,
+    namedTestIds: null,
     blocking: repositoryBlocking,
     changedFiles: null,
   });
   const executionSummary = runExecutionSummaryOf({
     executionResult: sealed.result,
     mode: 'executed',
-    scope: options.scope === 'changed' ? 'changed' : 'full',
+    scope: namedTestIds !== null ? 'named' : options.scope === 'changed' ? 'changed' : 'full',
     selectedVerdicts: evaluated.verdicts,
     selectedBlocking: evaluated.blocking,
     repositoryVerdicts: repositoryEvaluation.verdicts,
@@ -2807,7 +2833,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     });
   }
   const diagnosticContext = {
-    scope: options.scope,
+    scope: namedTestIds !== null ? ('named' as const) : options.scope,
     candidateTreeId: frozenTreeId,
     inputDigest: expectedDigest,
     evidenceState: snapshotUnavailable
@@ -2930,7 +2956,24 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // be evaluated honestly has nothing to report.
   const gateCode = strictness.exitCode;
   const softened = strictness.exitCode !== strictness.strictExitCode;
-  if (gateCode !== 0 || !sealed.result.complete || changedInputs || snapshotUnavailable || expectedDigest === null) {
+  if (namedTestIds !== null) {
+    // A named run is a REPORT, never a gate. It exits 0 only when the
+    // selection itself is honest and complete: every selected test
+    // passed and every obligation its claims declare is satisfied (or
+    // waived by the owner), with no run-execution finding, no
+    // incomplete execution, no changed inputs and a usable snapshot.
+    // Anything else is exit 1. It never exits 2 here: an unresolvable
+    // selector already threw a UsageError before anything ran, and it
+    // never clears a receipt, because result-only never seals one.
+    const selection =
+      executionSummary.selectedTests.passed === executionSummary.selectedTests.selected &&
+      executionSummary.selectedTests.selected > 0;
+    const claimsProven =
+      evaluated.blocking.length === 0 &&
+      evaluated.verdicts.every((verdict) => verdict.verdict === 'satisfied' || verdict.verdict === 'waived');
+    const runHonest = sealed.result.complete && !changedInputs && !snapshotUnavailable && expectedDigest !== null;
+    if (!selection || !claimsProven || !runHonest) return 1;
+  } else if (gateCode !== 0 || !sealed.result.complete || changedInputs || snapshotUnavailable || expectedDigest === null) {
     if (strictness.strictExitCode !== 0 && !options.resultOnly && !softened) clearGateReceipt(stateDir);
     if (softened) {
       writeLine(
@@ -2971,7 +3014,15 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     return 1;
   }
   if (options.resultOnly) {
+    // A named run always lands here: it reported its selection and
+    // sealed nothing.
     return 0;
+  }
+  if (expectedDigest === null) {
+    // Unreachable: the gate path above already returned 1 for an
+    // unusable snapshot. Kept so the seal below never sees a null
+    // input digest.
+    return 1;
   }
   if (witnessVerifierKey === undefined) {
     // No verifier key: the receipt cannot be signed by the same
@@ -3206,7 +3257,7 @@ function countUnclaimedObligations(stateDir: string, obligations: readonly { id:
 function runExecutionSummaryOf(input: {
   executionResult: ExecutionResult;
   mode: 'executed' | 'reused';
-  scope: 'full' | 'changed';
+  scope: 'full' | 'changed' | 'named';
   selectedVerdicts: readonly ObligationVerdict[];
   selectedBlocking: readonly BlockingEntry[];
   repositoryVerdicts: readonly ObligationVerdict[];

@@ -338,12 +338,13 @@ function installRepo(
   config: string,
   files: Record<string, string>,
   testMap: string,
+  policies: string = POLICIES_YML,
 ): void {
   void runner;
   repo.writeFiles({
     '.gateforge.yml': config,
     '.gateforge/fixture-detector.mjs': DETECTOR,
-    '.gateforge/policies.yml': POLICIES_YML,
+    '.gateforge/policies.yml': policies,
     '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,
     '.gateforge/adapters/tenant.accounts.mjs': ADAPTER,
     '.gateforge/baselines/obligations.json': `${JSON.stringify({ schemaVersion: 1, fingerprints: [] }, null, 2)}\n`,
@@ -1053,10 +1054,12 @@ interface NamedReport {
   selectors?: Array<{ selector: string; logicalKeys: string[] }>;
   blocking?: Array<{ cause: string; detail: string }>;
   execution?: {
+    scope?: string;
     testsPerformedThisInvocation?: number;
     selectedTests?: { selected: number; passed: number; failed?: number };
-    selectedClaims?: { blocking: number };
+    selectedClaims?: { selected: number; satisfied: number; blocking: number };
   };
+  diagnosticContext?: { scope?: string };
   summary: { blocking: number };
   verdicts: Array<{ obligationId: string; verdict: string }>;
 }
@@ -1397,4 +1400,94 @@ describe.skipIf(CYPRESS_BIN === '')('cypress multi-test project through the real
       expect(checked.stdout, why).toContain('receipt-verified');
     });
   }, 900_000);
+});
+
+/**
+ * A policy that requires one more operation than any fixture test
+ * declares: the extra obligation is real, unclaimed, and stays missing
+ * in every run of this repository.
+ */
+const POLICIES_WITH_UNCLAIMED_READ = `schemaVersion: 1
+policies:
+  - id: crud
+    when: {}
+    require: [persistence:create, persistence:read]
+`;
+
+describe('a named run grades only its selection', () => {
+  it('exits 0 on a green selection while an unrelated obligation stays missing', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'vitest',
+        gateforgeYml('vitest'),
+        {
+          'app.cjs': APP,
+          'vitest.config.mjs': VITEST_CONFIG,
+          'tests/green.test.mjs': VITEST_GREEN,
+          'tests/red.test.mjs': VITEST_RED,
+        },
+        testMapYmlMany('vitest', [
+          { file: 'tests/green.test.mjs', titlePath: ['creates account through the session proxy'] },
+          { file: 'tests/red.test.mjs', titlePath: ['creates account outside the session proxy'] },
+        ]),
+        POLICIES_WITH_UNCLAIMED_READ,
+      );
+      linkVitestModules(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'named grading fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const greenKey = 'tests/green.test.mjs#creates account through the session proxy';
+      const named = await runCli(
+        repo,
+        ['test-gates', '--test', greenKey, '--result-only', '--format', 'json'],
+        env,
+      );
+      const why = `${runnerFailures(repo)}named run stdout:\n${named.stdout}\nstderr:\n${named.stderr}`;
+      // The selection is honest and green, and it is a REPORT: it exits
+      // 0 even though the repository still owes an unclaimed read.
+      expect(named.code, why).toBe(0);
+      const report = JSON.parse(named.stdout) as NamedReport;
+      // Only the selected test's claims are graded — the unrelated
+      // obligation is reported as repository debt, never as a verdict.
+      expect(report.verdicts.map((entry) => entry.obligationId), why).toEqual([CREATE_CLAIM]);
+      expect(report.summary.blocking, why).toBe(0);
+      expect(report.execution?.scope, why).toBe('named');
+      expect(report.diagnosticContext?.scope, why).toBe('named');
+      expect(report.execution?.selectedClaims, why).toMatchObject({ selected: 1, satisfied: 1, blocking: 0 });
+
+      // The text report says the same thing out loud, in both halves.
+      const text = await runCli(repo, ['test-gates', '--test', greenKey, '--result-only'], env);
+      const textWhy = `named text stdout:\n${text.stdout}\nstderr:\n${text.stderr}`;
+      expect(text.code, textWhy).toBe(0);
+      expect(text.stdout, textWhy).toContain('execution: named scope');
+      expect(text.stdout, textWhy).toContain('diagnostic context: scope=named');
+      expect(text.stdout, textWhy).toMatch(/not graded in a named run: 1 obligation/);
+      expect(text.stdout, textWhy).toContain('2 obligations');
+
+      // The failing selection is still honest: exit 1, with its OWN
+      // claim unproven, and the ungraded read never joins the verdict.
+      const bypassKey = 'tests/red.test.mjs#creates account outside the session proxy';
+      const failing = await runCli(
+        repo,
+        ['test-gates', '--test', bypassKey, '--result-only', '--format', 'json'],
+        env,
+      );
+      const failingWhy = `${runnerFailures(repo)}named failing run stdout:\n${failing.stdout}\nstderr:\n${failing.stderr}`;
+      expect(failing.code, failingWhy).toBe(1);
+      const failingReport = JSON.parse(failing.stdout) as NamedReport;
+      expect(failingReport.verdicts.map((entry) => entry.obligationId), failingWhy).toEqual([CREATE_CLAIM]);
+      expect(
+        failingReport.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict,
+        failingWhy,
+      ).not.toBe('satisfied');
+      // A named run seals nothing, so the repository is untouched.
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json')), failingWhy).toBe(false);
+    });
+  }, 600_000);
 });

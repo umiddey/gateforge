@@ -165,6 +165,22 @@ export interface EvaluateInput {
     changedInputs?: boolean;
   };
   /**
+   * Named-run selection (plan 20260928_2315): the framework test ids a
+   * hand-picked `--test` run executed. When present (non-null), the
+   * evaluation grades ONLY the obligations those tests currently
+   * declare — an obligation no selected test claims was never observed
+   * by this run, so it is reported in the repository debt and blocks
+   * nothing here. Repository-wide findings (policy, mapping,
+   * inventory, the coverage policy) are findings about the REPOSITORY,
+   * not about the selection, so they stay out of a named run's blocking
+   * set. Evidence-context findings (unauthenticated evidence, changed
+   * inputs, the strict preflight) and every caller-projected
+   * run-execution finding (supervision, lifecycle, intent) still
+   * block: a hand-picked selection never forgives a broken run. Null or
+   * absent grades the whole repository exactly as before.
+   */
+  namedTestIds?: readonly string[] | null;
+  /**
    * Adoption-baseline forgiveness (phase 8 C): the fingerprint set of
    * the ADOPTED baseline. Deliberately caller-provided, never loaded
    * here: `check` honors a baseline only when its sibling adoption
@@ -233,6 +249,13 @@ export interface EvaluateResult {
   waiverCounts: WaiverCounts;
   /** Whether any blocking verdict or blocking entry exists. */
   blockingRun: boolean;
+  /**
+   * Obligations this evaluation deliberately did not grade because a
+   * named run observed only its own selection (0 for every other run).
+   * Descriptive: it says how much of the repository a hand-picked
+   * selection said nothing about.
+   */
+  notGradedObligations: number;
   /**
    * Adoption-baseline forgiveness counts (phase 8 C) — kept LOUD: the
    * report prints them on every run so baselined debt is never silently
@@ -519,7 +542,34 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   // incomplete context blocks HTTP satisfaction in the core resolver.
   const httpRoutes = httpRoutesView(graph);
 
-  const scoped = scopeObligations(input);
+  // Named-run grading: the graded set is exactly the obligations the
+  // SELECTED tests currently declare (after the same stale-row and
+  // quarantine filtering every other claim goes through). Derived here
+  // rather than passed in, so it can never disagree with the claims
+  // the verdicts are actually evaluated against.
+  // `null` and absent both mean "grades the whole repository"; only a
+  // present array narrows the graded set (an empty one is legal and
+  // grades nothing).
+  const namedTestIds = input.namedTestIds == null ? null : new Set(input.namedTestIds);
+  const namedObligationIds =
+    namedTestIds === null
+      ? null
+      : new Set(
+          effectiveClaims
+            .filter(
+              (claim) =>
+                namedTestIds.has(
+                  String((claim as { testId?: unknown }).testId ?? ''),
+                ),
+            )
+            .map((claim) => (claim as { obligationId?: unknown }).obligationId)
+            .filter((obligationId): obligationId is string => typeof obligationId === 'string'),
+        );
+  const allScoped = scopeObligations(input);
+  const scoped =
+    namedObligationIds === null
+      ? allScoped
+      : allScoped.filter((obligation) => namedObligationIds.has(obligation.id));
   // Trusted behavior context (plan 2026-09-19 §4.7): the compiled
   // catalog + requirements travel from the controller-bound pipeline
   // output — never CLI configuration, never record payloads. Absent
@@ -556,10 +606,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     });
   }
   const sources = sourcesByResourceId(graph, input.behaviorCatalog);
-  const scopedBlocking =
-    input.changedFiles === null || input.changedFiles === undefined
-      ? [...input.blocking]
-      : scopeBlocking(input.blocking, new Set(input.changedFiles), sources);
+  const scopedBlocking = namedScopeBlocking(input, scoped, namedObligationIds);
   // Evidence-context blockers are never diff-scoped away and never
   // waived: a changed-input or unauthenticated-evidence run must stay
   // visible even when every obligation is waived or unchanged.
@@ -572,7 +619,13 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   const blocking = [
     ...scopedBlocking,
     ...authorized.evidenceBlocking,
-    ...coveragePolicyBlocking(config, graph, input.mappedCoverage ?? []),
+    // The coverage policy grades the whole inventory against the whole
+    // mapping: a repository-wide finding, not a fact about a named
+    // selection. It stays in the report's repository debt and blocks
+    // only the runs that claim the repository.
+    ...(namedTestIds === null
+      ? coveragePolicyBlocking(config, graph, input.mappedCoverage ?? [])
+      : []),
     ...strictBlocking,
   ];
   // Strict E2E mode (plan §3.3): waived obligations are not proof.
@@ -592,6 +645,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     verdicts: gradedVerdicts,
     blocking: applied.blocking,
     baselined: applied.baselined,
+    notGradedObligations: input.obligations.length - scoped.length,
     waiverCounts: {
       total: waiverLoad.waivers.length + waiverLoad.staleOwner.length + waiverLoad.expired.length,
       active: waiverLoad.waivers.length,
@@ -688,6 +742,41 @@ function applyBaseline(
       classificationBlocked: classificationProvided ? waivedClassifications.size : undefined,
     },
   };
+}
+
+/**
+ * Projects the caller-supplied blocking entries onto the graded set:
+ * diff scope for an ordinary run, and for a named run the selection
+ * rule — only an entry that names a graded obligation survives. The
+ * caller keeps responsibility for the run-execution entries
+ * (supervision, lifecycle, intent, the witness channel), which a named
+ * run projects itself and therefore never reaches this filter.
+ *
+ * Args:
+ *   input: the evaluation input (its blocking entries and diff scope).
+ *   graded: the obligations this evaluation actually graded.
+ *   namedObligationIds: the named selection's obligation ids, or null
+ *     when the run grades the whole repository.
+ *
+ * Returns:
+ *   BlockingEntry[]: the entries that block this run.
+ */
+function namedScopeBlocking(
+  input: EvaluateInput,
+  graded: readonly Obligation[],
+  namedObligationIds: ReadonlySet<string> | null,
+): BlockingEntry[] {
+  if (namedObligationIds === null) {
+    return input.changedFiles === null || input.changedFiles === undefined
+      ? [...input.blocking]
+      : scopeBlocking(input.blocking, new Set(input.changedFiles), sourcesByResourceId(input.graph, input.behaviorCatalog));
+  }
+  const gradedResources = new Set(graded.map((obligation) => obligation.resourceId));
+  return input.blocking.filter(
+    (entry) =>
+      (entry.name !== null && entry.name !== undefined && namedObligationIds.has(entry.name)) ||
+      (entry.resourceId !== null && entry.resourceId !== undefined && gradedResources.has(entry.resourceId)),
+  );
 }
 
 /** Diff-scopes the obligation list itself (check --changed). */

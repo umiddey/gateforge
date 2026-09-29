@@ -67,7 +67,12 @@ export interface LifecycleDerivationReportEntry extends LifecycleDerivation {
 
 /** Measured work and whole-repository debt; descriptive only, never authorization. */
 export interface RunExecutionSummary {
-  scope: 'full' | 'changed';
+  /**
+   * The slice this run graded: `full`, the `changed`-scope slice, or
+   * `named`, the hand-picked `--test` selection — which is never
+   * authoritative and never grades anything outside its selection.
+   */
+  scope: 'full' | 'changed' | 'named';
   mode: 'executed' | 'reused';
   testsPerformedThisInvocation: number;
   selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
@@ -77,7 +82,7 @@ export interface RunExecutionSummary {
 
 /** Safe identifiers that let operators compare two gate reports. */
 export interface DiagnosticContext {
-  scope: 'full' | 'changed';
+  scope: 'full' | 'changed' | 'named';
   candidateTreeId: string | null;
   inputDigest: string | null;
   evidenceState: string;
@@ -553,6 +558,15 @@ function textReport(
       `repository debt: ${execution.repositoryDebt.blocking} blocking / ${execution.repositoryDebt.obligations} obligations ` +
         `(${execution.repositoryDebt.unclaimed} unclaimed; ${execution.repositoryDebt.blockingEntries} blocking entries)`,
     );
+    // A named run grades ONLY the selection it executed. Say the
+    // remainder out loud, so a green named run is never misread as a
+    // whole-repository verdict.
+    if (execution.scope === 'named') {
+      lines.push(
+        `not graded in a named run: ${Math.max(0, execution.repositoryDebt.obligations - execution.selectedClaims.selected)} obligation(s) — ` +
+          'a hand-picked selection never observed them; run the full suite for repository-wide verdicts',
+      );
+    }
   }
   if (options.diagnosticContext !== undefined) {
     const context = options.diagnosticContext;
