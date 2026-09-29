@@ -462,6 +462,11 @@ function supportFileOf(cwd: string): string | null {
 /**
  * Writes the generated config and support file for one run.
  *
+ * The generated config chains the project's own settings and pins the
+ * screenshot, video and download folders into `runDir`: Cypress writes
+ * them on any failing test, and inside the candidate they would enter
+ * the tree the evidence run is supposed to certify.
+ *
  * @param runDir the run-scoped Cypress directory.
  * @param projectConfigPath the project's chainable config, or null.
  * @param projectSupportFile the project's own support file to chain first.
@@ -489,6 +494,16 @@ function writeGeneratedConfig(
     `const base = ${projectConfigPath === null ? '{}' : `require(${JSON.stringify(projectConfigPath)})`};`,
     'const e2e = Object.assign({}, base.e2e || {});',
     `e2e.supportFile = ${JSON.stringify(supportFile)};`,
+    "// A failing Cypress run writes screenshots, videos and downloads",
+    '// under the project by default. Those files would enter the',
+    "// candidate's own tree and the fail-closed drift gate would then",
+    '// report the run changing its own inputs instead of the test',
+    '// failure. The run state directory is outside the candidate, so',
+    '// the three artifact folders are pinned there for this run and',
+    '// the project\'s other settings are chained unchanged.',
+    `e2e.screenshotsFolder = ${JSON.stringify(join(runDir, 'screenshots'))};`,
+    `e2e.videosFolder = ${JSON.stringify(join(runDir, 'videos'))};`,
+    `e2e.downloadsFolder = ${JSON.stringify(join(runDir, 'downloads'))};`,
     'const baseSetup = e2e.setupNodeEvents;',
     '// setupNodeEvents lives under the testing type: that is where',
     "// Cypress looks for it (config[testingType].setupNodeEvents).",

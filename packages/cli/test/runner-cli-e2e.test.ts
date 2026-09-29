@@ -763,6 +763,22 @@ const CYPRESS_RED = `describe('accounts', () => {
   });
 });
 `;
+/**
+ * The FAILING Cypress spec: a real `cy.request` at the app origin
+ * whose own assertion is wrong. The request crosses the session
+ * proxy, but the test fails — so the gate must report the test
+ * failure, and nothing the run leaves behind may be mistaken for it.
+ */
+const CYPRESS_FAILING = `describe('accounts', () => {
+  it('asserts the wrong status and fails', () => {
+    cy.request({
+      method: 'POST',
+      url: Cypress.env('appBaseUrl') + '/api/accounts',
+      body: { first_name: 'Alan', last_name: 'Turing' },
+    }).its('status').should('eq', 418);
+  });
+});
+`;
 
 /**
  * The project's own Cypress config — an ordinary CommonJS config with
@@ -866,6 +882,48 @@ describe.skipIf(CYPRESS_BIN === '')('cypress through the real CLI', () => {
       const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
       expect(checked.code).toBe(1);
       expect(checked.stdout).not.toContain('"evidenceState":"receipt-verified"');
+    });
+  }, 900_000);
+});
+
+describe.skipIf(CYPRESS_BIN === '')('cypress failure reporting through the real CLI', () => {
+  it('reports the failing test itself and leaves no artifacts in the candidate', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'cypress',
+        gateforgeYml('cypress'),
+        {
+          'app.cjs': APP,
+          'cypress.config.cjs': CYPRESS_CONFIG,
+          'cypress/e2e/failing.cy.js': CYPRESS_FAILING,
+        },
+        testMapYml('cypress', 'cypress/e2e/failing.cy.js', ['accounts', 'asserts the wrong status and fails']),
+      );
+      linkCypressCli(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'cypress failing fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      const why = `test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`;
+      expect(gated.code, why).toBe(1);
+      // A failing Cypress test writes screenshots and videos by
+      // default. If those land in the candidate, the drift gate
+      // reports the run changing its own inputs and hides the real
+      // failure behind it.
+      expect(gated.stdout).not.toContain('changed its own source or configuration inputs');
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.summary.blocking, why).toBeGreaterThan(0);
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict).not.toBe('satisfied');
+      expect(existsSync(repo.path('cypress/screenshots'))).toBe(false);
+      expect(existsSync(repo.path('cypress/videos'))).toBe(false);
+      expect(existsSync(repo.path('cypress/downloads'))).toBe(false);
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
     });
   }, 900_000);
 });
