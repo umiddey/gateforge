@@ -17,6 +17,7 @@
 ### Changed
 
 - Reports gained additive fields only, and only when they apply: `strictness` (non-strict modes) and `quarantine` (non-empty population). SARIF output stays machine-parseable JSON.
+- `gateforge adapters scaffold` generates adapters that match a hand-written one far more often: a per-parent sub-collection (`/contracts/{contractId}/invoices`) is never sold as the complete collection (and never as a by-id read), route naming matches across `_`/`-` per whole path segment, `deletion` follows the graph's own soft-delete signal (a soft-delete-looking column raises a "needs you" line instead of a silent hard delete), and `fields` projects every column the graph declares for the table — the SQLAlchemy detector now reports `columnNames` — minus the primary key and credential-shaped columns, which the file header names.
 
 ## 0.7.1
 
