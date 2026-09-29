@@ -443,6 +443,100 @@ test('creates account outside the session proxy', async () => {
 });
 `;
 
+/**
+ * The MULTI-TEST vitest suite: TWO `test()` cases in ONE file, each
+ * driving the observed route through its own per-test session proxy.
+ * A real project never has one test per file, so the supervised
+ * channel has to hold for every test the file declares.
+ */
+const VITEST_MULTI_FIRST = `import { test, expect } from 'vitest';
+import request from 'supertest';
+import { gateforgeSupertest } from '@gate-forge/pack-playwright/vitest';
+
+const gate = gateforgeSupertest(request);
+
+test('creates account through the session proxy', async () => {
+  const app = process.env.GATEFORGE_APP_BASE_URL;
+  const response = await (await gate(app)).post('/api/accounts').send({ first_name: 'Grace', last_name: 'Hopper' });
+  expect(response.status).toBe(201);
+});
+
+test('creates a second account in the same file', async () => {
+  const app = process.env.GATEFORGE_APP_BASE_URL;
+  const response = await (await gate(app)).post('/api/accounts').send({ first_name: 'Ada', last_name: 'Lovelace' });
+  expect(response.status).toBe(201);
+});
+`;
+
+/** The SECOND vitest file of the multi-test project (one more test). */
+const VITEST_MULTI_SECOND = `import { test, expect } from 'vitest';
+import request from 'supertest';
+import { gateforgeSupertest } from '@gate-forge/pack-playwright/vitest';
+
+const gate = gateforgeSupertest(request);
+
+test('creates an account from the second file', async () => {
+  const app = process.env.GATEFORGE_APP_BASE_URL;
+  const response = await (await gate(app)).post('/api/accounts').send({ first_name: 'Alan', last_name: 'Turing' });
+  expect(response.status).toBe(201);
+});
+`;
+
+/** The multi-test pytest module: TWO tests in ONE file. */
+const PYTEST_MULTI_FIRST = `def test_creates_account(gateforge_http):
+    response = gateforge_http.post(
+        "/api/accounts", json={"first_name": "Grace", "last_name": "Hopper"}
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_creates_a_second_account(gateforge_http):
+    response = gateforge_http.post(
+        "/api/accounts", json={"first_name": "Ada", "last_name": "Lovelace"}
+    )
+    assert response.status_code == 201, response.text
+`;
+
+/** The SECOND pytest module of the multi-test project. */
+const PYTEST_MULTI_SECOND = `def test_creates_an_account_from_the_second_file(gateforge_http):
+    response = gateforge_http.post(
+        "/api/accounts", json={"first_name": "Alan", "last_name": "Turing"}
+    )
+    assert response.status_code == 201, response.text
+`;
+
+/** The multi-test Cypress spec: TWO `it` cases in ONE spec. */
+const CYPRESS_MULTI_FIRST = `describe('accounts', () => {
+  it('creates account through the session proxy', () => {
+    cy.request({
+      method: 'POST',
+      url: Cypress.env('appBaseUrl') + '/api/accounts',
+      body: { first_name: 'Grace', last_name: 'Hopper' },
+    }).its('status').should('eq', 201);
+  });
+
+  it('creates a second account in the same spec', () => {
+    cy.request({
+      method: 'POST',
+      url: Cypress.env('appBaseUrl') + '/api/accounts',
+      body: { first_name: 'Ada', last_name: 'Lovelace' },
+    }).its('status').should('eq', 201);
+  });
+});
+`;
+
+/** The SECOND Cypress spec of the multi-test project. */
+const CYPRESS_MULTI_SECOND = `describe('accounts', () => {
+  it('creates an account from the second spec', () => {
+    cy.request({
+      method: 'POST',
+      url: Cypress.env('appBaseUrl') + '/api/accounts',
+      body: { first_name: 'Alan', last_name: 'Turing' },
+    }).its('status').should('eq', 201);
+  });
+});
+`;
+
 /** The vitest config the runner reads (never the consumer's own defaults). */
 const VITEST_CONFIG = `import { defineConfig } from 'vitest/config';
 export default defineConfig({
@@ -1010,4 +1104,146 @@ describe('witnessed single test through the real CLI', () => {
       expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
     });
   }, 600_000);
+});
+
+describe('vitest multi-test project through the real CLI', () => {
+  it('witnesses every test of a two-test file and a second file', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'vitest',
+        gateforgeYml('vitest'),
+        {
+          'app.cjs': APP,
+          'vitest.config.mjs': VITEST_CONFIG,
+          'tests/first.test.mjs': VITEST_MULTI_FIRST,
+          'tests/second.test.mjs': VITEST_MULTI_SECOND,
+        },
+        testMapYmlMany('vitest', [
+          { file: 'tests/first.test.mjs', titlePath: ['creates account through the session proxy'] },
+          { file: 'tests/first.test.mjs', titlePath: ['creates a second account in the same file'] },
+          { file: 'tests/second.test.mjs', titlePath: ['creates an account from the second file'] },
+        ]),
+      );
+      linkVitestModules(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'vitest multi-test fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      const why = `${runnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`;
+      expect(gated.code, why).toBe(0);
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.summary.blocking, why).toBe(0);
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict, why).toBe('satisfied');
+      // All THREE planned tests must hold a supervisor-sealed passed
+      // session: the completeness check is per test, so a green exit is
+      // the proof that every test of the project was witnessed.
+      const sealed = JSON.parse(
+        readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'),
+      ) as { selection?: { logicalKeys?: string[] }; outcomes?: unknown[] };
+      expect(sealed.selection?.logicalKeys, why).toHaveLength(3);
+      expect(sealed.outcomes, why).toHaveLength(3);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+      expect(checked.stdout, why).toContain('receipt-verified');
+    });
+  }, 600_000);
+});
+
+describe.skipIf(PYTHON === '')('pytest multi-test project through the real CLI', () => {
+  it('witnesses every test of a two-test file and a second file', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'pytest',
+        gateforgeYml('pytest', pytestSuiteYml(PYTHON)),
+        {
+          'app.cjs': APP,
+          'tests/test_first.py': PYTEST_MULTI_FIRST,
+          'tests/test_second.py': PYTEST_MULTI_SECOND,
+        },
+        testMapYmlMany('pytest', [
+          { file: 'tests/test_first.py', titlePath: ['test_creates_account'] },
+          { file: 'tests/test_first.py', titlePath: ['test_creates_a_second_account'] },
+          { file: 'tests/test_second.py', titlePath: ['test_creates_an_account_from_the_second_file'] },
+        ]),
+      );
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'pytest multi-test fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      const why = `${pytestRunnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`;
+      expect(gated.code, why).toBe(0);
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.summary.blocking, why).toBe(0);
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict, why).toBe('satisfied');
+      const sealed = JSON.parse(
+        readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'),
+      ) as { selection?: { logicalKeys?: string[] }; outcomes?: unknown[] };
+      expect(sealed.selection?.logicalKeys, why).toHaveLength(3);
+      expect(sealed.outcomes, why).toHaveLength(3);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+      expect(checked.stdout, why).toContain('receipt-verified');
+    });
+  }, 600_000);
+});
+
+describe.skipIf(CYPRESS_BIN === '')('cypress multi-test project through the real CLI', () => {
+  it('witnesses every test of a two-test spec and a second spec', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'cypress',
+        gateforgeYml('cypress'),
+        {
+          'app.cjs': APP,
+          'cypress.config.cjs': CYPRESS_CONFIG,
+          'cypress/e2e/first.cy.js': CYPRESS_MULTI_FIRST,
+          'cypress/e2e/second.cy.js': CYPRESS_MULTI_SECOND,
+        },
+        testMapYmlMany('cypress', [
+          { file: 'cypress/e2e/first.cy.js', titlePath: ['accounts', 'creates account through the session proxy'] },
+          { file: 'cypress/e2e/first.cy.js', titlePath: ['accounts', 'creates a second account in the same spec'] },
+          { file: 'cypress/e2e/second.cy.js', titlePath: ['accounts', 'creates an account from the second spec'] },
+        ]),
+      );
+      linkCypressCli(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'cypress multi-test fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+      const why = `${cypressRunnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`;
+      expect(gated.code, why).toBe(0);
+      const report = JSON.parse(gated.stdout) as GateReport;
+      expect(report.summary.blocking, why).toBe(0);
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict, why).toBe('satisfied');
+      const sealed = JSON.parse(
+        readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'),
+      ) as { selection?: { logicalKeys?: string[] }; outcomes?: unknown[] };
+      expect(sealed.selection?.logicalKeys, why).toHaveLength(3);
+      expect(sealed.outcomes, why).toHaveLength(3);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+      expect(checked.stdout, why).toContain('receipt-verified');
+    });
+  }, 900_000);
 });

@@ -27,6 +27,7 @@ import { getCurrentTest } from 'vitest/suite';
 import { humanMessage } from '@gate-forge/core';
 import { claimInjectionsFor } from '../runner-claims.js';
 import { appendSpoolEvent, spoolPathFor } from '../supervisor/spool.js';
+import { vitestWorkerSlot } from './worker-slot.js';
 
 /** Env the runner child receives from the adapter's allowlist. */
 const ENV_WITNESS_URL = 'GATEFORGE_WITNESS_URL';
@@ -132,7 +133,10 @@ function spoolTestBegin(identity: CurrentIdentity): void {
   appendSpoolEvent(spoolPathFor(stateDir, runId), {
     kind: 'testBegin',
     testId: identity.testId,
-    workerIndex: 0,
+    // The SAME derived slot the pack's reporter writes (see
+    // ./worker-slot.ts): vitest runs files in parallel, so a flat slot
+    // would make two running tests fight over one session.
+    workerIndex: vitestWorkerSlot(identity.file),
     file: identity.file,
     titlePath: identity.titlePath,
     project: null,
@@ -208,7 +212,7 @@ async function resolveCurrentSession(): Promise<SessionCredential> {
     const response = await fetch(`${witnessUrl.replace(/\/$/, '')}/sessions/resolve`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', [RUN_HEADER]: runToken },
-      body: JSON.stringify({ testId: identity.testId, workerIndex: 0 }),
+      body: JSON.stringify({ testId: identity.testId, workerIndex: vitestWorkerSlot(identity.file) }),
     });
     if (response.ok) {
       const body = (await response.json()) as Partial<SessionCredential>;

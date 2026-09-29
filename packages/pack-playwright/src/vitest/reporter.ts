@@ -28,6 +28,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { canonicalOf } from '../json.js';
 import { claimInjectionsFor } from '../runner-claims.js';
+import { vitestWorkerSlot } from './worker-slot.js';
 
 /** Env the runner child receives from the adapter's allowlist. */
 const ENV_STATE_DIR = 'GATEFORGE_STATE_DIR';
@@ -134,10 +135,14 @@ export default class GateforgeVitestReporter {
   onTestCaseReady(testCase: VitestTestCase): void {
     if (this.spoolFile === null) return;
     const identity = identityOf(testCase);
+    // The slot is derived from the file both processes agree on (see
+    // ./worker-slot.ts): vitest runs FILES in parallel, so one flat slot
+    // would collide two running tests and fail a genuinely parallel
+    // project closed.
     this.appendEvent({
       kind: 'testBegin',
       testId: identity.testId,
-      workerIndex: 0,
+      workerIndex: vitestWorkerSlot(identity.file),
       file: identity.file,
       titlePath: identity.titlePath,
       project: null,
@@ -163,7 +168,7 @@ export default class GateforgeVitestReporter {
     this.appendEvent({
       kind: 'testEnd',
       testId: identity.testId,
-      workerIndex: 0,
+      workerIndex: vitestWorkerSlot(identity.file),
       file: identity.file,
       titlePath: identity.titlePath,
       project: null,

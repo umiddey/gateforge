@@ -124,6 +124,16 @@ export function startSupervisorSpoolDrain(options: {
   const intentsFile = persistenceIntentsPathFor(options.stateDir, options.runId);
   const pollMs = options.pollMs ?? DEFAULT_DRAIN_POLL_MS;
   const openByWorker = new Map<number, OpenSlot>();
+  // Begins that arrived while their worker slot was still busy with an
+  // EARLIER test. A runner announces the next test's begin from the
+  // worker (prompt) while the previous test's end travels through the
+  // runner's main process (late), so the two lifecycles overlap by a
+  // few hundred milliseconds in every genuinely serial project. The
+  // witness mints one session per worker slot, so the queued begin
+  // opens the moment its slot frees — nothing is dropped, nothing is
+  // credited early, and a forged lifecycle still has to survive the
+  // same per-test pairing.
+  const pendingByWorker = new Map<number, SpoolEvent[]>();
   const endedTests = new Set<string>();
   const conflicts: string[] = [];
   const intentFailures: string[] = [];
@@ -174,15 +184,13 @@ const releaseReachedWaiters = (): void => {
     const existing = openByWorker.get(workerIndex);
     if (existing !== undefined && existing.testId === event.testId) return; // idempotent re-begin
     if (existing !== undefined) {
-      // A second begin over an open worker slot: genuine serial reporter
-      // events never do this (one test per worker at a time). The FIRST
-      // session stands (a forgery must not displace it); the collision is
-      // recorded and fails the run closed downstream.
-      conflicts.push(
-        `lifecycle conflict: worker ${String(workerIndex)} began '${event.testId}' while ` +
-          `'${existing.testId}' was still open — a duplicate begin never occurs in a genuine ` +
-          'serial run (forged or confused lifecycle events fail closed)',
-      );
+      // A second begin over a busy worker slot: the previous test's
+      // end simply has not travelled back yet. The queued begin opens
+      // when the slot frees, so a serial project whose reporter lags
+      // its worker is no longer failed closed for its own ordering.
+      const queued = pendingByWorker.get(workerIndex) ?? [];
+      if (!queued.some((pending) => pending.testId === event.testId)) queued.push(event);
+      pendingByWorker.set(workerIndex, queued);
       return;
     }
     if (endedTests.has(slotKey(workerIndex, event.testId))) {
@@ -202,6 +210,34 @@ const releaseReachedWaiters = (): void => {
       ...(event.claims !== undefined && event.claims.length > 0 ? { claims: event.claims } : {}),
     });
     openByWorker.set(workerIndex, { sessionId: opened.sessionId, testId: event.testId });
+  };
+
+  /**
+   * Opens the earliest begin that waited for a worker slot, in arrival
+   * order. A queued begin whose test already ended (a late replay) is
+   * dropped rather than reopened.
+   *
+   * Args:
+   *   workerIndex: the freed slot.
+   *
+   * Returns:
+   *   Promise<void>: resolves once the slot holds its next test (or is
+   *     empty again).
+   */
+  const openNextPending = async (workerIndex: number): Promise<void> => {
+    const queued = pendingByWorker.get(workerIndex);
+    if (queued === undefined || queued.length === 0) return;
+    for (let index = 0; index < queued.length; ) {
+      const next = queued[index] as SpoolEvent;
+      if (openByWorker.has(workerIndex) || endedTests.has(slotKey(workerIndex, next.testId))) {
+        queued.splice(index, 1);
+        continue;
+      }
+      queued.splice(index, 1);
+      await openSessionFor(next);
+      return;
+    }
+    if (queued.length === 0) pendingByWorker.delete(workerIndex);
   };
 
   const sealQuietly = async (slot: OpenSlot, outcome: string | undefined): Promise<void> => {
@@ -266,6 +302,8 @@ const releaseReachedWaiters = (): void => {
           await finalizeObserveQuietly(slot);
         }
         await sealQuietly(slot, event.outcome);
+        // The slot is free again: open whatever begin waited for it.
+        await openNextPending(event.workerIndex);
         return;
       }
       // An end with no matching open begin: genuine reporter events are
