@@ -6,6 +6,13 @@
  * changed path from the runner's OWN test catalog plus the repository's
  * own import graph, and fails closed on any doubt.
  *
+ * Import statements are read from each file's SYNTAX, never from its
+ * text: a JS/TS blob is parsed with the TypeScript compiler API and a
+ * Python blob with its comment lines and triple-quoted text removed, so
+ * a sentence in a comment that happens to name an import call is prose
+ * and never a computed import. Bytes the parser cannot read refuse the
+ * re-seal rather than pass unexamined.
+ *
  * Three classes exist, and only the first two may re-seal:
  *
  * - **test file** — a path the runner's own enumeration lists as
@@ -26,6 +33,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join, posix, relative, resolve } from 'node:path';
 import picomatch from 'picomatch';
+import ts from 'typescript';
 import { sanitizedAuthorityEnv } from './candidate-tree.js';
 import { UsageError } from './errors.js';
 
@@ -80,6 +88,8 @@ interface TrackedFile {
   imports: ImportRef[];
   /** True when the file loads a module through a computed specifier. */
   dynamic: boolean;
+  /** True when the file's bytes are not a parseable script. */
+  unparsable: boolean;
 }
 
 /** One `compilerOptions.paths` alias from the repository tsconfig. */
@@ -188,31 +198,20 @@ export function carryDiffIsWithinScope(input: {
   return changed.every((entry) => evaluated.has(entry.path));
 }
 
-/** One regex per static import form (TS/JS first, then Python). */
-const STATIC_IMPORT_PATTERNS: readonly RegExp[] = [
-  /(?:^|[\s;])import\s+(?:[^'"()]*?\s+from\s+)?['"]([^'"]+)['"]/g,
-  /(?:^|[\s;])export\s+(?:[^'"()]*?\s+from\s+)?['"]([^'"]+)['"]/g,
-  /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+/** One regex per static Python import form. */
+const PYTHON_IMPORT_PATTERNS: readonly RegExp[] = [
   /^\s*import\s+([\w.]+)\s*(?:$|#)/gm,
   /^\s*from\s+([\w.]+)\s+import\b/gm,
   /^\s*from\s+(\.[\w.]*)\s+import\b/gm,
 ];
 /**
- * One module-loading call form: the head that locates the call, and
- * the same call with a single string-literal argument. A literal
+ * One Python module-loading call form: the head that locates the call,
+ * and the same call with a single string-literal argument. A literal
  * specifier is fixed at parse time, so the call is an ordinary import
  * edge; anything else (a variable, a concatenation, a template with
  * `${…}`) is computed and refuses the re-seal.
  */
-const MODULE_CALLS: readonly { head: RegExp; literal: RegExp }[] = [
-  {
-    head: /\bimport\s*\(/g,
-    literal: /\bimport\s*\(\s*(?:(['"])([^'"\n]*)\1|`([^`$\n]*)`)\s*\)/,
-  },
-  {
-    head: /\brequire\s*\(/g,
-    literal: /\brequire\s*\(\s*(?:(['"])([^'"\n]*)\1|`([^`$\n]*)`)\s*\)/,
-  },
+const PYTHON_MODULE_CALLS: readonly { head: RegExp; literal: RegExp }[] = [
   {
     head: /\bimportlib\s*\.\s*import_module\s*\(/g,
     literal: /\bimportlib\s*\.\s*import_module\s*\(\s*(?:(['"])([^'"\n]*)\1|`([^`$\n]*)`)\s*\)/,
@@ -222,6 +221,70 @@ const MODULE_CALLS: readonly { head: RegExp; literal: RegExp }[] = [
     literal: /\b__import__\s*\(\s*(?:(['"])([^'"\n]*)\1|`([^`$\n]*)`)\s*\)/,
   },
 ];
+
+/**
+ * The parser mode a path's extension implies, so a `.tsx` file is read
+ * as TSX and a `.mjs` file as JS rather than being parsed as the wrong
+ * language and refused for bytes that are perfectly valid.
+ *
+ * Args:
+ *   path: repository-relative POSIX path.
+ *
+ * Returns:
+ *   ts.ScriptKind: the parser mode for that path.
+ */
+function scriptKindFor(path: string): ts.ScriptKind {
+  const extension = extname(path);
+  if (extension === '.tsx') return ts.ScriptKind.TSX;
+  if (extension === '.jsx') return ts.ScriptKind.JSX;
+  if (extension === '.js' || extension === '.mjs' || extension === '.cjs') return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
+}
+
+/**
+ * The Python source with comment lines and triple-quoted block text
+ * removed, so only real code is left to scan. A line whose first
+ * non-space character is `#` is a comment, and text between `'''` or
+ * `"""` delimiters is a string: neither is syntax, and neither can
+ * declare an import.
+ *
+ * Args:
+ *   source: the blob's bytes.
+ *
+ * Returns:
+ *   string: the code lines, rejoined.
+ */
+function pythonCodeOnly(source: string): string {
+  const kept: string[] = [];
+  let closer: string | null = null;
+  for (const line of source.split('\n')) {
+    if (closer !== null) {
+      if (line.includes(closer)) closer = null;
+      continue;
+    }
+    if (line.trimStart().startsWith('#')) continue;
+    let code = line;
+    for (;;) {
+      // The earliest triple-quote on the line opens a string. A partner
+      // on the same line makes the whole string droppable; without one
+      // the string runs on, and the rest of the file is its text.
+      const [earliest] = ['"""', "'''"]
+        .map((quote) => ({ quote, at: code.indexOf(quote) }))
+        .filter((candidate) => candidate.at >= 0)
+        .sort((left, right) => left.at - right.at);
+      if (earliest === undefined) break;
+      const end = code.indexOf(earliest.quote, earliest.at + 3);
+      if (end < 0) {
+        code = code.slice(0, earliest.at);
+        closer = earliest.quote;
+        break;
+      }
+      code = code.slice(0, earliest.at) + code.slice(end + 3);
+    }
+    kept.push(code);
+  }
+  return kept.join('\n');
+}
 
 /**
  * The suffix every refusal line ends with. The re-seal path is
@@ -241,28 +304,104 @@ export function resealRefusalVerdict(reason: string | null): string {
   return String(reason).replace(new RegExp(` ${RESEAL_REFUSAL_SUFFIX}$`), '');
 }
 
-/** Parses one file's import statements out of its bytes. */
-function parseTrackedFile(path: string, source: string): TrackedFile {
+/**
+ * Reads one JS/TS blob's import statements out of its syntax tree.
+ * Comments and string contents are not syntax, so a sentence that
+ * happens to name an import call can never be read as one. A specifier
+ * written as a string literal or a no-substitution template is fixed at
+ * parse time and is an ordinary edge; every other argument form — a
+ * variable, a concatenation, a template with `${…}` — computes the
+ * specifier and refuses. Bytes the parser cannot read refuse too,
+ * because an unread file cannot be shown to declare nothing computed.
+ *
+ * Args:
+ *   path: repository-relative POSIX path (selects the parser mode).
+ *   source: the blob's bytes.
+ *
+ * Returns:
+ *   TrackedFile: the edges, the computed-import flag, the parse flag.
+ */
+function parseScriptFile(path: string, source: string): TrackedFile {
+  // A byte-order mark is an encoding artifact, not source text. Node
+  // strips one before compiling, and the TypeScript parser cannot read
+  // a shebang that follows it, so leaving the mark in place would
+  // refuse a re-seal over bytes that run.
+  const text = source.charCodeAt(0) === 0xfeff ? source.slice(1) : source;
+  const sourceFile = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, scriptKindFor(path));
+  const parseDiagnostics = (sourceFile as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] })
+    .parseDiagnostics;
+  if ((parseDiagnostics ?? []).length > 0) {
+    return { path, imports: [], dynamic: false, unparsable: true };
+  }
   const imports: ImportRef[] = [];
-  const isPython = extname(path) === '.py';
-  const patterns = isPython ? STATIC_IMPORT_PATTERNS.slice(3) : STATIC_IMPORT_PATTERNS.slice(0, 3);
-  for (const pattern of patterns) {
-    for (const match of source.matchAll(pattern)) {
+  let dynamic = false;
+  const record = (expression: ts.Expression | undefined): void => {
+    if (expression === undefined) {
+      dynamic = true;
+      return;
+    }
+    if (!ts.isStringLiteral(expression) && !ts.isNoSubstitutionTemplateLiteral(expression)) {
+      dynamic = true;
+      return;
+    }
+    imports.push({ specifier: expression.text });
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      record(node.moduleSpecifier);
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      record(node.moduleReference.expression);
+    } else if (ts.isImportTypeNode(node)) {
+      // A type-position `import('x').T` loads nothing at run time, but
+      // it still couples this file to the target's shape, so it is an
+      // edge; only a computed one refuses.
+      if (!ts.isLiteralTypeNode(node.argument) || !ts.isStringLiteral(node.argument.literal)) dynamic = true;
+      else imports.push({ specifier: node.argument.literal.text });
+    } else if (ts.isCallExpression(node)) {
+      if (node.expression.kind === ts.SyntaxKind.ImportKeyword) record(node.arguments[0]);
+      else if (ts.isIdentifier(node.expression) && node.expression.text === 'require') record(node.arguments[0]);
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sourceFile, visit);
+  return { path, imports, dynamic, unparsable: false };
+}
+
+/**
+ * Reads one Python blob's import statements out of its code lines.
+ *
+ * Args:
+ *   path: repository-relative POSIX path.
+ *   source: the blob's bytes.
+ *
+ * Returns:
+ *   TrackedFile: the edges and the computed-import flag.
+ */
+function parsePythonFile(path: string, source: string): TrackedFile {
+  const code = pythonCodeOnly(source);
+  const imports: ImportRef[] = [];
+  for (const pattern of PYTHON_IMPORT_PATTERNS) {
+    for (const match of code.matchAll(pattern)) {
       if (match[1] !== undefined) imports.push({ specifier: match[1] });
     }
   }
   // A literal argument is a normal edge; the backtick alternative
   // excludes `$`, so an interpolated template never matches it.
   let dynamic = false;
-  for (const call of MODULE_CALLS.slice(isPython ? 2 : 0, isPython ? 4 : 2)) {
-    for (const match of source.matchAll(call.head)) {
-      const literal = call.literal.exec(source.slice(match.index));
+  for (const call of PYTHON_MODULE_CALLS) {
+    for (const match of code.matchAll(call.head)) {
+      const literal = call.literal.exec(code.slice(match.index));
       const specifier = literal?.[2] ?? literal?.[3];
       if (literal === null || specifier === undefined) dynamic = true;
       else imports.push({ specifier });
     }
   }
-  return { path, imports, dynamic };
+  return { path, imports, dynamic, unparsable: false };
+}
+
+/** Parses one file's import statements out of its bytes. */
+function parseTrackedFile(path: string, source: string): TrackedFile {
+  return extname(path) === '.py' ? parsePythonFile(path, source) : parseScriptFile(path, source);
 }
 
 /**
@@ -671,6 +810,12 @@ export function classifyResealChange(input: {
   const sources = trackedSources(input.gitDir, input.env, input.currentTreeId);
   if (sources === null) {
     return refuse(`the sealed tree's import graph could not be read (${input.currentTreeId})`);
+  }
+  // A file whose bytes the parser rejects has NOT been shown to declare
+  // nothing computed, so it refuses before the graph is read.
+  const unparsableFile = sources.find((file) => file.unparsable);
+  if (unparsableFile !== undefined) {
+    return refuse(`unresolvable import: ${unparsableFile.path} does not parse as a script`);
   }
   const dynamicFile = sources.find((file) => file.dynamic);
   if (dynamicFile !== undefined) {

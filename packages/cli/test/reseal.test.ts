@@ -455,6 +455,189 @@ describe('test-only re-seal change classification', () => {
       );
     });
   });
+
+  it('reads a JSDoc paragraph that names a reviewed import as prose, not as a computed import', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        // The consumer shape: a tracked file whose ONLY match for an
+        // import call is a JSDoc paragraph. Prose is not syntax, so
+        // the file declares no computed import and the re-seal stands.
+        'e2e/approval.ts': [
+          '/**',
+          ' * The approval record for this helper. A reviewer reads',
+          ' *   the reviewed import (always approved, active) and the journey imports',
+          ' * side by side, then signs the run off.',
+          ' */',
+          'export const amount = () => 2;',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/helper.ts': 'export const amount = () => 3;\n' }, 'fix the helper');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(true);
+      expect(classification.helperFiles).toEqual(['e2e/helper.ts']);
+      expect(classification.affectedTestFiles).toEqual(TEST_FILES);
+    });
+  });
+
+  it('reads an import call inside a line comment or a string as prose, not as a computed import', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/prose.ts': [
+          '// import(name) is what refuses a re-seal, and this line only says so.',
+          '// require(name) too.',
+          "export const sample = 'import(x)';",
+          'export const other = `require(y)`;',
+          'export const amount = () => 3;',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/helper.ts': 'export const amount = () => 4;\n' }, 'fix the helper');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(true);
+      expect(classification.helperFiles).toEqual(['e2e/helper.ts']);
+    });
+  });
+
+  it('reads a byte-order mark before a shebang as an encoding artifact, not a syntax error', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        '.gateforge/adapters/tenant.accounts.mjs': [
+          '﻿#!/usr/bin/env node',
+          "import { amount } from '../../e2e/helper.js';",
+          'export const accounts = amount();',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(true);
+      expect(classification.affectedTestFiles).toEqual(['e2e/accounts.spec.ts']);
+    });
+  });
+
+  it('still refuses a real computed import in a file whose comments also name one', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/mixed.ts': [
+          '/**',
+          ' * Only the reviewed import (always approved, active) is loaded here.',
+          ' */',
+          'export const load = (name) => import(name);',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'unresolvable import: e2e/mixed.ts loads a module through a computed specifier → changed-scope run',
+      );
+    });
+  });
+
+  it('refuses a file whose bytes do not parse, naming the file', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/broken.ts': 'export const amount = () => ;\n',
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'unresolvable import: e2e/broken.ts does not parse as a script → changed-scope run',
+      );
+    });
+  });
+
+  it('reads a Python comment and docstring naming a computed import as prose', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/pyprose.py': [
+          '"""Module notes: importlib.import_module(name) is refused here,',
+          'and so is __import__(name). Neither runs in this module.',
+          '"""',
+          '',
+          '# importlib.import_module(name) — prose in a comment, not a call.',
+          'import importlib',
+          '',
+          '',
+          'def amount():',
+          "    return importlib.import_module('os').path.sep",
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(true);
+      expect(classification.affectedTestFiles).toEqual(['e2e/accounts.spec.ts']);
+    });
+  });
+
+  it('still refuses a real computed Python import in a file whose comment names one', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/pymixed.py': [
+          'import importlib',
+          '',
+          '# importlib.import_module(name) is what a computed load looks like.',
+          '',
+          '',
+          'def load(name):',
+          '    return importlib.import_module(name)',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a real fix\n` }, 'test fix');
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'unresolvable import: e2e/pymixed.py loads a module through a computed specifier → changed-scope run',
+      );
+    });
+  });
+
+  it('counts a type-position import as an edge an app file owns', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/typed.ts': 'export type Amount = number;\nexport const amount = (): Amount => 1;\n',
+        'src/type-consumer.ts': "export type Alias = import('../e2e/typed.js').Amount;\n",
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles(
+        { 'e2e/typed.ts': 'export type Amount = number;\nexport const amount = (): Amount => 2;\n' },
+        'typed change',
+      );
+      const classification = classify(repo, parent, treeOf(repo));
+      expect(classification.eligible).toBe(false);
+      expect(classification.reason).toBe(
+        'app file changed: src/type-consumer.ts imports the changed test helper e2e/typed.ts → changed-scope run',
+      );
+    });
+  });
 });
 
 describe('plain carry-forward over sealed candidate trees', () => {
