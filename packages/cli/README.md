@@ -114,6 +114,57 @@ state may contain this run's report and attestation, but this command never
 creates, replaces, or clears a gate receipt. Pre-commit, hook, and CI gate
 paths remain authoritative and do not accept `--result-only`.
 
+### Re-check one failing test in seconds (`--test`)
+
+To re-confirm a handful of hand-picked tests you do not need a whole
+suite. `--test` names them, and the run is witnessed exactly like a full
+gate run — the same supervisor, the same run token, the same server-side
+evidence:
+
+```sh
+# one test (a logical key, or any unique substring of one)
+gateforge test-gates --test 'backend/tests/test_x.py::test_commits' --result-only
+
+# several at once — --test is repeatable
+gateforge test-gates --test UC-53 --test UC-51 --result-only
+```
+
+`--test` is accepted **only** together with `--result-only`. A
+hand-picked list never seals a receipt, so combining `--test` with a
+sealing run exits 2 and says so. The named run never reads, writes, or
+clears a gate receipt, so `check --require-e2e` is unaffected, and it
+carries `authority: non-authoritative` plus `outcome: partial-selection`
+in the report.
+
+A selector is resolved against the **planned** rows — the expected set
+fixed before the run — never against raw runner output, so it can only
+name a test the gate already planned. An exact logical key always wins;
+otherwise a unique case-insensitive substring is used. An unknown or
+ambiguous selector exits 2 and lists the candidate logical keys, because
+a narrower selection is never guessed:
+
+```sh
+$ gateforge test-gates --test 'session proxy' --result-only
+gateforge: the selector 'session proxy' matches 2 planned tests — pick one exact logical key. Run `gateforge discover --json`. [TEST_SELECTOR_AMBIGUOUS]
+candidate logical keys:
+  - tests/green.test.mjs#creates account through the session proxy
+  - tests/second.test.mjs#creates the billing account through the session proxy
+```
+
+The report gains an additive `selectors` field naming exactly what each
+selector resolved to, and the run uses the `named-selection` selection
+mode, so it can never collide with a full or a diff-linked slice:
+
+```json
+{ "outcome": "partial-selection", "selectors": [{ "selector": "UC-53", "logicalKeys": ["pytest:backend/tests/test_x.py::test_commits"] }] }
+```
+
+Selection works for every runner (Playwright, pytest, vitest, Cypress)
+through the shared runner-adapter contract. Because it works from the
+plan, it does not need the changed-file set — that is why `--test` is
+useful when a fix touches a `.env`, a fixture, or a helper that no test
+links to.
+
 ## Staged runtime (`.gateforge/runtime.yml`)
 
 `gateforge pre-commit` executes the candidate inside a materialized checkout

@@ -274,12 +274,26 @@ clock: { mode: fixed, fixedAt: '2026-01-01T00:00:00.000Z' }
 ${extra}`;
 }
 
-/** The sidecar binding one runner test to the create obligation. */
-function testMapYml(runner: string, file: string, titlePath: readonly string[]): string {
-  const titles = titlePath.map((title) => `        - ${title}`).join('\n');
-  return `schemaVersion: 1
-tests:
-  - key: ${file}#${titlePath.join('>')}
+/**
+ * The sidecar binding several runner tests to the create obligation, as
+ * ONE yaml document (concatenating two documents would duplicate the
+ * top-level `schemaVersion`/`tests` keys and the map would not parse).
+ *
+ * Args:
+ *   runner: the configured runner name.
+ *   entries: the runner tests to declare (file plus title path).
+ *
+ * Returns:
+ *   string: the full sidecar text.
+ */
+function testMapYmlMany(
+  runner: string,
+  entries: ReadonlyArray<{ file: string; titlePath: readonly string[] }>,
+): string {
+  const body = entries
+    .map(({ file, titlePath }) => {
+      const titles = titlePath.map((title) => `        - ${title}`).join('\n');
+      return `  - key: ${file}#${titlePath.join('>')}
     selector:
       runner: ${runner}
       file: ${file}
@@ -290,8 +304,18 @@ ${titles}
       - persistence.create
     claims:
       - ${CREATE_CLAIM}
-    reason: The test creates an account through the observed HTTP route and the witness confirms persistence.
+    reason: The test creates an account through the observed HTTP route and the witness confirms persistence.`;
+    })
+    .join('\n');
+  return `schemaVersion: 1
+tests:
+${body}
 `;
+}
+
+/** The sidecar binding one runner test to the create obligation. */
+function testMapYml(runner: string, file: string, titlePath: readonly string[]): string {
+  return testMapYmlMany(runner, [{ file, titlePath }]);
 }
 
 /**
@@ -926,4 +950,64 @@ describe.skipIf(CYPRESS_BIN === '')('cypress failure reporting through the real 
       expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
     });
   }, 900_000);
+});
+
+/** The JSON projection of a named `--test --result-only` run. */
+interface NamedReport {
+  outcome?: string;
+  selectors?: Array<{ selector: string; logicalKeys: string[] }>;
+  execution?: {
+    selectedTests?: { selected: number; passed: number; failed?: number };
+    selectedClaims?: { blocking: number };
+  };
+  summary: { blocking: number };
+  verdicts: Array<{ obligationId: string; verdict: string }>;
+}
+
+describe('witnessed single test through the real CLI', () => {
+  it('reports the honest failure of a named test that bypasses the witness', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'vitest',
+        gateforgeYml('vitest'),
+        {
+          'app.cjs': APP,
+          'vitest.config.mjs': VITEST_CONFIG,
+          'tests/green.test.mjs': VITEST_GREEN,
+          'tests/red.test.mjs': VITEST_RED,
+        },
+        testMapYmlMany('vitest', [
+          { file: 'tests/green.test.mjs', titlePath: ['creates account through the session proxy'] },
+          { file: 'tests/red.test.mjs', titlePath: ['creates account outside the session proxy'] },
+        ]),
+      );
+      linkVitestModules(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'green plus bypass fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      // Naming only the bypassing test shows its real verdict: the
+      // runner's own green is never authority, so the obligation the
+      // selected test claims stays blocking.
+      const bypassKey = 'tests/red.test.mjs#creates account outside the session proxy';
+      const named = await runCli(
+        repo,
+        ['test-gates', '--test', bypassKey, '--result-only', '--format', 'json'],
+        env,
+      );
+      const why = `${runnerFailures(repo)}named run stdout:\n${named.stdout}\nstderr:\n${named.stderr}`;
+      expect(named.code, why).toBe(1);
+      const report = JSON.parse(named.stdout) as NamedReport;
+      expect(report.selectors, why).toEqual([{ selector: bypassKey, logicalKeys: [bypassKey] }]);
+      expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict, why).not.toBe('satisfied');
+      expect(report.summary.blocking, why).toBeGreaterThan(0);
+      // A failing named run still seals nothing.
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 600_000);
 });

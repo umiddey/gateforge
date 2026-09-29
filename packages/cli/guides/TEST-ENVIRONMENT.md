@@ -185,6 +185,49 @@ Put fast checks such as formatting, lint, and import checks in `prepare.prefligh
 
 Run suite containers as the invoking user, avoid swapping mounted `.env` files or creating temporary workspace symlinks during the run, and warm or disable caches before sealing evidence.
 
+## Re-check one failing test without a full run
+
+When two tests fail and you only need to know whether your fix worked,
+do not spend a whole suite on it. Name the tests instead:
+
+```bash
+# One test: a logical key, or any unique substring of one.
+gateforge test-gates --test 'backend/tests/test_outbox.py::test_commits' --result-only
+
+# Two or more: --test repeats.
+gateforge test-gates --test UC-53 --test UC-51 --result-only
+```
+
+The run is still fully witnessed — same supervisor, same run token,
+same server-side evidence — it just executes the named tests instead of
+the whole suite, so it finishes in seconds.
+
+Two rules keep this safe to run any time:
+
+- It is only accepted with `--result-only`. A hand-picked list never
+  seals a receipt, so it can never stand in for the gate.
+- It never reads, writes, or clears `.gateforge/test-gates/receipt.json`.
+  Your existing receipt is byte-identical afterwards, and
+  `gateforge check --require-e2e` still reports exactly what it did
+  before.
+
+If a selector matches nothing, or more than one planned test, the
+command exits 2 and lists the candidate logical keys instead of
+guessing:
+
+```bash
+gateforge test-gates --test 'session proxy' --result-only || true
+```
+
+To find the exact keys, read them off the additive `selectors` field of
+any named run, or from `.gateforge/test-gates/test-catalog.json`
+(`gateforge tests discover`).
+
+Because selection works from the plan rather than from changed files,
+this is also the way to re-check a fix that touched a `.env`, a helper,
+or a fixture: no test links to those files, so a changed-file slice
+cannot select them.
+
 ## Reusable run script
 
 Replace the reset and seed comments with durable commands for your disposable stack. The seed must come from this checkout. `test-gates` starts and supervises the witness for the run.
