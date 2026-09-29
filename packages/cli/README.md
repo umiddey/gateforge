@@ -609,8 +609,7 @@ else):
 | `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; explicit selection remains blocking `missing` with `VERIFIER_UNSUPPORTED` |
 | `crud:*` (UI-semantic) | FAIL-CLOSED — the tested suite owns the browser; use `persistence:*` |
 | `http:effect-verified`, `http:read-result-verified` | AVAILABLE (behavior-case channel) — graded across the approved required cases with witness-issued `behavior.case` records; needs a compiled `behaviorPolicy` requirement set |
-| `auth:*`, `validation:*` | AVAILABLE (behavior-case channel) — same required-case aggregation over engine-controlled requests with independent state scopes |
-| `task:*`, `webhook:*`, `workflow:*` | UNSUPPORTED — every contract fail-closed; surfaces as `VERIFIER_UNSUPPORTED` (remove the contract or drop the pack; do not add tests) |
+| `auth:*`, `validation:*`, `task:*`, `webhook:*`, `workflow:*` | AVAILABLE (behavior-case channel) — same required-case aggregation over engine-controlled requests with independent state scopes. A repository that declares no case for the obligation stays blocking `missing`: the grader never falls back to transport evidence |
 
 Unsupported proof stays blocking. Nothing silently replaces browser proof
 with HTTP status proof.
