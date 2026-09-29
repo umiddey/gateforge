@@ -322,4 +322,33 @@ describe('candidate tree ingestion computes the same id in process as it did one
       rmSync(scratch, { recursive: true, force: true });
     }
   });
+
+  it('writes into the common object store of a linked worktree', () => {
+    withTempRepo({}, (repo) => {
+      writeMixedFixture(repo);
+      repo.stage();
+      repo.commit('mixed fixture');
+      const linked = mkdtempSync(join(tmpdir(), 'gateforge-linked-wt-'));
+      rmSync(linked, { recursive: true, force: true });
+      repo.git(['worktree', 'add', '--quiet', linked, '-b', 'linked']);
+      try {
+        const linkedGitDir = spawnSync('git', ['-C', linked, 'rev-parse', '--absolute-git-dir'], {
+          encoding: 'utf8',
+        }).stdout.trim();
+        const tree = computeCandidateTreeId(linkedGitDir, linked, process.env, null, 'record');
+        // Readable through the worktree's own git dir, which is not where
+        // the objects live: a linked worktree shares the common store.
+        const kind = spawnSync(
+          'git',
+          ['--git-dir', linkedGitDir, '--no-replace-objects', 'cat-file', '-t', tree],
+          { encoding: 'utf8' },
+        );
+        expect(kind.stdout.trim()).toBe('tree');
+        expect(computeCandidateTreeIdLegacy(linkedGitDir, linked, process.env, null, 'record')).toBe(tree);
+      } finally {
+        repo.git(['worktree', 'remove', '--force', linked], { allowFailure: true });
+        rmSync(linked, { recursive: true, force: true });
+      }
+    });
+  });
 });
