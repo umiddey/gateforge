@@ -321,14 +321,17 @@ export {
   RuntimeConfigSchema,
   RuntimeServiceSchema,
   RuntimeReadinessSchema,
+  RecipeStepSchema,
+  RecipeEnvFileSchema,
   isNormalizedRepoRelativePath,
   SERVICE_PORT_PLACEHOLDER,
   SERVICE_URL_PLACEHOLDER,
   DEFAULT_PREPARE_TIMEOUT_SECONDS,
   DEFAULT_READY_TIMEOUT_SECONDS,
+  DEFAULT_RECIPE_STEP_TIMEOUT_SECONDS,
 } from './schemas/runtime-config.js';
 /** Inferred staged-runtime types. */
-export type { RuntimeConfig, RuntimeService, RuntimeReadiness } from './schemas/runtime-config.js';
+export type { RuntimeConfig, RuntimeService, RuntimeReadiness, RecipeStep } from './schemas/runtime-config.js';
 
 /**
  * Behavior policy / catalog / evidence (plan 2026-09-19): owner-approved
