@@ -37,6 +37,7 @@
  * | `POST /sessions/open`             | run token + verifier key (supervisor);  |
  * |                                   | test must be in the registered set      |
  * | `POST /sessions/close`            | run token + verifier key (supervisor)   |
+ * | `POST /sessions/release`          | run token + verifier key (supervisor)   |
  *
  * Endpoints:
  *
@@ -52,6 +53,13 @@
  * - `POST /sessions/close`   — SUPERVISOR ONLY: seals the session with
  *   the observed outcome. Closing SEALS: every later submission for the
  *   session is rejected (no post-hoc record injection).
+ * - `POST /sessions/release` — SUPERVISOR ONLY: releases the session's
+ *   WORKER SLOT on the worker-side lifecycle end, before the runner's
+ *   main process has reported that test's outcome. Submissions and the
+ *   session proxy are refused from that moment (nothing can be
+ *   attributed to a finished test), and the outcome is still owed: the
+ *   later `/sessions/close` records it, and an outcome that never
+ *   arrives leaves the session outcome-less, which grades not-passed.
  * - `GET /runs/execution-trace` — SUPERVISOR ONLY: the witness-side
  *   session record (enforcement-review fix 2b) — per expected test,
  *   every session with its open/seal ticks and outcome. THE execution
@@ -214,6 +222,7 @@ import type {
   ServerPreObservationResponse,
   SessionCloseRequest,
   SessionOpenRequest,
+  SessionReleaseRequest,
   SessionResolveRequest,
   TestSession,
   WitnessHandle,
@@ -1739,6 +1748,11 @@ async function handleRequest(
       await handleSessionClose(state, res, (await readBody(req)) as SessionCloseRequest);
       return;
     }
+    if (req.method === 'POST' && path === '/sessions/release') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      await handleSessionRelease(state, res, (await readBody(req)) as SessionReleaseRequest);
+      return;
+    }
     if (req.method === 'POST' && path === '/sessions/resolve') {
       await handleSessionResolve(state, res, (await readBody(req)) as SessionResolveRequest);
       return;
@@ -2972,6 +2986,14 @@ function sessionView(state: WitnessState, session: TestSession): {
  * session fails (400); closing an already-sealed session is idempotent
  * (safe re-delivery). The suite has NO reachable close path: the run
  * token alone answers 403 before this handler runs.
+ *
+ * A RELEASED session (`outcome-pending`, see `POST /sessions/release`)
+ * is not open: the worker already stopped submitting, and its proxy is
+ * already dead. This close then only RECORDS the runner's outcome for
+ * it — the confirmation the release deliberately deferred. A second,
+ * DIFFERENT outcome for the same session is refused (409): two
+ * outcomes for one test is a confused lifecycle and never reads as a
+ * pass.
  */
 async function handleSessionClose(
   state: WitnessState,
@@ -2992,6 +3014,26 @@ async function handleSessionClose(
   if (session === undefined) {
     throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
   }
+  if (session.status === 'outcome-pending') {
+    if (typeof outcome === 'string') {
+      if (session.outcome !== null && session.outcome !== outcome) {
+        throw new HttpError(
+          409,
+          `session '${sessionId}' already carries outcome '${session.outcome}'; a second, different ` +
+            `outcome ('${outcome}') for the same test is a confused lifecycle and is refused`,
+        );
+      }
+      session.outcome = outcome;
+    }
+    // The session's own evidence died with its proxy at release; the
+    // observe snapshots are dropped HERE, at the moment the outcome is
+    // finally recorded, so an unreleased session's before-state can
+    // never be consumed by a later call.
+    state.observeSnapshots.delete(sessionId);
+    sendJson(res, 200, { sealed: true as const });
+    return;
+  }
+
   if (session.status === 'open') {
     session.status = 'sealed';
     session.sealedTick = (state.tick += 1);
@@ -3009,6 +3051,55 @@ async function handleSessionClose(
     await state.engineBrowser?.closeSession(session.sessionId);
   }
   sendJson(res, 200, { sealed: true as const });
+}
+
+/**
+ * `POST /sessions/release` — SUPERVISOR ONLY (enforced at dispatch).
+ *
+ * The worker finishes a test and announces its own end; the runner's
+ * MAIN process may still be seconds away from reporting that test's
+ * outcome. Rather than hold the worker's single session slot for an
+ * event the worker does not control, the supervisor RELEASES the slot:
+ * the worker is unbound (its next test opens its own session at once),
+ * the session's proxy dies and every submission path is refused from
+ * this moment on — so no traffic can be attributed to a test that has
+ * already finished. The OUTCOME is still owed and is recorded by the
+ * later close; a released session whose outcome never arrives grades
+ * not-passed, exactly like a session sealed without an outcome.
+ *
+ * Releasing an already-released or already-sealed session is idempotent
+ * (safe re-delivery); releasing an unknown session fails (400).
+ */
+async function handleSessionRelease(
+  state: WitnessState,
+  res: ServerResponse,
+  body: SessionReleaseRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session release body must be an object');
+  }
+  const { sessionId } = body;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw new HttpError(400, 'session release requires a sessionId');
+  }
+  const session = state.sessions.get(sessionId);
+  if (session === undefined) {
+    throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
+  }
+  if (session.status === 'open') {
+    session.status = 'outcome-pending';
+    session.sealedTick = (state.tick += 1);
+    // Only THIS session's binding leaves the worker: the next test on
+    // that worker opens its own session immediately.
+    if (state.workerSessions.get(session.workerIndex) === sessionId) {
+      state.workerSessions.delete(session.workerIndex);
+    }
+    // The dedicated channel dies with the release: no exchange can be
+    // observed through this session after its test finished.
+    await stopSessionProxy(session);
+    await state.engineBrowser?.closeSession(session.sessionId);
+  }
+  sendJson(res, 200, { released: true as const });
 }
 
 /**
@@ -4278,12 +4369,18 @@ async function handleObserveFinalize(
   if (session === undefined) {
     throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
   }
-  if (session.status !== 'open') {
+  if (session.status === 'sealed') {
     throw new HttpError(
       409,
       `session '${sessionId}' is sealed — observe finalizes before seal, never after (records cannot be injected after the test ended)`,
     );
   }
+  // A RELEASED session (`outcome-pending`) still finalizes: the release
+  // only unbound the worker slot and killed the proxy, so the traffic
+  // and the before-snapshot it did observe are exactly what an open
+  // session would hold, and no new traffic can join them. The finalize
+  // rides the runner's LATER outcome (the drain finalizes a passed
+  // test, then closes it with that outcome).
   if (state.observeDeclarations === null) {
     throw new HttpError(409, 'observe declarations are not bound on this witness — register them before the run');
   }

@@ -25,8 +25,9 @@
 import { isAbsolute, relative } from 'node:path';
 import { getCurrentTest } from 'vitest/suite';
 import { humanMessage } from '@gate-forge/core';
-import { claimInjectionsFor } from '../runner-claims.js';
+import { onTestFinished } from 'vitest';
 import { appendSpoolEvent, spoolPathFor } from '../supervisor/spool.js';
+import { claimInjectionsFor } from '../runner-claims.js';
 import { vitestWorkerSlot } from './worker-slot.js';
 
 /** Env the runner child receives from the adapter's allowlist. */
@@ -68,6 +69,9 @@ interface CurrentIdentity {
   readonly file: string;
   readonly titlePath: string[];
 }
+
+/** Tests whose worker-side end is already announced (one per test). */
+const WORKER_END_ANNOUNCED = new Set<string>();
 
 /** Session credentials resolved per test id (one HTTP round-trip each). */
 const RESOLVED_BY_TEST_ID = new Map<string, SessionCredential>();
@@ -144,6 +148,72 @@ function spoolTestBegin(identity: CurrentIdentity): void {
   });
 }
 
+/**
+ * Spools the running test's own `testEnd` — the WORKER-side end, with
+ * NO outcome (only the runner's main process knows the result, and only
+ * its reporter may state it).
+ *
+ * Vitest runs the tests of one file one at a time in one worker, and
+ * the main process reports each finished test back over IPC: on a
+ * loaded machine that report can trail by seconds. The next test's
+ * begin therefore used to queue behind the PREVIOUS test's end, and its
+ * session resolve timed out. Announcing the end here, in the same
+ * process and the same order as the begin, removes that dependency: the
+ * drain releases the worker slot and opens the next session at once,
+ * while this test's outcome still arrives (and seals) from the
+ * reporter's own end.
+ *
+ * Registered through `onTestFinished`, which vitest runs after the test
+ * body AND after every `afterEach` hook and cleanup — the last worker
+ * callback before the test's result is final, so no consumer hook can
+ * lose its session to it. Best effort like the begin: a failed append
+ * only means the reporter's own end still governs the seal.
+ *
+ * Args:
+ *   identity: the finished test's reconciliation identity.
+ *
+ * Returns:
+ *   void: nothing; the append is fire-and-forget.
+ */
+function spoolWorkerTestEnd(identity: CurrentIdentity): void {
+  const stateDir = process.env[ENV_STATE_DIR];
+  const runId = process.env[ENV_RUN_ID];
+  if (stateDir === undefined || stateDir === '' || runId === undefined || runId === '') return;
+  appendSpoolEvent(spoolPathFor(stateDir, runId), {
+    kind: 'testEnd',
+    testId: identity.testId,
+    workerIndex: vitestWorkerSlot(identity.file),
+    file: identity.file,
+    titlePath: identity.titlePath,
+    project: null,
+    // No `outcome`: this event says the test is over, never how it went.
+  });
+}
+
+/**
+ * Registers the worker-side end for the RUNNING test (once per test:
+ * a repeated registration is a re-delivery the drain ignores).
+ *
+ * Args:
+ *   identity: the running test's reconciliation identity.
+ *
+ * Returns:
+ *   void: nothing; the registration is best effort.
+ */
+function announceWorkerTestEnd(identity: CurrentIdentity): void {
+  if (WORKER_END_ANNOUNCED.has(identity.testId)) return;
+  WORKER_END_ANNOUNCED.add(identity.testId);
+  try {
+    onTestFinished(() => {
+      spoolWorkerTestEnd(identity);
+    });
+  } catch {
+    // Outside a test (or in a vitest that does not expose the hook):
+    // the reporter's own end still seals the session, so this is a
+    // missing optimisation, never a wrong verdict.
+  }
+}
+
 /** Repo-relative posix form of an absolute module path (process.cwd()). */
 function fileRelativize(path: string): string {
   const clean = path.replace(/^file:\/\//, '');
@@ -206,6 +276,12 @@ async function resolveCurrentSession(): Promise<SessionCredential> {
   // set — so this races the reporter, it never widens what the suite can
   // prove.
   spoolTestBegin(identity);
+  // The same reasoning, mirrored for the END of this test: the reporter
+  // in the main process may be seconds behind, and the NEXT test of
+  // this file would otherwise queue its begin behind that report. The
+  // worker announces its own end (without an outcome — the reporter
+  // alone states the verdict), so the drain can free the slot now.
+  announceWorkerTestEnd(identity);
   const deadline = Date.now() + SESSION_RESOLVE_TIMEOUT_MS;
   let lastDetail = 'no answer';
   while (Date.now() < deadline) {

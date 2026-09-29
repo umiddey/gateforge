@@ -484,6 +484,41 @@ test('creates an account from the second file', async () => {
 });
 `;
 
+/**
+ * The LAGGING-REPORTER vitest suite: ONE file, TWO tests, and the
+ * pack reporter's `testEnd` held behind a barrier file that only the
+ * SECOND test lifts — after it has resolved its own session.
+ *
+ * This is the real race, made deterministic: the runner's MAIN process
+ * (where the reporter lives) is the one that lags, so test 2's
+ * lifecycle must not depend on test 1's end travelling back through
+ * it. No sleep, no CPU load, no timing guess: the barrier is a file.
+ */
+const VITEST_LAGGING_REPORTER = `import { test, expect } from 'vitest';
+import { writeFileSync } from 'node:fs';
+import request from 'supertest';
+import { gateforgeSupertest } from '@gate-forge/pack-playwright/vitest';
+
+const gate = gateforgeSupertest(request);
+
+test('creates account through the session proxy', async () => {
+  const app = process.env.GATEFORGE_APP_BASE_URL;
+  const response = await (await gate(app)).post('/api/accounts').send({ first_name: 'Grace', last_name: 'Hopper' });
+  expect(response.status).toBe(201);
+});
+
+test('creates a second account while the reporter still owes the first end', async () => {
+  const app = process.env.GATEFORGE_APP_BASE_URL;
+  // Resolving this test's own session is the whole point: the previous
+  // test's end is still held by the barrier, so nothing the runner's
+  // main process has said can open it.
+  const api = await gate(app);
+  writeFileSync(process.env.GATEFORGE_VITEST_END_BARRIER, 'lifted');
+  const response = await api.post('/api/accounts').send({ first_name: 'Ada', last_name: 'Lovelace' });
+  expect(response.status).toBe(201);
+});
+`;
+
 /** The multi-test pytest module: TWO tests in ONE file. */
 const PYTEST_MULTI_FIRST = `def test_creates_account(gateforge_http):
     response = gateforge_http.post(
@@ -1306,6 +1341,71 @@ describe('vitest multi-test project through the real CLI', () => {
       const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
       expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
       expect(checked.stdout, why).toContain('receipt-verified');
+    });
+  }, 600_000);
+});
+
+describe('a lagging runner reporter never strands the next test of the same file', () => {
+  it("opens the second test's session while the reporter still owes the first test its end", async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      try {
+        installRepo(
+          repo,
+          'vitest',
+          gateforgeYml('vitest'),
+          {
+            'app.cjs': APP,
+            'vitest.config.mjs': VITEST_CONFIG,
+            'tests/first.test.mjs': VITEST_LAGGING_REPORTER,
+          },
+          testMapYmlMany('vitest', [
+            { file: 'tests/first.test.mjs', titlePath: ['creates account through the session proxy'] },
+            {
+              file: 'tests/first.test.mjs',
+              titlePath: ['creates a second account while the reporter still owes the first end'],
+            },
+          ]),
+        );
+        linkVitestModules(repo);
+        repo.git(['add', '-A']);
+        repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'vitest lagging-reporter fixture']);
+        repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+        const port = await freePort();
+        const appUrl = await startApp(port, repo.root);
+        // The pack reporter holds EVERY testEnd until this file exists;
+        // the fixture lifts it from inside the second test, after that
+        // test holds its own session. The first test's end therefore
+        // cannot open the second test's session — only the worker's own
+        // lifecycle can. The seam is ambient wiring the adapter
+        // forwards; the CLI runs in-process here, so it is set on
+        // process.env and cleared again below. The barrier file lives
+        // OUTSIDE the candidate repository: a file appearing in the
+        // repository mid-run is candidate drift, which the run must (and
+        // does) refuse.
+        process.env['GATEFORGE_VITEST_END_BARRIER'] = join(tempDir('gf-end-barrier-'), 'release');
+        const env = operatorEnv(repo, keyFile, appUrl);
+
+        const gated = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+        const why = `${runnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`;
+        expect(gated.code, why).toBe(0);
+        const report = JSON.parse(gated.stdout) as GateReport;
+        expect(report.summary.blocking, why).toBe(0);
+        expect(report.verdicts.find((entry) => entry.obligationId === CREATE_CLAIM)?.verdict, why).toBe('satisfied');
+        // BOTH tests hold a sealed, supervisor-confirmed `passed`
+        // session: the worker-side end opened the second test's session,
+        // and only the runner's own later outcome sealed the first one.
+        const sealed = JSON.parse(
+          readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'),
+        ) as { outcomes?: unknown[] };
+        expect(sealed.outcomes, why).toHaveLength(2);
+
+        const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+        expect(checked.stdout, why).toContain('receipt-verified');
+      } finally {
+        delete process.env['GATEFORGE_VITEST_END_BARRIER'];
+      }
     });
   }, 600_000);
 });

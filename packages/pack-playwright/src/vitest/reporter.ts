@@ -24,7 +24,7 @@
  * Loaded by the VitestRunnerAdapter through `--reporter=<this module>`;
  * Vitest instantiates custom reporters with `new`.
  */
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { canonicalOf } from '../json.js';
 import { claimInjectionsFor } from '../runner-claims.js';
@@ -34,8 +34,48 @@ import { vitestWorkerSlot } from './worker-slot.js';
 const ENV_STATE_DIR = 'GATEFORGE_STATE_DIR';
 const ENV_RUN_ID = 'GATEFORGE_RUN_ID';
 
+/**
+ * TEST SEAM (inert unless set): the absolute path of a BARRIER FILE
+ * this reporter waits for before it spools ANY `testEnd`.
+ *
+ * The lag between a worker finishing a test and this reporter seeing
+ * its result is exactly the race a serial project must survive, and it
+ * is load-dependent — a timing assertion can never pin it. The barrier
+ * makes that lag deterministic: whoever lifts the file holds the
+ * previous test's end for exactly as long as it wants, with no sleep,
+ * no CPU load and no wall-clock guess. Unset in every real run, so a
+ * supervised run is byte-for-byte the same run.
+ */
+export const VITEST_END_BARRIER_ENV = 'GATEFORGE_VITEST_END_BARRIER';
+
+/** Bound on the barrier wait (a barrier nobody lifts must never hang the run). */
+const END_BARRIER_TIMEOUT_MS = 60_000;
+
+/** Poll cadence while the barrier is closed (the wait is on a file, never on a guess). */
+const END_BARRIER_POLL_MS = 25;
+
 /** The runner-flags document the adapter merges into its envelope. */
 const RUNNER_FLAGS_FILE = 'runner-flags.json';
+
+/**
+ * Waits until the end-barrier file exists (see {@link VITEST_END_BARRIER_ENV}).
+ *
+ * Returns at once when the seam is unset or the file is already there;
+ * a barrier nobody lifts times out with a warning instead of hanging
+ * the runner forever.
+ *
+ * Returns:
+ *   Promise<void>: resolves once the barrier is open (or the bound elapsed).
+ */
+async function awaitEndBarrier(barrier: string | null): Promise<void> {
+  if (barrier === null || barrier === '') return;
+  const deadline = Date.now() + END_BARRIER_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (existsSync(barrier)) return;
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, END_BARRIER_POLL_MS));
+  }
+  console.warn(`[gateforge] the vitest reporter end barrier '${barrier}' was never lifted; continuing`);
+}
 
 /** One observed Vitest test entity (structural subset of vitest's TestCase). */
 interface VitestTestCase {
@@ -109,6 +149,7 @@ export default class GateforgeVitestReporter {
   private readonly stateDir: string | null;
   private readonly spoolFile: string | null;
   private readonly flagsFile: string | null;
+  private readonly endBarrier: string | null;
   private retriesDetected = false;
 
   constructor(_options: object = {}) {
@@ -118,6 +159,7 @@ export default class GateforgeVitestReporter {
     this.stateDir = wired ? (stateDir as string) : null;
     this.spoolFile = wired ? join(stateDir as string, 'spool', runId as string, 'events.jsonl') : null;
     this.flagsFile = wired ? join(stateDir as string, 'vitest', runId as string, RUNNER_FLAGS_FILE) : null;
+    this.endBarrier = process.env[VITEST_END_BARRIER_ENV] ?? null;
   }
 
   /** Spools one lifecycle event (never crashes the run on failure). */
@@ -154,10 +196,14 @@ export default class GateforgeVitestReporter {
    * testEnd: the observed outcome plus the attempt count (a
    * runner-assisted retry shows up as retryCount > 0 and is recorded in
    * the runner-flags document, which the adapter surfaces as
-   * `retriesDetected` — required retries are zero).
+   * `retriesDetected` — required retries are zero). When the test-seam
+   * end barrier is set, the event is held until the barrier file
+   * appears: the worker's lifecycle then races this reporter exactly as
+   * it does on a loaded machine, but deterministically.
    */
-  onTestCaseResult(testCase: VitestTestCase): void {
+  async onTestCaseResult(testCase: VitestTestCase): Promise<void> {
     if (this.spoolFile === null) return;
+    await awaitEndBarrier(this.endBarrier);
     const identity = identityOf(testCase);
     const result = testCase.result?.();
     const state = result?.state;

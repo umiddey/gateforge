@@ -17,6 +17,7 @@
 ### Fixed
 
 - Witnessed observe evidence no longer goes ambiguous when two tests create the same resource at the same time (parallel test files/workers are the normal case). A create is now attributed to the entity its OWN proxied response named, verified against the witness's after-list, so concurrent observed creates each resolve their own entity. A new entity that no observed response names — a writer outside the observation proxy — still makes the creation ambiguous and the obligation stays blocking; the unobserved-writer case is unchanged and fail-closed.
+- A vitest project's second test of a file no longer waits for the runner's main process to report the first one. The end of a test now reaches the drain from the worker that ran it — in the same order as that worker's own begin — which releases that worker's session slot; the runner's own end still seals the session with the observed outcome, and only the runner ever states a verdict. A release credits nothing: submissions and the session proxy stop at the release, an outcome that never arrives leaves the session outcome-less (it grades not-passed), two different outcomes for one test are a lifecycle conflict, and an outcome with no begin still fails closed.
 
 ## 0.7.1
 

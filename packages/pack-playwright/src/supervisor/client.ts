@@ -27,6 +27,8 @@ import type {
   SessionCloseResponse,
   SessionOpenRequest,
   SessionOpenResponse,
+  SessionReleaseRequest,
+  SessionReleaseResponse,
 } from '../witness/types.js';
 import { WitnessRequestError } from '../fixture/witness-client.js';
 
@@ -101,6 +103,18 @@ export class SupervisorClient {
     request: ServerE2eDeclarationsRequest,
   ): Promise<ServerE2eDeclarationsResponse> {
     return this.request<ServerE2eDeclarationsResponse>('/runs/server-e2e-declarations', request);
+  }
+
+  /**
+   * POST /sessions/release: gives the worker's slot back BEFORE the
+   * runner's outcome for that test has arrived (the worker-side
+   * lifecycle end), so the next test the same worker runs opens its
+   * session at once. The session itself stops accepting submissions and
+   * its proxy dies here; the outcome is still owed and is recorded by
+   * the later {@link closeSession}.
+   */
+  async releaseSession(request: SessionReleaseRequest): Promise<SessionReleaseResponse> {
+    return this.request<SessionReleaseResponse>('/sessions/release', request);
   }
 
   /**

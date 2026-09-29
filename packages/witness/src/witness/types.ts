@@ -296,6 +296,28 @@ export interface SessionCloseResponse {
   sealed: true;
 }
 
+/**
+ * `POST /sessions/release` body: the supervisor releases a session's
+ * WORKER SLOT before the runner's outcome for that test has arrived.
+ *
+ * The supervisor calls it on the WORKER's own lifecycle end (the end
+ * the worker spools as soon as the test itself is finished), so the
+ * next test that same worker runs opens its session immediately instead
+ * of queueing behind a main-process event that may still be seconds
+ * away. Nothing is credited: the session stops accepting submissions,
+ * its proxy dies, and only the runner's later `POST /sessions/close`
+ * records the outcome — an outcome that never arrives leaves the
+ * session without one, which grades not-passed.
+ */
+export interface SessionReleaseRequest {
+  sessionId: string;
+}
+
+/** `POST /sessions/release` response. */
+export interface SessionReleaseResponse {
+  released: true;
+}
+
 /** `POST /sessions/resolve` body: the worker proves WHICH open session it runs under. */
 export interface SessionResolveRequest {
   testId: string;
@@ -432,8 +454,15 @@ export interface TestSession {
   testId: string;
   /** The worker the session is bound to (one OPEN session per worker). */
   workerIndex: number;
-  /** `open` accepts submissions; `sealed` rejects everything (fail closed). */
-  status: 'open' | 'sealed';
+  /**
+   * `open` accepts submissions; `sealed` and `outcome-pending` reject
+   * everything (fail closed). `outcome-pending` is a RELEASED session:
+   * the worker's own lifecycle end unbound its worker slot (so the
+   * worker's next test opens its session without waiting for the
+   * runner's main process), but the session's OUTCOME is still owed by
+   * the runner's reporter and is recorded by the later close.
+   */
+  status: 'open' | 'sealed' | 'outcome-pending';
   /** Witness-monotonic tick at open. */
   openedTick: number;
   /** Witness-monotonic tick at seal (null while open). */

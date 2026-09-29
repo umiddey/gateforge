@@ -41,6 +41,7 @@ import type {
 import { ENV_APP_BASE_URL, ENV_RUN_ID, ENV_RUN_TOKEN, ENV_STATE_DIR, ENV_WITNESS_URL } from '@gate-forge/witness/constants';
 import { buildWitnessedSessionRunnerEnv } from './runner-env.js';
 import { untrustedEnv } from './reconcile.js';
+import { VITEST_END_BARRIER_ENV } from '../vitest/reporter.js';
 
 /** Per-test session variables a runner adapter publishes to the test. */
 export const VITEST_ENV_SESSION_ID = 'GATEFORGE_SESSION_ID';
@@ -275,6 +276,12 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
           [ENV_STATE_DIR]: request.stateDir,
           [ENV_RUN_ID]: request.runId,
           [ENV_APP_BASE_URL]: this.options.witness?.appBaseUrl ?? process.env[ENV_APP_BASE_URL] ?? '',
+          // The pack reporter's end-barrier TEST SEAM, read from the
+          // ambient environment like the other non-secret run wiring
+          // above: unset in every real run, and inert when set except
+          // that the reporter waits for the named file before it spools
+          // any `testEnd` (see ../vitest/reporter.ts).
+          [VITEST_END_BARRIER_ENV]: process.env[VITEST_END_BARRIER_ENV] ?? '',
         },
         process.env,
       ),

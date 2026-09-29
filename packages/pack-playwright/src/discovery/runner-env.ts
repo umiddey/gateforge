@@ -282,6 +282,12 @@ export function buildWitnessedPytestChildEnv(
 export const WITNESSED_SESSION_RUN_ENV: readonly string[] = [
   ...WITNESSED_PYTEST_RUN_ENV,
   'GATEFORGE_APP_BASE_URL',
+  // The pack's Vitest reporter's end-barrier TEST SEAM (see
+  // ../vitest/reporter.ts): a filesystem path, never a secret, and
+  // completely inert unless a test sets it. It exists so a test can
+  // hold the reporter's `testEnd` deterministically instead of racing a
+  // loaded machine for the same effect.
+  'GATEFORGE_VITEST_END_BARRIER',
 ];
 
 /**

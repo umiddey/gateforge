@@ -10,6 +10,25 @@
  * force-closes any session the runner left open (a crashed worker can
  * never leave the witness holding an open session past the run).
  *
+ * WORKER-SIDE END (the serial-project race): a runner's MAIN process
+ * can report test N's end long after the worker already started test
+ * N+1 of the same file, so a drain that waits for that end leaves the
+ * next test's begin queued behind a cross-process event the worker
+ * does not control (a loaded machine made the next test's session
+ * resolve time out). A worker therefore also spools the end of the
+ * test IT just finished — same process, same order as its own begin,
+ * and with no outcome (only the runner's reporter knows that). The
+ * drain RELEASES the worker slot on that end: the session stops
+ * accepting submissions and its proxy dies at once, so nothing can be
+ * attributed to a finished test, and the next begin opens
+ * immediately. The runner's own `testEnd` still seals that session
+ * moments later, with the observed outcome; an outcome that never
+ * arrives leaves the session outcome-less, which grades not-passed
+ * exactly like a seal without an outcome. Nothing is credited early
+ * and nothing is dropped: a release carries no verdict, and the
+ * lifecycle still fails closed on an outcome with no begin, a begin
+ * with no end at run end, and two different outcomes for one test.
+ *
  * SERVER-WITNESSED persistence channel: the drain also polls the
  * persistence-intents spool (`persistence-intents.jsonl` — claim INTENTS
  * the supervised suite may only WRITE) and forwards each one to the
@@ -143,6 +162,13 @@ export function startSupervisorSpoolDrain(options: {
   // a lifecycle conflict. An end whose begin never arrived still fails
   // the run closed exactly as before.
   const begunTests = new Set<string>();
+  // Sessions whose WORKER SLOT was released on the worker's own
+  // lifecycle end, keyed by test id: the test is over for the worker
+  // (its session accepts nothing and its proxy is dead), but the
+  // runner's reporter still owes the OUTCOME that confirms the seal.
+  // `outcome` is the one the supervisor already sealed, so a second,
+  // different outcome for the same test is a conflict, not a re-seal.
+  const awaitingOutcome = new Map<string, { sessionId: string; outcome: string | null }>();
   const conflicts: string[] = [];
   const intentFailures: string[] = [];
   const observeNotes: string[] = [];
@@ -190,6 +216,13 @@ const releaseReachedWaiters = (): void => {
   const openSessionFor = async (event: SpoolEvent): Promise<void> => {
     const workerIndex = event.workerIndex;
     begunTests.add(event.testId);
+    // The runner's own `testBegin` for a test whose WORKER-side end
+    // already released the slot: the same lifecycle, arriving over the
+    // slower channel. Re-opening it would be a second lifecycle for one
+    // test, and queueing it would resurrect a finished test — both wrong.
+    // Once the outcome is recorded the check below applies again, so a
+    // genuine re-begin after a sealed outcome still conflicts.
+    if (awaitingOutcome.has(event.testId)) return;
     const existing = openByWorker.get(workerIndex);
     if (existing !== undefined && existing.testId === event.testId) return; // idempotent re-begin
     if (existing !== undefined) {
@@ -294,6 +327,26 @@ const releaseReachedWaiters = (): void => {
     }
   };
 
+  /**
+   * Releases one session's worker slot on the worker's own end (see the
+   * module doc). The witness unbinds the worker and kills the session
+   * proxy; the test's outcome stays owed and is sealed by the runner's
+   * own end. A refused release is a conflict, not a silent pass: the
+   * session then keeps its slot and the next begin stays queued.
+   */
+  const releaseQuietly = async (slot: OpenSlot): Promise<void> => {
+    try {
+      await client.releaseSession({ sessionId: slot.sessionId });
+      awaitingOutcome.set(slot.testId, { sessionId: slot.sessionId, outcome: null });
+    } catch (error) {
+      const message =
+        `supervisor session release failed for test '${slot.testId}': ` +
+        `${error instanceof Error ? error.message : String(error)}`;
+      conflicts.push(message);
+      console.warn(`[gateforge] ${message}`);
+    }
+  };
+
   const handleEvent = async (event: SpoolEvent): Promise<void> => {
     if (event.kind === 'testBegin') {
       await openSessionFor(event);
@@ -304,7 +357,17 @@ const releaseReachedWaiters = (): void => {
       if (slot !== undefined && slot.testId === event.testId) {
         openByWorker.delete(event.workerIndex);
         endedTests.add(slotKey(event.workerIndex, event.testId));
-        // Observe finalize BEFORE seal (finalize requires an open
+        if (event.outcome === undefined) {
+          // The WORKER's own end: the test is over, but the runner's
+          // reporter still owes its outcome. Release the slot (the
+          // session stops accepting submissions and its proxy dies)
+          // instead of sealing a verdict nobody observed, then open
+          // whatever begin waited for it.
+          await releaseQuietly(slot);
+          await openNextPending(event.workerIndex);
+          return;
+        }
+        // Observe finalize BEFORE seal (finalize requires an unsealed
         // session), and only for passed tests — failed/crashed work
         // gets no evidence, and its claim stays blocking.
         if (event.outcome === 'passed') {
@@ -313,6 +376,28 @@ const releaseReachedWaiters = (): void => {
         await sealQuietly(slot, event.outcome);
         // The slot is free again: open whatever begin waited for it.
         await openNextPending(event.workerIndex);
+        return;
+      }
+      // The runner's own end for a test whose WORKER SLOT was already
+      // released: the seal that confirms the release, and the only
+      // source of that test's outcome. A repeated end carrying the SAME
+      // outcome is re-delivery; a DIFFERENT one is a confused lifecycle
+      // and fails the run closed (the witness refuses it too).
+      const released = awaitingOutcome.get(event.testId);
+      if (released !== undefined) {
+        if (event.outcome === undefined) return; // a repeated worker end
+        if (released.outcome !== null && released.outcome !== event.outcome) {
+          conflicts.push(
+            `lifecycle conflict: test '${event.testId}' ended twice with different outcomes ` +
+              `('${released.outcome}' then '${event.outcome}') — one test has one outcome`,
+          );
+          return;
+        }
+        released.outcome = event.outcome;
+        if (event.outcome === 'passed') {
+          await finalizeObserveQuietly({ sessionId: released.sessionId, testId: event.testId });
+        }
+        await sealQuietly({ sessionId: released.sessionId, testId: event.testId }, event.outcome);
         return;
       }
       // The end of a test whose begin the drain saw but never opened a
