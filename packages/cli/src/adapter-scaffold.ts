@@ -125,6 +125,94 @@ function projectedFields(resource: GraphResource): string[] {
   return Object.keys(seen).sort();
 }
 
+/** Column names that usually mark a soft-deleted row, not a removed one. */
+const SOFT_DELETE_COLUMNS: Record<string, true> = {
+  is_active: true,
+  active: true,
+  archived: true,
+  archived_at: true,
+  deleted_at: true,
+  is_deleted: true,
+};
+
+/**
+ * Reads column names out of one column-bearing graph attribute, in
+ * either of the two shapes a detector emits: bare names, or records
+ * that carry the name under `name` / `column`.
+ *
+ * Args:
+ *   value: the raw attribute value (never trusted).
+ *   key: the property holding the name for the record shape.
+ *
+ * Returns:
+ *   string[]: every non-empty column name in the attribute.
+ */
+function attributeColumns(value: unknown, key: 'name' | 'column'): string[] {
+  if (!Array.isArray(value)) return [];
+  const names: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === 'string') {
+      if (entry.length > 0) names.push(entry);
+      continue;
+    }
+    if (typeof entry === 'object' && entry !== null && key in entry) {
+      const name = entry[key];
+      if (typeof name === 'string' && name.length > 0) names.push(name);
+    }
+  }
+  return names;
+}
+
+/**
+ * Every column the compiled graph declares for one table.
+ *
+ * Detectors own their attribute vocabulary, so this reads the
+ * column-bearing attributes the graph actually carries: the full
+ * column list a detector emits (`columnNames` / `columns`), the
+ * primary-key, foreign-key, soft-delete and updateable field facts,
+ * and the classification's own identity/updateable declarations.
+ *
+ * Args:
+ *   resource: the business resource.
+ *
+ * Returns:
+ *   string[]: the declared column names, sorted and deduplicated.
+ */
+function declaredColumns(resource: GraphResource): string[] {
+  const attributes = resource.attributes;
+  const columns = [
+    ...attributeColumns(attributes['columnNames'], 'name'),
+    ...attributeColumns(attributes['columns'], 'name'),
+    ...attributeColumns(attributes['primaryKeyColumns'], 'name'),
+    ...attributeColumns(attributes['foreignKeyReferences'], 'column'),
+    ...attributeColumns(attributes['softDeleteCandidateFields'], 'name'),
+    ...attributeColumns(attributes['updateableFields'], 'name'),
+    ...(resource.classification?.primaryKey ?? []),
+    ...(resource.classification?.lifecycle.updateableFields ?? []),
+  ];
+  return [...new Set(columns)].sort();
+}
+
+/**
+ * How the table's delete semantics look to the graph.
+ *
+ * Args:
+ *   resource: the business resource.
+ *
+ * Returns:
+ *   {declared: string[], lookalike: string[]}: the columns the graph
+ *   itself declares as soft-delete evidence (authoritative), and the
+ *   columns that merely LOOK like one (a question for the human).
+ */
+function softDeleteSignal(resource: GraphResource): { declared: string[]; lookalike: string[] } {
+  const declared = attributeColumns(resource.attributes['softDeleteCandidateFields'], 'name').sort();
+  if (declared.length > 0) return { declared, lookalike: [] };
+  const lookalike = declaredColumns(resource).filter(
+    (column) => SOFT_DELETE_COLUMNS[column.toLowerCase()] === true,
+  );
+  return { declared, lookalike };
+}
+
 /**
  * Renders a JS string literal for generated source.
  *
@@ -195,6 +283,7 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
     const perParent = entries.filter((entry) => hasInnerParam(entry.split.prefix));
     const perParentReads = perParent.filter((entry) => entry.split.idSegments.length > 0);
 
+    const softDelete = softDeleteSignal(resource);
     const singleReads = reads.filter((entry) => entry.split.idSegments.length === 1);
     const collectionFirst = collections[0];
     // One resource's read and collection share a prefix; when both are
@@ -253,6 +342,17 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
           'path is the one your app serves',
       );
     }
+    if (
+      target.deleteSemantics === null &&
+      softDelete.declared.length === 0 &&
+      softDelete.lookalike.length > 0
+    ) {
+      needsYou.push(
+        `table has ${softDelete.lookalike.join(', ')}: if DELETE archives instead of removing, set ` +
+          "deletion: 'archive' — the graph declares no delete semantics, so the generated value is a " +
+          'guess',
+      );
+    }
     if (byId !== undefined || collection !== undefined) {
       needsYou.push(
         'reads may need authentication: if the app answers 401, declare auth.seats with the ' +
@@ -275,7 +375,7 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
     const readPath = byId.split.prefix + '/{id}';
     const listPath = collection.route.canonicalPath;
     const fields = projectedFields(resource);
-    const deletion = target.deleteSemantics ?? 'hard';
+    const deletion = target.deleteSemantics ?? (softDelete.declared.length > 0 ? 'archive' : 'hard');
     guesses.push(`readPath '${readPath}' guessed from GET ${byId.route.canonicalPath}`);
     guesses.push(`listPath '${listPath}' guessed from GET ${collection.route.canonicalPath}`);
     guesses.push(
@@ -289,10 +389,16 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
     );
     guesses.push('itemWrapper guessed as none (the response body IS the entity)');
     guesses.push(
-      target.deleteSemantics === null
-        ? `deletion '${deletion}' GUESSED: the classifier could not prove the delete semantics, so ` +
-          'confirm whether the resource hard-deletes or archives'
-        : `deletion '${deletion}' taken from the classification's delete semantics`,
+      target.deleteSemantics !== null
+        ? `deletion '${deletion}' taken from the classification's delete semantics`
+        : softDelete.declared.length > 0
+          ? `deletion '${deletion}' taken from the graph's soft-delete signal (${softDelete.declared.join(', ')}), ` +
+            'which is a guess about the endpoint: confirm the endpoint archives the row'
+          : softDelete.lookalike.length > 0
+            ? `deletion '${deletion}' GUESSED: the table has ${softDelete.lookalike.join(', ')}, ` +
+              'which usually means a soft delete — confirm whether the endpoint hard-deletes or archives'
+            : `deletion '${deletion}' GUESSED: the classifier could not prove the delete semantics, so ` +
+              'confirm whether the resource hard-deletes or archives',
     );
     guesses.push(
       'environmentFingerprint taken from GATEFORGE_TARGET_FINGERPRINT (the run target marker)',

@@ -337,6 +337,7 @@ const FIXTURE: FixtureResource[] = [
     resource: table('work_reports', {
       columnNames: ['id', 'summary', 'author_id', 'is_active'],
       updateableFields: ['summary'],
+      softDeleteCandidateFields: ['is_active'],
     }),
     routes: [get('/api/v1/work-reports'), get('/api/v1/work-reports/:id')],
     handWritten: {
