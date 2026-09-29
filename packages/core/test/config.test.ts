@@ -49,6 +49,33 @@ describe('parseConfig (pin #6)', () => {
     expect(config.clock.mode).toBe('system');
   });
 
+  it('defaults an absent runner key to playwright (frozen behavior)', () => {
+    const config = parseConfig(validConfig);
+    expect(config.runner).toBe('playwright');
+  });
+
+  it('accepts each supported runner value', () => {
+    for (const runner of ['pytest', 'vitest', 'cypress'] as const) {
+      expect(parseConfig({ ...validConfig, runner }).runner).toBe(runner);
+    }
+    expect(parseConfig({ ...validConfig, runner: 'playwright' }).runner).toBe('playwright');
+  });
+
+  it('rejects an unknown runner through the plain config-error path', () => {
+    let caught: unknown;
+    try {
+      parseConfig({ ...validConfig, runner: 'mocha' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(GateforgeConfigError);
+    const diagnostics = (caught as GateforgeConfigError).diagnostics;
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.jsonPath).toBe('$.runner');
+    expect(diagnostics[0]?.expected).toContain('"playwright"');
+    expect(diagnostics[0]?.got).toBe('"mocha"');
+  });
+
   it("rejects the reserved engine issuer id 'gateforge.core' (red-team V1)", () => {
     const forged = {
       ...validConfig,

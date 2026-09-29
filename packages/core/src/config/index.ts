@@ -468,6 +468,17 @@ export const GateforgeConfigSchema = z
      * and sees no other behavior change.
      */
     alembic: AlembicConfigSchema.optional(),
+    /**
+     * The test runner the supervised gate drives (plan 20260925_2012):
+     * `playwright` (the default and today's only wired surface),
+     * `pytest`, `vitest`, or `cypress`. ABSENT means `playwright`, so an
+     * existing repository parses and behaves byte-identically. The key
+     * lives in `.gateforge.yml`, so it is inside the trusted policy
+     * digest: switching runners is an owner-approved policy-revision
+     * change, never an agent-editable toggle. An unknown value fails the
+     * load through the plain config-error path (exit 2).
+     */
+    runner: z.enum(['playwright', 'pytest', 'vitest', 'cypress']).default('playwright'),
   })
   .strict();
 
