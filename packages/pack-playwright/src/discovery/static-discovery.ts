@@ -475,10 +475,18 @@ interface ScanState {
   maxImportDepth: number;
 }
 
-/** Reads a file's text; unreadable content is a parse error row. */
+/**
+ * Reads a file's text; unreadable content is a parse error row. A path
+ * that is not a regular file (a directory that reached the read through
+ * a seeded or traversed row) is skipped silently — a directory is not
+ * a parse failure of the consumer's source, and reporting one used to
+ * flip `inventoryComplete` on a repo that parses fine.
+ */
 function readText(state: ScanState, file: string): string | null {
+  const absolute = join(state.cwd, file);
+  if (!isFile(absolute)) return null;
   try {
-    return readFileSync(join(state.cwd, file), 'utf8');
+    return readFileSync(absolute, 'utf8');
   } catch (error) {
     state.result.parseErrors.push({
       file,
@@ -808,7 +816,25 @@ function isTestModuleSpecifier(specifier: string): boolean {
   return isPlaywrightSpecifier(specifier) || isPackSpecifier(specifier);
 }
 
-/** Resolves a relative specifier against the repo (candidate extensions). */
+/**
+ * Resolves a relative specifier the way node/TS resolve it: a FILE
+ * first (the bare path when it names one, then each parseable
+ * extension), then a directory's `index.*`. A directory is never a
+ * resolution result — `existsSync` is true for one, and returning it
+ * made `readText` fail with EISDIR and report a false parse error
+ * against the consumer's own source whenever a file and a directory
+ * shared a name (install rehearsal F16).
+ *
+ * Args:
+ *   state: the running scan (seeded/traversed files win outright).
+ *   cwd: absolute repo root.
+ *   fromFile: repo-relative file holding the import.
+ *   specifier: the import specifier, as written.
+ *
+ * Returns:
+ *   string | null: repo-relative FILE path, or null when nothing
+ *   resolves.
+ */
 function resolveSpecifier(state: ScanState, cwd: string, fromFile: string, specifier: string): string | null {
   const base = posix.dirname(fromFile);
   const joined = posix.normalize(posix.join(base, specifier));
@@ -818,11 +844,30 @@ function resolveSpecifier(state: ScanState, cwd: string, fromFile: string, speci
     ...PARSEABLE_EXTENSIONS.map((ext) => `${joined}/index${ext}`),
   ];
   for (const candidate of candidates) {
-    if (state.seeded.has(candidate) || state.traversed.has(candidate) || existsSync(join(cwd, candidate))) {
-      return candidate;
-    }
+    if (state.seeded.has(candidate) || state.traversed.has(candidate)) return candidate;
+  }
+  for (const candidate of candidates) {
+    if (isFile(join(cwd, candidate))) return candidate;
   }
   return null;
+}
+
+/**
+ * Whether an absolute path is an existing regular file (never a
+ * directory, a socket, or a device node).
+ *
+ * Args:
+ *   absolute: absolute filesystem path.
+ *
+ * Returns:
+ *   boolean: true only for an existing regular file.
+ */
+function isFile(absolute: string): boolean {
+  try {
+    return statSync(absolute).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**
