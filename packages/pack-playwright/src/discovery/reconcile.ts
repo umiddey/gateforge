@@ -283,7 +283,8 @@ function toRepoRelative(cwd: string, path: string): string {
  *
  * Throws:
  *   TestDiscoveryError: when the child cannot spawn, exceeds the
- *   timeout, or stdout is not parseable reporter JSON.
+ *   timeout, or produced no readable reporter JSON (the report is read
+ *   from the reporter's own output file, never from stdout).
  */
 export async function listNativePlaywrightTests(options: {
   cwd: string;
@@ -308,12 +309,24 @@ export async function listNativePlaywrightTests(options: {
   if (configDir !== '.') args.push('--config', basename(configPath));
   const discoveryStateDir =
     options.wiredEnv === undefined ? mkdtempSync(join(tmpdir(), 'gateforge-discovery-state-')) : undefined;
+  // The JSON report is read from a FILE the runner writes, never from
+  // stdout: a consumer's playwright config routinely prints at load
+  // time (a dotenv/dotenvx banner, a stray `console.log`) and stdout is
+  // the runner's own channel, not a document channel (install
+  // rehearsal F6). The path is absolute, so the reporter's
+  // cwd-relative resolution cannot move it, and the JSON reporter's
+  // `printsToStdio()` turns false — no part of the report can
+  // interleave with the config's logging.
+  const reportDir = mkdtempSync(join(tmpdir(), 'gateforge-playwright-report-'));
+  const reportPath = join(reportDir, 'reporter.json');
   let outcome: { code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null };
+  let reportText: string | null = null;
   try {
-    const childEnv =
+    const childEnv: NodeJS.ProcessEnv =
       options.wiredEnv === undefined
         ? untrustedEnv(process.env, discoveryStateDir)
         : buildRunnerChildEnv(options.wiredEnv, process.env);
+    childEnv['PLAYWRIGHT_JSON_OUTPUT_FILE'] = reportPath;
     const child = spawn(process.execPath, args, {
       cwd: childCwd,
       env: childEnv,
@@ -351,8 +364,18 @@ export async function listNativePlaywrightTests(options: {
       });
     },
   );
+    try {
+      reportText = readFileSync(reportPath, 'utf8');
+    } catch {
+      // A runner that never reached the reporter (or one whose version
+      // predates its output-file support) leaves no file. The whole
+      // captured stream is then the only candidate, and it is read as
+      // one document — never scanned for a plausible-looking substring.
+      reportText = outcome.stdout;
+    }
   } finally {
     if (discoveryStateDir !== undefined) rmSync(discoveryStateDir, { recursive: true, force: true });
+    rmSync(reportDir, { recursive: true, force: true });
   }
   if (outcome.error !== null) {
     throw new TestDiscoveryError(`playwright --list failed to run: ${outcome.error.message}`);
@@ -364,10 +387,12 @@ export async function listNativePlaywrightTests(options: {
   }
   let document: ReporterDocument;
   try {
-    document = JSON.parse(outcome.stdout) as ReporterDocument;
+    document = JSON.parse(reportText ?? '') as ReporterDocument;
   } catch {
     throw new TestDiscoveryError(
-      `playwright --list produced unparseable output (exit ${String(outcome.code)}): ` +
+      `playwright --list produced no readable reporter JSON (exit ${String(outcome.code)}). The report ` +
+        "is read from the reporter's own output file, so a config that logs to stdout no longer corrupts " +
+        'it — this means the run never reached the reporter. Runner output: ' +
         `${(outcome.stderr || outcome.stdout).slice(0, 400)}`,
     );
   }
