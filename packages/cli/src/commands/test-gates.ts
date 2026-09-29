@@ -1743,7 +1743,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     writeLine(
       io.stdout,
       namedSelections !== null
-        ? `scope: named (${plannedRows.length} tests) — ${humanMessage({ detail: 'a hand-picked test list never seals a receipt', type: 'partial-selection' })}`
+        ? `scope: named (${plannedRows.length} tests) — ${humanMessage({ detail: 'a hand-picked test list never seals a receipt; a run of the whole suite does', type: 'partial-selection', nextAction: 'gateforge test-gates' })}`
         : options.scope === 'changed'
           ? `scope: changed (${plannedRows.length} tests) — ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`
           : `scope: full (${fullPlannedCount} mapped tests) — add --scope changed for the ${affectedTestCount} tests affected by ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`,
