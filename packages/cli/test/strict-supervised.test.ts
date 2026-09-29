@@ -608,9 +608,85 @@ describe('strict supervised gate (test-gates --changed + receipt + check)', () =
         ]) {
           expect(report.verdicts.find((entry) => entry.obligationId === id)?.verdict).toBe('satisfied');
         }
+        // The Playwright no-change proof (runner-agnostic evidence): the
+        // documents this genuine engine-browser run produces keep
+        // EXACTLY today's key sets. Any renamed, dropped or added key in
+        // the JSON report, the sealed execution result or the receipt
+        // fails here — the Playwright path is not rewritten.
+        expect(Object.keys(report).sort()).toEqual([
+          'blocking',
+          'diagnosticContext',
+          'engine',
+          'execution',
+          'run',
+          'schemaVersion',
+          'scope',
+          'summary',
+          'verdicts',
+          'waiverCounts',
+        ]);
+        const sealedResult = JSON.parse(
+          readFileSync(join(repo.root, '.gateforge/test-gates/execution-result.json'), 'utf8'),
+        ) as { selection?: { runner?: string } };
+        expect(Object.keys(sealedResult as Record<string, unknown>).sort()).toEqual([
+          'browsers',
+          'catalogDigest',
+          'causes',
+          'claimInventory',
+          'complete',
+          'engines',
+          'enumerationDigest',
+          'environmentIdentity',
+          'finishedAt',
+          'fixtureOutcome',
+          'inputDigest',
+          'invocationId',
+          'maxAttemptObserved',
+          'outcomes',
+          'planned',
+          'runId',
+          'runnerExit',
+          'schemaVersion',
+          'selection',
+          'selectionDigest',
+          'sessionTrace',
+          'shardCompleteness',
+          'startedAt',
+          'trustedPolicyDigest',
+        ]);
+        expect(sealedResult.selection?.runner).toBe('playwright');
         // The sealed receipt exists and verifies under the same pin.
         const receiptRaw = readFileSync(join(repo.root, '.gateforge/test-gates/receipt.json'), 'utf8');
         expect(receiptRaw).toContain('"approvedPolicyDigest"');
+        expect(Object.keys(JSON.parse(receiptRaw) as Record<string, unknown>).sort()).toEqual([
+          'approvedPolicyDigest',
+          'behaviorCatalogDigest',
+          'candidateTreeId',
+          'caseExecutionDigest',
+          'catalogDigest',
+          'engine',
+          'engineBundleDigest',
+          'evidenceAttestationDigest',
+          'executionBoundaryDigest',
+          'executionResultDigest',
+          'gitSha',
+          'inputDigest',
+          'invocation',
+          'invocationId',
+          'issuedAt',
+          'mac',
+          'parentSha',
+          'receiptId',
+          'receiptVersion',
+          'requiredCaseSetDigest',
+          'runId',
+          'schemaVersion',
+          'selectionDigest',
+          'targetArtifactDigest',
+          'trustedPolicyDigest',
+          'verdictSummary',
+          'verifierKeyId',
+        ]);
         const originalReceipt = JSON.parse(receiptRaw) as {
           receiptId: string;
           runId: string;
