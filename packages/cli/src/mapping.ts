@@ -38,6 +38,7 @@ import {
 import type { MappedCoverage, CoverageOperation } from '@gate-forge/core';
 import {
   discoverTestCatalog,
+  findPlaywrightConfig,
   scanTestFiles,
   TestDiscoveryError,
   type DiscoverOptions,
@@ -49,6 +50,49 @@ import { UsageError } from './errors.js';
 
 /** The tracked sidecar path, repo-root-relative (plan §5.1 row 2). */
 export const TEST_MAP_RELATIVE = '.gateforge/test-map.yml';
+
+/** Candidate config file names per non-Playwright runner (probe order). */
+const RUNNER_CONFIG_CANDIDATES: Record<string, readonly string[]> = {
+  vitest: [
+    'vitest.config.ts',
+    'vitest.config.mts',
+    'vitest.config.js',
+    'vitest.config.mjs',
+    'vite.config.ts',
+    'vite.config.mts',
+    'vite.config.js',
+  ],
+  cypress: [
+    'cypress.config.ts',
+    'cypress.config.mts',
+    'cypress.config.js',
+    'cypress.config.cjs',
+    'cypress.config.mjs',
+  ],
+};
+
+/**
+ * The configured runner's own configuration file — the scope-expansion
+ * signal `check --changed`, `next`, and the supervised run use instead
+ * of probing the Playwright config unconditionally (plan 2026-09-25,
+ * runner-agnostic evidence). `playwright` resolves through the exact
+ * existing probe; pytest keeps its configuration inside `.gateforge.yml`
+ * (the diagnostics suites), so it reports null and never widens.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *   runner: the configured runner name (`config.runner`).
+ *
+ * Returns:
+ *   string | null: the repo-relative config file name, or null.
+ */
+export function findRunnerConfigPath(cwd: string, runner: string): string | null {
+  if (runner === 'playwright') return findPlaywrightConfig(cwd);
+  for (const name of RUNNER_CONFIG_CANDIDATES[runner] ?? []) {
+    if (existsSync(join(cwd, name))) return name;
+  }
+  return null;
+}
 
 /**
  * Loads and validates the sidecar, or returns null when the repository

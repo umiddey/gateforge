@@ -105,18 +105,26 @@ import {
 } from '@gate-forge/core';
 import {
   buildWitnessedPytestChildEnv,
+  CypressRunnerAdapter,
   diffNativePlaywrightTests,
   discoverTestCatalog,
   findPlaywrightConfig,
   listNativePlaywrightTests,
   PlaywrightAdapter,
+  PytestRunnerAdapter,
   readRunnerOutcomes,
   startSupervisorSpoolDrain,
   startWitnessProcess,
   SupervisorClient,
   TestDiscoveryError,
+  VitestRunnerAdapter,
+  DEFAULT_RUN_TIMEOUT_MS,
+  type ExpectedSetResponse,
   type NativeInstance,
   type NativeListResult,
+  type RunnerEnumeration,
+  type RunnerExecuteRequest,
+  type RunnerTestIdentity,
 } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
@@ -149,7 +157,7 @@ import {
   type InputSnapshot,
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
-import { mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
+import { findRunnerConfigPath, mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { loadReceiptFor, tryReuseReceipt } from '../receipts.js';
 import { computeEvaluationScope } from '../scope.js';
@@ -1084,11 +1092,100 @@ function quarantinedFrameworkIds(
   return ids;
 }
 
+/**
+ * Builds one planned row from a contract-enumerated test identity
+ * (plan 2026-09-25, runner-agnostic evidence): the adapter's logical
+ * key (`<file>#<title path>`), null project, and the runner's own
+ * framework id. Supervision joins planned, executed, and traced rows
+ * on (project, file, title path) — the same identity join the
+ * Playwright plan uses.
+ *
+ * Args:
+ *   test: the enumerated test identity.
+ *
+ * Returns:
+ *   PlannedRow: the planned instance plus its supervision input.
+ */
+function plannedRowOfIdentity(test: RunnerTestIdentity): PlannedRow {
+  return {
+    planned: {
+      logicalKey: test.logicalKey,
+      project: test.project,
+      file: test.file,
+      titlePath: [...test.titlePath],
+      frameworkId: test.frameworkId ?? null,
+    },
+    input: {
+      logicalKey: test.logicalKey,
+      project: test.project,
+      file: test.file,
+      titlePath: [...test.titlePath],
+      blockingAnnotations: [...test.blockingAnnotations],
+    },
+  };
+}
+
+/**
+ * Constructs the contract adapter for the configured runner (plan
+ * 2026-09-25, runner-agnostic evidence). Enumeration needs no trusted
+ * wiring; execution receives it through the constructor options so the
+ * runner child never reads more than the non-secret run identity.
+ *
+ * Args:
+ *   runner: the configured runner name (`config.runner`).
+ *   wiring: run-scoped, non-secret witness wiring for `execute`.
+ *
+ * Returns:
+ *   RunnerAdapter: the adapter serving that runner.
+ * @throws UsageError on a runner name with no adapter (the config
+ *   schema rejects unknown values first — this is a defensive seam).
+ */
+function runnerAdapterFor(
+  runner: string,
+  wiring: { witnessUrl?: string; runToken?: string; appBaseUrl?: string } = {},
+): RunnerAdapterHolder {
+  const witness = {
+    ...(wiring.witnessUrl !== undefined && wiring.witnessUrl !== '' ? { url: wiring.witnessUrl } : {}),
+    ...(wiring.runToken !== undefined && wiring.runToken !== '' ? { token: wiring.runToken } : {}),
+  };
+  const appBaseUrl =
+    wiring.appBaseUrl !== undefined && wiring.appBaseUrl !== '' ? { appBaseUrl: wiring.appBaseUrl } : {};
+  switch (runner) {
+    case 'pytest':
+      return new PytestRunnerAdapter({ witness, ...appBaseUrl });
+    case 'vitest':
+      return new VitestRunnerAdapter({ witness, ...appBaseUrl });
+    case 'cypress':
+      return new CypressRunnerAdapter({ witness, ...appBaseUrl });
+    default:
+      throw new UsageError(`test-gates: no runner adapter for '${runner}' (expected playwright | pytest | vitest | cypress)`);
+  }
+}
+
+/** Any contract adapter the supervised run can enumerate and execute. */
+type RunnerAdapterHolder = PytestRunnerAdapter | VitestRunnerAdapter | CypressRunnerAdapter;
+
 async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): Promise<number> {
   const { out, format, witnessUrl, runTimeoutMs } = options;
   const runtimeReuseDigest = options.runtimeReuseDigest;
   const runtimeReuseMounts = options.runtimeReuseMounts ?? [];
   const config = loadConfigAt(io.cwd);
+  // The configured runner (plan 2026-09-25, runner-agnostic evidence):
+  // `playwright` (the default) keeps the byte-identical supervised path;
+  // pytest/vitest/cypress enumerate, execute, and report through the
+  // RunnerAdapter contract behind the SAME witness session, run token,
+  // supervision, receipts, and strictness machinery.
+  const runnerName = config.runner;
+  if (runnerName === 'pytest') {
+    const configured = (config.diagnostics?.suites ?? []).filter((suite) => suite.runner === 'pytest');
+    if (configured.length > 1) {
+      throw new UsageError(
+        `test-gates: runner 'pytest' executes exactly one configured pytest suite, but ${String(configured.length)} are ` +
+          `configured (${configured.map((suite) => suite.name).join(', ')}) — keep a single suite under runner 'pytest' ` +
+          '(a second suite would run under the wrong argv; narrower selection is never guessed)',
+      );
+    }
+  }
   // Owner-chosen strictness (plan 20260925_2013 Phase 1). Absent key =
   // `strict` = today's exact behavior; the decision below only ever
   // maps an ALREADY-COMPUTED strict result onto the owner's exit code,
@@ -1289,6 +1386,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   let observeObligations: string[] = [];
   let fullPlannedCount = 0;
   let affectedTestCount = 0;
+  // The claimed files' slice (changed scope) a non-Playwright runner
+  // plans from — empty in full scope and for `playwright`.
+  let affectedRequiredFiles: readonly string[] = [];
   // Framework ids whose claims and records must never grade (owner
   // quarantine); empty when nothing is quarantined.
   let excludedTestIds: readonly string[] = [];
@@ -1330,6 +1430,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       behaviorCatalog: pipeline.behaviorCatalog,
     });
     affectedTestCount = affectedPlan.plannedRows.length;
+    affectedRequiredFiles = affectedPlan.requiredFiles;
     if (options.scope === 'changed') {
       plannedRows = affectedPlan.plannedRows.filter(
         (row) => !quarantinedKeys.has(row.planned.logicalKey),
@@ -1344,6 +1445,26 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         cause: 'EVIDENCE_SCOPE_INCOMPLETE',
         nextAction: CAUSE_NEXT_ACTIONS.EVIDENCE_SCOPE_INCOMPLETE,
       }));
+    }
+  }
+  // Runner-agnostic expected set (plan 2026-09-25): a NON-Playwright
+  // runner enumerates through the RunnerAdapter contract — the expected
+  // set is fixed BEFORE the run from the runner's own collection, and
+  // the plan is the enumeration (whole set in full scope, the claimed
+  // files' slice in changed scope). `playwright` never runs this: its
+  // planning above is byte-identical to before. An unavailable
+  // enumeration plans nothing and blocks the inventory below — never a
+  // guessed half-set, never a silent whole-suite widening.
+  let runnerEnumeration: RunnerEnumeration | null = null;
+  if (runnerName !== 'playwright' && catalog !== null && discoveryError === null) {
+    runnerEnumeration = await runnerAdapterFor(runnerName).enumerate(io.cwd);
+    if (runnerEnumeration.status === 'discovered') {
+      const enumeratedRows = runnerEnumeration.tests.map(plannedRowOfIdentity);
+      fullPlannedCount = enumeratedRows.length;
+      plannedRows =
+        options.scope === 'changed'
+          ? enumeratedRows.filter((row) => affectedRequiredFiles.includes(row.planned.file))
+          : enumeratedRows;
     }
   }
   if (format === 'text') {
@@ -1369,22 +1490,34 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         ]
       : nativeErrors.length > 0
         ? nativeInventoryBlocking(nativeInventoryProblem(nativeErrors))
-        : !catalog?.inventoryComplete
+        : runnerEnumeration !== null && runnerEnumeration.status !== 'discovered'
           ? [
               {
                 kind: 'finding',
                 resourceId: null,
                 name: null,
-                detail:
-                  'test inventory incomplete (parse errors, budget cuts, or unenumerated cases) — the expected set cannot be sealed over an incomplete inventory',
+                detail: `the configured runner '${runnerName}' could not enumerate its expected set: ${runnerEnumeration.detail} — nothing executed proves nothing`,
                 location: null,
                 cause: 'TEST_INVENTORY_INCOMPLETE',
                 nextAction: CAUSE_NEXT_ACTIONS.TEST_INVENTORY_INCOMPLETE,
               },
             ]
-          : [];
+          : !catalog?.inventoryComplete
+            ? [
+                {
+                  kind: 'finding',
+                  resourceId: null,
+                  name: null,
+                  detail:
+                    'test inventory incomplete (parse errors, budget cuts, or unenumerated cases) — the expected set cannot be sealed over an incomplete inventory',
+                  location: null,
+                  cause: 'TEST_INVENTORY_INCOMPLETE',
+                  nextAction: CAUSE_NEXT_ACTIONS.TEST_INVENTORY_INCOMPLETE,
+                },
+              ]
+            : [];
   const selection = {
-    runner: 'playwright',
+    runner: runnerName,
     // The selection mode names the slice honestly: a scoped run seals
     // `mapped-selection` so its execution result (and every receipt
     // binding it) can never be mistaken for a whole-suite seal. The
@@ -1535,7 +1668,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
             executionBoundaryDigest,
           })
         : null;
-    const playwrightConfig = findPlaywrightConfig(io.cwd);
+    const playwrightConfig = findRunnerConfigPath(io.cwd, runnerName);
     const scopeDecision =
       catalog === null
         ? null
@@ -1844,39 +1977,62 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   const supervisor = new SupervisorClient(effectiveWitnessUrl, runToken, witnessVerifierKey);
 
   // 4.6 Expected-set registration BEFORE the run (review fix 2a): the
-  // expected tests come from an INDEPENDENT enumeration — a separate
-  // `playwright --list` child with a scrubbed (GATEFORGE-free) env and a
-  // finite timeout — never from suite-writable state. The witness binds
-  // the set to this run; from now on /sessions/open accepts only tests
-  // in it, and the execution trace groups sessions by these identities.
-  const enumeration = await listNativePlaywrightTests({ cwd: io.cwd });
-  // Scoped registration (Goal 2): in a `changed`-scope run the expected
-  // set IS the planned slice — the witness binds and the trace groups
-  // exactly the tests the seal will vouch for. Full mode registers the
-  // whole enumeration, byte-identical to before. (A planned instance the
-  // enumeration never lists stays out of the set and can never open a
-  // session — the same completeness machinery blocks it downstream.)
+  // expected tests come from an INDEPENDENT enumeration — Playwright
+  // through a separate `playwright --list` child with a scrubbed
+  // (GATEFORGE-free) env and a finite timeout; pytest/vitest/cypress
+  // through the contract adapter's enumerate() — never from
+  // suite-writable state. The witness binds the set to this run; from
+  // now on /sessions/open accepts only tests in it, and the execution
+  // trace groups sessions by these identities.
   const plannedIdentities = new Set(
     plannedRows.map(
       (row) => `${row.planned.project ?? ''}\u0000${row.planned.file}\u0000${row.planned.titlePath.join('>')}`,
     ),
   );
-  const registeredInstances =
-    options.scope === 'changed'
-      ? enumeration.instances.filter((instance) =>
-          plannedIdentities.has(
-            `${instance.project ?? ''}\u0000${instance.file}\u0000${instance.titlePath.join('>')}`,
-          ),
+  const registered = await (async (): Promise<ExpectedSetResponse> => {
+    if (runnerName !== 'playwright') {
+      // The contract enumeration (fixed above, before the policy gate
+      // boundaries) IS the independent expected set. The runner's own
+      // spool identity is registered so the trace names what the child
+      // will report.
+      const tests = (runnerEnumeration?.tests ?? [])
+        .filter((test) =>
+          options.scope === 'changed'
+            ? plannedIdentities.has(`${test.project ?? ''}\u0000${test.file}\u0000${test.titlePath.join('>')}`)
+            : true,
         )
-      : enumeration.instances;
-  const registered = await supervisor.registerExpectedSet({
-    tests: registeredInstances.map((instance) => ({
-      testId: instance.frameworkId,
-      project: instance.project.length > 0 ? instance.project : null,
-      file: instance.file,
-      titlePath: instance.titlePath,
-    })),
-  });
+        .map((test: RunnerTestIdentity) => ({
+          testId: test.frameworkId ?? test.logicalKey,
+          project: test.project,
+          file: test.file,
+          titlePath: [...test.titlePath],
+        }));
+      return supervisor.registerExpectedSet({ tests });
+    }
+    const enumeration = await listNativePlaywrightTests({ cwd: io.cwd });
+    // Scoped registration (Goal 2): in a `changed`-scope run the expected
+    // set IS the planned slice — the witness binds and the trace groups
+    // exactly the tests the seal will vouch for. Full mode registers the
+    // whole enumeration, byte-identical to before. (A planned instance the
+    // enumeration never lists stays out of the set and can never open a
+    // session — the same completeness machinery blocks it downstream.)
+    const registeredInstances =
+      options.scope === 'changed'
+        ? enumeration.instances.filter((instance) =>
+            plannedIdentities.has(
+              `${instance.project ?? ''}\u0000${instance.file}\u0000${instance.titlePath.join('>')}`,
+            ),
+          )
+        : enumeration.instances;
+    return supervisor.registerExpectedSet({
+      tests: registeredInstances.map((instance) => ({
+        testId: instance.frameworkId,
+        project: instance.project.length > 0 ? instance.project : null,
+        file: instance.file,
+        titlePath: instance.titlePath,
+      })),
+    });
+  })();
   // Progress goes to stderr: with --format json, stdout carries ONLY the
   // machine-readable report.
   writeLine(
@@ -1896,23 +2052,30 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // paths as constructor options. The child env therefore carries ONLY
   // the witness URL + run token + app base — never run-state paths
   // (execution-authority fix; `buildRunnerChildEnv` refuses them).
-  const adapter = new PlaywrightAdapter({
-    config,
-    run: {
-      testFiles: plannedRows.map((row) => row.planned.file),
-      ...(io.env['GATEFORGE_APP_BASE_URL'] ? { appBaseUrl: io.env['GATEFORGE_APP_BASE_URL'] } : {}),
-      ...(io.env['GATEFORGE_SESSION_STATE'] ? { storageState: io.env['GATEFORGE_SESSION_STATE'] } : {}),
-      projects: [
-        ...new Set(
-          plannedRows.map((row) => row.planned.project).filter((project): project is string => project !== null),
-        ),
-      ],
-      // Operator-provided whole-run bound for multi-hour suites (default
-      // 30 minutes stands when absent — same expected set and
-      // completeness rules either way).
-      ...(runTimeoutMs !== undefined ? { timeoutMs: runTimeoutMs } : {}),
-    },
-  });
+  // Non-Playwright runners skip this entire Playwright-specific block:
+  // their trusted wiring crosses to the child through the adapter
+  // constructor (runnerAdapterFor below), and their registration comes
+  // from the contract enumeration (4.6), so there is no Playwright
+  // --list to re-diff.
+  const adapter = runnerName === 'playwright'
+    ? new PlaywrightAdapter({
+        config,
+        run: {
+          testFiles: plannedRows.map((row) => row.planned.file),
+          ...(io.env['GATEFORGE_APP_BASE_URL'] ? { appBaseUrl: io.env['GATEFORGE_APP_BASE_URL'] } : {}),
+          ...(io.env['GATEFORGE_SESSION_STATE'] ? { storageState: io.env['GATEFORGE_SESSION_STATE'] } : {}),
+          projects: [
+            ...new Set(
+              plannedRows.map((row) => row.planned.project).filter((project): project is string => project !== null),
+            ),
+          ],
+          // Operator-provided whole-run bound for multi-hour suites (default
+          // 30 minutes stands when absent — same expected set and
+          // completeness rules either way).
+          ...(runTimeoutMs !== undefined ? { timeoutMs: runTimeoutMs } : {}),
+        },
+      })
+    : null;
   const suiteEnv: Record<string, string> = {
     GATEFORGE_RUN_TOKEN: envRecord.GATEFORGE_RUN_TOKEN,
     GATEFORGE_CLI_VERSION: VERSION,
@@ -1929,30 +2092,32 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     if (typeof value === 'string' && value !== '') suiteEnv[name] = value;
   }
 
-  // Registration must be identical under planning's scrubbed env and
-  // the exact safe run variables before any Playwright test can execute.
-  let wiredNative: NativeListResult;
-  try {
-    wiredNative = await listNativePlaywrightTests({ cwd: io.cwd, wiredEnv: suiteEnv });
-  } catch (error) {
-    if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
-    throw error;
-  }
-  const registrationDiff = diffNativePlaywrightTests(nativeInstances, wiredNative.instances);
-  if (registrationDiff.scrubbedOnly.length > 0 || registrationDiff.wiredOnly.length > 0) {
-    if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
-    const details = [
-      ...registrationDiff.scrubbedOnly.map(
-        (instance) => `only with scrubbed env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
-      ),
-      ...registrationDiff.wiredOnly.map(
-        (instance) => `only with wired env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
-      ),
-    ];
-    throw new UsageError(
-      'test-gates: Playwright registration differs between scrubbed and wired --list; no tests were executed\n' +
-        details.join('\n'),
-    );
+  if (adapter !== null) {
+    // Registration must be identical under planning's scrubbed env and
+    // the exact safe run variables before any Playwright test can execute.
+    let wiredNative: NativeListResult;
+    try {
+      wiredNative = await listNativePlaywrightTests({ cwd: io.cwd, wiredEnv: suiteEnv });
+    } catch (error) {
+      if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+      throw error;
+    }
+    const registrationDiff = diffNativePlaywrightTests(nativeInstances, wiredNative.instances);
+    if (registrationDiff.scrubbedOnly.length > 0 || registrationDiff.wiredOnly.length > 0) {
+      if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+      const details = [
+        ...registrationDiff.scrubbedOnly.map(
+          (instance) => `only with scrubbed env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
+        ),
+        ...registrationDiff.wiredOnly.map(
+          (instance) => `only with wired env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
+        ),
+      ];
+      throw new UsageError(
+        'test-gates: Playwright registration differs between scrubbed and wired --list; no tests were executed\n' +
+          details.join('\n'),
+      );
+    }
   }
   // 6. Execute through the adapter under trusted-config synthesis (the
   // consumer config file is never loaded) under the SUPERVISOR SPOOL
@@ -2007,7 +2172,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // witness probes the adapter itself — and a witnessed suite that runs
     // red or unfinished BLOCKS the gate: the mapped server-e2e test's red
     // is never graded green.
-    if ((config.diagnostics?.suites ?? []).some((suite) => suite.witnessed === true)) {
+    // Playwright-only participant: with `runner: pytest` the configured
+    // suite IS the supervised run the adapter executes below, so a
+    // separate witnessed pass would execute it twice.
+    if (runnerName === 'playwright' && (config.diagnostics?.suites ?? []).some((suite) => suite.witnessed === true)) {
       const witnessed = await runWitnessedPytestSuites({
         config,
         cwd: io.cwd,
@@ -2038,11 +2206,44 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         nextAction: CAUSE_NEXT_ACTIONS['RUN_INCOMPLETE'],
       }));
     }
-    envelope = await adapter.execute({ logicalKeys: selection.logicalKeys }, {
-      stateDir,
-      runId: manifest.runId,
-      vars: suiteEnv,
-    });
+    if (adapter !== null) {
+      envelope = await adapter.execute({ logicalKeys: selection.logicalKeys }, {
+        stateDir,
+        runId: manifest.runId,
+        vars: suiteEnv,
+      });
+    } else if (runnerEnumeration?.status === 'discovered') {
+      // The RunnerAdapter contract (plan 2026-09-25): the exact
+      // selection, run identity, and wall-clock bound cross as data; the
+      // adapter spawns the runner and reads its structured report. The
+      // verdict still comes from supervision + the witness trace.
+      const request: RunnerExecuteRequest = {
+        logicalKeys: selection.logicalKeys,
+        stateDir,
+        runId: manifest.runId,
+        timeoutMs: runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
+        cwd: io.cwd,
+      };
+      envelope = await runnerAdapterFor(runnerName, {
+        witnessUrl: effectiveWitnessUrl,
+        runToken,
+        appBaseUrl: io.env['GATEFORGE_APP_BASE_URL'] ?? '',
+      }).execute(request);
+    } else {
+      // The runner could not enumerate its expected set: nothing is
+      // selected, so launching would widen to the whole suite. Fail
+      // closed here — the inventory blocking entry above names the cause.
+      envelope = {
+        processExit: null,
+        complete: false,
+        incompleteDetail:
+          runnerEnumeration === null
+            ? 'test inventory could not be enumerated — the configured runner never produced an expected set'
+            : runnerEnumeration.detail,
+        outcomes: [],
+        fixtureOutcome: 'unknown' as const,
+      };
+    }
   } finally {
     // Final spool sweep + force-close of runner-left-open sessions,
     // BEFORE the witness stops (the close calls need it alive).
@@ -2117,7 +2318,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     invocationId,
     inputDigest: expectedDigest ?? NO_DIGEST,
     trustedPolicyDigest: trustedPolicy,
-    runner: 'playwright',
+    // The REAL configured runner (additive values on the frozen schema:
+    // `playwright` stays byte-identical; pytest/vitest/cypress name
+    // themselves honestly in the execution result and every receipt
+    // binding it).
+    runner: runnerName,
     // A scoped seal names its selection mode honestly (Goal 2): the
     // execution result — and the receipt digest that binds it — record
     // that a mapped slice ran, never a whole relevant suite.

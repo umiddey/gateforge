@@ -123,6 +123,9 @@ export class PlaywrightRunnerAdapter implements RunnerAdapter {
               .map((signal) => signal.kind),
           ),
         ].sort(),
+        // The native reporter's own instance id (the same value the
+        // supervised registration path uses).
+        frameworkId: entry.parameterIdentity ?? undefined,
       }))
       .sort((a, b) => (a.logicalKey < b.logicalKey ? -1 : a.logicalKey > b.logicalKey ? 1 : 0));
     if (tests.length === 0) {

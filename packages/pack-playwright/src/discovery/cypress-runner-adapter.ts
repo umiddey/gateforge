@@ -46,9 +46,18 @@ import {
   ENV_STATE_DIR,
   ENV_WITNESS_URL,
 } from '@gate-forge/witness/constants';
-import { cypressSupportSource, registerGateforgeCypressPlugin, type CypressRunReport } from '../cypress/plugin.js';
+import {
+  cypressSupportSource,
+  registerGateforgeCypressPlugin,
+  type CypressRunReport,
+} from '../cypress/plugin.js';
 import { scanCypressSpecs } from '../cypress/spec-scan.js';
 import { buildWitnessedSessionRunnerEnv } from './runner-env.js';
+
+// Public re-exports (the CLI supervised surface drives the adapter and
+// needs the plugin registration plus the report type).
+export { cypressSupportSource, registerGateforgeCypressPlugin };
+export type { CypressRunReport };
 
 /** Per-test session variables a runner adapter publishes to the test. */
 export const CYPRESS_ENV_SESSION_ID = 'GATEFORGE_SESSION_ID';
@@ -130,6 +139,9 @@ export class CypressRunnerAdapter implements RunnerAdapter<CypressRunReport | nu
       file: test.file,
       titlePath: [...test.titlePath],
       blockingAnnotations: [],
+      // The generated support file spools `<file>#<title path>` —
+      // registration must name the same id.
+      frameworkId: `${test.file}#${test.titlePath.join('>')}`,
     }));
     return {
       status: 'discovered',

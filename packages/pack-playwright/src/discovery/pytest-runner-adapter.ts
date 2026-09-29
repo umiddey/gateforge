@@ -442,6 +442,8 @@ function collectedIdentityOf(collected: PytestCollectedCase): RunnerTestIdentity
     file: collected.file,
     titlePath: collected.titlePath,
     blockingAnnotations: [],
+    // The plugin spools `item.nodeid` — registration must name the same id.
+    frameworkId: collected.nodeId,
   };
 }
 

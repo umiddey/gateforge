@@ -38,11 +38,13 @@ import {
   type ExecutionResult,
   type ExecutedOutcome,
   type GateReceipt,
+  type BehaviorCatalog,
   type Obligation,
   type PlannedInstance,
   type ResolvedMappings,
   type ResourceGraph,
   type RunnerExecutionEnvelope,
+  type RunnerInstanceOutcome,
   type SupervisionFinding,
   type TestCatalog,
   type TracedTestInput,
@@ -429,12 +431,20 @@ export function planScopedExpectedSet(input: {
   obligations: readonly Obligation[];
   graph: ResourceGraph;
   changedFiles: readonly string[];
-  behaviorCatalog?: import('@gate-forge/core').BehaviorCatalog | null;
+  behaviorCatalog?: BehaviorCatalog | null;
 }): {
   plannedRows: PlannedRow[];
   affected: Obligation[];
   coveredFingerprints: string[];
   unclaimed: Array<{ obligationId: string; detail: string }>;
+  /**
+   * The distinct test files the testable claimed instances live in
+   * (additive, plan 2026-09-25 runner-agnostic evidence): the runner
+   * slice a NON-Playwright runner plans from, since its expected set
+   * comes from its adapter enumeration rather than the Playwright
+   * catalog rows {@link planExpectedSet} filters.
+   */
+  requiredFiles: string[];
 } {
   const changed = new Set(input.changedFiles);
   const sources = sourcesByResourceId(input.graph, input.behaviorCatalog);
@@ -507,7 +517,13 @@ export function planScopedExpectedSet(input: {
   const coveredFingerprints = [
     ...new Set(affected.map((obligation) => obligationFingerprint(obligation))),
   ].sort(compareStrings);
-  return { plannedRows, affected, coveredFingerprints, unclaimed };
+  return {
+    plannedRows,
+    affected,
+    coveredFingerprints,
+    unclaimed,
+    requiredFiles: [...requiredFiles].sort(compareStrings),
+  };
 }
 
 /**
@@ -516,9 +532,21 @@ export function planScopedExpectedSet(input: {
  * instance identity; rows outside the plan keep their framework-side
  * identity string so the supervision mismatch names them.
  *
+ * Runner-agnostic read path (plan 2026-09-25, runner-agnostic
+ * evidence): adapters behind the `RunnerAdapter` contract (pytest,
+ * vitest, cypress) return their structured outcomes IN the execution
+ * envelope and write no Playwright runner-outcomes document. When the
+ * document is absent, the envelope's rows are joined through the SAME
+ * identity (their logical key is `<file>#<title path>`), so every
+ * runner grades planned-versus-executed identically. An empty envelope
+ * outcome list still resolves to no rows — the Playwright
+ * missing-document case is byte-identical to before.
+ *
  * Args:
  *   outcomesDoc: the parsed runner-outcomes document (or null).
  *   plannedRows: the planned rows (identity join).
+ *   envelopeOutcomes: the adapter envelope's own outcome rows (used
+ *     only when the outcomes document is absent).
  *
  * Returns:
  *   ExecutedOutcome[]: supervision-normalized executed outcomes.
@@ -526,14 +554,31 @@ export function planScopedExpectedSet(input: {
 export function executedOutcomesOf(
   outcomesDoc: RunnerOutcomesDocument | null,
   plannedRows: readonly PlannedRow[],
+  envelopeOutcomes: readonly RunnerInstanceOutcome[] = [],
 ): ExecutedOutcome[] {
-  if (outcomesDoc === null) return [];
   const logicalKeyByKey = new Map(
     plannedRows.map((row) => [
       `${row.planned.project ?? '-'}\u0000${row.planned.file}\u0000${row.planned.titlePath.join('>')}`,
       row.planned.logicalKey,
     ]),
   );
+  if (outcomesDoc === null) {
+    return envelopeOutcomes.map((outcome) => {
+      const hash = outcome.logicalKey.indexOf('#');
+      const file = hash > 0 ? outcome.logicalKey.slice(0, hash) : outcome.logicalKey;
+      const titlePath = hash > 0 ? outcome.logicalKey.slice(hash + 1).split('>') : [];
+      const key = `${outcome.project ?? '-'}\u0000${file}\u0000${titlePath.join('>')}`;
+      return {
+        logicalKey: logicalKeyByKey.get(key) ?? outcome.logicalKey,
+        project: outcome.project,
+        file,
+        titlePath,
+        status: outcome.status,
+        attempt: outcome.attempt >= 1 ? outcome.attempt : 1,
+        expectedFailure: outcome.expectedFailure === true,
+      };
+    });
+  }
   return outcomesDoc.outcomes.map((row) => {
     const key = `${row.project ?? '-'}\u0000${row.file}\u0000${row.titlePath.join('>')}`;
     return {
@@ -649,7 +694,7 @@ export function sealExecutionResult(input: SealExecutionResultInput): SealedExec
     mode: input.mode ?? ('full-relevant-suite' as const),
     logicalKeys: [...new Set(input.logicalKeys)].sort(),
   };
-  const executed = executedOutcomesOf(input.outcomesDoc, input.plannedRows);
+  const executed = executedOutcomesOf(input.outcomesDoc, input.plannedRows, input.envelope.outcomes);
   const supervision = superviseExecution(
     input.plannedRows.map((row) => row.input),
     {

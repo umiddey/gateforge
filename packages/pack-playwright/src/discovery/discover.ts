@@ -50,6 +50,9 @@ import {
   repoRelative,
 } from './pytest-adapter.js';
 import type { PytestCollectionResult } from './pytest-adapter.js';
+import { CypressRunnerAdapter } from './cypress-runner-adapter.js';
+import { VitestRunnerAdapter } from './vitest-runner-adapter.js';
+import type { RunnerTestIdentity } from '@gate-forge/witness/adapter';
 import {
   fileDigest,
   listNativePlaywrightTests,
@@ -203,6 +206,30 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
           status: 'registered',
           detail: 'registered for diagnostics; collection not requested (run tests discover --pytest); execution is Phase 4',
         });
+      }
+    }
+
+    // The CONFIGURED runner (plan 2026-09-25, runner-agnostic evidence):
+    // when `runner:` names vitest or cypress, its adapter enumerates the
+    // expected set into catalog rows (discoveryStatus 'discovered' — the
+    // runner itself proved the case) so mappings, scope expansion, and
+    // the supervised plan resolve against it. `playwright` (the default)
+    // never runs this: the catalog above is byte-identical to before.
+    // pytest rows come from the diagnostics collection above.
+    if (config.runner === 'vitest' || config.runner === 'cypress') {
+      const adapter = config.runner === 'vitest' ? new VitestRunnerAdapter() : new CypressRunnerAdapter();
+      const enumeration = await adapter.enumerate(cwd);
+      runnerSummaries.push({
+        runner: config.runner,
+        name: config.runner,
+        status: enumeration.status === 'discovered' ? 'discovered' : 'unavailable',
+        detail: enumeration.detail,
+      });
+      if (enumeration.status === 'discovered') {
+        for (const test of enumeration.tests) {
+          const row = builder.adapterRunnerEntry(config.runner, test);
+          if (row !== null) entries.push(row);
+        }
       }
     }
 
@@ -544,6 +571,46 @@ class CatalogBuilder {
       rulesFired: [],
       categorySignals: [],
       suppressionSignals: nodeId.includes('[xfail]') || nodeId.includes('[xpass]') ? [{ kind: 'fixme', detail: 'pytest xfail/xpass parameter', location: { file: repoFile, line: 1, col: 0 } }] : [],
+    };
+  }
+
+  /**
+   * One configured-runner row from the adapter enumeration (plan
+   * 2026-09-25, runner-agnostic evidence): the runner itself proved the
+   * case, so the row is DISCOVERED with the runner's own framework id —
+   * the same honest shape the pytest rows use (no Playwright
+   * reconciliation applies to it).
+   *
+   * Args:
+   *   runner: the configured runner name (`vitest` or `cypress`).
+   *   test: the enumerated test identity.
+   *
+   * Returns:
+   *   TestCatalogEntry | null: the catalog row, or null when the file is
+   *   unreadable (never a fabricated row).
+   */
+  adapterRunnerEntry(runner: 'vitest' | 'cypress', test: RunnerTestIdentity): TestCatalogEntry | null {
+    const digest = fileDigest(this.cwd, test.file);
+    if (digest === null) return null; // unreadable file: no fabricated row
+    const title = test.titlePath[test.titlePath.length - 1] ?? test.logicalKey;
+    return {
+      logicalKey: deriveLogicalKey({ runner, project: test.project, file: test.file, titlePath: [...test.titlePath] }),
+      runner,
+      project: test.project,
+      file: test.file,
+      titlePath: [...test.titlePath],
+      title,
+      sourceLocation: { file: test.file, line: 1, col: 0 },
+      parameterIdentity: test.frameworkId ?? test.logicalKey,
+      sourceDigest: digest,
+      discoveryStatus: 'discovered',
+      reconciliation: 'unavailable',
+      inferredKind: 'unknown',
+      kindSignals: [],
+      weakSignals: [],
+      rulesFired: [],
+      categorySignals: [],
+      suppressionSignals: [],
     };
   }
 

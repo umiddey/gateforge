@@ -178,6 +178,12 @@ export {
   diffNativePlaywrightTests,
   staticAdapterFieldsFromSource,
   diagnoseMissingUiSurfaces,
+  PlaywrightRunnerAdapter,
+  PytestRunnerAdapter,
+  VitestRunnerAdapter,
+  CypressRunnerAdapter,
+  pytestPluginDir,
+  PYTEST_PLUGIN_MODULE,
 } from './discovery/index.js';
 export type {
   StaticScanOptions,
@@ -206,7 +212,25 @@ export type {
   SupervisedRunOptions,
   MissingSurfaceTest,
   SurfaceDoctorReport,
+  PlaywrightRunnerAdapterOptions,
+  PytestRunnerAdapterOptions,
+  VitestRunnerAdapterOptions,
+  CypressRunnerAdapterOptions,
+  CypressRunReport,
+  VitestJsonReport,
 } from './discovery/index.js';
+export type {
+  RunnerAdapter,
+  RunnerChildEnv,
+  RunnerChildEnvContext,
+  RunnerEnumeration,
+  RunnerExecuteRequest,
+  RunnerName,
+  RunnerRawResults,
+  RunnerSessionTag,
+  RunnerTagChannel,
+  RunnerTestIdentity,
+} from '@gate-forge/witness/adapter';
 
 export {
   CLAIM_ANNOTATION_TYPE,

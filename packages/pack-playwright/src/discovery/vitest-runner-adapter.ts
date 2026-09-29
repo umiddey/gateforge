@@ -535,6 +535,9 @@ function parseVitestListing(stdout: string, cwd: string): RunnerTestIdentity[] |
       file: relativeFile,
       titlePath,
       blockingAnnotations: [],
+      // The pack reporter spools `<file>#<title path>` — registration
+      // must name the same id.
+      frameworkId: `${relativeFile}#${titlePath.join('>')}`,
     });
   }
   return tests;

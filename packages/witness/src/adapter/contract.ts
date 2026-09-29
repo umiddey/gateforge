@@ -64,6 +64,16 @@ export interface RunnerTestIdentity {
   titlePath: readonly string[];
   /** Blocking annotations observed pre-run (`.skip` / `.only` / `.fixme`). */
   blockingAnnotations: readonly string[];
+  /**
+   * The runner's own id for this test, EXACTLY as the runner-side
+   * reporter writes it into the lifecycle spool (additive, plan
+   * 2026-09-25 runner-agnostic evidence): the pytest node id, the
+   * `<file>#<title path>` key for vitest and cypress. Optional — the
+   * trusted supervisor registers the expected set with it so the
+   * witness-side trace names the same identities the child will spool;
+   * a missing id falls back to the logical key.
+   */
+  frameworkId?: string;
 }
 
 /** Outcome of one `enumerate()` call (never a silent empty success). */
