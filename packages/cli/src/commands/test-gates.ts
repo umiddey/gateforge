@@ -165,7 +165,7 @@ import {
 import { findRunnerConfigPath, mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { loadReceiptFor, receiptScope, tryReuseReceipt } from '../receipts.js';
-import { classifyResealChange, type ResealChangeClassification } from '../reseal.js';
+import { carryDiffIsWithinScope, classifyResealChange, type ResealChangeClassification } from '../reseal.js';
 import { obligationFingerprint } from '../evaluate.js';
 import { computeEvaluationScope } from '../scope.js';
 import { candidateTreeCoversCommit, computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
@@ -2177,6 +2177,25 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       providerChangedFiles.every((path) =>
         pipeline.contributions.every((contribution) => contribution.scannedPaths?.includes(path) === true),
       );
+    // A sealed candidate tree carries gitignored and untracked bytes,
+    // so a verified parent proves the outcomes for ITS bytes. The
+    // plain carry-forward evaluates only the provider's changed files,
+    // so it may reuse the parent's outcomes exclusively when the two
+    // sealed trees differ in nothing else — a gitignored dependency or
+    // an untracked file would be a proof nobody produced. (The re-seal
+    // path needs no such test: it classifies the whole difference.)
+    const carryDiffWithinScope =
+      carryParent !== null &&
+      frozenTreeId !== null &&
+      freezeGitDir !== null &&
+      scopeDecision !== null &&
+      carryDiffIsWithinScope({
+        gitDir: freezeGitDir,
+        env: io.env,
+        parentTreeId: carryParent.treeId,
+        currentTreeId: frozenTreeId,
+        evaluatedPaths: scopeDecision.changedFiles,
+      });
     // A planned re-seal is never a carry-forward: it re-runs the
     // affected tests and seals its own receipt. `affectedTestCount`
     // is the CHANGED-SCOPE plan's count, which a test-only change
@@ -2192,6 +2211,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       scopeDecision?.mode === 'changed' &&
       scopeDecision.expandedBecause.length === 0 &&
       scopeDecision.unmappedFiles.length === 0 &&
+      carryDiffWithinScope &&
       coveredFingerprints.length === 0 &&
       affectedTestCount === 0 &&
       scopeBlockers.length === 0 &&

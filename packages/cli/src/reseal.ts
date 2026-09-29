@@ -150,6 +150,43 @@ export function diffSealedTrees(
   changed.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   return changed;
 }
+/**
+ * Tests whether a parent receipt's sealed tree and the tree this run
+ * froze differ ONLY in paths the caller already evaluated itself.
+ *
+ * A sealed candidate tree carries the workspace's untracked and
+ * gitignored bytes, so a verified parent proves the outcomes for ITS
+ * bytes — never for whatever the workspace holds now. A path the
+ * caller never evaluated (a gitignored dependency, an untracked file)
+ * is therefore invisible to its decision, and reusing the parent's
+ * outcomes over it would carry a proof nobody produced. The re-seal
+ * path does not need this test because it classifies the whole
+ * difference itself (see `classifyResealChange`).
+ *
+ * Args:
+ *   gitDir: the absolute git dir holding both tree objects.
+ *   env: the process environment (Git redirectors are stripped).
+ *   parentTreeId: the parent receipt's sealed candidate tree.
+ *   currentTreeId: the candidate tree this run froze.
+ *   evaluatedPaths: repo-relative posix paths the caller evaluated.
+ *
+ * Returns:
+ *   boolean: true only when the trees differ exclusively in evaluated
+ *   paths; false on any unevaluated path or an undiffable pair (fail
+ *   closed — the caller then runs exactly as it did before).
+ */
+export function carryDiffIsWithinScope(input: {
+  gitDir: string;
+  env: NodeJS.ProcessEnv;
+  parentTreeId: string;
+  currentTreeId: string;
+  evaluatedPaths: readonly string[];
+}): boolean {
+  const changed = diffSealedTrees(input.gitDir, input.env, input.parentTreeId, input.currentTreeId);
+  if (changed === null) return false;
+  const evaluated = new Set(input.evaluatedPaths);
+  return changed.every((entry) => evaluated.has(entry.path));
+}
 
 /** One regex per static import form (TS/JS first, then Python). */
 const STATIC_IMPORT_PATTERNS: readonly RegExp[] = [

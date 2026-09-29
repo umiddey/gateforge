@@ -176,6 +176,53 @@ describe('gateforge test-gates', () => {
       expect((JSON.parse(checked.stdout) as { fastPath?: boolean }).fastPath).toBe(true);
     });
   }, 120_000);
+  it('refuses carry-forward when the parent tree and the workspace differ outside the evaluated change set', async () => {
+    await withTempRepo({}, async (repo) => {
+      const verifierKey = 'carry-forward-workspace-drift-key';
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+        '.gitignore': '.gateforge/test-gages/\nnode_modules/\n',
+        'src/logs.txt': '# base log constant\n',
+        // Gitignored, so the provider diff never sees it — but the sealed
+        // candidate tree carries it, so the parent's outcomes were proven
+        // against THESE bytes and not against the ones below.
+        'node_modules/pkg/index.js': 'module.exports = "v1";\n',
+      });
+      repo.commitFiles({}, 'base');
+      const baseSha = repo.headSha();
+      expect(baseSha).not.toBeNull();
+      const config = loadConfig(repo.path('.gateforge.yml'));
+      const approvedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
+      await mintCompleteRunReceipt(repo, {
+        verifierKey,
+        parentSha: baseSha,
+        approvedPolicyDigest,
+        verdictSummary: { total: 2, satisfied: 0, waived: 2, blocking: 0 },
+      });
+
+      // One inert committed change (the empty slice the carry serves) and
+      // an UNEVALUATED change to a gitignored byte inside the sealed tree.
+      repo.writeFiles({ 'src/logs.txt': '# updated log constant\n' });
+      repo.stage(['src/logs.txt']);
+      repo.commit('inert log update');
+      repo.writeFiles({ 'node_modules/pkg/index.js': 'module.exports = "v2";\n' });
+
+      const result = await runCli(
+        repo,
+        ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'],
+        {
+          GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey,
+          GATEFORGE_APPROVED_POLICY_DIGEST: approvedPolicyDigest,
+          CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha ?? '',
+        },
+      );
+      expect(result.code, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+      expect(result.stdout).not.toContain('"carriedForward":true');
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 120_000);
+
   it('refuses carry-forward for a different verifier key or a gate configuration diff', async () => {
     await withTempRepo({}, async (repo) => {
       const verifierKey = 'carry-forward-binding-key';

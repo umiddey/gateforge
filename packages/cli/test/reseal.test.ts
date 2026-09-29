@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { withTempRepo } from '@gate-forge/core';
 import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
-import { classifyResealChange } from '../src/reseal.js';
+import { carryDiffIsWithinScope, classifyResealChange } from '../src/reseal.js';
 
 const TEST_FILES = ['e2e/accounts.spec.ts', 'e2e/orders.spec.ts'];
 
@@ -346,6 +346,52 @@ describe('test-only re-seal change classification', () => {
       expect(classification.reason).toBe(
         'setup test changed: e2e/accounts.spec.ts (the runner config declares a dependency project whose tests cannot be resolved) → full run',
       );
+    });
+  });
+});
+
+describe('plain carry-forward over sealed candidate trees', () => {
+  it('accepts a difference confined to the evaluated paths and refuses anything else', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ ...BASE_FILES, 'node_modules/pkg/index.js': 'module.exports = "v1";\n' });
+      repo.commitFiles({}, 'base');
+      const gitDir = resolveGitDir(repo.root, process.env) as string;
+      const parent = treeOf(repo);
+
+      repo.commitFiles({ 'src/accounts.ts': 'export const accounts = 2;\n' }, 'inert change');
+      expect(
+        carryDiffIsWithinScope({
+          gitDir,
+          env: process.env,
+          parentTreeId: parent,
+          currentTreeId: treeOf(repo),
+          evaluatedPaths: ['src/accounts.ts'],
+        }),
+      ).toBe(true);
+
+      // A gitignored byte inside the sealed tree that the evaluation
+      // never saw is a proof nobody produced.
+      repo.writeFiles({ 'node_modules/pkg/index.js': 'module.exports = "v2";\n' });
+      expect(
+        carryDiffIsWithinScope({
+          gitDir,
+          env: process.env,
+          parentTreeId: parent,
+          currentTreeId: treeOf(repo),
+          evaluatedPaths: ['src/accounts.ts'],
+        }),
+      ).toBe(false);
+
+      // An undiffable pair fails closed.
+      expect(
+        carryDiffIsWithinScope({
+          gitDir,
+          env: process.env,
+          parentTreeId: '0'.repeat(40),
+          currentTreeId: treeOf(repo),
+          evaluatedPaths: [],
+        }),
+      ).toBe(false);
     });
   });
 });
