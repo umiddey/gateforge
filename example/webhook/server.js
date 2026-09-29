@@ -166,6 +166,12 @@ async function handleWebhook(req, res, state = defaultWebhookState()) {
   send(res, 200, { ok: true, deduplicated: false, eventId: event.event_id });
 }
 
+
+/** GET /delivery-log — the complete delivery log, for a witness adapter. */
+function handleLogList(res, state = defaultWebhookState()) {
+  const deliveries = [...state.deliveryLog.values()].sort((a, b) => (a.eventId < b.eventId ? -1 : 1));
+  send(res, 200, { deliveries });
+}
 /** GET /delivery-log/:eventId — witness endpoint for the e2e. */
 function handleLogGet(req, res, state = defaultWebhookState()) {
   const url = (req.url ?? '').split('?')[0];
@@ -194,6 +200,10 @@ function start(port, state = defaultWebhookState()) {
     const url = (req.url ?? '').split('?')[0];
     if (req.method === 'POST' && (url === '/webhook/stripe' || url === '/webhook' || url === '/webhook/')) {
       handleWebhook(req, res, state);
+      return;
+    }
+    if (req.method === 'GET' && url === '/delivery-log') {
+      handleLogList(res, state);
       return;
     }
     if (req.method === 'GET' && url.startsWith('/delivery-log/')) {
