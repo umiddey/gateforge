@@ -703,7 +703,8 @@ export interface EvidenceAdapter {
    * suite-driven browser test runs. Each declared operation names the
    * method + backend-facing path template; `{id}` marks the single
    * segment carrying the entity id (required on read/update/delete,
-   * forbidden on create — create ids come from the list-diff). Only
+   * forbidden on create — a create id comes from the response the
+   * witness proxied, verified against the list-diff). Only
    * declared operations are observe-eligible; anything else grades
    * typed-missing. Observe additionally requires `list` (before-
    * snapshots); an adapter without it can serve no observe obligation.

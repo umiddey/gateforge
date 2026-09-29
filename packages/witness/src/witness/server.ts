@@ -199,6 +199,7 @@ import type {
   ObserveFinalizeRequest,
   ObserveFinalizeResponse,
   ObserveFinalizedObligation,
+  ObserveMutation,
   PersistenceRequest,
   PersistenceResponse,
   PreObservationRequest,
@@ -242,6 +243,12 @@ const OBSERVED_BODY_SNAPSHOT_BYTES = 16384;
  * stored raw; the finalize path parses JSON/form text from it.
  */
 const OBSERVED_REQUEST_BODY_BYTES = 65536;
+/**
+ * Cap on one response scalar retained for entity attribution: entity
+ * ids are short, so a longer scalar is dropped rather than retained
+ * (the attribution set stays a handful of small strings per exchange).
+ */
+const OBSERVED_RESPONSE_ID_CHARS = 128;
 /** One engine-observed proxied exchange (arrival order via `seq`). */
 interface ObservedExchange {
   method: string;
@@ -272,6 +279,31 @@ interface ObservedExchange {
   sessionId: string | null;
   /** Witness-monotonic tick stamped when the exchange completed. */
   tick: number;
+}
+
+/**
+ * One proxied exchange's RESPONSE attribution facts: the rendered
+ * scalar values its bounded JSON response body named (a create
+ * response names the entity it just created), plus whether that body
+ * was readable at all.
+ *
+ * This log is APPEND-ONLY and never consumed: an entry carries no
+ * request body and can therefore never itself become evidence. It
+ * exists so a create finalize can tell "another session's own observed
+ * create" apart from "a writer outside every session channel" when
+ * several tests create the same resource in parallel — the
+ * attribution is made of witness-proxied traffic, never of a
+ * suite-declared id and never of a raw before/after diff.
+ */
+interface ObservedResponseAttribution {
+  seq: number;
+  method: string;
+  path: string;
+  status: number;
+  /** Rendered scalar values the response body named (short ids only). */
+  named: string[];
+  /** False when no named key could be read (non-JSON, truncated, unparsable). */
+  readable: boolean;
 }
 
 /** Fail-closed witness configuration/startup error. */
@@ -403,6 +435,15 @@ interface WitnessState {
    * `http.request` record — they can never fabricate or mutate one.
    */
   observed: ObservedExchange[];
+  /**
+   * Append-only response attribution log (Observe channel): what each
+   * proxied exchange's JSON response NAMED, kept after the exchange
+   * itself is consumed, so a create finalize can attribute a
+   * concurrently created entity to the observed exchange that returned
+   * it. Entries carry no request body and are never evidence
+   * themselves.
+   */
+  observedResponses: ObservedResponseAttribution[];
   observedSeq: number;
   proxyServer: Server | null;
   nowIso: () => string;
@@ -625,12 +666,15 @@ async function startObservedProxy(state: WitnessState, sessionId: string | null)
             }
           });
           upstream.on('end', () => {
+            const seq = (state.observedSeq += 1);
+            const method = (req.method ?? 'GET').toUpperCase();
+            const bodySnapshot = Buffer.concat(snapshot);
             state.observed.push({
-              method: (req.method ?? 'GET').toUpperCase(),
+              method,
               path: observedPath,
               status,
-              seq: (state.observedSeq += 1),
-              bodySha256: createHash('sha256').update(Buffer.concat(snapshot)).digest('hex'),
+              seq,
+              bodySha256: createHash('sha256').update(bodySnapshot).digest('hex'),
               bodyBytes: totalBytes,
               requestBody: body.length === 0 ? null : Buffer.from(body.subarray(0, OBSERVED_REQUEST_BODY_BYTES)),
               requestTruncated: body.length > OBSERVED_REQUEST_BODY_BYTES,
@@ -638,6 +682,21 @@ async function startObservedProxy(state: WitnessState, sessionId: string | null)
               requestContentType: contentTypeOf(req.headers['content-type']),
               sessionId,
               tick: (state.tick += 1),
+            });
+            // Response attribution (Observe channel): what the response
+            // NAMED, kept even after the exchange is consumed, so a
+            // create finalize can tell a concurrent observed create
+            // apart from a writer outside every session channel.
+            state.observedResponses.push({
+              seq,
+              method,
+              path: observedPath,
+              status,
+              ...responseAttribution(
+                bodySnapshot,
+                contentTypeOf(upstream.headers['content-type']),
+                totalBytes > OBSERVED_BODY_SNAPSHOT_BYTES,
+              ),
             });
             settleFlight();
           });
@@ -875,6 +934,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     observeDeclarations: null,
     observeSnapshots: new Map(),
     observed: [],
+    observedResponses: [],
     observedSeq: 0,
     runContext: null,
     observedSeqAtBind: 0,
@@ -4030,6 +4090,156 @@ async function readObserveEntity(
 }
 
 /**
+ * Reads the canonical keys of every scalar value in one bounded JSON
+ * response-body snapshot: what that response NAMED (a create response
+ * names the entity it just created). A non-JSON, truncated, or
+ * unparsable body yields an UNREADABLE attribution — never a prefix,
+ * never a guess.
+ *
+ * Args:
+ *   snapshot: the bounded response bytes already hashed into the
+ *     exchange's body digest.
+ *   contentType: lowercased response media type, or null.
+ *   truncated: whether the body exceeded the snapshot cap.
+ *
+ * Returns:
+ *   {named, readable}: the canonical keys of the scalars the body
+ *   named (sorted, deduped), and whether it could be read at all.
+ */
+function responseAttribution(
+  snapshot: Buffer,
+  contentType: string | null,
+  truncated: boolean,
+): { named: string[]; readable: boolean } {
+  if (truncated || contentType !== 'application/json') return { named: [], readable: false };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(snapshot.toString('utf8'));
+  } catch {
+    return { named: [], readable: false };
+  }
+  const named = new Set<string>();
+  // Explicit stack, not recursion: a 16 KiB body can nest deeper than
+  // the call stack tolerates, and a deeply nested response is still a
+  // response.
+  const stack: unknown[] = [parsed];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (Array.isArray(value)) {
+      for (const item of value) stack.push(item);
+      continue;
+    }
+    if (isPlainObject(value)) {
+      for (const item of Object.values(value)) stack.push(item);
+      continue;
+    }
+    if (typeof value !== 'string' && typeof value !== 'number') continue;
+    // Entity ids are short; a longer scalar names nothing. The raw
+    // rendered scalar is kept (canonicalized against the snapshot key
+    // at attribution time, so numeric and string ids both resolve).
+    const rendered = String(value);
+    if (rendered.length === 0 || rendered.length > OBSERVED_RESPONSE_ID_CHARS) continue;
+    named.add(rendered);
+  }
+  return { named: [...named].sort(compareStrings), readable: true };
+}
+
+/** The fresh entities an after-list reported (absent from the before-snapshot). */
+type FreshEntity = { entityId: unknown; fields: unknown };
+
+/**
+ * Attributes the entity ONE observed create produced to the exchange
+ * that returned it, so concurrent observed creates of the same
+ * resource cannot make each other ambiguous.
+ *
+ * The id comes from the response the witness proxied — never from the
+ * suite, never from a raw before/after diff alone — and it is
+ * verified against the after-list. Every OTHER new entity must be
+ * named by exactly one other observed exchange of the same mutation:
+ * that is another test's own create through its own session proxy. A
+ * new entity no observed exchange names was written outside every
+ * session channel, and the creation then stays ambiguous (a typed
+ * note, no record).
+ *
+ * Args:
+ *   state: running witness state (the append-only attribution log).
+ *   binding: the adapter's observe binding for this create.
+ *   exchange: the one observed create this claim is crediting.
+ *   fresh: the entities absent from the session-open before-snapshot.
+ *
+ * Returns:
+ *   {key}: the fresh entity this create produced, or {note}: why the
+ *   attribution is not possible (never a guess).
+ */
+function attributeCreatedEntity(
+  state: WitnessState,
+  binding: ObserveMutation,
+  exchange: ObservedExchange,
+  fresh: Map<string, FreshEntity>,
+): { key: string } | { note: string } {
+  /** The fresh keys one attribution record names. */
+  const freshKeysNamedBy = (entry: ObservedResponseAttribution | undefined): string[] => {
+    if (entry === undefined) return [];
+    const keys: string[] = [];
+    for (const scalar of entry.named) {
+      const key = beforeKeyForSegment(fresh, scalar);
+      if (key !== null) keys.push(key);
+    }
+    return keys;
+  };
+  const ownAttribution = state.observedResponses.find((entry) => entry.seq === exchange.seq);
+  const own = freshKeysNamedBy(ownAttribution);
+  let key: string;
+  if (own.length === 1) {
+    key = own[0] as string;
+  } else if (own.length === 0 && fresh.size === 1) {
+    // Exactly one new entity and the response named none of them: the
+    // one create in this window is this session's (an unobserved
+    // writer would have made a second), so nothing is being picked
+    // between. The after-list read still has to confirm the entity.
+    key = [...fresh.keys()][0] as string;
+  } else if (own.length === 0) {
+    return {
+      note:
+        (ownAttribution?.readable === false
+          ? 'the observed create response named no entity (its body is not readable JSON, or it ' +
+            `exceeded the ${String(OBSERVED_BODY_SNAPSHOT_BYTES)}-byte witness snapshot cap)`
+          : 'the observed create response named no entity') +
+        ` among the ${String(fresh.size)} entities new since the session opened — the creation is ` +
+        'ambiguous, so no record is issued',
+    };
+  } else {
+    return {
+      note:
+        `the observed create response named ${String(own.length)} entities new since the session ` +
+        `opened (${[...own].sort(compareStrings).join(', ')}) — the creation is ambiguous, so no ` +
+        'record is issued',
+    };
+  }
+  for (const other of [...fresh.keys()].sort(compareStrings)) {
+    if (other === key) continue;
+    const attributedElsewhere = state.observedResponses.some((entry) => {
+      if (entry.seq === exchange.seq) return false;
+      if (entry.method !== binding.method) return false;
+      if (entry.status < 200 || entry.status > 299) return false;
+      if (matchObserveTemplate(entry.path, binding.path) === null) return false;
+      const named = freshKeysNamedBy(entry);
+      return named.length === 1 && named[0] === other;
+    });
+    if (!attributedElsewhere) {
+      const unattributed = fresh.get(other) as FreshEntity;
+      return {
+        note:
+          `entity ${JSON.stringify(unattributed.entityId) ?? '?'} is new since the session opened and ` +
+          `no observed ${binding.method} ${binding.path} response names it — a writer outside the ` +
+          'observation proxy made the creation ambiguous, so no record is issued',
+      };
+    }
+  }
+  return { key };
+}
+
+/**
  * `POST /observe/finalize` — SUPERVISOR ONLY: resolves one OPEN
  * session's observe-declared claims against the session's own proxied
  * traffic plus independent adapter reads, stamping witnessed
@@ -4044,7 +4254,10 @@ async function readObserveEntity(
  * - adapter binding + before-snapshot must exist (else typed note);
  * - exactly one 2xx session exchange must match the binding (zero →
  *   missing-traffic note; several → ambiguity note);
- * - create resolves its id from the list-diff (exactly one new entity);
+ * - create attributes its id to the response the witness proxied,
+ *   verified against the after-list (a concurrent observed create
+ *   named by its OWN response is not ambiguity; a new entity no
+ *   observed exchange names — a writer outside the proxy — is);
  *   read/update/delete bind `{id}` from the path against the snapshot;
  * - create/update echo the parsed request-body scalars against the
  *   adapter read (the record carries both; the ENGINE grades the echo);
@@ -4149,27 +4362,27 @@ async function finalizeObserveClaim(
     );
   }
   const matched = matches[0] as { exchange: ObservedExchange; id: string | null };
-  // Resolve the entity id: create diffs the witness-held lists (the new
-  // id is observed, never declared); read/update/delete bind `{id}`
-  // against the session-open snapshot.
+  // Resolve the entity id: create attributes the entity to the response
+  // the witness proxied (verified against the witness's own after-list,
+  // so a concurrent observed create cannot make it ambiguous);
+  // read/update/delete bind `{id}` against the session-open snapshot.
   let entityIdForRead: unknown;
   let before: { entityAbsent: boolean } | { found: boolean; fields?: unknown } | undefined;
   if (operation === 'create') {
-    let after: Map<string, { entityId: unknown; fields: unknown }>;
+    let after: Map<string, FreshEntity>;
     try {
       const ctx = observeAdapterContext(state, adapterBaseUrl, resourceId);
       after = await observeListEntities(adapterName, adapter, ctx);
     } catch (error) {
       return note(error instanceof HttpError ? error.message : (error as Error).message);
     }
-    const fresh = [...after.keys()].filter((key) => !snapshot.before.has(key));
-    if (fresh.length !== 1) {
-      return note(
-        `expected exactly one new entity after the observed create, found ${String(fresh.length)} — ` +
-          'the creation is ambiguous, so no record is issued',
-      );
+    const fresh = new Map<string, FreshEntity>();
+    for (const [key, entry] of after) {
+      if (!snapshot.before.has(key)) fresh.set(key, entry);
     }
-    const created = after.get(fresh[0] as string) as { entityId: unknown; fields: unknown };
+    const attributed = attributeCreatedEntity(state, binding, matched.exchange, fresh);
+    if ('note' in attributed) return note(attributed.note);
+    const created = after.get(attributed.key) as FreshEntity;
     entityIdForRead = created.entityId;
     before = { entityAbsent: true };
   } else {

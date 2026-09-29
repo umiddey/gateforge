@@ -520,3 +520,121 @@ describe('observe finalize (gates)', () => {
     }
   });
 });
+
+describe('observe finalize (concurrent observed creates)', () => {
+  /**
+   * Two sessions whose before-snapshots both predate BOTH creates: each
+   * after-list therefore reports two new entities, and each session
+   * can only be credited with the one its OWN proxied response named.
+   * Finalized in reverse creation order, so a witness that dropped a
+   * consumed exchange's attribution would fail the second finalize.
+   */
+  it('resolves both sessions when their observed creates overlap in one witness window', async () => {
+    const fixture = await startFixturedWitness();
+    const secondTestId = `${TEST_ID}#second-worker`;
+    try {
+      await declare(fixture.witness.url, [CREATE_CLAIM]);
+      const first = await openClaimedSession(fixture.witness.url, [CREATE_CLAIM]);
+      const second = await openSupervisorSession(
+        fixture.witness.url,
+        TOKEN,
+        secondTestId,
+        1,
+        VERIFIER_KEY,
+        [CREATE_CLAIM],
+      );
+      const created = await Promise.all([
+        proxyExchange(
+          first.proxyUrl as string,
+          'POST',
+          '/api/accounts',
+          JSON.stringify({ first_name: 'Grace', last_name: 'Hopper' }),
+        ),
+        proxyExchange(
+          second.proxyUrl as string,
+          'POST',
+          '/api/accounts',
+          JSON.stringify({ first_name: 'Alan', last_name: 'Turing' }),
+        ),
+      ]);
+      expect(created.map((exchange) => exchange.status)).toEqual([200, 200]);
+      // The LATER create finalizes first: the earlier finalize consumes
+      // its own exchange, and the second one must still attribute its
+      // own entity from witness-held response facts.
+      const secondDone = await finalize(fixture.witness.url, second.sessionId);
+      const firstDone = await finalize(fixture.witness.url, first.sessionId);
+      expect(secondDone.body['notes']).toEqual([]);
+      expect(firstDone.body['notes']).toEqual([]);
+      expect(secondDone.body['finalized']).toHaveLength(1);
+      expect(firstDone.body['finalized']).toHaveLength(1);
+      const records = (await ledgerRecords(fixture.witness.url)).filter(
+        (entry) => entry['kind'] === 'persistence.observed',
+      );
+      expect(records).toHaveLength(2);
+      // Each test is credited with ITS OWN entity: the record's
+      // adapter-read fields match the request that test sent, and the
+      // two records never carry the same id.
+      const byTest = new Map<string, Record<string, unknown>>();
+      for (const record of records) {
+        byTest.set(record['testId'] as string, record['payload'] as Record<string, unknown>);
+      }
+      expect([...byTest.keys()].sort()).toEqual([TEST_ID, secondTestId].sort());
+      const payloads = [...byTest.values()];
+      expect(
+        payloads
+          .map((payload) => (payload['observedFields'] as Record<string, unknown>)['first_name'])
+          .sort(),
+      ).toEqual(['Alan', 'Grace']);
+      for (const payload of payloads) {
+        expect(payload['fields']).toMatchObject(
+          (payload['observedFields'] as Record<string, unknown>)['first_name'] === 'Grace'
+            ? { first_name: 'Grace', last_name: 'Hopper' }
+            : { first_name: 'Alan', last_name: 'Turing' },
+        );
+        expect(payload['before']).toEqual({ entityAbsent: true });
+      }
+      expect(new Set(payloads.map((payload) => payload['entityId'])).size).toBe(2);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, first.sessionId, 'passed', VERIFIER_KEY);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, second.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('stays ambiguous when a writer outside the observation proxy creates in the same window', async () => {
+    const fixture = await startFixturedWitness();
+    try {
+      await declare(fixture.witness.url, [CREATE_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [CREATE_CLAIM]);
+      // Bypasses every session channel: the witness never proxied it, so
+      // no observed response names the entity it leaves behind.
+      const unobserved = await fetch(`${fixture.target.url}/api/accounts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ first_name: 'Outside', last_name: 'The Proxy' }),
+      });
+      expect(unobserved.status).toBe(200);
+      await proxyExchange(
+        session.proxyUrl as string,
+        'POST',
+        '/api/accounts',
+        JSON.stringify({ first_name: 'Grace', last_name: 'Hopper' }),
+      );
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['finalized']).toEqual([]);
+      expect(done.body['notes']).toHaveLength(1);
+      expect(String((done.body['notes'] as string[])[0])).toContain(
+        'no observed POST /api/accounts response names it',
+      );
+      const observed = (await ledgerRecords(fixture.witness.url)).filter(
+        (entry) => entry['kind'] === 'persistence.observed',
+      );
+      expect(observed).toEqual([]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+});

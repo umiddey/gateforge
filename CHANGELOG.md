@@ -14,6 +14,10 @@
 
 - Reports gained additive fields only, and only when they apply: `strictness` (non-strict modes) and `quarantine` (non-empty population). SARIF output stays machine-parseable JSON.
 
+### Fixed
+
+- Witnessed observe evidence no longer goes ambiguous when two tests create the same resource at the same time (parallel test files/workers are the normal case). A create is now attributed to the entity its OWN proxied response named, verified against the witness's after-list, so concurrent observed creates each resolve their own entity. A new entity that no observed response names — a writer outside the observation proxy — still makes the creation ambiguous and the obligation stays blocking; the unobserved-writer case is unchanged and fail-closed.
+
 ## 0.7.1
 
 ### Added
