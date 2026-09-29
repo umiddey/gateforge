@@ -1432,6 +1432,98 @@ policies:
     }
   }, 600_000);
 
+  it('a named run executes exactly the named spec location, not its file neighbours', async () => {
+    // The operator environment (verifier key + approved pin) lives
+    // outside the candidate, as in the native journey above.
+    const operatorEnv: Record<string, string> = {
+      GATEFORGE_WITNESS_VERIFIER_KEY: 'strict-supervised-verifier-key',
+      GATEFORGE_APPROVED_POLICY_DIGEST: 'pending-pin-computation',
+    };
+    const savedOperator: Record<string, string | undefined> = {};
+    const setOperator = (values: Record<string, string>): void => {
+      for (const [key, value] of Object.entries(values)) {
+        if (!(key in savedOperator)) savedOperator[key] = process.env[key];
+        process.env[key] = value;
+      }
+    };
+    const restoreOperator = (): void => {
+      for (const [key, value] of Object.entries(savedOperator)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    };
+    setOperator(operatorEnv);
+    try {
+      await withTempRepo({}, async (repo) => {
+        // The default fixture spec carries a create AND an update test;
+        // the update test depends on the id the create test created, so
+        // it can only pass when the whole file runs. Naming the create
+        // test must therefore execute exactly that `file:line`.
+        installStrictFixture(repo);
+        repo.git(['add', '-A']);
+        repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'named location fixture']);
+        repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited comment.\n' });
+        const app = await startApp();
+        const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+        try {
+          const config = loadConfigAt(repo.root);
+          const env: Record<string, string> = {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'strict-supervised-verifier-key',
+            GATEFORGE_APP_BASE_URL: proxy.url,
+            GATEFORGE_TARGET_BASE_URL: proxy.url,
+            GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+            GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
+          };
+          setOperator(env);
+          const selector =
+            'playwright:chromium:specs/crud.spec.js:creates an account through the rendered UI';
+          const named = await runSupervisedCli(
+            repo,
+            ['test-gates', '--test', selector, '--result-only', '--format', 'json'],
+            env,
+          );
+          const why = `named test-gates stdout:\n${named.stdout}\nstderr:\n${named.stderr}`;
+          expect(named.code, why).toBe(0);
+          const report = JSON.parse(named.stdout) as {
+            selectors?: Array<{ selector: string; logicalKeys: string[] }>;
+            execution?: {
+              scope?: string;
+              testsPerformedThisInvocation?: number;
+              selectedTests?: { selected: number; passed: number; failed?: number };
+              selectedClaims?: { selected: number; satisfied: number; blocking: number };
+              repositoryDebt?: { obligations: number };
+            };
+            diagnosticContext?: { scope?: string };
+            summary: { blocking: number };
+            verdicts: Array<{ obligationId: string; verdict: string }>;
+          };
+          expect(report.selectors, why).toEqual([{ selector, logicalKeys: [selector] }]);
+          // Exactly ONE test ran: the file's other journeys were
+          // narrowed away by their `file:line`, never merely ignored.
+          expect(report.execution?.testsPerformedThisInvocation, why).toBe(1);
+          expect(report.execution?.selectedTests, why).toMatchObject({ selected: 1, passed: 1, failed: 0 });
+          expect(report.execution?.scope, why).toBe('named');
+          expect(report.diagnosticContext?.scope, why).toBe('named');
+          // The grading is the named test's own claim; the rest of the
+          // repository is reported, never graded.
+          expect(report.execution?.selectedClaims?.selected, why).toBe(1);
+          expect(report.summary.blocking, why).toBe(0);
+          expect(
+            (report.execution?.repositoryDebt?.obligations ?? 0) > (report.execution?.selectedClaims?.selected ?? 0),
+            why,
+          ).toBe(true);
+          // A hand-picked selection never seals a gate receipt.
+          expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+        } finally {
+          await proxy.stop();
+          app.stop();
+        }
+      });
+    } finally {
+      restoreOperator();
+    }
+  }, 600_000);
+
   it('a candidate that weakens its own required checks is rejected under the approved pin (E17)', async () => {
     await withTempRepo({}, async (repo) => {
       installStrictFixture(repo);

@@ -91,6 +91,7 @@ import {
   type JsonValue,
   type ObligationVerdict,
   type RunManifest,
+  type ResolvedMappings,
   type RunExecutionSummary,
   type RunnerExecutionEnvelope,
   BLOCKING_VERDICTS,
@@ -1580,6 +1581,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // Framework ids whose claims and records must never grade (owner
   // quarantine); empty when nothing is quarantined.
   let excludedTestIds: readonly string[] = [];
+  // Hoisted: a named run grades the obligations its selection declares,
+  // which the mapping resolution below is the only trusted source for.
+  let gradedResolution: ResolvedMappings | null = null;
   if (catalog !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -1595,7 +1599,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // Quarantined tests prove nothing: their declarations and their
     // coverage bindings leave the mapping surface BEFORE planning, so an
     // obligation only they covered becomes uncovered and stays `missing`.
-    const gradedResolution = withoutQuarantinedBindings(mapped.resolution, quarantinedKeys);
+    gradedResolution = withoutQuarantinedBindings(mapped.resolution, quarantinedKeys);
     excludedTestIds = [...quarantinedFrameworkIds(catalog, quarantinedKeys)].sort();
     claimInventory = mapped.claimInventory.filter(
       (claim) => !excludedTestIds.includes(claim.testId),
@@ -1671,18 +1675,50 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   const namedTestIds: string[] | null =
     namedSelections === null
       ? null
-      : [
-          ...new Set(
-            namedSelections.flatMap((entry) => [...entry.logicalKeys]),
-          ),
-        ].sort();
+      : [...new Set(namedSelections.flatMap((entry) => [...entry.logicalKeys]))].sort();
+  // What the SELECTION declares, through EITHER surface: the trusted
+  // mapping resolution's bindings (the sidecar) or the current claim
+  // declarations of the selected tests (native Playwright annotations
+  // and sidecar-derived claims). Both are the same current inventory
+  // the verdict engine grades against; the union is the graded set of a
+  // named run. A test that declares nothing contributes nothing.
+  const namedObligationIds: string[] | null = (() => {
+    if (namedTestIds === null) return null;
+    const selected = new Set(namedTestIds);
+    // A claim names the declaring test the way its runner does: a
+    // sidecar row carries the logical key, a native Playwright
+    // annotation the framework id. The selected entries' own framework
+    // identities are the second half of that join.
+    const selectedFrameworks = new Set<string>();
+    for (const entry of catalog?.entries ?? []) {
+      if (!selected.has(entry.logicalKey)) continue;
+      if (entry.parameterIdentity !== null && entry.parameterIdentity.length > 0) {
+        selectedFrameworks.add(entry.parameterIdentity);
+      }
+    }
+    const declared = new Set<string>();
+    for (const group of gradedResolution?.obligations ?? []) {
+      if (group.bindings.some((binding) => selected.has(binding.logicalKey))) {
+        declared.add(group.obligationId);
+      }
+    }
+    for (const claim of claimInventory) {
+      if (selected.has(claim.testId) || selectedFrameworks.has(claim.testId)) {
+        declared.add(claim.obligationId);
+      }
+    }
+    return [...declared].sort();
+  })();
   if (namedSelections !== null) {
     const named = new Set(namedTestIds ?? []);
     plannedRows = plannedRows.filter((row) => named.has(row.planned.logicalKey));
-    // A test this run did not execute can never have produced evidence:
-    // its declarations leave the grading inventory together with its
-    // plan, so a named run grades the claims of the tests it ran.
-    claimInventory = claimInventory.filter((claim) => named.has(claim.testId));
+    // A test this run did not execute can never have produced
+    // evidence, so a claim row alone proves nothing: the graded SET is
+    // `namedObligationIds` below, and the declaration inventory stays
+    // whole. (A per-test filter here would silently drop a
+    // declaration whose source location a sibling declaration in the
+    // same file already occupies — the inventory is deduplicated per
+    // source location, not per test.)
   }
 
   // Per-test narrowing (additive): a named run hands the runner the exact
@@ -2552,6 +2588,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // is told exactly how many ran ungraded. Every other runner executes
   // exactly the selection, so any extra outcome there stays unplanned and
   // fails the run closed.
+  // Cypress identities of the tests that ran ungraded; the seal drops
+  // them from the executed document too, so an honest ungraded run is
+  // never reported as an unexpected extra execution.
+  let namedUngradedKeys: ReadonlySet<string> | null = null;
   if (selection.mode === 'named-selection' && runnerName === 'cypress') {
     const selected = new Set(selection.logicalKeys);
     const ungraded = envelope.outcomes.filter((outcome) => !selected.has(outcome.logicalKey));
@@ -2563,10 +2603,19 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       envelope = {
         ...envelope,
         outcomes: envelope.outcomes.filter((outcome) => selected.has(outcome.logicalKey)),
+        // The process status is the SPEC's, not the selection's: an
+        // ungraded test that fails (its session was never opened,
+        // because the selection registered only the named ones) would
+        // otherwise fail the whole run closed for a test the run
+        // explicitly said it does not grade. The selection's own
+        // outcomes still decide completeness — a selected test that
+        // never ran, or crashed, leaves the run incomplete.
+        processExit: 0,
       };
       // The witness trace rows carry file + title path, which is exactly
       // how a `<file>#<title path>` logical key spells them.
       const ungradedKeys = new Set(ungraded.map((outcome) => outcome.logicalKey));
+      namedUngradedKeys = ungradedKeys;
       sessionTrace =
         sessionTrace === null
           ? null
@@ -2596,19 +2645,24 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // trace are recorded as INFORMATION ONLY: leaving them in would make
   // supervision report them as unexpected extra executions.
   const quarantinedInstances = quarantinedInstanceKeys(catalog, quarantinedKeys);
+  // Executed rows the seal must not treat as planned executions: the
+  // quarantined instances, plus the tests a named Cypress run had to
+  // execute but never grades. Both are information only.
+  const unrequiredInstances = new Set<string>(quarantinedInstances);
+  for (const key of namedUngradedKeys ?? []) unrequiredInstances.add(key);
   const rawOutcomesDoc = readRunnerOutcomes(join(stateDir, 'runner-outcomes.json'));
   const outcomesDoc =
-    quarantinedInstances.size === 0 || rawOutcomesDoc === null
+    unrequiredInstances.size === 0 || rawOutcomesDoc === null
       ? rawOutcomesDoc
       : {
           ...rawOutcomesDoc,
           outcomes: rawOutcomesDoc.outcomes.filter(
-            (row) => !quarantinedInstances.has(`${row.file}#${row.titlePath.join('>')}`),
+            (row) => !unrequiredInstances.has(`${row.file}#${row.titlePath.join('>')}`),
           ),
         };
-  if (sessionTrace !== null && quarantinedInstances.size > 0) {
+  if (sessionTrace !== null && unrequiredInstances.size > 0) {
     sessionTrace = sessionTrace.filter(
-      (test) => !quarantinedInstances.has(`${test.file}#${test.titlePath.join('>')}`),
+      (test) => !unrequiredInstances.has(`${test.file}#${test.titlePath.join('>')}`),
     );
   }
   const sealed = sealExecutionResult({
@@ -2744,10 +2798,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // obligations are exactly the covered set the receipt seals. Full
     // mode stays unscoped (changedFiles: null), byte-identical.
     changedFiles: scopeChangedFiles,
-    // Named grading: the graded set is the claims of the selected
-    // tests. Absent for every other run, which then grades the whole
+    // Named grading: the graded set is what the selected tests
+    // declare. Absent for every other run, which then grades the whole
     // repository exactly as before.
-    ...(namedTestIds === null ? {} : { namedTestIds }),
+    ...(namedObligationIds === null ? {} : { namedObligationIds }),
     claimInventory,
     ...(excludedTestIds.length === 0 ? {} : { excludedTestIds }),
     witnessVerifierKey,
@@ -2807,7 +2861,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // identically, so this is a no-op outside a named run.
   const repositoryEvaluation = evaluateRun({
     ...evaluationInput,
-    namedTestIds: null,
+    namedObligationIds: null,
     blocking: repositoryBlocking,
     changedFiles: null,
   });

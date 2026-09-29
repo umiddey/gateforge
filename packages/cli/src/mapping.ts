@@ -515,8 +515,15 @@ function currentClaimInventory(
   }
   const unique = new Map<string, Claim>();
   for (const claim of claims) {
+    // The declaring test is part of the identity: two tests in ONE file
+    // that declare the same obligation share a source location whenever
+    // the catalog carries no precise one, and collapsing them would
+    // attribute the declaration to whichever sorted first — grading the
+    // wrong test's evidence (and, in a named run, grading a selection
+    // whose own declaration had been dropped).
     const key = [
       claim.obligationId,
+      claim.testId,
       claim.testFile ?? '',
       claim.location?.line ?? '',
       claim.location?.col ?? '',

@@ -1491,3 +1491,102 @@ describe('a named run grades only its selection', () => {
     });
   }, 600_000);
 });
+
+describe.skipIf(PYTHON === '')('a named pytest run executes exactly the named test', () => {
+  it('runs one test of a two-test module, not the whole module', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'pytest',
+        gateforgeYml('pytest', pytestSuiteYml(PYTHON)),
+        {
+          'app.cjs': APP,
+          'tests/test_first.py': PYTEST_MULTI_FIRST,
+        },
+        testMapYmlMany('pytest', [
+          { file: 'tests/test_first.py', titlePath: ['test_creates_account'] },
+          { file: 'tests/test_first.py', titlePath: ['test_creates_a_second_account'] },
+        ]),
+      );
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'pytest named-narrowing fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const named = await runCli(
+        repo,
+        ['test-gates', '--test', 'tests/test_first.py#test_creates_account', '--result-only', '--format', 'json'],
+        env,
+      );
+      const why = `${pytestRunnerFailures(repo)}named pytest run stdout:\n${named.stdout}\nstderr:\n${named.stderr}`;
+      // The node id narrowed the module down to ONE test, and the run
+      // graded exactly that test's claim.
+      expect(named.code, why).toBe(0);
+      const report = JSON.parse(named.stdout) as NamedReport;
+      expect(report.execution?.testsPerformedThisInvocation, why).toBe(1);
+      expect(report.execution?.selectedTests, why).toMatchObject({ selected: 1, passed: 1, failed: 0 });
+      expect(report.execution?.scope, why).toBe('named');
+      expect(report.verdicts.map((entry) => entry.obligationId), why).toEqual([CREATE_CLAIM]);
+      expect(report.blocking, why).toEqual([]);
+    });
+  }, 900_000);
+});
+
+describe.skipIf(CYPRESS_BIN === '')('a named cypress run grades only the named test', () => {
+  it('runs the whole spec but grades and reports only the selection', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'cypress',
+        gateforgeYml('cypress'),
+        {
+          'app.cjs': APP,
+          'cypress.config.cjs': CYPRESS_CONFIG,
+          'cypress/e2e/first.cy.js': CYPRESS_MULTI_FIRST,
+        },
+        testMapYmlMany('cypress', [
+          { file: 'cypress/e2e/first.cy.js', titlePath: ['accounts', 'creates account through the session proxy'] },
+          { file: 'cypress/e2e/first.cy.js', titlePath: ['accounts', 'creates a second account in the same spec'] },
+        ]),
+      );
+      linkCypressCli(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'cypress named-narrowing fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      const env = operatorEnv(repo, keyFile, appUrl);
+
+      const named = await runCli(
+        repo,
+        [
+          'test-gates',
+          '--test',
+          'cypress/e2e/first.cy.js#accounts>creates account through the session proxy',
+          '--result-only',
+          '--format',
+          'json',
+        ],
+        env,
+      );
+      const why = `${cypressRunnerFailures(repo)}named cypress run stdout:\n${named.stdout}\nstderr:\n${named.stderr}`;
+      expect(named.code, why).toBe(0);
+      const report = JSON.parse(named.stdout) as NamedReport;
+      // Cypress cannot filter below the spec, so the whole spec ran —
+      // and the operator is told exactly how much of it was not graded.
+      // Only the selection counts as performed work: the ungraded test's
+      // outcome is dropped before the seal, never graded, never evidence.
+      expect(named.stderr, why).toContain('also ran 1 other test(s) in the same file — not graded');
+      expect(report.execution?.testsPerformedThisInvocation, why).toBe(1);
+      // The grading is the selection's alone.
+      expect(report.execution?.selectedTests, why).toMatchObject({ selected: 1, passed: 1, failed: 0 });
+      expect(report.execution?.scope, why).toBe('named');
+      expect(report.verdicts.map((entry) => entry.obligationId), why).toEqual([CREATE_CLAIM]);
+      expect(report.summary.blocking, why).toBe(0);
+    });
+  }, 900_000);
+});

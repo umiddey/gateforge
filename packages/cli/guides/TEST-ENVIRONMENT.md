@@ -228,6 +228,33 @@ this is also the way to re-check a fix that touched a `.env`, a helper,
 or a fixture: no test links to those files, so a changed-file slice
 cannot select them.
 
+### What a named run grades (and how it exits)
+
+A named run grades **only the tests it named** — the obligations those
+tests declare. Debt elsewhere in the repository is still printed (under
+`repositoryDebt`, and as `not graded in a named run: N obligation(s)`),
+but it does not block: this run never observed it, and it never becomes
+a verdict. Only the run's own honesty still blocks: a red named test, an
+obligation the selection declares but cannot prove, an incomplete run, or
+a workspace that changed underneath it.
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | the whole selection is green and every claim it declares is satisfied |
+| `1` | a red selected test, an unproven claim, or a run that was not complete/honest |
+| `2` | the selector matched no planned test, or more than one (nothing ran) |
+
+So a green named run is a statement about your selection, never about the
+repository: it says nothing about the other 500 obligations your branch
+still owes. Use `gateforge test-gates --changed` (or `--changed --scope
+changed`) for those.
+
+Playwright, pytest and vitest are handed the exact location of each named
+test, so only those tests execute. Cypress has no trustworthy way to
+filter below a spec, so the whole spec runs and the report tells you so:
+`also ran N other test(s) in the same file — not graded`. Those extra
+tests' results are dropped before grading — they are never evidence.
+
 ## Reusable run script
 
 Replace the reset and seed comments with durable commands for your disposable stack. The seed must come from this checkout. `test-gates` starts and supervises the witness for the run.

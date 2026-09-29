@@ -165,6 +165,39 @@ plan, it does not need the changed-file set — that is why `--test` is
 useful when a fix touches a `.env`, a fixture, or a helper that no test
 links to.
 
+Each runner narrows to the named tests as far as it honestly can:
+Playwright, pytest and vitest receive the exact `file:line` / node id /
+anchored test name, so a named test never drags its file neighbours
+along. Cypress cannot filter below the spec without a plugin the gate
+refuses to trust, so it executes the whole spec, drops every unselected
+outcome and session (an unselected test never becomes evidence), and
+says `also ran N other test(s) in the same file — not graded`.
+
+#### What a named run grades, and its exit codes
+
+A named run grades **only the selection**: the obligations its selected
+tests declare through the sidecar or native annotations. Everything else
+— repository-wide policy, mapping and inventory findings, the coverage
+policy — is still reported, under `repositoryDebt` and as
+`not graded in a named run: N obligation(s)`, but never blocks: the run
+never observed it. What still blocks is everything about the run itself
+(supervision findings, lifecycle conflicts, intent failures, the witness
+channel, evidence-context failures) and any finding that names a graded
+obligation. The report and the diagnostic context both carry
+`scope: "named"`, and the execution summary keeps the whole-repository
+counts next to the selection's own.
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | every selected test passed and every obligation it declares is satisfied (or waived by the owner), with a complete run and no run-execution finding |
+| `1` | anything else: a red selected test, an unproven graded obligation, an incomplete run, changed inputs, or a workspace that moved during the run |
+| `2` | the selector could not be resolved (unknown or ambiguous) — nothing ran |
+
+A named run never carries gate authority: it is `--result-only` only,
+never creates, replaces or clears a receipt, and `check --require-e2e`
+keeps reading the seal the authoritative run left. A run without
+`--test` is unaffected by any of this.
+
 ## Staged runtime (`.gateforge/runtime.yml`)
 
 `gateforge pre-commit` executes the candidate inside a materialized checkout

@@ -166,7 +166,13 @@ engine now serves, end to end:
   receipt only after complete success. `check --require-e2e` (and the
   staged gate) accept only a valid, non-stale receipt for the current input
   digest: missing → `RUN_INCOMPLETE`, different bytes → `EVIDENCE_STALE`,
-  forged/tampered → `ENFORCEMENT_UNTRUSTED`.
+  forged/tampered → `ENFORCEMENT_UNTRUSTED`. `test-gates --test <selector>
+  --result-only` re-checks a handful of hand-picked tests in seconds: it
+  executes exactly the named tests where the runner can filter below a
+  file, grades only the obligations those tests declare (the rest is
+  reported as `not graded in a named run`, never blocked), exits 0 only
+  when the whole selection is green and proven, 1 otherwise and 2 for an
+  unresolvable selector — and never touches a receipt.
 - **Evidence model.** Witness-issued per-test sessions bound every record:
   the trusted reporter opens one session per started test, and each UI action
   runs inside a witness-recorded observation interval, so proxy exchanges

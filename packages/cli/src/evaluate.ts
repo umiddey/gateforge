@@ -165,13 +165,16 @@ export interface EvaluateInput {
     changedInputs?: boolean;
   };
   /**
-   * Named-run selection: the framework test ids a
-   * hand-picked `--test` run executed. When present (non-null), the
-   * evaluation grades ONLY the obligations those tests currently
-   * declare — an obligation no selected test claims was never observed
-   * by this run, so it is reported in the repository debt and blocks
-   * nothing here. Repository-wide findings (policy, mapping,
-   * inventory, the coverage policy) are findings about the REPOSITORY,
+   * Named-run selection: the obligations the
+   * selected tests DECLARE through the trusted mapping resolution
+   * (sidecar or native bindings). When present (non-null), the
+   * evaluation grades ONLY those — an obligation no selected test
+   * claims was never observed by this run, so it is reported in the
+   * repository debt and blocks nothing here. The caller resolves the
+   * declarations, so a channel that mints evidence without writing a
+   * claim row is graded exactly like every other one. Repository-wide
+   * findings (policy, mapping, inventory, the coverage policy) are
+   * findings about the REPOSITORY,
    * not about the selection, so they stay out of a named run's blocking
    * set. Evidence-context findings (unauthenticated evidence, changed
    * inputs, the strict preflight) and every caller-projected
@@ -179,7 +182,7 @@ export interface EvaluateInput {
    * block: a hand-picked selection never forgives a broken run. Null or
    * absent grades the whole repository exactly as before.
    */
-  namedTestIds?: readonly string[] | null;
+  namedObligationIds?: readonly string[] | null;
   /**
    * Adoption-baseline forgiveness (phase 8 C): the fingerprint set of
    * the ADOPTED baseline. Deliberately caller-provided, never loaded
@@ -542,29 +545,12 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   // incomplete context blocks HTTP satisfaction in the core resolver.
   const httpRoutes = httpRoutesView(graph);
 
-  // Named-run grading: the graded set is exactly the obligations the
-  // SELECTED tests currently declare (after the same stale-row and
-  // quarantine filtering every other claim goes through). Derived here
-  // rather than passed in, so it can never disagree with the claims
-  // the verdicts are actually evaluated against.
+  // Named-run grading: the graded set is exactly what the selection
+  // declares, as resolved by the caller against the current catalog.
   // `null` and absent both mean "grades the whole repository"; only a
   // present array narrows the graded set (an empty one is legal and
   // grades nothing).
-  const namedTestIds = input.namedTestIds == null ? null : new Set(input.namedTestIds);
-  const namedObligationIds =
-    namedTestIds === null
-      ? null
-      : new Set(
-          effectiveClaims
-            .filter(
-              (claim) =>
-                namedTestIds.has(
-                  String((claim as { testId?: unknown }).testId ?? ''),
-                ),
-            )
-            .map((claim) => (claim as { obligationId?: unknown }).obligationId)
-            .filter((obligationId): obligationId is string => typeof obligationId === 'string'),
-        );
+  const namedObligationIds = input.namedObligationIds == null ? null : new Set(input.namedObligationIds);
   const allScoped = scopeObligations(input);
   const scoped =
     namedObligationIds === null
@@ -623,7 +609,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     // mapping: a repository-wide finding, not a fact about a named
     // selection. It stays in the report's repository debt and blocks
     // only the runs that claim the repository.
-    ...(namedTestIds === null
+    ...(namedObligationIds === null
       ? coveragePolicyBlocking(config, graph, input.mappedCoverage ?? [])
       : []),
     ...strictBlocking,
