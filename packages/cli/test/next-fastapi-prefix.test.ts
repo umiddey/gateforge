@@ -226,3 +226,18 @@ describe('gateforge next: an unfollowable include_router target names importRoot
     });
   });
 });
+
+describe('gateforge next: a printed file-content block is a real fenced block', () => {
+  it('never prints a bare `[CODE]` marker line', async () => {
+    await withTempRepo({}, async (repo) => {
+      withUnresolvedTarget(repo);
+      const { stdout } = await runCli(repo, ['next']);
+      // The marker is not a template placeholder: it is literal text the
+      // reader copies, and its meaning was inferable but never stated.
+      expect(stdout.split('\n').some((line) => line.trim() === '[CODE]')).toBe(false);
+      // The JSON snippet is delimited the way the rest of the product
+      // delimits one, and its language is named.
+      expect(stdout.split('\n').map((line) => line.trim())).toContain('```json');
+    });
+  });
+});
