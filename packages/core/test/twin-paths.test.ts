@@ -168,6 +168,12 @@ describe('twin links', () => {
     // Two described raw tests under one label: which one is the twin is
     // the owner's call (`twinOf`), never a guess.
     expect(twinLinksFor([...candidates, { logicalKey: 'k-raw-2', title: 'UC-7 raw: invoice list only' }])).toEqual([]);
+    // Two witnessed tests under one label and one described raw test:
+    // the raw test is the twin of at most one of them, and which one is
+    // again the owner's call.
+    expect(
+      twinLinksFor([...candidates, { logicalKey: 'k-witnessed-2', title: 'UC-7 [witnessed]: invoice review observed' }]),
+    ).toEqual([]);
   });
 
   it('names nothing when either side is missing, rather than a ghost pair', () => {
