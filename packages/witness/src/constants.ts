@@ -96,14 +96,6 @@ export const ENV_TWIN_QUERY_KEYS = 'GATEFORGE_TWIN_QUERY_KEYS';
  * id). Absent = the identifier-blind fallback, never a raw path.
  */
 export const ENV_TWIN_INVENTORY = 'GATEFORGE_TWIN_INVENTORY';
-/**
- * Comma-separated runner test ids the supervisor marked
- * OBSERVATION-ONLY (E64): a raw twin's session may be observed but
- * issues nothing. Set by the orchestrating CLI on the SPAWNED witness
- * only; a mark can never carry claims, so a witnessed test is never
- * demoted by it.
- */
-export const ENV_TWIN_OBSERVATION_ONLY = 'GATEFORGE_TWIN_OBSERVATION_ONLY';
 /** Observation proxy target (loopback base URL the proxy forwards to). */
 export const ENV_PROXY_TARGET = 'GATEFORGE_PROXY_TARGET';
 /**

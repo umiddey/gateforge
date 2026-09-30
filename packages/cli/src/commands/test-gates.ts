@@ -146,7 +146,6 @@ import {
   ENV_CHAOS_SEED,
   ENV_PROXY_TARGET,
   ENV_TWIN_INVENTORY,
-  ENV_TWIN_OBSERVATION_ONLY,
   ENV_TWIN_QUERY_KEYS,
   ENV_TWIN_SHAPES,
   type ExpectedSetResponse,
@@ -2686,12 +2685,26 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               .map((entry) => [entry.key, entry.twinOf]),
           ),
         );
-  // The raw twin's runner test id: the id the supervisor's lifecycle
-  // spool and the witness's session channel both speak.
-  const twinObservationOnlyTestIds: string[] = twinLinks
-    .map((link) => plannedRows.find((row) => row.planned.logicalKey === link.raw)?.planned.frameworkId)
-    .filter((testId): testId is string => typeof testId === 'string' && testId.length > 0)
-    .sort(compareStrings);
+  // Twin coverage is only WORTH wiring when there is a pair to compare:
+  // with the option on and no link, the run records no shape, writes no
+  // inventory and adds no report key — byte-identical to a run that
+  // never heard of twins.
+  const twinComparisonOn = twinPathsMode !== null && twinLinks.length > 0;
+  // The raw twins' REGISTERED identities (project, file, titlePath) —
+  // not their runner test ids. The id the catalog enumerated is not the
+  // id the test runs under: Playwright hashes the test's file path
+  // relative to the config it loaded, so a supervised run driving a
+  // trusted config from another directory mints different ids from the
+  // same tests. The identity is the join key both sides speak.
+  const twinRawIdentities = new Set<string>();
+  for (const link of twinLinks) {
+    const raw = plannedRows.find((row) => row.planned.logicalKey === link.raw);
+    if (raw !== undefined) {
+      twinRawIdentities.add(
+        `${raw.planned.project ?? ''}\u0000${raw.planned.file}\u0000${raw.planned.titlePath.join('>')}`,
+      );
+    }
+  }
   // Runner-agnostic expected set (plan 2026-09-25): a NON-Playwright
   // runner enumerates through the RunnerAdapter contract — the expected
   // set is fixed BEFORE the run from the runner's own collection, and
@@ -3258,11 +3271,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   writeClassificationsView(stateDir, pipeline.classificationsView);
   // The route inventory a recorded twin shape resolves against, so a
   // shape names a route template (`/accounts/{}`) and never a concrete
-  // id. Written ONLY when the owner configured twin coverage: a run
-  // without it never adds a state file.
+  // id. Written ONLY when a pair can actually be compared: a run with
+  // the option on and no link adds no state file at all.
   const twinQueryKeys = config.enforcement?.twinQueryKeys ?? [];
   const twinInventoryPath = join(stateDir, 'twin-inventory.json');
-  if (twinPathsMode !== null) {
+  if (twinComparisonOn) {
     writeTwinInventory(
       twinInventoryPath,
       httpRoutes.map((route) => route.canonicalPath).filter((template) => template.length > 0),
@@ -3345,25 +3358,23 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               ...(appBase !== '' ? { [ENV_PROXY_TARGET]: appBase } : {}),
             }),
         // Twin path coverage (E64): the observation-only shape
-        // recording, the owner's query-key allowlist, the route
-        // inventory the shapes resolve against, and the raw twins whose
-        // sessions may issue nothing. Like chaos, the Playwright path
-        // needs the observation proxy wired explicitly (its sessions are
-        // engine-browser scoped and therefore proxy-free by default),
-        // because a shape can only come from a request the proxy saw.
-        // Without `enforcement.twinPaths` this spawn is byte-identical
-        // to the one it always was.
-        ...(twinPathsMode === null
-          ? {}
-          : {
+        // recording, the owner's query-key allowlist and the route
+        // inventory the shapes resolve against. Like chaos, the
+        // Playwright path needs the observation proxy wired explicitly
+        // (its sessions are engine-browser scoped and therefore
+        // proxy-free by default), because a shape can only come from a
+        // request the proxy saw. The raw twins themselves are NOT
+        // listed here: their mark travels with the expected-set
+        // registration, keyed by identity. With no link to compare this
+        // spawn is byte-identical to the one it always was.
+        ...(twinComparisonOn
+          ? {
               [ENV_TWIN_SHAPES]: 'on',
               ...(twinQueryKeys.length > 0 ? { [ENV_TWIN_QUERY_KEYS]: twinQueryKeys.join(',') } : {}),
               [ENV_TWIN_INVENTORY]: twinInventoryPath,
-              ...(twinObservationOnlyTestIds.length > 0
-                ? { [ENV_TWIN_OBSERVATION_ONLY]: twinObservationOnlyTestIds.join(',') }
-                : {}),
               ...(appBase !== '' ? { [ENV_PROXY_TARGET]: appBase } : {}),
-            }),
+            }
+          : {}),
       });
     } catch (error) {
       throw new UsageError(`test-gates: the observer (witness service) could not start: ${(error as Error).message}`);
@@ -3460,6 +3471,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           project: test.project,
           file: test.file,
           titlePath: [...test.titlePath],
+          ...(twinRawIdentities.has(`${test.project ?? ''}\u0000${test.file}\u0000${test.titlePath.join('>')}`)
+            ? { observationOnly: true }
+            : {}),
         }));
       return supervisor.registerExpectedSet({ tests });
     }
@@ -3487,6 +3501,18 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         project: instance.project.length > 0 ? instance.project : null,
         file: instance.file,
         titlePath: instance.titlePath,
+        // Twin path coverage (E64): a raw twin is marked by its
+        // REGISTERED IDENTITY, which is the one part of a registration
+        // that is the same in enumeration and execution. Its runner test
+        // id is not: Playwright derives it from the test's file path
+        // relative to the config it loaded, so an id enumerated from the
+        // repository's own config is not the id the supervised run
+        // opens the session with.
+        ...(twinRawIdentities.has(
+          `${instance.project ?? ''}\u0000${instance.file}\u0000${instance.titlePath.join('>')}`,
+        )
+          ? { observationOnly: true }
+          : {}),
       })),
     });
   })();
@@ -3794,12 +3820,15 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         );
       }
     }
-    if (twinPathsMode !== null && effectiveWitnessUrl !== undefined && witnessVerifierKey !== undefined) {
+    if (twinComparisonOn && effectiveWitnessUrl !== undefined && witnessVerifierKey !== undefined) {
       // Twin path coverage (E64): the honest comparison. The shapes
-      // come from the witness's own per-session proxies, keyed by the
-      // runner test id the supervisor opened them for; a pair is
-      // compared only when BOTH twins were observed in this run, and a
-      // run that could not read them says so rather than reporting
+      // come from the witness's own per-session proxies and are joined
+      // to the catalog by the session's REGISTERED IDENTITY (project,
+      // file, titlePath) — never by the runner test id, which is not
+      // stable from enumeration to execution (Playwright derives it from
+      // the test's file path relative to the config it loaded). A pair
+      // is compared only when BOTH twins were observed in this run, and
+      // a run that could not read them says so rather than reporting
       // twins that agree because nobody looked.
       const shapes = await supervisor.twinShapes();
       if (shapes === null) {
@@ -3809,16 +3838,21 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
             'TWIN_PATH_DIVERGENT check (an unread comparison is never a passing one)',
         );
       } else {
-        const logicalKeyByTestId = new Map<string, string>();
+        const logicalKeyByIdentity = new Map<string, string>();
         for (const row of plannedRows) {
-          const frameworkId = row.planned.frameworkId;
-          if (frameworkId !== null && frameworkId.length > 0) {
-            logicalKeyByTestId.set(frameworkId, row.planned.logicalKey);
-          }
+          logicalKeyByIdentity.set(
+            `${row.planned.project ?? ''}\u0000${row.planned.file}\u0000${row.planned.titlePath.join('>')}`,
+            row.planned.logicalKey,
+          );
         }
         const observed = new Map<string, { observationOnly: boolean; shapes: TwinShape[] }>();
         for (const twin of shapes.twins) {
-          const logicalKey = logicalKeyByTestId.get(twin.testId);
+          const logicalKey =
+            twin.identity === null
+              ? undefined
+              : logicalKeyByIdentity.get(
+                  `${twin.identity.project ?? ''}\u0000${twin.identity.file}\u0000${twin.identity.titlePath.join('>')}`,
+                );
           if (logicalKey !== undefined) {
             observed.set(logicalKey, { observationOnly: twin.observationOnly, shapes: [...twin.shapes] });
           }
@@ -4169,7 +4203,15 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       changedInputs,
     },
   };
-  const evaluated = evaluateRun(evaluationInput);
+  const evaluatedBase = evaluateRun(evaluationInput);
+  // Twin path coverage in `block` mode joins the run's OWN blocking set:
+  // it appears in `blocking` (not only in `advisories`) and it fails the
+  // run the way any other blocking finding does. In `advisory` mode this
+  // is the base evaluation, byte-identical.
+  const evaluated: typeof evaluatedBase =
+    twinBlocking.length === 0
+      ? evaluatedBase
+      : { ...evaluatedBase, blocking: [...evaluatedBase.blocking, ...twinBlocking] };
   // Owner-chosen strictness: the mapping from the strict decision to the
   // effective exit code. `changed` reuses the run's own provider diff and
   // the evaluator's own attribution rule — an unknown change fails closed.

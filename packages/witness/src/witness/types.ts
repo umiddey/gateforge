@@ -535,7 +535,14 @@ export interface TestSession {
 
 /** One test's recorded twin shapes, as the supervisor read surface returns them. */
 export interface TwinShapeReport {
-  /** The supervisor-issued test id (never a credential). */
+  /**
+   * The registered identity of the test these shapes belong to: the
+   * join key both sides speak (project, file, titlePath). Null only when
+   * the run registered no expected set, in which case the caller has no
+   * honest way to name the test and should say so.
+   */
+  identity: { file: string; titlePath: string[]; project: string | null } | null;
+  /** The runner-assigned test id the session ran under (diagnostic). */
   testId: string;
   /** True when this session was marked observation-only (a raw twin). */
   observationOnly: boolean;
@@ -566,6 +573,18 @@ export interface ExpectedTestRegistration {
   file: string;
   /** Full title path (the identity join key). */
   titlePath: readonly string[];
+  /**
+   * Twin path coverage (E64): the supervisor marked this test as the RAW
+   * twin of a witnessed one. Absent/false = an ordinary session.
+   *
+   * The mark travels with the REGISTRATION rather than as a list of
+   * runner test ids, because a runner-assigned id is not the id the test
+   * runs under: Playwright hashes the test's file path relative to the
+   * config it loaded, so an id enumerated from the repository's own
+   * config is not the id a supervised run opens the session with. The
+   * identity (project, file, titlePath) is what both sides speak.
+   */
+  observationOnly?: boolean;
 }
 
 /** `POST /runs/expected-set` body (SUPERVISOR ONLY). */
@@ -625,14 +644,6 @@ export interface WitnessOptions {
    * obligation, or enter an attestation.
    */
   twinShapes?: TwinShapePlan | null;
-  /**
-   * The observation-only test ids the supervisor marked (E64): a raw
-   * twin's session may be observed but issues NOTHING. Every
-   * submission from such a session is refused, so "can satisfy
-   * nothing" is enforced by the witness rather than assumed of the
-   * suite.
-   */
-  observationOnlyTestIds?: readonly string[];
   /**
    * Observation-proxy mount prefix (with `proxyTarget`; e.g. `/api`).
    *

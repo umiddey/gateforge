@@ -789,6 +789,63 @@ Keep a race-free twin next to the racy test — the same requests against
 a page that renders by request id. It must stay green under the same
 seed; when it does not, the timing is not the finding.
 
+## Keep raw and witnessed twins honest
+
+**Rule:** When a raw test and a witnessed test are meant to cover the
+same thing, link them and switch twin coverage on, so the run compares
+the requests each side actually made.
+
+**Why:** The reported bug was GREEN. A raw test and its witnessed twin
+shared a helper whose parameter defaults sent them down different paths
+— the list call carried `?tab=all` in one and `?tab=open` in the other —
+so "green three times" proved nothing about the path the witnessed twin
+covered, and nothing in the run said so. Both tests were correct; they
+were not testing the same thing. Twin coverage records the REQUEST SHAPE
+each twin exercised (a method, a route template, and the values of the
+query keys YOU allowlist) and reports `TWIN_PATH_DIVERGENT` when the two
+sides disagree, naming both tests and the exact differing value.
+
+**Example:**
+
+```yaml
+# .gateforge.yml
+enforcement:
+  twinPaths: advisory        # or: block (then the finding fails the run)
+  twinQueryKeys: [tab]       # values of THESE keys may appear in a finding
+```
+
+Link the pair in one of two ways, both read only when `twinPaths` is set:
+
+- the test map, when the link should survive a rename of either test —
+  `twinOf: <the raw twin's logical key>` on the witnessed test's entry
+  in `.gateforge/test-map.yml`;
+- the title convention: `X [witnessed]` next to `X raw` (or a bare `X`).
+
+```bash
+# A run with the pair linked reports the divergence and keeps its verdict:
+gateforge test-gates --changed --format json
+#   advisories: [ { cause: "TWIN_PATH_DIVERGENT",
+#     detail: "GET /api/items?tab=open is exercised by '…:lists open items
+#              [witnessed]' and never by '…:lists open items raw'" } ]
+```
+
+Four rules keep it honest:
+
+- The raw twin proves nothing, and the engine enforces it: its session
+  is marked OBSERVATION-ONLY from the registered test identity, and
+  every submission from it is refused with 403. What it contributes is
+  its request shapes.
+- A shape never carries a URL, a body or a value you did not
+  allowlist. With no `twinQueryKeys` a shape says a parameter was sent
+  and never what it said, so a report is safe to paste into a bug.
+- With `twinPaths` absent — or set, with no pair linked — nothing is
+  wired, nothing is recorded, no state file is written, and the report
+  is byte-identical to a run that never heard of twins.
+- The comparison is by the runner's REGISTERED IDENTITY (project, file,
+  title path), never by a runner-assigned test id, because a supervised
+  run drives its own trusted config and the ids it runs tests under are
+  not the ids the repository's config enumerates.
+
 ## Reusable run script
 
 Replace the reset and seed comments with durable commands for your disposable stack. The seed must come from this checkout. `test-gates` starts and supervises the witness for the run.
