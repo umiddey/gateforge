@@ -4094,11 +4094,20 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // the screened failing-test diagnosis as a Gateforge-owned artifact,
   // so a CI job never has to publish the runner log to explain a red
   // test. Both happen only when the stream is on — a local run with the
-  // stream off writes and prints nothing new.
+  // stream off writes nothing new into the state directory.
   progress.finish();
   if (progressTarget !== null) {
     writeTestFailures(stateDir, manifest.runId, progress.failures);
   }
+  // A local run has no stream, so the report is the only place its
+  // operator will ever read WHY. The records are the same guarded ones
+  // the stream prints (never runner output), and they are offered to
+  // the report ONLY with the stream off — a stream that already named
+  // the failures must not have them named twice.
+  const localFailures: { title: string; message: string }[] =
+    progressTarget === null
+      ? progress.failures.map((failure) => ({ title: failure.title, message: failure.message }))
+      : [];
 
   // Cypress cannot filter below the spec without a plugin the gate
   // refuses to trust, so a named Cypress run executes the whole spec and
@@ -4530,6 +4539,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     ...(chaosRun === null
       ? {}
       : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
+    ...(localFailures.length === 0 ? {} : { failedTests: localFailures }),
   });
   /**
    * The persisted json document: the same report shape stdout shows for a

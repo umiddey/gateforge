@@ -32,6 +32,29 @@ import { ENGINE_UPGRADE_REFUSAL_PREFIX, humanMessage } from './human-message.js'
 const SARIF_SCHEMA_URI =
   'https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json';
 
+/** How many failing tests the text report names inline. */
+const MAX_LOCAL_FAILURES = 3;
+
+/** The longest first error line the text report prints. */
+const MAX_ERROR_LINE = 200;
+
+/**
+ * The first line of a runner error message, bounded. The message is
+ * already credential-screened by the caller, so this only trims and
+ * caps it; a message that carries no line at all yields '' and the
+ * report names the test without inventing a reason.
+ *
+ * Args:
+ *   message: the guarded runner error message.
+ *
+ * Returns:
+ *   string: the first non-empty line, truncated; '' when there is none.
+ */
+function firstErrorLine(message: string): string {
+  const first = message.split('\n').find((line) => line.trim().length > 0)?.trim() ?? '';
+  return first.length > MAX_ERROR_LINE ? `${first.slice(0, MAX_ERROR_LINE)}…` : first;
+}
+
 /** Waiver-population counts for report summaries (from the waivers loader). */
 export interface WaiverCounts {
   /** All waivers found in the configured directory. */
@@ -315,6 +338,17 @@ export interface RenderRunOptions {
     ageDays?: number;
     neverWitnessed?: number;
   };
+  /**
+   * The run's failing tests with their guarded first error line, for a
+   * LOCAL run whose progress stream is off: without it a red run prints
+   * a count and no reason at all, because the only other copy of the
+   * reason lives in the runner log a local operator cannot read. The
+   * caller passes records already screened for credentials, adds this
+   * option ONLY when the stream itself is off (a stream that printed
+   * them must not print them twice), and the lines are TEXT-only: the
+   * json and SARIF documents keep exactly the keys they always had.
+   */
+  failedTests?: readonly { title: string; message: string }[];
 }
 
 /** A run's exit code (architecture contract 4). */
@@ -718,6 +752,21 @@ function textReport(
         `(selected ${execution.selectedTests.selected}; ${execution.selectedTests.skipped} skipped; ` +
         `${execution.selectedTests.expectedFailures} expected failures)`,
     );
+    // A local run has no progress stream (it is OFF unless CI or a flag
+    // asks for it), so without these lines a red run states a count and
+    // never a reason. At most three are named inline — enough to see
+    // what broke — and the rest are exactly one command away.
+    const failures = options.failedTests ?? [];
+    if (failures.length > 0) {
+      for (const failure of failures.slice(0, MAX_LOCAL_FAILURES)) {
+        const reason = firstErrorLine(failure.message);
+        lines.push(`failed test: ${failure.title}${reason === '' ? '' : ` — ${reason}`}`);
+      }
+      const rest = failures.length - MAX_LOCAL_FAILURES;
+      if (rest > 0) {
+        lines.push(`… ${String(rest)} more — run with \`--progress stderr\` to print every failure as it happens`);
+      }
+    }
     lines.push(
       `selected claims: ${execution.selectedClaims.satisfied} satisfied, ${execution.selectedClaims.blocking} blocking ` +
         `(selected ${execution.selectedClaims.selected}; ${execution.selectedClaims.blockingEntries} blocking entries; ` +

@@ -758,3 +758,67 @@ describe('renderRun — adopted-baseline age', () => {
     expect(text).toContain('age: 16 day(s); never witnessed: 1');
   });
 });
+
+describe('renderRun — local failure reasons when the progress stream is off', () => {
+  const executionWith = (failed: number): RunExecutionSummary => ({
+    scope: 'full',
+    mode: 'executed',
+    testsPerformedThisInvocation: 5,
+    selectedTests: { selected: 5, passed: 5 - failed, failed, skipped: 0, expectedFailures: 0 },
+    selectedClaims: { selected: 0, satisfied: 0, blocking: 0, blockingEntries: 0, waived: 0 },
+    repositoryDebt: {
+      obligations: 0,
+      blocking: 0,
+      blockingEntries: 0,
+      baselined: 0,
+      newlyBlocking: 0,
+      unclaimed: 0,
+      notGradedBlocking: 0,
+    },
+  });
+  const failed = (title: string, message: string): { title: string; message: string } => ({ title, message });
+
+  it('names the first error line of up to three failures, then how to see the rest', () => {
+    const text = renderRun([entry(accounts, 'missing')], {
+      format: 'text',
+      execution: executionWith(4),
+      failedTests: [
+        failed('checkout > pays with a card', 'Error: browserType.launch: Target page, context or browser has been closed'),
+        failed('checkout > pays with a voucher', 'Error: expect(received).toBe(expected)\n  at line 12'),
+        failed('cart > empties', ''),
+        failed('cart > merges', 'Error: timeout of 5000ms exceeded'),
+      ],
+    });
+    expect(text).toContain(
+      'failed test: checkout > pays with a card — Error: browserType.launch: Target page, context or browser has been closed',
+    );
+    expect(text).toContain('failed test: checkout > pays with a voucher — Error: expect(received).toBe(expected)');
+    // A failure the runner reported no message for is still named.
+    expect(text).toContain('failed test: cart > empties');
+    // The fourth is NOT printed inline, and the line that replaces it is
+    // the exact command that prints every failure as it happens.
+    expect(text).not.toContain('cart > merges');
+    expect(text).toContain(
+      '… 1 more — run with `--progress stderr` to print every failure as it happens',
+    );
+  });
+
+  it('adds nothing to a run that failed no test, and never touches the json document', () => {
+    const green = renderRun([entry(accounts, 'satisfied')], { format: 'text', execution: executionWith(0) });
+    expect(green).not.toContain('failed test:');
+    expect(green).not.toContain('--progress stderr');
+    // The json document is the machine contract: the local hint is text
+    // only, so a consumer's parsed report keeps exactly its old shape.
+    const withHint = JSON.parse(
+      renderRun([entry(accounts, 'missing')], {
+        format: 'json',
+        execution: executionWith(1),
+        failedTests: [failed('checkout > pays', 'Error: nope')],
+      }),
+    ) as Record<string, unknown>;
+    const withoutHint = JSON.parse(
+      renderRun([entry(accounts, 'missing')], { format: 'json', execution: executionWith(1) }),
+    ) as Record<string, unknown>;
+    expect(Object.keys(withHint).sort()).toEqual(Object.keys(withoutHint).sort());
+  });
+});

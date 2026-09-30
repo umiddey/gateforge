@@ -585,6 +585,34 @@ export default defineConfig({
 });
 `;
 
+/**
+ * The RED vitest suite a local operator hits on a machine whose
+ * browser cannot start: four failing tests, each with the runner's own
+ * error message, and one green test so the run has both outcomes.
+ */
+const VITEST_FAILING = `import { test, expect } from 'vitest';
+
+test('opens the storefront', () => {
+  expect(1).toBe(1);
+});
+
+test('adds a card', () => {
+  expect('card added').toBe('card declined');
+});
+
+test('charges the card', () => {
+  expect('charged').toBe('declined');
+});
+
+test('emails the receipt', () => {
+  expect('sent').toBe('queued');
+});
+
+test('shows the receipt', () => {
+  expect('shown').toBe('hidden');
+});
+`;
+
 /** Links the workspace modules the vitest suite imports. */
 function linkVitestModules(repo: TempRepo): void {
   const modules = join(repo.root, 'node_modules');
@@ -1689,4 +1717,57 @@ describe.skipIf(CYPRESS_BIN === '')('a named cypress run grades only the named t
       expect(report.summary.blocking, why).toBe(0);
     });
   }, 900_000);
+});
+
+/**
+ * A local run has no progress stream: `auto` is OFF unless CI is set,
+ * so before this a red local run printed a count of failures and not
+ * one word about WHY. The final report now names the failing tests
+ * with their first error line, from the same credential-screened
+ * records the stream itself uses — never from runner output.
+ */
+describe('a local red run names its failures in the report', () => {
+  it('names three failures with their first error line and points at the rest', async () => {
+    const keyFile = provisionKeyRing();
+    await withTempRepo({}, async (repo) => {
+      installRepo(
+        repo,
+        'vitest',
+        gateforgeYml('vitest'),
+        { 'app.cjs': APP, 'vitest.config.mjs': VITEST_CONFIG, 'tests/failing.test.mjs': VITEST_FAILING },
+        testMapYmlMany('vitest', [
+          { file: 'tests/failing.test.mjs', titlePath: ['opens the storefront'] },
+          { file: 'tests/failing.test.mjs', titlePath: ['adds a card'] },
+          { file: 'tests/failing.test.mjs', titlePath: ['charges the card'] },
+          { file: 'tests/failing.test.mjs', titlePath: ['emails the receipt'] },
+          { file: 'tests/failing.test.mjs', titlePath: ['shows the receipt'] },
+        ]),
+      );
+      linkVitestModules(repo);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'failing vitest fixture']);
+      repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited.\n' });
+      const port = await freePort();
+      const appUrl = await startApp(port, repo.root);
+      // CI unset: this IS the local default, where the stream is off.
+      const env = { ...operatorEnv(repo, keyFile, appUrl), CI: undefined };
+
+      const gated = await runCli(repo, ['test-gates', '--changed'], env);
+      const why = `${runnerFailures(repo)}test-gates stdout:\n${gated.stdout}\nstderr:\n${gated.stderr}`;
+      expect(gated.code, why).not.toBe(0);
+      // The stream itself stayed off — this is the report, not a log.
+      expect(gated.stderr, why).not.toMatch(/^gateforge: /m);
+      expect(gated.stdout, why).toContain("failed test: adds a card — expected 'card added' to be 'card declined'");
+      expect(gated.stdout, why).toContain("failed test: charges the card — expected 'charged' to be 'declined'");
+      expect(gated.stdout, why).toContain("failed test: emails the receipt — expected 'sent' to be 'queued'");
+      // The fourth failure is named by count, and the line that replaces
+      // it is the command that prints every failure as it happens.
+      expect(gated.stdout, why).toContain(
+        '… 1 more — run with `--progress stderr` to print every failure as it happens',
+      );
+      expect(gated.stdout, why).not.toContain('failed test: shows the receipt');
+      // The local state directory is left exactly as the run found it.
+      expect(existsSync(repo.path('.gateforge/test-gates/failures.json'))).toBe(false);
+    });
+  }, 600_000);
 });
