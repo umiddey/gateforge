@@ -1514,6 +1514,13 @@ def _fact(
     # against and stays silent.
     fields = models.fields_for(route.file, route.effective_response_model)
     if fields is not None:
+        # FastAPI answers a FAILED request with ``{"detail": ...}``
+        # (HTTPException) or a ``detail`` list (request validation), and a
+        # frontend reads it to report the error. It is therefore a
+        # legitimate field of every route this pack reports, never
+        # evidence of a dropped success-model field.
+        if "detail" not in fields:
+            fields.append("detail")
         attributes["responseModelFields"] = fields
     return {
         "schemaVersion": 1,

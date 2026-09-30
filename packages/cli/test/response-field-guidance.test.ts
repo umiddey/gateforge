@@ -45,7 +45,7 @@ function route(fields?: readonly string[], overrides: Partial<HttpContractFact> 
 
 /** One frontend-call fact of a joined endpoint, with its field reads. */
 function call(
-  reads: ReadonlyArray<{ field: string; location: HttpLocation }>,
+  reads: ReadonlyArray<{ field: string; location: HttpLocation; chain?: number }>,
   overrides: Partial<HttpContractFact> = {},
 ): HttpContractFact {
   return {
@@ -198,6 +198,47 @@ describe('response-field advisory', () => {
     for (const facts of malformed) {
       expect(responseFieldGaps([endpoint([route(['id'])], [facts])])).toEqual([]);
     }
+  });
+
+  it('treats the operands of a fallback chain as one read of the same result', () => {
+    // `res.data?.invoice_id || res.data?.invoice?.id` — the model declares
+    // `invoice_id`, so the second operand is the defensive fallback and
+    // no field is missing.
+    const chain = [
+      { field: 'invoice_id', location: at('frontend/src/invoices.ts', 42), chain: 0 },
+      { field: 'invoice', location: at('frontend/src/invoices.ts', 42), chain: 0 },
+    ];
+    expect(responseFieldGaps([endpoint([route(['id', 'invoice_id'])], [call(chain)])])).toEqual([]);
+    // A chain in which NO operand is declared drops every operand: both
+    // spellings are unproven, so both are still reported.
+    expect(
+      responseFieldGaps([endpoint([route(['id'])], [call(chain)])]).map((gap) => gap.field),
+    ).toEqual(['invoice', 'invoice_id']);
+    // Two independent chains do not excuse each other: only the chain
+    // with a declared operand is silent.
+    expect(
+      responseFieldGaps([
+        endpoint([route(['invoice_id'])], [
+          call([
+            { field: 'invoice_id', location: at('frontend/src/invoices.ts', 42), chain: 0 },
+            { field: 'invoice', location: at('frontend/src/invoices.ts', 42), chain: 0 },
+            { field: 'paidAt', location: at('frontend/src/invoices.ts', 43), chain: 1 },
+            { field: 'settledAt', location: at('frontend/src/invoices.ts', 43), chain: 1 },
+          ]),
+        ]),
+      ]).map((gap) => gap.field),
+    ).toEqual(['paidAt', 'settledAt']);
+    // An unchained read is never a fallback, however a sibling reads.
+    expect(
+      responseFieldGaps([
+        endpoint([route(['id'])], [
+          call([
+            { field: 'invoice_id', location: at('frontend/src/invoices.ts', 42) },
+            { field: 'invoice', location: at('frontend/src/invoices.ts', 43) },
+          ]),
+        ]),
+      ]).map((gap) => gap.field),
+    ).toEqual(['invoice_id', 'invoice']);
   });
 
   it('finds the gap through the real endpoint join, not just hand-built facts', () => {

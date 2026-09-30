@@ -156,6 +156,11 @@ return annotation otherwise (FastAPI's own default), with the containers
 FastAPI unwraps peeled off: `list[InvoiceOut]`, `Optional[MoneyOut]` and
 `MoneyOut | None` all report the element model.
 
+`detail` is always among the names: FastAPI answers a failed request with
+`{"detail": ...}` (an `HTTPException`) or a `detail` list (request
+validation), so a frontend reading `detail` to report an error is never
+evidence of a dropped success-model field.
+
 The attribute is **absent** whenever the wire names are not statically
 computable, never partial:
 

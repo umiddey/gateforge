@@ -184,4 +184,82 @@ describe('bounded response field reads', () => {
       },
     ]);
   });
+
+  it('collects nothing inside an envelope guard, and still the success path', () => {
+    // The real shape that produced the false positives: the error body
+    // read inside the failure branch of the same call result.
+    const guarded = [
+      `const res = await apiClient.post(\`/api/v1/jobs/\${jobId}/draft\`, { document_type });`,
+      `if (!res.ok) {`,
+      `  const detail = res.data?.detail;`,
+      `  throw new Error(typeof detail === 'string' ? detail : \`request failed (\${res.status})\`);`,
+      `}`,
+      `setDue(res.data.dueDate);`,
+    ].join('\n');
+    expect(readsOf('src/guarded.ts', guarded)).toEqual([{ field: 'dueDate', line: 6 }]);
+
+    const byStatus = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `if (res.status >= 400) {`,
+      `  report(res.data.detail);`,
+      `} else {`,
+      `  report(res.data.dueDate);`,
+      `}`,
+    ].join('\n');
+    expect(readsOf('src/by-status.ts', byStatus)).toEqual([]);
+
+    const ternary = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `const detail = res.ok ? null : res.data.detail;`,
+      `setDue(res.data.dueDate);`,
+    ].join('\n');
+    expect(readsOf('src/ternary.ts', ternary)).toEqual([{ field: 'dueDate', line: 3 }]);
+
+    const caught = [
+      `try {`,
+      `  await apiClient.get('/invoices/1');`,
+      `} catch (e) {`,
+      `  report(e.response?.data?.detail);`,
+      `}`,
+    ].join('\n');
+    expect(readsOf('src/caught.ts', caught)).toEqual([]);
+  });
+
+  it('marks the operands of a `||` / `??` fallback chain as one chain', () => {
+    const source = [
+      `const res = await apiClient.post('/invoices', payload);`,
+      `const createdId = res.data?.invoice_id || res.data?.invoice?.id;`,
+    ].join('\n');
+    expect(
+      scanClientCalls('src/chain.ts', source, CONFIG, new Map([['src/chain.ts', source]])).calls[0]
+        ?.responseReads,
+    ).toEqual([
+      { field: 'invoice_id', location: { file: 'src/chain.ts', line: 2, col: 18 }, chain: 0 },
+      { field: 'invoice', location: { file: 'src/chain.ts', line: 2, col: 42 }, chain: 0 },
+    ]);
+
+    const twoChains = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `const first = res.data.a ?? res.data.b;`,
+      `const second = res.data.c || res.data.d;`,
+    ].join('\n');
+    expect(
+      scanClientCalls('src/two.ts', twoChains, CONFIG, new Map([['src/two.ts', twoChains]])).calls[0]
+        ?.responseReads,
+    ).toEqual([
+      { field: 'a', location: { file: 'src/two.ts', line: 2, col: 14 }, chain: 0 },
+      { field: 'b', location: { file: 'src/two.ts', line: 2, col: 28 }, chain: 0 },
+      { field: 'c', location: { file: 'src/two.ts', line: 3, col: 15 }, chain: 1 },
+      { field: 'd', location: { file: 'src/two.ts', line: 3, col: 29 }, chain: 1 },
+    ]);
+
+    const plain = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `setDue(res.data.dueDate);`,
+    ].join('\n');
+    expect(
+      scanClientCalls('src/plain.ts', plain, CONFIG, new Map([['src/plain.ts', plain]])).calls[0]
+        ?.responseReads,
+    ).toEqual([{ field: 'dueDate', location: { file: 'src/plain.ts', line: 2, col: 7 } }]);
+  });
 });

@@ -66,7 +66,9 @@ function compareText(left: string, right: string): number {
 }
 
 /** A well-formed response read, or null for anything else. */
-function readOf(value: unknown): { field: string; location: HttpLocation } | null {
+function readOf(
+  value: unknown,
+): { field: string; location: HttpLocation; chain: number | null } | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const read = value as { field?: unknown; location?: unknown };
   if (typeof read.field !== 'string' || read.field.length === 0) return null;
@@ -75,7 +77,12 @@ function readOf(value: unknown): { field: string; location: HttpLocation } | nul
   if (typeof location.file !== 'string' || location.file.length === 0) return null;
   if (typeof location.line !== 'number' || !Number.isInteger(location.line) || location.line < 1) return null;
   if (typeof location.col !== 'number' || !Number.isInteger(location.col) || location.col < 0) return null;
-  return { field: read.field, location: location as HttpLocation };
+  const chain = (value as { chain?: unknown }).chain;
+  return {
+    field: read.field,
+    location: location as HttpLocation,
+    chain: typeof chain === 'number' && Number.isInteger(chain) && chain >= 0 ? chain : null,
+  };
 }
 
 /** The proven wire names of one route, or null when it declares none. */
@@ -132,9 +139,25 @@ export function responseFieldGaps(
     // One entry per (endpoint, field); the first read names the location.
     const found = new Map<string, ResponseFieldGap>();
     for (const call of endpoint.calls) {
+      // A `||` / `??` chain is ONE decision about ONE result
+      // (`res.data?.invoice_id || res.data?.invoice?.id`): when any operand
+      // reads a field the model declares, the others are the defensive
+      // fallbacks for it and no field is missing. A chain in which no
+      // operand is declared is reported whole.
+      const chains = new Map<number, boolean[]>();
+      const reads: Array<{ field: string; location: HttpLocation; chain: number | null }> = [];
       for (const raw of call.responseReads ?? []) {
         const read = readOf(raw);
-        if (read === null || declaredKeys.has(fieldKey(read.field))) continue;
+        if (read === null) continue;
+        reads.push(read);
+        if (read.chain === null) continue;
+        const declaredHere = chains.get(read.chain) ?? [];
+        declaredHere.push(declaredKeys.has(fieldKey(read.field)));
+        chains.set(read.chain, declaredHere);
+      }
+      for (const read of reads) {
+        if (declaredKeys.has(fieldKey(read.field))) continue;
+        if (read.chain !== null && (chains.get(read.chain) ?? []).some((declared) => declared)) continue;
         const existing = found.get(read.field);
         if (existing === undefined) {
           found.set(read.field, {

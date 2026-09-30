@@ -42,12 +42,14 @@ describe('response model fields', () => {
     const fields = await declaredFields();
     // The return annotation is FastAPI's own default response model, and
     // `due_date` reaches the wire under its declared alias.
+    // `detail` is appended by the error-envelope rule (the test below).
     expect(fields['GET /invoices/{}']).toEqual([
       'amount_cents',
       'currency',
       'id',
       'invoiceDueDate',
       'due_date',
+      'detail',
     ]);
     // `list[InvoiceOut]` is the element model, unwrapped exactly as
     // FastAPI unwraps it.
@@ -55,8 +57,8 @@ describe('response model fields', () => {
     // The decorator's explicit `response_model=` wins over the annotation
     // and yields the very same list.
     expect(fields['POST /invoices']).toEqual(fields['GET /invoices/{}']);
-    expect(fields['GET /money']).toEqual(['amount_cents', 'currency']);
-    expect(fields['GET /maybe']).toEqual(['amount_cents', 'currency']);
+    expect(fields['GET /money']).toEqual(['amount_cents', 'currency', 'detail']);
+    expect(fields['GET /maybe']).toEqual(['amount_cents', 'currency', 'detail']);
   });
 
   it('declares nothing at all for a model whose wire names it cannot compute', async () => {
@@ -70,6 +72,17 @@ describe('response model fields', () => {
     expect(fields['GET /opaque']).toBeUndefined();
     expect(fields['GET /union']).toBeUndefined();
     expect(fields['GET /unannotated']).toBeUndefined();
+  });
+
+  it('always declares the framework error-envelope field', async () => {
+    const fields = await declaredFields();
+    // FastAPI answers a failed request with `{ "detail": ... }`, and a
+    // frontend reads it to report the error — it is a legitimate field of
+    // every route this pack reports, so it is never evidence of a dropped
+    // success-model field.
+    for (const key of ['GET /invoices/{}', 'GET /money', 'GET /maybe']) {
+      expect(fields[key]).toContain('detail');
+    }
   });
 
   it('leaves the existing responseModel attribute exactly as it was', async () => {

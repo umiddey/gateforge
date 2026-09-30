@@ -60,6 +60,15 @@ export const ResponseReadSchema = z
   .object({
     field: z.string().min(1),
     location: HttpLocationSchema,
+    /**
+     * Index of the `||` / `??` fallback chain this operand belongs to, in
+     * source order within the call; absent for a read that stands alone.
+     * The operands of one chain are ONE decision about ONE result, so the
+     * response-model check judges them together: when a chain reads a
+     * declared field, its other operands are the defensive fallbacks and
+     * no field is missing.
+     */
+    chain: z.number().int().min(0).optional(),
   })
   .strict();
 export type ResponseRead = z.infer<typeof ResponseReadSchema>;

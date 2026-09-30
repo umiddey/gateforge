@@ -454,7 +454,11 @@ function buildFact(input: {
   location: HttpLocation;
   idSuffix: string;
   callsites?: string[];
-  responseReads?: ReadonlyArray<{ field: string; location: { file: string; line: number; col: number } }>;
+  responseReads?: ReadonlyArray<{
+    field: string;
+    location: { file: string; line: number; col: number };
+    chain?: number;
+  }>;
 }): FactOutcome {
   const method = normalizeHttpMethod(input.method);
   if (method === null) {
@@ -493,6 +497,7 @@ function buildFact(input: {
     attributes['responseReads'] = input.responseReads.map((read) => ({
       field: read.field,
       location: { file: read.location.file, line: read.location.line, col: read.location.col },
+      ...(read.chain === undefined ? {} : { chain: read.chain }),
     }));
   }
   if (input.handler !== undefined && input.handler.length > 0) attributes['handlerSymbol'] = input.handler;

@@ -244,6 +244,14 @@ export function activeClientSymbolNamesIn(config: ClientScanConfig, file: string
 export interface ResponseRead {
   field: string;
   location: Location;
+  /**
+   * Index of the `||` / `??` fallback chain this operand belongs to, in
+   * source order within the call; absent for a read that stands alone.
+   * `res.data?.invoice_id || res.data?.invoice?.id` is one decision about
+   * ONE result, so its operands are judged together by the response-model
+   * check instead of one by one.
+   */
+  chain?: number;
 }
 
 
@@ -308,6 +316,23 @@ const NEVER_MODEL_FIELDS: Readonly<Record<string, boolean>> = {
   unshift: true, values: true, valueOf: true,
 };
 
+/**
+ * Members of the response envelope that decide whether the call
+ * SUCCEEDED. A branch that opens on one of them of the call's own result
+ * is a guard: the error body a failure branch reads is the framework's,
+ * never the success model, so nothing inside such a branch is collected.
+ */
+const ENVELOPE_MEMBERS: Readonly<Record<string, boolean>> = {
+  ok: true,
+  status: true,
+  statusText: true,
+};
+
+/** `||` and `??` are the two ways code writes a fallback chain. */
+function chainOperator(kind: ts.SyntaxKind): boolean {
+  return kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken;
+}
+
 /** The names a binding pattern binds, in source order. */
 function bindingNames(name: ts.BindingName): string[] {
   if (ts.isIdentifier(name)) return [name.text];
@@ -370,7 +395,15 @@ interface ReadHolder {
  *   and `holder['<field>']` is a read, and so is each key of an object
  *   destructuring of a holder or of `<holder>.data`;
  * - computed access (`d[key]`), a reassigned (`let`) holder, and a read
- *   of a JavaScript member (`data.map`, `data.length`, …) yield nothing.
+ *   of a JavaScript member (`data.map`, `data.length`, …) yield nothing;
+ * - a read inside a branch that opens on the call's OWN envelope
+ *   (`if (!res.ok)`, `if (res.status >= 400)`, `res.ok ? … : …`) is not
+ *   collected: which side of such a guard runs is not statically known,
+ *   and the body a failure branch reads is the error envelope, not the
+ *   success model. A read AFTER the guard is collected as usual;
+ * - a read that is one operand of a `||` / `??` chain carries the chain's
+ *   index, so the response-model check can judge the whole chain at once
+ *   instead of flagging a defensive fallback.
  *
  * A read is recorded once per field and location, in source order.
  */
@@ -380,11 +413,13 @@ function responseReadsOf(
   source: ts.SourceFile,
 ): ResponseRead[] {
   const reads = new Map<string, ResponseRead>();
-  const add = (field: string, node: ts.Node): void => {
-    if (field.length === 0 || NEVER_MODEL_FIELDS[field] === true) return;
-    const location = locationOf(file, source, node);
-    const key = `${field}@${String(location.line)}:${String(location.col)}`;
-    if (!reads.has(key)) reads.set(key, { field, location });
+  const chainRoots: ts.Node[] = [];
+  // Reads the BINDING pass already saw (an inline `(await call).data.x`).
+  // They are recorded first and replayed once `add` knows the holders,
+  // which the binding pass is what discovers.
+  const bound: Array<{ field: string; node: ts.Node }> = [];
+  let add: (field: string, node: ts.Node) => void = (field, node) => {
+    bound.push({ field, node });
   };
 
   const awaited = unwrapExpression(call);
@@ -421,6 +456,76 @@ function responseReadsOf(
       break;
     }
   }
+  // A branch that opens on the call's OWN envelope (`if (!res.ok)`,
+  // `if (res.status >= 400)`, `res.ok ? … : …`) is a guard: which side
+  // runs is not statically known, and the error body a failure branch
+  // reads is the framework's, not the success model. Nothing inside such a
+  // branch is a proven read of the success model — see the failure-path
+  // note in the module doc.
+  const guarded = new Set<ts.Node>();
+  /** Whether a condition opens on this call's own response envelope. */
+  const opensEnvelopeGuard = (condition: ts.Expression): boolean => {
+    let found = false;
+    const inspect = (node: ts.Node): void => {
+      if (
+        ts.isPropertyAccessExpression(node) &&
+        ENVELOPE_MEMBERS[node.name.text] === true &&
+        ts.isIdentifier(node.expression) &&
+        responseNames.has(node.expression.text)
+      ) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(node, inspect);
+    };
+    inspect(condition);
+    return found;
+  };
+  const markGuards = (node: ts.Node): void => {
+    if (ts.isIfStatement(node) && opensEnvelopeGuard(node.expression)) {
+      guarded.add(node.thenStatement);
+      if (node.elseStatement !== undefined) guarded.add(node.elseStatement);
+    }
+    if (ts.isConditionalExpression(node) && opensEnvelopeGuard(node.condition)) {
+      guarded.add(node.whenTrue);
+      guarded.add(node.whenFalse);
+    }
+    ts.forEachChild(node, markGuards);
+  };
+  markGuards(scope);
+  /** Whether a node sits inside one of the guarded branch bodies. */
+  const insideGuard = (node: ts.Node): boolean => {
+    for (let at: ts.Node | undefined = node; at !== undefined && at !== scope; at = at.parent) {
+      if (guarded.has(at)) return true;
+    }
+    return false;
+  };
+  /** The outermost `||` / `??` chain an operand belongs to, if any. */
+  const chainOf = (node: ts.Node): ts.Node | undefined => {
+    for (let at: ts.Node | undefined = node; at !== undefined && at !== scope; at = at.parent) {
+      if (ts.isBinaryExpression(at) && chainOperator(at.operatorToken.kind)) return at;
+    }
+    return undefined;
+  };
+  add = (field: string, node: ts.Node): void => {
+    if (field.length === 0 || NEVER_MODEL_FIELDS[field] === true) return;
+    if (insideGuard(node)) return;
+    const location = locationOf(file, source, node);
+    const key = `${field}@${String(location.line)}:${String(location.col)}`;
+    if (reads.has(key)) return;
+    const root = chainOf(node);
+    if (root === undefined) {
+      reads.set(key, { field, location });
+      return;
+    }
+    let index = chainRoots.indexOf(root);
+    if (index < 0) {
+      chainRoots.push(root);
+      index = chainRoots.length - 1;
+    }
+    reads.set(key, { field, location, chain: index });
+  };
+  for (const read of bound) add(read.field, read.node);
   const visit = (node: ts.Node): void => {
     if (ts.isPropertyAccessExpression(node) && isPayload(node.expression)) {
       add(node.name.text, node);
@@ -444,7 +549,7 @@ function responseReadsOf(
     ts.forEachChild(node, visit);
   };
   visit(scope);
-  return [...reads.values()].sort((left, right) => {
+  const ordered = [...reads.values()].sort((left, right) => {
     const where =
       (left.location.file < right.location.file ? -1 : left.location.file > right.location.file ? 1 : 0) ||
       left.location.line - right.location.line ||
@@ -452,6 +557,22 @@ function responseReadsOf(
       (left.field < right.field ? -1 : left.field > right.field ? 1 : 0);
     return where;
   });
+  // Chain numbers are handed out in discovery order; renumber them by
+  // where each chain FIRST appears in source, so the fact is independent
+  // of the traversal.
+  const firstOf = (index: number): ResponseRead =>
+    ordered.find((read) => read.chain === index) as ResponseRead;
+  const chains = [...new Set(ordered.map((read) => read.chain))]
+    .filter((index): index is number => index !== undefined)
+    .sort(
+      (left, right) =>
+        firstOf(left).location.line - firstOf(right).location.line ||
+        firstOf(left).location.col - firstOf(right).location.col,
+    );
+  const renumbered = new Map(chains.map((index, position) => [index, position]));
+  return ordered.map((read) =>
+    read.chain === undefined ? read : { ...read, chain: renumbered.get(read.chain) ?? read.chain },
+  );
 
   /** The key a binding element pulls off the object it destructures. */
   function bindingKey(element: ts.BindingElement): string {

@@ -134,7 +134,19 @@ The model is deliberately small:
   destructuring of a holder or of `<holder>.data`;
 - a `let` holder (reassigned before the read), a computed key
   (`d[key]`), and a JavaScript member (`data.map`, `data.length`,
-  `status`) are never reads.
+  `status`) are never reads;
+- a read inside a branch that opens on the call's OWN envelope
+  (`if (!res.ok)`, `if (res.status >= 400)`, `res.ok ? … : …`) is **not**
+  collected. Which side of such a guard runs is not statically known, and
+  the body a failure branch reads (`res.data?.detail`) is the server's
+  ERROR envelope, never the success model. A read after the guard is
+  collected as usual, so the check still names a field the success path
+  reads and the model dropped;
+- a read that is one operand of a `||` / `??` chain carries that chain's
+  index, so the check judges the chain as the ONE decision it is:
+  `res.data?.invoice_id || res.data?.invoice?.id` is silent when the
+  model declares `invoice_id`, because `invoice` is its defensive
+  fallback. A chain in which no operand is declared is reported whole.
 
 `gateforge check` compares these reads against the response model the
 joined backend route declares and emits one **non-blocking**
