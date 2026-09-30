@@ -3,6 +3,7 @@
  */
 import type { Server } from 'node:http';
 import type { EvidenceRecord, TracedSession, TrustTier } from '@gate-forge/core';
+import type { ChaosOptions } from './chaos.js';
 
 /**
  * Supervisor-issued session credential (plan Phase 1, work item 2): the
@@ -573,6 +574,13 @@ export interface WitnessOptions {
    * suite-claimed. Must be loopback.
    */
   proxyTarget?: string;
+  /**
+   * Timing chaos (E63): the seeded release plan the observation proxy
+   * applies to proxied app RESPONSES. Null/absent is the
+   * byte-identical no-chaos path; a set plan changes timing only —
+   * bytes, status, headers and evidence semantics never move.
+   */
+  chaos?: ChaosOptions | null;
   /**
    * Observation-proxy mount prefix (with `proxyTarget`; e.g. `/api`).
    *

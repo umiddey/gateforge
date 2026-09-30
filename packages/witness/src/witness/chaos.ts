@@ -230,9 +230,6 @@ export class ChaosScheduler {
   /** Per-route-key release cursors. */
   private readonly cursors = new Map<string, RouteCursor>();
 
-  /** The recorded release decisions, in reservation order. */
-  private readonly recorded: ChaosScheduleEntry[] = [];
-
   /**
    * Args:
    *   options: the resolved bounds for this run.
@@ -285,35 +282,33 @@ export class ChaosScheduler {
       k,
       delayMs: plannedMs,
       releaseAt: baseAt + plannedMs,
-      releasedBefore: k > 1 && plannedMs <= previous,
+      // Strictly before: a plan that could not open a gap (both at
+      // zero) never claims a reorder it did not perform.
+      releasedBefore: k > 1 && plannedMs < previous,
     };
   }
 
   /**
-   * Records the applied delay for a reserved slot.
+   * Resolves the applied delay for a reserved slot and returns the
+   * release decision to record. A response that already waited longer
+   * than its slot (a slow upstream) is released immediately: the plan
+   * holds a response back, it never extends one.
    *
    * Args:
    *   slot: the slot returned by {@link ChaosScheduler.reserve}.
-   *   now: monotonic instant the response became releasable.
+   *   now: instant the response became releasable.
+   *
+   * Returns:
+   *   ChaosScheduleEntry: the recorded decision (route key, k, applied
+   *   delay, reorder flag) - the replay record.
    */
-  release(slot: ChaosSlot, now: number): void {
-    this.recorded.push({
+  release(slot: ChaosSlot, now: number): ChaosScheduleEntry {
+    return {
       routeKey: slot.routeKey,
       k: slot.k,
       delayMs: Math.max(0, Math.min(slot.releaseAt - now, this.options.maxDelayMs)),
       releasedBefore: slot.releasedBefore,
-    });
-  }
-
-  /**
-   * The recorded release decisions, in reservation order.
-   *
-   * Returns:
-   *   ChaosScheduleEntry[]: a copy of the schedule (route key, k,
-   *   applied delay, reorder flag) — the replay record.
-   */
-  entries(): ChaosScheduleEntry[] {
-    return this.recorded.map((entry) => ({ ...entry }));
+    };
   }
 
   /** The seeded delay of the k-th request under a route key, in ms. */

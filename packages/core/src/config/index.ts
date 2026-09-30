@@ -417,6 +417,24 @@ export const GateforgeConfigSchema = z
       .object({
         /** `auto` | `off` | `stderr` | `file:<path>`. */
         progress: z.string().min(1),
+        /**
+         * Timing-chaos bounds (E63). The SEED is never configured here:
+         * only `gateforge test-gates --chaos <seed>` switches chaos on,
+         * so a repository that configures bounds without the flag runs
+         * byte-identically. `maxDelayMs` caps every applied delay
+         * (default 400) and `reorder` decides whether a later response
+         * on one route may be released before an earlier one (default
+         * on). Neither is evidence and no gate reads them.
+         */
+        chaos: z
+          .object({
+            /** Upper bound of every applied delay, in whole milliseconds. */
+            maxDelayMs: z.number().int().min(0).max(5000).optional(),
+            /** Whether a later response may be released before an earlier one. */
+            reorder: z.boolean().optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

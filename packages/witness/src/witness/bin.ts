@@ -45,9 +45,13 @@
  */
 import { startWitness, WitnessStartupError } from './server.js';
 import { loadFixtureProvider } from './fixture-provider.js';
+import { parseChaosOptions } from './chaos.js';
 import {
   ENV_ADAPTER_BASE_URL,
   ENV_ADAPTERS_DIR,
+  ENV_CHAOS_MAX_DELAY_MS,
+  ENV_CHAOS_REORDER,
+  ENV_CHAOS_SEED,
   ENV_CLASSIFICATIONS,
   ENV_FIXTURE_PROVIDER,
   ENV_MOUNT_PATH,
@@ -192,6 +196,16 @@ export async function main(
     runId,
     token,
     proxyTarget: flagOrEnv(flags, 'proxy-target', env[ENV_PROXY_TARGET]),
+    // Timing chaos (E63): the seeded release plan for proxied
+    // responses. Environment-only (like the verifier key), absent in
+    // every run that did not ask for chaos, and parsed fail-closed: a
+    // seed the witness cannot read would produce a schedule the owner
+    // could never replay.
+    chaos: parseChaosOptions({
+      seed: env[ENV_CHAOS_SEED],
+      maxDelayMs: env[ENV_CHAOS_MAX_DELAY_MS],
+      reorder: env[ENV_CHAOS_REORDER],
+    }),
     mountPath: flagOrEnv(flags, 'mount-path', env[ENV_MOUNT_PATH]),
     stateDir: flagOrEnv(flags, 'state-dir', env[ENV_STATE_DIR]),
     classificationsPath: flagOrEnv(flags, 'classifications', env[ENV_CLASSIFICATIONS]),

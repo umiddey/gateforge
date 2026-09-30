@@ -64,6 +64,18 @@ export const ENV_TARGET_FINGERPRINT = 'GATEFORGE_TARGET_FINGERPRINT';
 export const ENV_ADAPTERS_DIR = 'GATEFORGE_ADAPTERS_DIR';
 export const ENV_CLASSIFICATIONS = 'GATEFORGE_CLASSIFICATIONS';
 export const ENV_ADAPTER_BASE_URL = 'GATEFORGE_ADAPTER_BASE_URL';
+/**
+ * Timing-chaos surface (E63): the SEEDED release plan the observation
+ * proxy applies to proxied app responses. Set by
+ * `gateforge test-gates --chaos <seed>` on the SPAWNED witness only —
+ * absent means the byte-identical no-chaos path. The seed is the switch;
+ * the other two only tune its bounds.
+ */
+export const ENV_CHAOS_SEED = 'GATEFORGE_CHAOS_SEED';
+/** Upper bound of every applied chaos delay, in whole milliseconds. */
+export const ENV_CHAOS_MAX_DELAY_MS = 'GATEFORGE_CHAOS_MAX_DELAY_MS';
+/** Whether a later response may be released before an earlier one. */
+export const ENV_CHAOS_REORDER = 'GATEFORGE_CHAOS_REORDER';
 /** Observation proxy target (loopback base URL the proxy forwards to). */
 export const ENV_PROXY_TARGET = 'GATEFORGE_PROXY_TARGET';
 /**

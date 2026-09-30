@@ -9,7 +9,11 @@
  * field can carry a query value, a body or a header.
  */
 import { describe, expect, it } from 'vitest';
-import { ChaosScheduler, parseChaosOptions } from '../src/witness/chaos.js';
+import {
+  ChaosScheduler,
+  parseChaosOptions,
+  type ChaosScheduleEntry,
+} from '../src/witness/chaos.js';
 
 const OPTIONS = { seed: 7, maxDelayMs: 400, reorder: true };
 
@@ -54,30 +58,29 @@ describe('chaos options', () => {
 
 describe('chaos schedule', () => {
   it('replays the identical schedule for the same seed, session and route key', () => {
-    const first = new ChaosScheduler(OPTIONS, 'items.spec.js#tab B wins');
-    const second = new ChaosScheduler(OPTIONS, 'items.spec.js#tab B wins');
-    for (const scheduler of [first, second]) {
+    const schedule = (): ChaosScheduleEntry[] => {
+      const scheduler = new ChaosScheduler(OPTIONS, 'items.spec.js#tab B wins');
+      const entries: ChaosScheduleEntry[] = [];
       for (let k = 0; k < 6; k += 1) {
-        const slot = scheduler.reserve('GET /api/items', 1_000 * k);
-        scheduler.release(slot, 1_000 * k);
+        entries.push(scheduler.release(scheduler.reserve('GET /api/items', 1_000 * k), 1_000 * k));
       }
-    }
-    expect(second.entries()).toEqual(first.entries());
-    expect(first.entries().length).toBe(6);
+      return entries;
+    };
+    expect(schedule()).toEqual(schedule());
+    expect(schedule().length).toBe(6);
   });
 
   it('is a pure function of the seed: another seed moves the schedule', () => {
     const withSeven = new ChaosScheduler(OPTIONS, 'session');
     const withEight = new ChaosScheduler({ ...OPTIONS, seed: 8 }, 'session');
-    const schedule = (scheduler: ChaosScheduler): unknown =>
-      scheduler.entries().map((entry) => [entry.routeKey, entry.k, entry.delayMs, entry.releasedBefore]);
-    for (let k = 0; k < 4; k += 1) {
-      const at = 500 * k;
-      for (const scheduler of [withSeven, withEight]) {
-        const slot = scheduler.reserve('GET /api/items', at);
-        scheduler.release(slot, at);
+    const schedule = (scheduler: ChaosScheduler): unknown[] => {
+      const entries: unknown[] = [];
+      for (let k = 0; k < 4; k += 1) {
+        const at = 500 * k;
+        entries.push(scheduler.release(scheduler.reserve('GET /api/items', at), at));
       }
-    }
+      return entries;
+    };
     expect(schedule(withEight)).not.toEqual(schedule(withSeven));
   });
 
@@ -85,9 +88,10 @@ describe('chaos schedule', () => {
     const scheduler = new ChaosScheduler(OPTIONS, 'session');
     for (let k = 0; k < 200; k += 1) {
       const slot = scheduler.reserve('GET /api/items', 10_000 * k);
-      expect(slot.delayMs).toBeGreaterThanOrEqual(0);
+      const entry = scheduler.release(slot, 10_000 * k);
+      expect(entry.delayMs).toBeGreaterThanOrEqual(0);
+      expect(entry.delayMs).toBeLessThanOrEqual(OPTIONS.maxDelayMs);
       expect(slot.delayMs).toBeLessThanOrEqual(OPTIONS.maxDelayMs);
-      scheduler.release(slot, 10_000 * k);
     }
   });
 
@@ -119,17 +123,18 @@ describe('chaos schedule', () => {
       const slot = scheduler.reserve('GET /api/items', at);
       expect(slot.releasedBefore).toBe(false);
       expect(slot.delayMs).toBeGreaterThanOrEqual(k - 1);
-      scheduler.release(slot, at);
+      expect(scheduler.release(slot, at).releasedBefore).toBe(false);
     }
   });
 
   it('counts each route key independently and records nothing but the route key', () => {
     const scheduler = new ChaosScheduler(OPTIONS, 'session');
     const at = 0;
-    scheduler.release(scheduler.reserve('GET /api/items?tab=a&token=secret', at), at);
-    scheduler.release(scheduler.reserve('GET /api/items?tab=b&token=other', at), at);
-    scheduler.release(scheduler.reserve('POST /api/items?token=secret', at), at);
-    const entries = scheduler.entries();
+    const entries = [
+      scheduler.release(scheduler.reserve('GET /api/items?tab=a&token=secret', at), at),
+      scheduler.release(scheduler.reserve('GET /api/items?tab=b&token=other', at), at),
+      scheduler.release(scheduler.reserve('POST /api/items?token=secret', at), at),
+    ];
     expect(entries.map((entry) => [entry.routeKey, entry.k])).toEqual([
       ['GET /api/items', 1],
       ['GET /api/items', 2],
@@ -146,7 +151,6 @@ describe('chaos schedule', () => {
     // The upstream took longer than the planned slot: the response is
     // released immediately, never "negative delay".
     const slot = scheduler.reserve('GET /api/items', 0);
-    scheduler.release(slot, 5_000);
-    expect(scheduler.entries()[0]?.delayMs).toBe(0);
+    expect(scheduler.release(slot, 5_000).delayMs).toBe(0);
   });
 });
