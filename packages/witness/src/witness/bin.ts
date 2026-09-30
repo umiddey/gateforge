@@ -64,7 +64,6 @@ import {
   ENV_TARGET_BASE_URL,
   ENV_TARGET_FINGERPRINT,
   ENV_TWIN_INVENTORY,
-  ENV_TWIN_OBSERVATION_ONLY,
   ENV_TWIN_QUERY_KEYS,
   ENV_TWIN_SHAPES,
   ENV_WITNESS_VERIFIER_KEY,
@@ -181,21 +180,6 @@ function parseTwinShapePlanOrFail(input: {
 }
 
 /**
- * The runner test ids the supervisor marked observation-only.
- *
- * Split from the engine's own comma-separated value and trimmed, so a
- * mark can never carry whitespace into an identity. An absent value is
- * the honest "no raw twin in this run".
- */
-function observationOnlyTestIdsFrom(raw: string | undefined): string[] {
-  if (raw === undefined || raw === '') return [];
-  return raw
-    .split(',')
-    .map((id) => id.trim())
-    .filter((id) => id.length > 0);
-}
-
-/**
  * Reads env + argv and starts the witness.
  *
  * Args:
@@ -257,7 +241,6 @@ export async function main(
       queryKeys: env[ENV_TWIN_QUERY_KEYS],
       inventoryPath: env[ENV_TWIN_INVENTORY],
     }),
-    observationOnlyTestIds: observationOnlyTestIdsFrom(env[ENV_TWIN_OBSERVATION_ONLY]),
     mountPath: flagOrEnv(flags, 'mount-path', env[ENV_MOUNT_PATH]),
     stateDir: flagOrEnv(flags, 'state-dir', env[ENV_STATE_DIR]),
     classificationsPath: flagOrEnv(flags, 'classifications', env[ENV_CLASSIFICATIONS]),

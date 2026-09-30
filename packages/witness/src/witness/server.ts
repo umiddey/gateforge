@@ -524,11 +524,14 @@ interface WitnessState {
   chaos: { options: ChaosOptions; entries: ChaosScheduleEntry[] } | null;
   /**
    * Twin path coverage (E64): the shape plan this run's proxy records
-   * with, plus the supervisor's observation-only marks. Null in every
-   * run that did not configure `enforcement.twinPaths` — the
-   * byte-identical path, where no shape is computed and none is stored.
+   * with. Null in every run that did not configure
+   * `enforcement.twinPaths` — the byte-identical path, where no shape
+   * is computed and none is stored. Which sessions are observation-only
+   * is NOT decided here: the marks travel with the registered expected
+   * set (below), because only the registered identity survives from
+   * enumeration to execution.
    */
-  twinShapes: { plan: TwinShapePlan; observationOnlyTestIds: Set<string> } | null;
+  twinShapes: TwinShapePlan | null;
   /**
    * The expected test set the supervisor registered BEFORE the run
    * (enforcement-review fix 2a), keyed by the identity join key
@@ -536,7 +539,10 @@ interface WitnessState {
    * only tests in this set, and the execution trace reports sessions
    * grouped by these registered identities.
    */
-  expectedTests: Map<string, { testId: string | null; project: string | null; file: string; titlePath: string[] }>;
+  expectedTests: Map<
+    string,
+    { testId: string | null; project: string | null; file: string; titlePath: string[]; observationOnly: boolean }
+  >;
   /** Domain-separated digest over the registered expected set. */
   enumerationDigest: string | null;
   /**
@@ -745,7 +751,7 @@ async function startObservedProxy(
           // this line does not exist for the run.
           const twinSession = sessionId === null ? undefined : state.sessions.get(sessionId);
           if (twinSession !== undefined && state.twinShapes !== null) {
-            recordTwinShape(twinSession.twinShapes, method, forwardUrl, state.twinShapes.plan);
+            recordTwinShape(twinSession.twinShapes, method, forwardUrl, state.twinShapes);
           }
           const bodySnapshot = Buffer.concat(snapshot);
           state.observed.push({
@@ -1052,10 +1058,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
       options.chaos === undefined || options.chaos === null
         ? null
         : { options: options.chaos, entries: [] },
-    twinShapes:
-      options.twinShapes === undefined || options.twinShapes === null
-        ? null
-        : { plan: options.twinShapes, observationOnlyTestIds: new Set(options.observationOnlyTestIds ?? []) },
+    twinShapes: options.twinShapes === undefined || options.twinShapes === null ? null : options.twinShapes,
     expectedTests: new Map(),
     enumerationDigest: null,
     behaviorCatalog: null,
@@ -1860,14 +1863,33 @@ async function handleRequest(
       // non-allowlisted query value. `enabled: false` is the honest
       // answer for a run that never configured twin coverage, and it
       // arrives with an empty list rather than a guess.
+      //
+      // Each entry is keyed by the session's REGISTERED identity, not by
+      // the runner-assigned test id: that id is what the test ran under,
+      // and the supervisor enumerated a different one from the
+      // repository's config (Playwright hashes the file path relative to
+      // the config it loaded). The identity is what both sides speak.
       const twins: TwinShapeReport[] = [...state.sessions.values()]
         .filter((session) => session.twinShapes.length > 0)
         .map((session) => ({
+          identity:
+            session.registered === null
+              ? null
+              : {
+                  file: session.registered.file,
+                  titlePath: [...session.registered.titlePath],
+                  project: session.registered.project,
+                },
           testId: session.testId,
           observationOnly: session.observationOnly,
           shapes: session.twinShapes,
         }))
-        .sort((left, right) => compareStrings(left.testId, right.testId));
+        .sort((left, right) =>
+          compareStrings(
+            left.identity === null ? left.testId : expectedKey(left.identity.project, left.identity.file, left.identity.titlePath),
+            right.identity === null ? right.testId : expectedKey(right.identity.project, right.identity.file, right.identity.titlePath),
+          ),
+        );
       const response: TwinShapesResponse = { enabled: state.twinShapes !== null, twins };
       sendJson(res, 200, response);
       return;
@@ -2043,7 +2065,13 @@ async function handleExpectedSet(
   if (!isPlainObject(body) || !Array.isArray(body['tests'])) {
     throw new HttpError(400, 'expected-set body must be {tests: [...]}');
   }
-  const tests: Array<{ testId: string | null; project: string | null; file: string; titlePath: string[] }> = [];
+  const tests: Array<{
+    testId: string | null;
+    project: string | null;
+    file: string;
+    titlePath: string[];
+    observationOnly: boolean;
+  }> = [];
   for (const entry of body['tests']) {
     if (typeof entry !== 'object' || entry === null) {
       throw new HttpError(400, 'expected-set tests must be objects');
@@ -2051,6 +2079,11 @@ async function handleExpectedSet(
     const row = entry as Record<string, unknown>;
     const testId = row['testId'] === undefined || row['testId'] === null ? null : row['testId'];
     const project = row['project'] === undefined || row['project'] === null ? null : row['project'];
+    // Twin path coverage (E64): the raw-twin mark rides on the identity,
+    // which is the only part of a registration that survives from
+    // enumeration to execution. Absent = an ordinary session, so a
+    // registration without the field is byte-identical to before.
+    const observationOnly = row['observationOnly'] === true;
     if (
       (testId !== null && typeof testId !== 'string') ||
       (project !== null && typeof project !== 'string') ||
@@ -2058,12 +2091,13 @@ async function handleExpectedSet(
       row['file'].length === 0 ||
       !Array.isArray(row['titlePath']) ||
       (row['titlePath'] as unknown[]).length === 0 ||
-      !(row['titlePath'] as unknown[]).every((part) => typeof part === 'string' && part.length > 0)
+      !(row['titlePath'] as unknown[]).every((part) => typeof part === 'string' && part.length > 0) ||
+      (row['observationOnly'] !== undefined && typeof row['observationOnly'] !== 'boolean')
     ) {
       throw new HttpError(
         400,
         'expected-set tests require file (non-empty string), titlePath (non-empty string array), ' +
-          'and optional testId/project strings',
+          'and optional testId/project strings and an optional observationOnly boolean',
       );
     }
     tests.push({
@@ -2071,6 +2105,7 @@ async function handleExpectedSet(
       project: project,
       file: row['file'],
       titlePath: row['titlePath'] as string[],
+      observationOnly,
     });
   }
   const digest = enumerationDigestOf(tests);
@@ -3040,7 +3075,13 @@ async function handleSessionOpen(
   // Expected-set membership (fix 2a): once the supervisor registered the
   // expected tests, sessions exist only for them. Identity comes from the
   // supervisor's spool drain (file + titlePath + project).
-  let registered: { testId: string | null; project: string | null; file: string; titlePath: string[] } | null = null;
+  let registered: {
+    testId: string | null;
+    project: string | null;
+    file: string;
+    titlePath: string[];
+    observationOnly: boolean;
+  } | null = null;
   if (state.enumerationDigest !== null) {
     const file = typeof body['file'] === 'string' ? body['file'] : null;
     const rawTitlePath = Array.isArray(body['titlePath'])
@@ -3101,12 +3142,18 @@ async function handleSessionOpen(
   }
   // Twin path coverage (E64): the supervisor marks a RAW twin's session
   // observation-only, and the mark is decided HERE, engine-side, from
-  // the run's own registered set — never from a suite-supplied flag.
+  // the run's own registered set — never from a suite-supplied flag, and
+  // never from the runner-assigned testId: Playwright hashes a test's
+  // file path relative to the config it loaded, so the id enumerated
+  // from the repository's own config is NOT the id this session runs
+  // under. The registered identity (project, file, titlePath) resolved
+  // above is what both sides speak.
   // An observation-only session is refused every submission below, so
   // it can issue no record, no attestation and satisfy nothing; what it
-  // contributes is the request SHAPES its proxy saw.
-  const observationOnly =
-    claims.length === 0 && (state.twinShapes?.observationOnlyTestIds.has(testId) ?? false);
+  // contributes is the request SHAPES its proxy saw. A session with
+  // claims is never observation-only: a test that claims an obligation
+  // is being graded, not compared.
+  const observationOnly = claims.length === 0 && (registered?.observationOnly ?? false);
   const sessionId = randomUUID();
   const session: TestSession = {
     sessionId,
