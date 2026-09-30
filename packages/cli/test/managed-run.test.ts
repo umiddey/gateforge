@@ -25,6 +25,7 @@ import {
   startApp,
   writeTinyRecipe,
 } from './witnessed-run-fixture.js';
+import { strictCheckArgs } from '../src/commands/run.js';
 
 afterEach(() => {
   cleanupWitnessedFixture();
@@ -136,5 +137,17 @@ describe('gateforge run (the whole local proof, in order)', () => {
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     }
+  });
+});
+
+describe('the strict check a managed run ends with', () => {
+  it('checks a scoped run (--scope changed) at the changed scope it sealed, and every other run whole', () => {
+    // A scoped receipt covers only the changed slice; a whole-repository
+    // strict check after it demands evidence the run never meant to seal.
+    expect(strictCheckArgs(['--changed', '--scope', 'changed'])).toEqual(['--changed', '--require-e2e']);
+    expect(strictCheckArgs(['--changed', '--scope=changed', '--format', 'json'])).toEqual(['--changed', '--require-e2e']);
+    expect(strictCheckArgs(['--changed', '--scope', 'full'])).toEqual(['--require-e2e']);
+    expect(strictCheckArgs(['--changed'])).toEqual(['--require-e2e']);
+    expect(strictCheckArgs([])).toEqual(['--require-e2e']);
   });
 });
