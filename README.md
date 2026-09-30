@@ -279,6 +279,14 @@ HTTP endpoint obligations (plan §8 / D1) are honest about transport:
 reports say "witness observed an HTTP exchange" and "suite-claimed", never
 "browser verified".
 
+An `http.endpoint` owes those observation contracts only when a
+`consumed: true` policy matches it, so a new route no UI calls owes
+nothing today. The pinned policies document takes one additive option,
+`'http.endpoint.requireObservation': all`, that makes every discovered
+route owe them; existing routes are forgiven by the adopted baseline
+(`gateforge adopt`) and only new ones block with `TEST_MAPPING_MISSING`.
+See [`packages/cli/README.md`](packages/cli/README.md#observation-scope-for-http-endpoints-opt-in-policy-option).
+
 Evidence binds to tested inputs (plan §11, F2): the witness attests a
 v2 envelope (`attestationVersion: 2`, domain `gateforge.ledger.v2`)
 over its run id, a fresh per-invocation id, a deterministic snapshot

@@ -629,6 +629,50 @@ HTTP endpoints in new installations. Existing policies are unchanged;
 explicitly requiring `http:frontend-request-observed` still blocks. The init
 scan names that unavailable channel once as not yet provable.
 
+### Observation scope for HTTP endpoints (opt-in policy option)
+
+By default an `http.endpoint` owes the observation contracts
+(`http:request-observed`, `http:response-status-ok`) only when a
+`consumed: true` policy matches it — the static join with the frontend.
+A brand-new route that no UI calls therefore owes nothing, and "you
+forgot a test" stays invisible: `check` exits 0.
+
+The pinned policies document (`.gateforge/policies.yml`, the trusted
+policy) takes one additive option that widens that scope:
+
+```yaml
+schemaVersion: 1
+options:
+  'http.endpoint.requireObservation': all   # or 'consumed' (the default)
+policies:
+  - id: frontend-consumed-endpoints-transport-only
+    when:
+      kind: http.endpoint
+      consumed: true
+    require:
+      - http:request-observed
+      - http:response-status-ok
+```
+
+- Absent (or `consumed`): today's behavior, byte for byte. A document
+  without the `options` section generates the same obligations, the same
+  report and the same exit code it always did.
+- `all`: EVERY discovered endpoint owes the observation contracts of a
+  `consumed: true` endpoint policy. An unmapped one is `missing` with the
+  existing `TEST_MAPPING_MISSING` cause and the existing overlay next
+  action. Existing routes are not re-litigated: run `gateforge adopt`
+  once (the sanctioned bulk-add) and the adopted baseline forgives them,
+  so only NEW routes block.
+- The option never widens a `consumed: false` policy, a policy that does
+  not name the `http.endpoint` kind, or anything that is not a route; it
+  adds no contract, cause code or exit code.
+- It lives in the pinned policy document, so an agent cannot widen or
+  narrow the scope by itself — that is a policy revision.
+- `gateforge next` names the option on the one item it explains (an
+  unmapped obligation on a route the frontend never calls while the
+  option is `all`) and stays silent everywhere else.
+
+
 
 ## Configuration
 

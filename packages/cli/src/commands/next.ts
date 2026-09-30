@@ -13,11 +13,13 @@ import { join } from 'node:path';
 import {
   BLOCKING_VERDICTS,
   CAUSE_NEXT_ACTIONS,
+  HTTP_ENDPOINT_RESOURCE_KIND,
   type BlockingEntry,
   type CauseCode,
   type ChangedProvider,
   type Claim,
   type ObligationVerdict,
+  type ResourceGraph,
 } from '@gate-forge/core';
 import {
   discoverTestCatalog,
@@ -246,6 +248,50 @@ function unresolvedRouteGuidance(
     '    reason: "<owner-written reason and evidence for treating this route as internal>"',
     '[CODE]',
     'An internal rule is certificate-checked; it is not an override.',
+  ];
+}
+
+/**
+ * The `http.endpoint.requireObservation` scope note (plan Phase 4c,
+ * E60), offered on the ONE item it can explain: an unmapped obligation
+ * on a route the frontend never calls, while the pinned option is `all`.
+ * That obligation exists only because the owner widened the scope, and
+ * narrowing it back is a legitimate answer when the route is out of
+ * scope. Anywhere else (option absent, consumed endpoints, other
+ * causes) nothing is printed — the surface never adds noise.
+ *
+ * Args:
+   candidate: the ranked next item.
+   graph: the run's resource graph.
+ *   observationScope: the effective pinned option.
+ *   policiesPath: repo-relative policies document path.
+ *
+ * Returns:
+ *   string[]: the note lines, or an empty array when it does not apply.
+ */
+function observationScopeNote(
+  candidate: NextCandidate,
+  graph: ResourceGraph,
+  observationScope: 'consumed' | 'all',
+  policiesPath: string,
+): string[] {
+  if (observationScope !== 'all' || candidate.cause !== 'TEST_MAPPING_MISSING') return [];
+  const route = graph.resources.find(
+    (resource) =>
+      resource.id !== null &&
+      resource.kind === HTTP_ENDPOINT_RESOURCE_KIND &&
+      candidate.id.startsWith(`${resource.id}:`) &&
+      resource.attributes['frontendConsumed'] !== true,
+  );
+  if (route === undefined) return [];
+  const method = route.attributes['method'];
+  const path = route.attributes['canonicalPath'];
+  const name =
+    typeof method === 'string' && typeof path === 'string' ? `${method} ${path}` : route.name;
+  return [
+    `scope: ${name} is not consumed by the frontend, so it owes this obligation only because the pinned`,
+    `policy option 'http.endpoint.requireObservation' is 'all'. Prove it with a test, or set the option`,
+    `back to 'consumed' in ${policiesPath} if this route is out of scope.`,
   ];
 }
 /**
@@ -505,6 +551,12 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       ? null
       : unresolvedRouteGuidance(routeName, unresolvedRoute.name, unresolvedRoute.source);
   const guide = ENVIRONMENT_GUIDES[first.cause as CauseCode] ?? null;
+  const scopeNote = observationScopeNote(
+    first,
+    pipeline.graph,
+    pipeline.observationScope,
+    config.policies,
+  );
   if (asJson) {
     writeLine(
       io.stdout,
@@ -516,6 +568,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         remainingBlocking: candidates.length - 1,
         guide,
         ...(routeGuidance === null ? {} : { guidance: routeGuidance }),
+        ...(scopeNote.length === 0 ? {} : { scopeNote }),
       }),
     );
   } else {
@@ -529,6 +582,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       writeLine(io.stdout, 'do: confirm the route owner and run only the matching plane command below');
       for (const line of routeGuidance) writeLine(io.stdout, line);
     }
+    for (const line of scopeNote) writeLine(io.stdout, line);
   }
   return 1;
 }

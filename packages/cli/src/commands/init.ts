@@ -283,6 +283,14 @@ export const POLICIES_TEMPLATE = `\
 # deliberately. Consumed HTTP endpoints use transport-only proof;
 # 'http:frontend-request-observed' has no independent browser/test channel
 # and is never included in a new-install starter.
+#
+# A route no UI calls owes nothing below, so a NEW endpoint with no test is
+# invisible until it is consumed. To make every discovered route owe the
+# observation contracts (only NEW debt blocks; run 'gateforge adopt' to
+# forgive what already exists), uncomment the options section below:
+#
+# options:
+#   'http.endpoint.requireObservation': all
 schemaVersion: 1
 policies:
   # Capability-scoped endpoint policies (workflow/validation/...) may be added
