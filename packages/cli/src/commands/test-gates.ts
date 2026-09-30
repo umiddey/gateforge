@@ -169,6 +169,7 @@ import {
   issueRunRecord,
   parentSha,
   planExpectedSet,
+  plannedProjectScopes,
   sealExecutionResult,
   supervisionBlocking,
   SUPERVISED_INVOCATION,
@@ -3742,6 +3743,16 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               plannedRows.map((row) => row.planned.project).filter((project): project is string => project !== null),
             ),
           ],
+          // Per-project file selection (setup-dependency fix): the plan
+          // already knows which files belong to which project, and project
+          // identity is the join key the registered expected set speaks. A
+          // single global testMatch collects every selected file under EVERY
+          // project, so a standard `{ name: 'setup', testMatch: /.*\.setup\.ts/ }`
+          // config would run the whole suite once per project and execute
+          // identities the expected set never bound — refused sessions, no
+          // evidence, and a counter past its own total. Project-less plan
+          // rows (none here, kept for honesty) keep the global selection.
+          projectScopes: plannedProjectScopes(plannedRows),
           // Operator-provided whole-run bound for multi-hour suites (default
           // 30 minutes stands when absent — same expected set and
           // completeness rules either way).

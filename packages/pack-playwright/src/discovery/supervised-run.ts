@@ -40,7 +40,7 @@ import type {
 } from '@gate-forge/core';
 import { buildRunnerChildEnv } from './runner-env.js';
 import { localPlaywrightCliCandidates } from './reconcile.js';
-import { synthesizeTrustedConfig, trustedReporterEntry } from './trusted-config.js';
+import { synthesizeTrustedConfig, trustedReporterEntry, type ProjectScope } from './trusted-config.js';
 
 /** Default whole-run wall-clock bound for one supervised playwright run. */
 export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60 * 1000;
@@ -102,6 +102,15 @@ export interface SupervisedRunOptions {
    * filter. Per-project code options are never honored.
    */
   projects?: readonly string[];
+  /**
+   * The supervisor's OWN per-project file selection — each named project
+   * runs exactly the files the plan attributed to it. Required whenever a
+   * project-scoped config is in play (the standard `setup`-dependency auth
+   * pattern): without it the runner collects every selected file under every
+   * project and executes identities the registered expected set never bound.
+   * Files no scope claims still run through the global `testMatch`.
+   */
+  projectScopes?: readonly ProjectScope[];
   /**
    * Engine reporter entry override (tests point at a built reporter;
    * production resolves the pack's own dist entry).
@@ -172,6 +181,7 @@ export async function executeSupervisedPlaywright(
     ...(options.storageState !== undefined ? { storageState: options.storageState } : {}),
     ...(options.testFiles !== undefined ? { testFiles: options.testFiles } : {}),
     ...(options.projects !== undefined ? { projects: options.projects } : {}),
+    ...(options.projectScopes !== undefined ? { projectScopes: options.projectScopes } : {}),
   });
   const baseCommand = options.command ?? defaultPlaywrightCommand(cwd);
   const isStub = options.command !== undefined;

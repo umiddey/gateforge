@@ -137,7 +137,7 @@ export {
   TRUSTED_CONFIG_FILE,
   TRUSTED_REPORTER_OPTIONS_FILE,
 } from './discovery/trusted-config.js';
-export type { TrustedConfigInput, TrustedReporterOptions } from './discovery/trusted-config.js';
+export type { ProjectScope, TrustedConfigInput, TrustedReporterOptions } from './discovery/trusted-config.js';
 
 /**
  * Test discovery (plan 2026-09-13 phase 2): bounded static scanning,
