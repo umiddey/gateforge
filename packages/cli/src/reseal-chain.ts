@@ -227,6 +227,12 @@ export function resealChainBlocking(input: {
   gitDir: string | null;
   cwd: string;
   env: NodeJS.ProcessEnv;
+  /**
+   * The owner-declared runtime files (`enforcement.resealRuntimeFiles`)
+   * the candidate config carries, applied to the recomputation exactly
+   * as the sealing run applied them. Absent or empty changes nothing.
+   */
+  runtimeFileGlobs?: readonly string[];
 }): BlockingEntry[] {
   const child = input.receipt;
   if (child.resealedFrom === undefined) return [];
@@ -294,6 +300,7 @@ export function resealChainBlocking(input: {
     }
     let parentDigest: string;
     let parentTreeId: string | null;
+    let parentSha: string | null;
     let parentReceipt: GateReceipt | null = null;
     if (retainedKind === 'run-record') {
       // A run-record parent is recomputed exactly like a parent
@@ -331,6 +338,7 @@ export function resealChainBlocking(input: {
       }
       parentDigest = sha256Canonical(record as unknown as Record<string, never>);
       parentTreeId = record.candidateTreeId;
+      parentSha = record.gitSha;
     } else {
       const parentParsed = GateReceiptSchema.safeParse(hop.receipt);
       if (!parentParsed.success) {
@@ -352,6 +360,7 @@ export function resealChainBlocking(input: {
       parentReceipt = parent;
       parentDigest = sha256Canonical(parent as unknown as Record<string, never>);
       parentTreeId = parent.candidateTreeId;
+      parentSha = parent.gitSha;
     }
     if (parentDigest !== currentReceipt.resealedFrom) {
       return stale(
@@ -390,6 +399,17 @@ export function resealChainBlocking(input: {
         `re-sealed receipt names changed paths ${names(claimed)} but the trees differ in ${names(diffPaths)}`,
       );
     }
+    // The owner declaration the candidate config carries is applied to
+    // the recomputation too, so CI reaches the identical decision with
+    // its own engine: the two commit trees say which paths are
+    // TRACKED, and a tracked path never matches, whatever the glob reads.
+    // A document that names no commit has no committed file list, so
+    // nothing can be proven untracked: the classifier then disregards
+    // nothing and a receipt that claims otherwise is stale below.
+    const commitTrees =
+      parentSha !== null && currentReceipt.gitSha !== null
+        ? { parentCommitTreeId: `${parentSha}^{tree}`, currentCommitTreeId: `${currentReceipt.gitSha}^{tree}` }
+        : {};
     const classification = classifyResealChange({
       gitDir: input.gitDir,
       env: input.env,
@@ -397,9 +417,22 @@ export function resealChainBlocking(input: {
       parentTreeId: parentTreeId,
       currentTreeId: currentReceipt.candidateTreeId,
       testFiles: [...new Set(catalog.entries.map((entry) => entry.file))],
+      runtimeFileGlobs: input.runtimeFileGlobs ?? [],
+      ...commitTrees,
     });
     if (!classification.eligible) {
       return stale(`re-sealed receipt does not recompute: ${resealRefusalVerdict(classification.reason)}`);
+    }
+    // The receipt says which paths the declaration hid. Reproducing the
+    // decision is not enough: it must hide exactly the same ones.
+    const recomputed = classification.disregardedPaths ?? [];
+    const claimedDisregarded = currentReceipt.resealDisregarded ?? [];
+    if (recomputed.join(' ') !== claimedDisregarded.join(' ')) {
+      return stale(
+        `re-sealed receipt names ${String(claimedDisregarded.length)} disregarded declared runtime file(s) ` +
+          `(${names(claimedDisregarded)}) but the recomputation disregards ${String(recomputed.length)} ` +
+          `(${names(recomputed)}) (fail closed)`,
+      );
     }
     const affected = new Set(classification.affectedTestFiles);
     const freshFiles = new Set(currentExecution.outcomes.map((outcome) => outcome.file));

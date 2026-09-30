@@ -361,6 +361,9 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
       gitDir: authorityGitDir,
       cwd: workspace,
       env: io.env,
+      ...(digests.config.enforcement?.resealRuntimeFiles !== undefined
+        ? { runtimeFileGlobs: digests.config.enforcement.resealRuntimeFiles }
+        : {}),
     });
     if (chainBlocking.length > 0) {
       const [first] = chainBlocking;

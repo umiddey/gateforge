@@ -101,6 +101,26 @@ recompute the whole chain with their own key before accepting it. See
 [`Fix one test without a full run`](packages/cli/guides/TEST-ENVIRONMENT.md#fix-one-test-without-a-full-run)
 for the rules, the exact reason lines, and the residual risk.
 
+If your run writes into the workspace — a witnessed login stage saving
+its storage state, a runner cache — those gitignored bytes are part of
+every sealed tree, so the re-seal refuses on them every time. Declare
+them with `enforcement.resealRuntimeFiles` (repo-relative globs, off by
+default):
+
+```yaml
+enforcement:
+  reseal: true
+  resealRuntimeFiles:
+    - 'e2e/.auth/*.json'
+```
+
+A matching path is disregarded only while **neither sealed commit tracks
+it**; a committed one is source, and a declaration can never hide a
+source change. The run prints
+`test-gates: re-seal disregards 2 declared runtime file(s): …`, the
+receipt records the list in `resealDisregarded`, and CI recomputes that
+exact list or rejects the receipt.
+
 ## What the gate catches that ordinary tests can miss
 
 Mocks and passing clicks can miss bugs in the real path:

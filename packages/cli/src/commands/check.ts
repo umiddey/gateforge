@@ -1533,6 +1533,9 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
                 gitDir,
                 cwd: io.cwd,
                 env: io.env,
+                ...(config.enforcement?.resealRuntimeFiles !== undefined
+                  ? { runtimeFileGlobs: config.enforcement.resealRuntimeFiles }
+                  : {}),
               }).map((entry) => ({ ...entry, detail: `require-e2e: ${entry.detail}` }));
             }
           }

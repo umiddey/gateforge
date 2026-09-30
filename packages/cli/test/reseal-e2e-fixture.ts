@@ -154,7 +154,10 @@ export async function installAndSealParent(
     '.gateforge.yml': `${gateConfig}${configYml()}`,
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
     'node_modules/playwright/cli.js': STUB_CLI,
-    '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
+    // `.auth/` is gitignored: the witnessed login stage writes its
+    // storage state there, so it exists in the sealed candidate tree as
+    // ignored workspace bytes and never in a commit.
+    '.gitignore': '.gateforge/test-gates/\nnode_modules/\n.auth/\n',
   });
   repo.commitFiles({}, 'base');
   const baseSha = repo.headSha() as string;
@@ -201,7 +204,7 @@ export async function installAndRunFailingParent(
     '.gateforge.yml': `${gateConfig}${configYml()}`,
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
     'node_modules/playwright/cli.js': STUB_CLI,
-    '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
+    '.gitignore': '.gateforge/test-gates/\nnode_modules/\n.auth/\n',
   });
   repo.commitFiles({}, 'base');
   if (Object.keys(uncommittedChanges).length > 0) repo.writeFiles(uncommittedChanges);
@@ -254,6 +257,23 @@ export function sealedRunRecord(repo: { root: string }): Record<string, unknown>
 }
 
 /**
+ * Writes the gitignored storage state a witnessed login stage rewrites
+ * on every run. The bytes live only in the workspace: `git ls-files`
+ * never lists them and `git check-ignore` claims them.
+ *
+ * Args:
+ *   repo: the repository whose workspace gains the runtime file.
+ *   name: the state file name inside `.auth/`.
+ *   token: the fresh value the run leaves behind.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeIgnoredRuntimeState(repo: TempRepo, name: string, token: string): void {
+  repo.writeFiles({ [`.auth/${name}`]: `{"token":"${token}"}\n` });
+}
+
+/**
  * Changes ONE test file and asks for the re-seal.
  *
  * Args:
@@ -289,11 +309,17 @@ export async function changeOneSpecAndReseal(
  * Args:
  *   repo: the repository whose run state holds the sealed receipt.
  *   changedPaths: the claim the forged receipt carries.
+ *   resealDisregarded: the disregarded-list claim, when the test forges
+ *     that field instead of `changedPaths`.
  *
  * Returns:
  *   void.
  */
-export function reforgeReceipt(repo: TempRepo, changedPaths: readonly string[]): void {
+export function reforgeReceipt(
+  repo: TempRepo,
+  changedPaths: readonly string[],
+  resealDisregarded?: readonly string[],
+): void {
   const current = sealedReceipt(repo);
   const forged = issueGateReceipt({
     verifierKey: VERIFIER_KEY,
@@ -314,6 +340,11 @@ export function reforgeReceipt(repo: TempRepo, changedPaths: readonly string[]):
     rerunTests: current.rerunTests,
     changeClass: current.changeClass,
     changedPaths,
+    ...(resealDisregarded !== undefined
+      ? { resealDisregarded }
+      : current.resealDisregarded !== undefined
+        ? { resealDisregarded: current.resealDisregarded }
+        : {}),
     invocation: current.invocation,
     selectionDigest: current.selectionDigest,
     catalogDigest: current.catalogDigest,

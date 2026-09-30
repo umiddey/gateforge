@@ -334,8 +334,65 @@ module it can load as a literal import, for example a map
 `{ accounts: () => import('./tenant.accounts.mjs'), … }` instead of
 `` import(`./tenant.${table}.mjs`) ``.
 
+### Declaring runtime state the run itself rewrites
+
+Some repositories write into the workspace **during** the run: a
+witnessed login stage saves its storage state, a runner writes a cache.
+Those files are normally gitignored, and a sealed candidate tree covers
+the workspace's untracked and ignored bytes too — so the parent tree and
+this run's tree differ in them on **every** run. The re-seal sees those
+differences as unknown app files and refuses, however test-only your
+change is:
+
+```text
+app file changed: e2e/.auth/contractor.json → changed-scope run
+```
+
+Gateforge cannot guess which ignored files are disposable: an ignored
+`.env.test` can flip an outcome, and hiding it silently would be a hole
+in the check, not a fix. So the owner declares them:
+
+```yaml
+# .gateforge.yml
+enforcement:
+  reseal: true
+  resealRuntimeFiles:
+    - 'e2e/.auth/*.json'
+```
+
+Entries are repo-root-relative POSIX globs. An absolute path, a
+backslash, or a `..` segment fails the config load rather than quietly
+matching nothing. Without the key nothing changes, byte for byte.
+
+**The tracked-files rule.** A matching path is disregarded **only when
+neither sealed commit tracks it** — when it exists purely as untracked
+or ignored workspace bytes. The moment the same path is committed, it is
+source: a declaration can never hide a source change, whatever the glob
+reads. The rule is the owner's assertion about the repository, exactly
+like the documentation exclusions, and the config digest binds it.
+
+**What it prints, and what the receipt records.** One plain line, so the
+ignored bytes are visible rather than inferred:
+
+```text
+test-gates: re-seal disregards 2 declared runtime file(s): e2e/.auth/contractor.json, e2e/.auth/employee.json
+```
+
+The re-sealed receipt keeps `changedPaths` as the **real** tree
+difference and adds `resealDisregarded` with exactly the paths the
+declaration removed from the classification. `check --require-e2e` and
+the broker recompute the list from the same globs and the two commit
+trees; a receipt that names a different list is `EVIDENCE_STALE`.
+
+**When to declare it.** Only for files the run itself rewrites, every
+run, with no bearing on any test's outcome — storage state, a scratch
+cache, a coverage report. Not for anything a test reads to decide what
+to assert, and not as a way around an `app file changed` line about
+code.
+
 A file that does not parse refuses too (`… does not parse as a
 script`): an unread file cannot be shown to declare nothing computed.
+
 
 A refused re-seal prints **one plain reason line** naming the path and
 the step that actually follows: the run takes the ordinary

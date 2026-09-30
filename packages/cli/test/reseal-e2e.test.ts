@@ -20,6 +20,7 @@ import {
   sealedReceipt,
   sealedRunRecord,
   SPECS,
+  writeIgnoredRuntimeState,
 } from './reseal-e2e-fixture.js';
 
 describe('test-only re-seal (real CLI, end to end)', () => {
@@ -162,6 +163,95 @@ describe('test-only re-seal from a RUN RECORD (a failed parent run)', () => {
       expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
     });
   }, 180_000);
+});
+
+describe('a runtime file the run itself rewrites (owner-declared)', () => {
+  // The state directory sits OUTSIDE the runner's test root, exactly
+  // as it does on the consumer: the specs live in `e2e/`, the login
+  // stage writes its storage state into a gitignored `.auth/`.
+  const DECLARED = "mode: changed\nenforcement:\n  reseal: true\n  resealRuntimeFiles:\n    - '.auth/*.json'\n";
+  const UNDECLARED = 'mode: changed\nenforcement:\n  reseal: true\n';
+
+  it('refuses it with one plain line when the owner declared nothing', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo, UNDECLARED);
+      writeIgnoredRuntimeState(repo, 'contractor.json', 'a');
+      const run = await changeOneSpecAndReseal(repo, env, { expectReseal: false });
+      expect(run.stderr.split('\n').filter((row) => row.startsWith('test-gates: app file changed'))).toEqual([
+        'test-gates: app file changed: .auth/contractor.json → changed-scope run',
+      ]);
+      expect(run.stderr).not.toContain('only test files changed');
+      expect(run.stderr).not.toContain('re-seal disregards');
+    });
+  }, 180_000);
+
+  it('re-seals when the owner declared it, records it, and check --require-e2e recomputes the same decision', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo, DECLARED);
+      // The bytes are the run's own: ignored by Git, absent from every
+      // commit, present in the sealed candidate tree.
+      writeIgnoredRuntimeState(repo, 'contractor.json', 'a');
+      expect(repo.git(['ls-files', '.auth/contractor.json']).stdout.trim()).toBe('');
+      expect(repo.git(['check-ignore', '.auth/contractor.json']).stdout.trim()).toBe('.auth/contractor.json');
+      // A second stage rewrites both before the fix run.
+      writeIgnoredRuntimeState(repo, 'employee.json', 'b');
+      writeIgnoredRuntimeState(repo, 'contractor.json', 'c');
+
+      const resealed = await changeOneSpecAndReseal(repo, env);
+
+      expect(resealed.stderr).toContain(
+        'test-gates: re-seal disregards 2 declared runtime file(s): .auth/contractor.json, .auth/employee.json',
+      );
+      expect(sealedReceipt(repo).resealDisregarded).toEqual([
+        '.auth/contractor.json',
+        '.auth/employee.json',
+      ]);
+      // The receipt still names the REAL tree difference; the
+      // declaration only removed those paths from the classification.
+      expect(sealedReceipt(repo).changedPaths).toEqual([
+        '.auth/contractor.json',
+        '.auth/employee.json',
+        'e2e/accounts.spec.mjs',
+      ]);
+      // The consumer recomputes with its own engine, key and config, so
+      // an agreeing recomputation is the proof the declaration is sound.
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 180_000);
+
+  it('prints no disregard line when the declaration covers nothing', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo, DECLARED);
+      const plain = await changeOneSpecAndReseal(repo, env);
+      expect(plain.stderr).not.toContain('re-seal disregards');
+      expect(sealedReceipt(repo).resealDisregarded).toBeUndefined();
+    });
+  }, 180_000);
+
+  it('never lets the declaration hide a TRACKED file', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo, DECLARED);
+      // The same declared glob, on a path this run COMMITS: an owner
+      // declaration is an assertion about ignored runtime bytes, never
+      // about source, so trackedness is what decides.
+      repo.writeFiles({ '.auth/contractor.json': '{"token":"a"}\n' });
+      repo.git(['add', '-f', '.auth/contractor.json']);
+      repo.commit('track the state file');
+      writeIgnoredRuntimeState(repo, 'contractor.json', 'b');
+      repo.git(['add', '-f', '.auth/contractor.json']);
+      repo.commitFiles(
+        { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race fix\n` },
+        'a tracked state file changed next to a test fix',
+      );
+      const refused = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(refused.stderr.split('\n').filter((row) => row.startsWith('test-gates: app file changed'))).toEqual([
+        'test-gates: app file changed: .auth/contractor.json → changed-scope run',
+      ]);
+      expect(refused.stderr).not.toContain('re-seal disregards');
+      expect(refused.stderr).not.toContain('only test files changed');
+    });
+  }, 240_000);
 });
 
 describe('one plain reason line when a re-seal parent cannot be used', () => {

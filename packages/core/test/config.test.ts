@@ -61,6 +61,20 @@ describe('parseConfig (pin #6)', () => {
     expect(parseConfig({ ...validConfig, runner: 'playwright' }).runner).toBe('playwright');
   });
 
+  it('accepts repo-relative runtime-file globs and rejects anything that escapes the repo root', () => {
+    expect(
+      parseConfig({
+        ...validConfig,
+        enforcement: { reseal: true, resealRuntimeFiles: ['e2e/.auth/*.json', 'e2e/.auth/**'] },
+      }).enforcement?.resealRuntimeFiles,
+    ).toEqual(['e2e/.auth/*.json', 'e2e/.auth/**']);
+    // Absent by default: a repository that declares nothing is untouched.
+    expect(parseConfig(validConfig).enforcement?.resealRuntimeFiles).toBeUndefined();
+    for (const bad of ['/etc/.env', '../outside.json', 'e2e//state.json', 'C:/state.json', '']) {
+      expect(() => parseConfig({ ...validConfig, enforcement: { resealRuntimeFiles: [bad] } })).toThrow();
+    }
+  });
+
   it('rejects an unknown runner through the plain config-error path', () => {
     let caught: unknown;
     try {

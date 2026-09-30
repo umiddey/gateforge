@@ -230,6 +230,16 @@ export const GateReceiptSchema = z
      * list rejects the receipt (EVIDENCE_STALE).
      */
     changedPaths: z.array(z.string().min(1)).optional(),
+    /**
+     * ADDITIVE: the changed paths the OWNER declaration
+     * `enforcement.resealRuntimeFiles` kept out of the classification —
+     * runtime state the run itself rewrites, which no sealed commit
+     * tracks. Present only when at least one path was disregarded, and
+     * bound by the receipt MAC like every other re-seal field: the
+     * consumer recomputes the list from the same globs and the two
+     * commit trees, and any difference is `EVIDENCE_STALE`.
+     */
+    resealDisregarded: z.array(z.string().min(1)).optional(),
     /** 64-hex digest binding the approved engine/policy bundle version. */
     engineBundleDigest: z.string().regex(HEX64, 'engineBundleDigest must be 64-char lowercase hex'),
     /**
@@ -287,6 +297,13 @@ export const GateReceiptSchema = z
         message: 'resealedFromKind is a re-seal binding and stands or falls with the re-seal fields',
       });
     }
+    if (receipt.resealDisregarded !== undefined && presentResealFields !== resealFields.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resealDisregarded'],
+        message: 'resealDisregarded is a re-seal binding and stands or falls with the re-seal fields',
+      });
+    }
     if (presentResealFields === resealFields.length) {
       // A `run-record` parent is NOT a receipt: `resealedFrom` then
       // names the run record's own digest and no carried-receipt binding
@@ -316,6 +333,25 @@ export const GateReceiptSchema = z
             code: 'custom',
             path: ['changedPaths', index],
             message: "changedPaths must be sorted; expected '" + String(sortedPaths[index]) + "' at index " + String(index),
+          });
+          return;
+        }
+      }
+      // The disregarded list is a CLAIM the consumer recomputes entry
+      // for entry, so it is sorted exactly like `changedPaths`: an
+      // unordered claim could never be reproduced.
+      const disregarded = receipt.resealDisregarded ?? [];
+      const sortedDisregarded = [...disregarded].sort();
+      for (let index = 0; index < disregarded.length; index += 1) {
+        if (disregarded[index] !== sortedDisregarded[index]) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['resealDisregarded', index],
+            message:
+              "resealDisregarded must be sorted; expected '" +
+              String(sortedDisregarded[index]) +
+              "' at index " +
+              String(index),
           });
           return;
         }

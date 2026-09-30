@@ -66,6 +66,41 @@ export interface ResealChangeClassification {
    * every transitive importer of a changed helper, sorted.
    */
   affectedTestFiles: string[];
+  /**
+   * Changed paths the owner declared as runtime state the run itself
+   * rewrites (`enforcement.resealRuntimeFiles`) and that neither
+   * sealed commit tracks — the ONLY paths a declaration may hide. A
+   * tracked path is never here, so a declaration can never hide a
+   * source change.
+   *
+   * Present only when the config declares at least one glob, so a
+   * repository that declares nothing gets today's result object byte
+   * for byte. `changedPaths` always keeps the real tree difference,
+   * declared or not: the receipt states what the trees really differ
+   * in, and the consumer recomputes that from the trees themselves.
+   */
+  disregardedPaths?: string[];
+}
+
+/**
+ * Reads one committed tree's file list, so a path can be proven to be
+ * untracked in it. A changed path that EITHER commit tracks is source
+ * and never matches a runtime declaration, however the glob reads.
+ *
+ * Args:
+ *   gitDir: the absolute git dir holding the tree object.
+ *   env: the process environment (Git redirectors are stripped).
+ *   treeId: the commit's tree (`<sha>^{tree}`).
+ *
+ * Returns:
+ *   Set<string>: every repo-relative posix path the commit tracks;
+ *   null when the list cannot be read (never a guess — the caller
+ *   then disregards nothing).
+ */
+function committedPaths(gitDir: string, env: NodeJS.ProcessEnv, treeId: string): Set<string> | null {
+  const out = run(gitDir, env, ['ls-tree', '-r', '-z', '--name-only', treeId]);
+  if (out === null) return null;
+  return new Set(out.split('\0').filter((path) => path.length > 0));
 }
 
 /** Extensions whose import statements the graph resolves. */
@@ -320,6 +355,22 @@ export function resealRefusal(reason: string): string {
 /** The same reason without the suffix, for a recomputation verdict. */
 export function resealRefusalVerdict(reason: string | null): string {
   return String(reason).replace(new RegExp(` ${RESEAL_REFUSAL_SUFFIX}$`), '');
+}
+
+/**
+ * The one plain line a run prints when a declared runtime file was
+ * dropped from the change set, so a user sees exactly which ignored
+ * bytes the decision ignored instead of having to infer it.
+ *
+ * Args:
+ *   paths: the disregarded changed paths, sorted.
+ *
+ * Returns:
+ *   string: the line body, without the `test-gates: ` prefix the
+ *   caller writes (that prefix is the surface, not the message).
+ */
+export function resealDisregardNotice(paths: readonly string[]): string {
+  return `re-seal disregards ${String(paths.length)} declared runtime file(s): ${paths.join(', ')}`;
 }
 
 /**
@@ -791,32 +842,73 @@ export function classifyResealChange(input: {
   parentTreeId: string;
   currentTreeId: string;
   testFiles: readonly string[];
+  runtimeFileGlobs?: readonly string[];
+  parentCommitTreeId?: string;
+  currentCommitTreeId?: string;
 }): ResealChangeClassification {
   const changed = diffSealedTrees(input.gitDir, input.env, input.parentTreeId, input.currentTreeId);
   const changedPaths = (changed ?? []).map((entry) => entry.path);
-  const refuse = (reason: string): ResealChangeClassification => ({
+  // An undeclared repository gets no `disregardedPaths` key at all, so
+  // the whole result object is the one it got before this feature.
+  const declared = input.runtimeFileGlobs ?? [];
+  const refuse = (reason: string, disregarded: string[] = []): ResealChangeClassification => ({
     eligible: false,
     reason: resealRefusal(reason),
     changedPaths,
     testFiles: [],
     helperFiles: [],
     affectedTestFiles: [],
+    ...(declared.length > 0 ? { disregardedPaths: disregarded } : {}),
   });
   if (changed === null) {
     return refuse(
       `the sealed trees could not be diffed (${input.parentTreeId} → ${input.currentTreeId})`,
     );
   }
-  if (changed.length === 0) {
-    return refuse('the sealed trees are identical, so there is nothing to classify');
+  // The owner may declare runtime state the run itself rewrites (a
+  // witnessed login stage's storage state, a runner's own cache): the
+  // bytes are gitignored workspace state, so EVERY sealed candidate
+  // tree differs from the last one in them and no re-seal could ever
+  // succeed without a declaration. It is an OWNER ASSERTION, so it is
+  // deliberately narrow: a matching changed path is disregarded only
+  // when it is absent from BOTH sealed commits, i.e. when it exists
+  // solely as untracked/ignored workspace bytes. A tracked path never
+  // matches, whatever the glob reads. Without a declaration, or without
+  // the two commit trees to check trackedness against, nothing is
+  // disregarded (fail closed).
+  let disregarded: string[] = [];
+  if (declared.length > 0 && input.parentCommitTreeId !== undefined && input.currentCommitTreeId !== undefined) {
+    const parentTracked = committedPaths(input.gitDir, input.env, input.parentCommitTreeId);
+    const currentTracked = committedPaths(input.gitDir, input.env, input.currentCommitTreeId);
+    if (parentTracked === null || currentTracked === null) {
+      return refuse(
+        `the files tracked by the two sealed commits could not be read ` +
+          `(${input.parentCommitTreeId}, ${input.currentCommitTreeId})`,
+      );
+    }
+    const matchers = declared.map((glob) => picomatch(glob, { dot: true }));
+    disregarded = changed
+      .filter(
+        (entry) =>
+          !parentTracked.has(entry.path) &&
+          !currentTracked.has(entry.path) &&
+          matchers.some((matcher) => matcher(entry.path)),
+      )
+      .map((entry) => entry.path);
+  }
+  const ignored = new Set(disregarded);
+  const changes = changed.filter((entry) => !ignored.has(entry.path));
+  const classifiedPaths = changes.map((entry) => entry.path);
+  if (changes.length === 0) {
+    return refuse('the sealed trees are identical, so there is nothing to classify', disregarded);
   }
   const testFileSet = new Set(input.testFiles);
   const roots = testRoots(input.testFiles);
-  const testFiles = changed.filter((entry) => testFileSet.has(entry.path)).map((entry) => entry.path);
+  const testFiles = changes.filter((entry) => testFileSet.has(entry.path)).map((entry) => entry.path);
   // A deleted path is classified by the SAME catalog: a deleted test
   // file simply leaves the expected set, while a deleted anything-else is
   // app code by definition and its importers break at run time.
-  for (const entry of changed) {
+  for (const entry of changes) {
     if (entry.status === 'D' && !testFileSet.has(entry.path)) {
       return refuse(`app file deleted: ${entry.path}`);
     }
@@ -839,7 +931,7 @@ export function classifyResealChange(input: {
       return refuse(`setup test changed: ${setup}`);
     }
   }
-  const candidates = changed.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);
+  const candidates = changes.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);
   // A changed path outside every test root is app code whatever the
   // import graph says, so it refuses first and by its own name: the
   // reason a user needs is "you changed app code", not a doubt about
@@ -861,8 +953,8 @@ export function classifyResealChange(input: {
   // file of any extension counts as the script family, since a script
   // can import data files). Files of the other family can hide no edge
   // and are left out of the graph, doubts included.
-  const pythonChanged = changedPaths.some((path) => extname(path) === '.py');
-  const scriptChanged = changedPaths.some((path) => extname(path) !== '.py');
+  const pythonChanged = classifiedPaths.some((path) => extname(path) === '.py');
+  const scriptChanged = classifiedPaths.some((path) => extname(path) !== '.py');
   const sources = allSources.filter((file) => (extname(file.path) === '.py' ? pythonChanged : scriptChanged));
   // A file whose bytes the parser rejects has NOT been shown to declare
   // nothing computed, so it refuses before the graph is read.
@@ -947,5 +1039,6 @@ export function classifyResealChange(input: {
     testFiles,
     helperFiles: helperFiles.sort(),
     affectedTestFiles: [...affected].sort(),
+    ...(declared.length > 0 ? { disregardedPaths: disregarded } : {}),
   };
 }

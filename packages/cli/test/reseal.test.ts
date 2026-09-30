@@ -741,6 +741,134 @@ describe('test-only re-seal change classification', () => {
   });
 });
 
+describe('declared runtime files the run itself rewrites', () => {
+  // The consumer's layout: the specs live in their own test root, and
+  // the gitignored storage state the login stage writes sits beside it
+  // under `e2e/.auth/`, outside every test root — so today it reads as
+  // app code, exactly as it does on the consumer.
+  const SCENARIO_FILES = ['e2e/scenarios/accounts.spec.ts', 'e2e/scenarios/orders.spec.ts'];
+  const RUNTIME_FILES = {
+    'src/accounts.ts': 'export const accounts = 1;\n',
+    'e2e/scenarios/accounts.spec.ts': SPEC,
+    'e2e/scenarios/orders.spec.ts': SPEC,
+    '.gitignore': '.gateforge/\ne2e/.auth/\n',
+  };
+
+  /**
+   * Classifies with the owner declaration the config carries: the
+   * globs, plus the two COMMIT trees the parent and this run sealed.
+   */
+  const classifyDeclared = (
+    repo: { root: string },
+    parentTreeId: string,
+    currentTreeId: string,
+    parentSha: string,
+    currentSha: string,
+    globs: readonly string[] = ['e2e/.auth/*.json'],
+  ) =>
+    classifyResealChange({
+      gitDir: resolveGitDir(repo.root, process.env) as string,
+      env: process.env,
+      cwd: repo.root,
+      parentTreeId,
+      currentTreeId,
+      testFiles: SCENARIO_FILES,
+      runtimeFileGlobs: globs,
+      parentCommitTreeId: `${parentSha}^{tree}`,
+      currentCommitTreeId: `${currentSha}^{tree}`,
+    });
+
+  it('refuses a rewritten gitignored state file when the owner declared nothing', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles(RUNTIME_FILES);
+      repo.commitFiles({}, 'base');
+      repo.writeFiles({ 'e2e/.auth/contractor.json': '{"token":"a"}\n' });
+      const parent = treeOf(repo);
+      const parentSha = repo.headSha() as string;
+      repo.writeFiles({ 'e2e/.auth/contractor.json': '{"token":"b"}\n' });
+      repo.commitFiles(
+        { 'e2e/scenarios/accounts.spec.ts': `${SPEC}\n// the real fix\n` },
+        'the login stage rewrote its state, and the test was fixed',
+      );
+      const current = treeOf(repo);
+      const currentSha = repo.headSha() as string;
+
+      expect(classify(repo, parent, current, SCENARIO_FILES).reason).toBe(
+        'app file changed: e2e/.auth/contractor.json → changed-scope run',
+      );
+      // The declaration changes the decision, and names what it dropped.
+      const declared = classifyDeclared(repo, parent, current, parentSha, currentSha);
+      expect(declared.eligible).toBe(true);
+      expect(declared.reason).toBeNull();
+      expect(declared.changedPaths).toEqual(['e2e/.auth/contractor.json', 'e2e/scenarios/accounts.spec.ts']);
+      expect(declared.disregardedPaths).toEqual(['e2e/.auth/contractor.json']);
+      expect(declared.testFiles).toEqual(['e2e/scenarios/accounts.spec.ts']);
+      expect(declared.affectedTestFiles).toEqual(['e2e/scenarios/accounts.spec.ts']);
+    });
+  });
+
+  it('never lets a declaration hide a TRACKED file, however the glob reads', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles(RUNTIME_FILES);
+      repo.writeFiles({ 'e2e/.auth/contractor.json': '{"token":"a"}\n' });
+      repo.git(['add', '-f', 'e2e/.auth/contractor.json']);
+      repo.commit('base');
+      const parent = treeOf(repo);
+      const parentSha = repo.headSha() as string;
+      repo.writeFiles({ 'e2e/.auth/contractor.json': '{"token":"b"}\n' });
+      const currentSha = repo.commitFiles(
+        { 'e2e/scenarios/accounts.spec.ts': `${SPEC}\n// the real fix\n` },
+        'a tracked state file changed next to a test fix',
+      );
+      const current = treeOf(repo);
+
+      const declared = classifyDeclared(repo, parent, current, parentSha, currentSha, [
+        'e2e/.auth/contractor.json',
+        'e2e/.auth/*.json',
+        'e2e/**',
+      ]);
+      expect(declared.eligible).toBe(false);
+      expect(declared.reason).toBe('app file changed: e2e/.auth/contractor.json → changed-scope run');
+      expect(declared.disregardedPaths).toEqual([]);
+    });
+  });
+
+  it('keeps the identical-tree refusal when the declaration covers the whole change', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles(RUNTIME_FILES);
+      repo.commitFiles({}, 'base');
+      repo.writeFiles({ 'e2e/.auth/contractor.json': '{"token":"a"}\n' });
+      const parent = treeOf(repo);
+      const parentSha = repo.headSha() as string;
+      repo.writeFiles({ 'e2e/.auth/contractor.json': '{"token":"b"}\n' });
+      const current = treeOf(repo);
+      const currentSha = repo.headSha() as string;
+
+      const declared = classifyDeclared(repo, parent, current, parentSha, currentSha);
+      expect(declared.eligible).toBe(false);
+      expect(declared.reason).toBe(
+        'the sealed trees are identical, so there is nothing to classify → changed-scope run',
+      );
+    });
+  });
+
+  it('declares nothing when the key is absent, so the classification is byte-identical', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles(RUNTIME_FILES);
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      const parentSha = repo.headSha() as string;
+      repo.commitFiles({ 'e2e/scenarios/accounts.spec.ts': `${SPEC}\n// the real fix\n` }, 'the real fix');
+      const current = treeOf(repo);
+      const currentSha = repo.headSha() as string;
+
+      const plain = classify(repo, parent, current, SCENARIO_FILES);
+      expect(plain).toEqual(classifyDeclared(repo, parent, current, parentSha, currentSha, []));
+      expect(plain.disregardedPaths).toBeUndefined();
+    });
+  });
+});
+
 describe('plain carry-forward over sealed candidate trees', () => {
   it('accepts a difference confined to the evaluated paths and refuses anything else', async () => {
     await withTempRepo({}, async (repo) => {

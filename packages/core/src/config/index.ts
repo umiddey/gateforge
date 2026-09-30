@@ -85,6 +85,18 @@ export const ConfigPluginSchema = z
 export type ConfigPlugin = z.infer<typeof ConfigPluginSchema>;
 
 /**
+ * True when one declared glob is a usable repo-root-relative POSIX
+ * pattern: not absolute, no Windows drive, no backslash, and no
+ * `..` segment. A path that escapes the repo root is never a
+ * declaration Gateforge can evaluate against a tree path, so it must
+ * fail the config load rather than silently match nothing.
+ */
+function isRepoRelativeGlob(value: string): boolean {
+  if (value.length === 0 || value.includes('\\') || value.startsWith('/') || /^[A-Za-z]:/.test(value)) return false;
+  return !value.split('/').some((segment) => segment === '..' || segment === '');
+}
+
+/**
  * Enforcement-mode configuration (plan 2026-09-13 §3.4/§3.3, ADR 0005
  * D1/D4). OPTIONAL and off by default — enabling strict E2E is an
  * explicit, tracked owner decision.
@@ -144,6 +156,34 @@ export const EnforcementConfigSchema = z
      * so the switch turns on a cheaper run, never a weaker check.
      */
     reseal: z.boolean().optional(),
+    /**
+     * ADDITIVE owner declaration beside `enforcement.reseal`: repo-
+     * root-relative POSIX globs for RUNTIME STATE THE RUN ITSELF
+     * REWRITES inside the repository — a witnessed login stage's
+     * storage state, a runner's own cache. Such bytes are gitignored
+     * workspace state, so every sealed candidate tree differs from the
+     * last one in them and no re-seal could ever succeed without a
+     * declaration.
+     *
+     * The declaration is an OWNER ASSERTION (like the documentation
+     * exclusions), so it is deliberately narrow: the re-seal
+     * disregards a matching changed path ONLY when the path is absent
+     * from BOTH sealed commits, i.e. when it exists solely as
+     * untracked/ignored workspace bytes. A tracked path never matches,
+     * so a declaration can never hide a source change. The receipt
+     * records what was disregarded and CI recomputes it from the same
+     * globs; a difference is `EVIDENCE_STALE`.
+     *
+     * Absent (the default) changes nothing: the classifier disregards
+     * nothing and a run is byte-identical to before.
+     */
+    resealRuntimeFiles: z
+      .array(z.string().min(1, 'resealRuntimeFiles entries must be non-empty strings'))
+      .refine((entries) => entries.every(isRepoRelativeGlob), {
+        message:
+          'resealRuntimeFiles entries must be repo-root-relative globs (no absolute path, no backslash, no "." or ".." segment)',
+      })
+      .optional(),
   })
   .strict();
 

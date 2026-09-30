@@ -842,6 +842,12 @@ export interface IssueGateReceiptInput {
   changeClass?: 'test-only';
   /** The changed paths Gateforge itself diffed between the sealed trees. */
   changedPaths?: readonly string[];
+  /**
+   * The changed paths the owner declaration `enforcement.resealRuntimeFiles`
+   * kept out of the classification: runtime state the run itself rewrites,
+   * which no sealed commit tracks (re-seal).
+   */
+  resealDisregarded?: readonly string[];
   /** Normalized invocation. */
   invocation: string;
   /** Selection digest. */
@@ -964,6 +970,7 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
           rerunTests: input.rerunTests,
           changeClass: input.changeClass,
           ...(input.changedPaths !== undefined ? { changedPaths: [...input.changedPaths] } : {}),
+          ...(input.resealDisregarded !== undefined ? { resealDisregarded: [...input.resealDisregarded] } : {}),
         }
       : {}),
     // Additive scope binding (opt-in scoped supervised runs): present

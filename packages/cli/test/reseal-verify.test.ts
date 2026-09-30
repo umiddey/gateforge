@@ -17,6 +17,7 @@ import {
   installAndSealParent,
   reforgeReceipt,
   sealedReceipt,
+  writeIgnoredRuntimeState,
 } from './reseal-e2e-fixture.js';
 
 describe('re-seal recomputation in check --require-e2e', () => {
@@ -31,6 +32,29 @@ describe('re-seal recomputation in check --require-e2e', () => {
       expect(checked.stdout).toContain('EVIDENCE_STALE');
       expect(checked.stdout).toContain(
         're-sealed receipt names changed paths e2e/accounts.spec.mjs, e2e/orders.spec.mjs but the trees differ in e2e/accounts.spec.mjs',
+      );
+    });
+  }, 180_000);
+
+  it('rejects a re-sealed receipt whose disregarded runtime-file list does not recompute', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(
+        repo,
+        "mode: changed\nenforcement:\n  reseal: true\n  resealRuntimeFiles:\n    - '.auth/*.json'\n",
+      );
+      writeIgnoredRuntimeState(repo, 'contractor.json', 'a');
+      await changeOneSpecAndReseal(repo, env);
+      expect(sealedReceipt(repo).resealDisregarded).toEqual(['.auth/contractor.json']);
+      // The strongest forgery available: a fresh MAC over a claim the
+      // consumer must reproduce list for list.
+      reforgeReceipt(repo, ['.auth/contractor.json', 'e2e/accounts.spec.mjs'], []);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code).not.toBe(0);
+      expect(checked.stdout).toContain('EVIDENCE_STALE');
+      expect(checked.stdout).toContain(
+        're-sealed receipt names 0 disregarded declared runtime file(s) (<none>) but the recomputation ' +
+          'disregards 1 (.auth/contractor.json) (fail closed)',
       );
     });
   }, 180_000);

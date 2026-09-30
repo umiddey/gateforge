@@ -173,6 +173,7 @@ import { loadReceiptFor, receiptScope, tryReuseReceipt, type ReceiptLoad } from 
 import {
   carryDiffIsWithinScope,
   classifyResealChange,
+  resealDisregardNotice,
   RESEAL_REFUSAL_SUFFIX,
   resealRefusal,
   type ResealChangeClassification,
@@ -1379,6 +1380,19 @@ export function decideTestOnlyReseal(input: {
   catalog: TestCatalog;
   obligations: readonly Obligation[];
   enabled: boolean;
+  /**
+   * The owner-declared runtime files (`enforcement.resealRuntimeFiles`).
+   * Absent or empty changes nothing: the classifier disregards nothing
+   * and the decision is the one it always was.
+   */
+  runtimeFileGlobs?: readonly string[];
+  /**
+   * The tree of the commit this run froze (`<baseSha>^{tree}`). The
+   * declaration may only hide a path NEITHER sealed commit tracks, so
+   * the classifier needs both commit trees; without them it
+   * disregards nothing (fail closed).
+   */
+  currentCommitTreeId?: string;
 }): { plan: ResealPlan | null; reason: string | null } {
   const parent = input.parent;
   if (parent === null) return { plan: null, reason: null };
@@ -1415,6 +1429,16 @@ export function decideTestOnlyReseal(input: {
     parentTreeId: parent.treeId,
     currentTreeId: input.currentTreeId,
     testFiles: [...new Set(input.catalog.entries.map((entry) => entry.file))],
+    ...(input.runtimeFileGlobs !== undefined &&
+    input.currentCommitTreeId !== undefined &&
+    parent.sha.length > 0
+      ? {
+          runtimeFileGlobs: input.runtimeFileGlobs,
+          parentCommitTreeId: `${parent.sha}^{tree}`,
+          currentCommitTreeId: input.currentCommitTreeId,
+        }
+      : {}),
+
   });
   if (!classification.eligible) {
     return { plan: null, reason: classification.reason };
@@ -2173,6 +2197,17 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               catalog,
               obligations: pipeline.policy.obligations,
               enabled: config.enforcement?.reseal === true,
+              ...(config.enforcement?.resealRuntimeFiles !== undefined
+                ? { runtimeFileGlobs: config.enforcement.resealRuntimeFiles }
+                : {}),
+              // The commit this run froze is the receipt's own `gitSha`:
+              // it, and the parent's, are the two commit trees that say
+              // which paths are TRACKED. Absent (outside a checkout) the
+              // declaration can hide nothing, so the classifier refuses
+              // exactly as it does without it.
+              ...(pipeline.manifest.gitSha !== null
+                ? { currentCommitTreeId: `${pipeline.manifest.gitSha}^{tree}` }
+                : {}),
             });
       if (reSeal.reason !== null) writeLine(io.stderr, `test-gates: ${reSeal.reason}`);
       // A parent document the run state holds but cannot be re-sealed
@@ -3832,6 +3867,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           carriedTests: reSealPlan.carriedTests,
           rerunTests: plannedRows.length,
           changedPaths: reSealPlan.classification.changedPaths,
+          // Which of those paths the owner's runtime-file declaration
+          // hid, and the consumer recomputes the list from the same
+          // declaration — a difference is EVIDENCE_STALE.
+          ...((reSealPlan.classification.disregardedPaths ?? []).length > 0
+            ? { resealDisregarded: reSealPlan.classification.disregardedPaths }
+            : {}),
         }),
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: liveAttestation === null ? null : sha256Canonical(liveAttestation as unknown as Record<string, never>),
@@ -3880,6 +3921,8 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   writeCandidateTreeEntries(stateDir, resultTreeSnapshot?.entries ?? []);
   writeLine(io.stderr, `receipt ${receipt.receiptId} sealed (complete run, evidence graded, inputs bound)`);
   if (reSealPlan !== null) {
+    const disregarded = reSealPlan.classification.disregardedPaths ?? [];
+    if (disregarded.length > 0) writeLine(io.stderr, `test-gates: ${resealDisregardNotice(disregarded)}`);
     writeLine(
       io.stderr,
       `only test files changed: re-ran ${String(plannedRows.length)} test(s), kept ${String(reSealPlan.carriedTests)} ` +
