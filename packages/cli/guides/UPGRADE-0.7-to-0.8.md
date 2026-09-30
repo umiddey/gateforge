@@ -56,10 +56,10 @@
 
 ## What changes for an existing repository
 
-- **CI progress on stderr:** under `CI=true`, `test-gates` now prints a secret-free progress stream on stderr (start line, one line per finished test, an alive line each quiet minute). Local runs are unchanged. Set `run.progress: off` in `.gateforge.yml` to keep the 0.7 CI output.
+- **CI progress on stderr:** under `CI=true`, `test-gates` now prints a secret-screened progress stream on stderr (start line, one line per finished test, an alive line each quiet minute). Set `run.progress: off` in `.gateforge.yml` to disable that stream. Passing local runs are unchanged; when a local run fails with the stream off, its text report now names up to three failed tests with their first error line and tells you how to stream any remaining failures.
 - **Merge-request CI without a base commit:** `--scope changed` and `check --changed` in a merge-request pipeline that provides no base commit now refuse in seconds with exit 2 and the fix, instead of silently using the local staged diff. Pipelines that are not merge requests, a present base commit, an explicit provider and every local run are unchanged.
 - **Selection reports:** the in-runner reporter of a changed- or named-scope run prints `GATEFORGE GATE: SELECTION (…; repository verdict not graded here)` instead of a repository verdict it did not grade. Debt the run did not observe is named on its own line, never as `new blocking`.
-- **Browser builds:** the doctor and the run preflight check the browser builds your own `@playwright/test` pins. A FAIL there names `npx playwright install <browser>` and the directory to run it in.
+- **Browser readiness:** the doctor and the run preflight check the browser builds your own `@playwright/test` pins. Missing builds name `npx playwright install <browser>` and the directory to run it in. On Linux, installed Chromium-family executables are also probed with `--version`; a launch failure names its first stderr line and `npx playwright install-deps <browser>` (requires root or sudo). On a fresh Linux container, install both in one step with `npx playwright install --with-deps chromium`.
 - **Reports** gain additive fields only (`strictness`, `quarantine`, `run`, `engine` provenance in text reports). Existing JSON keys, cause codes and exit codes are unchanged.
 - **Queue observation** needs `bullmq` and `ioredis` only when you configure `queueObserver`; they are optional peers of `@gate-forge/witness`.
 
@@ -88,4 +88,5 @@
 | `npm error code EOVERRIDE` (`Override for @gate-forge/… conflicts with direct dependency`) | Set every `@gate-forge/*` entry in `overrides`/`resolutions` and every `npm:@gate-forge/…` alias to `0.8.0` by hand, then run `npm install` (step 1). |
 | `E404` for `@gate-forge/witness` or `@gate-forge/pack-alembic` during a tarball install | Install every tarball of the release in one command. |
 | A doctor `runner` FAIL naming browser builds | Run the printed `npx playwright install …` in the printed directory. |
+| A doctor `runner` FAIL saying an installed browser cannot start | Run the printed `npx playwright install-deps …` command with root or sudo available, then run the doctor again. |
 | Exit 2 on `--scope changed` in a merge-request pipeline | Provide the base commit (for example a deeper clone) or configure the change provider explicitly, as the message says. |
