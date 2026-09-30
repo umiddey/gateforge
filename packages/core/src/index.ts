@@ -1283,3 +1283,4 @@ export type {
   VitestRunOptions,
   VitestRunResult,
 } from './testing/index.js';
+export * from './twin-paths.js';
