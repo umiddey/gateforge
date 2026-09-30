@@ -562,8 +562,9 @@ You are gated by Gateforge. Work one blocking item at a time.
 
 ## Setup guides
 
-- Environment rules: \`packages/cli/guides/TEST-ENVIRONMENT.md\`.
-- Quickstart: \`packages/cli/guides/QUICKSTART.md\`.
+- Environment rules: \`node_modules/@gate-forge/cli/guides/TEST-ENVIRONMENT.md\`.
+- Quickstart: \`node_modules/@gate-forge/cli/guides/QUICKSTART.md\`.
+  (both ship with the installed CLI package)
 
 ## Proof lives in the overlay
 
@@ -607,8 +608,10 @@ with a surface map — they do NOT rewrite existing journeys.
 - New proof tests go here: \`tests/e2e/gateforge/<resource>.<op>.spec.js\`.
 - Do not rewrite existing \`tests/e2e/**\` journeys into \`evidence.ui\`.
 - Do not use \`gateforge tests mark\` as proof: mappings are intent, not proof.
-- Fixture shape: \`example/e2e/accounts-crud-journey.spec.js\` in the
-  gateforge monorepo and the \`@gate-forge/pack-playwright\` README.
+- Fixture shape: \`node_modules/@gate-forge/pack-playwright/examples/overlay-proof.spec.js\`
+  (a complete, runnable proof test shipped with the pack you installed —
+  copy it here and change the surface). Journey-writing rules:
+  \`node_modules/@gate-forge/pack-playwright/README.md\`.
 `;
 
 /**

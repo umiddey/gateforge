@@ -3,6 +3,7 @@
  * (automatic classification contract).
  */
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -11,6 +12,11 @@ import { withTempRepo, loadConfig } from '@gate-forge/core';
 import { VERSION } from '../src/commands/common.js';
 import { readPlanesConfigOrNull } from '@gate-forge/pack-sqlalchemy';
 import { runCli } from './helpers.js';
+
+/** The pack-playwright package root (its packed layout is the fixture's home). */
+function packPlaywrightRoot(): string {
+  return fileURLToPath(new URL('../../pack-playwright', import.meta.url));
+}
 
 const TARGETS = [
   '.gateforge.yml',
@@ -642,8 +648,8 @@ describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', ()
       expect(skill).toContain('tests/e2e/**');
       expect(skill).toContain('VERIFIER_UNSUPPORTED');
       expect(skill).toContain('coveragePolicy');
-      expect(skill).toContain('packages/cli/guides/TEST-ENVIRONMENT.md');
-      expect(skill).toContain('packages/cli/guides/QUICKSTART.md');
+      expect(skill).toContain('node_modules/@gate-forge/cli/guides/TEST-ENVIRONMENT.md');
+      expect(skill).toContain('node_modules/@gate-forge/cli/guides/QUICKSTART.md');
       const overlay = readFileSync(repo.path('tests/e2e/gateforge/README.md'), 'utf8');
       expect(overlay).toContain('tests/e2e/gateforge/<resource>.<op>.spec.js');
       // User edits survive a second run.
@@ -654,6 +660,40 @@ describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', ()
       expect(readFileSync(repo.path('tests/e2e/gateforge/README.md'), 'utf8')).toBe('# mine\n');
     });
   });
+
+  it('the fixture shape init points at is really inside the installed pack (F13)', async () => {
+    await withTempRepo({}, async (repo) => {
+      const first = await runCli(repo, ['init', '--no-scan']);
+      expect(first.code, first.stdout).toBe(0);
+      const overlay = readFileSync(repo.path('tests/e2e/gateforge/README.md'), 'utf8');
+      const named = overlay.match(/node_modules\/@gate-forge\/pack-playwright\/[\w./-]+/);
+      expect(named?.[0], `the scaffold names no file inside the installed pack: ${overlay}`).toBeDefined();
+      // No monorepo path: nothing a consumer install can have.
+      expect(overlay).not.toContain('example/e2e/accounts-crud-journey.spec.js');
+      // The named file ships: it is in the pack's packed tarball.
+      const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+        cwd: packPlaywrightRoot(),
+        encoding: 'utf8',
+      });
+      expect(packed.status, packed.stderr).toBe(0);
+      const files = (JSON.parse(packed.stdout)[0].files as { path: string }[]).map((file) => file.path);
+      expect(files).toContain(named![0].replace('node_modules/@gate-forge/pack-playwright/', ''));
+      // The two guides GATEFORGE.md names are in the CLI package's own
+      // tarball, at the path the scaffold tells the reader.
+      const skill = readFileSync(repo.path('GATEFORGE.md'), 'utf8');
+      const guides = [...skill.matchAll(/node_modules\/@gate-forge\/cli\/[\w./-]+/g)].map((m) => m[0]);
+      expect(guides).toHaveLength(2);
+      const packedCli = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        encoding: 'utf8',
+      });
+      expect(packedCli.status, packedCli.stderr).toBe(0);
+      const cliFiles = (JSON.parse(packedCli.stdout)[0].files as { path: string }[]).map((file) => file.path);
+      for (const guide of guides) {
+        expect(cliFiles).toContain(guide.replace('node_modules/@gate-forge/cli/', ''));
+      }
+    });
+  }, 180_000);
 
   it('--proof observe is accepted: no overlay scaffold, checklist printed', async () => {
     await withTempRepo({}, async (repo) => {

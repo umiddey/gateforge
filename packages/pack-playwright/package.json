@@ -43,6 +43,7 @@
   "files": [
     "bin",
     "dist",
+    "examples",
     "python"
   ],
   "scripts": {

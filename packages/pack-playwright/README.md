@@ -2,6 +2,10 @@
 
 A witnessed journey must exercise the real application behavior and verify the result that users depend on. A passing test declaration is not proof: only a valid receipt proves a run, and an adopted baseline forgives previously accepted debt.
 
+## Start from a complete example
+
+`examples/overlay-proof.spec.js` (in this package, so `node_modules/@gate-forge/pack-playwright/examples/overlay-proof.spec.js` in your repo) is a complete overlay proof test: a surface descriptor for a small list/create/edit/archive app, the `gateforge` annotation, and the witnessed `evidence.ui.*` / `visible.confirm` / `http.observe` / `persistence.verify` / `finalize` sequence. Copy it, change the selectors, and the fixture calls stay the same.
+
 ## Keep each journey isolated
 
 - Create distinct records and tenant context for every test. Do not reuse a per-tenant singleton across tests; shared state can hide cross-tenant leaks and make outcomes depend on test order.
