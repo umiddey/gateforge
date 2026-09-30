@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { sha256Canonical, withTempRepo, type TempRepo } from '@gate-forge/core';
 import { runCli } from './helpers.js';
 import {
+  changeEvidenceSpecAndReseal,
   changeOneSpecAndReseal,
   EVIDENCE_SPECS,
   fixOrdersSpecAndReseal,
@@ -516,4 +517,74 @@ describe('the parent is bound to its OWN commit, never to a CI variable', () => 
       expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
     });
   }, 180_000);
+});
+
+/**
+ * CONSECUTIVE re-seals. One re-seal is a chain of length 1; the
+ * consumer fixes one test at a time, so the second fix arrives while
+ * the first re-seal is the only parent in the run state. The parent of
+ * a re-seal is therefore a re-seal, and every hop's evidence has to
+ * survive to it — otherwise the second `check --changed --require-e2e`
+ * grades the untouched spec `missing` on evidence three runs witnessed.
+ */
+describe('consecutive test-only re-seals', () => {
+  const THREE = ['accounts', 'orders', 'invoices'];
+
+  /** The per-obligation verdicts `check` graded, with their trust tier. */
+  function graded(stdout: string): Array<{ obligationId: string; verdict: string; trustTier: string }> {
+    return (JSON.parse(stdout) as { verdicts: Array<{ obligationId: string; verdict: string; trustTier: string }> })
+      .verdicts;
+  }
+
+  it('re-seals twice in a row from a clean full parent and still passes check --require-e2e', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndSealEvidenceParent(repo, THREE);
+      try {
+        const full = sealedReceipt(repo);
+        expect(full.verdictSummary.total).toBe(3);
+        expect(full.resealedFrom).toBeUndefined();
+        const hopOneDigest = sha256Canonical(full as unknown as Record<string, never>);
+
+        // Hop 1: one test file changes, the other two carry.
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/orders.spec.mjs', {
+          carried: 2,
+          message: 'touch the orders spec',
+        });
+        const hopOne = sealedReceipt(repo);
+        expect(hopOne.resealedFrom).toBe(hopOneDigest);
+        expect(hopOne.rerunTests).toBe(1);
+        expect(hopOne.carriedTests).toBe(2);
+        expect(existsSync(join(repo.root, '.gateforge/test-gates/reseal-chain/hop-1-receipt.json'))).toBe(true);
+
+        const afterOne = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(afterOne.code, `${afterOne.stdout}\n${afterOne.stderr}`).toBe(0);
+
+        // Hop 2: a DIFFERENT test file changes, so the second re-seal's
+        // parent is the first re-seal and its carried count spans the
+        // whole chain.
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/invoices.spec.mjs', {
+          carried: 2,
+          message: 'touch the invoices spec',
+        });
+        const hopTwo = sealedReceipt(repo);
+        expect(hopTwo.resealedFrom).toBe(sha256Canonical(hopOne as unknown as Record<string, never>));
+        expect(hopTwo.resealedFromKind).toBe('receipt');
+        expect(hopTwo.carriedTests).toBe(2);
+        expect(hopTwo.rerunTests).toBe(1);
+        expect(existsSync(join(repo.root, '.gateforge/test-gates/reseal-chain/hop-2-receipt.json'))).toBe(true);
+
+        const afterTwo = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(afterTwo.code, `${afterTwo.stdout}\n${afterTwo.stderr}`).toBe(0);
+        // Every obligation — the two re-run ones and the one NO hop ever
+        // re-ran — is satisfied on witnessed evidence.
+        expect(graded(afterTwo.stdout).map((row) => [row.obligationId, row.verdict, row.trustTier])).toEqual([
+          ['tenant.accounts:persistence:read', 'satisfied', 'witnessed'],
+          ['tenant.invoices:persistence:read', 'satisfied', 'witnessed'],
+          ['tenant.orders:persistence:read', 'satisfied', 'witnessed'],
+        ]);
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
 });

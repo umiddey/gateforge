@@ -4016,7 +4016,14 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     const runHonest = sealed.result.complete && !changedInputs && !snapshotUnavailable && expectedDigest !== null;
     if (!selection || !claimsProven || !runHonest) return 1;
   } else if (gateCode !== 0 || !sealed.result.complete || changedInputs || snapshotUnavailable || expectedDigest === null) {
-    if (strictness.strictExitCode !== 0 && !options.resultOnly && !softened) clearGateReceipt(stateDir);
+    if (strictness.strictExitCode !== 0 && !options.resultOnly && !softened) {
+      clearGateReceipt(stateDir);
+      // A run that seals no receipt invalidates the re-seal chain with
+      // it: the chain describes the parents of the receipt that is no
+      // longer there, and its evidence was already overwritten by this
+      // run's own. Leaving it behind would be read as a chain.
+      clearResealChain(stateDir);
+    }
     // The run sealed no receipt; the evidence it DID produce is
     // retained as a run record, which only the test-only re-seal path
     // may read. It grants nothing on its own.

@@ -394,27 +394,61 @@ export function reforgeReceipt(
 /** The environment marker the attested app presents (GF-13). */
 export const EVIDENCE_FINGERPRINT = 'reseal-e2e-env';
 
-/** The two evidence spec files; `__EVIDENCE__` drives the witness intent. */
-export const EVIDENCE_SPECS: Record<string, string> = {
-  'e2e/accounts.spec.mjs': [
-    "import { test } from 'playwright/test';",
-    "test('reads an account', async () => {});",
-    '// __EVIDENCE__ tenant.accounts',
-    '',
-  ].join('\n'),
-  'e2e/orders.spec.mjs': [
-    "import { test } from 'playwright/test';",
-    "test('reads an order', async () => {});",
-    '// __EVIDENCE__ tenant.orders',
-    '',
-  ].join('\n'),
-};
+/**
+ * Every evidence spec the fixture can install: the runner sees one test
+ * per file, the sidecar maps it, and the witness probes the row while
+ * it runs. A test names its resource in `__EVIDENCE__`, so the suite
+ * scales to N specs without changing any runner code.
+ */
+const EVIDENCE_SPEC_TABLE = [
+  { name: 'accounts', title: 'reads an account', row: 'account' },
+  { name: 'orders', title: 'reads an order', row: 'order' },
+  { name: 'invoices', title: 'reads an invoice', row: 'invoice' },
+] as const;
+
+/** The two-spec evidence repository every existing suite installs. */
+export const DEFAULT_EVIDENCE_NAMES: readonly string[] = ['accounts', 'orders'];
+
+function evidenceSpecTable(names: readonly string[]): Array<(typeof EVIDENCE_SPEC_TABLE)[number]> {
+  const chosen = EVIDENCE_SPEC_TABLE.filter((row) => names.includes(row.name));
+  if (chosen.length !== names.length) throw new Error(`unknown evidence spec: ${names.join(', ')}`);
+  return chosen;
+}
+
+function evidenceSpecFile(name: string): string {
+  return `e2e/${name}.spec.mjs`;
+}
+
+function evidenceSpecsOf(names: readonly string[]): Record<string, string> {
+  return Object.fromEntries(
+    evidenceSpecTable(names).map((row) => [
+      evidenceSpecFile(row.name),
+      [
+        "import { test } from 'playwright/test';",
+        `test('${row.title}', async () => {});`,
+        `// __EVIDENCE__ tenant.${row.name}`,
+        '',
+      ].join('\n'),
+    ]),
+  );
+}
+
+/** The evidence spec files; `__EVIDENCE__` drives the witness intent. */
+export function evidenceSpecs(names: readonly string[] = DEFAULT_EVIDENCE_NAMES): Record<string, string> {
+  return evidenceSpecsOf(names);
+}
+
+/** The evidence spec files of the standard two-spec repository. */
+export const EVIDENCE_SPECS: Record<string, string> = evidenceSpecsOf(DEFAULT_EVIDENCE_NAMES);
 
 /** The sidecar identity (and so the claim's testId) of each evidence spec. */
-export const EVIDENCE_KEYS: Record<string, string> = {
-  'e2e/accounts.spec.mjs': 'accounts-e2e',
-  'e2e/orders.spec.mjs': 'orders-e2e',
-};
+export function evidenceKeys(names: readonly string[] = DEFAULT_EVIDENCE_NAMES): Record<string, string> {
+  return Object.fromEntries(
+    evidenceSpecTable(names).map((row) => [evidenceSpecFile(row.name), `${row.name}-e2e`]),
+  );
+}
+
+export const EVIDENCE_KEYS: Record<string, string> = evidenceKeys();
 
 /** The evidence adapter: an attested read base plus the server-side probe. */
 export function evidenceAdapter(baseUrl: string): string {
@@ -431,32 +465,28 @@ export function evidenceAdapter(baseUrl: string): string {
   ].join('\n');
 }
 
-/** The sidecar mapping both evidence tests, declared `server-e2e`. */
-export const EVIDENCE_TEST_MAP = [
-  'schemaVersion: 1',
-  'tests:',
-  '  - key: accounts-e2e',
-  '    selector:',
-  '      runner: playwright',
-  '      file: e2e/accounts.spec.mjs',
-  '      titlePath:',
-  '        - reads an account',
-  '    kind: server-e2e',
-  '    claims:',
-  '      - tenant.accounts:persistence:read',
-  '    reason: the witness probes the account row server-side while this test runs',
-  '  - key: orders-e2e',
-  '    selector:',
-  '      runner: playwright',
-  '      file: e2e/orders.spec.mjs',
-  '      titlePath:',
-  '        - reads an order',
-  '    kind: server-e2e',
-  '    claims:',
-  '      - tenant.orders:persistence:read',
-  '    reason: the witness probes the order row server-side while this test runs',
-  '',
-].join('\n');
+/** The sidecar mapping the named evidence tests, declared `server-e2e`. */
+export function evidenceTestMap(names: readonly string[] = DEFAULT_EVIDENCE_NAMES): string {
+  return [
+    'schemaVersion: 1',
+    'tests:',
+    ...evidenceSpecTable(names).flatMap((row) => [
+      `  - key: ${row.name}-e2e`,
+      '    selector:',
+      '      runner: playwright',
+      `      file: ${evidenceSpecFile(row.name)}`,
+      '      titlePath:',
+      `        - ${row.title}`,
+      '    kind: server-e2e',
+      '    claims:',
+      `      - tenant.${row.name}:persistence:read`,
+      `    reason: the witness probes the ${row.row} row server-side while this test runs`,
+    ]),
+    '',
+  ].join('\n');
+}
+
+export const EVIDENCE_TEST_MAP: string = evidenceTestMap();
 
 /**
  * The evidence stub runner: the wire-registration pattern plus the two
@@ -464,15 +494,15 @@ export const EVIDENCE_TEST_MAP = [
  * spool (the witness observes; the suite only declares) and the
  * witness-issued ledger copy the evaluator reads.
  */
-export const EVIDENCE_STUB_CLI = [
+export function evidenceStubCli(names: readonly string[] = DEFAULT_EVIDENCE_NAMES): string {
+  return [
   "const { readFileSync, writeFileSync, mkdirSync } = require('node:fs');",
   'const argv = process.argv.slice(2);',
-  `const files = ${JSON.stringify(Object.keys(EVIDENCE_SPECS))};`,
-  `const titles = ${JSON.stringify({
-    'e2e/accounts.spec.mjs': 'reads an account',
-    'e2e/orders.spec.mjs': 'reads an order',
-  })};`,
-  `const keys = ${JSON.stringify(EVIDENCE_KEYS)};`,
+  `const files = ${JSON.stringify(Object.keys(evidenceSpecs(names)))};`,
+  `const titles = ${JSON.stringify(
+    Object.fromEntries(evidenceSpecTable(names).map((row) => [evidenceSpecFile(row.name), row.title])),
+  )};`,
+  `const keys = ${JSON.stringify(evidenceKeys(names))};`,
   "if (argv.includes('--list')) {",
   '  process.stdout.write(JSON.stringify({',
   '    config: { rootDir: process.cwd() },',
@@ -553,6 +583,9 @@ export const EVIDENCE_STUB_CLI = [
   '}',
   '',
 ].join('\n');
+}
+
+export const EVIDENCE_STUB_CLI: string = evidenceStubCli();
 
 /** The attested app the witness probes before every adapter read (GF-13). */
 export interface EvidenceApp {
@@ -586,36 +619,62 @@ export async function startEvidenceApp(): Promise<EvidenceApp> {
   };
 }
 
-/** Writes the evidence repository (specs, sidecar, attested adapters). */
-export function installEvidenceRepo(repo: TempRepo, appUrl: string, specOverrides: Record<string, string> = {}): void {
+/**
+ * Writes the evidence repository (specs, sidecar, attested adapters,
+ * and the resource file each obligation is derived from).
+ *
+ * Args:
+ *   repo: the temporary repository.
+ *   appUrl: the attested app's loopback base URL.
+ *   specOverrides: spec bodies written over the generated ones.
+ *   names: the specs to install; the whole table minus these is absent,
+ *     so a suite can ask for a two- or a three-spec repository.
+ */
+export function installEvidenceRepo(
+  repo: TempRepo,
+  appUrl: string,
+  specOverrides: Record<string, string> = {},
+  names: readonly string[] = DEFAULT_EVIDENCE_NAMES,
+): void {
+  const table = evidenceSpecTable(names);
   repo.writeFiles({
-    ...EVIDENCE_SPECS,
+    ...evidenceSpecs(names),
     ...specOverrides,
-    '.gateforge/adapters/accounts.mjs': evidenceAdapter(appUrl),
-    '.gateforge/adapters/orders.mjs': evidenceAdapter(appUrl),
-    '.gateforge/test-map.yml': EVIDENCE_TEST_MAP,
+    ...Object.fromEntries(table.map((row) => [`src/${row.name}.txt`, `${row.name} fixture.table\n`])),
+    ...Object.fromEntries(table.map((row) => [`.gateforge/adapters/${row.name}.mjs`, evidenceAdapter(appUrl)])),
+    '.gateforge/test-map.yml': evidenceTestMap(names),
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-    'node_modules/playwright/cli.js': EVIDENCE_STUB_CLI,
+    'node_modules/playwright/cli.js': evidenceStubCli(names),
     '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
   });
 }
 
+/** The evidence repository a test sealed its parent from. */
+export interface EvidenceParent {
+  env: ResealEnv;
+  close: () => Promise<void>;
+}
+
 /**
  * Installs the evidence repository and seals a CLEAN whole-suite parent
- * receipt whose two obligations are proven by witnessed records.
+ * receipt whose obligations are proven by witnessed records.
  *
  * Args:
  *   repo: the temporary repository.
+ *   names: the specs to install.
  *
  * Returns:
  *   { env, close }: the shared run environment, and the attested app the
  *   witness probes — it must stay up for EVERY later run in the test,
  *   not just the parent.
  */
-export async function installAndSealEvidenceParent(repo: TempRepo): Promise<{ env: ResealEnv; close: () => Promise<void> }> {
+export async function installAndSealEvidenceParent(
+  repo: TempRepo,
+  names: readonly string[] = DEFAULT_EVIDENCE_NAMES,
+): Promise<EvidenceParent> {
   const app = await startEvidenceApp();
   installFixture(repo);
-  installEvidenceRepo(repo, app.url);
+  installEvidenceRepo(repo, app.url, {}, names);
   repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
   repo.commitFiles({}, 'base');
   const env = resealRunEnv(repo);
@@ -631,12 +690,16 @@ export async function installAndSealEvidenceParent(repo: TempRepo): Promise<{ en
  */
 export async function installAndRunFailingEvidenceParent(
   repo: TempRepo,
-): Promise<{ env: ResealEnv; close: () => Promise<void> }> {
+  names: readonly string[] = DEFAULT_EVIDENCE_NAMES,
+): Promise<EvidenceParent> {
   const app = await startEvidenceApp();
   installFixture(repo);
-  installEvidenceRepo(repo, app.url, {
-    'e2e/orders.spec.mjs': `${EVIDENCE_SPECS['e2e/orders.spec.mjs'] as string}// __FAIL__ a race in this test\n`,
-  });
+  installEvidenceRepo(
+    repo,
+    app.url,
+    { 'e2e/orders.spec.mjs': `${evidenceSpecs(names)['e2e/orders.spec.mjs'] as string}// __FAIL__ a race in this test\n` },
+    names,
+  );
   repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
   repo.commitFiles({}, 'base');
   const env = resealRunEnv(repo);
@@ -681,6 +744,37 @@ export async function fixOrdersSpecAndReseal(
   if (!expectReseal) return resealed;
   expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
   expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous run');
+  return resealed;
+}
+
+/**
+ * Commits a change to ONE evidence spec and asks for the re-seal. The
+ * carried count is a parameter because it grows with the chain: a
+ * three-spec repository carries two tests on the first hop and keeps
+ * carrying them on every hop after it.
+ *
+ * Args:
+ *   repo: the temporary repository.
+ *   env: the shared run environment.
+ *   spec: the spec file to change.
+ *   options.carried: the kept-test count the printed line must state.
+ *   options.message: the commit message.
+ *   options.expectReseal: false where the run must NOT re-seal.
+ *
+ * Returns:
+ *   { code, stdout, stderr }: the re-seal invocation's own result.
+ */
+export async function changeEvidenceSpecAndReseal(
+  repo: TempRepo,
+  env: ResealEnv,
+  spec: string,
+  { carried, message, expectReseal = true }: { carried: number; message: string; expectReseal?: boolean },
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  repo.commitFiles({ [spec]: `${readFileSync(join(repo.root, spec), 'utf8')}// ${message}\n` }, message);
+  const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+  if (!expectReseal) return resealed;
+  expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
+  expect(resealed.stderr).toContain(`only test files changed: re-ran 1 test(s), kept ${String(carried)} from the previous receipt`);
   return resealed;
 }
 
