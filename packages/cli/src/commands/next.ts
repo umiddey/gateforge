@@ -42,8 +42,8 @@ import type { MappedCoverage } from '@gate-forge/core';
 import {
   collectInputFiles,
   computeInputSnapshot,
-  danglingSymlinkNotices,
   diffInputFiles,
+  symlinkNotices,
   SnapshotUnavailableError,
   UnsupportedSnapshotError,
   type SnapshotFileEntry,
@@ -287,11 +287,12 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       throw error;
     }
   }
-  // A dangling symlink is captured by its link text, so the run
-  // continues; one plain notice line names what does not resolve. In
-  // --json mode stdout stays a single JSON document, so the notice
-  // goes to stderr there.
-  for (const notice of danglingSymlinkNotices(preFiles ?? [])) {
+  // A dangling symlink, or one pointing at a directory, is captured by
+  // its link text, so the run continues; one plain notice line names what
+  // does not resolve and whether an action is needed. In --json mode
+  // stdout stays a single JSON document, so the notice goes to stderr
+  // there.
+  for (const notice of symlinkNotices(preFiles ?? [])) {
     writeLine(asJson ? io.stderr : io.stdout, notice);
   }
 
