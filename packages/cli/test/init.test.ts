@@ -864,3 +864,109 @@ class ${cls}(Base):
     });
   });
 });
+
+/**
+ * A repository that shows the queue machinery a background worker uses
+ * (BullMQ Queue/Worker, `attempts:` bound, idempotency key) but declares
+ * NO `queueObserver`.
+ */
+const QUEUE_SOURCE_NO_OBSERVER = [
+  "import { Queue, Worker } from 'bullmq';",
+  '',
+  "const queue = new Queue('mailer', { connection });",
+  "await queue.add('send', { to });",
+  "new Worker('mailer', handler, { connection });",
+  '',
+].join('\n');
+
+/** The same queue machinery, plus the engine-owned `queueObserver` block. */
+const QUEUE_OBSERVER_YML = `queueObserver:
+  kind: bullmq
+  connection:
+    urlEnv: GATEFORGE_TEST_REDIS_URL
+  queues:
+    - name: mailer
+      taskResourceId: task.email.send
+`;
+
+/**
+ * The exact `gateforge init` stdout for a repository that SHOWS queue
+ * machinery but declares no `queueObserver` — captured from the
+ * pre-change build, so any drift in the default surface fails here.
+ */
+const QUEUE_REPO_INIT_OUTPUT_WITHOUT_OBSERVER = "no terminal: writing the light preset (report everything, block nothing) — a human must choose the goal: re-run with --preset <light|normal|strict> (in a terminal, `gateforge init` asks)\nscan:\n  languages: javascript\n  signals: (none)\nrecommended:\n  plugins: gateforge.pack-http\n  why: gateforge.pack-http — no repository signal — the javascript default set\n  policy: persistence:* on user-facing tables; transport-only HTTP on consumed endpoints\n  proof: overlay (tests/e2e/gateforge/)\nskipped:\n  gateforge.pack-task — no semantic verifier (VERIFIER_UNSUPPORTED)\n  http:frontend-request-observed — not provable yet: no independent browser channel\n  coveragePolicy / strictE2E — owner opt-in\ntip: re-run with --plugins <comma,list> to add detectors (entries already in .gateforge.yml are kept; nothing else in the file changes)\ntip: non-interactive init keeps full evidence identity; use --docs-exclude <folder,...> to opt in\ncreated: <REPO>/.gateforge.yml\ncreated: <REPO>/.gateforge/policies.yml\ncreated: <REPO>/.gateforge/classification-policy.yml\ncreated: <REPO>/.gateforge/baselines/obligations.json\ncreated: <REPO>/GATEFORGE.md\ncreated: <REPO>/tests/e2e/gateforge/README.md\nwrote mode: warn (strict — block everything / changed — block only what this change touches / warn — block nothing)\nwrote no hooks: nothing blocks your commits — read the report instead\nundo: rm -rf .gateforge.yml .gateforge/policies.yml .gateforge/classification-policy.yml .gateforge/baselines/obligations.json GATEFORGE.md tests/e2e/gateforge/README.md\nskeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines\n";
+
+describe('gateforge init: the task behavior pack is offered only with a queueObserver', () => {
+  it('without a queueObserver, init output is byte-identical to the pre-change output', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ 'src/mailer.js': QUEUE_SOURCE_NO_OBSERVER });
+      const { code, stdout, stderr } = await runCli(repo, ['init']);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+      // The repository SHOWS a queue (so the task needles are all present)
+      // yet nothing is offered: without the engine's own queue read every
+      // `task:*` case fails closed, so the pack must not be recommended.
+      // This golden is the exact pre-change output of this same fixture.
+      expect(stdout.split(repo.root).join('<REPO>')).toBe(QUEUE_REPO_INIT_OUTPUT_WITHOUT_OBSERVER);
+      // No offer line for the pack (the pre-existing `skipped:` entry
+      // naming `gateforge.pack-task` is the scan block's own text and is
+      // part of the golden above).
+      expect(stdout).not.toContain('--behavior-packs task');
+      expect(stdout).not.toMatch(/^ {2}task — `/m);
+    });
+  });
+
+  it('with a queueObserver, init offers the task pack the way it offers every other pack', async () => {
+    await withTempRepo({}, async (repo) => {
+      // An initialized repository whose owner pinned an engine queue
+      // observer: the engine can now grade `task:*` from real job state.
+      const base = await runCli(repo, ['init', '--no-scan']);
+      expect(base.code, `${base.stdout}\n${base.stderr}`).toBe(0);
+      repo.writeFiles({
+        'src/mailer.js': QUEUE_SOURCE_NO_OBSERVER,
+        '.gateforge.yml': readFileSync(repo.path('.gateforge.yml'), 'utf8') + QUEUE_OBSERVER_YML,
+      });
+      expect(() => loadConfig(join(repo.root, '.gateforge.yml'))).not.toThrow();
+
+      const { code, stdout, stderr } = await runCli(repo, ['init']);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+      // Named exactly as the other packs are named: the namespace, its
+      // evidence, then the flag that enables it.
+      expect(stdout).toContain('behavior packs detected in this repository');
+      expect(stdout).toMatch(/^ {2}task — `[^`]+` in src\/mailer\.js$/m);
+      expect(stdout).toContain('  gateforge init --behavior-packs task');
+    });
+  });
+
+  it('the task example case is a delivery case, never an HTTP request', async () => {
+    await withTempRepo({}, async (repo) => {
+      const base = await runCli(repo, ['init', '--no-scan']);
+      expect(base.code, `${base.stdout}\n${base.stderr}`).toBe(0);
+      repo.writeFiles({
+        'src/mailer.js': QUEUE_SOURCE_NO_OBSERVER,
+        '.gateforge.yml': readFileSync(repo.path('.gateforge.yml'), 'utf8') + QUEUE_OBSERVER_YML,
+      });
+      const enabled = await runCli(repo, ['init', '--behavior-packs', 'task']);
+      expect(enabled.code, `${enabled.stdout}\n${enabled.stderr}`).toBe(0);
+      const document = readFileSync(repo.path('.gateforge/behavior.yml'), 'utf8');
+      // A task case is a claim about the delivery queue, so it declares a
+      // `deliver` action on the `engine-task` channel and an `attempts`
+      // state rule — an HTTP request could never settle a delivery.
+      expect(document).toContain('kind: deliver');
+      expect(document).toContain('channel: engine-task');
+      expect(document).toContain('kind: attempts');
+      expect(document).toContain('contract: task:retry-policy-enforced');
+      // Declared under `resources:` — a task resource is not a route.
+      expect(document).toContain('# resources:');
+      expect(document).not.toContain('pathTemplate:');
+      // The scaffold still parses as a document with NO declarations.
+      const parsed = parseYaml(
+        document
+          .split('\n')
+          .filter((line) => !line.trimStart().startsWith('#'))
+          .join('\n'),
+      ) as { endpoints: unknown[]; resources: unknown[] };
+      expect(parsed.endpoints).toEqual([]);
+      expect(parsed.resources).toEqual([]);
+    });
+  });
+});

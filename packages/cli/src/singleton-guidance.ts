@@ -7,7 +7,7 @@
  * use one process-global login. The sqlalchemy pack emits that as an
  * additive `singletonPerTenant` fact; this module turns it into the ONE
  * plain advisory line the owner reads, plus the same guidance as ready-made
- * lines for `next`/`init` (both of which call
+ * lines for `gateforge next` (which calls
  * {@link singletonPerTenantGuidanceLines} rather than re-deriving the rule).
  *
  * Nothing here blocks: the advisory is a finding in the report's advisory

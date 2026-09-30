@@ -148,17 +148,21 @@ const BUNDLED_PLUGIN_VERSIONS: Readonly<Record<string, string>> = Object.freeze(
 
 /**
  * The bundled plugin ids init may write (the four trusted detector
- * packs). `gateforge.pack-task` carries no semantic verifier, so it is
- * opt-in only via `--plugins` — never recommended, never defaulted.
+ * packs). `gateforge.pack-task` is opt-in only via `--plugins` — never
+ * recommended, never defaulted — because the `task:*` contracts it
+ * discovers are gradable ONLY once the owner configures a
+ * `queueObserver` (the engine's own queue read); without one every one
+ * of them stays `VERIFIER_UNSUPPORTED`/fail-closed.
  */
 const KNOWN_BUNDLED_PLUGIN_IDS: ReadonlySet<string> = new Set(Object.keys(BUNDLED_PLUGIN_MODULES));
 
 /**
  * Selects the bundled detectors required by the generated coverage and
  * trusted-entry-point rules for the requested source languages.
- * `gateforge.pack-task` is NEVER included: it has no semantic verifier
- * (every contract grades VERIFIER_UNSUPPORTED), so it is opt-in only
- * via `--plugins`.
+ * `gateforge.pack-task` is NEVER included: it is opt-in only via
+ * `--plugins`, because its contracts grade only with a configured
+ * `queueObserver` and a generated default would promise coverage the
+ * repository cannot produce.
  *
  * Args:
  *   languages (readonly string[]): Languages selected by `gateforge init`.
@@ -340,8 +344,8 @@ policies:
  * Task-scoped rules (the `linkage.task` coverage rule and the worker
  * entry-point detector binding) are emitted ONLY when `pack-task` is in
  * the selected plugin set: a coverage rule or detector binding naming an
- * unconfigured detector fails every run closed, and task is opt-in
- * (no semantic verifier).
+ * unconfigured detector fails every run closed, and task is opt-in —
+ * its contracts grade only with a configured `queueObserver`.
  */
 function classificationPolicyTemplate(
   languages: readonly string[],
@@ -1437,7 +1441,15 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       throw new UsageError("flag '--behavior-packs' requires at least one pack name");
     }
   }
-  const detectedPacks = noScan || noBehavior ? [] : detectBehaviorPacks(cwd);
+  // The `task` pack is offered ONLY when the owner's config declares a
+  // `queueObserver`: without the engine's own queue read every `task:*`
+  // case fails closed, so recommending it would print a flag whose cases
+  // can never be satisfied. Absent the block the offer is byte-identical
+  // to a repository that has no background work at all.
+  const detectedPacks =
+    noScan || noBehavior
+      ? []
+      : detectBehaviorPacks(cwd, draftConfig.queueObserver !== undefined);
   const enabledNamespaces = await resolveBehaviorPacks(io, {
     detectedPacks,
     explicit: requestedNamespaces,

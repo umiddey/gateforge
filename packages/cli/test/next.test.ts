@@ -10,6 +10,7 @@ import {
   installFixture,
   LIFECYCLE,
   OBLIGATION_ACCOUNTS,
+  PLUGIN_SOURCE,
   OBLIGATION_ORDERS,
   POLICY_ID,
   runCli,
@@ -441,6 +442,135 @@ describe('gateforge next: behavior ranking (plan §5)', () => {
       ]);
       expect(report.verdicts.every((item) => item.cause === 'TEST_MAPPING_MISSING')).toBe(true);
       expect(report.blocking).toEqual([]);
+    });
+  });
+});
+
+/**
+ * The standard fixture plugin, extended so ONE resource also carries the
+ * additive `singletonPerTenant` fact the sqlalchemy pack mints for a
+ * table whose UNIQUE constraint admits one row per tenant.
+ */
+const SINGLETON_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
+  "attributes: { resourceName: name },",
+  `attributes: {
+            resourceName: name,
+            ...(name === 'ledger'
+              ? {
+                  singletonPerTenant: {
+                    constraint: 'uq_ledger_tenant_ledger_kind',
+                    tenantColumn: 'tenant_id',
+                    columns: ['tenant_id', 'ledger', 'kind'],
+                  },
+                }
+              : {}),
+          },`,
+);
+
+/**
+ * The standard fixture plugin with the `ledger` resource declared as the
+ * background task resource a queue delivers to — the discovery half of
+ * what makes the `task` pack gradable.
+ */
+const TASK_RESOURCE_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
+  "attributes: { resourceName: name },",
+  `attributes: { resourceName: name, ...(name === 'ledger' ? { queue: 'mailer' } : {}) },`,
+);
+
+/**
+ * The exact `gateforge next` stdout of the standard fixture, captured
+ * from the pre-change build. A repository with no per-tenant singleton
+ * must keep it byte for byte.
+ */
+const FIXTURE_NEXT_OUTPUT_WITHOUT_SINGLETON = "next: tenant.accounts:persistence:read\ncause: TEST_MAPPING_MISSING\nwhy: no claim declares 'tenant.accounts:persistence:read'\ndo: Overlay: write `tests/e2e/gateforge/<resource>.<op>.spec.js`. Do not `tests mark` as a fix — that cannot satisfy the obligation.\n";
+
+describe('gateforge next: the task pack offer and the singleton guidance', () => {
+  it('without a singleton fact, next output is byte-identical to the pre-change output', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      expect(stdout).toBe(FIXTURE_NEXT_OUTPUT_WITHOUT_SINGLETON);
+      // The JSON contract is unchanged too: the new keys are omitted
+      // entirely when they have nothing to say.
+      const json = await runCli(repo, ['next', '--json']);
+      const parsed = JSON.parse(json.stdout) as Record<string, unknown>;
+      expect(parsed['singletonGuidance']).toBeUndefined();
+      expect(parsed['taskPackOffer']).toBeUndefined();
+    });
+  });
+
+  it('with a singleton fact, next prints the guidance lines and names the resource', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        'plugin.mjs': SINGLETON_PLUGIN_SOURCE,
+        'src/ledger.txt': 'ledger fixture.table\n',
+        '.gateforge/adapters/ledger.mjs': 'export default {};\n',
+      });
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      // The guidance is the SAME sentence `check` renders as an advisory,
+      // so the two surfaces can never disagree.
+      const line = stdout
+        .split('\n')
+        .find((candidate) => candidate.includes('is a singleton per tenant'));
+      expect(line).toBeDefined();
+      expect(line).toContain("'tenant.ledger'");
+      expect(line).toContain('uq_ledger_tenant_ledger_kind unique(tenant_id, ledger, kind)');
+      expect(line).toContain("'tenant_id'");
+      expect(line).toContain('POST /sessions/identity');
+      // The next action itself is unchanged — the guidance is additive.
+      expect(stdout.startsWith('next: tenant.accounts:persistence:read\n')).toBe(true);
+      const json = await runCli(repo, ['next', '--json']);
+      const parsed = JSON.parse(json.stdout) as { singletonGuidance: string[] };
+      expect(parsed.singletonGuidance).toHaveLength(1);
+      expect(parsed.singletonGuidance[0]).toContain('is a singleton per tenant');
+    });
+  });
+
+  it('without a queueObserver, next offers no task pack even with a task resource', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        'plugin.mjs': TASK_RESOURCE_PLUGIN_SOURCE,
+        'src/ledger.txt': 'ledger task.resource\n',
+        '.gateforge/adapters/ledger.mjs': 'export default {};\n',
+      });
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      expect(stdout).not.toContain('gateforge init --behavior-packs task');
+      expect(stdout).toBe(
+        'next: tenant.accounts:persistence:read\ncause: TEST_MAPPING_MISSING\nwhy: no claim declares ' +
+          "'tenant.accounts:persistence:read'\ndo: Overlay: write `tests/e2e/gateforge/<resource>.<op>.spec.js`. " +
+          'Do not `tests mark` as a fix — that cannot satisfy the obligation.\n',
+      );
+    });
+  });
+
+  it('with a queueObserver, next offers the task pack the way init names it', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        'plugin.mjs': TASK_RESOURCE_PLUGIN_SOURCE,
+        'src/ledger.txt': 'ledger task.resource\n',
+        '.gateforge/adapters/ledger.mjs': 'export default {};\n',
+        '.gateforge.yml':
+          readFileSync(join(repo.root, '.gateforge.yml'), 'utf8') +
+          `queueObserver:
+  kind: bullmq
+  connection:
+    urlEnv: GATEFORGE_TEST_REDIS_URL
+  queues:
+    - name: mailer
+      taskResourceId: tenant.ledger
+`,
+      });
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      expect(stdout).toContain('the task behavior pack is gradable in this repository');
+      expect(stdout).toContain("'tenant.ledger' is a discovered task resource");
+      expect(stdout).toContain('  gateforge init --behavior-packs task');
     });
   });
 });

@@ -26,11 +26,40 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
+/**
+ * The namespaces the engine drives through an HTTP request: a case in
+ * one of them is a claim about what a route answered and what changed.
+ */
+const HTTP_BEHAVIOR_NAMESPACES = ['webhook', 'workflow', 'auth', 'validation'] as const;
+
+/**
+ * The one namespace whose cases are graded from the delivery queue
+ * itself rather than from an HTTP attempt. The engine's own
+ * `queueObserver` is what makes them gradable: absent that block every
+ * `task:*` case fails closed as `missing`, so the pack is only ever
+ * OFFERED when the repository declares one. It is last in print order
+ * for that reason — a repository without an observer never reaches it.
+ */
+export const TASK_BEHAVIOR_NAMESPACE = 'task' as const;
+
 /** The behavior packs a repository can be asked to enable cases for. */
-export const BEHAVIOR_NAMESPACES = ['webhook', 'workflow', 'auth', 'validation'] as const;
+export const BEHAVIOR_NAMESPACES = [...HTTP_BEHAVIOR_NAMESPACES, TASK_BEHAVIOR_NAMESPACE] as const;
 
 /** One behavior pack namespace. */
 export type BehaviorNamespace = (typeof BEHAVIOR_NAMESPACES)[number];
+
+/**
+ * The behavior document list each namespace's cases are declared under:
+ * a task case is a claim about a task resource, never about a route.
+ */
+const NAMESPACE_LIST_KEY: Readonly<Record<BehaviorNamespace, 'endpoints' | 'resources'>> =
+  Object.freeze({
+    webhook: 'endpoints',
+    workflow: 'endpoints',
+    auth: 'endpoints',
+    validation: 'endpoints',
+    task: 'resources',
+  });
 
 /** The bundled plugin each namespace's cases are graded through. */
 export const BEHAVIOR_NAMESPACE_PLUGIN: Readonly<Record<BehaviorNamespace, string>> = Object.freeze({
@@ -38,6 +67,7 @@ export const BEHAVIOR_NAMESPACE_PLUGIN: Readonly<Record<BehaviorNamespace, strin
   workflow: 'gateforge.pack-workflow',
   auth: 'gateforge.pack-auth',
   validation: 'gateforge.pack-validation',
+  task: 'gateforge.pack-task',
 });
 
 /** Directories never descended into (mirrors `repo-scan.ts`). */
@@ -63,7 +93,7 @@ const MAX_EVIDENCE_FILES = 5;
  * The machinery a namespace's cases are about. A namespace is detected
  * only when one of these appears in the repository's own source text: the
  * code that decides a signature, an authorization outcome, a state
- * transition, or a request schema.
+ * transition, a request schema, or a background delivery.
  */
 const NAMESPACE_NEEDLES: Readonly<Record<BehaviorNamespace, readonly RegExp[]>> = Object.freeze({
   webhook: [
@@ -96,6 +126,18 @@ const NAMESPACE_NEEDLES: Readonly<Record<BehaviorNamespace, readonly RegExp[]>> 
     /\bclass-validator\b/,
     /\bfield_validator\b/,
     /\bvalidateSchema\s*\(/,
+  ],
+  task: [
+    /\bnew\s+Queue\s*\(/,
+    /\bnew\s+Worker\s*\(/,
+    /\bqueue\.add\s*\(/,
+    /\bnew\s+QueueEvents\s*\(/,
+    /\battempts\s*:\s*\d/,
+    /\bbackoff\s*:/,
+    /\bmaxAttempts\b/,
+    /\bidempotencyKey\b/,
+    /\bBullMQ\b/,
+    /\bCelery\b/,
   ],
 });
 
@@ -142,22 +184,37 @@ export function parseBehaviorPacks(value: string): BehaviorNamespace[] {
 /**
  * Detects which behavior packs the repository shows, in print order.
  *
+ * The `task` namespace is scanned ONLY when the repository's config
+ * declares a `queueObserver`: the engine can only grade a delivery case
+ * from a queue it reads itself, so offering the pack without one would
+ * print a flag whose cases can never be satisfied. Absent the block the
+ * scan never looks for those needles, which is what keeps a repository
+ * without an observer byte-identical.
+ *
  * Args:
  *   cwd: absolute repository root.
+ *   queueObserverConfigured: whether `.gateforge.yml` declares a
+ *     `queueObserver` block.
  *
  * Returns:
  *   DetectedBehaviorPack[]: one entry per detected namespace, each with
  *   the first file that proved it. Empty for a repository that shows none
  *   — the byte-identical `init` case.
  */
-export function detectBehaviorPacks(cwd: string): DetectedBehaviorPack[] {
+export function detectBehaviorPacks(
+  cwd: string,
+  queueObserverConfigured: boolean,
+): DetectedBehaviorPack[] {
+  const offered = queueObserverConfigured
+    ? BEHAVIOR_NAMESPACES
+    : HTTP_BEHAVIOR_NAMESPACES;
   const files: string[] = [];
   collectFiles(cwd, cwd, files);
   const found = new Map<BehaviorNamespace, DetectedBehaviorPack>();
   for (const file of files) {
     const text = readSmallText(join(cwd, file));
     if (text === null) continue;
-    for (const namespace of BEHAVIOR_NAMESPACES) {
+    for (const namespace of offered) {
       if (found.has(namespace)) continue;
       for (const needle of NAMESPACE_NEEDLES[namespace]) {
         const match = needle.exec(text);
@@ -170,7 +227,7 @@ export function detectBehaviorPacks(cwd: string): DetectedBehaviorPack[] {
         break;
       }
     }
-    if (found.size === BEHAVIOR_NAMESPACES.length) break;
+    if (found.size === offered.length) break;
   }
   return BEHAVIOR_NAMESPACES.filter((namespace) => found.has(namespace)).map(
     (namespace) => found.get(namespace) as DetectedBehaviorPack,
@@ -201,19 +258,33 @@ export function behaviorSkeletonExamples(packs: readonly DetectedBehaviorPack[])
   if (packs.length === 0) return '';
   return [
     '',
-    ...packs.map((pack) =>
-      [
+    ...packs.map((pack) => {
+      const isTask = pack.namespace === TASK_BEHAVIOR_NAMESPACE;
+      // The header names what THIS pack's example actually contains: a
+      // delivery case is declared from the task resource, never from a
+      // route, so the placeholders and the list key both differ.
+      const header = isTask
+        ? [
+            "# Replace <resource-id>, <recipe-id> and <actor-id> with this repository's own",
+            "# values, then uncomment the block below. The engine produces the delivery and",
+            '# reads the queue itself, so these cases are graded on job attempts, never on',
+            '# an HTTP attempt.',
+          ]
+        : [
+            "# Replace <resource-id>, <METHOD>, <path>, <recipe-id> and <actor-id> with this",
+            "# repository's own values, then uncomment the block below. `gateforge next`",
+            '# prints the complete declaration for each discovered route, the matching',
+            '# test-map entries, and the command that runs the gate.',
+          ];
+      return [
         `# --- ${pack.namespace}: ${behaviorPackEvidence(pack)} ---`,
-        "# Replace <resource-id>, <METHOD>, <path>, <recipe-id> and <actor-id> with this",
-        "# repository's own values, then uncomment the block below. `gateforge next`",
-        '# prints the complete declaration for each discovered route, the matching',
-        '# test-map entries, and the command that runs the gate.',
-        '# endpoints:',
+        ...header,
+        `# ${NAMESPACE_LIST_KEY[pack.namespace]}:`,
         ...behaviorExampleCase(pack.namespace)
           .split('\n')
           .map((line) => `#   ${line}`),
-      ].join('\n'),
-    ),
+      ].join('\n');
+    }),
   ].join('\n');
 }
 
@@ -223,13 +294,46 @@ export function behaviorSkeletonExamples(packs: readonly DetectedBehaviorPack[])
  * reads are real (`channel`, `credentialVariant`, `signatureProfile`);
  * values only the owner knows stay visibly placeheld rather than guessed.
  *
+ * The `task` namespace is the exception that proves the rule: its case
+ * is graded from the queue the ENGINE produced, so it declares a
+ * `deliver` action on the `engine-task` channel and an `attempts` state
+ * rule — never an HTTP request, which could never settle a delivery.
+ *
  * Args:
  *   namespace: the behavior namespace.
  *
  * Returns:
- *   string: the YAML case list for one endpoint.
+ *   string: the YAML case list for one endpoint or task resource.
  */
 export function behaviorExampleCase(namespace: BehaviorNamespace): string {
+  if (namespace === TASK_BEHAVIOR_NAMESPACE) {
+    return [
+      '- resourceId: <resource-id>         # the task resource id the queueObserver binds',
+      '  effects: []',
+      '  cases:',
+      `    - id: ${slugOf(TASK_EXAMPLE_CONTRACT)}`,
+      `      contract: ${TASK_EXAMPLE_CONTRACT}`,
+      '      channel: engine-task         # only the engine\'s own queue read can settle this',
+      '      fixture: <recipe-id>          # the recipe id in fixtures/behavior-fixtures.yml',
+      '      actor: <actor-id>            # an actor of that recipe',
+      '      action:',
+      '        kind: deliver',
+      '        resourceId: <resource-id>',
+      '        payload: {from: fixture, key: <payload-key>}',
+      '        idempotencyKey: {from: literal, value: <idempotency-key>}',
+      '        deliveryId: {from: literal, value: <delivery-id>}',
+      '        count: 1',
+      '        schedule: serial',
+      '      expect:',
+      '        statuses: []               # a delivery answers no HTTP status',
+      '        response: []',
+      '        state:',
+      '          - kind: attempts',
+      '            resourceId: <resource-id>',
+      '            count: <max-attempts>   # the retry bound the queue declares',
+      '            terminal: succeeded     # succeeded | failed | rejected',
+    ].join('\n');
+  }
   const contract = BEHAVIOR_NAMESPACE_CONTRACTS[namespace];
   return [
     '- resourceId: <resource-id>',
@@ -245,7 +349,7 @@ export function behaviorExampleCase(namespace: BehaviorNamespace): string {
     '        method: <METHOD>',
     '        pathTemplate: <path>       # what `gateforge next` prints for this route',
     '        path: {}',
-    '        query: {}',
+    '        query: {},',
     '        body: {encoding: json, fields: {}}',
     `        credentialVariant: ${contract.credential}`,
     '      expect:',
@@ -255,7 +359,7 @@ export function behaviorExampleCase(namespace: BehaviorNamespace): string {
     `      contract: ${contract.rejected}`,
     `      controlCase: ${slugOf(contract.accepted)}`,
     `      channel: ${contract.channel}`,
-    `      fixture: <recipe-id>`,
+    '      fixture: <recipe-id>',
     '      actor: <actor-id>',
     '      action:',
     '        kind: request',
@@ -270,6 +374,12 @@ export function behaviorExampleCase(namespace: BehaviorNamespace): string {
     '        response: []',
   ].join('\n');
 }
+
+/**
+ * The contract the task example proves: the queue's own retry bound, the
+ * claim the engine's queue read is the only thing that can settle.
+ */
+const TASK_EXAMPLE_CONTRACT = 'task:retry-policy-enforced';
 
 /** Per-namespace declaration defaults, in the engine's own vocabulary. */
 interface NamespaceContracts {
@@ -290,8 +400,9 @@ interface NamespaceContracts {
 }
 
 /** The engine's per-namespace declaration vocabulary. */
-const BEHAVIOR_NAMESPACE_CONTRACTS: Readonly<Record<BehaviorNamespace, NamespaceContracts>> =
-  Object.freeze({
+const BEHAVIOR_NAMESPACE_CONTRACTS: Readonly<
+  Record<(typeof HTTP_BEHAVIOR_NAMESPACES)[number], NamespaceContracts>
+> = Object.freeze({
     webhook: {
       accepted: 'webhook:signature-accepted',
       rejected: 'webhook:signature-rejected',
@@ -488,10 +599,18 @@ const CONTRACT_SHAPES: Readonly<Record<string, ContractShape>> = Object.freeze({
   'webhook:retry-bounded': { status: 429, state: 'unchanged', signatureProfile: 'hmac-sha256', credential: 'valid' },
 });
 
-/** The case shape a contract falls back to when it has no engine-proven one. */
+/**
+ * The case shape a contract falls back to when it has no engine-proven
+ * one. A namespace with no per-namespace table (the `task` one, whose
+ * cases are graded from the queue rather than from a response) takes the
+ * neutral transport shape; the caller refuses to print a delivery case
+ * here at all.
+ */
 function defaultShape(contract: string): ContractShape {
-  const namespace = contract.slice(0, contract.indexOf(':')) as BehaviorNamespace;
-  const contracts = BEHAVIOR_NAMESPACE_CONTRACTS[namespace];
+  const namespace = contract.slice(0, contract.indexOf(':'));
+  const contracts = (BEHAVIOR_NAMESPACE_CONTRACTS as Readonly<Record<string, NamespaceContracts>>)[
+    namespace
+  ];
   if (contracts === undefined) return { status: 200, state: 'unchanged', credential: 'valid' };
   if (contract === contracts.rejected) {
     return {
