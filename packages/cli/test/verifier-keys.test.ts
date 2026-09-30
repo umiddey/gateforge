@@ -183,3 +183,44 @@ describe('verifier key-ring source', () => {
     });
   });
 });
+
+describe('key create on an existing key ring is honest about what is already there', () => {
+  it('names the existing ring, its active key id, and the command for a new key', async () => {
+    await withTempRepo({}, async (repo) => {
+      const xdg = externalRoot();
+      const created = await runCli(repo, ['key', 'create', '--confirm'], { XDG_CONFIG_HOME: xdg });
+      expect(created.code).toBe(0);
+      const document = JSON.parse(
+        readFileSync(join(xdg, 'gateforge', 'verifier-keyring.json'), 'utf8'),
+      ) as { activeKeyId: string; keys: Record<string, string> };
+      const secret = document.keys[document.activeKeyId] ?? '';
+
+      // The documented second-project step: the ring exists and already
+      // holds an active key, so nothing needs doing.
+      const again = await runCli(repo, ['key', 'create', '--confirm'], { XDG_CONFIG_HOME: xdg });
+      expect(again.code).toBe(2);
+      expect(again.stderr).toContain('already exists');
+      expect(again.stderr).toContain(document.activeKeyId);
+      // The secret never appears.
+      expect(again.stderr).not.toContain(secret);
+      // The way forward for a NEW key is named, and it is the real one.
+      expect(again.stderr).toContain('gateforge key rotate');
+      // Nothing needs doing while that key is active.
+      expect(again.stderr).toMatch(/nothing to do|no action/i);
+      // The ring is untouched by the refusal.
+      expect(
+        JSON.parse(readFileSync(join(xdg, 'gateforge', 'verifier-keyring.json'), 'utf8')),
+      ).toEqual(document);
+    });
+  });
+
+  it('still refuses a file it cannot read as a key ring', async () => {
+    await withTempRepo({}, async (repo) => {
+      const path = join(externalRoot(), 'keys.json');
+      writeFileSync(path, 'not a key ring\n', { mode: 0o600 });
+      const again = await runCli(repo, ['key', 'create', '--file', path, '--confirm']);
+      expect(again.code).toBe(2);
+      expect(again.stderr).not.toContain('gateforge key rotate');
+    });
+  });
+});
