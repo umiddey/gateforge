@@ -60,6 +60,7 @@ import { computeEvaluationScope, detectStagedWorkingTreeMismatches } from '../sc
 import { httpRoutesView, resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags, VERIFIER_KEY_ENV } from './common.js';
 import { loadCacheExclusions } from '../cache-exclusions.js';
+import { singletonPerTenantGuidanceLines } from '../singleton-guidance.js';
 import {
   buildEndpointDeclaration,
   loadBehaviorRecipes,
@@ -428,6 +429,37 @@ function behaviorDeclarationGuidance(input: {
 }
 
 /**
+ * The `task` behavior pack, offered under the same rule as every other
+ * pack: it is named only when the repository actually shows the
+ * machinery AND the engine can grade the claim. The engine's own
+ * `queueObserver` is that second half — without it every `task:*` case
+ * fails closed, so offering the pack would print a flag whose cases can
+ * never be satisfied. Both halves are required, so a repository
+ * without an observer is byte-identical to a repository with no
+ * background work.
+ *
+ * Args:
+ *   graph: the run's resource graph.
+ *   queueObserverConfigured: whether the loaded config declares one.
+ *
+ * Returns:
+ *   string[]: the offer lines, or an empty array when it does not apply.
+ */
+function taskPackOffer(graph: ResourceGraph, queueObserverConfigured: boolean): string[] {
+  if (!queueObserverConfigured) return [];
+  const taskResource = graph.resources.find(
+    (resource) => resource.kind === 'task.resource' && resource.id !== null,
+  );
+  if (taskResource === undefined) return [];
+  return [
+    'the task behavior pack is gradable in this repository (a queueObserver is configured',
+    `and '${taskResource.id}' is a discovered task resource), so its cases can be enabled:`,
+    '  task — the engine reads the delivery queue itself to grade these contracts',
+    '  gateforge init --behavior-packs task',
+  ];
+}
+
+/**
  * The contracts the repository's policy document requires of every HTTP
  * endpoint. Unreadable or absent policies yield none, which keeps the
  * guidance quiet on a repository that has approved no behavior yet.
@@ -739,6 +771,15 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
           runner: config.runner,
         })
       : [];
+  // The per-tenant singleton guidance (plan 2026-09-25 Phase 4b item 3)
+  // rides the same advisory tail the other owner notes use, and is the
+  // SAME {@link singletonPerTenantGuidanceLines} output `check` renders
+  // as a finding — a graph with no tagged resource yields an empty list
+  // and prints nothing at all, so the next action stays byte-identical.
+  const singletonNote = singletonPerTenantGuidanceLines(pipeline.graph.resources);
+  // The task pack is offered only when the engine could actually grade
+  // it — a configured queueObserver plus a discovered task resource.
+  const taskOffer = taskPackOffer(pipeline.graph, config.queueObserver !== undefined);
   if (asJson) {
     writeLine(
       io.stdout,
@@ -752,6 +793,8 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         ...(routeGuidance === null ? {} : { guidance: routeGuidance }),
         ...(behaviorGuidance.length === 0 ? {} : { behaviorGuidance }),
         ...(scopeNote.length === 0 ? {} : { scopeNote }),
+        ...(singletonNote.length === 0 ? {} : { singletonGuidance: singletonNote }),
+        ...(taskOffer.length === 0 ? {} : { taskPackOffer: taskOffer }),
       }),
     );
   } else {
@@ -767,6 +810,8 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     }
     for (const line of behaviorGuidance) writeLine(io.stdout, line);
     for (const line of scopeNote) writeLine(io.stdout, line);
+    for (const line of singletonNote) writeLine(io.stdout, line);
+    for (const line of taskOffer) writeLine(io.stdout, line);
   }
   return 1;
 }
