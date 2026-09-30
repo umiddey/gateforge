@@ -57,11 +57,143 @@ const PACK_SIGNAL: Record<string, string> = {
 };
 
 /**
- * A SQLModel table model: `class Item(SQLModel, table=True)`. The
- * canonical FastAPI-template model style, and an SQLAlchemy model the
+ * A SQLModel table model written with `SQLModel` literally in the class
+ * head: `class Item(SQLModel, table=True)`. An SQLAlchemy model the
  * declarative-base needles below never match.
  */
 const SQLMODEL_TABLE = /class\s+([A-Za-z_]\w*)\s*\(\s*SQLModel\b[^)]*\btable\s*=\s*True/;
+
+/**
+ * One `class <Name>(<bases>)` head, captured for base-chain resolution.
+ * A head is "table-bearing" when it also carries `table=True`.
+ */
+const CLASS_HEAD = /class\s+([A-Za-z_]\w*)\s*\(([^)]*)\)/g;
+
+/** A `table=True` class keyword, the SQLModel table marker. */
+const TABLE_TRUE = /\btable\s*=\s*True\b/;
+
+/** An `import`/`from ... import` binding, for cross-module base provenance. */
+const IMPORT_BINDING = /(?:^|\n)\s*from\s+([\w.]+)\s+import\s+([^\n(]+)|(?:^|\n)\s*import\s+([\w.]+)/g;
+
+/**
+ * The simple names a module binds from `sqlmodel` (`SQLModel` itself, or
+ * whatever alias it is imported as).
+ */
+function sqlmodelLocalNames(text: string): Set<string> {
+  const names = new Set<string>();
+  for (const match of text.matchAll(IMPORT_BINDING)) {
+    const module = match[1];
+    const imported = match[2];
+    if (module === undefined || !/^sqlmodel(\.|\b)/.test(module) || imported === undefined) continue;
+    for (const raw of imported.split(',')) {
+      const parts = raw.trim().split(/\s+as\s+/);
+      const local = parts[1] ?? parts[0];
+      if (local !== undefined && /^[A-Za-z_]\w*$/.test(local)) names.add(local);
+    }
+  }
+  return names;
+}
+
+/** Every class declared in one file, with its base simple names. */
+function classHeads(text: string): Map<string, string[]> {
+  const declared = new Map<string, string[]>();
+  for (const match of text.matchAll(CLASS_HEAD)) {
+    const name = match[1];
+    const bases = match[2];
+    if (name === undefined || bases === undefined) continue;
+    declared.set(
+      name,
+      bases
+        .split(',')
+        .map((base) => base.trim().split(/[\s=(:]/)[0] ?? '')
+        .filter((base) => /^[A-Za-z_]\w*$/.test(base)),
+    );
+  }
+  return declared;
+}
+
+/** The `table=True` class heads of one file, with their base simple names. */
+function tableClassHeads(text: string): Array<{ name: string; bases: string[] }> {
+  const tables: Array<{ name: string; bases: string[] }> = [];
+  for (const match of text.matchAll(CLASS_HEAD)) {
+    const name = match[1];
+    const bases = match[2];
+    if (name === undefined || bases === undefined || !TABLE_TRUE.test(bases)) continue;
+    tables.push({
+      name,
+      bases: bases
+        .split(',')
+        .map((base) => base.trim().split(/[\s=(:]/)[0] ?? '')
+        .filter((base) => /^[A-Za-z_]\w*$/.test(base)),
+    });
+  }
+  return tables;
+}
+
+/** Whether one base simple name reaches SQLModel through `declared`. */
+function baseReachesSqlmodel(
+  base: string,
+  declared: ReadonlyMap<string, readonly string[]>,
+  sqlmodelRoots: ReadonlySet<string>,
+  depth = 0,
+): boolean {
+  if (sqlmodelRoots.has(base)) return true;
+  if (depth > 4) return false;
+  const bases = declared.get(base);
+  if (bases === undefined) return false;
+  return bases.some((parent) => baseReachesSqlmodel(parent, declared, sqlmodelRoots, depth + 1));
+}
+
+/**
+ * A SQLModel table model whose base is another class: the shape the
+ * canonical FastAPI template writes — `class UserBase(SQLModel)` above
+ * `class User(UserBase, table=True)`. The base chain resolves over the
+ * classes THIS file declares, and over `importedBases`: simple names
+ * imported from a module that itself declares a SQLModel class. A chain
+ * that never reaches SQLModel is never promoted.
+ *
+ * Args:
+ *   text: the python file's source.
+ *   sqlmodelRoots: names bound from `sqlmodel` in this file.
+ *   importedBases: names imported from modules that declare SQLModel classes.
+ *
+ * Returns:
+ *   string | null: the class head a signal can quote, or null.
+ */
+function sqlmodelTableInFile(
+  text: string,
+  sqlmodelRoots: ReadonlySet<string>,
+  importedBases: ReadonlySet<string>,
+): string | null {
+  const declared = classHeads(text);
+  for (const table of tableClassHeads(text)) {
+    // `table=True` splits to the bare keyword `table`; it is the marker,
+    // never a base, so the quoted head re-joins it as written.
+    const head = `${table.name}(${[...table.bases.filter((base) => base !== 'table'), 'table=True'].join(', ')})`;
+    if (table.bases.some((base) => baseReachesSqlmodel(base, declared, sqlmodelRoots))) return head;
+    if (table.bases.some((base) => importedBases.has(base))) return head;
+  }
+  return null;
+}
+
+/**
+ * The simple names other modules may import as a SQLModel base: every
+ * class a module that imports sqlmodel declares over a SQLModel root
+ * (its own `class UserBase(SQLModel)`), plus the sqlmodel names it
+ * binds itself.
+ */
+function exportedSqlmodelNames(texts: ReadonlyMap<string, string>): Set<string> {
+  const exported = new Set<string>();
+  for (const text of texts.values()) {
+    const roots = sqlmodelLocalNames(text);
+    if (roots.size === 0) continue;
+    const declared = classHeads(text);
+    for (const [name, bases] of declared) {
+      if (bases.some((base) => baseReachesSqlmodel(base, declared, roots))) exported.add(name);
+    }
+  }
+  return exported;
+}
 
 /**
  * A generated API client inside a js/ts file: the generator's own
@@ -102,6 +234,16 @@ export function scanRepo(cwd: string): RepoScan {
   let hasPytestFile = false;
   /** Signal → the concrete file evidence that justifies it. */
   const reasons: Record<string, string> = {};
+  // The cross-module half of the SQLModel base-chain rule needs every
+  // python file's text up front (a base imported from a module that
+  // imports sqlmodel). Bounded by the same size guard as the scan.
+  const pythonTexts = new Map<string, string>();
+  for (const file of files) {
+    if (!file.endsWith('.py')) continue;
+    const text = readSmallText(join(cwd, file));
+    if (text !== null) pythonTexts.set(file, text);
+  }
+  const exportedBases = exportedSqlmodelNames(pythonTexts);
   for (const file of files) {
     const base = basename(file);
     if (file.endsWith('.py')) hasPy = true;
@@ -129,11 +271,14 @@ export function scanRepo(cwd: string): RepoScan {
       hasPytestFile = true;
     }
     if (file.endsWith('.py') && !reasons.sqlalchemy) {
-      const text = readSmallText(join(cwd, file));
+      const text = pythonTexts.get(file) ?? null;
       const sqlmodel = text === null ? null : SQLMODEL_TABLE.exec(text);
+      const chained = text === null ? null : sqlmodelTableInFile(text, sqlmodelLocalNames(text), exportedBases);
       if (sqlmodel) {
         reasons.sqlalchemy =
           `SQLModel table model 'class ${sqlmodel[1]}(SQLModel, table=True)' in ${file}`;
+      } else if (chained !== null) {
+        reasons.sqlalchemy = `SQLModel table model 'class ${chained}' in ${file}`;
       } else if (
         text !== null &&
         (text.includes('DeclarativeBase') ||
