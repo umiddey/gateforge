@@ -790,7 +790,9 @@ async function stagedCheckCommand(
             detail:
               `require-e2e: authenticated receipt is bound to candidate tree ${fastPathReceipt.receipt.candidateTreeId ?? '<unavailable>'}, ` +
               `not ${fastPathReceipt.expectedTreeId ?? '<unavailable>'}.${treeDiff}`,
-            nextAction,
+            // The detail names the command that re-seals this candidate;
+            // the block's own `next action:` line keeps the cause prose.
+            nextAction: 'gateforge test-gates --changed',
           });
           releaseStagedCandidate(frozen);
           return renderStagedBlock(io, 'EVIDENCE_STALE', detail, nextAction);
