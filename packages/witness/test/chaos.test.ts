@@ -62,7 +62,7 @@ describe('chaos schedule', () => {
       const scheduler = new ChaosScheduler(OPTIONS, 'items.spec.js#tab B wins');
       const entries: ChaosScheduleEntry[] = [];
       for (let k = 0; k < 6; k += 1) {
-        entries.push(scheduler.release(scheduler.reserve('GET /api/items', 1_000 * k), 1_000 * k));
+        entries.push(scheduler.release(scheduler.reserve('GET /api/items', 1_000 * k), true));
       }
       return entries;
     };
@@ -77,7 +77,7 @@ describe('chaos schedule', () => {
       const entries: unknown[] = [];
       for (let k = 0; k < 4; k += 1) {
         const at = 500 * k;
-        entries.push(scheduler.release(scheduler.reserve('GET /api/items', at), at));
+        entries.push(scheduler.release(scheduler.reserve('GET /api/items', at), true));
       }
       return entries;
     };
@@ -88,7 +88,7 @@ describe('chaos schedule', () => {
     const scheduler = new ChaosScheduler(OPTIONS, 'session');
     for (let k = 0; k < 200; k += 1) {
       const slot = scheduler.reserve('GET /api/items', 10_000 * k);
-      const entry = scheduler.release(slot, 10_000 * k);
+      const entry = scheduler.release(slot, true);
       expect(entry.delayMs).toBeGreaterThanOrEqual(0);
       expect(entry.delayMs).toBeLessThanOrEqual(OPTIONS.maxDelayMs);
       expect(slot.delayMs).toBeLessThanOrEqual(OPTIONS.maxDelayMs);
@@ -123,7 +123,7 @@ describe('chaos schedule', () => {
       const slot = scheduler.reserve('GET /api/items', at);
       expect(slot.releasedBefore).toBe(false);
       expect(slot.delayMs).toBeGreaterThanOrEqual(k - 1);
-      expect(scheduler.release(slot, at).releasedBefore).toBe(false);
+      expect(scheduler.release(slot, true).releasedBefore).toBe(false);
     }
   });
 
@@ -131,9 +131,9 @@ describe('chaos schedule', () => {
     const scheduler = new ChaosScheduler(OPTIONS, 'session');
     const at = 0;
     const entries = [
-      scheduler.release(scheduler.reserve('GET /api/items?tab=a&token=secret', at), at),
-      scheduler.release(scheduler.reserve('GET /api/items?tab=b&token=other', at), at),
-      scheduler.release(scheduler.reserve('POST /api/items?token=secret', at), at),
+      scheduler.release(scheduler.reserve('GET /api/items?tab=a&token=secret', at), true),
+      scheduler.release(scheduler.reserve('GET /api/items?tab=b&token=other', at), true),
+      scheduler.release(scheduler.reserve('POST /api/items?token=secret', at), true),
     ];
     expect(entries.map((entry) => [entry.routeKey, entry.k])).toEqual([
       ['GET /api/items', 1],
@@ -151,6 +151,7 @@ describe('chaos schedule', () => {
     // The upstream took longer than the planned slot: the response is
     // released immediately, never "negative delay".
     const slot = scheduler.reserve('GET /api/items', 0);
-    expect(scheduler.release(slot, 5_000).delayMs).toBe(0);
+    expect(scheduler.release(slot, false).delayMs).toBe(0);
+    expect(scheduler.release(slot, true).delayMs).toBe(slot.delayMs);
   });
 });

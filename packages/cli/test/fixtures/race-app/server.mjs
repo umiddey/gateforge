@@ -63,10 +63,15 @@ function tabPage({ title, racy }) {
 <script>
   let newest = 0;
   const rows = document.getElementById('rows');
+  // Every response is counted, stale or not: a test waits for this
+  // before asserting, so it can never declare a winner while the stale
+  // answer is still in flight.
+  window.__settled = 0;
   async function loadTab(tab) {
     const requestId = ++newest;
     const response = await fetch('/api/tab?tab=' + tab);
     const body = await response.json();
+    window.__settled += 1;
     ${racy
       ? '// The bug under test: no request id, so the LAST response wins.'
       : "// Race-free: a response that is no longer the newest is dropped.\n    if (requestId !== newest) return;"}

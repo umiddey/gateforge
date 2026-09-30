@@ -144,10 +144,14 @@ export type TracedTest = z.infer<typeof TracedTestSchema>;
  */
 const ChaosScheduleEntrySchema = z
   .object({
+    /** Supervisor-issued test id the plan released under (never a credential). */
+    session: z.string().min(1),
     /** `METHOD /pathname` (query stripped). */
     routeKey: z.string().min(1),
     /** 1-based index of the request under its route key. */
     k: z.number().int().min(1),
+    /** The planned release offset: a pure function of seed/session/route/k. */
+    plannedDelayMs: z.number().int().min(0),
     /** Milliseconds the response was actually held back. */
     delayMs: z.number().int().min(0),
     /** True when the plan released this response before the previous one. */

@@ -730,6 +730,65 @@ unchanged. `gateforge enforcement doctor --strict-preflight` exits 1 at the
 first failing precondition, which is exactly what `gateforge run` does before
 it starts.
 
+## Find timing bugs on purpose
+
+**Rule:** When a test passes but the product has shipped a stale-response
+race, do not wait for a loaded machine to find it again. Re-run the
+test with `--chaos <seed> --result-only` and keep the seed.
+
+**Why:** A race — an older list response landing after a newer one, so
+the UI shows the wrong tab's rows — only shows up when the older request
+happens to be slower. On a fast network it never appears, and on a busy
+one it appears at random, which makes it impossible to reproduce, hand
+over, or prove fixed. The witness already sits on the request path of
+every witnessed test, so it can make the timing uneven deliberately
+instead of waiting for luck. Only timing moves: the bytes, the status,
+the headers and the evidence semantics are exactly what the app sent.
+
+**Example:**
+
+```bash
+# One named test, with its response timing perturbed from a seed.
+gateforge test-gates --test 'specs/tabs.spec.js#tab B rows win' \
+  --result-only --chaos 4 --progress stderr
+
+# The run names the seed it used, and the seed replays the schedule:
+# timing chaos: seed 4 (max delay 400 ms, reorder on) - replay with --chaos 4
+```
+
+The same seed always produces the same schedule, so the run that failed
+is the run you can re-run. The report and the sealed execution result
+carry it: `chaos: { seed, maxDelayMs, reorder, schedule }`, where every
+entry names the route key (method + pathname, query stripped — never a
+credential), the request index, how long the response was held, and
+whether it went out before its predecessor. A second run with the same
+seed records the same schedule; that is what makes the finding a finding
+instead of a ghost.
+
+Two rules keep it safe to run at any time:
+
+- It is only accepted with `--result-only`, exactly like `--test`. A run
+  whose timing was perturbed on purpose finds races; it never proves a
+  commit, never seals a receipt and never writes the run record.
+- Bounds are yours to tune in `.gateforge.yml` and never switch it on:
+
+  ```yaml
+  run:
+    chaos:
+      maxDelayMs: 400   # default; the ceiling for every applied delay
+      reorder: true     # default; may a later response go out first
+  ```
+
+  Without `--chaos`, that configuration changes nothing: a repository
+  that declares `run.chaos` and never passes the flag runs, reports and
+  seals byte-identically. A seed that is not a non-negative integer is
+  refused with exit 2 and one plain line, before a witness or a browser
+  is started.
+
+Keep a race-free twin next to the racy test — the same requests against
+a page that renders by request id. It must stay green under the same
+seed; when it does not, the timing is not the finding.
+
 ## Reusable run script
 
 Replace the reset and seed comments with durable commands for your disposable stack. The seed must come from this checkout. `test-gates` starts and supervises the witness for the run.

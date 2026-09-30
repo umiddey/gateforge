@@ -10,3 +10,7 @@
  * imports keep working.
  */
 export * from './adapter/index.js';
+// The seeded timing-chaos plan (E63). Exported so a run's schedule can
+// be recomputed from (seed, session, route key, k) without replaying
+// the whole suite - that is what makes a finding reproducible.
+export * from './witness/chaos.js';

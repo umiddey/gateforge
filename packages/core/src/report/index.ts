@@ -217,10 +217,14 @@ export interface ChaosReport {
 
 /** One recorded chaos release decision (never a secret: no query value). */
 export interface ChaosScheduleEntryReport {
+  /** Supervisor-issued test id the plan released under (never a credential). */
+  session: string;
   /** `METHOD /pathname` (query stripped). */
   routeKey: string;
   /** 1-based index of the request under its route key. */
   k: number;
+  /** The planned release offset: a pure function of seed/session/route/k. */
+  plannedDelayMs: number;
   /** Milliseconds the response was actually held back. */
   delayMs: number;
   /** True when the plan released this response before the previous one. */

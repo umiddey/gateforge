@@ -872,10 +872,14 @@ export interface SupervisedOptions {
 
 /** One recorded chaos release decision, exactly as the witness reports it. */
 export interface ChaosScheduleResponse {
+  /** Supervisor-issued test id the plan released under (never a secret). */
+  session: string;
   /** `METHOD /pathname` (query stripped) — never a secret. */
   routeKey: string;
   /** 1-based index of the request under its route key. */
   k: number;
+  /** The planned release offset: a pure function of seed/session/route/k. */
+  plannedDelayMs: number;
   /** Milliseconds the response was actually held back. */
   delayMs: number;
   /** True when the plan released this response before the previous one. */
