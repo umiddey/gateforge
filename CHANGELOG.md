@@ -117,6 +117,7 @@
 
 ### Fixed
 
+- A flag given three or more times keeps every value. `test-gates --test a --test b --test c` used to fuse the first values into one comma-joined selector (`'a,b'`), so naming three or more tests always failed with `TEST_SELECTOR_UNKNOWN`; the same applied to every other repeatable flag.
 - Installing `@gate-forge/witness` no longer pulls in `bullmq` and `ioredis`, and loading it no longer needs them. The queue observer imported them at load time, so every witnessed run of a project without them (every project without a queue) died at start with `Cannot find package 'bullmq'`. They are now optional peers, loaded only when `.gateforge.yml` declares `queueObserver: { kind: bullmq }`; a project that declares it without them fails closed with the install command.
 - The shipped `example/` project checks clean again with its new `webhook/` sub-project: that sub-project's engine-side modules (its evidence adapter, gate script and fixture provider) are excluded from the frontend call scan, like `behavior/`'s.
 - The twin title convention now links the way pairs are usually written: `X [witnessed]: <what it proves>` next to `X raw: <what it does>`. Before, only an exact `X raw` (or a bare `X`) title linked, so a suite that labels both sides and then describes each one got no twin comparison at all and had to spell every pair out with `twinOf`. An exact `X raw` still wins; two described raw tests under one label link nothing (the owner names that pair with `twinOf`).

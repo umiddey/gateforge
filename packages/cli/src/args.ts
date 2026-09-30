@@ -98,6 +98,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     const existing = options[name];
     if (existing === undefined) {
       options[name] = value;
+    } else if (Array.isArray(existing)) {
+      // A third or later repeat appends; stringifying the array would
+      // fuse the earlier values into one comma-joined value.
+      options[name] = [...existing, String(value)];
     } else if (typeof existing === 'string' && typeof value === 'string') {
       options[name] = [existing, value];
     } else {
