@@ -1,0 +1,29 @@
+# The receiver's own committed config: what this application IS, before
+# any behavior setup. `behaviorPolicy:` is deliberately absent — the
+# printed steps of `gateforge init --behavior` add it.
+schemaVersion: 1
+project:
+  languages: [javascript]
+  paths:
+    include: ['server.js', 'specs/**', 'fixtures/fixture-detector.mjs']
+    # The fixture/actor provider is ENGINE-SIDE harness code: the witness
+    # loads it through GATEFORGE_FIXTURE_PROVIDER and the suite never sees
+    # it. Its provisioning traffic is not application call sites.
+    exclude: ['fixtures/fixture-provider.mjs']
+plugins:
+  - id: gateforge.webhook-fixture
+    version: '1.0.0'
+    transport: in-process
+    module: './fixtures/fixture-detector.mjs'
+policies: .gateforge/policies.yml
+classificationPolicy: .gateforge/classification-policy.yml
+adapters: .gateforge/adapters
+waivers: .gateforge/waivers
+baselines: .gateforge/baselines/obligations.json
+changed:
+  provider: auto
+witness:
+  maxDurationSeconds: 30
+clock:
+  mode: fixed
+  fixedAt: '2026-01-01T00:00:00.000Z'

@@ -1,0 +1,13 @@
+schemaVersion: 1
+# Every webhook route in this app must be signed, must reject a forged
+# signature without recording anything, and must be idempotent per event.
+# These are the contracts the owner approves; `.gateforge/behavior.yml`
+# declares the cases that prove them.
+policies:
+  - id: webhook-signatures
+    when:
+      kind: http.endpoint
+    require:
+      - webhook:signature-accepted
+      - webhook:signature-rejected
+      - webhook:replay-idempotent

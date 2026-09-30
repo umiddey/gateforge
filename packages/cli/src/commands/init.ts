@@ -82,12 +82,22 @@ import {
   type InitPresetName,
   type InitPresetSettings,
 } from './init-presets.js';
+import {
+  BEHAVIOR_NAMESPACES,
+  behaviorPackEvidence,
+  behaviorSkeletonExamples,
+  detectBehaviorPacks,
+  parseBehaviorPacks,
+  type BehaviorNamespace,
+  type DetectedBehaviorPack,
+} from '../behavior-setup.js';
 export const INIT_USAGE =
   '[--preset light|normal|strict] [--explain-presets] [--no-scan] [--proof overlay|observe] ' +
   '[--blocking] [--no-blocking] [--pre-commit] [--no-pre-commit] [--mode changed|staged] ' +
   '[--witnessed staged|full] [--ci] [--no-ci] ' +
   '[--docs-exclude <folder,...> [--confirm-doc-exclusions]] [--cache-exclude <file,...> ' +
-  '[--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--no-planes] [--behavior]';
+  '[--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--no-planes] ' +
+  '[--behavior] [--no-behavior] [--behavior-packs <pack,...>]';
 
 /** Template for the complete-behavior owner document (plan §4.1). */
 export const BEHAVIOR_TEMPLATE = `\
@@ -103,6 +113,7 @@ schemaVersion: 1
 endpoints: []
 resources: []
 `;
+
 
 /** The behavior-setup checklist: the work no scaffold can do. */
 export const BEHAVIOR_CHECKLIST = [
@@ -779,6 +790,74 @@ async function resolveHistoryRetention(io: Io): Promise<number | 'off' | undefin
 }
 
 /**
+ * Resolves which behavior packs' cases `init` enables (plan 2026-09-30
+ * Phase 4). Flags win, then the terminal question, then nothing.
+ *
+ * A non-interactive run — an agent, a CI job, a test — NEVER enables a
+ * pack silently: it prints what it found and the exact flag that
+ * enables each pack, and returns none. `--no-behavior` prints nothing at
+ * all, so a repository that shows no behavior pack keeps `init`
+ * byte-identical.
+ *
+ * Args:
+ *   io: process context (the question is asked on the real terminal).
+ *   input: the detected packs and the owner's explicit flags.
+ *
+ * Returns:
+ *   Promise<BehaviorNamespace[]>: the enabled namespaces, in print order.
+ */
+async function resolveBehaviorPacks(
+  io: Io,
+  input: {
+    detectedPacks: readonly DetectedBehaviorPack[];
+    explicit: readonly BehaviorNamespace[];
+    enableAll: boolean;
+    disabled: boolean;
+  },
+): Promise<BehaviorNamespace[]> {
+  if (input.disabled) return [];
+  if (input.explicit.length > 0) return [...input.explicit];
+  if (input.detectedPacks.length === 0) return [];
+  if (input.enableAll) return input.detectedPacks.map((pack) => pack.namespace);
+  if (!process.stdin.isTTY) {
+    writeLine(
+      io.stdout,
+      'behavior packs detected in this repository (nothing is enabled without a flag):',
+    );
+    for (const pack of input.detectedPacks) {
+      writeLine(io.stdout, `  ${pack.namespace} — ${behaviorPackEvidence(pack)}`);
+    }
+    writeLine(io.stdout, 'enable their cases, then re-run init:');
+    for (const pack of input.detectedPacks) {
+      writeLine(io.stdout, `  gateforge init --behavior-packs ${pack.namespace}`);
+    }
+    if (input.detectedPacks.length > 1) {
+      const all = input.detectedPacks.map((pack) => pack.namespace).join(',');
+      writeLine(io.stdout, `  gateforge init --behavior-packs ${all}`);
+    }
+    return [];
+  }
+  const enabled: BehaviorNamespace[] = [];
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    writeLine(
+      io.stdout,
+      'behavior packs detected in this repository — enable the cases for the ones this app really has:',
+    );
+    for (const pack of input.detectedPacks) {
+      writeLine(io.stdout, `  ${pack.namespace} — ${behaviorPackEvidence(pack)}`);
+      const answer = (await rl.question(`enable ${pack.namespace} behavior cases? [y/N] `))
+        .trim()
+        .toLowerCase();
+      if (answer === 'y' || answer === 'yes') enabled.push(pack.namespace);
+    }
+  } finally {
+    rl.close();
+  }
+  return BEHAVIOR_NAMESPACES.filter((namespace) => enabled.includes(namespace));
+}
+
+/**
  * Asks (TTY only) whether init should propose `.gateforge/planes.json`
  * from the discovered model directories. Flags win: --planes forces
  * yes, --no-planes forces no, non-interactive runs default to no (the
@@ -1034,6 +1113,9 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       'strict-e2e',
       'planes',
       'no-planes',
+      'behavior',
+      'no-behavior',
+      'behavior-packs',
       'docs-exclude',
       'confirm-doc-exclusions',
       'cache-exclude',
@@ -1322,23 +1404,67 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   mkdirSync(join(gateforgeDir, 'waivers'), { recursive: true });
   mkdirSync(join(gateforgeDir, 'baselines'), { recursive: true });
 
-  // Behavior-profile setup (plan 2026-09-19 §4.11): `--behavior` scaffolds
-  // .gateforge/behavior.yml (scaffold only — never real approval) and
-  // wires `behaviorPolicy` into a NEW .gateforge.yml; an existing config
-  // is left untouched with an instruction to add the key manually.
-  // `--no-behavior` skips; default (flag absent) skips.
-  const behaviorFlag = options['behavior'] === true;
+  // Behavior-case setup (plan 2026-09-19 §4.11, Phase 4 of
+  // 2026-09-25): `--behavior` scaffolds .gateforge/behavior.yml
+  // (scaffold only — never real approval) and wires `behaviorPolicy`
+  // into a NEW .gateforge.yml; an existing config is left untouched with
+  // the exact line to add. `--behavior-packs <pack,...>` enables the
+  // named packs' example cases; `--no-behavior` skips.
+  //
+  // Detection decides what init OFFERS, never what it enables: flags
+  // win, then the terminal question, then nothing. A non-interactive
+  // (agent/CI) run prints the exact flag for each pack it found and
+  // enables none of them.
   const noBehavior = options['no-behavior'] === true;
-  const wantBehavior = behaviorFlag && !noBehavior;
+  const behaviorFlag = options['behavior'] === true;
+  const packsValue = options['behavior-packs'];
+  if (typeof packsValue === 'boolean' || Array.isArray(packsValue)) {
+    throw new UsageError("flag '--behavior-packs' may only be given once");
+  }
+  if (typeof packsValue !== 'string' && packsValue !== undefined) {
+    throw new UsageError("flag '--behavior-packs' must be a comma-separated list of pack names");
+  }
+  let requestedNamespaces: BehaviorNamespace[] = [];
+  if (packsValue !== undefined) {
+    try {
+      requestedNamespaces = parseBehaviorPacks(packsValue);
+    } catch (cause) {
+      throw new UsageError(
+        `flag '--behavior-packs': ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+    if (requestedNamespaces.length === 0) {
+      throw new UsageError("flag '--behavior-packs' requires at least one pack name");
+    }
+  }
+  const detectedPacks = noScan || noBehavior ? [] : detectBehaviorPacks(cwd);
+  const enabledNamespaces = await resolveBehaviorPacks(io, {
+    detectedPacks,
+    explicit: requestedNamespaces,
+    enableAll: behaviorFlag && requestedNamespaces.length === 0,
+    disabled: noBehavior,
+  });
+  const wantBehavior = enabledNamespaces.length > 0 || (behaviorFlag && !noBehavior);
   if (wantBehavior) {
     const behaviorPath = join(gateforgeDir, 'behavior.yml');
+    const enabledPacks = detectedPacks.filter((pack) => enabledNamespaces.includes(pack.namespace));
+    const template = `${BEHAVIOR_TEMPLATE}${behaviorSkeletonExamples(enabledPacks)}`;
     if (existsSync(behaviorPath)) {
       writeLine(io.stdout, `exists, leaving untouched: ${behaviorPath}`);
+      for (const pack of enabledPacks) {
+        writeLine(
+          io.stdout,
+          `  the ${pack.namespace} example case for this repository — add it under 'endpoints:' in ${behaviorPath}:`,
+        );
+        for (const line of behaviorSkeletonExamples([pack]).split('\n').slice(1)) {
+          writeLine(io.stdout, `  ${line}`);
+        }
+      }
     } else {
       targets.push({
         path: behaviorPath,
         label: 'complete-behavior document (SCAFFOLD — not approval)',
-        write: () => writeFileSync(behaviorPath, BEHAVIOR_TEMPLATE, 'utf8'),
+        write: () => writeFileSync(behaviorPath, template, 'utf8'),
       });
     }
     if (!existsSync(join(cwd, '.gateforge.yml'))) {
@@ -1358,8 +1484,9 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     } else {
       writeLine(
         io.stdout,
-        'note: existing .gateforge.yml left untouched — add `behaviorPolicy: .gateforge/behavior.yml` to enable the profile',
+        'note: existing .gateforge.yml left untouched — add this line to it to enable the profile:',
       );
+      writeLine(io.stdout, '  behaviorPolicy: .gateforge/behavior.yml');
     }
   }
 
