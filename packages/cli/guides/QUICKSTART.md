@@ -187,6 +187,21 @@ gateforge next
 
 Follow its `do:` line, then run the check again. See [Test environment](TEST-ENVIRONMENT.md) if the block is caused by setup or test state.
 
+The first real `next` on a FastAPI repository asks which data plane owns a
+route's records. That is an owner decision, so Gateforge explains the
+question before asking it and prints one runnable command per answer. For
+`DELETE /items/{}` on tenant-scoped records, the answer is `tenant`:
+
+```sh
+gateforge init --planes                                        # once: create the owner-reviewed planes file
+gateforge classify plane 'app/main.py' tenant \
+  --reason 'Owner review confirms the tenant plane for DELETE /items/{}.' --confirm
+```
+
+Then run `gateforge next` again: the same block must not reappear. A route
+that is genuinely internal is the other answer, and it stays owner-only (an
+`internalRules` entry in `.gateforge/classification-policy.yml`).
+
 To verify a specific commit tree (for example, the tip of a pushed ref)
 instead of the current worktree or index:
 
