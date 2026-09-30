@@ -381,6 +381,22 @@ describe('positional path matching (pathMatchesShape)', () => {
     expect(pathMatchesShape('/a/x/b/c', '/a/{*}/c')).toBe(false);
     expect(pathMatchesShape('/a/x/y', '/a/{}/y')).toBe(true);
   });
+
+  it('a named parameter segment matches exactly one non-empty segment', () => {
+    // The host declares its routes in its own grammar (Express `:id`,
+    // FastAPI/other `{id}`); the grader must resolve an observed path
+    // against that SAME declaration, exactly as the witness-side route
+    // inventory does. A route whose id never resolves can never be
+    // proven — a silent failure, not a fail-closed one.
+    expect(pathMatchesShape('/admin/accounts/acc-3', '/admin/accounts/:id')).toBe(true);
+    expect(pathMatchesShape('/api/accounts/acc-3', '/api/accounts/{id}')).toBe(true);
+    // A named parameter is positional: never zero segments, never many.
+    expect(pathMatchesShape('/admin/accounts', '/admin/accounts/:id')).toBe(false);
+    expect(pathMatchesShape('/admin/accounts/acc-3/edit', '/admin/accounts/:id')).toBe(false);
+    // Everything else in the shape stays literal and case-sensitive.
+    expect(pathMatchesShape('/admin/Accounts/acc-3', '/admin/accounts/:id')).toBe(false);
+    expect(pathMatchesShape('/admin/accounts/acc-3', '/admin/Accounts/:id')).toBe(false);
+  });
 });
 
 describe('http contract grading', () => {
