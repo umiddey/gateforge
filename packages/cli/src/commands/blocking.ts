@@ -8,6 +8,7 @@
  * Engine resolution order: developer override, repository-pinned CLI,
  * recorded engine checkout, explicit engine path, then PATH fallback.
  */
+import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { UsageError } from '../errors.js';
 import { join } from 'node:path';
@@ -491,6 +492,28 @@ export function ensureHookScript(
   return hookScript;
 }
 
+/**
+ * Reports whether a repository-relative path is tracked in the index.
+ *
+ * The undo line has to name a command that really works, and
+ * `git restore` only restores a tracked path. An unreadable index, a
+ * missing git, or an untracked file all answer `false`: then the undo
+ * is "delete the appended entry", never a command that would fail.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   relativePath: repository-relative posix path.
+ *
+ * Returns:
+ *   boolean: true when git has the path in its index.
+ */
+function isTracked(cwd: string, relativePath: string): boolean {
+  return spawnSync('git', ['ls-files', '--error-unmatch', '--', relativePath], {
+    cwd,
+    stdio: 'ignore',
+  }).status === 0;
+}
+
 /** Appends the gateforge-check hook to .pre-commit-config.yaml (idempotent). */
 export function appendPreCommitHook(io: Io): void {
   const path = join(io.cwd, '.pre-commit-config.yaml');
@@ -502,7 +525,17 @@ export function appendPreCommitHook(io: Io): void {
       return;
     }
     writeFileSync(path, `${current.endsWith('\n') ? current : current + '\n'}${PRE_COMMIT_BLOCK}`);
-    writeLine(io.stdout, `updated: ${path} (gateforge-check hook appended)`);
+    // One line, one action: the file belongs to the OWNER, so the line
+    // says so and carries the exact way back. The command is printed
+    // only where it really works — `git restore` needs a tracked file,
+    // and an untracked config has nothing to restore.
+    const undo = isTracked(io.cwd, '.pre-commit-config.yaml')
+      ? 'undo: git restore -- .pre-commit-config.yaml'
+      : 'undo: delete the appended gateforge-check entry from .pre-commit-config.yaml (the file is not tracked by git, so there is nothing to restore)';
+    writeLine(
+      io.stdout,
+      `updated: ${path} (gateforge-check hook appended) — your repo's own hook file: ${undo}`,
+    );
     return;
   }
   writeFileSync(path, `repos:\n${PRE_COMMIT_BLOCK}`);

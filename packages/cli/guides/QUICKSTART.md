@@ -248,6 +248,14 @@ Unset the variable and rerun the generator for the registry install. The
 GitLab template needs no variable: it installs the repository's own declared
 `@gate-forge/cli` dependency.
 
+If your repository already had a `.pre-commit-config.yaml`, the wiring
+appends to it and says so on one line, with the exact way back
+(`undo: git restore -- .pre-commit-config.yaml`). Check that line before
+you commit. Then put the `gateforge-check` entry FIRST: hooks that rewrite
+files must not run after the gate, or they invalidate its receipt —
+`enforcement doctor` reports those hooks as `hook-mutation` and names
+those files.
+
 **You should see:** `installed:`, `updated:`, `verified:`, or a framework-managed hook message, followed by `blocking gate wired`.
 
 **If not:** follow the exact `required action` printed for an incomplete installation. Resolve hook-manager conflicts, then rerun `gateforge init --blocking` and verify the active hook.
