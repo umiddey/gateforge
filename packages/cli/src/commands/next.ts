@@ -20,6 +20,7 @@ import {
   sha256Canonical,
   type BlockingEntry,
   type CauseCode,
+  type ClassificationDecision,
   type ChangedProvider,
   type Claim,
   type ObligationVerdict,
@@ -110,6 +111,8 @@ interface NextCandidate {
   why: string;
   /** The single imperative action. */
   do: string;
+  /** The blocking entry's kind, or `'verdict'` for an obligation. */
+  kind: string;
   /** Rank per the plan §2 table (lower wins). */
   rank: number;
 }
@@ -197,6 +200,7 @@ function rankBlockers(blocking: readonly BlockingEntry[], verdicts: readonly Obl
           : entry.resourceId !== null && entry.resourceId !== undefined
             ? `gateforge explain ${entry.resourceId}`
             : 'gateforge discover --json'),
+      kind: entry.kind,
       rank: rankCause(cause, entry.kind),
     });
   }
@@ -210,11 +214,70 @@ function rankBlockers(blocking: readonly BlockingEntry[], verdicts: readonly Obl
       do:
         verdict.nextAction ??
         (cause !== null ? CAUSE_NEXT_ACTIONS[cause] : CAUSE_NEXT_ACTIONS['EVIDENCE_NOT_COLLECTED']),
+      kind: 'verdict',
       rank: rankCause(cause, 'verdict'),
     });
   }
   candidates.sort((a, b) => (a.rank !== b.rank ? a.rank - b.rank : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return candidates;
+}
+
+/**
+ * The state-changing command that clears ONE classifier block. A code
+ * with no entry here is never given an invented command.
+ */
+const CLASSIFIER_BLOCK_ANSWERS: Readonly<Record<string, string>> = {
+  ADAPTER_MISSING:
+    '`gateforge adapters scaffold` — run it, then review the adapter it writes for this resource',
+  DELETE_SEMANTICS_UNRESOLVED:
+    "declare what the endpoint does in '.gateforge/endpoints.json' — 'crud-archive' or 'crud-delete' on a DELETE endpoint (an ENDPOINT_SEMANTICS_UNRESOLVED block prints the exact entry)",
+  PLANE_UNRESOLVED:
+    "gateforge classify plane <file> <tenant|master|global> --reason '<why>' --confirm — or change the existing rule for that file in '.gateforge/planes.json'",
+};
+
+/**
+ * The answer for a resource the classifier blocked DEFINITIONALLY: it
+ * has no effective classification, so nothing on it can be graded.
+ *
+ * The block used to be exactly three lines ending in `do: gateforge
+ * classify --json` — a read-only dump that writes nothing, so the
+ * documented loop (run the printed command, run `next` again) printed
+ * the identical block forever, and nothing named the blocks that
+ * actually hold the resource. `gateforge explain <id>` shows them, so
+ * the id this block prints is the one that resolves.
+ *
+ * Args:
+ *   candidate: the ranked next item.
+ *   decisions: the run's classifier decisions.
+ *
+ * Returns:
+ *   { do: string; lines: string[] }: the imperative action and the
+ *     explanation, or `null` when this candidate is not such a block.
+ */
+function classifierBlockGuidance(
+  candidate: NextCandidate,
+  decisions: readonly ClassificationDecision[],
+): { do: string; lines: string[] } | null {
+  if (candidate.kind !== 'unclassified') return null;
+  const decision = decisions.find((row) => row.name === candidate.id || row.resourceId === candidate.id);
+  const blocks = decision?.blocks ?? [];
+  if (blocks.length === 0) return null;
+  const first = blocks[0] as { code: string };
+  const answer = CLASSIFIER_BLOCK_ANSWERS[first.code];
+  return {
+    do: answer ?? `read every block on this resource with \`gateforge explain ${shellQuote(candidate.id)}\``,
+    lines: [
+      'about this block: the classifier refused this resource definitionally, so it carries no effective',
+      'classification and nothing on it can be graded. `gateforge classify --json` only LISTS these blocks — it',
+      'writes nothing, so running it and running `gateforge next` again prints this identical block. What closes',
+      'each one:',
+      ...blocks.map(
+        (block) =>
+          `  [${block.code}] — ${CLASSIFIER_BLOCK_ANSWERS[block.code] ?? 'nothing in Gateforge closes this on your behalf; its evidence is below'}`,
+      ),
+      `Read every block and the evidence behind it: gateforge explain ${shellQuote(candidate.id)}`,
+    ],
+  };
 }
 
 /**
@@ -1031,6 +1094,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   const endpointGuidance =
     routeGuidance === null ? endpointSemanticsGuidance(first.why, pipeline.graph) : [];
   const prefixGuidance = routeGuidance === null ? fastapiPrefixGuidance(first.why, io.cwd) : [];
+  const classifierBlocks = classifierBlockGuidance(first, pipeline.classification.decisions);
   const guide = ENVIRONMENT_GUIDES[first.cause as CauseCode] ?? null;
   const scopeNote = observationScopeNote(
     first,
@@ -1081,6 +1145,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         ...(taskOffer.length === 0 ? {} : { taskPackOffer: taskOffer }),
         ...(endpointGuidance.length === 0 ? {} : { endpointSemanticsGuidance: endpointGuidance }),
         ...(prefixGuidance.length === 0 ? {} : { fastapiPrefixGuidance: prefixGuidance }),
+        ...(classifierBlocks === null ? {} : { classifierBlockGuidance: classifierBlocks.lines }),
       }),
     );
   } else {
@@ -1100,6 +1165,9 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     } else if (prefixGuidance.length > 0) {
       writeLine(io.stdout, `do: ${fastapiPrefixDo(first.why)}`);
       for (const line of prefixGuidance) writeLine(io.stdout, line);
+    } else if (classifierBlocks !== null) {
+      writeLine(io.stdout, `do: ${classifierBlocks.do}`);
+      for (const line of classifierBlocks.lines) writeLine(io.stdout, line);
     } else {
       writeLine(io.stdout, `do: ${first.do}`);
     }
