@@ -83,10 +83,11 @@ import {
   type InitPresetSettings,
 } from './init-presets.js';
 export const INIT_USAGE =
-  '[--preset light|normal|strict] [--explain-presets] [--no-scan] [--proof overlay|observe] [--blocking] ' +
-  '[--pre-commit] [--mode changed|staged] [--witnessed staged|full] [--ci] [--no-ci] ' +
+  '[--preset light|normal|strict] [--explain-presets] [--no-scan] [--proof overlay|observe] ' +
+  '[--blocking] [--no-blocking] [--pre-commit] [--no-pre-commit] [--mode changed|staged] ' +
+  '[--witnessed staged|full] [--ci] [--no-ci] ' +
   '[--docs-exclude <folder,...> [--confirm-doc-exclusions]] [--cache-exclude <file,...> ' +
-  '[--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--behavior]';
+  '[--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--no-planes] [--behavior]';
 
 /** Template for the complete-behavior owner document (plan §4.1). */
 export const BEHAVIOR_TEMPLATE = `\

@@ -35,6 +35,46 @@ One non-blocking test-map advisory remains for the standalone UI journey; this i
 next: none — clean
 ```
 
+## Where the witnessed run lives
+
+This root project is a STATIC `check` demo: `gateforge check` classifies the routes
+and reports. There is no receipt lane here, so asking for one can only say that
+none exists:
+
+```sh
+$ gateforge check --require-e2e
+require-e2e: no gate receipt exists for the current state — run `gateforge test-gates --changed` to execute the configured E2E suite ...
+exit code: 1
+```
+
+The witnessed project is the sub-directory `behavior/` — it carries its own
+`.gateforge.yml`, adapters, behavior policy, test map and Playwright config, and a
+run started at the root does not see it. Run it from there (the verifier key is
+required and must live outside the repository, as in the quickstart's step 6):
+
+```sh
+$ cd behavior
+$ gateforge tests discover
+test catalog: discovered=3 unresolved=0 parseErrors=0 inventoryComplete=true
+
+$ gateforge tests suggest
+suggest: 3 obligation(s) considered (3 in all scope), 0 mapping problem(s), 0 suggestion(s)
+
+$ gateforge test-gates --changed
+```
+
+`test-gates` supervises the three committed `evidence.prove` cases through the
+loopback witness and a real Chromium. Honest status of this repository today: in a
+fresh copy of `example/behavior/` the run does not seal a receipt — it exits 1, and
+every failing test prints its own next line, for example
+
+```text
+instance 'playwright:chromium:e2e/behavior-proof.spec.js:admin editor updates an account' failed on attempt 1 — the whole run fails. Run `gateforge explain playwright:chromium:e2e/behavior-proof.spec.js:admin editor updates an account`. [TEST_FAILED]
+```
+
+Run the `gateforge explain <test>` line it prints before re-running. This example is
+a verification fixture, not a green reference run.
+
 ## Run
 
 ```sh
