@@ -123,24 +123,31 @@ export interface EvaluateInput {
    */
   witnessVerifierKey?: string | null;
   /**
-   * The CARRIED evidence of a test-only re-seal: the parent run's v2
-   * attestation envelope, the run identity and input digest it binds,
-   * and the record ids it attests. A re-seal carries a test's outcomes
-   * AND the evidence those outcomes were witnessed with, and that
-   * evidence was witnessed under the PARENT's input digest — which is
-   * exactly what this re-computation proved may differ from the current
-   * one. The envelope is authenticated here with the same witness
-   * verifier keys as any other, and only the records it names keep
-   * their witnessed trust; every other record grades as it does today.
-   * The consumer's own recomputation (`resealChainBlocking`) is what
-   * proves this envelope belongs to the verified parent document.
+   * The CARRIED evidence of a test-only re-seal: one channel per run
+   * that contributed to the retained evidence union, the parent first.
+   * A chain of re-seals carries records several runs witnessed, each
+   * under its own run identity and input digest, and a record is
+   * authorized ONLY by the envelope of the run that issued it — one
+   * envelope for the whole union would either vouch for records it
+   * never issued or vouch for none of them.
+   *
+   * A re-seal carries a test's outcomes AND the evidence those
+   * outcomes were witnessed with, and that evidence was witnessed
+   * under the CONTRIBUTOR's input digest — which is exactly what this
+   * re-computation proved may differ from the current one. Every
+   * envelope is authenticated here with the same witness verifier
+   * keys as any other, and only the records it names keep their
+   * witnessed trust; every other record grades as it does today. The
+   * consumer's own recomputation (`resealChainBlocking`) is what
+   * proves each envelope belongs to the verified document that binds
+   * it.
    */
-  carriedEvidence?: {
+  carriedEvidence?: readonly {
     attestation: unknown;
     runId: string;
     inputDigest: string;
     recordIds: readonly string[];
-  } | null;
+  }[] | null;
   /** Active and retained keys used to verify older witnessed envelopes. */
   /**
    * Engine-issued Alembic witness records from this process. Never read
@@ -856,17 +863,18 @@ function authorizeRecords(
     requireInvocationId?: boolean;
     changedInputs?: boolean;
     /**
-     * The re-seal's carried parent envelope: authenticated against the
-     * PARENT input digest it binds (never the current one — the
-     * re-computation is what proved the two trees differ only in test
+     * The re-seal's carried envelopes, one per run that contributed to
+     * the retained union: each authenticated against the input digest
+     * of the document that binds it (never the current one — the
+     * re-computation is what proved the trees differ only in test
      * files), and usable for exactly the records it attests.
      */
-    carried?: {
+    carried?: readonly {
       attestation: unknown;
       runId: string;
       inputDigest: string;
       recordIds: readonly string[];
-    } | null;
+    }[] | null;
   } = {},
 ): { records: unknown[]; evidenceBlocking: BlockingEntry[] } {
   const issuedRecordId = /^[0-9a-f]{64}$/;
@@ -1080,13 +1088,15 @@ function authorizeRecords(
     }
   }
 
-  // Carried channel (test-only re-seal): the parent run's envelope,
-  // validated against the identity and input digest the re-seal's own
-  // recomputation bound it to. It authorizes EXACTLY the records it
+  // Carried channel (test-only re-seal): every run that contributed to
+  // the retained evidence union brings its own envelope, validated
+  // against the identity and input digest the re-seal's own
+  // recomputation bound it to. Each authorizes EXACTLY the records it
   // attests, under its own run id — never this run's, never a record
-  // the envelope does not name.
-  const carried = auth.carried ?? null;
-  if (carried !== null && verifierKeys.length > 0) {
+  // its envelope does not name, and never a record another
+  // contributor's envelope issued.
+  for (const carried of auth.carried ?? []) {
+    if (verifierKeys.length === 0) break;
     const carriedParsed = AttestationSchema.safeParse(carried.attestation);
     if (carriedParsed.success) {
       const envelope = carriedParsed.data;

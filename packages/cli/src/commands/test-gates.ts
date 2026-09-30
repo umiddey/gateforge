@@ -180,19 +180,21 @@ import {
   type ResealChangeClassification,
 } from '../reseal.js';
 import {
-  authenticateParentEvidence,
+  authenticateContributingEvidence,
   carriedEvidenceDigestOf,
   carriedEvidenceDocuments,
-  carriedRecordIds,
   carriedTestIdentities,
   readParentEvidenceDocuments,
+  readRunAttestation,
   stringField,
-  type CarriedParentEvidence,
+  type CarriedEvidenceContribution,
 } from '../reseal-evidence.js';
 import {
   clearResealChain,
   RESEAL_CHAIN_MAX_HOPS,
   resealChainHopCount,
+  retainedChainCarriedTests,
+  retainedEvidenceContributors,
   writeResealChainHop,
   writeResealChainParentEvidence,
 } from '../reseal-chain.js';
@@ -1028,6 +1030,12 @@ interface CarryForwardParentInput {
    * merge base, unchanged.
    */
   parentCommitBinding?: 'own-ancestor-commit';
+  /**
+   * Every obligation fingerprint this repository declares. A re-seal
+   * parent must have covered exactly this set, which is what lets one
+   * re-seal become the parent of the next.
+   */
+  repositoryFingerprints?: readonly string[];
   trustedPolicyDigest: string;
   approvedPolicyDigest: string;
   executionBoundaryDigest: string;
@@ -1131,10 +1139,17 @@ function verifyCarryForwardParent(input: CarryForwardParentInput): ParentVerific
     if (receipt.trustedPolicyDigest !== input.trustedPolicyDigest) return refuse('the trusted policy changed');
     if (receipt.approvedPolicyDigest !== input.approvedPolicyDigest) return refuse('the approved policy changed');
     if (receipt.receiptStage !== input.config.enforcement?.receiptStage) return refuse('the receipt stage changed');
+    // A plain carried or sliced run proves a slice, so it never
+    // re-seals. A RE-SEAL is different: it names the parent it carried
+    // from in `resealedFrom` and the whole repository in
+    // `coveredObligationFingerprints`, which is exactly what a
+    // further re-seal needs to carry from.
+    const isReseal = receipt.changeClass === 'test-only' && receipt.resealedFrom !== undefined;
     if (
-      receipt.carriedFrom !== undefined ||
-      receipt.parentReceiptDigest !== undefined ||
-      (receipt.scope !== undefined && receipt.scope !== 'full')
+      (receipt.carriedFrom !== undefined ||
+        receipt.parentReceiptDigest !== undefined ||
+        (receipt.scope !== undefined && receipt.scope !== 'full')) &&
+      !isReseal
     ) {
       return refuse('a carried or sliced run never re-seals');
     }
@@ -1156,12 +1171,18 @@ function verifyCarryForwardParent(input: CarryForwardParentInput): ParentVerific
     ) {
       return refuse('it was not a clean run');
     }
+    // The parent is loaded against the coverage it sealed: a
+    // whole-suite run, or — for a re-seal parent — the exact set of
+    // obligation fingerprints this repository declares, which the
+    // loader compares against the receipt's own list.
     const loaded = loadReceiptFor(input.stateDir, input.verifierKeyring, {
       inputDigest: receipt.inputDigest,
       trustedPolicyDigest: input.trustedPolicyDigest,
       candidateTreeId: treeId,
       executionBoundaryDigest: input.executionBoundaryDigest,
-      scope: 'full',
+      ...(isReseal
+        ? { scope: 'changed' as const, coveredObligationFingerprints: input.repositoryFingerprints ?? [] }
+        : { scope: 'full' as const }),
     });
     if (loaded.status !== 'ok') return refuse(receiptLoadRefusal(loaded.status));
     const approved = assertReceiptApprovedPolicy(loaded.receipt, input.approvedPolicyDigest);
@@ -1247,6 +1268,11 @@ export interface ResealParentCoordinates {
    * DOCUMENT names; absent keeps the exact merge-base rule.
    */
   parentCommitBinding?: 'own-ancestor-commit';
+  /**
+   * Every obligation fingerprint this repository declares; a re-seal
+   * parent must have covered exactly this set.
+   */
+  repositoryFingerprints?: readonly string[];
   /** Trusted policy/config revision digest of this run. */
   trustedPolicyDigest: string;
   /** Owner-approved policy revision digest of this run. */
@@ -1464,6 +1490,13 @@ export function decideTestOnlyReseal(input: {
    * disregards nothing (fail closed).
    */
   currentCommitTreeId?: string;
+  /**
+   * How many parent outcomes the WHOLE retained chain carries, read
+   * from the run state. A parent that is itself a re-seal planned
+   * only the tests it re-ran, so its own plan cannot count the rest;
+   * absent, the parent's plan is counted exactly as before.
+   */
+  chainCarriedTests?: number;
 }): { plan: ResealPlan | null; reason: string | null } {
   const parent = input.parent;
   if (parent === null) return { plan: null, reason: null };
@@ -1474,10 +1507,29 @@ export function decideTestOnlyReseal(input: {
     };
   }
   if (parent.kind === 'receipt' && parent.receipt !== null) {
-    if (receiptScope(parent.receipt) !== 'full') {
+    // A re-seal parent is a whole-suite proof in its own way: it names
+    // the parent it carried from and seals a `coveredObligation-
+    // Fingerprints` list covering the whole repository, so the next
+    // re-seal carries from exactly the same coverage. A plain slice
+    // covers less, and a plain full run is graded in full.
+    const isReseal = parent.receipt.changeClass === 'test-only' && parent.receipt.resealedFrom !== undefined;
+    if (isReseal) {
+      const covered = new Set(parent.receipt.coveredObligationFingerprints ?? []);
+      const uncovered = input.obligations
+        .map((obligation) => obligationFingerprint(obligation))
+        .filter((fingerprint) => !covered.has(fingerprint));
+      if (uncovered.length > 0) {
+        return {
+          plan: null,
+          reason: resealRefusal(
+            `the previous re-seal covered ${String(input.obligations.length - uncovered.length)} of ` +
+            `${String(input.obligations.length)} obligation(s), so it proves no whole-suite run`,
+          ),
+        };
+      }
+    } else if (receiptScope(parent.receipt) !== 'full') {
       return { plan: null, reason: resealRefusal('the previous receipt sealed a slice, not a whole-suite run') };
-    }
-    if (parent.receipt.verdictSummary.total !== input.obligations.length) {
+    } else if (parent.receipt.verdictSummary.total !== input.obligations.length) {
       return {
         plan: null,
         reason: resealRefusal(
@@ -1554,9 +1606,14 @@ export function decideTestOnlyReseal(input: {
       parentTreeId: parent.treeId,
       parentSha: parent.sha,
       affectedFiles: classification.affectedTestFiles,
-      carriedTests: parent.execution.planned.filter(
-        (planned) => catalogKeys.has(planned.logicalKey) && !affectedKeys.has(planned.logicalKey),
-      ).length,
+      // A parent that is itself a re-seal planned only the tests IT
+      // re-ran, so the chain's own count is authoritative; a
+      // whole-suite parent counts the same way from its own plan.
+      carriedTests:
+        input.chainCarriedTests ??
+        parent.execution.planned.filter(
+          (planned) => catalogKeys.has(planned.logicalKey) && !affectedKeys.has(planned.logicalKey),
+        ).length,
     },
     reason: null,
   };
@@ -2162,8 +2219,16 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // The parent run's authenticated witness EVIDENCE, reduced to what
   // the carried tests proved: the union this run grades and seals is
   // this plus its own fresh records. Resolved at the re-seal decision,
-  // BEFORE this run overwrites the state documents that hold it.
-  let reSealParentEvidence: (CarriedParentEvidence & { attestationDigest: string | null }) | null = null;
+  // BEFORE this run overwrites the state documents that hold it. In a
+  // chain, several runs contributed to that union, so it keeps every
+  // contributing run's envelope and the channel each one authorizes.
+  let reSealParentEvidence: {
+    records: unknown[];
+    claims: unknown[];
+    attestations: unknown[];
+    contributions: readonly CarriedEvidenceContribution[];
+    contributingRunIds: string[];
+  } | null = null;
   if (catalog !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -2245,6 +2310,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               verifierKeyring,
               baseSha: '',
               parentCommitBinding: 'own-ancestor-commit',
+              repositoryFingerprints: [
+                ...new Set(pipeline.policy.obligations.map((obligation) => obligationFingerprint(obligation))),
+              ].sort(),
               gitDir: freezeGitDir as string,
               docsExclusions,
               cacheExclusions,
@@ -2306,24 +2374,38 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       }
       reSealPlan = reSeal.plan;
       reSealParent = reSeal.plan === null ? null : reSealParentCandidate;
+      // What the WHOLE chain carries: a parent that is itself a
+      // re-seal planned only the tests it re-ran, so its own plan
+      // cannot count the rest. Absent a retained chain, the plan's own
+      // count stands (a whole-suite parent, exactly as before).
+      const reSealCarried =
+        reSealPlan === null
+          ? null
+          : retainedChainCarriedTests({ stateDir, childFiles: reSealPlan.affectedFiles });
+      if (reSealPlan !== null && reSealCarried !== null) {
+        reSealPlan = { ...reSealPlan, carriedTests: reSealCarried.count };
+      }
       // The parent's witness EVIDENCE is retained BEFORE this run
       // overwrites `records.json`, `claims.json` and the run manifest: a
       // re-seal carries a carried test's outcomes AND the records those
-      // outcomes were witnessed with.
+      // outcomes were witnessed with — and in a chain, the records
+      // EVERY contributing run witnessed, each under its own envelope.
       if (reSeal.plan !== null && reSealParent !== null) {
-        const parentDocument = reSealParent.record ?? reSealParent.receipt;
-        const authenticated = authenticateParentEvidence(
-          readParentEvidenceDocuments(stateDir),
-          {
-            runId: parentDocument?.runId ?? '',
-            inputDigest: parentDocument?.inputDigest ?? '',
-            evidenceAttestationDigest: parentDocument?.evidenceAttestationDigest ?? null,
-          },
-          verifierKeyring === null ? [] : verifierKeyring.keys.map((entry) => entry.key),
-        );
-        if (authenticated === null) {
-          reSealParentEvidence = null;
-        } else if (!authenticated.ok) {
+        const contributors = retainedEvidenceContributors({
+          stateDir,
+          parent: { kind: reSealParent.kind, receipt: reSealParent.receipt, record: reSealParent.record },
+          parentAttestation: readRunAttestation(stateDir),
+          verifierKeyring,
+        });
+        const authenticated =
+          contributors.reason === null
+            ? authenticateContributingEvidence(
+                readParentEvidenceDocuments(stateDir),
+                contributors.contributors,
+                verifierKeyring === null ? [] : verifierKeyring.keys.map((entry) => entry.key),
+              )
+            : { ok: false as const, reason: contributors.reason };
+        if (!authenticated.ok) {
           writeLine(
             io.stderr,
             `test-gates: the previous run cannot be re-sealed from: ${authenticated.reason} ${RESEAL_REFUSAL_SUFFIX}`,
@@ -2331,12 +2413,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           reSealPlan = null;
           reSealParent = null;
         } else {
-          const carriedFiles = new Set(
+          const identities =
+            reSealCarried?.identities ?? carriedTestIdentities(reSealParent.execution, reSeal.plan.affectedFiles);
+          const carriedFiles = reSealCarried?.files ?? new Set(
             reSealParent.execution.outcomes
               .filter((outcome) => !reSeal.plan?.affectedFiles.includes(outcome.file))
               .map((outcome) => outcome.file),
           );
-          const identities = carriedTestIdentities(reSealParent.execution, reSeal.plan.affectedFiles);
           // A witness-issued record is stamped with the CLAIMING test's
           // identity, which for a mapped test is the mapping key: the
           // trusted resolution of this very run, never the record's word.
@@ -2350,11 +2433,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           const carriedDocuments = carriedEvidenceDocuments(authenticated.evidence, identities);
           reSealParentEvidence = {
             ...carriedDocuments,
-            attestation: authenticated.evidence.attestation,
-            attestationDigest: authenticated.evidence.attestationDigest,
-            runId: authenticated.evidence.runId,
-            inputDigest: authenticated.evidence.inputDigest,
-            recordIds: carriedRecordIds(carriedDocuments.records),
+            attestations: contributors.contributors.map((contributor) => contributor.attestation),
+            contributions: authenticated.evidence.contributions,
+            contributingRunIds: [...new Set(authenticated.evidence.contributions.map((entry) => entry.runId))],
           };
           writeResealChainParentEvidence(stateDir, reSealParentEvidence);
         }
@@ -3568,7 +3649,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       records: [
         ...reSealParentEvidence.records,
         ...readJsonArray(stateDir, 'records.json').filter(
-          (record) => stringField(record, 'runId') !== reSealParentEvidence.runId,
+          (record) => !reSealParentEvidence.contributingRunIds.includes(stringField(record, 'runId') ?? ''),
         ),
       ],
       claims: [
@@ -3633,18 +3714,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     witnessVerifierKey,
     witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
     witnessAttestation: liveAttestation,
-    // The parent's own envelope, authenticated against the identity and
-    // input digest the re-seal's own recomputation bound it to.
-    ...(reSealParentEvidence === null || reSealParentEvidence.attestation === null
+    // Every contributing run's own envelope, authenticated against the
+    // identity and input digest the re-seal's own recomputation bound
+    // it to.
+    ...(reSealParentEvidence === null
       ? {}
-      : {
-          carriedEvidence: {
-            attestation: reSealParentEvidence.attestation,
-            runId: reSealParentEvidence.runId,
-            inputDigest: reSealParentEvidence.inputDigest,
-            recordIds: reSealParentEvidence.recordIds,
-          },
-        }),
+      : { carriedEvidence: reSealParentEvidence.contributions }),
     // Goal 1: the supervised gate honors the adopted baseline through the
     // SAME fail-closed seam as `check` (no adoption record → nothing is
     // forgiven). Under strictE2E the evaluator still re-grades every
@@ -4094,7 +4169,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       catalog,
       records: reSealParentEvidence?.records ?? [],
       claims: reSealParentEvidence?.claims ?? [],
-      attestation: reSealParentEvidence?.attestation ?? null,
+      attestations: reSealParentEvidence?.attestations ?? [],
     });
   } else {
     clearResealChain(stateDir);

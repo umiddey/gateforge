@@ -14,20 +14,21 @@
  *
  * This module owns that carry, and it owns it honestly:
  *
- * - The parent's evidence documents are read from the run state BEFORE
- *   the re-seal's own run overwrites them.
- * - The attestation that binds the parent's records is verified with the
- *   CONSUMER'S OWN KEY and must name the parent run and the parent
- *   input digest the parent document itself binds — and, when the parent
- *   document sealed one, must hash to that document's
- *   `evidenceAttestationDigest`. Evidence nobody attested is not carried
- *   at all (it would grade nothing anyway).
- * - Attribution is by the witness-issued test identity: a parent record
- *   or claim survives only when its `testId` is a CARRIED test's own
- *   identity, taken from the parent's execution result. A record of a
- *   test this run re-ran never survives — its fresh record replaced it,
- *   and a re-run that stopped proving anything leaves its obligation
- *   unproven.
+ * - The evidence documents are read from the run state BEFORE the
+ *   re-seal's own run overwrites them.
+ * - A CHAIN of re-seals has more than one contributing run: the state
+ *   holds a union whose records were issued under different run
+ *   identities, each with its own witness envelope. Every envelope is
+ *   verified with the CONSUMER'S OWN KEY, must name the run and input
+ *   digest the contributing document binds, and — when that document
+ *   sealed one — must hash to its `evidenceAttestationDigest`. A
+ *   record is authorized only by the envelope of the run that issued
+ *   it; nobody's envelope vouches for anybody else's records.
+ * - Attribution is by the witness-issued test identity: a record or
+ *   claim survives only when its `testId` is a CARRIED test's own
+ *   identity. A record of a test this run re-ran never survives — its
+ *   fresh record replaced it, and a re-run that stopped proving
+ *   anything leaves its obligation unproven.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -38,44 +39,66 @@ import {
   type ExecutionResult,
 } from '@gate-forge/core';
 
-/** The parent run's raw evidence documents, as the run state holds them. */
+/** The evidence documents a run's state holds, before any carry. */
 export interface ParentEvidenceDocuments {
-  /** `records.json` of the parent run (witness-issued ledger). */
+  /** `records.json` of the run (witness-issued ledger). */
   records: unknown[];
-  /** `claims.json` of the parent run (what the tests declared). */
+  /** `claims.json` of the run (what the tests declared). */
   claims: unknown[];
-  /** The parent's v2 attestation envelope from its run manifest. */
-  attestation: unknown;
-}
-
-/** The parent's evidence, authenticated and reduced to what may be carried. */
-export interface CarriedParentEvidence {
-  /** The parent run's attested, witness-issued records. */
-  records: unknown[];
-  /** The parent run's claims (they are declarations, not evidence). */
-  claims: unknown[];
-  /** The parent's verified v2 attestation envelope. */
-  attestation: unknown;
-  /** Canonical digest of the retained attestation envelope. */
-  attestationDigest: string | null;
-  /** The parent run identity the envelope binds. */
-  runId: string;
-  /** The parent input digest the envelope binds. */
-  inputDigest: string;
-  /** Exactly the record ids the witness says it issued in that run. */
-  recordIds: string[];
 }
 
 /**
- * The outcome of authenticating the parent evidence: the evidence
- * itself, a refusal in plain words (the caller prints one reason line),
- * or null when the parent run witnessed nothing at all and there is
- * nothing to carry.
+ * ONE run that contributed evidence to the state, with the witness
+ * envelope that run issued. The contributing document (a verified
+ * receipt or run record) binds the run identity, the input digest and
+ * — when the run fetched its envelope live — the envelope's own digest.
+ */
+export interface EvidenceContributor {
+  /** The run identity the contributing document binds. */
+  runId: string;
+  /** The input digest the contributing document binds. */
+  inputDigest: string;
+  /** The envelope digest the document seals, or null when it sealed none. */
+  evidenceAttestationDigest: string | null;
+  /** The envelope that run issued, exactly as the run state holds it. */
+  attestation: unknown;
+}
+
+/** The authenticated evidence of every contributing run, as one union. */
+export interface CarriedEvidenceSet {
+  /** Every attested record, deduplicated by record id. */
+  records: unknown[];
+  /** Every claim (they are declarations, not evidence). */
+  claims: unknown[];
+  /**
+   * One channel entry per contributing run: the envelope that issued
+   * its records, with exactly the record ids it attests.
+   */
+  contributions: readonly CarriedEvidenceContribution[];
+}
+
+/** What the evaluator needs to authorize ONE contributing run's records. */
+export interface CarriedEvidenceContribution {
+  /** The witness envelope itself, exactly as the run state holds it. */
+  attestation: unknown;
+  /** The run identity that envelope binds. */
+  runId: string;
+  /** The input digest that envelope binds. */
+  inputDigest: string;
+  /** Exactly the record ids that envelope attests. */
+  recordIds: readonly string[];
+}
+
+/**
+ * The outcome of authenticating the carried evidence: the evidence
+ * itself, or a refusal in plain words (the caller prints one reason
+ * line). null is no longer an outcome: an evidence set with no
+ * contributor is not evidence, and the caller decides what to do
+ * about that.
  */
 export type ParentEvidenceResult =
-  | { ok: true; evidence: CarriedParentEvidence }
-  | { ok: false; reason: string }
-  | null;
+  | { ok: true; evidence: CarriedEvidenceSet }
+  | { ok: false; reason: string };
 
 function readJsonArrayFile(path: string): unknown[] {
   try {
@@ -105,8 +128,8 @@ export function stringField(value: unknown, field: string): string | null {
 }
 
 /**
- * Reads the parent run's evidence documents from the run state. Called
- * BEFORE the re-seal's own run overwrites them.
+ * Reads the evidence documents a run's state holds. Called BEFORE
+ * the re-seal's own run overwrites them.
  *
  * Args:
  *   stateDir: absolute run-state directory.
@@ -115,89 +138,95 @@ export function stringField(value: unknown, field: string): string | null {
  *   ParentEvidenceDocuments: the raw documents (empty arrays when absent).
  */
 export function readParentEvidenceDocuments(stateDir: string): ParentEvidenceDocuments {
-  const manifest = readJsonFile(join(stateDir, 'manifest.json'));
-  const attestation =
-    typeof manifest === 'object' && manifest !== null
-      ? ((manifest as Record<string, unknown>)['attestation'] ?? null)
-      : null;
   return {
     records: readJsonArrayFile(join(stateDir, 'records.json')),
     claims: readJsonArrayFile(join(stateDir, 'claims.json')),
-    attestation,
   };
 }
 
 /**
- * Authenticates the parent run's evidence against the parent document.
- *
- * The parent document (a verified receipt or run record) already binds
- * the run identity, the input digest and — when the run fetched its
- * attestation live — the attestation's own digest. This function demands
- * exactly that agreement under the consumer's own witness verifier key,
- * and keeps only the records the attestation says the witness issued.
+ * The witness envelope the run in this state fetched, from its run
+ * manifest. Null when the run witnessed nothing.
  *
  * Args:
- *   documents: the raw parent documents.
- *   parent: the run identity + input digest + attestation digest the
- *     verified parent document binds.
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   unknown: the envelope document, or null.
+ */
+export function readRunAttestation(stateDir: string): unknown {
+  const manifest = readJsonFile(join(stateDir, 'manifest.json'));
+  if (typeof manifest !== 'object' || manifest === null) return null;
+  return (manifest as Record<string, unknown>)['attestation'] ?? null;
+}
+
+/**
+ * Authenticates the evidence of every contributing run against the
+ * document that run sealed.
+ *
+ * Each contributing document already binds the run identity, the
+ * input digest and — when that run fetched its attestation live — the
+ * attestation's own digest. This function demands exactly that
+ * agreement under the consumer's own witness verifier key, and keeps
+ * only the records the attestations say the witness issued, each run's
+ * records under that run's envelope.
+ *
+ * Args:
+ *   documents: the raw evidence documents (the union in the run state).
+ *   contributors: one entry per run that contributed evidence, the
+ *     parent itself first.
  *   verifierKeys: the consumer's witness verifier keys.
  *
  * Returns:
- *   CarriedParentEvidence | ParentEvidenceRefusal: the authenticated
- *     evidence, or the exact reason it cannot be carried.
+ *   CarriedEvidenceSet | ParentEvidenceRefusal: the authenticated
+ *     union, or the exact reason it cannot be carried.
  */
-export function authenticateParentEvidence(
+export function authenticateContributingEvidence(
   documents: ParentEvidenceDocuments,
-  parent: { runId: string; inputDigest: string; evidenceAttestationDigest: string | null },
+  contributors: readonly EvidenceContributor[],
   verifierKeys: readonly string[],
 ): ParentEvidenceResult {
-  const parsed = AttestationSchema.safeParse(documents.attestation);
-  if (!parsed.success) {
-    // Nothing to carry is a legitimate outcome (a run that witnessed
-    // nothing), never a refusal: the re-seal still re-runs and seals.
-    return documents.records.length === 0 && documents.claims.length === 0
-      ? null
-      : refuse('its evidence carries no witness attestation envelope');
-    return refuse('its evidence carries no witness attestation envelope');
-  }
-  const envelope = parsed.data;
-  if (envelope.runId !== parent.runId || envelope.inputDigest !== parent.inputDigest) {
-    return refuse('its evidence attestation names a different run or input digest than the parent document');
-  }
-  const attestationDigest = sha256Canonical(envelope as unknown as Record<string, never>);
-  if (
-    parent.evidenceAttestationDigest !== null &&
-    parent.evidenceAttestationDigest !== attestationDigest
-  ) {
-    return refuse('its retained evidence does not match the attestation its document seals');
-  }
-  const body = {
-    runId: envelope.runId,
-    invocationId: envelope.invocationId,
-    inputDigest: envelope.inputDigest,
-    recordIds: envelope.recordIds,
-  };
-  if (!verifierKeys.some((key) => verifyAttestationMac(key, body, envelope.mac))) {
-    return refuse('its evidence attestation does not verify with this keyring');
-  }
-  const attested = new Set(envelope.recordIds);
-  const records = documents.records.filter(
-    (record) =>
-      stringField(record, 'runId') === envelope.runId &&
-      attested.has(stringField(record, 'recordId') ?? ''),
-  );
-  return {
-    ok: true,
-    evidence: {
-      records,
-      claims: documents.claims,
+  const records: unknown[] = [];
+  const seen = new Set<string>();
+  const contributions: CarriedEvidenceContribution[] = [];
+  for (const contributor of contributors) {
+    const parsed = AttestationSchema.safeParse(contributor.attestation);
+    if (!parsed.success) return refuse('its evidence carries no witness attestation envelope');
+    const envelope = parsed.data;
+    if (envelope.runId !== contributor.runId || envelope.inputDigest !== contributor.inputDigest) {
+      return refuse('its evidence attestation names a different run or input digest than the parent document');
+    }
+    if (
+      contributor.evidenceAttestationDigest !== null &&
+      contributor.evidenceAttestationDigest !== sha256Canonical(envelope as unknown as Record<string, never>)
+    ) {
+      return refuse('its retained evidence does not match the attestation its document seals');
+    }
+    const body = {
+      runId: envelope.runId,
+      invocationId: envelope.invocationId,
+      inputDigest: envelope.inputDigest,
+      recordIds: envelope.recordIds,
+    };
+    if (!verifierKeys.some((key) => verifyAttestationMac(key, body, envelope.mac))) {
+      return refuse('its evidence attestation does not verify with this keyring');
+    }
+    const attested = new Set(envelope.recordIds);
+    for (const record of documents.records) {
+      const recordId = stringField(record, 'recordId');
+      if (recordId === null || seen.has(recordId)) continue;
+      if (stringField(record, 'runId') !== envelope.runId || !attested.has(recordId)) continue;
+      seen.add(recordId);
+      records.push(record);
+    }
+    contributions.push({
       attestation: envelope,
-      attestationDigest,
       runId: envelope.runId,
       inputDigest: envelope.inputDigest,
       recordIds: [...envelope.recordIds],
-    },
-  };
+    });
+  }
+  return { ok: true, evidence: { records, claims: documents.claims, contributions } };
 }
 
 /**
@@ -254,18 +283,19 @@ export function mappedTestIdentities(
 }
 
 /**
- * Reduces the parent evidence to what the carried tests actually proved.
+ * Reduces the carried evidence to what the carried tests actually
+ * proved.
  *
  * Args:
- *   evidence: the authenticated parent evidence.
+ *   evidence: the authenticated evidence union.
  *   identities: the carried test identities.
  *
  * Returns:
- *   { records, claims }: the parent's records and claims whose
- *     witness-issued `testId` is a carried test's own identity.
+ *   { records, claims }: the records and claims whose witness-issued
+ *     `testId` is a carried test's own identity.
  */
 export function carriedEvidenceDocuments(
-  evidence: CarriedParentEvidence,
+  evidence: { records: readonly unknown[]; claims: readonly unknown[] },
   identities: ReadonlySet<string>,
 ): { records: unknown[]; claims: unknown[] } {
   const belongs = (document: unknown): boolean => {
@@ -280,7 +310,7 @@ export function carriedEvidenceDocuments(
 
 /**
  * The record ids the CARRIED records carry — the exact set the parent
- * attestation must still vouch for when the evaluator grades the union.
+ * attestations must still vouch for when the evaluator grades the union.
  *
  * Args:
  *   records: the carried parent records.
