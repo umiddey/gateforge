@@ -17,6 +17,21 @@
 
    Keep the packs you already use; the list above is an example. The CLI now also installs two new packages as its own dependencies: `@gate-forge/witness` and `@gate-forge/pack-alembic`. Installing from tarballs instead of the registry: install every `.tgz` of the release in one command (`npm i -D ./gate-forge-*.tgz`).
 
+   **If your `package.json` pins Gateforge anywhere else**, change those entries by hand first: every `@gate-forge/*` version in an `overrides` (npm) or `resolutions` (yarn) block, and every alias such as `"@gateforge/pack-playwright": "npm:@gate-forge/pack-playwright@0.7.0"`, must say `0.8.0`. Then run `npm install`. With an override still at `0.7.0`, the `npm i -D` command above stops with `EOVERRIDE` and changes nothing. Example:
+
+   ```json
+   "devDependencies": {
+     "@gate-forge/cli": "0.8.0",
+     "@gateforge/pack-playwright": "npm:@gate-forge/pack-playwright@0.8.0"
+   },
+   "overrides": {
+     "@gate-forge/core": "0.8.0",
+     "@gate-forge/pack-playwright": "0.8.0"
+   }
+   ```
+
+   You do not need to add the two new packages to `overrides`; the CLI brings them at `0.8.0`.
+
 2. Check the setup:
 
    ```sh
@@ -70,6 +85,7 @@
 |---|---|
 | `EVIDENCE_STALE` after upgrading | Run `gateforge test-gates --changed`, then check again. |
 | `GATEFORGE_PACKAGE_INCOMPATIBLE` | Align every direct Gateforge package to `0.8.0`, update wrapper pins, then run `npm install`. |
+| `npm error code EOVERRIDE` (`Override for @gate-forge/… conflicts with direct dependency`) | Set every `@gate-forge/*` entry in `overrides`/`resolutions` and every `npm:@gate-forge/…` alias to `0.8.0` by hand, then run `npm install` (step 1). |
 | `E404` for `@gate-forge/witness` or `@gate-forge/pack-alembic` during a tarball install | Install every tarball of the release in one command. |
 | A doctor `runner` FAIL naming browser builds | Run the printed `npx playwright install …` in the printed directory. |
 | Exit 2 on `--scope changed` in a merge-request pipeline | Provide the base commit (for example a deeper clone) or configure the change provider explicitly, as the message says. |
