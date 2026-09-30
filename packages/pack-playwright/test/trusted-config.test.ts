@@ -146,7 +146,8 @@ describe('synthesizeTrustedConfig', () => {
       ],
     });
     const content = readFileSync(configPath, 'utf8');
-    expect(content).toContain(`projects: [{"name":"chromium","testMatch":["tests/feature.spec.ts"]}]`);
+    expect(content).toContain('testMatch: ["tests/feature.spec.ts"]');
+    expect(content).toContain('projects: [{"name":"chromium"}]');
     expect(content).not.toContain('"setup"');
   });
 
@@ -191,13 +192,12 @@ describe('synthesizeTrustedConfig', () => {
     // Playwright refuses to load a config whose `dependencies` entry names
     // a project it does not define, so the edge is dropped with the
     // project — never emitted as a dangling name.
-    expect(content).toContain(
-      `projects: [{"name":"chromium","testMatch":["tests/feature.spec.ts"]}]`,
-    );
+    expect(content).toContain('projects: [{"name":"chromium"}]');
+    expect(content).not.toContain('"setup"');
     expect(content).not.toContain('dependencies');
   });
 
-  it('selects the same files with or without a scope that owns them all', () => {
+  it('keeps a single-project config byte-identical when one scope owns every file', () => {
     const { cwd, stateDir } = tempDirs();
     const plain = synthesizeTrustedConfig({
       cwd,
@@ -219,16 +219,11 @@ describe('synthesizeTrustedConfig', () => {
       projectScopes: [{ name: 'chromium', files: ['specs/a.spec.js', 'specs/b.spec.js'] }],
     });
     // One project owning every selected file selects exactly the same set a
-    // global testMatch does, so a single-project run is unaffected by the
-    // scoping: only the `projects:` shape differs.
+    // global testMatch does, so a single-project run keeps the old config
+    // byte for byte (only the state directory path differs here).
     const plainContent = readFileSync(plain.configPath, 'utf8');
     const scopedContent = readFileSync(scoped.configPath, 'utf8');
-    expect(plainContent).toContain('testMatch: ["specs/a.spec.js","specs/b.spec.js"]');
-    expect(scopedContent).toContain(
-      'projects: [{"name":"chromium","testMatch":["specs/a.spec.js","specs/b.spec.js"]}]',
-    );
-    // Every selected file is still selected exactly once.
-    expect(scopedContent.match(/specs\/[ab]\.spec\.js/g)).toHaveLength(2);
+    expect(scopedContent.split(otherState).join(stateDir)).toBe(plainContent);
   });
 
   it('trustedReporterEntry resolves to the pack dist reporter', () => {

@@ -174,13 +174,18 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
   // plan attributed to it, so a project-scoped consumer config (the standard
   // `setup`-project auth pattern) does not have every selected file collected
   // under every project. Files no project scope claims stay in the global
-  // `testMatch` — a project-less plan row must still execute. With no scopes
-  // at all (the single-project case) this is exactly the old one-global-
-  // `testMatch` config, so those runs stay byte-identical.
-  const projectScopes = (input.projectScopes ?? [])
+  // `testMatch` — a project-less plan row must still execute. Scoping only
+  // changes what runs when TWO or more projects share the config: with one
+  // project the global `testMatch` selects the identical set, so a
+  // single-project run keeps exactly the old one-global-`testMatch` config.
+  const scopedProjects = (input.projectScopes ?? [])
     .map((scope) => ({ name: scope.name, files: [...new Set(scope.files)].sort(), dependencies: scope.dependencies ?? [] }))
     .filter((scope) => scope.name.length > 0 && scope.files.length > 0)
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+  const projectScopes = scopedProjects.length >= 2 ? scopedProjects : [];
+  // One surviving scope runs its files under that project alone — a named
+  // project that owns no file must not collect them a second time.
+  const plainProjects = scopedProjects.length === 1 ? [scopedProjects[0]!.name] : projects;
   const scopedFiles = new Set(projectScopes.flatMap((scope) => scope.files));
   const unscopedFiles = testFiles.filter((file) => !scopedFiles.has(file));
   // Dependency edges are carried as the runner resolved them (names
@@ -214,8 +219,8 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
       ? [
           `  projects: ${JSON.stringify(synthesizedProjects)},`,
         ]
-      : projects.length > 0
-        ? [`  projects: ${JSON.stringify(projects.map((name) => ({ name })) )},`]
+      : plainProjects.length > 0
+        ? [`  projects: ${JSON.stringify(plainProjects.map((name) => ({ name })) )},`]
         : []),
     '  workers: 1,',
     '  fullyParallel: false,',
