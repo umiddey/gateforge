@@ -437,13 +437,14 @@ the previous receipt graded 561 obligation(s) while this candidate declares 563 
 
 
 **When the previous run cannot be the parent.** A parent is only usable
-when it is bound to this run: the same merge-base commit, the same
-approved policy, engine bundle and execution boundary, an intact
-signature, and a sealed tree that really is the tree of that commit.
-When the run state holds such a document and no parent qualifies, the run
-says so in **one plain line** naming the first binding that failed,
-instead of falling through to the changed-scope path in silence (which
-looks exactly like a run that never had a parent):
+when it is bound to this run: the commit **its own document names**, the
+same approved policy, engine bundle and execution boundary, an intact
+signature, and a sealed tree that really is the tree of that commit. No
+CI variable is consulted — see **Consecutive re-seals** below. When the
+run state holds such a document and no parent qualifies, the run says so
+in **one plain line** naming the first binding that failed, instead of
+falling through to the changed-scope path in silence (which looks exactly
+like a run that never had a parent):
 
 ```text
 test-gates: the previous run cannot be re-sealed from: its sealed tree is not the tree of commit 9c8a3b7 (uncommitted changes were tested) → changed-scope run
@@ -454,36 +455,58 @@ never be a re-seal parent. Sign every run with the same verifier key
 (`gateforge key create` once, or one `GATEFORGE_WITNESS_VERIFIER_KEY`
 secret in CI): a run signed with a one-off key reads `it was signed with
 a different verifier key` and can never be a parent either. The other bindings read the same way — `it
-was sealed at commit 1a2b3c4, the merge base is 5d6e7f8`, `the approved
-policy changed`, `the engine changed`, `the execution boundary changed`,
-`its execution result was replaced by a later run`, `its signature does
-not verify with this keyring`, `no merge-base commit is known (set
-CI_MERGE_REQUEST_DIFF_BASE_SHA or GITHUB_BASE_REF)`, `the test inventory
+was sealed at commit 1a2b3c4, which is not an ancestor of HEAD`, `the
+approved policy changed`, `the engine changed`, `the execution boundary
+changed`, `its execution result was replaced by a later run`, `its
+signature does not verify with this keyring`, `the test inventory
 is incomplete`, `a named/result-only run never re-seals` — and each is
 followed by `→ changed-scope run`. With the path off, or when the run
 state holds no parent document at all, nothing is printed and the run is
 byte-identical to before.
 
-**One re-seal per full parent.** A re-seal seals a `scope: changed`
-receipt, and a carried or sliced run is never a parent again: the next
-test-only push prints
+**Consecutive re-seals.** A re-seal is itself a whole-suite proof: it
+names the parent it carried from and seals a
+`coveredObligationFingerprints` list covering the whole repository, so the
+**next** re-seal carries from exactly the same coverage. Fix one test,
+commit, run; fix the next, commit, run — each re-seal's parent is the
+previous re-seal, and each printed line counts what the whole chain
+carries:
 
 ```text
-test-gates: the previous run cannot be re-sealed from: a carried or sliced run never re-seals → changed-scope run
+only test files changed: re-ran 1 test(s), kept 562 from the previous receipt
 ```
 
-and takes its own changed-scope run — which re-runs the changed slice
-and still leaves `check --changed --require-e2e` green, because that
-run's own evidence is complete for what it re-ran. So the carried
-evidence is retained for exactly **one** hop: the re-seal that consumed
-it. The bound of five below is the verifier's backstop for a retained
-chain, not a promise that five re-seals happen in a row.
+The chain is retained hop by hop in `.gateforge/test-gates/reseal-chain/`,
+each hop holding its parent receipt, that parent's execution result, the
+catalog the classification used, and the witness evidence every
+contributing run issued. A test carries when **no** hop re-ran it, so a
+spec untouched across the whole chain keeps its original evidence, and
+the receipt of record states the chain's total in `carriedTests`.
 
 **At most five in a row.** Each re-seal carries its parent, so the
 evidence can be walked back at most five hops before it has drifted too
-far to recompute honestly. The sixth consecutive re-seal takes the full
-run and says so; `check --require-e2e` rejects a longer chain the same
-way.
+far to recompute honestly. The sixth consecutive re-seal prints
+
+```text
+test-gates: the run state already retains 5 consecutive re-seals, the bound this path may chain to → changed-scope run
+```
+
+and takes its own changed-scope run; `check --require-e2e` rejects a
+longer chain the same way.
+
+**The parent is the previous run in the state dir.** No CI variable is
+involved: the parent must be a document in
+`.gateforge/test-gates/` — `receipt.json` from a clean run, or
+`run-record.json` from a failed one — whose own `gitSha` names a commit
+that **exists in this checkout and is an ancestor of HEAD**, and whose
+sealed tree really is the tree of that commit. A merge-base variable is
+the wrong thing to bind to (no CI sets it to the commit the previous
+pipeline tested), so the re-seal path ignores
+`CI_MERGE_REQUEST_DIFF_BASE_SHA` and `GITHUB_BASE_REF` entirely. What
+that means for a pipeline is simple: **the state directory must persist
+from one pipeline to the next** — cache or restore it, keyed by branch.
+With a cold cache the state dir holds no parent, the run is the ordinary
+run, and nothing is printed.
 
 **What a carried test brings with it.** A carried test brings its
 **outcomes and the evidence those outcomes were witnessed with**: the
@@ -492,33 +515,45 @@ re-seal's own run overwrites them and bound to the parent run's
 attestation — the envelope must carry the parent document's own run id
 and input digest, hash to the `evidenceAttestationDigest` that document
 seals, and verify with your keyring, or the re-seal is refused like any
-other parent binding. Attribution is by the witness-issued test id, and
-only the parent records and claims whose test this run did **not** re-run
-are carried: a re-run test's parent record never survives, so a test that
-stopped proving anything after the fix leaves its obligation unproven.
-The graded evidence is the **union** of the carried half and the re-run's
-own, it is what the report and the receipt's `verdictSummary` grade, and
-it is what stands in the run state afterwards — so the next
+other parent binding. In a **chain** there is more than one contributing
+run, so there is more than one envelope: every retained hop's records are
+authorized only by the envelope **that run** issued, and nobody's
+envelope vouches for anybody else's records. A hop whose envelope does
+not verify takes the whole re-seal with it.
+
+Attribution is by the witness-issued test id, and only the records and
+claims whose test **no hop of the chain** re-ran are carried: a re-run
+test's parent record never survives, so a test that stopped proving
+anything after the fix leaves its obligation unproven. The graded
+evidence is the **union** of the carried half and the re-run's own, it is
+what the report and the receipt's `verdictSummary` grade, and it is what
+stands in the run state afterwards — so the next
 `check --changed --require-e2e` grades the same evidence this run did.
 The receipt binds the union in `carriedEvidenceDigest`, MAC-covered like
 the other re-seal fields.
 
 **CI and the broker recompute all of it.** A re-sealed receipt is never
 believed. `check --require-e2e` and `broker commit` walk the retained
-chain with their **own** keyring and object store and redo the work: the
-parent authenticates, the two sealed trees are re-diffed, the claimed
-changed paths are compared with the real diff, the change set is
-re-classified from the retained catalog, the affected set is recomputed
-and matched against the fresh outcomes, the parent must carry exactly
-the rest, the retained parent evidence is authenticated against the
-parent document with that same keyring, and the state evidence must
-equal the recomputed union. Any mismatch is a typed `EVIDENCE_STALE` with the
-exact reason, for example:
+chain **hop by hop, outward** with their **own** keyring and object store
+and redo the work: each parent authenticates, the two sealed trees are
+re-diffed, the claimed changed paths are compared with the real diff, the
+change set is re-classified from that hop's retained catalog, the
+affected set is recomputed and matched against the fresh outcomes, and
+the parent must carry exactly the rest — reduced by what an inner hop
+already re-ran, so the chain's carried total is checked once, against the
+receipt of record, after every hop has been seen. Each hop's retained
+evidence is authenticated against **every** contributing run's envelope
+with that same keyring, and the state evidence must equal the recomputed
+union. Any mismatch is a typed `EVIDENCE_STALE` with the exact reason, for
+example:
 
 ```text
 the re-sealed receipt names parent 9f2c… but the run state retains no parent receipt (fail closed)
 re-seal hop 1 claims a receipt parent but the run state retains a run-record (fail closed)
 re-seal hop 1's parent receipt does not authenticate with this keyring: … (fail closed)
+re-seal hop 2's parent receipt does not authenticate with this keyring: … (fail closed)
+re-seal hop 1's retained evidence does not recompute: its evidence attestation does not verify with this keyring (fail closed)
+re-sealed receipt claims 561 carried test(s) but its chain holds 560 carried outcome(s)
 the re-sealed receipt carries 6 consecutive re-seals, past the bound of 5 — run the full suite
 this consumer has no verifier keyring or object store, so the re-seal cannot be recomputed (fail closed)
 ```

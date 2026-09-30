@@ -95,15 +95,20 @@ back to the plain changed-scope run with one reason line — app code, a
 deleted file, a setup-stage test, a computed or unresolvable import.
 A whole-suite run that
 failed a test seals no receipt, so it leaves a MAC'd run record instead
-and the same command re-seals from it. One re-seal per full parent: the
-re-seal seals a `scope: changed` receipt, and a carried or sliced run is
-never a parent again, so the next test-only push takes its own
-changed-scope run (`a carried or sliced run never re-seals →
-changed-scope run`) and stays green. The carried evidence — the parent's
-witnessed records and claims, bound to the parent attestation — is
-retained for that one hop. The verifier's chain bound is five, and
-`check --require-e2e` and `broker commit` recompute the whole chain with
-their own key before accepting it. See
+and the same command re-seals from it. A re-seal is itself a whole-suite
+proof, so **consecutive re-seals chain**: fix one test, commit, run; fix
+the next, commit, run. Each re-seal's parent is the previous re-seal, the
+chain retains every hop's outcomes and each contributing run's witnessed
+evidence, and a test no hop re-ran keeps its original proof. The parent is
+the previous run **in `.gateforge/test-gates/`** — no CI variable is
+involved (`CI_MERGE_REQUEST_DIFF_BASE_SHA` names a merge base, never the
+commit the previous pipeline tested, and is ignored), so a CI run must
+**persist the state directory between pipelines**, cached by branch; with
+a cold cache there is no parent and the run is the ordinary run. The chain
+is bounded at five consecutive re-seals — the sixth prints
+`test-gates: the run state already retains 5 consecutive re-seals, the bound this path may chain to → changed-scope run`
+— and `check --require-e2e` and `broker commit` recompute the whole chain
+with their own key before accepting it. See
 [`Fix one test without a full run`](packages/cli/guides/TEST-ENVIRONMENT.md#fix-one-test-without-a-full-run)
 for the rules, the exact reason lines, and the residual risk.
 
