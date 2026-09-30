@@ -102,6 +102,25 @@ describe('gate strictness: warn', () => {
     });
   });
 
+  it('never prints a bare `exit code:` line it is not exiting with (F11)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ '.gateforge.yml': configWithMode('warn') });
+      const result = await runCli(repo, ['check']);
+      expect(result.code).toBe(0);
+      // The process exits 0, so a report line reading `exit code: 1`
+      // contradicts it. The softened value is named as what it is.
+      expect(result.stdout).not.toMatch(/^exit code: \d+$/m);
+      expect(result.stdout).toContain('would exit 1 in blocking mode');
+      // Strict mode still prints the real exit code, unchanged.
+      repo.writeFiles({ '.gateforge.yml': configWithMode('strict') });
+      const strict = await runCli(repo, ['check']);
+      expect(strict.code).toBe(1);
+      expect(strict.stdout).toMatch(/^exit code: 1$/m);
+      expect(strict.stdout).not.toContain('would exit 1 in blocking mode');
+    });
+  });
+
   it('stays clean — and reports no would-block — when the debt is forgiven', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

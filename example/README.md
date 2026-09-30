@@ -29,6 +29,10 @@ gateforge run: 0 obligation(s) — 0 satisfied, 0 waived, 0 blocking
 exit code: 0
 ```
 
+`exit code:` is the code the process exits with. When a non-blocking mode
+(`mode: warn` or `mode: changed`) softens a blocking result, the report says
+`would exit 1 in blocking mode` instead — the same fact, named as what it is.
+
 One non-blocking test-map advisory remains for the standalone UI journey; this in-memory app has no persistence adapter for that persistence claim. Navigation is:
 
 ```text
