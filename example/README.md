@@ -53,31 +53,36 @@ exit code: 1
 
 The witnessed project is the sub-directory `behavior/` — it carries its own
 `.gateforge.yml`, adapters, behavior policy, test map and Playwright config, and a
-run started at the root does not see it. Run it from there (the verifier key is
-required and must live outside the repository, as in the quickstart's step 6):
+run started at the root does not see it. It declares every route the app exposes
+in `.gateforge/behavior.yml` (mutating routes as `http:effect-verified` cases, read
+routes as `http:read-result-verified` cases), so an undeclared route would block
+with `ENDPOINT_BEHAVIOR_MISSING` instead of hiding.
+
+One command runs the whole witnessed proof on a fresh copy:
 
 ```sh
 $ cd behavior
-$ gateforge tests discover
-test catalog: discovered=3 unresolved=0 parseErrors=0 inventoryComplete=true
-
-$ gateforge tests suggest
-suggest: 3 obligation(s) considered (3 in all scope), 0 mapping problem(s), 0 suggestion(s)
-
-$ gateforge test-gates --changed
+$ npm install
+$ npm run gate
 ```
 
-`test-gates` supervises the three committed `evidence.prove` cases through the
-loopback witness and a real Chromium. Honest status of this repository today: in a
-fresh copy of `example/behavior/` the run does not seal a receipt — it exits 1, and
-every failing test prints its own next line, for example
+`npm run gate` (`scripts/gate.mjs`) does what a supervised run needs around it:
 
-```text
-instance 'playwright:chromium:e2e/behavior-proof.spec.js:admin editor updates an account' failed on attempt 1 — the whole run fails. Run `gateforge explain playwright:chromium:e2e/behavior-proof.spec.js:admin editor updates an account`. [TEST_FAILED]
-```
+1. picks a free loopback port and starts the app on it (a supervised
+   `test-gates` run never loads the Playwright config, so its `webServer` never
+   starts the app);
+2. creates a verifier key ring in the OS temp directory, outside the repository
+   (mode 0600, never printed), and removes it at the end;
+3. sets `GATEFORGE_APP_BASE_URL`, `GATEFORGE_TARGET_BASE_URL`,
+   `GATEFORGE_TARGET_FINGERPRINT`, `GATEFORGE_FIXTURE_PROVIDER` and
+   `GATEFORGE_WITNESS_VERIFIER_KEY_FILE` for the three commands it runs:
+   `gateforge tests discover`, `gateforge test-gates --changed` and
+   `gateforge check --require-e2e`;
+4. stops the app and exits with the `check --require-e2e` status.
 
-Run the `gateforge explain <test>` line it prints before re-running. This example is
-a verification fixture, not a green reference run.
+A green run seals a receipt and ends with `check --require-e2e` exiting 0. To
+run the same steps by hand, start `node server.js --port <port>` first and set the
+five variables above yourself.
 
 ## Run
 
