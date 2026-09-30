@@ -44,12 +44,52 @@ export const PolicySchema = z
 /** Inferred single-policy shape. */
 export type Policy = z.infer<typeof PolicySchema>;
 
+/**
+ * Document-level policy options (plan Phase 4c, E60). Additive and
+ * opt-in: a document with no `options` section is byte-for-byte and
+ * behavior-for-behavior today's document.
+ */
+export const PolicyFileOptionsSchema = z
+  .object({
+    /**
+     * Which `http.endpoint` resources owe the observation contracts
+ * (`http:request-observed` / `http:response-status-ok`) demanded by a
+     * `consumed: true` policy:
+     * - `consumed` (default, today's behavior): only endpoints the
+     *   frontend statically consumes. A route no UI calls owes nothing,
+     *   so a new untested route is invisible to the gate.
+     * - `all`: EVERY discovered endpoint owes them, so a new route with
+     *   no test blocks (`TEST_MAPPING_MISSING`) until it is mapped or
+     *   the baseline is adopted. Existing debt is handled by the
+     *   adopted baseline, so this makes NEW routes visible without
+     *   re-litigating old ones.
+     *
+     * The key lives in `.gateforge/policies.yml`, the pinned trusted
+     * policy document: widening (or narrowing) the observation scope
+     * is an owner-approved policy revision, never an agent-editable
+     * toggle. The value only ever changes WHICH endpoint resources a
+     * declared policy selects — it never adds a contract, a cause code
+     * or an exit code.
+     */
+    'http.endpoint.requireObservation': z.enum(['consumed', 'all']).default('consumed'),
+  })
+  .strict();
+
+/** Inferred policy-options shape. */
+export type PolicyFileOptions = z.infer<typeof PolicyFileOptionsSchema>;
+
 /** The policies document loaded from the path in `.gateforge.yml`. */
 export const PolicyFileSchema = z
   .object({
     schemaVersion: SchemaVersionField,
     /** Policy list, evaluated in order. */
     policies: z.array(PolicySchema).min(1),
+    /**
+     * Document-level options (plan Phase 4c, E60). ABSENT = every
+     * option at its default, so a document without the section behaves
+     * exactly as it did before the option existed.
+     */
+    options: PolicyFileOptionsSchema.optional(),
   })
   .strict();
 

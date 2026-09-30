@@ -109,6 +109,13 @@ export interface PipelineResult {
   /** The raw classifier result (decisions with traces, stale/invalid signals). */
   classification: ClassificationResult;
   /**
+   * The effective `http.endpoint.requireObservation` option from the
+   * pinned policies document (plan Phase 4c, E60): which endpoint
+   * resources owe the observation contracts. Navigation surfaces read
+   * it to explain an obligation the option itself created.
+   */
+  observationScope: 'consumed' | 'all';
+  /**
    * The effective-classification view (plan phase 5): every resolved
    * resource's classification keyed by plane-qualified id. Derived
    * artifact — the engine recomputes it from signals on every run and
@@ -593,6 +600,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     endpointInventory,
     graph,
     policy,
+    observationScope: policiesParsed.data.options?.['http.endpoint.requireObservation'] ?? 'consumed',
     manifest,
     now,
     changedFiles,
