@@ -408,9 +408,10 @@ export function resolveHttpRoute(
 /**
  * Positional match of a concrete observed path against a compiled
  * canonical shape (ADR 0004 D2/D3 semantics): literal segments must be
- * equal, `{}` matches any single non-empty segment, and a TRAILING `{*}`
- * matches one or more trailing segments. Non-trailing wildcards and any
- * other shape never match. Case-sensitive.
+ * equal, a parameter slot (`{}`, `:name`, or `{name}`) matches any
+ * single non-empty segment, and a TRAILING `{*}` matches one or more
+ * trailing segments. Non-trailing wildcards and any other shape never
+ * match. Case-sensitive.
  *
  * Args:
  *   observedPath: the concrete observed path (query already stripped).
@@ -436,9 +437,19 @@ export function pathMatchesShape(observedPath: string, canonicalPath: string): b
   const literalPositions = wildcardIndex === -1 ? shape.length : wildcardIndex;
   for (let i = 0; i < literalPositions; i++) {
     const pattern = shape[i];
-    // `{}` matches any single (non-empty — empties were dropped)
-    // segment; anything else must be literally equal. Case-sensitive.
-    if (pattern !== '{}' && pattern !== observed[i]) return false;
+    if (pattern === undefined) continue;
+    // A parameter slot matches any single (non-empty — empties were
+    // dropped) segment; anything else must be literally equal.
+    // Case-sensitive. A host declares its routes with NAMED parameters
+    // (Express `:id`, FastAPI/Next `{id}`) and the host detector keeps
+    // that framework spelling on the route fact, so all three spellings
+    // denote the same positional slot — a route whose id segment never
+    // resolves could never be proven, a silent failure rather than a
+    // fail-closed one. `{*}` is the trailing wildcard and never
+    // reaches this loop.
+    const isSlot =
+      pattern === '{}' || /^:[^/]+$/.test(pattern) || /^\{[^/{}]+\}$/.test(pattern);
+    if (!isSlot && pattern !== observed[i]) return false;
   }
   return true;
 }

@@ -30,6 +30,7 @@
 ### Fixed
 
 - `--scope changed` in a merge-request CI pipeline with no base commit no longer falls back to the local staged diff (zero changed files, and a failure an hour later on debt nobody changed). `test-gates --scope changed` and `check --changed` refuse in seconds with exit 2 and the fix; an explicitly configured provider, a pipeline that is not a merge request, a present base commit, and every local run are unchanged.
+- Route attribution in the behavior grader no longer fails on a host's own parameter spelling. The compiled route inventory carries each endpoint's path in the framework's grammar (Express `:id`, FastAPI/Next `{id}`), but the grader's positional matcher only understood the engine's own `{}` slot, so a witnessed `POST /admin/accounts/acc-3` never resolved against the declared `POST /admin/accounts/:id` and every effect proof for such a route came back `invalid` with `BEHAVIOR_BINDING_MISMATCH` — a silently unprovable route, not a fail-closed one. `pathMatchesShape` now treats `{}`, `:name` and `{name}` as the same single-segment slot (still positional, still case-sensitive, never zero or many segments, `{*}` still trailing-only), which is the same normalization the witness-side route registration already performed. Literal, wildcard and ambiguity behavior is unchanged.
 
 ### Fixed
 
