@@ -894,7 +894,10 @@ Link the pair in one of two ways, both read only when `twinPaths` is set:
 - the test map, when the link should survive a rename of either test —
   `twinOf: <the raw twin's logical key>` on the witnessed test's entry
   in `.gateforge/test-map.yml`;
-- the title convention: `X [witnessed]` next to `X raw` (or a bare `X`).
+- the title convention: `X [witnessed]` next to `X raw`, else next to the one
+  `X raw: <description>` (so `UC-7 [witnessed]: …` pairs with `UC-7 raw: …`),
+  else next to a bare `X`. Two described raw tests under one label link
+  nothing: name the pair with `twinOf`.
 
 ```bash
 # A run with the pair linked reports the divergence and keeps its verdict:
