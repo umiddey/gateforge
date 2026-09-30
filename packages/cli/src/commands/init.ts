@@ -894,15 +894,24 @@ async function proposePlanesConfig(cwd: string, io: Io): Promise<void> {
       `note: ${inference.skippedTestTables} table(s) under test directories were excluded from plane inference (fixtures are not business surface)`,
     );
   }
-  if (inference.config === null) {
-    writeLine(io.stdout, `tip: ${inference.note ?? 'nothing to propose'}`);
-    return;
-  }
-  const serialized = `${JSON.stringify(inference.config, null, 2)}\n`;
+  // A reviewed file with zero rules is a real answer, not a failure:
+  // it declares no plane, which is exactly what the classifier already
+  // assumes while the file is absent. Writing it anyway is what makes
+  // `gateforge init --planes` the runnable prerequisite the
+  // `gateforge next` guidance prints for an unresolved route.
+  const serialized = `${JSON.stringify(inference.config ?? { rules: [] }, null, 2)}\n`;
   // Self-check the draft against the runtime's strict reader contract
   // BEFORE writing (a broken proposal must fail here, not at the next run).
   parsePlanesConfigText(serialized, planesPath);
   writeFileSync(planesPath, serialized, 'utf8');
+  if (inference.config === null) {
+    writeLine(
+      io.stdout,
+      `created: ${planesPath} (no rule could be inferred — ${inference.note ?? 'nothing to propose'}; ` +
+        'the file declares no plane, so every table still blocks until you add a reviewed rule)',
+    );
+    return;
+  }
   writeLine(
     io.stdout,
     `created: ${planesPath} (${inference.config.rules.length} rule(s) inferred from model directories — review the reasons before the next gateforge run)`,
@@ -1337,7 +1346,14 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   //       discovered tables live in — a review artifact with a reason on
   //       every rule, written only when absent, never silently applied
   //       (the next run reads it and the user reviews first).
-  if (languages.includes('python')) {
+  //
+  // An EXPLICIT `--planes` is always honored: it is the runnable
+  // prerequisite the `gateforge next` guidance prints for an unresolved
+  // route, and a language gate would make that printed command a no-op
+  // on exactly the repositories that need it. The proposal itself is
+  // conservative — no discovered table means no inferred rule.
+  const planesRequested = options['planes'] === true;
+  if (planesRequested || languages.includes('python')) {
     if (await resolvePlanes(io, options)) {
       await proposePlanesConfig(cwd, io);
     }

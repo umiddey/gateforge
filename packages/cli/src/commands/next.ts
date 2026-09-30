@@ -199,6 +199,11 @@ function shellQuote(value: string): string {
 /**
  * Builds owner-directed advice for an endpoint with no resolved plane.
  *
+ * Every printed command runs exactly as printed: the prerequisite that
+ * creates the owner-reviewed planes file is printed FIRST, because the
+ * plane command below it exits 2 without that file — the omission this
+ * guidance used to have.
+ *
  * Args:
  *   routeName: canonical method and path shown to the user.
  *   resourceName: detector identity used by the owner-only policy edit.
@@ -220,7 +225,10 @@ function unresolvedRouteGuidance(
   return [
     `question: ${routeName} — is this route used by real users, and which data plane owns its records?`,
     'This edits a classification input; re-approve any approved policy pin before strict gates run.',
-    'Choose only the command for the boundary confirmed by the owner:',
+    "The plane command below needs the owner-reviewed '.gateforge/planes.json' first — run this once to create it:",
+    'gateforge init --planes',
+    '[CODE]',
+    'Then choose only the command for the boundary confirmed by the owner:',
     ...commands.flatMap((command) => [command, '[CODE]']),
     'Owner-only alternative: only if this route is genuinely internal, edit `.gateforge/classification-policy.yml` under `internalRules`:',
     '  - match:',
