@@ -224,9 +224,22 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
       globMatch(source, rule.match) &&
       !(rule.exclude ?? []).some((excluded) => globMatch(source, excluded)),
   );
-  if (overlapping.some((rule) => rule.plane !== planeValue)) {
+  const conflicting = overlapping.filter((rule) => rule.plane !== planeValue);
+  if (conflicting.length > 0) {
+    // The refusal must be answerable from its own output: it used to name
+    // the FILE to edit but not the rule inside it, so the owner had to go
+    // hunting through the document to undo a wrong answer — and this
+    // command is the only way the product ever suggests that answer, so
+    // there was no other way back from it.
     throw new UsageError(
-      `classify plane will not add a conflicting rule for '${source}'; edit the existing owner-reviewed rule in '${PLANES_CONFIG_PATH}'`,
+      `classify plane will not add a conflicting rule for '${source}'; edit the existing owner-reviewed rule in '${PLANES_CONFIG_PATH}':\n` +
+        conflicting
+          .map(
+            (rule) =>
+              `  rule with match '${rule.match}' has plane '${rule.plane}'; change its \`plane\` key to '${planeValue}'` +
+              ` (and its \`reason\` to your own words) to classify '${source}'`,
+          )
+          .join('\n'),
     );
   }
   if (overlapping.length > 0) {

@@ -92,6 +92,34 @@ describe('automatic classification commands', () => {
       });
     });
   });
+
+  it('names the conflicting rule and the key to change when it refuses', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const existing = { match: 'src/**', plane: 'tenant', reason: 'Owner-reviewed tenant data.' };
+      repo.writeFiles({ '.gateforge/planes.json': JSON.stringify({ rules: [existing] }) });
+      const result = await runCli(repo, [
+        'classify',
+        'plane',
+        'src/new-route.js',
+        'master',
+        '--reason',
+        'Owner-reviewed operator data.',
+        '--confirm',
+      ]);
+      expect(result.code).toBe(2);
+      // The refusal named the FILE but not the rule, so the owner had to
+      // go hunting through the document to undo a wrong answer the
+      // product itself offered no way back from.
+      expect(result.stderr).toContain("match 'src/**'");
+      expect(result.stderr).toContain('`plane`');
+      expect(result.stderr).toContain('master');
+      // Nothing is written and the exit code is unchanged.
+      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
+        rules: [existing],
+      });
+    });
+  });
   it('explain exposes the decision trace and generated obligation', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

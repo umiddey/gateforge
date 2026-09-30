@@ -767,3 +767,51 @@ describe('gateforge next: copy-pasteable output and honest prerequisites', () =>
     });
   });
 });
+
+/**
+ * A resource the classifier blocked DEFINITIONALLY (no effective
+ * classification) used to print exactly three lines, the last of which
+ * was `do: gateforge classify --json` — a read-only dump that writes
+ * nothing, so the documented loop (run the printed command, run `next`
+ * again) printed the identical block forever. The block also named no
+ * cause: `gateforge explain` shows the real ones.
+ *
+ * Reproduced on the FastAPI full-stack template: the health probe
+ * (`http-get-utils-health-check-…`, no plane) and the model resource
+ * (`tenant.item`, `ADAPTER_MISSING` + `DELETE_SEMANTICS_UNRESOLVED`).
+ */
+const DEFINITIONALLY_BLOCKED_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
+  `        signal('delete-semantics', 'hard');\n        signal('adapter-binding', name);`,
+  `        signal('lifecycle.delete', true);`,
+);
+
+describe('gateforge next: a definitionally blocked resource names its causes', () => {
+  it('names each block and the command that clears it, never the read-only dump', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ 'plugin.mjs': DEFINITIONALLY_BLOCKED_PLUGIN_SOURCE });
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      expect(stdout).toContain('has no effective classification');
+      // The block that actually holds this resource is named, not a dump.
+      expect(stdout).toContain('[DELETE_SEMANTICS_UNRESOLVED]');
+      expect(stdout).toContain('endpoints.json');
+      expect(stdout).not.toContain('do: gateforge classify --json');
+    });
+  });
+
+  it('prints an id `gateforge explain` accepts', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ 'plugin.mjs': DEFINITIONALLY_BLOCKED_PLUGIN_SOURCE });
+      const { stdout } = await runCli(repo, ['next']);
+      const id = /^next: (\S+)$/mu.exec(stdout)?.[1] ?? '';
+      expect(id).not.toBe('');
+      // The printed id resolves: `explain` finds the resource and shows
+      // the same blocks the block names.
+      const explained = await runCli(repo, ['explain', id]);
+      expect(explained.stdout + explained.stderr).not.toContain('no discovered resource matches');
+      expect(explained.stdout).toContain('[DELETE_SEMANTICS_UNRESOLVED]');
+    });
+  });
+});
