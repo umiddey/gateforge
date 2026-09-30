@@ -256,6 +256,14 @@ export interface RenderRunOptions {
   toolVersion?: string;
   /** Engine installation identity shown in the report. */
   engine?: EngineMetadata;
+  /**
+   * The engine line the TEXT report prints, when the caller can prove
+   * more than the receipt-bound `engine.source` carries (a tarball or
+   * directory install reads `registry` there, because a receipt is only
+   * valid for the engine that sealed it). Additive and text-only: the
+   * json and SARIF documents keep `engine` verbatim.
+   */
+  engineLine?: string;
   /** Marks non-authoritative selected-run output without changing exit codes. */
   outcome?: 'partial-selection';
   /**
@@ -672,7 +680,9 @@ function textReport(
     `gateforge run: ${entries.length} obligation(s) — ` +
       `${counts.satisfied} satisfied, ${counts.waived} waived, ${blockingCount} blocking`,
   );
-  if (options.engine !== undefined) {
+  if (options.engineLine !== undefined) {
+    lines.push(options.engineLine);
+  } else if (options.engine !== undefined) {
     lines.push(`engine: ${options.engine.version} from ${options.engine.source}`);
     if (options.engine.unpublished) lines.push('unpublished engine: CI will not have this code');
   }

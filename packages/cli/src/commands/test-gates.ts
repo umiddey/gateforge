@@ -225,7 +225,7 @@ import { computeEvaluationScope } from '../scope.js';
 import { candidateTreeCoversCommit, computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
 import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
-import { engineIdentity } from '../engine-identity.js';
+import { engineIdentity, reportEngineLine } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import {
   clearGateReceipt,
@@ -808,6 +808,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
     run: manifest,
     toolVersion: VERSION,
     engine: engineIdentity(),
+    engineLine: reportEngineLine(),
     lifecycleDerivation: pipeline.lifecycleDerivation,
     diagnosticContext,
   });
@@ -822,6 +823,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
       run: manifest,
       toolVersion: VERSION,
       engine: engineIdentity(),
+      engineLine: reportEngineLine(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext,
     }),
@@ -3082,6 +3084,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       run: { ...pipeline.manifest, invocationId, inputDigest: expectedDigest ?? undefined },
       toolVersion: VERSION,
       engine: engineIdentity(),
+      engineLine: reportEngineLine(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext: {
         scope: namedTestIds !== null ? ('named' as const) : (options.scope ?? 'full'),
@@ -3350,6 +3353,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       run: { ...pipeline.manifest, invocationId, inputDigest: expectedDigest ?? undefined },
       toolVersion: VERSION,
       engine: engineIdentity(),
+      engineLine: reportEngineLine(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext: {
         scope: namedTestIds !== null ? ('named' as const) : (options.scope ?? 'full'),
@@ -4517,6 +4521,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     run: manifest,
     toolVersion: VERSION,
     engine: engineIdentity(),
+    engineLine: reportEngineLine(),
     lifecycleDerivation: pipeline.lifecycleDerivation,
     execution: executionSummary,
     diagnosticContext,

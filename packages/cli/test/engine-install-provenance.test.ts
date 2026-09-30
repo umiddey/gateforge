@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ObligationSchema, renderRun, type ObligationVerdict } from '@gate-forge/core';
 import { engineInstallProvenance, engineSourceLine } from '../src/engine-identity.js';
 
 /** Temp dirs to remove after each test. */
@@ -151,5 +152,53 @@ describe('doctor engine line (provenance it can prove)', () => {
         { kind: 'local-path', specifier: null },
       ),
     ).toBe('engine: 0.7.1 from local path /work/gateforge');
+  });
+});
+
+describe('the run report prints the provenance the doctor prints', () => {
+  /** One satisfied verdict, so the text report reaches its engine line. */
+  const entry: ObligationVerdict = {
+    obligation: ObligationSchema.parse({
+      schemaVersion: 1,
+      id: 'tenant.accounts:persistence:read',
+      resourceId: 'tenant.accounts',
+      contract: 'persistence:read',
+      policyId: 'user-facing-crud',
+      lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'hard' },
+    }),
+    verdict: 'satisfied',
+    reason: null,
+    recordIds: ['a'.repeat(64)],
+    trustTier: 'witnessed',
+  };
+
+  it('names the tarball install in the text line while the json document keeps the receipt-bound source', () => {
+    const tarballLine = engineSourceLine(
+      { version: '0.7.1', source: 'registry', unpublished: false },
+      { kind: 'file', specifier: 'file:vendor/gate-forge-cli-0.7.1.tgz' },
+    );
+    expect(tarballLine).toContain('tarball or directory install');
+    const text = renderRun([entry], {
+      format: 'text',
+      engine: { version: '0.7.1', source: 'registry', unpublished: false },
+      engineLine: tarballLine,
+    });
+    expect(text).toContain(tarballLine);
+    // The receipt-bound source is frozen: a receipt is only valid for
+    // the engine that sealed it, so the JSON document still says
+    // `registry` and the tarball never appears in it.
+    const json = JSON.parse(
+      renderRun([entry], {
+        format: 'json',
+        engine: { version: '0.7.1', source: 'registry', unpublished: false },
+        engineLine: tarballLine,
+      }),
+    ) as { engine: { version: string; source: string } };
+    expect(json.engine.source).toBe('registry');
+    expect(renderRun([entry], {
+      format: 'json',
+      engine: { version: '0.7.1', source: 'registry', unpublished: false },
+      engineLine: tarballLine,
+    })).not.toContain('tarball');
   });
 });
