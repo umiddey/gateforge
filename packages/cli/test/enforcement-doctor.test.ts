@@ -333,7 +333,17 @@ describe('enforcement doctor (determinism + text surface)', () => {
       installFixture(repo);
       const first = await runCli(repo, ['enforcement', 'doctor', '--json']);
       const second = await runCli(repo, ['enforcement', 'doctor', '--json']);
-      expect(first.stdout).toBe(second.stdout);
+      // The host-load advisory reports the machine's live load average and
+      // free disk, which move between two runs; every other byte is a
+      // function of the repository and must not move.
+      const withoutLiveHostFacts = (stdout: string): string =>
+        JSON.stringify(JSON.parse(stdout), (_key, value: unknown) =>
+          typeof value === 'object' && value !== null && (value as { id?: unknown }).id === 'host-load'
+            ? { id: 'host-load', live: true }
+            : value,
+        );
+      expect(withoutLiveHostFacts(first.stdout)).toContain('"id":"host-load","live":true');
+      expect(withoutLiveHostFacts(first.stdout)).toBe(withoutLiveHostFacts(second.stdout));
       const text = await runCli(repo, ['enforcement', 'doctor']);
       expect(text.code).toBe(0);
       expect(text.stdout).toContain('gateforge enforcement doctor');
