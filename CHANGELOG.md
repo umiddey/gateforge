@@ -19,6 +19,7 @@
 ### Changed
 
 - A named or changed-scope run's in-runner reporter no longer prints a repository verdict it cannot own: it says `GATEFORGE GATE: SELECTION (N satisfied, 0 blocking; repository verdict not graded here)` instead of `NOT PASSED` over debt the run never observed, which contradicted the CLI exit code printed seconds later. A selection whose own claim is unsatisfied still prints `FAIL`; a whole-repository run is unchanged.
+- `tests discover` never narrows several Playwright configs silently: when a repo holds more than one, the runner line now names every config it found, the one enumeration ran, why that one, and the ones NOT inventoried (their test cases are missing from the catalog). The chosen config, the invocation and every field are unchanged.
 - Reports gained additive fields only, and only when they apply: `strictness` (non-strict modes) and `quarantine` (non-empty population). SARIF output stays machine-parseable JSON.
 
 ### Fixed
