@@ -19,8 +19,9 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync, type Dirent } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { policyWeakenedCandidate, type GateforgeConfig } from '@gate-forge/core';
+import { findPlaywrightConfig } from '@gate-forge/pack-playwright';
 import { loadConfigAt } from './commands/common.js';
 import { trustedPolicyDigestForConfig } from './execution.js';
 import { resolveVerifierKeyring } from './verifier-keys.js';
@@ -244,6 +245,42 @@ function approvedPolicyCheck(cwd: string, config: GateforgeConfig, env: NodeJS.P
 }
 
 /**
+ * Finds the installed runner package where the supervised run resolves
+ * it: for Playwright, from the directory of the config enumeration runs
+ * (a sub-project like `e2e/` owns its own install), then from the
+ * repository root; each start walks up like Node resolution.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   runner: the configured runner.
+ *   packageNames: package names to accept, in preference order.
+ *
+ * Returns:
+ *   string | null: the absolute path of the first `package.json` found.
+ */
+export function findRunnerManifest(cwd: string, runner: string, packageNames: readonly string[]): string | null {
+  const starts: string[] = [];
+  if (runner === 'playwright') {
+    const playwrightConfig = findPlaywrightConfig(cwd);
+    if (playwrightConfig !== null) starts.push(dirname(join(cwd, playwrightConfig)));
+  }
+  starts.push(resolve(cwd));
+  for (const start of starts) {
+    let cursor = start;
+    for (let depth = 0; depth < 6; depth += 1) {
+      for (const packageName of packageNames) {
+        const candidate = join(cursor, 'node_modules', packageName, 'package.json');
+        if (existsSync(candidate)) return candidate;
+      }
+      const parent = resolve(cursor, '..');
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+  }
+  return null;
+}
+
+/**
  * Reports whether the configured runner's BINARY resolves and reports a
  * version. The enforcement doctor's `runner` line answers a different
  * question (is the runner configured and installed); this one answers
@@ -291,15 +328,13 @@ function runnerCheck(cwd: string, config: GateforgeConfig, env: NodeJS.ProcessEn
       detail: `pytest suite(s) ${suites.map((suite) => suite.name).join(', ')} resolve and run: ${versions.join('; ')}`,
     };
   }
-  const packageName = config.runner;
-  let cursor = resolve(cwd);
-  let manifest: string | null = null;
-  for (let depth = 0; depth < 6 && manifest === null; depth += 1) {
-    const candidate = join(cursor, 'node_modules', packageName, 'package.json');
-    if (existsSync(candidate)) manifest = candidate;
-    else cursor = join(cursor, '..');
-  }
+  const manifest = findRunnerManifest(
+    cwd,
+    config.runner,
+    config.runner === 'playwright' ? ['@playwright/test', 'playwright'] : [config.runner],
+  );
   if (manifest === null) {
+    const packageName = config.runner;
     return {
       id: 'runner',
       status: 'fail',
