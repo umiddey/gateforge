@@ -66,7 +66,7 @@ export interface ChaosScheduleEntry {
 }
 
 /** The largest accepted `maxDelayMs` (a chaos run is a finding tool). */
-const MAX_DELAY_CEILING_MS = 5_000;
+export const MAX_DELAY_CEILING_MS = 5_000;
 
 /** The documented default bound when the owner configures none. */
 const DEFAULT_MAX_DELAY_MS = 400;

@@ -860,6 +860,39 @@ Two rules keep it safe to run at any time:
   refused with exit 2 and one plain line, before a witness or a browser
   is started.
 
+### When your repository starts the witness itself
+
+A repository whose own script starts the witness and hands
+`test-gates --witness-url` the origin needs **nothing on the witness
+side**: the run hands the whole plan to the witness with the run
+context, before the first test opens a session.
+
+```bash
+# 1. The repository's own script starts a plain witness, as always.
+./scripts/start-witness.sh &            # prints the origin and the run token
+
+# 2. The run names the seed; the witness is never reconfigured.
+gateforge test-gates --test 'specs/tabs.spec.js#tab B rows win' \
+  --result-only --chaos 4 \
+  --witness-url "$WITNESS_URL" --run-token "$RUN_TOKEN" --out "$RUN_STATE"
+```
+
+The bounds are still yours, in `run.chaos` under `.gateforge.yml` — the
+same two keys, the same defaults, the same ceiling. What changed is
+only who applies them: a witness `test-gates` starts gets them in its
+environment, and one you start gets them in the binding. Either way the
+report labels the plan that actually ran.
+
+Two rules keep it honest, and both cost seconds rather than a suite:
+
+- A **normal** run against a witness that was itself started with
+  `GATEFORGE_CHAOS_SEED` is refused before any test runs (exit 2, one
+  line, naming the variable to unset). A witness that perturbs timing
+  can never serve a run that seals.
+- A witness too old to accept run options is refused for `--chaos` (it
+  would apply no schedule while reporting as if it had) and says one
+  plain line for twin coverage. Neither failure is ever silent.
+
 Keep a race-free twin next to the racy test — the same requests against
 a page that renders by request id. It must stay green under the same
 seed; when it does not, the timing is not the finding.
@@ -923,6 +956,23 @@ Four rules keep it honest:
   title path), never by a runner-assigned test id, because a supervised
   run drives its own trusted config and the ids it runs tests under are
   not the ids the repository's config enumerates.
+
+- **Your own witness needs no twin environment.** When the repository
+  starts the witness itself and passes `--witness-url`, the run hands it
+  the allowlist and the route inventory with the run context, so the
+  pair is compared with nothing configured on the witness side:
+
+  ```bash
+  ./scripts/start-witness.sh &
+  gateforge test-gates --changed --format json \
+    --witness-url "$WITNESS_URL" --run-token "$RUN_TOKEN" --out "$RUN_STATE"
+  ```
+
+  A witness too old to accept run options cannot record shapes, and the
+  run says so in one line (`twin path coverage needs a witness that
+  accepts run options — this witness does not; pairs were not
+  compared`) instead of reporting twins that agree because nobody
+  looked.
 
 ## Reusable run script
 

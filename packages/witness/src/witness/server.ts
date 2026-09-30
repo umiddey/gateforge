@@ -247,6 +247,12 @@ import type {
 } from './types.js';
 import { ChaosScheduler, chaosRouteKey, type ChaosOptions, type ChaosScheduleEntry } from './chaos.js';
 import { recordTwinShape, type TwinShapePlan } from './twin-shapes.js';
+import {
+  assertNoStartedConflict,
+  parseRunOptions,
+  type AppliedRunOptions,
+  type RunOptions,
+} from './run-options.js';
 import type { FixtureLease } from './fixture-provider.js';
 import { validateScopeSnapshot } from './behavior.js';
 import { BEHAVIOR_BODY_LIMIT_BYTES, BehaviorDriverError, driveBehaviorRequest } from './behavior-request.js';
@@ -678,7 +684,22 @@ async function startObservedProxy(
   // schedule are its own, so two tests in one run can never shift each
   // other's timing. `chaosSession` is the supervisor-issued test id
   // (stable across replays), never the random session uuid.
-  const chaos = state.chaos === null ? null : new ChaosScheduler(state.chaos.options, chaosSession);
+  //
+  // Built on FIRST USE, not at proxy creation: the shared proxy is
+  // created at start-up, before the run context (and with it the run
+  // options) is bound, and a bound plan must still take effect. Keyed
+  // by the live plan, so a witness re-planned mid-run rebuilds rather
+  // than serving a stale schedule.
+  let chaos: ChaosScheduler | null = null;
+  let chaosPlan: ChaosOptions | null = null;
+  const chaosFor = (): ChaosScheduler | null => {
+    if (state.chaos === null) return null;
+    if (chaos === null || chaosPlan !== state.chaos.options) {
+      chaos = new ChaosScheduler(state.chaos.options, chaosSession);
+      chaosPlan = state.chaos.options;
+    }
+    return chaos;
+  };
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -698,6 +719,7 @@ async function startObservedProxy(
       // Timing chaos (E63): the release slot is reserved at ARRIVAL, so
       // the per-route key `k` counts requests in the order the suite
       // made them - never in the order responses happened to complete.
+      const chaos = chaosFor();
       const chaosSlot =
         chaos === null ? null : chaos.reserve(chaosRouteKey(req.method ?? 'GET', forwardUrl), Date.now());
       let chaosHeld = chaosSlot !== null && chaosSlot.releaseAt <= Date.now();
@@ -5479,7 +5501,7 @@ async function handleRunContext(
       existing.invocationId === invocationId &&
       existing.inputDigest === inputDigest
     ) {
-      sendJson(res, 200, { bound: true, ...existing });
+      sendJson(res, 200, { bound: true, ...existing, applied: appliedOptionsOf(state) });
       return;
     }
     sendJson(res, 409, {
@@ -5506,9 +5528,47 @@ async function handleRunContext(
     });
     return;
   }
+  // The run OPTIONS travel with the context: the same supervisor-
+  // authenticated, before-any-observation moment that already fixes
+  // which run this evidence belongs to also fixes what this run
+  // perturbs and records. A witness STARTED with the same feature must
+  // agree on the plan, or the binding is refused rather than silently
+  // resolved — a run whose timing nobody can name is not a finding.
+  let boundOptions: RunOptions;
+  try {
+    boundOptions = parseRunOptions(record['options']);
+    assertNoStartedConflict(appliedOptionsOf(state), boundOptions);
+  } catch (error) {
+    sendJson(res, 409, { error: (error as Error).message });
+    return;
+  }
+  if (boundOptions.chaos !== undefined && state.chaos === null) {
+    state.chaos = { options: boundOptions.chaos, entries: [] };
+  }
+  if (boundOptions.twinShapes !== undefined && state.twinShapes === null) {
+    state.twinShapes = boundOptions.twinShapes;
+  }
   state.runContext = { runId, invocationId, inputDigest };
   state.observedSeqAtBind = state.observedSeq;
-  sendJson(res, 200, { bound: true, runId, invocationId, inputDigest });
+  sendJson(res, 200, { bound: true, runId, invocationId, inputDigest, applied: appliedOptionsOf(state) });
+}
+
+/**
+ * The run options a witness is currently applying: the plan it booted
+ * with, or the one a binding handed it. Read from LIVE state, so the
+ * echo answers what the proxy will actually do.
+ *
+ * Args:
+ *   state: running witness state.
+ *
+ * Returns:
+ *   AppliedRunOptions: the effective plans (null = the feature is off).
+ */
+function appliedOptionsOf(state: WitnessState): AppliedRunOptions {
+  return {
+    chaos: state.chaos === null ? null : state.chaos.options,
+    twinShapes: state.twinShapes,
+  };
 }
 
 /**
