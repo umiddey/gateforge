@@ -33,14 +33,49 @@ const MAX_SCAN_BYTES = 1024 * 1024;
  * Languages are a subset of `python` / `javascript` / `typescript`
  * (`python` when the repo is empty or yields no signal). Signals name
  * the bundled-detector evidence found: `sqlalchemy`, `fastapi`,
- * `playwright`, `vitest`, `cypress`, `pytest`, `http-clients`.
+ * `playwright`, `vitest`, `cypress`, `pytest`, `http-clients`. Each
+ * signal carries the file evidence it was read from in `reasons`.
  */
 export interface RepoScan {
   /** Detected languages, deterministically ordered. */
   languages: string[];
   /** Detected signals, deterministically ordered. */
   signals: string[];
+  /**
+   * The concrete evidence behind each signal, keyed by signal name: a
+   * human sentence naming what was read and the repo-relative file it
+   * was read from. Absent for a signal with no file evidence.
+   */
+  reasons?: Record<string, string>;
 }
+
+/** The signal that justifies each recommended pack, in print order. */
+const PACK_SIGNAL: Record<string, string> = {
+  'gateforge.pack-fastapi': 'fastapi',
+  'gateforge.pack-sqlalchemy': 'sqlalchemy',
+  'gateforge.pack-http': 'http-clients',
+};
+
+/**
+ * A SQLModel table model: `class Item(SQLModel, table=True)`. The
+ * canonical FastAPI-template model style, and an SQLAlchemy model the
+ * declarative-base needles below never match.
+ */
+const SQLMODEL_TABLE = /class\s+([A-Za-z_]\w*)\s*\(\s*SQLModel\b[^)]*\btable\s*=\s*True/;
+
+/**
+ * A generated API client inside a js/ts file: the generator's own
+ * banner, or an import of a generated-client runtime. Matched in file
+ * text only — a directory merely named `client` is not evidence.
+ */
+const GENERATED_CLIENT =
+  /(?:auto|code)[-\s]?generated[^\n]{0,120}?(openapi|hey-api|orval|swagger)|from\s+['"](@hey-api\/client-fetch|openapi-fetch|@orval\/[a-z-]+|@openapitools\/[a-z-]+)['"]/i;
+
+/** A shared axios instance — one client every call goes through. */
+const AXIOS_INSTANCE = /axios\s*\.\s*create\s*\(/;
+
+/** The file extensions whose text can carry a js/ts client signal. */
+const JS_OR_TS = /\.(js|jsx|mjs|cjs|ts|tsx)$/;
 
 /**
  * Scans the repository rooted at `cwd`.
@@ -59,15 +94,14 @@ export function scanRepo(cwd: string): RepoScan {
   let hasJs = false;
   let hasTs = false;
   let hasPackageJson = false;
-  let hasSqlalchemy = false;
-  let hasFastapi = false;
   let hasPlaywright = false;
   let hasVitest = false;
   let hasCypress = false;
   let hasPytestIni = false;
   let hasPytestToml = false;
   let hasPytestFile = false;
-  let hasHttpClient = false;
+  /** Signal → the concrete file evidence that justifies it. */
+  const reasons: Record<string, string> = {};
   for (const file of files) {
     const base = basename(file);
     if (file.endsWith('.py')) hasPy = true;
@@ -75,7 +109,10 @@ export function scanRepo(cwd: string): RepoScan {
     if (/\.(ts|tsx)$/.test(file)) hasTs = true;
     if (base === 'package.json') {
       hasPackageJson = true;
-      if (packageJsonHasHttpClient(join(cwd, file))) hasHttpClient = true;
+      const dependency = packageJsonHttpClient(join(cwd, file));
+      if (dependency && !reasons['http-clients']) {
+        reasons['http-clients'] = `package.json dependency '${dependency}' in ${file}`;
+      }
     }
     if (base.startsWith('playwright.config.')) hasPlaywright = true;
     if (base.startsWith('vitest.config.') || base.startsWith('vite.config.')) hasVitest = true;
@@ -91,21 +128,33 @@ export function scanRepo(cwd: string): RepoScan {
     ) {
       hasPytestFile = true;
     }
-    if (file.endsWith('.py') && !hasSqlalchemy) {
-      if (
-        fileTextContains(join(cwd, file), 'DeclarativeBase') ||
-        fileTextContains(join(cwd, file), 'declarative_base(') ||
-        fileTextContains(join(cwd, file), '__tablename__')
+    if (file.endsWith('.py') && !reasons.sqlalchemy) {
+      const text = readSmallText(join(cwd, file));
+      const sqlmodel = text === null ? null : SQLMODEL_TABLE.exec(text);
+      if (sqlmodel) {
+        reasons.sqlalchemy =
+          `SQLModel table model 'class ${sqlmodel[1]}(SQLModel, table=True)' in ${file}`;
+      } else if (
+        text !== null &&
+        (text.includes('DeclarativeBase') ||
+          text.includes('declarative_base(') ||
+          text.includes('__tablename__'))
       ) {
-        hasSqlalchemy = true;
+        reasons.sqlalchemy = `SQLAlchemy declarative model in ${file}`;
       }
     }
-    if (file.endsWith('.py') && !hasFastapi) {
-      if (
-        fileTextContains(join(cwd, file), 'from fastapi') ||
-        fileTextContains(join(cwd, file), 'import fastapi')
-      ) {
-        hasFastapi = true;
+    if (file.endsWith('.py') && !reasons.fastapi) {
+      const text = readSmallText(join(cwd, file));
+      if (text !== null && (text.includes('from fastapi') || text.includes('import fastapi'))) {
+        reasons.fastapi = `FastAPI imported ('from fastapi') in ${file}`;
+      }
+    }
+    if (JS_OR_TS.test(file) && !reasons['http-clients']) {
+      const text = readSmallText(join(cwd, file));
+      if (text !== null && GENERATED_CLIENT.test(text)) {
+        reasons['http-clients'] = `generated API client in ${file}`;
+      } else if (text !== null && AXIOS_INSTANCE.test(text)) {
+        reasons['http-clients'] = `shared axios client instance in ${file}`;
       }
     }
   }
@@ -115,14 +164,14 @@ export function scanRepo(cwd: string): RepoScan {
   if (hasTs) languages.push('typescript');
   if (languages.length === 0) languages.push('python');
   const signals: string[] = [];
-  if (hasSqlalchemy) signals.push('sqlalchemy');
-  if (hasFastapi) signals.push('fastapi');
+  if (reasons.sqlalchemy) signals.push('sqlalchemy');
+  if (reasons.fastapi) signals.push('fastapi');
   if (hasPlaywright) signals.push('playwright');
   if (hasVitest) signals.push('vitest');
   if (hasCypress) signals.push('cypress');
   if (hasPytestIni || hasPytestToml || hasPytestFile) signals.push('pytest');
-  if (hasHttpClient) signals.push('http-clients');
-  return { languages, signals };
+  if (reasons['http-clients']) signals.push('http-clients');
+  return { languages, signals, reasons };
 }
 
 /**
@@ -197,6 +246,15 @@ export function renderScanBlock(
     `  signals: ${scan.signals.length > 0 ? scan.signals.join(', ') : '(none)'}`,
     'recommended:',
     `  plugins: ${plugins.length > 0 ? [...plugins].join(', ') : '(none)'}`,
+    ...plugins.flatMap((plugin) => {
+      const signal = PACK_SIGNAL[plugin];
+      const evidence = signal === undefined ? undefined : scan.reasons?.[signal];
+      return [
+        `  why: ${plugin} — ${
+          evidence ?? `no repository signal — the ${scan.languages.join('/')} default set`
+        }`,
+      ];
+    }),
     '  policy: persistence:* on user-facing tables; transport-only HTTP on consumed endpoints',
     proof === 'observe'
       ? '  proof: observe (existing suite through the witness — no new tests)'
@@ -254,17 +312,17 @@ function fileTextContains(absolute: string, needle: string): boolean {
   return text !== null && text.includes(needle);
 }
 
-/** Whether a package.json names an HTTP framework dependency. */
-function packageJsonHasHttpClient(absolute: string): boolean {
+/** The HTTP framework dependency a package.json names, if any. */
+function packageJsonHttpClient(absolute: string): string | null {
   const text = readSmallText(absolute);
-  if (text === null) return false;
+  if (text === null) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return false;
+    return null;
   }
-  if (typeof parsed !== 'object' || parsed === null) return false;
+  if (typeof parsed !== 'object' || parsed === null) return null;
   const sections = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
   for (const section of sections) {
     const deps = (parsed as Record<string, unknown>)[section];
@@ -277,9 +335,9 @@ function packageJsonHasHttpClient(absolute: string): boolean {
         name === '@nestjs' ||
         name.startsWith('@nestjs/')
       ) {
-        return true;
+        return name;
       }
     }
   }
-  return false;
+  return null;
 }
