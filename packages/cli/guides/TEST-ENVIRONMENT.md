@@ -215,6 +215,14 @@ Under `CI=true` the default is already `stderr`; locally it is off, and a local 
 
 **Reading the numbers:** `repository debt: N known (baselined), M new blocking` names the two numbers separately, and only the gate prints them. `N` is the debt the adopted baseline forgave; `M` is what this run's exit code blocks on — a full run's whole surface, a `--changed` or `--test` run's own slice, never a subtraction that can reach zero while blockers remain. Debt outside a slice run is real and still reported, in its own words: `not graded by this changed-scope run: 96 blocking obligation(s) — this run never observed them; a full run grades them`. The in-runner reporter prints `repository debt: graded by gateforge after the run`: it grades claims only, so it has no waivers, scope or baseline to split debt with, and one run can never show two different counts.
 
+## Install the browsers YOUR Playwright pins
+
+**Rule:** Run `npx playwright install` from the directory that holds your Playwright config, for the browsers your projects name — before the first witnessed run. `gateforge enforcement doctor` reports the exact builds the runner it will launch needs; a `FAIL` there names the command and that directory.
+
+**Why:** Every Playwright release pins its own browser revisions. A machine that already installed a DIFFERENT release's browsers has a full-looking browser cache, and the run still dies on every test with `Executable doesn't exist at .../chromium_headless_shell-<revision>/…`. The fix is per release, not per machine.
+
+**Example:** With your config in `e2e/`, run `cd e2e && npx playwright install chromium` (add `firefox`/`webkit` if your projects use them).
+
 ## Keep the runner quiet
 
 **Rule:** Keep concurrent work below the machine's CPU count. Prefer a quiet runner for witnessed tests.

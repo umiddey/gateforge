@@ -24,6 +24,7 @@ import { policyWeakenedCandidate, type GateforgeConfig } from '@gate-forge/core'
 import { findPlaywrightConfig } from '@gate-forge/pack-playwright';
 import { loadConfigAt } from './commands/common.js';
 import { trustedPolicyDigestForConfig } from './execution.js';
+import { browserBuildSummary, inspectBrowserBuilds } from './playwright-browsers.js';
 import { resolveVerifierKeyring } from './verifier-keys.js';
 import { describeApprovedPolicyResolution, resolveApprovedPolicyDigest } from './trusted-policy.js';
 import { resolveStateDir } from './state.js';
@@ -355,11 +356,48 @@ function runnerCheck(cwd: string, config: GateforgeConfig, env: NodeJS.ProcessEn
   } catch {
     // A readable-but-unparsable manifest stays 'ok' with an unknown version.
   }
+  // A resolvable binary is not a launchable browser: the resolved
+  // runner pins its own browser revisions, and a cache holding another
+  // release's builds fails every test with "Executable doesn't exist".
+  if (config.runner === 'playwright') {
+    const readiness = inspectBrowserBuilds(manifest, playwrightConfigText(cwd), env);
+    if (readiness.missing.length > 0) {
+      const configPath = findPlaywrightConfig(cwd);
+      const installCwd = configPath === null ? cwd : dirname(join(cwd, configPath));
+      return {
+        id: 'runner',
+        status: 'fail',
+        detail:
+          `${config.runner} resolves at '${manifest}' (version ${version}), but ` +
+          browserBuildSummary(readiness, installCwd),
+      };
+    }
+  }
   return {
     id: 'runner',
     status: 'ok',
     detail: `${config.runner} resolves at '${manifest}' (version ${version}); the supervised run can execute it`,
   };
+}
+
+/**
+ * The resolved Playwright config's source ('' when the repository has
+ * none): the config names the browsers its projects launch.
+ *
+ * Args:
+ *   cwd: repository root.
+ *
+ * Returns:
+ *   string: the config text, or '' when there is no readable config.
+ */
+function playwrightConfigText(cwd: string): string {
+  const config = findPlaywrightConfig(cwd);
+  if (config === null) return '';
+  try {
+    return readFileSync(join(cwd, config), 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 /**
