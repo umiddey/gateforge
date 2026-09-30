@@ -8,7 +8,14 @@
  * covered and nothing said so.
  */
 import { describe, expect, it } from 'vitest';
-import { twinDivergenceDetail, twinPathDivergence, twinShapeOf, type TwinShape } from '../src/twin-paths.js';
+import {
+  twinDivergenceDetail,
+  twinLinksFor,
+  twinPathDivergence,
+  twinShapeOf,
+  type TwinCandidate,
+  type TwinShape,
+} from '../src/twin-paths.js';
 
 const INVENTORY = { templates: ['/api/accounts', '/api/accounts/{}'] };
 
@@ -99,5 +106,78 @@ describe('twin path divergence', () => {
     );
     expect(twinDivergenceDetail(divergence[0] as never)).not.toContain('abc123');
     expect(twinDivergenceDetail(divergence[0] as never)).toContain('/api/accounts');
+  });
+});
+
+describe('twin links', () => {
+  /** The catalog a link resolves against: logical key + the test's own title. */
+  const catalog = (...rows: readonly [string, string][]): TwinCandidate[] =>
+    rows.map(([logicalKey, title]) => ({ logicalKey, title }));
+
+  it('links an explicit `twinOf` declaration, which survives a rename of either title', () => {
+    const candidates = catalog(
+      ['k-witnessed', 'lists the open items through the rendered UI'],
+      ['k-raw', 'lists the open items fast, without the witness'],
+    );
+    expect(twinLinksFor(candidates, { 'k-witnessed': 'k-raw' })).toEqual([
+      { witnessed: 'k-witnessed', raw: 'k-raw', source: 'test-map' },
+    ]);
+    // The declaration names the graded test, so a repository that spells
+    // the same pair out twice gets exactly one link, and the explicit
+    // rule owns it even when the titles would link it too.
+    expect(
+      twinLinksFor(
+        catalog(
+          ['k-witnessed', 'lists the open items [witnessed]'],
+          ['k-raw', 'lists the open items raw'],
+        ),
+        { 'k-witnessed': 'k-raw' },
+      ),
+    ).toEqual([{ witnessed: 'k-witnessed', raw: 'k-raw', source: 'test-map' }]);
+  });
+
+  it('links the title convention, preferring the explicit `raw` partner over a bare one', () => {
+    const candidates = catalog(
+      ['k-witnessed', 'lists the open items [witnessed]'],
+      ['k-raw', 'lists the open items raw'],
+      ['k-bare', 'lists the open items'],
+    );
+    expect(twinLinksFor(candidates)).toEqual([
+      { witnessed: 'k-witnessed', raw: 'k-raw', source: 'title' },
+    ]);
+    // Without a `raw` partner the bare title is the owner's convention
+    // for the same pair.
+    expect(twinLinksFor(candidates.filter((candidate) => candidate.logicalKey !== 'k-raw'))).toEqual([
+      { witnessed: 'k-witnessed', raw: 'k-bare', source: 'title' },
+    ]);
+  });
+
+  it('names nothing when either side is missing, rather than a ghost pair', () => {
+    const candidates = catalog(['k-witnessed', 'lists the open items [witnessed]']);
+    // A dangling `twinOf`: the raw twin is not in the catalog.
+    expect(twinLinksFor(candidates, { 'k-witnessed': 'k-gone' })).toEqual([]);
+    // A dangling title: no partner carries the untagged stem.
+    expect(twinLinksFor(candidates)).toEqual([]);
+    // A self-link is not a pair either.
+    expect(twinLinksFor(candidates, { 'k-witnessed': 'k-witnessed' })).toEqual([]);
+  });
+
+  it('leaves a contested bare title to one witnessed twin instead of guessing twice', () => {
+    const candidates = catalog(
+      ['a-witnessed', 'lists the open items [witnessed]'],
+      ['b-witnessed', 'lists the open items [witnessed] too'],
+      ['k-raw', 'lists the open items'],
+    );
+    // Both stems are `lists the open items`, so both would claim the
+    // one bare raw test. The first key (sorted) owns it; the other names
+    // nothing rather than reporting a pair the owner never described.
+    expect(twinLinksFor(candidates)).toEqual([
+      { witnessed: 'a-witnessed', raw: 'k-raw', source: 'title' },
+    ]);
+  });
+
+  it('never pairs a witnessed title with another witnessed title', () => {
+    const candidates = catalog(['k-a', 'lists the open items [witnessed]'], ['k-b', 'lists the open items [witnessed]']);
+    expect(twinLinksFor(candidates)).toEqual([]);
   });
 });
