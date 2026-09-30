@@ -150,6 +150,7 @@ export {
   inferTestKind,
   listNativePlaywrightTests,
   findPlaywrightConfig,
+  findPlaywrightConfigs,
   untrustedEnv,
   reconciliationKey,
   splitPytestNodeId,

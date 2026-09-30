@@ -205,34 +205,33 @@ export function untrustedEnv(env: NodeJS.ProcessEnv, discoveryStateDir?: string)
 }
 
 /**
- * Finds the consumer's playwright config: at the repo root first, then —
- * only when no root-level config exists — ONE directory level deep
- * (immediate subdirectories, dependency/build/VCS/runner directories
- * pruned), alphabetically first match. Returns the repo-relative posix
- * path (`'playwright.config.ts'`, or `'e2e/playwright.config.ts'` for a
- * subdirectory project), or null when none exists.
+ * Enumerates EVERY playwright config the search space contains, in the
+ * order the choice is made: repo-root configs first (in
+ * {@link PLAYWRIGHT_CONFIG_NAMES} order), then ONE directory level
+ * deep (immediate subdirectories, dependency/build/VCS/runner
+ * directories pruned, alphabetically).
  *
- * Root-level configs always win: an existing root project must keep its
- * exact historical invocation. The nested search only extends discovery
- * to the self-contained subdirectory layout (the config's OWN directory
- * pins its playwright install — see {@link playwrightCliPath}).
+ * Enumeration runs exactly one config, so a repo with several configs
+ * is inventoried as a subset. Listing them all is what lets that
+ * narrowing be reported instead of silent — see
+ * {@link findPlaywrightConfig}.
  *
  * Args:
  *   cwd: absolute repo root.
  *
  * Returns:
- *   string | null: repo-relative posix config path, or null.
+ *   string[]: repo-relative posix config paths, in choice order.
  */
-export function findPlaywrightConfig(cwd: string): string | null {
+export function findPlaywrightConfigs(cwd: string): string[] {
+  const found: string[] = [];
   for (const name of PLAYWRIGHT_CONFIG_NAMES) {
-    const path = join(cwd, name);
-    if (existsSync(path)) return name;
+    if (existsSync(join(cwd, name))) found.push(name);
   }
   let names: string[];
   try {
     names = readdirSync(cwd);
   } catch {
-    return null; // unreadable root: the root-level search already came up empty
+    return found; // unreadable root: the root-level search already came up empty
   }
   const subdirs = names
     .filter((name) => !CONFIG_SEARCH_PRUNED_DIRS.has(name))
@@ -246,10 +245,69 @@ export function findPlaywrightConfig(cwd: string): string | null {
     .sort();
   for (const dir of subdirs) {
     for (const name of PLAYWRIGHT_CONFIG_NAMES) {
-      if (existsSync(join(cwd, dir, name))) return `${dir}/${name}`;
+      if (existsSync(join(cwd, dir, name))) found.push(`${dir}/${name}`);
     }
   }
-  return null;
+  return found;
+}
+
+/**
+ * Finds the ONE consumer playwright config enumeration runs: at the
+ * repo root first, then — only when no root-level config exists — ONE
+ * directory level deep (see {@link findPlaywrightConfigs}). Returns
+ * the repo-relative posix path (`'playwright.config.ts'`, or
+ * `'e2e/playwright.config.ts'` for a subdirectory project), or null
+ * when none exists.
+ *
+ * Root-level configs always win: an existing root project must keep its
+ * exact historical invocation. The nested search only extends discovery
+ * to the self-contained subdirectory layout (the config's OWN directory
+ * pins its playwright install — see {@link playwrightCliPath}).
+ *
+ * The choice is never silent: when more than one config exists,
+ * {@link listNativePlaywrightTests} names every discovered config, the
+ * one used and why, and the ones NOT inventoried. There is deliberately
+ * no configuration key for the choice: any such key would change WHICH
+ * consumer code runs, not just what is reported, and it would have to
+ * be plumbed through the discovery callers' option sets.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *
+ * Returns:
+ *   string | null: repo-relative posix config path, or null.
+ */
+export function findPlaywrightConfig(cwd: string): string | null {
+  return findPlaywrightConfigs(cwd)[0] ?? null;
+}
+
+/**
+ * Builds the one-line disclosure appended to enumeration's detail when
+ * the repo holds more than one playwright config. Without it a repo
+ * with several suites is silently graded as a subset.
+ *
+ * Args:
+ *   configs: every discovered config, in choice order (first = used).
+ *   used: the config enumeration ran.
+ *
+ * Returns:
+ *   string: the disclosure, or '' when there is nothing to disclose.
+ */
+function configChoiceNote(configs: readonly string[], used: string): string {
+  if (configs.length < 2) return '';
+  const reason = used.includes('/')
+    ? 'no repo-root config exists, so the alphabetically first subdirectory config is inventoried'
+    : 'a repo-root config always wins, so a root project keeps its exact invocation';
+  const listed = configs
+    .map((path) =>
+      path === used
+        ? `${path} (inventoried: ${reason})`
+        : `${path} (not inventoried: its test cases are missing from this catalog)`,
+    )
+    .join(', ');
+  return (
+    ` — note: ${String(configs.length)} playwright configs are present, and only 1 is inventoried: ${listed}`
+  );
 }
 
 /** Minimal JSON-reporter suite node shape (fields discovery consumes). */
@@ -370,7 +428,8 @@ export async function listNativePlaywrightTests(options: {
   timeoutMs?: number;
   wiredEnv?: Readonly<Record<string, string>>;
 }): Promise<NativeListResult> {
-  const configPath = findPlaywrightConfig(options.cwd);
+  const configs = findPlaywrightConfigs(options.cwd);
+  const configPath = configs[0] ?? null;
   if (configPath === null) {
     return {
       status: 'unavailable',
@@ -535,7 +594,7 @@ export async function listNativePlaywrightTests(options: {
     status: 'discovered',
     detail:
       `native playwright --list over '${configPath}'${configDetail} enumerated ${String(instances.length)} ` +
-      `instance(s) as untrusted code (${envDetail})`,
+      `instance(s) as untrusted code (${envDetail})` + configChoiceNote(configs, configPath),
     instances,
     errors,
   };
