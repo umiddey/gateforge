@@ -663,7 +663,10 @@ for you, in that order, and stops at the first failure:
 2. **recipe** — `prepare`, `reset`, `seed`, `services_up`, `healthcheck`;
 3. **`gateforge test-gates`** — supervised, with the flags you passed
    (`gateforge run -- --changed`);
-4. **`gateforge check --require-e2e`** — the strict receipt check;
+4. **`gateforge check --require-e2e`** — the strict receipt check; a scoped
+   run (`gateforge run -- --changed --scope changed`) seals a receipt for the
+   changed slice only, so it is checked at that scope with
+   `check --changed --require-e2e`;
 5. **`services_down`** — always, after success, after a failing gate, and
    after a failing recipe step.
 
@@ -792,7 +795,7 @@ read-only line per precondition with the exact fix command.
 | `runner` | the configured runner's binary resolves and reports a version | `npm install --save-dev <runner>` |
 | `interpreter` | every configured suite's `argv[0]` exists AND runs | correct `diagnostics.suites.argv[0]` (e.g. `.venv/bin/python`) |
 | `bytecode-safety` | the run cannot rewrite `__pycache__` bytes into the candidate tree | `PYTHONDONTWRITEBYTECODE=1 gateforge run`, or pre-compile outside the run |
-| `target` | the configured target base URL answers (only probed when one is configured) | start the app, then export `GATEFORGE_TARGET_BASE_URL` |
+| `target` | the configured target base URL answers (only probed when one is configured; never with `--witness-url`, because a probe through an external witness's proxy counts as an exchange before the run binds it) | start the app, then export `GATEFORGE_TARGET_BASE_URL` |
 | `app-healthcheck` | the recipe's own healthcheck passes (only when a recipe declares one) | make the app healthy, or fix the declared healthcheck |
 | `host-load` | advisory only: load average and free disk | never fails a run |
 | `candidate-tree` | the tree can be hashed; uncommitted changes are reported | commit or stash before the run |

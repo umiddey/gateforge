@@ -10,7 +10,9 @@
  *      `healthcheck`;
  *   3. `gateforge test-gates` (supervised; the user's own flags are
  *      passed through unchanged);
- *   4. `gateforge check --require-e2e` (the strict receipt check);
+ *   4. `gateforge check --require-e2e` (the strict receipt check; a
+ *      scoped run, `--scope changed`, is checked at that changed scope
+ *      with `check --changed --require-e2e`);
  *   5. the recipe's `services_down`, ALWAYS — after success, after a
  *      failing gate, and after a failing recipe step.
  *
@@ -50,6 +52,24 @@ interface FailedStep {
   step: RunRecipeStep;
   /** Its exit code. */
   code: number;
+}
+
+/**
+ * The strict check that closes a run, at the scope the run sealed.
+ *
+ * A `--scope changed` receipt covers only the changed slice, so the
+ * matching strict check is diff-scoped (`--changed`); every other run
+ * sealed a whole receipt and is checked whole, exactly as before.
+ *
+ * Args:
+ *   passthrough: the flags `run` passed to `test-gates`.
+ *
+ * Returns:
+ *   string[]: the `check` arguments.
+ */
+export function strictCheckArgs(passthrough: readonly string[]): string[] {
+  const scope = parseArgs(passthrough).options['scope'];
+  return scope === 'changed' ? ['--changed', '--require-e2e'] : ['--require-e2e'];
 }
 
 /**
@@ -110,8 +130,9 @@ export async function runCommand(io: Io, argv: readonly string[]): Promise<numbe
     report('test-gates', Date.now() - gatesStarted);
     if (code === 0) {
       const checkStarted = Date.now();
-      code = await checkCommand(io, ['--require-e2e']);
-      report('check --require-e2e', Date.now() - checkStarted);
+      const checkArgs = strictCheckArgs(passthrough);
+      code = await checkCommand(io, checkArgs);
+      report(`check ${checkArgs.join(' ')}`, Date.now() - checkStarted);
     }
   } else {
     code = failed.code;
