@@ -214,6 +214,51 @@ gateforge check --candidate-commit <full-commit-sha> --require-e2e
 Add `--changed` to evaluate only that commit's first-parent diff. The command
 uses an isolated checkout of the immutable commit tree.
 
+## 8a. Enable behavior cases
+
+Behavior cases are the strongest evidence Gateforge can grade: the ENGINE
+drives the request, the app's own state is read back, and the record is
+sealed. They are opt-in, and the setup is printed rather than guessed.
+
+`gateforge init` reads the repository and names the behavior packs it
+finds — the code that decides a webhook signature, an authorization
+outcome, a state transition, or a request schema. A non-interactive run
+(an agent, a CI job) enables **nothing** and prints the exact flag for
+each pack it found; in a terminal it asks per pack. Either way:
+
+```sh
+gateforge init --behavior-packs webhook
+```
+
+That writes `.gateforge/behavior.yml` — a scaffold, not approval: one
+commented example case per enabled pack — and prints the exact
+`behaviorPolicy: .gateforge/behavior.yml` line to add to an existing
+`.gateforge.yml`. `--behavior` enables every pack the scan found,
+`--behavior-packs webhook,auth` names them yourself, and `--no-behavior`
+keeps the run silent. A repository with no behavior pack is byte-identical
+to before.
+
+`gateforge next` then prints the whole remaining setup for a route it
+found but cannot prove, and every block is finished work rather than a
+template:
+
+* the `endpoints:` entry for that exact route, with the case ids, the
+  adapter-backed entity the case is graded against, and the recipe the
+  repository declares under `fixtures/`;
+* the proof test that asks the ENGINE to drive each case;
+* the `.gateforge/test-map.yml` entries that map every case to its test;
+* the command that runs the gate.
+
+Paste the blocks as printed, run the gate command, and run
+`gateforge next` again. `example/webhook` is exactly this flow: a fresh
+copy, `gateforge init --behavior-packs webhook`, the printed steps, and a
+green `test-gates --changed` + `check --require-e2e`.
+
+When a declaration needs a fact the repository has not declared (an
+entity with no reviewed adapter, a recipe that does not say what a
+delivery records), `next` prints that fact instead of a block that could
+not pass: the case is never printed as if it were provable.
+
 ## 9. Install the blocking hook and CI wiring
 
 ```sh

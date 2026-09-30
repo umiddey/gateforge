@@ -1,0 +1,10 @@
+schemaVersion: 1
+# The fixture/actor provider is engine-side harness code (loaded through
+# GATEFORGE_FIXTURE_PROVIDER, never by the suite), so it is not classified
+# as product source — see the matching project exclude in .gateforge.yml.
+scanRoots: ['server.js']
+trustedInternalEntryPoints: []
+internalRules: []
+declarations:
+  internality: gateforge:internal
+volatileFields: []

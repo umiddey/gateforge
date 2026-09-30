@@ -1,0 +1,19 @@
+# The fixture/actor recipes this app can be driven with.
+#
+# The engine (never the suite) provisions these through the operator's
+# trusted provider, named by GATEFORGE_FIXTURE_PROVIDER. `gateforge init`
+# and `gateforge next` read this file: the recipe, actor, subject and the
+# row a delivery creates are the values they print into
+# `.gateforge/behavior.yml`, so a printed case never names a fixture the
+# app cannot provide. The provider provisions the same values at runtime.
+schemaVersion: 1
+recipes:
+  - id: stripe-delivery
+    actor: provider
+    subject: accepted-event
+    # What one accepted delivery records. A `webhook:signature-accepted`
+    # case is proved by the row it creates, so this map is what makes that
+    # case printable; it is also what the provider's subject body carries.
+    creates:
+      eventId: evt-accepted
+      sideEffectCount: 1

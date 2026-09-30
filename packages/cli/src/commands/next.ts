@@ -8,12 +8,16 @@
  * prints the single highest-ranked item. Exit 0 when clean, 1 when a
  * next action exists, 2 on config/usage errors.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
 import { join } from 'node:path';
 import {
   BLOCKING_VERDICTS,
   CAUSE_NEXT_ACTIONS,
+  BEHAVIOR_CASE_DOMAIN,
   HTTP_ENDPOINT_RESOURCE_KIND,
+  PolicyFileSchema,
+  sha256Canonical,
   type BlockingEntry,
   type CauseCode,
   type ChangedProvider,
@@ -56,8 +60,28 @@ import { computeEvaluationScope, detectStagedWorkingTreeMismatches } from '../sc
 import { httpRoutesView, resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags, VERIFIER_KEY_ENV } from './common.js';
 import { loadCacheExclusions } from '../cache-exclusions.js';
+import {
+  buildEndpointDeclaration,
+  loadBehaviorRecipes,
+  renderProofSpec,
+  renderTestMapEntries,
+  type BehaviorDeclarationPrint,
+  type BehaviorEffectFacts,
+  type BehaviorEndpointFacts,
+} from '../behavior-setup.js';
 
 export const NEXT_USAGE = 'usage: gateforge next [--changed] [--json]';
+
+/**
+ * The causes that mean "this repository has no proof yet" rather than
+ * "this proof failed". A fresh repository owes all three at once, so the
+ * behavior setup is printed for any of them.
+ */
+const SETUP_CAUSES: readonly CauseCode[] = [
+  'ENDPOINT_BEHAVIOR_MISSING',
+  'TEST_INVENTORY_INCOMPLETE',
+  'TEST_MAPPING_MISSING',
+];
 
 const ENVIRONMENT_GUIDES: Partial<Record<CauseCode, string>> = {
   EVIDENCE_STALE: 'packages/cli/guides/TEST-ENVIRONMENT.md#keep-the-repository-unchanged-during-a-run',
@@ -293,6 +317,147 @@ function observationScopeNote(
     `policy option 'http.endpoint.requireObservation' is 'all'. Prove it with a test, or set the option`,
     `back to 'consumed' in ${policiesPath} if this route is out of scope.`,
   ];
+}
+
+/**
+ * The complete behavior setup `gateforge next` prints for a discovered
+ * endpoint that has no approved cases yet (plan 2026-09-30 Phase 4).
+ *
+ * Every block is finished work, not a template: the resource id and
+ * route are the ones discovery reported, the effect scope is the
+ * repository's own adapter-backed entity, the recipe is the one declared
+ * under `fixtures/`, and the case ids are the ids the compiler hashes.
+ * When a fact the declaration needs is missing, nothing is printed as if
+ * it were known — the reason is printed instead.
+ *
+ * Args:
+ *   input: the repository root, the policies document path, the run's
+ *   graph, and the endpoint's classified resource id.
+ *
+ * Returns:
+ *   string[]: the ordered steps, or an empty array when this candidate
+ *   is not a behavior declaration gap.
+ */
+function behaviorDeclarationGuidance(input: {
+  cwd: string;
+  policiesPath: string;
+  graph: ResourceGraph;
+  resourceId: string;
+  runner: string;
+}): string[] {
+  const route = input.graph.resources.find(
+    (resource) => resource.id === input.resourceId && resource.kind === HTTP_ENDPOINT_RESOURCE_KIND,
+  );
+  if (route === undefined) return [];
+  const method = route.attributes['method'];
+  const path = route.attributes['canonicalPath'];
+  if (typeof method !== 'string' || typeof path !== 'string') return [];
+  const effects: BehaviorEffectFacts[] = input.graph.resources
+    .filter(
+      (resource) =>
+        resource.id !== null &&
+        resource.id !== input.resourceId &&
+        resource.classification?.evidenceAdapter !== undefined,
+    )
+    .map((resource) => {
+      const writable = resource.attributes['updateableFields'];
+      return {
+        id: resource.name,
+        resourceId: resource.id as string,
+        adapter: resource.classification?.evidenceAdapter as string,
+        identityFields: resource.classification?.primaryKey ?? [],
+        fields:
+          Array.isArray(writable) && writable.every((field) => typeof field === 'string')
+            ? (writable as string[])
+            : (resource.classification?.primaryKey ?? []),
+      };
+    });
+  const endpoint: BehaviorEndpointFacts = {
+    resourceId: input.resourceId,
+    routeName: `${method} ${path}`,
+    method,
+    path,
+    effects,
+  };
+  const declared: BehaviorDeclarationPrint = buildEndpointDeclaration({
+    endpoint,
+    requiredContracts: requiredContractsForEndpoints(input.cwd, input.policiesPath),
+    recipe: loadBehaviorRecipes(input.cwd)[0] ?? null,
+    caseIdFor: (resourceId, slug) =>
+      sha256Canonical({ domain: BEHAVIOR_CASE_DOMAIN, resourceId, id: slug }),
+    specFile: 'specs/gateforge-cases.spec.js',
+    project: 'chromium',
+    runner: input.runner,
+  });
+  if (declared.entry === null) {
+    return [
+      `about this gap: ${endpoint.routeName} (${input.resourceId}) has no approved behavior cases, and`,
+      'the complete declaration cannot be printed from what this repository declares:',
+      `  ${declared.incompleteReason ?? 'no reason recorded'}`,
+      'next: fix that first, then re-run gateforge next',
+    ];
+  }
+  return [
+    `about this gap: ${endpoint.routeName} (${input.resourceId}) is discovered but has no approved`,
+    'behavior cases, so nothing in this repository can prove what it must do. The steps below are',
+    'the whole remaining setup — every block is complete, so paste each one exactly as printed.',
+    "step 1 — declare the cases in .gateforge/behavior.yml (add this entry under 'endpoints:'):",
+    '[CODE]',
+    declared.entry,
+    '[CODE]',
+    'step 2 — create specs/gateforge-cases.spec.js with exactly this content (one test per case;',
+    'the ENGINE drives each case, and the test only asserts the engine sealed it):',
+    '[CODE]',
+    renderProofSpec({ resourceId: input.resourceId, cases: declared.cases }),
+    '[CODE]',
+    'step 3 — map every case to its test in .gateforge/test-map.yml (add these entries under',
+    "'tests:'; if the file does not exist yet, create it starting with 'schemaVersion: 1' and",
+    "'tests:'):",
+    '[CODE]',
+    renderTestMapEntries({
+      cases: declared.cases,
+      specFile: 'specs/gateforge-cases.spec.js',
+      project: 'chromium',
+      runner: input.runner,
+    }),
+    '[CODE]',
+    'step 4 — run the gate:',
+    '  npm run gate',
+    'then re-run gateforge next to see what, if anything, is still open',
+  ];
+}
+
+/**
+ * The contracts the repository's policy document requires of every HTTP
+ * endpoint. Unreadable or absent policies yield none, which keeps the
+ * guidance quiet on a repository that has approved no behavior yet.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   policiesPath: repo-relative policies document path.
+ *
+ * Returns:
+ *   string[]: the required contract names, deduplicated in print order.
+ */
+function requiredContractsForEndpoints(cwd: string, policiesPath: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(join(cwd, policiesPath), 'utf8');
+  } catch {
+    return [];
+  }
+  const parsed = PolicyFileSchema.safeParse(parseYaml(text));
+  if (!parsed.success) return [];
+  const contracts: string[] = [];
+  for (const policy of parsed.data.policies) {
+    const coversEndpoints =
+      policy.when?.kind === undefined || policy.when.kind === HTTP_ENDPOINT_RESOURCE_KIND;
+    if (!coversEndpoints) continue;
+    for (const contract of policy.require) {
+      if (!contracts.includes(contract)) contracts.push(contract);
+    }
+  }
+  return contracts;
 }
 /**
  * Runs the `gateforge next` subcommand.
@@ -557,6 +722,23 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     pipeline.observationScope,
     config.policies,
   );
+  // The behavior setup is printed whenever the run still owes a behavior
+  // DECLARATION and the top item is one of the three "this repository has
+  // no proof yet" causes. A brand-new repository is usually missing all
+  // three at once (no cases, no tests, no mapping), and answering only
+  // the top one would send the owner back for a second `next` run with
+  // the same answer.
+  const behaviorGap = evaluated.blocking.find((entry) => entry.cause === 'ENDPOINT_BEHAVIOR_MISSING');
+  const behaviorGuidance =
+    behaviorGap !== undefined && SETUP_CAUSES.includes(first.cause as CauseCode)
+      ? behaviorDeclarationGuidance({
+          cwd: io.cwd,
+          policiesPath: config.policies,
+          graph: pipeline.graph,
+          resourceId: behaviorGap.resourceId ?? behaviorGap.name ?? '',
+          runner: config.runner,
+        })
+      : [];
   if (asJson) {
     writeLine(
       io.stdout,
@@ -568,6 +750,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         remainingBlocking: candidates.length - 1,
         guide,
         ...(routeGuidance === null ? {} : { guidance: routeGuidance }),
+        ...(behaviorGuidance.length === 0 ? {} : { behaviorGuidance }),
         ...(scopeNote.length === 0 ? {} : { scopeNote }),
       }),
     );
@@ -582,6 +765,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       writeLine(io.stdout, 'do: confirm the route owner and run only the matching plane command below');
       for (const line of routeGuidance) writeLine(io.stdout, line);
     }
+    for (const line of behaviorGuidance) writeLine(io.stdout, line);
     for (const line of scopeNote) writeLine(io.stdout, line);
   }
   return 1;

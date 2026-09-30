@@ -13,6 +13,7 @@ obligation, and which evidence is missing or invalid.
 
 - [Connect your project](packages/cli/guides/CONNECT-YOUR-PROJECT.md)
 - [Quickstart](packages/cli/guides/QUICKSTART.md)
+- [Enable behavior cases (QUICKSTART §8a)](packages/cli/guides/QUICKSTART.md#8a-enable-behavior-cases) — what `init` finds, and the printed steps from a detected pack to a green gate
 - [Test environment](packages/cli/guides/TEST-ENVIRONMENT.md)
 - [Upgrade from 0.6 to 0.7](packages/cli/guides/UPGRADE-0.6-to-0.7.md)
 - [Changelog](CHANGELOG.md)
