@@ -181,6 +181,39 @@ async function runSubprocessPlugin(
   }
 }
 
+/**
+ * The remedy for a plugin whose declared `version:` does not match the
+ * detector the module reports. Copying a sibling entry's version is the
+ * ordinary mistake, and the contract error alone names neither the field
+ * nor the fix, so the boundary says both: the field to edit, the value
+ * the detector declares, and the command that writes it.
+ *
+ * Args:
+ *   plugin: the pinned plugin config entry.
+ *   detector: the identity the signal claimed.
+ *
+ * Returns:
+ *   string: the fix sentence (empty when the id, not the version, is
+ *   what mismatched — a foreign id is never repaired by a version edit).
+ */
+function signalIdentityFix(
+  plugin: ConfigPlugin,
+  detector: { id: string; version: string },
+): string {
+  if (detector.id !== plugin.id) {
+    return (
+      `the signal claims a different detector id ('${detector.id}'), which no ` +
+      `plugins[].version edit can repair — a plugin may only signal under its own id`
+    );
+  }
+  return (
+    `the signal's version ('${detector.version}') is the version the pack's detector declares, ` +
+    `not the pack's npm version; fix: set version: '${detector.version}' on the ` +
+    `'${plugin.id}' entry in .gateforge.yml, or run \`gateforge init --plugins ${plugin.id}\` ` +
+    'to write the pin the installed pack declares'
+  );
+}
+
 /** Loads and drives one in-process plugin module. */
 async function runInProcessPlugin(
   plugin: ConfigPlugin,
@@ -266,7 +299,8 @@ async function runInProcessPlugin(
         `in-process plugin '${plugin.id}'@'${plugin.version}' returned a classification signal ` +
           `claiming detector ${JSON.stringify(signal.detector.id)}@` +
           `${JSON.stringify(signal.detector.version)}; signal identity must equal the pinned ` +
-          `plugin identity (suppressive authority is engine-issued, never plugin-issued)`,
+          `plugin identity (suppressive authority is engine-issued, never plugin-issued); ` +
+          signalIdentityFix(plugin, signal.detector),
       );
     }
   }
