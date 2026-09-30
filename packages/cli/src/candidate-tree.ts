@@ -601,7 +601,7 @@ function computeCandidateTree(
     docsExclusions,
     cacheExclusions,
   );
-  const treeId = buildTreeFromEntries(gitDir, env, entries);
+  const treeId = buildTreeFromEntries(writer, gitDir, env, entries);
   return includeEntries ? { treeId, entries } : treeId;
 }
 
@@ -610,7 +610,8 @@ function computeCandidateTree(
  * every subtree before the parent that references it.
  *
  * Args:
- *   gitDir: authority object store used to write the tree objects.
+ *   writer: in-process loose-object writer for the authority object store.
+ *   gitDir: authority object store the root tree is checked in.
  *   env: sanitized child-process environment.
  *   entries: candidate entries with mode, blob sha, and repo-relative path.
  *
@@ -621,6 +622,7 @@ function computeCandidateTree(
  *   UsageError: when a tree object cannot be written (fail closed).
  */
 function buildTreeFromEntries(
+  writer: LooseObjectWriter,
   gitDir: string,
   env: NodeJS.ProcessEnv,
   entries: readonly CandidateTreeEntry[],

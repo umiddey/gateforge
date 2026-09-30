@@ -206,12 +206,12 @@ describe('doctor run preconditions (each mistake its own line)', () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       const keyFile = externalVerifierKey();
-      const env = { [VERIFIER_KEY_FILE_ENV]: keyFile, GATEFORGE_TARGET_BASE_URL: 'http://[IP_ADDRESS]:1/' };
+      const env = { [VERIFIER_KEY_FILE_ENV]: keyFile, GATEFORGE_TARGET_BASE_URL: 'http://127.0.0.1:1/' };
       const report = await runCli(repo, ['enforcement', 'doctor', '--json'], env);
       expect(report.code).toBe(0);
       const section = runSection(report.stdout);
       expect(line(section, 'target').status).toBe('fail');
-      expect(line(section, 'target').detail).toContain('http://[IP_ADDRESS]:1/');
+      expect(line(section, 'target').detail).toContain('http://127.0.0.1:1/');
       const strict = await runCli(repo, ['enforcement', 'doctor', '--strict-preflight'], env);
       expect(strict.code).toBe(1);
       expect(strict.stdout).toContain('[FAIL] target:');
