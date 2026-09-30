@@ -73,7 +73,7 @@ import {
   writeExecutionResult,
   writeGateReceipt,
 } from '../src/state.js';
-import { VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
+import { VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV, VERSION } from '../src/commands/common.js';
 import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 
 const KEY = 'e2e-receipt-verifier-key';
@@ -504,7 +504,7 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
         .split('\n')
         .find((line) => line.includes('[EVIDENCE_STALE]')) as string;
       expect(stale, result.stdout).toContain(
-        'this receipt was sealed by Gateforge 0.7.1 and this engine is 0.8.0',
+        `this receipt was sealed by Gateforge 0.7.1 and this engine is ${VERSION}`,
       );
       expect(stale, result.stdout).toContain('Run `gateforge test-gates --changed`. [EVIDENCE_STALE]');
       expect(stale, result.stdout).not.toContain('discover --json');

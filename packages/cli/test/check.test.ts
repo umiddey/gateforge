@@ -756,6 +756,30 @@ describe('gateforge check', () => {
         ).toBe(true);
       }
 
+      // Genuine envelope over OLD inputs (a run sealed before the tree
+      // changed, or by an earlier engine): the MAC verifies, the digest
+      // does not → the finding names the re-seal, never the read-only
+      // `discover --json` dump.
+      {
+        const old = 'e'.repeat(64);
+        const sortedIds = [...recordIds].sort();
+        const mac = attestationMac(verifierKey, { runId, invocationId, inputDigest: old, recordIds: sortedIds });
+        writeManifest({
+          invocationId,
+          inputDigest: old,
+          recordIds: sortedIds,
+          attestation: { attestationVersion: 2, runId, invocationId, inputDigest: old, recordIds: sortedIds, mac },
+        });
+        const result = await runCli(repo, ['check', '--format', 'json'], withKey);
+        expect(result.code).toBe(1);
+        const report = JSON.parse(result.stdout) as { blocking: Array<{ detail?: string; message?: string }> };
+        const stale = report.blocking.find((entry) =>
+          (entry.detail ?? '').includes('does not match the current input snapshot'),
+        );
+        expect(stale, result.stdout).toBeDefined();
+        expect(stale?.message, result.stdout).toContain('Run `gateforge test-gates --changed`');
+      }
+
       // Transplanted record: an id issued under another run inserted
       // into the current bundle → demotes (run identity binds per
       // envelope) → invalid.

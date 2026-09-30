@@ -1137,11 +1137,14 @@ function authorizeRecords(
   // its own inputs reports the single generic blocker — per-envelope
   // details would only restate it.
   if (auth.changedInputs !== true) {
+    // Every attestation rejection (stale digest, other invocation,
+    // tampered or malformed envelope) is repaired the same way: a fresh
+    // supervised run writes a new envelope over the current inputs.
     if (durablePresent && durableRejection !== null && durableDetail !== null) {
-      block(`evidence-context: ${durableDetail}`);
+      block(`evidence-context: ${durableDetail}`, 'gateforge test-gates --changed');
     }
     if (liveRejection !== null && liveDetail !== null && validEnvelopes.length === 0) {
-      block(`evidence-context: ${liveDetail}`);
+      block(`evidence-context: ${liveDetail}`, 'gateforge test-gates --changed');
     }
   }
   if (witnessedCount > 0 && validEnvelopes.length === 0 && !durablePresent && auth.live == null) {
