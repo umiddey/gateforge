@@ -575,13 +575,149 @@ describe('gateforge next: the task pack offer and the singleton guidance', () =>
   });
 });
 
+/**
+ * The standard fixture plugin plus ONE delegated route whose handler
+ * carries no code evidence of what it does: the shape that leaves
+ * `ENDPOINT_SEMANTICS_UNRESOLVED` open (a method alone never decides
+ * semantics, and no schema/model/link fact corroborates it).
+ */
+const DELEGATED_ROUTE_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
+  'return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };',
+  `const delegatedRoute = {
+         schemaVersion: 1,
+         kind: 'http.contract',
+         source: 'src/http.ts',
+         location: { file: 'src/http.ts', line: 1, col: 0 },
+         detectorVersion: '1.0.0',
+         attributes: {
+           role: 'server-route',
+           method: 'POST',
+           normalizedPath: '/things/{thing_id}/render',
+           rawPath: '/things/{thing_id}/render',
+           framework: 'express',
+           handlerSymbol: 'renderThing',
+         },
+         id: 'http.contract:delegated',
+       };
+       resources.push(delegatedRoute);
+       return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };`,
+);
+
+/**
+ * Installs the delegated-route fixture with its data plane already
+ * reviewed, so the ONE open block on this route is its unresolved
+ * semantics — the state a user reaches after answering every plane
+ * question on a real repository.
+ *
+ * @param repo the temp repository under test
+ */
+function withDelegatedRoute(repo: Parameters<typeof installFixture>[0]): void {
+  installFixture(repo);
+  repo.writeFiles({
+    'plugin.mjs': DELEGATED_ROUTE_PLUGIN_SOURCE,
+    '.gateforge/planes.json': JSON.stringify({
+      rules: [{ match: 'src/http.ts', plane: 'tenant', reason: 'Owner review confirms the plane.' }],
+    }),
+  });
+}
+
+/** The first `[CODE]`-fenced block of a printed step list. */
+function firstCodeBlock(stdout: string): string {
+  const lines = stdout.split('\n');
+  const start = lines.findIndex((line) => line.trim() === '[CODE]');
+  if (start < 0) return '';
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => line.trim() === '[CODE]');
+  return (end < 0 ? rest : rest.slice(0, end)).join('\n');
+}
+
+describe('gateforge next: an unresolved endpoint is answerable from the output alone', () => {
+  it('prints the exact endpoints.json entry for THAT endpoint plus the verify command', async () => {
+    await withTempRepo({}, async (repo) => {
+      withDelegatedRoute(repo);
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      expect(stdout).toContain('ENDPOINT_SEMANTICS_UNRESOLVED');
+      // The printed action changes state — it is not a read-only dump.
+      expect(stdout).toContain('.gateforge/endpoints.json');
+      // The entry names THIS endpoint's own method and canonical path.
+      expect(stdout).toContain('"method": "POST"');
+      expect(stdout).toContain('"paths": ["/things/{thing_id}/render"]');
+      // …the fields the owner chooses, with the allowed values.
+      expect(stdout).toContain('"capability"');
+      expect(stdout).toContain('"reason"');
+      expect(stdout).toContain('crud-update');
+      expect(stdout).toContain('workflow-command');
+      // …and the command that proves the declaration applied.
+      const verify = printedCommands(stdout).find((command) =>
+        command.startsWith('gateforge explain'),
+      );
+      expect(verify).toBeDefined();
+      expect(verify).toContain('http-post-things-thing-id-render');
+    });
+  });
+
+  it('answering the two owner fields ends the block (the loop terminates)', async () => {
+    await withTempRepo({}, async (repo) => {
+      withDelegatedRoute(repo);
+      const first = await runCli(repo, ['next']);
+      expect(first.code).toBe(1);
+      const printed = firstCodeBlock(first.stdout);
+      expect(printed).toContain('"method": "POST"');
+      // Answer exactly as the printed instructions say: replace the two
+      // marked fields, keep every other byte.
+      const declaration = printed
+        .replace('"<owner choice>"', '"crud-update"')
+        .replace(
+          '"<owner-written reason and evidence: what this handler really does>"',
+          '"Owner read: the handler renders the stored record."',
+        );
+      repo.writeFiles({ '.gateforge/endpoints.json': `${declaration}\n` });
+      const after = await runCli(repo, ['next']);
+      expect(after.stdout).not.toContain('ENDPOINT_SEMANTICS_UNRESOLVED');
+      // The verify command the guidance printed actually proves it.
+      const verify = printedCommands(first.stdout).find((command) =>
+        command.startsWith('gateforge explain'),
+      ) as string;
+      const explain = await runCli(repo, parsePrintedCommand(verify).slice(1));
+      expect(explain.code, explain.stderr).toBe(0);
+      expect(explain.stdout).toContain('endpoints.json');
+      expect(explain.stdout).toContain('crud-update');
+    });
+  });
+
+  it('--json carries the same guidance additively', async () => {
+    await withTempRepo({}, async (repo) => {
+      withDelegatedRoute(repo);
+      const { code, stdout } = await runCli(repo, ['next', '--json']);
+      expect(code).toBe(1);
+      const parsed = JSON.parse(stdout) as Record<string, unknown>;
+      expect(parsed['do']).toBe('gateforge discover --json');
+      expect(Array.isArray(parsed['endpointSemanticsGuidance'])).toBe(true);
+      expect((parsed['endpointSemanticsGuidance'] as string[]).join('\n')).toContain(
+        '/things/{thing_id}/render',
+      );
+    });
+  });
+
+  it('a repository with no unresolved endpoint prints no endpoint guidance', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      expect(stdout).not.toContain('.gateforge/endpoints.json');
+      const json = await runCli(repo, ['next', '--json']);
+      const parsed = JSON.parse(json.stdout) as Record<string, unknown>;
+      expect(parsed['endpointSemanticsGuidance']).toBeUndefined();
+    });
+  });
+});
+
 describe('gateforge next: copy-pasteable output and honest prerequisites', () => {
   /**
    * The standard fixture plus one route with no data plane — the block
    * that prints the owner commands (and, only while it is missing, the
    * prerequisite that creates the planes file).
-   *
-   * @param repo the temp repository under test
    */
   async function withUnresolvedRoute(repo: Parameters<typeof installFixture>[0]): Promise<void> {
     installFixture(repo);
