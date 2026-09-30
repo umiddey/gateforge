@@ -25,6 +25,24 @@ ONE next action.
 writes `.gateforge.yml`. Add or remove a pack later by editing the
 `plugins:` list — that file is yours; an agent must not weaken it.
 
+A complete entry looks like this (add one per pack):
+
+```yaml
+plugins:
+  - id: gateforge.pack-sqlalchemy   # the detector's id, exactly as the pack declares it
+    version: '0.2.0'                # the version THAT pack's detector declares — not the pack's npm version
+    transport: in-process
+    module: '@gate-forge/pack-sqlalchemy'
+```
+
+`version:` is the detector version the pack's own signals carry, and it
+is NOT the pack's npm version (the pack publishes as 0.7.1 while its
+detector declares, say, 0.2.0). Copying a neighbouring entry's value is
+the usual mistake, and it makes every command exit 2: the detector
+refuses to signal under a version the config did not pin. The error names
+the value to write, and `gateforge init --plugins gateforge.pack-sqlalchemy`
+writes the right pin for you.
+
 **Your own detector or runner?** Both are public plugin surfaces: a
 detector is a module exporting `discover(paths)` (see
 `packages/plugin-protocol`), and a runner is an adapter implementing the
