@@ -7,6 +7,8 @@
  * fixture is shared with the witnessed CI job template test.
  */
 import { readFileSync, existsSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { withTempRepo } from '@gate-forge/core';
@@ -103,5 +105,36 @@ describe('gateforge run (the whole local proof, in order)', () => {
       expect(result.stderr).toContain('approved-policy');
       expect(recipeSteps(repo)).toEqual([]);
     });
+  });
+
+  it('never probes the target through an external witness proxy before the run binds it', async () => {
+    const { env } = operatorEnvironment();
+    // An external witness's observation proxy counts every exchange, and
+    // it refuses the run-context binding once it has seen one. A preflight
+    // probe through it would therefore break the run it prepares.
+    let hits = 0;
+    const server = createServer((_request, response) => {
+      hits += 1;
+      response.writeHead(200).end('ok');
+    });
+    const loopback = [127, 0, 0, 1].join('.');
+    await new Promise<void>((resolveListen) => server.listen(0, loopback, () => resolveListen()));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      await withTempRepo({}, async (repo) => {
+        installStrictFixture(repo);
+        // The witness URL leads nowhere, so the supervised step fails right
+        // after the preflight; what matters is what reached the proxy.
+        const outcome = await runCli(
+          repo,
+          ['run', '--', '--changed', '--witness-url', `http://${loopback}:1`, '--run-token', 'fixture-run-token'],
+          { ...env, GATEFORGE_APP_BASE_URL: `http://${loopback}:${String(port)}` },
+        ).catch((error: unknown) => error as Error);
+        expect(String(outcome instanceof Error ? outcome.message : outcome.stderr)).toContain('wired witness');
+        expect(hits).toBe(0);
+      });
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    }
   });
 });

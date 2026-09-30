@@ -88,7 +88,10 @@ export async function runCommand(io: Io, argv: readonly string[]): Promise<numbe
   };
 
   const preflightStarted = Date.now();
-  const preflight = await buildRunPreflight(io);
+  // An external witness's proxy fronts the target: probing it before the
+  // run binds would count as an observed exchange and break the run.
+  const externalWitness = passthrough.some((arg) => arg === '--witness-url' || arg.startsWith('--witness-url='));
+  const preflight = await buildRunPreflight(io, { externalWitness });
   report('preflight', Date.now() - preflightStarted);
   for (const check of preflight.checks) {
     writeLine(io.stdout, `    [${check.status.toUpperCase()}] ${check.id}: ${check.detail}`);
