@@ -838,12 +838,22 @@ capability from the closed compiler vocabulary and a required non-empty
 }
 ```
 
+Resource linkage accepts the path-derived name or its singular form with
+one trailing `s` removed: `/items/{id}` can link to model `item`.
+Exactly one discovered model must match, and a schema symbol or whole
+handler-name word must corroborate it. Name coincidence alone never links;
+if both `items` and `item` exist, the compiler blocks the ambiguity rather
+than preferring one.
+
 Evaluation per endpoint identity, deterministic and fail closed:
 
 - **All matching rules agree** → the capability is declared (composed
   with detected ones; overlapping agreeing rules are one declaration).
   A declared `crud-delete`/`crud-archive` on a DELETE endpoint resolves
   the archive-vs-hard question the linked model could not prove.
+  The declaration also supplies that evidence to the linked model's
+  classifier. Conflicting model/route semantics still block; an archive
+  declaration still needs the model's archive-state evidence.
 - **Matching rules disagree** → a blocking
   `ENDPOINT_CAPABILITY_CONTRADICTION` entry names every matching rule,
   its capability, and its reason; NOTHING is applied — never

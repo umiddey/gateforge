@@ -643,15 +643,19 @@ export function compileEndpointContribution(
     const consumed = endpointCalls.length > 0;
 
     // Linkage: explicit evidence only. The path-derived name is a
-    // NON-authoritative candidate; it becomes a link solely when it names
-    // EXACTLY ONE discovered business resource AND a deterministic
-    // corroboration fact holds (schema symbol or handler-name word). Name
-    // coincidence alone never links.
+    // NON-authoritative candidate; its exact or one-trailing-s singular
+    // form must name EXACTLY ONE discovered business resource AND a
+    // deterministic corroboration fact must hold (schema or handler word).
+    // Name coincidence alone never links.
     const candidate = derivePathResourceName(canonicalPath);
     let linkedResourceName: string | null = null;
     if (candidate !== null) {
-      const matches = [...businessNames.values()].filter((entry) => entry.name === candidate);
-      if (matches.length === 1) {
+      const singularCandidate = candidate.endsWith('s') ? candidate.slice(0, -1) : candidate;
+      const matches = [...businessNames.values()].filter(
+        (entry) => entry.name === candidate || entry.name === singularCandidate,
+      );
+      const match = matches[0];
+      if (matches.length === 1 && match !== undefined) {
         const corroboratedBySchema = endpointRoutes.some((route) =>
           [...(route.responseSchemaSymbols ?? []), ...(route.requestSchemaSymbols ?? [])].some(
             (symbol) => symbolCorroborates(symbol, candidate),
@@ -661,7 +665,7 @@ export function compileEndpointContribution(
           (route) => route.handlerSymbol !== undefined && handlerCorroborates(route.handlerSymbol, candidate),
         );
         if (corroboratedBySchema || corroboratedByHandler) {
-          linkedResourceName = candidate;
+          linkedResourceName = match.name;
         } else {
           const key = `link:${identity}`;
           if (!seenEndpointUnresolved.has(key)) {
@@ -966,6 +970,18 @@ export function compileEndpointContribution(
     signals.push(endpointSignal('identity', ['method', 'path'], record));
     if (linkedResourceName !== null) {
       signals.push(endpointSignal('adapter-binding', linkedResourceName, record));
+      if (method === 'DELETE' && declaredDelete !== undefined) {
+        signals.push({
+          schemaVersion: 1,
+          target: { resourceName: linkedResourceName },
+          dimension: 'delete-semantics',
+          assertion: deleteSemantics,
+          basis: 'declaration',
+          source: `${ENDPOINT_COMPILER_DETECTOR_ID}:config`,
+          location: record.routes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+          detector: { id: ENDPOINT_COMPILER_DETECTOR_ID, version: ENDPOINT_COMPILER_VERSION },
+        });
+      }
     }
     if (configPlane !== null) {
       // The config plane is EVIDENCE, not a blanket override: it enters
