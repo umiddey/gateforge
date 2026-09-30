@@ -230,6 +230,21 @@ Under `CI=true` the default is already `stderr`; locally it is off, and a local 
 
 **Example:** With your config in `e2e/`, run `cd e2e && npx playwright install chromium` (add `firefox`/`webkit` if your projects use them).
 
+**On a Linux machine without the browser's system libraries** — a container, a
+CI image, WSL — the download alone is not enough: the build is installed, the
+dynamic loader fails before the browser's `main`, and every test dies with
+`Target page, context or browser has been closed`. Install both in one command
+(`--with-deps` needs root or sudo):
+
+```bash
+cd e2e && npx playwright install --with-deps chromium
+```
+
+`gateforge enforcement doctor` names this case rather than reporting the cache
+ready: the `runner` line then reads `the browser build '<cache>/chromium-<revision>'
+is installed but cannot start on this machine: <the loader's line>` and prints
+`npx playwright install-deps chromium` in the config's own directory.
+
 **A cache you choose:** if you set `PLAYWRIGHT_BROWSERS_PATH` (a common way to keep browsers in a CI cache mount), install into THAT directory and leave the variable set for the run. The supervised Playwright child receives it, so `enforcement doctor` and the run read the same cache — the doctor never reports one directory ready while the tests launch from another.
 
 ## Keep the runner quiet

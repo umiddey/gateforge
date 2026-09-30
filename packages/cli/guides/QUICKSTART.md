@@ -182,6 +182,20 @@ gateforge test-gates --changed
 
 Gateforge supervises the full relevant mapped suite and writes an authenticated receipt only after a complete successful run. To run only the tests affected by your change, add `--scope changed` (see [How much runs?](#how-much-runs)).
 
+**Once per machine, install the browsers the runner pins:**
+
+```sh
+cd <the directory holding your Playwright config>
+npx playwright install chromium
+```
+
+On a Linux machine without the browser's system libraries — a container, a CI
+image, WSL — use `npx playwright install --with-deps chromium` instead (it
+installs them too, and needs root or sudo). `gateforge enforcement doctor`
+names whichever case you are in: a missing build names `npx playwright install`,
+and a build that is installed but cannot start names the loader's own line and
+`npx playwright install-deps chromium`.
+
 **You should see:** the selected tests pass and the run seals a receipt.
 
 **If not:** use the first typed blocker. Check the changed-file base, mapping, app readiness, seed data, and verifier key. A test declaration or a plain passing test run is not a receipt.

@@ -25,3 +25,7 @@ A witnessed journey must exercise the real application behavior and verify the r
 - When multiple journeys cover the same obligation, state why each one is needed; avoid copy-pasted tests that compete for shared data.
 
 Run the configured suite with `gateforge test-gates --changed`. For a selected non-authoritative slice, use `gateforge test-gates --changed --scope changed --result-only`; this reports selected results without creating or changing a receipt.
+
+## Install the browsers before the first witnessed run
+
+`npx playwright install chromium`, from the directory that holds your Playwright config. On a Linux machine without the browser's system libraries — a container, a CI image, WSL — install those too in the same command: `npx playwright install --with-deps chromium` (it needs root or sudo). `gateforge enforcement doctor` names the case: a missing build names the install, and a build that is installed but cannot start names the loader's own line and the `npx playwright install-deps chromium` that fixes it.

@@ -102,6 +102,19 @@ exact directory when they are missing:
 $ npx playwright install chromium
 ```
 
+On a Linux machine that has no browser system libraries — a container, a CI
+image, WSL — that install is not enough: the download lands, the tests still
+die, and the doctor says so by name:
+
+```sh
+$ npx playwright install --with-deps chromium   # needs root or sudo
+```
+
+`gateforge enforcement doctor` reports a build in exactly this state as
+`the browser build '<cache>/chromium-<revision>' is installed but cannot start
+on this machine: …libnss3.so…` with the `npx playwright install-deps chromium`
+command that fixes it, so the cause and the fix are never something to guess.
+
 `npm run gate` (`scripts/gate.mjs`) does what a supervised run needs around it:
 
 1. picks a free loopback port and starts the app on it (a supervised
