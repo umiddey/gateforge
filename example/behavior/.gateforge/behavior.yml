@@ -1,8 +1,264 @@
 # Complete behavior coverage for the three separate user-facing surfaces.
 # All mutations use the supported engine-http driver. The browser overlay
 # remains a separate consumer fixture and does not claim spreadsheet proof.
+#
+# Every discovered endpoint is declared here — a complete-behavior document
+# has no silent gap, so an undeclared route blocks with
+# ENDPOINT_BEHAVIOR_MISSING. The seven read routes are declared as
+# `http:read-result-verified` cases, not dispositions: the engine drives the
+# read and checks the returned entity against its own scope snapshot, which
+# is stronger than declaring a route out of scope.
 schemaVersion: 1
 endpoints:
+  # --- Read surfaces: the same accounts table, read through four routes ---
+  - resourceId: tenant.http-get-profile-accounts-d1960ba9
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: profile-list-reads-accounts
+        contract: http:read-result-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: owner-a
+        action:
+          kind: request
+          method: GET
+          pathTemplate: /profile/accounts
+          path: {}
+          query: {}
+          body: {encoding: json, fields: {}}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response:
+            # The profile list is a server-rendered page: the engine's read
+            # proof is that the route returned a real rendered body AND left
+            # the store untouched.
+            - kind: envelope
+              schema: {type: string, minLength: 1, maxLength: 1000000}
+          # A read must leave the store exactly as it found it.
+          state:
+            - kind: unchanged
+              scope: accounts
+  - resourceId: tenant.http-get-profile-accounts-id-edit-70cd8bde
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: profile-edit-form-reads-account
+        contract: http:read-result-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: owner-a
+        action:
+          kind: request
+          method: GET
+          pathTemplate: /profile/accounts/{id}/edit
+          path:
+            id: {from: fixture, key: accountA.id}
+          query: {}
+          body: {encoding: json, fields: {}}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response:
+            - kind: envelope
+              schema: {type: string, minLength: 1, maxLength: 1000000}
+          state:
+            - kind: unchanged
+              scope: accounts
+  - resourceId: tenant.http-get-admin-accounts-f4f0496f
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: admin-list-reads-accounts
+        contract: http:read-result-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: admin-a
+        action:
+          kind: request
+          method: GET
+          pathTemplate: /admin/accounts
+          path: {}
+          query: {}
+          body: {encoding: json, fields: {}}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response:
+            - kind: envelope
+              schema: {type: string, minLength: 1, maxLength: 1000000}
+          state:
+            - kind: unchanged
+              scope: accounts
+  - resourceId: tenant.http-get-admin-accounts-id-edit-dea4a195
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: admin-edit-form-reads-account
+        contract: http:read-result-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: admin-a
+        action:
+          kind: request
+          method: GET
+          pathTemplate: /admin/accounts/{id}/edit
+          path:
+            id: {from: fixture, key: accountA.id}
+          query: {}
+          body: {encoding: json, fields: {}}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response:
+            - kind: envelope
+              schema: {type: string, minLength: 1, maxLength: 1000000}
+          state:
+            - kind: unchanged
+              scope: accounts
+  - resourceId: tenant.http-get-imports-accounts-30d78338
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: import-form-reads-accounts
+        contract: http:read-result-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: admin-a
+        action:
+          kind: request
+          method: GET
+          pathTemplate: /imports/accounts
+          path: {}
+          query: {}
+          body: {encoding: json, fields: {}}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response:
+            - kind: envelope
+              schema: {type: string, minLength: 1, maxLength: 1000000}
+          state:
+            - kind: unchanged
+              scope: accounts
+  - resourceId: tenant.http-get-api-accounts-4187c96f
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: api-list-reads-accounts
+        contract: http:read-result-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: admin-a
+        action:
+          kind: request
+          method: GET
+          pathTemplate: /api/accounts
+          path: {}
+          query: {}
+          body: {encoding: json, fields: {}}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response:
+            - kind: envelope
+              schema:
+                type: object
+                properties:
+                  accounts:
+                    type: array
+                    minItems: 0
+                    maxItems: 1000
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string, minLength: 1, maxLength: 200}
+                        first_name: {type: string, minLength: 1, maxLength: 200}
+                        last_name: {type: string, minLength: 1, maxLength: 200}
+                        status: {type: string, minLength: 1, maxLength: 200}
+                        created_at: {type: string, minLength: 1, maxLength: 200}
+                        updated_at: {type: string, minLength: 1, maxLength: 200}
+                      required: [id, first_name, last_name, status, created_at, updated_at]
+                      additionalProperties: false
+                required: [accounts]
+                additionalProperties: false
+          state:
+            - kind: unchanged
+              scope: accounts
+  - resourceId: tenant.http-get-api-accounts-id-0964a3d5
+    effects:
+      - id: accounts
+        resourceId: tenant.accounts
+        adapter: accounts
+        scope: fixture-accounts
+        identityFields: [id]
+        fields: [first_name, last_name, status]
+        completion: immediate
+    cases:
+      - id: api-read-returns-one-account
+        contract: http:read-result-verified
+        channel: engine-http
+        fixture: two-tenants-two-accounts
+        actor: admin-a
+        action:
+          kind: request
+          method: GET
+          pathTemplate: /api/accounts/{id}
+          path:
+            id: {from: fixture, key: accountB.id}
+          query: {}
+          body: {encoding: json, fields: {}}
+          credentialVariant: valid
+        expect:
+          statuses: [200]
+          response:
+            - kind: equals
+              pointer: /id
+              value: {from: fixture, key: accountB.id}
+            - kind: equals
+              pointer: /first_name
+              # The provider provisions accountB as Grace Hopper.
+              value: {from: literal, value: Grace}
+          state:
+            - kind: unchanged
+              scope: accounts
   - resourceId: tenant.http-post-profile-accounts-id-d27ca586
     effects:
       - id: accounts
@@ -32,7 +288,8 @@ endpoints:
               last_name: {from: literal, value: Lovelace}
           credentialVariant: valid
         expect:
-          statuses: [200]
+          # A successful update redirects to the list (see server.js).
+          statuses: [303]
           response: []
           state:
             - kind: updated
@@ -70,7 +327,8 @@ endpoints:
               last_name: {from: literal, value: Hopper}
           credentialVariant: valid
         expect:
-          statuses: [200]
+          # A successful update redirects to the list (see server.js).
+          statuses: [303]
           response: []
           state:
             - kind: updated

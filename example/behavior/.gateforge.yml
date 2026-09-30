@@ -6,7 +6,12 @@ project:
   languages: [javascript]
   paths:
     include: ['server.js', 'e2e/**/*.js', 'fixtures/**/*.mjs']
-    exclude: ['node_modules/**']
+    # The fixture/actor provider is ENGINE-SIDE harness code: the witness
+    # loads it through GATEFORGE_FIXTURE_PROVIDER and the suite never sees
+    # it. Its HTTP calls provision fixture subjects, so scanning it as
+    # product frontend would report the engine's own provisioning traffic
+    # as unresolved application call sites.
+    exclude: ['node_modules/**', 'fixtures/fixture-provider.mjs']
 plugins:
   - id: gateforge.pack-http
     version: '0.4.1'
