@@ -179,10 +179,21 @@ import {
   type ResealChangeClassification,
 } from '../reseal.js';
 import {
+  authenticateParentEvidence,
+  carriedEvidenceDigestOf,
+  carriedEvidenceDocuments,
+  carriedRecordIds,
+  carriedTestIdentities,
+  readParentEvidenceDocuments,
+  stringField,
+  type CarriedParentEvidence,
+} from '../reseal-evidence.js';
+import {
   clearResealChain,
   RESEAL_CHAIN_MAX_HOPS,
   resealChainHopCount,
   writeResealChainHop,
+  writeResealChainParentEvidence,
 } from '../reseal-chain.js';
 import { obligationFingerprint } from '../evaluate.js';
 import { computeEvaluationScope } from '../scope.js';
@@ -2088,6 +2099,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // Hoisted: a named run grades the obligations its selection declares,
   // which the mapping resolution below is the only trusted source for.
   let gradedResolution: ResolvedMappings | null = null;
+  // The parent run's authenticated witness EVIDENCE, reduced to what
+  // the carried tests proved: the union this run grades and seals is
+  // this plus its own fresh records. Resolved at the re-seal decision,
+  // BEFORE this run overwrites the state documents that hold it.
+  let reSealParentEvidence: (CarriedParentEvidence & { attestationDigest: string | null }) | null = null;
   if (catalog !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -2227,7 +2243,45 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         );
       }
       reSealPlan = reSeal.plan;
-      if (reSeal.plan !== null) reSealParent = reSealParentCandidate;
+      reSealParent = reSeal.plan === null ? null : reSealParentCandidate;
+      // The parent's witness EVIDENCE is retained BEFORE this run
+      // overwrites `records.json`, `claims.json` and the run manifest: a
+      // re-seal carries a carried test's outcomes AND the records those
+      // outcomes were witnessed with.
+      if (reSeal.plan !== null && reSealParent !== null) {
+        const parentDocument = reSealParent.record ?? reSealParent.receipt;
+        const authenticated = authenticateParentEvidence(
+          readParentEvidenceDocuments(stateDir),
+          {
+            runId: parentDocument?.runId ?? '',
+            inputDigest: parentDocument?.inputDigest ?? '',
+            evidenceAttestationDigest: parentDocument?.evidenceAttestationDigest ?? null,
+          },
+          verifierKeyring === null ? [] : verifierKeyring.keys.map((entry) => entry.key),
+        );
+        if (authenticated === null) {
+          reSealParentEvidence = null;
+        } else if (!authenticated.ok) {
+          writeLine(
+            io.stderr,
+            `test-gates: the previous run cannot be re-sealed from: ${authenticated.reason} ${RESEAL_REFUSAL_SUFFIX}`,
+          );
+          reSealPlan = null;
+          reSealParent = null;
+        } else {
+          const identities = carriedTestIdentities(reSealParent.execution, reSeal.plan.affectedFiles);
+          const carriedDocuments = carriedEvidenceDocuments(authenticated.evidence, identities);
+          reSealParentEvidence = {
+            ...carriedDocuments,
+            attestation: authenticated.evidence.attestation,
+            attestationDigest: authenticated.evidence.attestationDigest,
+            runId: authenticated.evidence.runId,
+            inputDigest: authenticated.evidence.inputDigest,
+            recordIds: carriedRecordIds(carriedDocuments.records),
+          };
+          writeResealChainParentEvidence(stateDir, reSealParentEvidence);
+        }
+      }
       if (reSeal.plan !== null) {
         const affected = new Set(reSeal.plan.affectedFiles);
         plannedRows = fullPlannedRows.filter(
@@ -3423,6 +3477,34 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     ...inventoryBlocking,
     ...expiredQuarantineBlocking(quarantines.expired),
   ];
+  // The graded evidence of a re-seal is the UNION: the carried parent
+  // records and claims plus this run's own. It is written to the run
+  // state BEFORE grading, so the verdict summary the receipt seals and
+  // every later `check` grade the exact same documents, and the
+  // carriedEvidenceDigest below binds them.
+  let carriedEvidenceDocumentsUnion: { records: unknown[]; claims: unknown[] } | null = null;
+  if (reSealParentEvidence !== null) {
+    const carriedClaims = new Set(
+      reSealParentEvidence.claims.map((claim) => stringField(claim, 'testId')).filter((id): id is string => id !== null),
+    );
+    carriedEvidenceDocumentsUnion = {
+      records: [
+        ...reSealParentEvidence.records,
+        ...readJsonArray(stateDir, 'records.json').filter(
+          (record) => stringField(record, 'runId') !== reSealParentEvidence.runId,
+        ),
+      ],
+      claims: [
+        ...reSealParentEvidence.claims,
+        ...readJsonArray(stateDir, 'claims.json').filter((claim) => {
+          const testId = stringField(claim, 'testId');
+          return testId !== null && !carriedClaims.has(testId);
+        }),
+      ],
+    };
+    writeFileSync(join(stateDir, 'records.json'), `${JSON.stringify(carriedEvidenceDocumentsUnion.records, null, 2)}\n`, 'utf8');
+    writeFileSync(join(stateDir, 'claims.json'), `${JSON.stringify(carriedEvidenceDocumentsUnion.claims, null, 2)}\n`, 'utf8');
+  }
   const evaluationInput: EvaluateInput = {
     cwd: io.cwd,
     config,
@@ -3474,6 +3556,18 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     witnessVerifierKey,
     witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
     witnessAttestation: liveAttestation,
+    // The parent's own envelope, authenticated against the identity and
+    // input digest the re-seal's own recomputation bound it to.
+    ...(reSealParentEvidence === null || reSealParentEvidence.attestation === null
+      ? {}
+      : {
+          carriedEvidence: {
+            attestation: reSealParentEvidence.attestation,
+            runId: reSealParentEvidence.runId,
+            inputDigest: reSealParentEvidence.inputDigest,
+            recordIds: reSealParentEvidence.recordIds,
+          },
+        }),
     // Goal 1: the supervised gate honors the adopted baseline through the
     // SAME fail-closed seam as `check` (no adoption record → nothing is
     // forgiven). Under strictE2E the evaluator still re-grades every
@@ -3873,6 +3967,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           ...((reSealPlan.classification.disregardedPaths ?? []).length > 0
             ? { resealDisregarded: reSealPlan.classification.disregardedPaths }
             : {}),
+          // The graded evidence union — the carried parent records and
+          // claims plus this run's own — bound by the receipt MAC, so a
+          // consumer recomputes it and demands the state evidence equal
+          // it.
+          ...(carriedEvidenceDocumentsUnion === null
+            ? {}
+            : { carriedEvidenceDigest: carriedEvidenceDigestOf(carriedEvidenceDocumentsUnion) }),
         }),
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: liveAttestation === null ? null : sha256Canonical(liveAttestation as unknown as Record<string, never>),
@@ -3914,6 +4015,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         : { receipt: reSealParent.receipt, runRecord: null }),
       execution: reSealParent.execution,
       catalog,
+      records: reSealParentEvidence?.records ?? [],
+      claims: reSealParentEvidence?.claims ?? [],
+      attestation: reSealParentEvidence?.attestation ?? null,
     });
   } else {
     clearResealChain(stateDir);

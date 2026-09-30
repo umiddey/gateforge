@@ -92,7 +92,7 @@ import {
   scopedReceiptCoverageBlocking,
   type ScopedObligationRef,
 } from '../receipts.js';
-import { resealChainBlocking } from '../reseal-chain.js';
+import { resealChainBlocking, retainedCarriedEvidence } from '../reseal-chain.js';
 import { resolveProvider } from '../providers.js';
 import {
   computeEvaluationScope,
@@ -1248,6 +1248,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   }
 
   const adoptedBaseline = resolveAdoptedBaseline(io.cwd, config.baselines);
+  // A re-sealed run grades the evidence UNION: this run's own records
+  // plus the parent's carried ones, authenticated by the retained
+  // parent envelope. `resealChainBlocking` below is what recomputes the
+  // whole chain and fails closed on any difference.
+  const carriedEvidence = retainedCarriedEvidence(stateDir);
   const evaluated = evaluateRun({
     cwd: io.cwd,
     config,
@@ -1274,6 +1279,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     mappedCoverage,
     witnessVerifierKey,
     witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
+    ...(carriedEvidence === null ? {} : { carriedEvidence }),
     baseline: adoptedBaseline,
     evidenceContext: {
       expectedInputDigest: expectedDigest,

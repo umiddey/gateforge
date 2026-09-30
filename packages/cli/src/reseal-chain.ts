@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import {
   CAUSE_NEXT_ACTIONS,
   ExecutionResultSchema,
+  AttestationSchema,
   GateReceiptSchema,
   TestCatalogSchema,
   executionResultDigestOf,
@@ -33,7 +34,14 @@ import {
   testOutcomesDigestOf,
 } from '@gate-forge/core';
 import { classifyResealChange, diffSealedTrees, resealRefusalVerdict } from './reseal.js';
-import { readStateDocument } from './state.js';
+import {
+  authenticateParentEvidence,
+  carriedEvidenceDigestOf,
+  carriedEvidenceDocuments,
+  carriedTestIdentities,
+  stringField,
+} from './reseal-evidence.js';
+import { readJsonArray, readStateDocument } from './state.js';
 import { verifyGateReceiptWithKeyring, verifyRunRecordWithKeyring, type VerifierKeyring } from './verifier-keys.js';
 
 /** Run-state subdirectory holding the retained re-seal chain. */
@@ -47,7 +55,11 @@ export const RESEAL_CHAIN_DIRECTORY = 'reseal-chain';
  */
 export const RESEAL_CHAIN_MAX_HOPS = 5;
 
-/** One retained hop: the parent a re-seal carried from, plus the catalog its classification used. */
+/**
+ * One retained hop: the parent a re-seal carried from, plus the catalog
+ * its classification used and the witness EVIDENCE its carried tests
+ * were proven with.
+ */
 export interface ResealChainHop {
   /** The parent receipt document, exactly as it was issued (null for a run-record parent). */
   receipt: unknown;
@@ -57,15 +69,51 @@ export interface ResealChainHop {
   execution: unknown;
   /** The test catalog of the CHILD tree (the re-sealed candidate). */
   catalog: unknown;
+  /** The parent run's witness-issued records (the ledger copy it graded). */
+  records: unknown;
+  /** The parent run's claims. */
+  claims: unknown;
+  /** The parent's v2 attestation envelope, the document that binds those records. */
+  attestation: unknown;
 }
 
-function hopFileNames(hop: number): [string, string, string, string] {
+function hopFileNames(hop: number): [string, string, string, string, string, string, string] {
   return [
     `hop-${String(hop)}-receipt.json`,
     `hop-${String(hop)}-run-record.json`,
     `hop-${String(hop)}-execution-result.json`,
     `hop-${String(hop)}-catalog.json`,
+    `hop-${String(hop)}-records.json`,
+    `hop-${String(hop)}-claims.json`,
+    `hop-${String(hop)}-attestation.json`,
   ];
+}
+
+/**
+ * Retains the parent run's evidence BEFORE the re-seal's own run
+ * overwrites `records.json`, `claims.json` and the run manifest. It
+ * writes only the three evidence members of hop 1, without shifting the
+ * chain: the hop itself is written when the receipt seals, and a run
+ * that seals nothing leaves no hop-1 parent behind, so a stale evidence
+ * file is never read as a chain.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   evidence: the authenticated parent records, claims and attestation.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeResealChainParentEvidence(
+  stateDir: string,
+  evidence: { records: readonly unknown[]; claims: readonly unknown[]; attestation: unknown },
+): void {
+  const directory = join(stateDir, RESEAL_CHAIN_DIRECTORY);
+  mkdirSync(directory, { recursive: true });
+  const [, , , , recordsName, claimsName, attestationName] = hopFileNames(1);
+  writeFileSync(join(directory, recordsName), `${JSON.stringify(evidence.records, null, 2)}\n`, 'utf8');
+  writeFileSync(join(directory, claimsName), `${JSON.stringify(evidence.claims, null, 2)}\n`, 'utf8');
+  writeFileSync(join(directory, attestationName), `${JSON.stringify(evidence.attestation, null, 2)}\n`, 'utf8');
 }
 
 /**
@@ -132,10 +180,14 @@ export function writeResealChainHop(stateDir: string, hop: ResealChainHop): void
       }
     }
   }
-  const [receiptName, runRecordName, executionName, catalogName] = hopFileNames(1);
+  const [receiptName, runRecordName, executionName, catalogName, recordsName, claimsName, attestationName] =
+    hopFileNames(1);
   writeFileSync(join(directory, receiptName), `${JSON.stringify(hop.receipt, null, 2)}\n`, 'utf8');
   writeFileSync(join(directory, executionName), `${JSON.stringify(hop.execution, null, 2)}\n`, 'utf8');
   writeFileSync(join(directory, catalogName), `${JSON.stringify(hop.catalog, null, 2)}\n`, 'utf8');
+  writeFileSync(join(directory, recordsName), `${JSON.stringify(hop.records, null, 2)}\n`, 'utf8');
+  writeFileSync(join(directory, claimsName), `${JSON.stringify(hop.claims, null, 2)}\n`, 'utf8');
+  writeFileSync(join(directory, attestationName), `${JSON.stringify(hop.attestation, null, 2)}\n`, 'utf8');
   // A leftover run record from an earlier chain would be read as this
   // hop's parent, so the absent member is removed rather than left.
   if (hopCarriesRunRecord(hop)) {
@@ -163,18 +215,58 @@ export function clearResealChain(stateDir: string): void {
 function readResealChain(stateDir: string): ResealChainHop[] {
   const hops: ResealChainHop[] = [];
   for (let index = 1; ; index += 1) {
-    const [receiptName, runRecordName, executionName, catalogName] = hopFileNames(index);
+    const [receiptName, runRecordName, executionName, catalogName, recordsName, claimsName, attestationName] =
+      hopFileNames(index);
     const directory = join(stateDir, RESEAL_CHAIN_DIRECTORY);
     const receipt = readStateDocument(directory, receiptName);
     const runRecord = readStateDocument(directory, runRecordName);
     if (receipt === null && runRecord === null) return hops;
     const execution = readStateDocument(directory, executionName);
     const catalog = readStateDocument(directory, catalogName);
+    const records = readStateDocument(directory, recordsName);
+    const claims = readStateDocument(directory, claimsName);
+    const attestation = readStateDocument(directory, attestationName);
     if (execution === null || catalog === null) {
-      return [...hops, { receipt, runRecord, execution: null, catalog: null }];
+      return [...hops, { receipt, runRecord, execution: null, catalog: null, records, claims, attestation }];
     }
-    hops.push({ receipt, runRecord, execution, catalog });
+    hops.push({ receipt, runRecord, execution, catalog, records, claims, attestation });
   }
+}
+
+/**
+ * The carried-evidence metadata a GRADER needs for a re-sealed run: the
+ * retained parent envelope plus the identity and input digest the
+ * retained parent document binds. Nothing here is trusted — the
+ * envelope's MAC is verified inside the evaluator and the whole chain is
+ * recomputed by `resealChainBlocking` — this only tells the grader which
+ * envelope belongs to the run it is grading.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   the metadata, or null when the state holds no re-sealed receipt, no
+ *   retained hop, or no envelope to carry.
+ */
+export function retainedCarriedEvidence(
+  stateDir: string,
+): { attestation: unknown; runId: string; inputDigest: string; recordIds: string[] } | null {
+  const receipt = readStateDocument(stateDir, 'receipt.json');
+  if (stringField(receipt, 'resealedFrom') === null) return null;
+  const chain = readResealChain(stateDir);
+  const hop = chain[0];
+  if (hop === undefined || hop === null || hop.attestation === null) return null;
+  const parent = hopCarriesRunRecord(hop) ? hop.runRecord : hop.receipt;
+  const runId = stringField(parent, 'runId');
+  const inputDigest = stringField(parent, 'inputDigest');
+  if (runId === null || inputDigest === null) return null;
+  const parsed = AttestationSchema.safeParse(hop.attestation);
+  return {
+    attestation: hop.attestation,
+    runId,
+    inputDigest,
+    recordIds: parsed.success ? [...parsed.data.recordIds] : [],
+  };
 }
 
 /**
@@ -475,6 +567,73 @@ export function resealChainBlocking(input: {
         `re-sealed receipt claims ${String(currentReceipt.carriedTests ?? -1)} carried test(s) but its parent ` +
           `holds ${String(carriedOutcomes.length)} carried outcome(s)`,
       );
+    }
+    // The carried EVIDENCE (the second half of what a re-seal carries):
+    // the retained parent records and claims are authenticated against
+    // the parent document's own attestation with THIS keyring and
+    // reduced to the tests the recomputed affected set left untouched.
+    if (hop.records === null || hop.claims === null || hop.attestation === null) {
+      return stale(`re-seal hop ${hopNumber} retains no parent evidence documents (fail closed)`);
+    }
+    const parentDocument = retainedKind === 'run-record' ? hop.runRecord : parentReceipt;
+    const authenticated = authenticateParentEvidence(
+      {
+        records: Array.isArray(hop.records) ? hop.records : [],
+        claims: Array.isArray(hop.claims) ? hop.claims : [],
+        attestation: hop.attestation,
+      },
+      {
+        runId: stringField(parentDocument, 'runId') ?? '',
+        inputDigest: stringField(parentDocument, 'inputDigest') ?? '',
+        evidenceAttestationDigest: stringField(parentDocument, 'evidenceAttestationDigest'),
+      },
+      input.verifierKeyring.keys.map((entry) => entry.key),
+    );
+    if (authenticated === null) {
+      return stale(`re-seal hop ${hopNumber} retains no parent evidence to carry (fail closed)`);
+    }
+    if (!authenticated.ok) {
+      return stale(`re-seal hop ${hopNumber}'s retained evidence does not recompute: ${authenticated.reason} (fail closed)`);
+    }
+    // The state evidence is the IMMEDIATE re-seal's union, so only the
+    // first hop can be compared with it: a deeper hop's own union was
+    // the run that sealed its successor, whose evidence this chain no
+    // longer retains.
+    if (index === 0) {
+      if (currentReceipt.carriedEvidenceDigest === undefined) {
+        return stale(`re-seal hop ${hopNumber} seals no carriedEvidenceDigest (fail closed)`);
+      }
+      const identities = carriedTestIdentities(parentExecution, classification.affectedTestFiles);
+      const carried = carriedEvidenceDocuments(authenticated.evidence, identities);
+      const stateRecords = readJsonArray(input.stateDir, 'records.json');
+      const stateClaims = readJsonArray(input.stateDir, 'claims.json');
+      if (carriedEvidenceDigestOf({ records: stateRecords, claims: stateClaims }) !== currentReceipt.carriedEvidenceDigest) {
+        return stale(
+          `re-seal hop ${hopNumber}: the state evidence no longer hashes to the carriedEvidenceDigest the receipt ` +
+            'sealed (fail closed)',
+        );
+      }
+      // The state evidence must BE the union: the retained carried
+      // evidence plus exactly this run's own (never the parent's twice).
+      const recomputedUnion = {
+        records: [
+          ...carried.records,
+          ...stateRecords.filter((record) => stringField(record, 'runId') !== authenticated.evidence.runId),
+        ],
+        claims: [
+          ...carried.claims,
+          ...stateClaims.filter((claim) => {
+            const testId = stringField(claim, 'testId');
+            return testId !== null && !identities.has(testId);
+          }),
+        ],
+      };
+      if (carriedEvidenceDigestOf(recomputedUnion) !== currentReceipt.carriedEvidenceDigest) {
+        return stale(
+          `re-seal hop ${hopNumber}: the state evidence is not the union of the retained parent evidence ` +
+            `(${String(carried.records.length)} carried record(s)) and this run's own (fail closed)`,
+        );
+      }
     }
     // A run record is the tail of a chain by construction: it is the
     // only parent a re-seal can have before any receipt exists, so a

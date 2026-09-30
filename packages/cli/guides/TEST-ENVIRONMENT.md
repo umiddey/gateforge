@@ -470,14 +470,34 @@ far to recompute honestly. The sixth consecutive re-seal takes the full
 run and says so; `check --require-e2e` rejects a longer chain the same
 way.
 
+**What a carried test brings with it.** A carried test brings its
+**outcomes and the evidence those outcomes were witnessed with**: the
+parent run's `records.json` and `claims.json`, retained before the
+re-seal's own run overwrites them and bound to the parent run's
+attestation — the envelope must carry the parent document's own run id
+and input digest, hash to the `evidenceAttestationDigest` that document
+seals, and verify with your keyring, or the re-seal is refused like any
+other parent binding. Attribution is by the witness-issued test id, and
+only the parent records and claims whose test this run did **not** re-run
+are carried: a re-run test's parent record never survives, so a test that
+stopped proving anything after the fix leaves its obligation unproven.
+The graded evidence is the **union** of the carried half and the re-run's
+own, it is what the report and the receipt's `verdictSummary` grade, and
+it is what stands in the run state afterwards — so the next
+`check --changed --require-e2e` grades the same evidence this run did.
+The receipt binds the union in `carriedEvidenceDigest`, MAC-covered like
+the other re-seal fields.
+
 **CI and the broker recompute all of it.** A re-sealed receipt is never
 believed. `check --require-e2e` and `broker commit` walk the retained
 chain with their **own** keyring and object store and redo the work: the
 parent authenticates, the two sealed trees are re-diffed, the claimed
 changed paths are compared with the real diff, the change set is
 re-classified from the retained catalog, the affected set is recomputed
-and matched against the fresh outcomes, and the parent must carry
-exactly the rest. Any mismatch is a typed `EVIDENCE_STALE` with the
+and matched against the fresh outcomes, the parent must carry exactly
+the rest, the retained parent evidence is authenticated against the
+parent document with that same keyring, and the state evidence must
+equal the recomputed union. Any mismatch is a typed `EVIDENCE_STALE` with the
 exact reason, for example:
 
 ```text

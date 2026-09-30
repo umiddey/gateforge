@@ -122,6 +122,25 @@ export interface EvaluateInput {
    * issuance.
    */
   witnessVerifierKey?: string | null;
+  /**
+   * The CARRIED evidence of a test-only re-seal: the parent run's v2
+   * attestation envelope, the run identity and input digest it binds,
+   * and the record ids it attests. A re-seal carries a test's outcomes
+   * AND the evidence those outcomes were witnessed with, and that
+   * evidence was witnessed under the PARENT's input digest — which is
+   * exactly what this re-computation proved may differ from the current
+   * one. The envelope is authenticated here with the same witness
+   * verifier keys as any other, and only the records it names keep
+   * their witnessed trust; every other record grades as it does today.
+   * The consumer's own recomputation (`resealChainBlocking`) is what
+   * proves this envelope belongs to the verified parent document.
+   */
+  carriedEvidence?: {
+    attestation: unknown;
+    runId: string;
+    inputDigest: string;
+    recordIds: readonly string[];
+  } | null;
   /** Active and retained keys used to verify older witnessed envelopes. */
   /**
    * Engine-issued Alembic witness records from this process. Never read
@@ -515,6 +534,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     expectedInvocationId: input.evidenceContext?.expectedInvocationId,
     requireInvocationId: input.evidenceContext?.requireInvocationId,
     changedInputs: input.evidenceContext?.changedInputs,
+    carried: input.carriedEvidence ?? null,
   });
   // Owner quarantine (plan 20260925_2013 Phase 2): a quarantined test's
   // records are discarded HERE — before any verifier sees them — so its
@@ -835,6 +855,18 @@ function authorizeRecords(
     expectedInvocationId?: string | null;
     requireInvocationId?: boolean;
     changedInputs?: boolean;
+    /**
+     * The re-seal's carried parent envelope: authenticated against the
+     * PARENT input digest it binds (never the current one — the
+     * re-computation is what proved the two trees differ only in test
+     * files), and usable for exactly the records it attests.
+     */
+    carried?: {
+      attestation: unknown;
+      runId: string;
+      inputDigest: string;
+      recordIds: readonly string[];
+    } | null;
   } = {},
 ): { records: unknown[]; evidenceBlocking: BlockingEntry[] } {
   const issuedRecordId = /^[0-9a-f]{64}$/;
@@ -1046,6 +1078,45 @@ function authorizeRecords(
       liveRejection = result.rejection;
       liveDetail = result.detail;
     }
+  }
+
+  // Carried channel (test-only re-seal): the parent run's envelope,
+  // validated against the identity and input digest the re-seal's own
+  // recomputation bound it to. It authorizes EXACTLY the records it
+  // attests, under its own run id — never this run's, never a record
+  // the envelope does not name.
+  const carried = auth.carried ?? null;
+  if (carried !== null && verifierKeys.length > 0) {
+    const carriedParsed = AttestationSchema.safeParse(carried.attestation);
+    if (carriedParsed.success) {
+      const envelope = carriedParsed.data;
+      const macOk = verifierKeys.some((key) =>
+        verifyAttestationMac(
+          key,
+          {
+            runId: carried.runId,
+            invocationId: envelope.invocationId,
+            inputDigest: carried.inputDigest,
+            recordIds: carried.recordIds,
+          },
+          envelope.mac,
+        ),
+      );
+      // The envelope is usable only when it is the one the re-seal's
+      // recomputation bound: its own run identity, its own input
+      // digest, and exactly the records it attests.
+      if (macOk && envelope.runId === carried.runId && envelope.inputDigest === carried.inputDigest) {
+        validEnvelopes.push({
+          runId: carried.runId,
+          invocationId: envelope.invocationId,
+          inputDigest: carried.inputDigest,
+          recordIds: new Set(carried.recordIds),
+        });
+      }
+    }
+    // A carried envelope that does not authenticate authorizes
+    // nothing: its records keep no witnessed trust and grade exactly as
+    // unproven evidence. This run's own evidence is never affected.
   }
 
   // Explicit evidence-context blockers (visible even when no obligation

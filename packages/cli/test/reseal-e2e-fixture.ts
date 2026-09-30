@@ -368,3 +368,318 @@ export function reforgeReceipt(
     'utf8',
   );
 }
+
+/* ------------------------------------------------------------------ *
+ * Witnessed-evidence variant: the same re-seal, but the obligations
+ * are proven by WITNESS-ISSUED records (the server-witnessed
+ * persistence channel) instead of owner waivers, so a carried test's
+ * evidence is the only thing that can satisfy what it proved in the
+ * parent run.
+ * ------------------------------------------------------------------ */
+
+/** The environment marker the attested app presents (GF-13). */
+export const EVIDENCE_FINGERPRINT = 'reseal-e2e-env';
+
+/** The two evidence spec files; `__EVIDENCE__` drives the witness intent. */
+export const EVIDENCE_SPECS: Record<string, string> = {
+  'e2e/accounts.spec.mjs': [
+    "import { test } from 'playwright/test';",
+    "test('reads an account', async () => {});",
+    '// __EVIDENCE__ tenant.accounts',
+    '',
+  ].join('\n'),
+  'e2e/orders.spec.mjs': [
+    "import { test } from 'playwright/test';",
+    "test('reads an order', async () => {});",
+    '// __EVIDENCE__ tenant.orders',
+    '',
+  ].join('\n'),
+};
+
+/** The sidecar identity (and so the claim's testId) of each evidence spec. */
+export const EVIDENCE_KEYS: Record<string, string> = {
+  'e2e/accounts.spec.mjs': 'accounts-e2e',
+  'e2e/orders.spec.mjs': 'orders-e2e',
+};
+
+/** The evidence adapter: an attested read base plus the server-side probe. */
+export function evidenceAdapter(baseUrl: string): string {
+  return [
+    'export default {',
+    `  baseUrl: '${baseUrl}',`,
+    '  read: async () => null,',
+    '  normalize: (body) => ({ entityId: body.id, fields: {} }),',
+    "  deletion: 'hard',",
+    `  environmentFingerprint: '${EVIDENCE_FINGERPRINT}',`,
+    '  probeServer: async () => ({ found: true, fields: { id: "acc-1" } }),',
+    '};',
+    '',
+  ].join('\n');
+}
+
+/** The sidecar mapping both evidence tests, declared `server-e2e`. */
+export const EVIDENCE_TEST_MAP = [
+  'schemaVersion: 1',
+  'tests:',
+  '  - key: accounts-e2e',
+  '    selector:',
+  '      runner: playwright',
+  '      file: e2e/accounts.spec.mjs',
+  '      titlePath:',
+  '        - reads an account',
+  '    kind: server-e2e',
+  '    claims:',
+  '      - tenant.accounts:persistence:read',
+  '    reason: the witness probes the account row server-side while this test runs',
+  '  - key: orders-e2e',
+  '    selector:',
+  '      runner: playwright',
+  '      file: e2e/orders.spec.mjs',
+  '      titlePath:',
+  '        - reads an order',
+  '    kind: server-e2e',
+  '    claims:',
+  '      - tenant.orders:persistence:read',
+  '    reason: the witness probes the order row server-side while this test runs',
+  '',
+].join('\n');
+
+/**
+ * The evidence stub runner: the wire-registration pattern plus the two
+ * suite-side channels a real reporter drives — the persistence-intent
+ * spool (the witness observes; the suite only declares) and the
+ * witness-issued ledger copy the evaluator reads.
+ */
+export const EVIDENCE_STUB_CLI = [
+  "const { readFileSync, writeFileSync, mkdirSync } = require('node:fs');",
+  'const argv = process.argv.slice(2);',
+  `const files = ${JSON.stringify(Object.keys(EVIDENCE_SPECS))};`,
+  `const titles = ${JSON.stringify({
+    'e2e/accounts.spec.mjs': 'reads an account',
+    'e2e/orders.spec.mjs': 'reads an order',
+  })};`,
+  `const keys = ${JSON.stringify(EVIDENCE_KEYS)};`,
+  "if (argv.includes('--list')) {",
+  '  process.stdout.write(JSON.stringify({',
+  '    config: { rootDir: process.cwd() },',
+  '    suites: files.map((file) => ({',
+  '      file,',
+  '      specs: [{',
+  '        id: file,',
+  '        title: titles[file],',
+  '        line: 2,',
+  '        column: 0,',
+  "        tests: [{ projectId: 'chromium', projectName: 'chromium', expectedStatus: 'passed', annotations: [] }],",
+  '      }],',
+  '    })),',
+  '  }));',
+  '} else {',
+  "  const config = readFileSync(argv[argv.indexOf('--config') + 1], 'utf8');",
+  '  const selected = JSON.parse(/testMatch: (\\[[^\\]]*\\])/.exec(config)[1]);',
+  '  const reporter = /"stateDir":"([^"]+)","runId":"([^"]+)","outcomesPath":"([^"]+)"/.exec(config);',
+  '  const stateDir = reporter[1];',
+  '  const runId = reporter[2];',
+  "  const spool = stateDir + '/spool/' + runId;",
+  '  mkdirSync(spool, { recursive: true });',
+  "  const fails = (file) => readFileSync(file, 'utf8').includes('__FAIL__');",
+  '  const intents = [];',
+  '  const events = selected.flatMap((file) => {',
+  '    const declared = /__EVIDENCE__ (tenant\\.[a-z]+)/.exec(readFileSync(file, "utf8"));',
+  '    if (declared !== null) {',
+  '      intents.push({',
+  '        entity: declared[1],',
+  '        operation: "read",',
+  '        phase: "post",',
+  '        intent: "expect-present",',
+  '        key: "acc-1",',
+  '        claimId: declared[1] + ":persistence:read",',
+  '        testId: keys[file],',
+  '        sequence: 1,',
+  '      });',
+  '    }',
+  "    return [",
+  "      { kind: 'testBegin', testId: file, workerIndex: 0, file, titlePath: [titles[file]], project: 'chromium' },",
+  "      { kind: 'testEnd', testId: file, workerIndex: 0, file, titlePath: [titles[file]], project: 'chromium', outcome: fails(file) ? 'failed' : 'passed', attempt: 1 },",
+  '    ];',
+  '  });',
+  "  writeFileSync(spool + '/events.jsonl', events.map((event) => JSON.stringify(event)).join('\\n') + '\\n');",
+  "  writeFileSync(spool + '/persistence-intents.jsonl', intents.map((intent) => JSON.stringify(intent)).join('\\n') + '\\n');",
+  "  writeFileSync(reporter[3], JSON.stringify({",
+  '    schemaVersion: 1,',
+  "    runStatus: selected.some(fails) ? 'failed' : 'passed',",
+  '    runnerErrors: [],',
+  '    shard: null,',
+  '    outcomes: selected.map((file) => ({',
+  '      testId: file,',
+  '      file,',
+  '      titlePath: [titles[file]],',
+  "      project: 'chromium',",
+  "      status: fails(file) ? 'failed' : 'passed',",
+  '      attempt: 1,',
+  '      expectedFailure: false,',
+  '    })),',
+  '  }));',
+  '  const url = process.env.GATEFORGE_WITNESS_URL;',
+  '  const token = process.env.GATEFORGE_RUN_TOKEN;',
+  '  // The engine reporter copies the WITNESS-ISSUED ledger once every',
+  '  // session answered; the suite can only read it, never write it.',
+  '  const copyLedger = async () => {',
+  '    if (url === undefined || token === undefined) return;',
+  '    for (let attempt = 0; attempt < 200; attempt += 1) {',
+  '      const response = await fetch(url + "/records", { headers: { "x-gateforge-run": token } });',
+  '      const body = await response.json();',
+  '      if (Array.isArray(body.records) && body.records.length >= intents.length) {',
+  '        writeFileSync(stateDir + "/records.json", JSON.stringify(body.records, null, 2) + "\\n");',
+  '        return;',
+  '      }',
+  '      await new Promise((resolve) => setTimeout(resolve, 25));',
+  '    }',
+  '  };',
+  '  copyLedger();',
+  '}',
+  '',
+].join('\n');
+
+/** The attested app the witness probes before every adapter read (GF-13). */
+export interface EvidenceApp {
+  url: string;
+  close: () => Promise<void>;
+}
+
+/** Starts the attested environment on a free loopback port. */
+export async function startEvidenceApp(): Promise<EvidenceApp> {
+  const { createServer } = await import('node:http');
+  const server = createServer((_request, response) => {
+    response.setHeader('x-gateforge-env-fingerprint', EVIDENCE_FINGERPRINT);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('{}');
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, '[IP_ADDRESS]', () => {
+      resolve();
+    });
+  });
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  return {
+    url: `http://[IP_ADDRESS]:${String(port)}`,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      }),
+  };
+}
+
+/** Writes the evidence repository (specs, sidecar, attested adapters). */
+export function installEvidenceRepo(repo: TempRepo, appUrl: string, specOverrides: Record<string, string> = {}): void {
+  repo.writeFiles({
+    ...EVIDENCE_SPECS,
+    ...specOverrides,
+    '.gateforge/adapters/accounts.mjs': evidenceAdapter(appUrl),
+    '.gateforge/adapters/orders.mjs': evidenceAdapter(appUrl),
+    '.gateforge/test-map.yml': EVIDENCE_TEST_MAP,
+    'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
+    'node_modules/playwright/cli.js': EVIDENCE_STUB_CLI,
+    '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
+  });
+}
+
+/** The environment the evidence runs and the later check share. */
+export async function evidenceRunEnv(repo: TempRepo): Promise<ResealEnv> {
+  const baseSha = repo.headSha() as string;
+  const config = loadConfig(repo.path('.gateforge.yml'));
+  return {
+    GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
+    GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
+    CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha,
+  };
+}
+
+/**
+ * Installs the evidence repository and seals a CLEAN whole-suite parent
+ * receipt whose two obligations are proven by witnessed records.
+ */
+export async function installAndSealEvidenceParent(repo: TempRepo): Promise<ResealEnv> {
+  installFixture(repo);
+  const app = await startEvidenceApp();
+  try {
+    installEvidenceRepo(repo, app.url);
+    repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
+    repo.commitFiles({}, 'base');
+    const env = await evidenceRunEnv(repo);
+    const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+    expect(full.code, `${full.stdout}\n${full.stderr}`).toBe(0);
+    return env;
+  } finally {
+    await app.close();
+  }
+}
+
+/**
+ * Installs the evidence repository and runs a whole suite in which the
+ * ORDERS test fails on a planted test bug: the run seals no receipt and
+ * leaves the run record a re-seal may carry from.
+ */
+export async function installAndRunFailingEvidenceParent(repo: TempRepo): Promise<ResealEnv> {
+  installFixture(repo);
+  const app = await startEvidenceApp();
+  try {
+    installEvidenceRepo(repo, app.url, {
+      'e2e/orders.spec.mjs': `${EVIDENCE_SPECS['e2e/orders.spec.mjs'] as string}// __FAIL__ a race in this test\n`,
+    });
+    repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
+    repo.commitFiles({}, 'base');
+    const env = await evidenceRunEnv(repo);
+    const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+    expect(full.code, `${full.stdout}\n${full.stderr}`).not.toBe(0);
+    expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+    return env;
+  } finally {
+    await app.close();
+  }
+}
+
+/**
+ * Edits ONLY the orders spec and asks for the re-seal.
+ *
+ * Args:
+ *   repo: the temporary repository.
+ *   env: the shared run environment.
+ *   options.keepEvidence: false makes the fixed test stop declaring its
+ *     persistence intent, so the re-run proves nothing and the parent's
+ *     record must not survive.
+ *   options.expectReseal: false where the run must NOT re-seal.
+ *
+ * Returns:
+ *   { code, stdout, stderr }: the re-seal invocation's own result.
+ */
+export async function fixOrdersSpecAndReseal(
+  repo: TempRepo,
+  env: ResealEnv,
+  { keepEvidence = true, expectReseal = true }: { keepEvidence?: boolean; expectReseal?: boolean } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const body = (EVIDENCE_SPECS['e2e/orders.spec.mjs'] as string)
+    .split('\n')
+    .filter((line) => keepEvidence || !line.includes('__EVIDENCE__'))
+    .join('\n');
+  repo.commitFiles(
+    {
+      'e2e/orders.spec.mjs': keepEvidence
+        ? `${body}// the race is fixed\n`
+        : `${body}// the race is fixed and the assertion was dropped\n`,
+    },
+    'fix the race in the one failing spec',
+  );
+  const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+  if (!expectReseal) return resealed;
+  expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
+  expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous run');
+  return resealed;
+}
+
+/** The state-dir evidence ledger of the run that just finished. */
+export function stateRecords(repo: { root: string }): unknown[] {
+  return JSON.parse(readFileSync(join(repo.root, '.gateforge/test-gates/records.json'), 'utf8')) as unknown[];
+}

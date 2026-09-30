@@ -848,6 +848,11 @@ export interface IssueGateReceiptInput {
    * which no sealed commit tracks (re-seal).
    */
   resealDisregarded?: readonly string[];
+  /**
+   * Canonical digest of the evidence union this re-seal sealed: the
+   * carried parent records and claims together with the re-run's own.
+   */
+  carriedEvidenceDigest?: string;
   /** Normalized invocation. */
   invocation: string;
   /** Selection digest. */
@@ -971,6 +976,9 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
           changeClass: input.changeClass,
           ...(input.changedPaths !== undefined ? { changedPaths: [...input.changedPaths] } : {}),
           ...(input.resealDisregarded !== undefined ? { resealDisregarded: [...input.resealDisregarded] } : {}),
+          ...(input.carriedEvidenceDigest !== undefined
+            ? { carriedEvidenceDigest: input.carriedEvidenceDigest }
+            : {}),
         }
       : {}),
     // Additive scope binding (opt-in scoped supervised runs): present

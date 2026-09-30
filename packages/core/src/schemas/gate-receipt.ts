@@ -260,6 +260,18 @@ export const GateReceiptSchema = z
      * be clean when no evidence was required).
      */
     evidenceAttestationDigest: z.string().regex(HEX64, 'evidenceAttestationDigest must be 64-char lowercase hex').nullable(),
+    /**
+     * ADDITIVE: canonical digest of the EVIDENCE UNION this re-seal
+     * sealed — the parent run's carried witness-issued records and
+     * claims together with the re-run's own, exactly as they stand in
+     * the run state. A re-seal carries a test's outcomes AND the
+     * evidence those outcomes were witnessed with; this field binds
+     * that second half, so a consumer recomputes the union from the
+     * retained parent documents and demands the state evidence equal it
+     * (any difference is `EVIDENCE_STALE`). MAC-bound like every other
+     * re-seal field.
+     */
+    carriedEvidenceDigest: z.string().regex(HEX64, 'carriedEvidenceDigest must be 64-char lowercase hex').optional(),
     /** Final verdict summary (blocking must have been 0 at issuance). */
     verdictSummary: ReceiptVerdictSummarySchema,
     /** Issuance instant (ISO-8601). */
@@ -302,6 +314,16 @@ export const GateReceiptSchema = z
         code: 'custom',
         path: ['resealDisregarded'],
         message: 'resealDisregarded is a re-seal binding and stands or falls with the re-seal fields',
+      });
+    }
+    // The carried-EVIDENCE binding is a re-seal binding: a receipt that
+    // carries one half of a re-seal's proof without the other is
+    // malformed, never half-believed.
+    if (receipt.carriedEvidenceDigest !== undefined && presentResealFields !== resealFields.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['carriedEvidenceDigest'],
+        message: 'carriedEvidenceDigest is a re-seal binding and stands or falls with the re-seal fields',
       });
     }
     if (presentResealFields === resealFields.length) {
