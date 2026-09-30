@@ -69,6 +69,15 @@ export const ExecutedOutcomeSchema = z
     attempt: z.number().int().min(1),
     /** True when the instance was an expected failure (never proves behavior). */
     expectedFailure: z.boolean(),
+    /**
+     * The id the runner itself gave this instance while it ran (e.g.
+     * Playwright's per-run test id). Natively claimed evidence is stamped
+     * with it, and it can differ from the enumerated catalog id (the
+     * trusted config lives in another directory), so a test-only re-seal
+     * needs it to attribute a carried test's records. Absent when the
+     * runner reported none.
+     */
+    runnerTestId: z.string().min(1).optional(),
   })
   .strict();
 

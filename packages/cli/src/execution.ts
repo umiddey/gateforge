@@ -628,6 +628,7 @@ export function executedOutcomesOf(
       status: normalizeOutcomeStatus(row.status),
       attempt: row.attempt >= 1 ? row.attempt : 1,
       expectedFailure: row.expectedFailure === true,
+      ...(typeof row.testId === 'string' && row.testId.length > 0 ? { runnerTestId: row.testId } : {}),
     };
   });
 }
