@@ -11,8 +11,10 @@ import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { SchemaVersionField, TransportSchema } from '../schemas/common.js';
 import { CoveragePolicySchema } from '../schemas/coverage-policy.js';
+import { QueueObserverConfigSchema } from '../schemas/queue-observer.js';
 import { z } from 'zod';
 import { StrictnessModeSchema } from '../strictness.js';
+import { bindQueueObserver } from '../verdict/pack-verifiers.js';
 
 /**
  * A plugin entry in `.gateforge.yml`. Unlike a run-manifest plugin
@@ -491,6 +493,16 @@ export const GateforgeConfigSchema = z
      */
     behaviorPolicy: z.string().min(1).optional(),
     /**
+     * Engine-owned queue observer (plan 20260925-2011 Phase 3): the
+     * trusted read that lets the engine grade `task:*` contracts from
+     * the queue's own job state instead of the test's word. ABSENT = no
+     * queue reader exists, the `task` namespace stays unavailable, and
+     * every `engine-task` case blocks fail-closed — the block lives in
+     * `.gateforge.yml`, so it is inside the trusted policy digest and
+     * the candidate cannot point the engine at a queue it controls.
+     */
+    queueObserver: QueueObserverConfigSchema.optional(),
+    /**
      * Registered diagnostic suites (plan 2026-09-13 §3.5). ABSENT = no
      * suites; the advisory alarm is opt-in via explicit, tracked
      * configuration — gateforge never scans for or launches anything the
@@ -814,5 +826,11 @@ export function loadConfig(path = '.gateforge.yml'): GateforgeConfig {
     ]);
   }
 
-  return parseConfig(document, { file: path });
+  const config = parseConfig(document, { file: path });
+  // The `queueObserver` block decides whether the engine owns a queue
+  // reader at all, so loading the owner's config is exactly where the
+  // `task` namespace's availability is bound. A repository without the
+  // block binds "none" and every task contract stays fail-closed.
+  bindQueueObserver(config.queueObserver);
+  return config;
 }

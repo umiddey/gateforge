@@ -23,6 +23,7 @@ export {
   registeredNamespaces,
   registerContractCapabilities,
   capabilityFor,
+  setContractAvailability,
   allCapabilities,
   type ClaimEvidenceInput,
   type ClaimOutcome,
@@ -51,6 +52,7 @@ export {
  */
 export {
   registerPackVerifiers,
+  bindQueueObserver,
   interpretObservedPath,
   resolveHttpRoute,
   pathMatchesShape,

@@ -488,10 +488,36 @@ export const StateRuleSchema = z.discriminatedUnion('kind', [
     .object({
       kind: z.literal('attempts'),
       resourceId: z.string().min(1),
+      /**
+       * The declared attempt bound: no produced job may exceed it, and
+       * the queue's own declared bound may not exceed it either.
+       */
       count: z.number().int().min(0),
       terminal: z.enum(['succeeded', 'failed', 'rejected']),
+      /**
+       * Optional floor (plan 20260925-2011 Phase 3): every job must
+       * have used at least this many attempts, so "retries up to N"
+       * cannot be satisfied by a queue that never retried anything.
+       */
+      minAttempts: z.number().int().min(1).optional(),
+      /**
+       * Optional stall claim: the engine's own timeline must show a
+       * lost worker being reclaimed (a job sampled `active`, later
+       * non-terminal with unchanged attempts and no failure reason)
+       * and the delivery still settling.
+       */
+      recoveredFromStall: z.boolean().optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((rule, ctx) => {
+      if (rule.minAttempts !== undefined && rule.minAttempts > rule.count) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['minAttempts'],
+          message: `minAttempts (${String(rule.minAttempts)}) exceeds the declared bound (${String(rule.count)})`,
+        });
+      }
+    }),
 ]);
 
 /** Inferred state-rule shape. */

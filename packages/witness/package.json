@@ -62,6 +62,7 @@
   },
   "dependencies": {
     "@gate-forge/core": "^0.7.1",
+    "bullmq": "^6.3.10",
     "yaml": "^2.8.1"
   },
   "peerDependencies": {

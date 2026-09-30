@@ -18,6 +18,7 @@ export * from './behavior-policy.js';
 export * from './signature-profile.js';
 export * from './behavior-catalog.js';
 export * from './behavior-evidence.js';
+export * from './queue-observer.js';
 export * from './test-catalog.js';
 export * from './runner-adapter.js';
 export * from './plugin.js';

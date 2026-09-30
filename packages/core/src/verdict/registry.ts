@@ -190,6 +190,28 @@ export function registerContractCapabilities(capability: ContractCapability): vo
 }
 
 /**
+ * Replaces the NAMESPACE-level availability of an already registered
+ * capability record (plan 20260925-2011 Phase 3: the `task` namespace is
+ * available only while the engine owns a queue observer). The record
+ * itself stays first-wins — only the availability bit moves, and only
+ * for a namespace that is already registered, so no caller can invent
+ * contracts or rewrite another namespace's observer description.
+ *
+ * Args:
+   namespace: the namespace whose availability changes.
+   availability: the availability the namespace now reports.
+ *
+ * @throws Error when the namespace has no capability record.
+ */
+export function setContractAvailability(namespace: string, availability: ContractAvailability): void {
+  const current = capabilities.get(namespace);
+  if (current === undefined) {
+    throw new Error(`no capability record for contract namespace '${namespace}'; availability cannot be bound`);
+  }
+  capabilities.set(namespace, { ...current, availability });
+}
+
+/**
  * The capability record for a contract's namespace, or null when the
  * namespace has none (an unregistered namespace is itself unsupported).
  *

@@ -9,6 +9,7 @@
 import { z } from 'zod';
 import { FingerprintHexSchema } from './baseline.js';
 import { JsonSchema } from './behavior-policy.js';
+import { QueueObservationSchema } from './queue-observer.js';
 
 /** Evidence kind issued for a complete behavior case. */
 export const BEHAVIOR_CASE_KIND = 'behavior.case';
@@ -166,6 +167,14 @@ export const BehaviorCasePayloadSchema = z
       })
       .strict()
       .optional(),
+    /**
+     * Engine-read queue observation (Phase 3): what the engine's own
+     * bounded reads of the delivery's jobs found. Absent for HTTP- and
+     * browser-driven cases; present for every `engine-task` case,
+     * because a task contract is a claim about the queue and only the
+     * engine's read of it can settle one.
+     */
+    queueObservation: QueueObservationSchema.optional(),
     /**
      * Sealed fixture values (Phase 5): authoritative generated subject
      * identities the witness resolved fixture keys against. Identity

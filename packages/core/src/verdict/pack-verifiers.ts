@@ -40,6 +40,7 @@
  */
 import { isProvenancedRecord } from '../provenance.js';
 import { compareStrings } from '../graph/util.js';
+import type { QueueObserverConfig } from '../schemas/queue-observer.js';
 
 /**
  * Stable typed code for untrusted runtime observations. Mirrors
@@ -49,9 +50,11 @@ import { compareStrings } from '../graph/util.js';
 const HTTP_OBSERVATION_UNTRUSTED = 'HTTP_OBSERVATION_UNTRUSTED';
 import {
   registerContractCapabilities,
+  setContractAvailability,
   registerContractVerifier,
   type ClaimEvidenceInput,
   type ClaimOutcome,
+  type ContractAvailability,
   type ContractCapability,
   type ContractVerifier,
   type HttpRouteCandidate,
@@ -902,6 +905,22 @@ const HTTP_CAPABILITY: ContractCapability = {
   availability: { status: 'available' },
 };
 
+/**
+ * Fail-closed availability of the `task` namespace while no queue
+ * observer is configured. A task contract is a claim about a
+ * background job's delivery state, and only an engine-owned read of
+ * the queue can settle one — so without the observer nothing in the
+ * namespace is provable.
+ */
+const TASK_UNAVAILABLE: ContractAvailability = {
+  status: 'unavailable',
+  reason:
+    "no engine-owned queue observer is configured: a background job's attempts, state and " +
+    'idempotency live in the queue and no engine-side producer reads them, so every task ' +
+    "contract fails closed (a suite's own \"the job succeeded\" is never proof) — declare a " +
+    '`queueObserver` block in .gateforge.yml to make the namespace available',
+};
+
 /** Builds the fail-closed capability record for one domain namespace. */
 function domainCapability(
   namespace: string,
@@ -934,8 +953,26 @@ function domainCapability(
       'a witness-issued behavior.case record binding the exact endpoint, request, actor, and ' +
       'before/after effects, graded across every required case',
     testKinds: ['browser-e2e', 'api-e2e'],
-    availability: { status: 'available' },
+    availability: namespace === 'task' ? TASK_UNAVAILABLE : { status: 'available' },
   };
+}
+
+/**
+ * Binds the engine-owned queue observer (plan 20260925-2011 Phase 3) and
+ * moves the `task` namespace's availability with it: available while a
+ * `queueObserver` block is configured, unavailable (every task contract
+ * fails closed) otherwise. Called from the engine's own config load —
+ * the only place the owner-approved block is known. Idempotent.
+ *
+ * Args:
+   observer: the validated `queueObserver` block, or null/undefined
+     when the repository declares none.
+ */
+export function bindQueueObserver(observer: QueueObserverConfig | null | undefined): void {
+  setContractAvailability(
+    'task',
+    observer === null || observer === undefined ? TASK_UNAVAILABLE : { status: 'available' },
+  );
 }
 
 /** Registers every pack namespace + the http namespace. Idempotent. */

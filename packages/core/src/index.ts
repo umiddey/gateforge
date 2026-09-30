@@ -382,6 +382,41 @@ export type {
 } from './schemas/index.js';
 
 /**
+ * Engine-owned queue observer (plan 20260925-2011 Phase 3): the
+ * owner-declared `queueObserver` configuration, the normalized
+ * vocabulary every queue implementation maps onto, and the sealed
+ * observation the engine's own reads are graded against.
+ */
+export {
+  QueueBindingSchema,
+  QueueConnectionSchema,
+  QueueJobObservationSchema,
+  QueueJobSampleSchema,
+  QueueObservationSchema,
+  QueueObserverConfigSchema,
+  DEFAULT_QUEUE_LIST_LIMIT,
+  DEFAULT_QUEUE_POLL_INTERVAL_MS,
+  DEFAULT_QUEUE_TERMINAL_TIMEOUT_MS,
+  MAX_QUEUE_FIELD_CHARS,
+  MAX_QUEUE_LIST_LIMIT,
+  MAX_QUEUE_SAMPLES,
+  QUEUE_JOB_STATES,
+  QUEUE_OBSERVER_CONFIG_ENV,
+  QUEUE_OBSERVER_ENV,
+  TERMINAL_QUEUE_JOB_STATES,
+  parseQueueObserverConfigJson,
+} from './schemas/index.js';
+export type {
+  QueueBinding,
+  QueueConnection,
+  QueueJobObservation,
+  QueueJobSample,
+  QueueJobState,
+  QueueObservation,
+  QueueObserverConfig,
+} from './schemas/index.js';
+
+/**
  * UnresolvedReason (pin #5): `{code, detail, location{file,line,col}}` —
  * single-cause, machine-readable, no stack dumps.
  */
@@ -841,11 +876,19 @@ export {
  */
 export {
   registerContractCapabilities,
+  setContractAvailability,
   capabilityFor,
   allCapabilities,
   type ContractCapability,
   type ContractAvailability,
 } from './verdict/index.js';
+
+/**
+ * Engine-owned queue observer (plan 20260925-2011 Phase 3): binds the
+ * owner-declared `queueObserver` block and moves the `task` contract
+ * namespace's availability with it.
+ */
+export { bindQueueObserver } from './verdict/index.js';
 
 /**
  * Cause mapping + strict preflight (plan 2026-09-13 §5.4 / Phase 0 item
