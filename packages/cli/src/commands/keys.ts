@@ -49,7 +49,24 @@ export function keysCommand(io: Io, argv: readonly string[]): number {
   const keyId = stringFlag(options, 'key-id');
   if (operation === 'create') {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    if (existsSync(path)) throw new UsageError(`key create: refusing to overwrite existing file '${path}'`);
+    if (existsSync(path)) {
+      // The ring is owner state that already resolves: say what is
+      // there, whether anything needs doing, and how to get a NEW key.
+      // A file that is not a readable key ring keeps the plain refusal —
+      // it is an unknown file, not an existing ring, and naming a
+      // rotation for it would be advice nobody could follow.
+      let active: { activeKeyId: string };
+      try {
+        active = readSecureKeyring(path);
+      } catch {
+        throw new UsageError(`key create: refusing to overwrite existing file '${path}'`);
+      }
+      throw new UsageError(
+        `key create: verifier key ring already exists at '${path}'; ` +
+          `active key id: ${active.activeKeyId} (secret not displayed) — ` +
+          'nothing to do while that key is active; run `gateforge key rotate --confirm` for a new key',
+      );
+    }
     const created = createVerifierKeyringFile(path);
     writeLine(io.stdout, `verifier key ring created; active key id: ${created.keyId}; secret not displayed`);
     return 0;
