@@ -31,15 +31,16 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type {
   RunnerExecutionEnv,
   RunnerExecutionEnvelope,
   RunnerInstanceOutcome,
   RunnerSelection,
 } from '@gate-forge/core';
+import { ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
 import { buildRunnerChildEnv } from './runner-env.js';
-import { localPlaywrightCliCandidates } from './reconcile.js';
+import { findPlaywrightConfig, localPlaywrightCliCandidates } from './reconcile.js';
 import { synthesizeTrustedConfig, trustedReporterEntry, type ProjectScope } from './trusted-config.js';
 
 /** Default whole-run wall-clock bound for one supervised playwright run. */
@@ -197,6 +198,17 @@ export async function executeSupervisedPlaywright(
         '--workers=1',
         ...locations,
       ];
+  // The evidence fixture binds to the CONSUMER's runner. The directory
+  // that holds the consumer's Playwright config is the one context the
+  // fixture resolves from, so a non-root config that installs its own
+  // `node_modules` binds correctly instead of only a hoisted root install.
+  // This LOCATES the config file; the config itself is never loaded here —
+  // the supervised run keeps driving the synthesized trusted config.
+  const childEnv = buildRunnerChildEnv(env.vars, process.env);
+  const consumerConfig = findPlaywrightConfig(cwd);
+  if (consumerConfig !== null) {
+    childEnv[ENV_PLAYWRIGHT_CONFIG_DIR] = dirname(resolve(cwd, consumerConfig));
+  }
   const child = spawn(argv[0] ?? '', argv.slice(1), {
     cwd,
     // ALLOWLIST ONLY (enforcement-review fix 1 + execution-authority
@@ -204,7 +216,7 @@ export async function executeSupervisedPlaywright(
     // other unlisted variable never reach the untrusted runner — and NO
     // state paths (spool/outcomes/obligations locations stay parent-side
     // so worker code cannot address them). stdio stdin is 'ignore'.
-    env: buildRunnerChildEnv(env.vars, process.env),
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';

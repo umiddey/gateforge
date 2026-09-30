@@ -14,7 +14,8 @@
  * raw `playwright/test` bypasses the fixture and produces claims with no
  * records (the engine grades the obligation `missing`; GF-24).
  */
-import { test as base, expect, type Page } from 'playwright/test';
+import type { Page } from 'playwright/test';
+import { expect, test as base } from './consumer-runner.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ENV_WITNESS_URL } from '../constants.js';
 import {

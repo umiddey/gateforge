@@ -41,7 +41,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 
 import { buildRunnerChildEnv } from './runner-env.js';
-import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
+import { CLAIM_ANNOTATION_TYPE, ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
 import type { Location } from '@gate-forge/core';
 import { PROJECT_GRAPH_PATH_ENV, type ProjectGraphDocument } from '../reporter/project-graph-reporter.js';
 
@@ -508,6 +508,12 @@ export async function listNativePlaywrightTests(options: {
       options.wiredEnv === undefined
         ? untrustedEnv(process.env, discoveryStateDir)
         : buildRunnerChildEnv(options.wiredEnv, process.env);
+    // The evidence fixture binds to the CONSUMER's runner, resolved from
+    // the config directory this enumeration just discovered: that is what
+    // makes a non-root config with its own `node_modules` work, not only a
+    // hoisted repository-root install. Set on BOTH the scrubbed and the
+    // wired child so the two registrations can never differ.
+    childEnv[ENV_PLAYWRIGHT_CONFIG_DIR] = childCwd;
     childEnv['PLAYWRIGHT_JSON_OUTPUT_FILE'] = reportPath;
     childEnv[PROJECT_GRAPH_PATH_ENV] = join(reportDir, 'project-graph.json');
     const child = spawn(process.execPath, args, {
