@@ -26,7 +26,7 @@ import type { BlockingEntry } from '../policy/index.js';
 import type { RunManifest } from '../schemas/run-manifest.js';
 import type { Verdict } from '../schemas/verdict.js';
 import { BLOCKING_VERDICTS, type ObligationVerdict } from '../verdict/index.js';
-import { humanMessage } from './human-message.js';
+import { ENGINE_UPGRADE_REFUSAL_PREFIX, humanMessage } from './human-message.js';
 
 /** The official SARIF 2.1.0 (errata 01) JSON schema location. */
 const SARIF_SCHEMA_URI =
@@ -365,6 +365,12 @@ export function renderRun(
   const entries = [...verdicts].sort((a, b) => compareStrings(a.obligation.id, b.obligation.id));
   const blocking = [...(options.blocking ?? [])].sort(
     (a, b) =>
+      // An engine-upgrade refusal leads every other blocker: it names the
+      // single cause (the receipt was sealed by another engine) that one
+      // command fixes, and the rest of the run's blocking is downstream of
+      // the same stale inputs.
+      Number(b.detail.startsWith(ENGINE_UPGRADE_REFUSAL_PREFIX)) -
+        Number(a.detail.startsWith(ENGINE_UPGRADE_REFUSAL_PREFIX)) ||
       compareStrings(a.kind, b.kind) ||
       compareStrings(a.resourceId ?? '', b.resourceId ?? '') ||
       compareStrings(a.detail, b.detail),

@@ -1207,7 +1207,7 @@ export { adoptClassificationBlocked, shrinkClassificationBlocked } from './basel
  * waiver counts). Deterministic; identical inputs serialize identically.
  */
 export { renderRun } from './report/index.js';
-export { humanMessage } from './report/human-message.js';
+export { humanMessage, ENGINE_UPGRADE_REFUSAL_PREFIX } from './report/human-message.js';
 export type { HumanMessageEntry } from './report/human-message.js';
 
 /** Exit codes (contract 4): 0 clean/waived, 1 unresolved, 2 config. */

@@ -132,6 +132,7 @@ import {
   strictnessSummaryLine,
   CAUSE_NEXT_ACTIONS,
   canonicalJson,
+  ENGINE_UPGRADE_REFUSAL_PREFIX,
   volatileEchoSkips,
   engineBundleDigestOf,
   executionBoundaryDigestOf,
@@ -1727,12 +1728,27 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
                     io.env,
                   )
                 : '';
+            // The refusal names the ONE command that re-seals (a
+            // read-only `discover --json` dump changes nothing), so the
+            // full-scope variant stays advice in the sentence itself.
             const revalidation = 'gateforge test-gates --changed --scope full --run-timeout-min 5';
-            receiptBlocking = receiptBlocking.map((entry) => ({
-              ...entry,
-              detail: `${entry.detail}${changedSummary}${treeDiff}`,
-              nextAction: `Run \`${revalidation}\` to test the full configured scope within five minutes.`,
-            }));
+            // The engine-upgrade refusal is already one complete sentence
+            // naming the cause and the fix; the changed-input summary
+            // belongs to the digest line beside it.
+            receiptBlocking = receiptBlocking.map((entry) =>
+              entry.detail.startsWith(ENGINE_UPGRADE_REFUSAL_PREFIX)
+                ? entry
+                : {
+                    ...entry,
+                    // No trailing period: humanMessage supplies the
+                    // sentence's own, and a detail ending in one printed
+                    // `.. Run`.
+                    detail:
+                      `${entry.detail}${changedSummary}${treeDiff} ` +
+                      `Revalidate the full configured scope within five minutes with \`${revalidation}\``,
+                    nextAction: 'gateforge test-gates --changed',
+                  },
+            );
           }
         }
       }

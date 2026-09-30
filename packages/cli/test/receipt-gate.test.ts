@@ -7,7 +7,7 @@
  * integrity check, failure-after-evidence blocking a later check, and
  * exact cache reuse on identical authenticated inputs only.
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -484,6 +484,63 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
       await sealGreenRun(repo, digestAfter);
       const cleared = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
       expect(cleared.code).toBe(0);
+    });
+  });
+
+  it('an engine upgrade refusal names the re-seal command and both engine versions', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      const digestBefore = await currentInputDigest(repo);
+      await sealGreenRun(repo, digestBefore, {
+        engine: { version: '0.7.1', source: 'registry', unpublished: false },
+      });
+      // A new engine derives the gate inputs again, so the sealed run is
+      // stale for the current engine (fail closed).
+      repo.writeFiles({ 'ignored-after-seal.env': 'changed after the witnessed run\n' });
+
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      const stale = result.stdout
+        .split('\n')
+        .find((line) => line.includes('[EVIDENCE_STALE]')) as string;
+      expect(stale, result.stdout).toContain(
+        'this receipt was sealed by Gateforge 0.7.1 and this engine is 0.8.0',
+      );
+      expect(stale, result.stdout).toContain('Run `gateforge test-gates --changed`. [EVIDENCE_STALE]');
+      expect(stale, result.stdout).not.toContain('discover --json');
+      expect(stale, result.stdout).not.toContain('..');
+    });
+  });
+
+  it('a missing attestation envelope names the re-seal command, never the discover dump', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      const stateDir = resolveStateDir(repo.root);
+      const identity = {
+        runId: RUN_ID,
+        obligationId: 'tenant.accounts',
+        kind: 'http:effect-verified',
+        testId: 'e2e/accounts.spec.ts::deletes an account',
+        origin: 'engine-observed' as const,
+        payload: { status: 204 },
+      };
+      repo.writeFiles({
+        '.gateforge/test-gates/records.json': `${JSON.stringify([
+          { schemaVersion: 1, recordId: recordIdOf(identity), trust: 'witnessed', ...identity },
+        ])}\n`,
+      });
+      expect(existsSync(join(stateDir, 'manifest.json'))).toBe(false);
+
+      const result = await runCli(repo, ['check', '--format', 'json'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      const report = JSON.parse(result.stdout) as { blocking: Array<{ detail?: string; message?: string }> };
+      const missing = report.blocking.find((entry) =>
+        (entry.detail ?? '').includes('no evidence attestation envelope found'),
+      );
+      expect(missing, result.stdout).toBeDefined();
+      expect(missing?.message, result.stdout).toContain('Run `gateforge test-gates --changed`');
+      expect(missing?.message, result.stdout).not.toContain('discover --json');
+      expect(missing?.message, result.stdout).not.toContain('..');
     });
   });
 
