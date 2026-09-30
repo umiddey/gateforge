@@ -60,6 +60,13 @@ export function createBehaviorApp({ store = null, backend = null } = {}) {
   const app = express();
   app.use(express.urlencoded({ extended: false }));
   app.use(express.json());
+  // Environment attestation marker (GF-13): the witness refuses to start
+  // against an unattested subject, so the loopback reference app stamps
+  // the same fingerprint its reviewed adapter declares.
+  app.use((req, res, next) => {
+    res.set('x-gateforge-env-fingerprint', 'behavior-loopback-v1');
+    next();
+  });
 
   async function loadAccount(req, res, next) {
     const account = await accounts.get(req.params.id);

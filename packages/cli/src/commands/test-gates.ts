@@ -4746,7 +4746,13 @@ async function registerWitnessBehaviorCatalog(input: {
       routes: input.routes.map((route) => ({
         resourceId: route.resourceId,
         method: route.method,
-        canonicalPath: route.canonicalPath,
+        // Route shapes use `{}` wildcards (core pathMatchesShape), so a
+        // graph path written with a named parameter (`:id`, `{id}`) is
+        // registered in that grammar.
+        canonicalPath: route.canonicalPath
+          .split('/')
+          .map((segment) => (/^:[^/]+$/.test(segment) || /^\{[^/{}]+\}$/.test(segment) ? '{}' : segment))
+          .join('/'),
       })),
       authorityProfileDigest: input.authorityProfileDigest,
     });
