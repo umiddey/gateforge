@@ -3,7 +3,7 @@
  * navigation, not the gate. Exit 0 clean, 1 next action, 2 config/usage.
  */
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fingerprint, withTempRepo } from '@gate-forge/core';
 import {
@@ -127,6 +127,33 @@ describe('gateforge next', () => {
       const parsed = JSON.parse(json.stdout) as { next: null; remainingBlocking: number };
       expect(parsed.next).toBeNull();
       expect(parsed.remainingBlocking).toBe(0);
+    });
+  });
+
+  it('a tracked dangling symlink does not block the run (F2)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      // The template shape: a checked-in skill link into a virtualenv
+      // that exists only after the project's own bootstrap.
+      mkdirSync(join(repo.root, '.agents/skills'), { recursive: true });
+      symlinkSync(
+        '../../.venv/lib/python3.14/site-packages/fastapi',
+        join(repo.root, '.agents/skills/fastapi'),
+      );
+      repo.git(['add', '-A']);
+      repo.git([
+        '-c', 'user.name=fixture',
+        '-c', 'user.email=fixture@gateforge.invalid',
+        'commit', '--quiet', '-m', 'dangling skill link',
+      ]);
+      const { code, stdout, stderr } = await runCli(repo, ['next']);
+      expect(stderr).not.toContain('unsupported input snapshot');
+      expect(code).toBe(1);
+      expect(stdout).toContain('next:');
+      // One plain notice line naming the dangling link, then the run
+      // continues with the single next action.
+      expect(stdout).toContain('dangling symlink');
+      expect(stdout).toContain('.agents/skills/fastapi');
     });
   });
 });

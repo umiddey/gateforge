@@ -22,9 +22,13 @@
  *
  * File identity is bytes + path + type: a deleted tracked file changes
  * the digest (explicit `deleted` entry). Symlink identity is preserved
- * (link target string plus target bytes); links escaping the repository,
- * unresolvable links, directory links, and submodules cannot be captured
- * and fail closed with {@link UnsupportedSnapshotError} — never a silent
+ * (link target string plus target bytes). A DANGLING symlink — one
+ * whose target does not exist, e.g. a checked-in link into a
+ * not-yet-created virtualenv — is recorded the way git records it: as
+ * a `dangling-symlink` entry bound to its link text alone, never
+ * followed and never read, so the run continues. Links escaping the
+ * repository, directory links, and submodules cannot be captured and
+ * fail closed with {@link UnsupportedSnapshotError} — never a silent
  * omission. Only the actual resolved run-state directory (`--out`) is
  * excluded from the evidence digest; `.git` internals, absolute paths,
  * timestamps, run tokens, and verifier keys never enter it. There is no
@@ -137,10 +141,11 @@ export const MANIFEST_NAMES = [
 export const GIT_SCOPE_CONTROL_BASENAMES = ['.gitignore', '.gitattributes'];
 
 /**
- * The input tree cannot be captured completely (submodule, escaping or
- * unresolvable symlink, unreadable required input). Evaluation must fail
- * closed with an explicit unsupported-snapshot block — never a partial
- * digest claimed complete.
+ * The input tree cannot be captured completely (submodule, escaping
+ * symlink, directory symlink, unreadable required input). Evaluation
+ * must fail closed with an explicit unsupported-snapshot block — never
+ * a partial digest claimed complete. A merely DANGLING symlink is not
+ * one of these: it is captured as a `dangling-symlink` entry.
  */
 export class UnsupportedSnapshotError extends Error {
   constructor(message: string) {
@@ -165,10 +170,12 @@ export class SnapshotUnavailableError extends Error {
 export interface SnapshotFileEntry {
   /** Repo-root-relative posix path (or config-relative label for absence). */
   path: string;
-  /** `file` = regular bytes, `symlink` = link+target bytes, `absent` = missing optional config, `deleted` = tracked but gone. */
-  type: 'file' | 'symlink' | 'absent' | 'deleted';
+  /** `file` = regular bytes, `symlink` = link+target bytes, `dangling-symlink` = link text of a link whose target does not exist, `absent` = missing optional config, `deleted` = tracked but gone. */
+  type: 'file' | 'symlink' | 'dangling-symlink' | 'absent' | 'deleted';
   /** Hex digest binding path + type + content (or absence marker). */
   contentDigest: string;
+  /** The raw link text of a `symlink`/`dangling-symlink` entry (never resolved). */
+  linkTarget?: string;
 }
 
 /** Canonical gate context hashed alongside the file inventory. */
@@ -359,9 +366,27 @@ function entryForPath(cwd: string, path: string): SnapshotFileEntry {
     let targetStat: ReturnType<typeof lstatSync>;
     try {
       targetStat = lstatSync(resolved);
-    } catch {
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        // A DANGLING link is a link, not a hole: git itself stores a
+        // symlink as a 120000 blob whose bytes are the link-target
+        // string, so the link text IS the identity. The target is never
+        // followed and never read, so a link into a not-yet-created
+        // virtualenv is captured exactly the way git records it and the
+        // run continues (one plain notice line names it). The entry
+        // still moves the digest: retargeting the link, or the target
+        // appearing after the project's own bootstrap, changes its
+        // identity and its entry type.
+        return {
+          path,
+          type: 'dangling-symlink',
+          linkTarget: target,
+          contentDigest: hashEntry('dangling-symlink', path, `link:${target}\0`),
+        };
+      }
       throw new UnsupportedSnapshotError(
-        `input snapshot rejects unresolvable symlink '${path}' -> '${target}'; ` +
+        `input snapshot cannot inspect symlink target of '${path}' (${code ?? 'UNKNOWN'}); ` +
           'explicit unsupported-snapshot block',
       );
     }
@@ -383,7 +408,7 @@ function entryForPath(cwd: string, path: string): SnapshotFileEntry {
     // Identity = link location + link target string + target bytes: a
     // retargeted link and a changed target both move the digest.
     const combined = Buffer.concat([Buffer.from(`link:${target}\0`, 'utf8'), targetBytes]);
-    return { path, type: 'symlink', contentDigest: hashEntry('symlink', path, combined) };
+    return { path, type: 'symlink', linkTarget: target, contentDigest: hashEntry('symlink', path, combined) };
   }
   if (stat.isFile()) {
     let bytes: Buffer;
@@ -1062,4 +1087,29 @@ export function diffInputFiles(before: readonly SnapshotFileEntry[], after: read
     if (!beforeByPath.has(path)) differences.push(`added during discovery: ${path}`);
   }
   return differences.sort(compareStrings);
+}
+
+/**
+ * One plain notice line per dangling symlink in an inventory.
+ *
+ * A dangling link is captured, not fatal, so the run must still say
+ * what it saw: each line names the link and its target so the owner
+ * knows which path is not resolving (e.g. a checked-in link into a
+ * virtualenv that only exists after the project's own bootstrap).
+ *
+ * Args:
+ *   files: the captured file entries.
+ *
+ * Returns:
+ *   string[]: one notice line per dangling link, in path order (empty
+ *   when every link resolves).
+ */
+export function danglingSymlinkNotices(files: readonly SnapshotFileEntry[]): string[] {
+  return files
+    .filter((entry) => entry.type === 'dangling-symlink')
+    .map(
+      (entry) =>
+        `note: dangling symlink '${entry.path}' -> '${entry.linkTarget ?? ''}' is recorded by its link text ` +
+        '(the target does not exist; create it with the project\'s own bootstrap, or remove the link)',
+    );
 }
