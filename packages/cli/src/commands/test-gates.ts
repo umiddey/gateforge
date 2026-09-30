@@ -173,6 +173,7 @@ import { loadReceiptFor, receiptScope, tryReuseReceipt, type ReceiptLoad } from 
 import {
   carryDiffIsWithinScope,
   classifyResealChange,
+  parentCommitAcceptance,
   resealDisregardNotice,
   RESEAL_REFUSAL_SUFFIX,
   resealRefusal,
@@ -1019,6 +1020,14 @@ interface CarryForwardParentInput {
   stateDir: string;
   verifierKeyring: VerifierKeyring | null;
   baseSha: string;
+  /**
+   * `own-ancestor-commit` binds the parent to the commit the parent
+   * DOCUMENT names (the re-seal path, which must work in a merge
+   * request where no CI variable names the previous pipeline's
+   * commit). Absent keeps the plain carry-forward path on its exact
+   * merge base, unchanged.
+   */
+  parentCommitBinding?: 'own-ancestor-commit';
   trustedPolicyDigest: string;
   approvedPolicyDigest: string;
   executionBoundaryDigest: string;
@@ -1027,6 +1036,48 @@ interface CarryForwardParentInput {
   /** Owner-approved exclusions that are never inside a candidate tree. */
   docsExclusions: readonly string[];
   cacheExclusions: readonly string[];
+}
+
+/**
+ * The commit a parent document is held to, or the plain refusal that
+ * says why it is bound to none.
+ *
+ * A re-seal binds the parent to the commit the parent itself names:
+ * the previous pipeline tested that commit's bytes, and this run
+ * froze a descendant of it, so the two sealed trees differ only by
+ * this run's change set. No CI variable is involved — a merge
+ * request's diff base is a different commit from the one the previous
+ * pipeline tested, and nothing sets such a variable to the parent.
+ * The plain carry-forward path keeps its exact merge-base rule.
+ *
+ * Args:
+ *   input: the repository coordinates, including the binding.
+ *   ownSha: the commit the parent document names, or null when it
+ *     names none.
+ *
+ * Returns:
+ *   the bound commit, or the first binding that failed in plain words.
+ */
+function boundParentCommit(
+  input: Pick<CarryForwardParentInput, 'io' | 'gitDir' | 'baseSha' | 'parentCommitBinding'>,
+  ownSha: string | null | undefined,
+): { sha: string; reason: null } | { sha: null; reason: string } {
+  if (input.parentCommitBinding !== 'own-ancestor-commit') {
+    if (input.baseSha.length === 0) return { sha: null, reason: 'no merge-base commit is known' };
+    return { sha: input.baseSha, reason: null };
+  }
+  const commit = (ownSha ?? '').trim();
+  const acceptance = parentCommitAcceptance(input.gitDir, input.io.env, commit);
+  if (acceptance === 'ancestor') return { sha: commit, reason: null };
+  if (acceptance === 'missing') {
+    return {
+      sha: null,
+      reason: /^[0-9a-f]{40}$/.test(commit)
+        ? `it was sealed at commit ${shortSha(commit)}, which this repository cannot read`
+        : 'it names no commit, so there is nothing to bind it to',
+    };
+  }
+  return { sha: null, reason: `it was sealed at commit ${shortSha(commit)}, which is not an ancestor of HEAD` };
 }
 
 /**
@@ -1045,9 +1096,11 @@ function verifyCarryForwardParent(input: CarryForwardParentInput): ParentVerific
     const parsed = GateReceiptSchema.safeParse(readStateDocument(input.stateDir, 'receipt.json'));
     if (!parsed.success) return refuse('it is not a gate receipt Gateforge can read');
     const receipt = parsed.data;
+    const bound = boundParentCommit(input, receipt.gitSha);
+    if (bound.reason !== null) return refuse(bound.reason);
     // The sealed candidate is a WORKSPACE tree (it carries the repo's
     // untracked and gitignored bytes too), so it is never equal to the
-    // commit's tree. What must hold is that it COVERS the merge-base
+    // commit's tree. What must hold is that it COVERS the bound
     // commit's committed content: the parent proves those exact bytes,
     // and everything else it sealed is diffed against this run's tree.
     const treeId = receipt.candidateTreeId;
@@ -1058,16 +1111,16 @@ function verifyCarryForwardParent(input: CarryForwardParentInput): ParentVerific
         input.gitDir,
         input.io.env,
         treeId,
-        `${input.baseSha}^{tree}`,
+        `${bound.sha}^{tree}`,
         input.docsExclusions,
         input.cacheExclusions,
       )
     ) {
       return refuse(
-        `its sealed tree is not the tree of commit ${shortSha(input.baseSha)} (uncommitted changes were tested)`,
+        `its sealed tree is not the tree of commit ${shortSha(bound.sha)} (uncommitted changes were tested)`,
       );
     }
-    if (receipt.gitSha !== input.baseSha) {
+    if (input.parentCommitBinding !== 'own-ancestor-commit' && receipt.gitSha !== input.baseSha) {
       return refuse(
         `it was sealed at commit ${shortSha(receipt.gitSha)}, the merge base is ${shortSha(input.baseSha)}`,
       );
@@ -1189,6 +1242,11 @@ export interface ResealParentCoordinates {
   verifierKeyring: VerifierKeyring | null;
   /** Verified merge-base commit the parent must have sealed. */
   baseSha: string;
+  /**
+   * `own-ancestor-commit` binds the parent to the commit the parent
+   * DOCUMENT names; absent keeps the exact merge-base rule.
+   */
+  parentCommitBinding?: 'own-ancestor-commit';
   /** Trusted policy/config revision digest of this run. */
   trustedPolicyDigest: string;
   /** Owner-approved policy revision digest of this run. */
@@ -1232,6 +1290,8 @@ function verifyRunRecordParent(input: ResealParentCoordinates): ParentVerificati
     const verified = verifyRunRecord(input.verifierKeyring.active.key, document);
     if (!verified.ok) return refuse('its signature does not verify with this keyring');
     const record = verified.record;
+    const bound = boundParentCommit(input, record.gitSha);
+    if (bound.reason !== null) return refuse(bound.reason);
     const treeId = record.candidateTreeId;
     if (
       input.gitDir === null ||
@@ -1240,16 +1300,16 @@ function verifyRunRecordParent(input: ResealParentCoordinates): ParentVerificati
         input.gitDir,
         input.io.env,
         treeId,
-        `${input.baseSha}^{tree}`,
+        `${bound.sha}^{tree}`,
         input.docsExclusions,
         input.cacheExclusions,
       )
     ) {
       return refuse(
-        `its sealed tree is not the tree of commit ${shortSha(input.baseSha)} (uncommitted changes were tested)`,
+        `its sealed tree is not the tree of commit ${shortSha(bound.sha)} (uncommitted changes were tested)`,
       );
     }
-    if (record.gitSha !== input.baseSha) {
+    if (input.parentCommitBinding !== 'own-ancestor-commit' && record.gitSha !== input.baseSha) {
       return refuse(
         `it was sealed at commit ${shortSha(record.gitSha)}, the merge base is ${shortSha(input.baseSha)}`,
       );
@@ -1287,7 +1347,7 @@ function verifyRunRecordParent(input: ResealParentCoordinates): ParentVerificati
         receipt: null,
         record,
         treeId,
-        sha: record.gitSha,
+        sha: bound.sha,
         execution: result,
       },
       reason: null,
@@ -2157,7 +2217,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       // set, the classification, the carried outcomes — Gateforge
       // recomputes itself. A refused re-seal prints ONE plain reason
       // line and the run continues through the unchanged path below.
-      const reSealBaseSha = resolveCarryForwardBaseSha(io, providerIdentity);
+      // The parent is bound to the commit the parent document itself
+      // names, which must be an ancestor of HEAD: a merge request's
+      // diff base is a different commit, and no CI variable names the
+      // one the previous pipeline tested.
       // The first binding this run itself cannot offer a parent for, in
       // the same plain words a rejected parent document gets. null means
       // every precondition holds and the parent must be looked up.
@@ -2170,11 +2233,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               ? 'this run pinned no input digest'
               : approvedPolicyDigest === null
                 ? 'this run pinned no owner-approved policy'
-                : reSealBaseSha === null
-                  ? 'no merge-base commit is known (set CI_MERGE_REQUEST_DIFF_BASE_SHA or GITHUB_BASE_REF)'
-                  : catalog.inventoryComplete
-                    ? null
-                    : 'the test inventory is incomplete';
+                : catalog.inventoryComplete
+                  ? null
+                  : 'the test inventory is incomplete';
       const reSealParentLookup: ParentVerification<ResealParent> =
         reSealPrecondition === null
           ? resolveResealParent({
@@ -2182,7 +2243,8 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               config,
               stateDir,
               verifierKeyring,
-              baseSha: reSealBaseSha as string,
+              baseSha: '',
+              parentCommitBinding: 'own-ancestor-commit',
               gitDir: freezeGitDir as string,
               docsExclusions,
               cacheExclusions,

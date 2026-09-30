@@ -213,6 +213,41 @@ export function diffSealedTrees(
   changed.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   return changed;
 }
+
+/**
+ * Whether a re-seal parent is bound to its OWN commit: the commit the
+ * parent document says it sealed must exist in this repository's
+ * object store and be an ancestor of (or equal to) HEAD. A parent
+ * sealed on a sibling branch, or one whose commit this repository
+ * cannot read, proves nothing about the bytes this run froze.
+ *
+ * The commit is read from the parent DOCUMENT, never from a CI
+ * variable: a merge request's diff base is a different commit from the
+ * one the previous pipeline tested, and no CI sets that variable to
+ * the parent anyway.
+ *
+ * Args:
+ *   gitDir: the absolute git dir of this repository.
+ *   env: the process environment (Git redirectors are stripped).
+ *   sha: the commit the parent document names, or null when it names
+ *     none.
+ *
+ * Returns:
+ *   'ancestor' when the commit exists and HEAD descends from it,
+ *   'missing' when the parent names no commit or none this
+ *   repository can read, and 'diverged' when the commit exists but
+ *   HEAD does not descend from it.
+ */
+export function parentCommitAcceptance(
+  gitDir: string | null,
+  env: NodeJS.ProcessEnv,
+  sha: string | null | undefined,
+): 'ancestor' | 'missing' | 'diverged' {
+  const commit = (sha ?? '').trim();
+  if (gitDir === null || !/^[0-9a-f]{40}$/.test(commit)) return 'missing';
+  if (runBytes(gitDir, env, ['cat-file', '-e', `${commit}^{commit}`]) === null) return 'missing';
+  return runBytes(gitDir, env, ['merge-base', '--is-ancestor', commit, 'HEAD']) === null ? 'diverged' : 'ancestor';
+}
 /**
  * Tests whether a parent receipt's sealed tree and the tree this run
  * froze differ ONLY in paths the caller already evaluated itself.

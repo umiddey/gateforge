@@ -269,20 +269,23 @@ describe('one plain reason line when a re-seal parent cannot be used', () => {
   async function fixAndRunChanged(
     repo: TempRepo,
     gateConfig: string,
-  ): Promise<{ stderr: string; stdout: string; code: number; baseSha: string }> {
+  ): Promise<{ stderr: string; stdout: string; code: number; parentSha: string }> {
     const env = await installAndRunFailingParent(repo, gateConfig, { uncommittedChanges: UNCOMMITTED });
+    // The parent is bound to the commit ITS OWN document names — no CI
+    // variable is involved, and none is set.
+    const parentSha = sealedRunRecord(repo)['gitSha'] as string;
     repo.commitFiles(
       { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
       'fix the race in the one failing spec',
     );
     const run = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
-    return { ...run, stderr: run.stderr.split(repo.root).join('<repo>'), baseSha: env['CI_MERGE_REQUEST_DIFF_BASE_SHA'] as string };
+    return { ...run, stderr: run.stderr.split(repo.root).join('<repo>'), parentSha };
   }
 
   it('names the uncommitted tree when the previous run tested uncommitted changes', async () => {
     await withTempRepo({}, async (repo) => {
       const run = await fixAndRunChanged(repo, 'mode: changed\nenforcement:\n  reseal: true\n');
-      const line = `test-gates: the previous run cannot be re-sealed from: its sealed tree is not the tree of commit ${run.baseSha.slice(0, 7)} (uncommitted changes were tested) → changed-scope run`;
+      const line = `test-gates: the previous run cannot be re-sealed from: its sealed tree is not the tree of commit ${run.parentSha.slice(0, 7)} (uncommitted changes were tested) → changed-scope run`;
       expect(run.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'))).toEqual([line]);
       expect(run.stderr).not.toContain('only test files changed');
       expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
@@ -432,4 +435,85 @@ describe('a re-seal carries the witness EVIDENCE of the tests it carries', () =>
       }
     });
   }, 300_000);
+});
+
+/**
+ * The parent is bound to the commit the PARENT DOCUMENT names, which
+ * must exist here and be an ancestor of HEAD. No CI variable is
+ * involved: `CI_MERGE_REQUEST_DIFF_BASE_SHA` is a merge base, not the
+ * commit the previous pipeline tested, and no CI sets it to the
+ * parent — so a re-seal that needs it can never work in a real merge
+ * request.
+ */
+describe('the parent is bound to its OWN commit, never to a CI variable', () => {
+  it('re-seals and passes check --require-e2e in a pipeline that sets no base variable at all', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      // A merge request publishes a diff BASE, never the commit the
+      // previous pipeline tested, so the re-seal is asked for with no
+      // such variable in the environment at all.
+      const { CI_MERGE_REQUEST_DIFF_BASE_SHA: _unpublished, ...reSealEnv } = env;
+      expect(reSealEnv['GITHUB_BASE_REF']).toBeUndefined();
+      // The failed run is at M1; the fix is M2, a child of it.
+      const parentSha = sealedRunRecord(repo)['gitSha'] as string;
+      const fixSha = repo.commitFiles(
+        { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
+        'fix the race in the one failing spec',
+      );
+      expect(repo.git(['merge-base', '--is-ancestor', parentSha, fixSha], { allowFailure: true }).status).toBe(0);
+
+      const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], reSealEnv);
+      expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
+      expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous run');
+      expect(sealedReceipt(repo).changeClass).toBe('test-only');
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 180_000);
+
+  it('ignores a CI_MERGE_REQUEST_DIFF_BASE_SHA naming a commit that is not the parent', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo);
+      // A commit that exists in this repository and is NOT the parent:
+      // the sibling branch below. Publishing it is exactly what a CI
+      // does, and the re-seal must not be decided by it.
+      repo.git(['checkout', '--orphan', 'sibling']);
+      const siblingSha = repo.commitFiles(
+        { 'e2e/orders.spec.mjs': `${SPECS['e2e/orders.spec.mjs'] as string}// work on a sibling branch\n` },
+        'a change that lives on another branch',
+      );
+      repo.git(['checkout', 'main']);
+
+      const resealed = await changeOneSpecAndReseal(repo, {
+        ...env,
+        CI_MERGE_REQUEST_DIFF_BASE_SHA: siblingSha,
+      });
+      expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous receipt');
+      expect(siblingSha).not.toBe(sealedReceipt(repo).gitSha);
+    });
+  }, 180_000);
+
+  it('refuses a parent sealed on a sibling branch, naming the real rule', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      const parentSha = sealedRunRecord(repo)['gitSha'] as string;
+      // A branch with no shared history: HEAD no longer descends from
+      // the commit the run record was sealed at.
+      repo.git(['checkout', '--orphan', 'sibling']);
+      repo.commitFiles(
+        { 'e2e/orders.spec.mjs': `${SPECS['e2e/orders.spec.mjs'] as string}// work on a sibling branch\n` },
+        'a change that lives on another branch',
+      );
+
+      const refused = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(
+        refused.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed')),
+      ).toEqual([
+        `test-gates: the previous run cannot be re-sealed from: it was sealed at commit ${parentSha.slice(0, 7)}, which is not an ancestor of HEAD → changed-scope run`,
+      ]);
+      expect(refused.stderr).not.toContain('only test files changed');
+      expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 180_000);
 });

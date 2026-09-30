@@ -131,6 +131,33 @@ export function sealedExecution(repo: { root: string }): {
 export type ResealEnv = Record<string, string>;
 
 /**
+ * The environment every re-seal fixture run shares: the witness key,
+ * the owner-approved policy digest, and the CI diff base.
+ *
+ * The diff base belongs to a DIFFERENT consumer: `check --changed`
+ * asks the diff provider what changed, and that is the only thing
+ * that reads it here. A re-seal binds the parent to the commit the
+ * parent document names, so the suite that re-seals with the
+ * variable REMOVED proves the path needs no such variable, and the
+ * suite that publishes a base naming another commit proves it
+ * ignores one.
+ *
+ * Args:
+ *   repo: the repository whose config pins the approved policy.
+ *
+ * Returns:
+ *   ResealEnv: the environment the runs and the check share.
+ */
+export function resealRunEnv(repo: TempRepo): ResealEnv {
+  const config = loadConfig(repo.path('.gateforge.yml'));
+  return {
+    GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
+    GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
+    CI_MERGE_REQUEST_DIFF_BASE_SHA: repo.headSha() as string,
+  };
+}
+
+/**
  * Installs the repository and seals a whole-suite parent receipt.
  *
  * Args:
@@ -160,14 +187,7 @@ export async function installAndSealParent(
     '.gitignore': '.gateforge/test-gates/\nnode_modules/\n.auth/\n',
   });
   repo.commitFiles({}, 'base');
-  const baseSha = repo.headSha() as string;
-  const config = loadConfig(repo.path('.gateforge.yml'));
-  const approvedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
-  const env = {
-    GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
-    GATEFORGE_APPROVED_POLICY_DIGEST: approvedPolicyDigest,
-    CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha,
-  };
+  const env = resealRunEnv(repo);
   const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
   expect(full.code, `${full.stdout}\n${full.stderr}`).toBe(0);
   return env;
@@ -208,13 +228,7 @@ export async function installAndRunFailingParent(
   });
   repo.commitFiles({}, 'base');
   if (Object.keys(uncommittedChanges).length > 0) repo.writeFiles(uncommittedChanges);
-  const baseSha = repo.headSha() as string;
-  const config = loadConfig(repo.path('.gateforge.yml'));
-  const env = {
-    GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
-    GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
-    CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha,
-  };
+  const env = resealRunEnv(repo);
   const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
   expect(full.code, `${full.stdout}\n${full.stderr}`).not.toBe(0);
   // A failing test seals no receipt (and clears an old one): there is
@@ -586,17 +600,6 @@ export function installEvidenceRepo(repo: TempRepo, appUrl: string, specOverride
   });
 }
 
-/** The environment the evidence runs and the later check share. */
-export async function evidenceRunEnv(repo: TempRepo): Promise<ResealEnv> {
-  const baseSha = repo.headSha() as string;
-  const config = loadConfig(repo.path('.gateforge.yml'));
-  return {
-    GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
-    GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
-    CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha,
-  };
-}
-
 /**
  * Installs the evidence repository and seals a CLEAN whole-suite parent
  * receipt whose two obligations are proven by witnessed records.
@@ -615,7 +618,7 @@ export async function installAndSealEvidenceParent(repo: TempRepo): Promise<{ en
   installEvidenceRepo(repo, app.url);
   repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
   repo.commitFiles({}, 'base');
-  const env = await evidenceRunEnv(repo);
+  const env = resealRunEnv(repo);
   const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
   expect(full.code, `${full.stdout}\n${full.stderr}`).toBe(0);
   return { env, close: app.close };
@@ -636,7 +639,7 @@ export async function installAndRunFailingEvidenceParent(
   });
   repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
   repo.commitFiles({}, 'base');
-  const env = await evidenceRunEnv(repo);
+  const env = resealRunEnv(repo);
   const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
   expect(full.code, `${full.stdout}\n${full.stderr}`).not.toBe(0);
   expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
