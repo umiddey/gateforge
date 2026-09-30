@@ -14,18 +14,26 @@ Example for a React frontend, FastAPI backend, and SQLAlchemy data layer:
 
 ```sh
 npm i -D \
-  @gate-forge/cli@0.7.1 \
-  @gate-forge/pack-playwright@0.7.1 \
-  @gate-forge/pack-http@0.7.1 \
-  @gate-forge/pack-fastapi@0.7.1 \
-  @gate-forge/pack-sqlalchemy@0.7.1
+  @gate-forge/cli@0.8.0 \
+  @gate-forge/pack-playwright@0.8.0 \
+  @gate-forge/pack-http@0.8.0 \
+  @gate-forge/pack-fastapi@0.8.0 \
+  @gate-forge/pack-sqlalchemy@0.8.0
 ```
 
 Use the project-local `gateforge` binary from your npm script or add `node_modules/.bin` to your shell `PATH`. If the scan recommends other packs, add only the ones your code uses, at the same version. A mismatched Gateforge package contract can stop the CLI with exit code 2 and `GATEFORGE_PACKAGE_INCOMPATIBLE`.
 
+**Installing from tarballs** (a release that is not on the registry yet): install every `.tgz` of that release in ONE command. The CLI depends on shared packages and packs that are not in the list above, and npm resolves them from the files only when they are all in the same install; a partial set makes npm look for the rest on the registry and fail with `E404`.
+
+```sh
+npm i -D ./gate-forge-*.tgz
+```
+
+This installs every pack of the release; the scan still recommends the ones your code uses, and `.gateforge.yml` loads only those.
+
 **You should see:** npm installs the packages without a Gateforge compatibility error.
 
-**If not:** align every direct `@gate-forge/*` package to `0.7.1`, then install again. Do not work around the compatibility error.
+**If not:** align every direct `@gate-forge/*` package to `0.8.0`, then install again. Do not work around the compatibility error.
 
 ## 2. Pick a goal
 
@@ -304,7 +312,7 @@ the registry. To gate a release that is not on the registry yet (a local
 regenerate:
 
 ```sh
-GATEFORGE_CI_ENGINE_SOURCE=vendor/gate-forge-cli-0.7.1.tgz \
+GATEFORGE_CI_ENGINE_SOURCE=vendor/gate-forge-cli-0.8.0.tgz \
   gateforge enforce --ci github
 ```
 

@@ -36,7 +36,7 @@ plugins:
 ```
 
 `version:` is the detector version the pack's own signals carry, and it
-is NOT the pack's npm version (the pack publishes as 0.7.1 while its
+is NOT the pack's npm version (the pack publishes as 0.8.0 while its
 detector declares, say, 0.2.0). Copying a neighbouring entry's value is
 the usual mistake, and it makes every command exit 2: the detector
 refuses to signal under a version the config did not pin. The error names

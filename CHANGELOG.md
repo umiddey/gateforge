@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 
 ### Added
 - Run options travel with the run context, so a repository that starts its OWN witness gets timing chaos and twin path coverage with nothing configured on the witness side. Both features were only reachable through the spawn environment of a witness `test-gates` starts, so against `--witness-url` `--chaos` refused outright (`--chaos needs the witness this run spawns`) and an external witness answered `enabled: false` to the twin query — a comparison that silently compared nothing. The supervisor-authenticated `POST /run-context` now carries an additive, optional `options` object (`chaos: { seed, maxDelayMs, reorder }` and/or `twinShapes: { queryKeys, inventory }` — the inventory travels as its route TEMPLATES, never a path), the witness applies it for this run (its shared observation proxy reads the chaos plan lazily, so a plan bound after start-up still takes effect), and the binding answers with an additive `applied` echo. Absent `options` the request body and every byte of behavior are unchanged; a witness STARTED with the same feature keeps working exactly as before, and a binding that disagrees with how the witness was started is refused rather than silently resolved. `gateforge test-gates --chaos <seed> --result-only` is now accepted with `--witness-url`, and `enforcement.twinPaths` works against an external witness.
