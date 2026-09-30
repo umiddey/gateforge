@@ -12,14 +12,16 @@
  * must stay green under any timing the proxy can produce.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { ChaosScheduler } from '@gate-forge/witness';
-import { startAttestationProxy } from '@gate-forge/pack-playwright';
+import { startAttestationProxy, startWitnessProcess } from '@gate-forge/pack-playwright';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { loadConfigAt, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
 import { runCli } from './helpers.js';
@@ -575,4 +577,233 @@ ${probe.stderr}`).not.toBe('');
       }
     });
   }, 600_000);
+});
+
+/** The verifier key the external-witness cases share with their witness. */
+const EXTERNAL_KEY = 'external-chaos-verifier-key';
+
+/** An external witness the TEST owns — exactly how a repository starts it. */
+interface ExternalWitness {
+  /** The supervisor origin passed to `--witness-url`. */
+  url: string;
+  /** The observation proxy the suite's browser is routed through. */
+  proxyUrl: string;
+  /** The non-authoritative state directory shared with `--out`. */
+  stateDir: string;
+  /** The run token shared with `--run-token`. */
+  token: string;
+  /** Stops the witness process and removes its state directory. */
+  stop: () => Promise<void>;
+}
+
+/**
+ * Starts a witness the way a repository's own script does: the chaos
+ * plan is handed over in the ENVIRONMENT at boot, and the witness
+ * reads it exactly once. A null seed starts a witness with no plan.
+ */
+async function startExternalWitness(
+  repo: TempRepo,
+  targetUrl: string,
+  chaosSeed: number | null,
+): Promise<ExternalWitness> {
+  const stateDir = mkdtempSync(join(tmpdir(), 'gateforge-external-chaos-'));
+  const token = randomUUID();
+  // The witness reads the classifications a repository's own script
+  // hands it: the file one previous real run produced.
+  copyFileSync(
+    join(repo.root, '.gateforge/test-gates/classifications.json'),
+    join(stateDir, 'classifications.json'),
+  );
+  const witness = await startWitnessProcess({
+    GATEFORGE_RUN_ID: randomUUID(),
+    GATEFORGE_RUN_TOKEN: token,
+    GATEFORGE_STATE_DIR: stateDir,
+    GATEFORGE_CLASSIFICATIONS: join(stateDir, 'classifications.json'),
+    GATEFORGE_ADAPTERS_DIR: join(repo.root, '.gateforge/adapters'),
+    GATEFORGE_TARGET_BASE_URL: targetUrl,
+    GATEFORGE_ADAPTER_BASE_URL: targetUrl,
+    GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+    GATEFORGE_PROXY_TARGET: targetUrl,
+    GATEFORGE_WITNESS_VERIFIER_KEY: EXTERNAL_KEY,
+    ...(chaosSeed === null ? {} : { GATEFORGE_CHAOS_SEED: String(chaosSeed) }),
+  });
+  if (witness.proxyUrl === null) throw new Error('the external witness started no observation proxy');
+  return {
+    url: witness.url,
+    proxyUrl: witness.proxyUrl,
+    stateDir,
+    token,
+    stop: async () => {
+      if (witness.child.exitCode === null && witness.child.signalCode === null) {
+        witness.child.kill('SIGTERM');
+        await once(witness.child, 'exit');
+      }
+      rmSync(stateDir, { recursive: true, force: true });
+    },
+  };
+}
+
+/**
+ * The operator environment an external-witness run needs. The run
+ * reads the same key the witness boots with, through a key FILE (the
+ * CLI accepts exactly one verifier-key source).
+ */
+function externalOperatorEnv(witness: ExternalWitness): Record<string, string> {
+  const directory = mkdtempSync(join(tmpdir(), 'gateforge-external-chaos-keys-'));
+  keyDirectories.push(directory);
+  const keyFile = join(directory, 'keys.json');
+  writeFileSync(
+    keyFile,
+    `${JSON.stringify({ schemaVersion: 1, activeKeyId: 'external-chaos-key', keys: { 'external-chaos-key': EXTERNAL_KEY } })}\n`,
+    { mode: 0o600 },
+  );
+  return {
+    [VERIFIER_KEY_FILE_ENV]: keyFile,
+    GATEFORGE_APP_BASE_URL: witness.proxyUrl,
+  };
+}
+
+/** The `--witness-url` argv prefix every external run shares. */
+function externalPrefix(witness: ExternalWitness): string[] {
+  return ['--witness-url', witness.url, '--out', witness.stateDir, '--run-token', witness.token];
+}
+
+describe('timing chaos with your own witness: the run owns the plan', () => {
+  it('perturbs through a bound plan, replays it, and never seals against a perturbed witness', async () => {
+    await withTempRepo({}, async (repo) => {
+      installRepo(repo);
+      const app = await startRaceApp();
+      const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+      // One real run first, so the classifications an external witness
+      // needs exist exactly as a repository's own script provides them.
+      const bootstrap = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], {
+        ...operatorEnv(proxy.url).env,
+        GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo),
+      });
+      expect(bootstrap.code, `bootstrap stdout:\n${bootstrap.stdout}\nstderr:\n${bootstrap.stderr}`).toBe(0);
+      const receiptBefore = readFileSync(repo.path('.gateforge/test-gates/receipt.json'), 'utf8');
+      try {
+        // An external witness serves exactly ONE invocation (its bound
+        // run context is never relabelled), so each case gets its own
+        // — which is also what a repository's own script does.
+        const withWitness = async (
+          envChaosSeed: number | null,
+          run: (witness: ExternalWitness) => Promise<void>,
+        ): Promise<void> => {
+          const witness = await startExternalWitness(repo, proxy.url, envChaosSeed);
+          try {
+            await run(witness);
+          } finally {
+            await witness.stop();
+          }
+        };
+
+        // Which seed reorders the two tab requests is a pure function
+        // of the session identity the witness releases under, so the
+        // seed is COMPUTED from a probe, never guessed.
+        let agreed = 0;
+        await withWitness(null, async (witness) => {
+          const probeRun = await runCli(
+            repo,
+            ['test-gates', '--test', RACY_KEY, '--result-only', '--chaos', '0', '--format', 'json', ...externalPrefix(witness)],
+            externalOperatorEnv(witness),
+          );
+          const session =
+            (parseReport(probeRun).chaos?.schedule as Array<{ session: string }> | undefined)?.[0]?.session ?? '';
+          expect(
+            session,
+            `the probe must name the session it released under\nstdout:\n${probeRun.stdout}\nstderr:\n${probeRun.stderr}`,
+          ).not.toBe('');
+          agreed = reorderingSeedFor(session);
+        });
+
+        // ---- (a) the run binds the plan; the race surfaces, labelled ----
+        // Nothing is configured on the witness side: the seed travels
+        // with the run context, and the report carries the plan that
+        // actually ran.
+        const chaosArgv = (witness: ExternalWitness): string[] => [
+          'test-gates',
+          '--test',
+          RACY_KEY,
+          '--result-only',
+          '--chaos',
+          String(agreed),
+          '--format',
+          'json',
+          ...externalPrefix(witness),
+        ];
+        let schedule: unknown[] = [];
+        await withWitness(null, async (witness) => {
+          const chaos = await runCli(
+            repo,
+            chaosArgv(witness),
+            { ...externalOperatorEnv(witness), GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo) },
+          );
+          const report = parseReport(chaos);
+          expect(
+            chaos.code,
+            `seed ${String(agreed)} must surface the race through the external witness\nstdout:\n${chaos.stdout}\nstderr:\n${chaos.stderr}`,
+          ).toBe(1);
+          expect(report.chaos?.seed, chaos.stderr).toBe(agreed);
+          expect(report.chaos?.maxDelayMs, JSON.stringify(report.chaos)).toBe(400);
+          expect(report.chaos?.reorder, JSON.stringify(report.chaos)).toBe(true);
+          expect(report.chaos?.schedule?.length, JSON.stringify(report.chaos)).toBeGreaterThan(0);
+          expect(report.execution?.selectedTests?.failed, chaos.stderr).toBe(1);
+          expect(chaos.stderr).toContain(RACY_ASSERTION);
+          // A chaos run is a finding: the sealed receipt is untouched.
+          expect(readFileSync(repo.path('.gateforge/test-gates/receipt.json'), 'utf8')).toBe(receiptBefore);
+          schedule = report.chaos?.schedule ?? [];
+        });
+
+        // The same seed against a FRESH witness replays the identical
+        // plan: a finding nobody can reproduce is a ghost.
+        await withWitness(null, async (witness) => {
+          const replay = await runCli(
+            repo,
+            chaosArgv(witness),
+            { ...externalOperatorEnv(witness), GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo) },
+          );
+          const replayed = parseReport(replay).chaos?.schedule ?? [];
+          expect(replay.code, `replay stdout:\n${replay.stdout}\nstderr:\n${replay.stderr}`).toBe(1);
+          expect(plannedSchedule(replayed as ChaosEntry[]), 'the same seed must plan the same schedule').toEqual(
+            plannedSchedule(schedule as ChaosEntry[]),
+          );
+        });
+
+        // ---- (b) a witness STARTED with a plan cannot seal a run ----
+        await withWitness(agreed, async (witness) => {
+          const normal = await runCli(
+            repo,
+            ['test-gates', '--test', RACY_KEY, '--result-only', '--format', 'json', ...externalPrefix(witness)],
+            { ...externalOperatorEnv(witness), GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo) },
+          );
+          expect(normal.code, `normal-vs-chaos stdout:\n${normal.stdout}\nstderr:\n${normal.stderr}`).toBe(2);
+          expect(normal.stdout, 'a refused run prints no report').toBe('');
+          expect(normal.stderr).toContain('never serve a run that seals');
+          expect(normal.stderr, 'the fix names the environment to unset').toContain('GATEFORGE_CHAOS_SEED');
+          expect(readFileSync(repo.path('.gateforge/test-gates/receipt.json'), 'utf8')).toBe(receiptBefore);
+        });
+
+        // ---- (c) a normal run against a normal external witness ----
+        await withWitness(null, async (witness) => {
+          const run = await runCli(
+            repo,
+            ['test-gates', '--test', RACY_KEY, '--result-only', '--format', 'json', ...externalPrefix(witness)],
+            { ...externalOperatorEnv(witness), GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo) },
+          );
+          expect(run.code, `plain external stdout:\n${run.stdout}\nstderr:\n${run.stderr}`).toBe(0);
+          const plainReport = parseReport(run);
+          // Byte-identical to a run with no chaos anywhere: no label,
+          // no extra output, and the racy page passes unperturbed.
+          expect(Object.keys(plainReport)).not.toContain('chaos');
+          expect(JSON.stringify(plainReport)).not.toContain('timing chaos');
+          expect(run.stderr).not.toContain('GATEFORGE_CHAOS_SEED');
+          expect(plainReport.execution?.selectedTests?.passed, run.stderr).toBe(1);
+        });
+      } finally {
+        await proxy.stop();
+        app.stop();
+      }
+    });
+  }, 900_000);
 });

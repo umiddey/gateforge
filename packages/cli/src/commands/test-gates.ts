@@ -284,7 +284,9 @@ export const TEST_GATES_USAGE =
   '       --chaos <seed> (requires --result-only): make the witness proxy delay and reorder app responses\n' +
   '       from a seeded schedule, so rare response-order races fail on purpose. The seed IS the schedule:\n' +
   '       the same seed replays it exactly. Bounds come from run.chaos (maxDelayMs, reorder). A chaos run is a\n' +
-  '       finding tool: it never seals a receipt and never writes the run record\n' +
+  '       finding tool: it never seals a receipt and never writes the run record. With --witness-url the plan\n' +
+  '       travels with the run context, so the witness needs nothing configured on its side, and a run against a\n' +
+  '       witness that was itself started with GATEFORGE_CHAOS_SEED is refused before any test runs\n' +
   '       --test <selector> (repeatable, requires --result-only): run only the named tests, witnessed. A\n' +
   '       selector is a logical key or a unique substring of one. A hand-picked test list never seals a\n' +
   '       receipt, so it is refused without --result-only. An unknown or ambiguous selector exits 2 with\n' +
@@ -367,7 +369,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
   // schedule exactly.
   const chaosSeed = stringFlag(options, 'chaos');
   const chaos =
-    chaosSeed === undefined ? null : parseChaosSeed(chaosSeed, resultOnly, stringFlag(options, 'witness-url'));
+    chaosSeed === undefined ? null : parseChaosSeed(chaosSeed, resultOnly);
   // A named run builds its plan from the FULL planned rows and then
   // narrows to the named keys, so it relaxes the diff-linked
   // `--changed --scope changed` requirement --result-only otherwise has.
@@ -922,20 +924,22 @@ const CHAOS_MAX_DELAY_CEILING_MS = 5_000;
  * a non-negative integer is refused in seconds — before a witness, a
  * browser or a suite is spawned.
  *
+ * An EXTERNAL witness (`--witness-url`) is accepted here: the plan
+ * travels with the run-context binding (see {@link WitnessRunOptions}),
+ * so the repository's own witness needs nothing configured on its side.
+ *
  * Args:
  *   raw: the value the operator typed.
  *   resultOnly: whether `--result-only` was given.
- *   witnessUrl: the external witness origin, when one was wired.
  *
  * Returns:
  *   { seed: number }: the accepted seed (the bounds are resolved later,
  *   from the trusted config).
  *
- * @throws UsageError: without `--result-only`, on a seed that is not a
- *   non-negative integer, or against an external witness (whose proxy
- *   the run does not own, so the schedule could not be applied).
+ * @throws UsageError: without `--result-only`, or on a seed that is not
+ *   a non-negative integer.
  */
-function parseChaosSeed(raw: string, resultOnly: boolean, witnessUrl: string | undefined): { seed: number } {
+function parseChaosSeed(raw: string, resultOnly: boolean): { seed: number } {
   if (!resultOnly) {
     throw new UsageError(
       'test-gates: --chaos requires --result-only — a run whose timing was perturbed on purpose finds races, ' +
@@ -947,13 +951,93 @@ function parseChaosSeed(raw: string, resultOnly: boolean, witnessUrl: string | u
       `test-gates: --chaos takes a non-negative integer seed (0, 1, 2, ...), got '${raw}'`,
     );
   }
-  if (witnessUrl !== undefined) {
+  return { seed: Number(raw) };
+}
+
+/** The run options this CLI hands a witness with the run context. */
+export interface WitnessRunOptions {
+  chaos?: ChaosRun;
+  twinShapes?: { queryKeys: readonly string[]; inventory: readonly string[] };
+}
+
+/** The run options a witness confirmed it is applying. */
+export interface AppliedWitnessOptions {
+  chaos: ChaosRun | null;
+  twinShapes: { queryKeys: readonly string[]; inventory?: readonly string[] } | null;
+}
+
+/** True when a binding echo is the additive `applied` block we sent. */
+function isAppliedWitnessOptions(value: unknown): value is AppliedWitnessOptions {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return 'chaos' in record && 'twinShapes' in record;
+}
+
+/** The run options as the plain json the binding body carries. */
+function runOptionsJson(options: WitnessRunOptions): JsonValue {
+  return {
+    ...(options.chaos === undefined ? {} : { chaos: { ...options.chaos } }),
+    ...(options.twinShapes === undefined
+      ? {}
+      : {
+          twinShapes: {
+            queryKeys: [...options.twinShapes.queryKeys],
+            inventory: [...options.twinShapes.inventory],
+          },
+        }),
+  };
+}
+
+/**
+ * Refuses a NORMAL run whose external witness perturbs timing on its
+ * own, before a single test executes.
+ *
+ * The run owns the plan now: a witness only perturbs when THIS run
+ * asked for it through the binding, and this run only asks with
+ * `--chaos --result-only`. So a plan the witness reports for a run
+ * that asked for none can only have come from the witness's own
+ * ENVIRONMENT — and a perturbed run must never seal.
+ *
+ * A witness too old to have the route answers 404: it cannot perturb
+ * timing it was never told to, so the run is exactly what it always
+ * was.
+ *
+ * Args:
+ *   witnessUrl: the external witness origin.
+ *   runToken: the run token the supervisor surface authenticates with.
+ *   verifierKey: the supervisor verifier key.
+ *
+ * @throws UsageError: when the witness reports a plan this run did not
+ *   ask for, or cannot be asked at all.
+ */
+async function refuseChaosWitnessOnSealingRun(
+  witnessUrl: string,
+  runToken: string,
+  verifierKey: string,
+): Promise<void> {
+  let body: { chaos?: ChaosRun | null } | null;
+  let status: number;
+  try {
+    const response = await fetch(`${witnessUrl}/runs/chaos-schedule`, {
+      headers: { [RUN_HEADER]: runToken, [VERIFIER_HEADER]: verifierKey },
+    });
+    status = response.status;
+    body = response.ok ? ((await response.json()) as { chaos?: ChaosRun | null }) : null;
+  } catch (error) {
     throw new UsageError(
-      'test-gates: --chaos needs the witness this run spawns: the release plan lives in the observation proxy, ' +
-        'and --witness-url points at one this run does not own',
+      `test-gates: the external witness at '${witnessUrl}' could not be asked whether it perturbs timing on its ` +
+        `own (${(error as Error).message}) — a sealing run never assumes its witness is not perturbing timing`,
     );
   }
-  return { seed: Number(raw) };
+  if (status === 404 || body === null) return;
+  const reported = body.chaos ?? null;
+  if (reported === null) return;
+  throw new UsageError(
+    `test-gates: the external witness at '${witnessUrl}' was started with a timing-chaos plan (seed ` +
+      `${String(reported.seed)}), and a witness that perturbs timing can never serve a run that seals — unset ` +
+      `${ENV_CHAOS_SEED} when starting it (this run never asked for chaos), or re-run with --chaos ` +
+      `${String(reported.seed)} --result-only to report under the same plan`,
+  );
 }
 
 /**
@@ -2154,7 +2238,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   const runnerName = config.runner;
   // The timing-chaos plan for THIS run (E63). Null without the flag:
   // then the witness is spawned with no plan and every byte of the run
-  // is exactly what it was before chaos existed.
+  // is exactly what it was before chaos existed. The bounds come from
+  // `run.chaos` either way: a SPAWNED witness is configured with them
+  // in its environment, an EXTERNAL one through the run-context
+  // binding. The run owns the plan in both cases.
   const chaosRun: ChaosRun | null =
     options.chaos === undefined || options.chaos === null ? null : chaosRunOf(config, options.chaos.seed);
   // The schedule the witness actually used (filled in before it stops);
@@ -3412,16 +3499,62 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   if (expectedDigest !== null) {
     manifest = { ...manifest, invocationId, inputDigest: expectedDigest };
   }
+  // The run OPTIONS (chaos, twin shapes) travel with the context, so a
+  // repository that starts its OWN witness gets both features with
+  // nothing configured on the witness side. A run that asks for
+  // nothing sends no `options` key at all: the body is byte-identical
+  // to what it always was.
+  const runOptions: WitnessRunOptions = {
+    ...(chaosRun === null ? {} : { chaos: chaosRun }),
+    ...(twinComparisonOn
+      ? {
+          twinShapes: {
+            queryKeys: twinQueryKeys,
+            inventory: httpRoutes.map((route) => route.canonicalPath).filter((template) => template.length > 0),
+          },
+        }
+      : {}),
+  };
+  let appliedOptions: AppliedWitnessOptions | null = null;
   if (
     effectiveWitnessUrl !== undefined &&
     witnessVerifierKey !== undefined &&
     expectedDigest !== null
   ) {
-    await bindWitnessContext(effectiveWitnessUrl, runToken, witnessVerifierKey, {
+    appliedOptions = await bindWitnessContext(effectiveWitnessUrl, runToken, witnessVerifierKey, {
       runId: manifest.runId,
       invocationId,
       inputDigest: expectedDigest,
+      ...(Object.keys(runOptions).length === 0 ? {} : { options: runOptionsJson(runOptions) }),
     });
+  }
+  // A witness that does not echo its options is older than them, and
+  // this run would then perturb or compare nothing while reporting as
+  // if it had. Say which, rather than reporting the fiction.
+  if (chaosRun !== null && appliedOptions?.chaos == null) {
+    if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+    throw new UsageError(
+      `test-gates: --chaos ${String(chaosRun.seed)} needs a witness that accepts run options; the witness at ` +
+        `'${effectiveWitnessUrl ?? ''}' confirmed no chaos plan, so no schedule was applied and this run would ` +
+        'report a finding it never made — upgrade the witness',
+    );
+  }
+  if (twinComparisonOn && appliedOptions?.twinShapes == null) {
+    writeLine(
+      io.stderr,
+      'test-gates: twin path coverage needs a witness that accepts run options — this witness does not; ' +
+        'pairs were not compared',
+    );
+  }
+  // A witness that perturbs timing on its OWN (its environment, never
+  // this run's binding) can never serve a run that seals.
+  if (
+    chaosRun === null &&
+    witnessUrl !== undefined &&
+    effectiveWitnessUrl !== undefined &&
+    witnessVerifierKey !== undefined
+  ) {
+    await refuseChaosWitnessOnSealingRun(effectiveWitnessUrl, runToken, witnessVerifierKey);
   }
   // The compiled behavior catalog is a PRE-run fact, so the witness binds
   // it now — before any session opens — exactly like the run context. A
@@ -3468,7 +3601,6 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     );
   }
   const supervisor = new SupervisorClient(effectiveWitnessUrl, runToken, witnessVerifierKey);
-
   // 4.6 Expected-set registration BEFORE the run (review fix 2a): the
   // expected tests come from an INDEPENDENT enumeration — Playwright
   // through a separate `playwright --list` child with a scrubbed
@@ -5032,7 +5164,13 @@ async function stopWitnessProcess(handle: { child: ChildProcess }): Promise<void
  *   verifierKey: the witness verifier key (attestation auth; never the
  *     suite run token).
  *   body: the validated current runId, fresh invocationId, and tested
- *     inputDigest from trusted caller memory.
+ *     inputDigest from trusted caller memory, plus the additive run
+ *     `options` (chaos / twin shapes) when this run asked for any.
+ *
+ * Returns:
+ *   AppliedWitnessOptions | null: the options the witness confirmed it
+ *   is applying, or null for a witness that does not echo them (an
+ *   older build) — never a guess.
  *
  * Throws:
  *   Error: fail-closed when the witness refuses (used witness, changed
@@ -5050,8 +5188,8 @@ async function bindWitnessContext(
   witnessUrl: string,
   runToken: string,
   verifierKey: string,
-  body: { runId: string; invocationId: string; inputDigest: string },
-): Promise<void> {
+  body: { runId: string; invocationId: string; inputDigest: string; options?: JsonValue },
+): Promise<AppliedWitnessOptions | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5_000);
   try {
@@ -5067,7 +5205,14 @@ async function bindWitnessContext(
       body: canonicalJson(body),
       signal: controller.signal,
     });
-    if (response.ok) return;
+    if (response.ok) {
+      // The `applied` echo is how the run learns whether this witness
+      // UNDERSTOOD the options. A witness older than them answers
+      // without it, and the caller must say so rather than report a
+      // comparison — or a schedule — that never happened.
+      const confirmed = (await response.json().catch(() => null)) as { applied?: unknown } | null;
+      return isAppliedWitnessOptions(confirmed?.applied) ? confirmed.applied : null;
+    }
     const status = response.status;
     let detail = '';
     try {

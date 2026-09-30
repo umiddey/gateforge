@@ -15,13 +15,16 @@
  * runner test id would compare nothing and report silence.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, readdirSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
-import { startAttestationProxy } from '@gate-forge/pack-playwright';
+import { startAttestationProxy, startWitnessProcess } from '@gate-forge/pack-playwright';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
-import { loadConfigAt } from '../src/commands/common.js';
+import { loadConfigAt, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
 import { runCli } from './helpers.js';
 import {
   cleanupWitnessedFixture,
@@ -440,6 +443,68 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(run.stdout, 'the report must not name a value the owner never allowlisted').not.toContain(nonce.nonce);
         expect(stateText, 'no state file may name a value the owner never allowlisted').not.toContain(nonce.nonce);
       } finally {
+        await proxy.stop();
+        app.stop();
+      }
+    });
+  }, 600_000);
+
+  it('compares the twins through a witness the repository started itself', async () => {
+    await withTempRepo({}, async (repo) => {
+      installRepo(repo, DIVERGENT);
+      const app = await startTwinApp();
+      const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+      // The classifications a repository's own witness reads: the file
+      // one real run produced.
+      const bootstrap = await runFixture(repo, proxy.url, { ...DIVERGENT, enforcement: null });
+      expect(bootstrap.code, `bootstrap stdout:\n${bootstrap.stdout}\nstderr:\n${bootstrap.stderr}`).toBe(0);
+      const externalDir = mkdtempSync(join(tmpdir(), 'gateforge-external-twins-'));
+      const token = randomUUID();
+      copyFileSync(join(stateDir(repo), 'classifications.json'), join(externalDir, 'classifications.json'));
+      const { keyFile } = operatorEnvironment();
+      const keyring = JSON.parse(readFileSync(keyFile, 'utf8')) as { activeKeyId: string; keys: Record<string, string> };
+      const witness = await startWitnessProcess({
+        GATEFORGE_RUN_ID: randomUUID(),
+        GATEFORGE_RUN_TOKEN: token,
+        GATEFORGE_STATE_DIR: externalDir,
+        GATEFORGE_CLASSIFICATIONS: join(externalDir, 'classifications.json'),
+        GATEFORGE_ADAPTERS_DIR: join(repo.root, '.gateforge/adapters'),
+        GATEFORGE_TARGET_BASE_URL: proxy.url,
+        GATEFORGE_ADAPTER_BASE_URL: proxy.url,
+        GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+        GATEFORGE_PROXY_TARGET: proxy.url,
+        GATEFORGE_WITNESS_VERIFIER_KEY: keyring.keys[keyring.activeKeyId] as string,
+      });
+      try {
+        expect(witness.proxyUrl, 'the external witness started no observation proxy').not.toBeNull();
+        reshapeRepo(repo, DIVERGENT);
+        // NOTHING is configured on the witness side: the shape plan
+        // travels with the run context, so a repository's own witness
+        // needs no twin environment at all.
+        const run = await runCli(repo, ['test-gates', '--changed', '--format', 'json', '--witness-url', witness.url, '--out', externalDir, '--run-token', token], {
+          [VERIFIER_KEY_FILE_ENV]: keyFile,
+          GATEFORGE_APP_BASE_URL: witness.proxyUrl as string,
+          GATEFORGE_TARGET_BASE_URL: witness.proxyUrl as string,
+          GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+          GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
+        });
+        const report = parseReport(run);
+        expect(run.code, `the run must stay green\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`).toBe(0);
+        expect(run.stderr, 'a witness that accepted the options says nothing').not.toContain('pairs were not compared');
+        const details = divergences(report).map((entry) => entry.detail);
+        expect(details.some((detail) => detail.includes('tab=open')), JSON.stringify(details)).toBe(true);
+        expect(details.some((detail) => detail.includes('tab=all')), JSON.stringify(details)).toBe(true);
+        expect(details.some((detail) => detail.includes(WITNESSED_TITLE)), JSON.stringify(details)).toBe(true);
+        expect(details.some((detail) => detail.includes(RAW_TITLE)), JSON.stringify(details)).toBe(true);
+        const shapes = JSON.parse(readFileSync(join(externalDir, 'twin-shapes.json'), 'utf8')) as TwinShapesDocument;
+        expect(shapes.twins.length, JSON.stringify(shapes)).toBeGreaterThan(0);
+      } finally {
+        if (witness.child.exitCode === null && witness.child.signalCode === null) {
+          witness.child.kill('SIGTERM');
+          await once(witness.child, 'exit');
+        }
+        rmSync(externalDir, { recursive: true, force: true });
+        rmSync(join(keyFile, '..'), { recursive: true, force: true });
         await proxy.stop();
         app.stop();
       }
