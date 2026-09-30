@@ -115,6 +115,18 @@ describe('fastapi detector (subprocess, real python)', () => {
     }
   });
 
+  it('closes the computed-prefix finding when the same mount declares a literal', async () => {
+    // The guidance `gateforge next` prints for FASTAPI_PREFIX_UNRESOLVED
+    // names exactly one fix: write the prefix as a literal at the mount
+    // site. This is that fix, run through the REAL python detector — the
+    // same app shape as `simple/computed.py`, one edit apart.
+    const computed = await runDiscover(['simple/computed.py']);
+    expect(computed.unresolved.map((entry) => entry['code'])).toContain('FASTAPI_PREFIX_UNRESOLVED');
+    const literal = await runDetector(['simple/literal_prefix.py']);
+    expect(literal.unresolved.map((entry) => entry['code'])).not.toContain('FASTAPI_PREFIX_UNRESOLVED');
+    expect(effectivePaths(literal)).toEqual(['GET /computed/x']);
+  });
+
   it('reports unsupported verbs instead of dropping the route', async () => {
     const outcome = await runDiscover(['unsupported.py']);
     expect(facts(outcome.resources)).toEqual([]);

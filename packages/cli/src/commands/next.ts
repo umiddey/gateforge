@@ -25,7 +25,10 @@ import {
   type ObligationVerdict,
   type ResourceGraph,
 } from '@gate-forge/core';
-import { ENDPOINT_SEMANTICS_UNRESOLVED } from '@gate-forge/http-contract';
+import {
+  ENDPOINT_SEMANTICS_UNRESOLVED,
+  FASTAPI_PREFIX_UNRESOLVED,
+} from '@gate-forge/http-contract';
 import { PLANES_CONFIG_PATH } from '@gate-forge/pack-sqlalchemy';
 import {
   discoverTestCatalog,
@@ -353,6 +356,54 @@ function endpointSemanticsGuidance(detail: string, graph: ResourceGraph): string
           'Then prove the declaration applied — the capabilities line names the capability and the trace says endpoints.json:',
           `gateforge explain ${shellQuote(route.id)}`,
         ]),
+  ];
+}
+
+/**
+ * Builds the answer for a `FASTAPI_PREFIX_UNRESOLVED` finding: an
+ * `include_router(...)`/router prefix the detector cannot read
+ * statically, so no route fact is emitted for that mount at all.
+ *
+ * The block exists because the effective path cannot be proven, and
+ * Gateforge never guesses one (a fabricated path is a route the app does
+ * not serve). What the block must therefore do is name the ONE way the
+ * finding closes today: make the prefix a literal at the mount site.
+ *
+ * Nothing else is printed, and that is a verified statement, not an
+ * omission — each alternative was run against the real in-process pack
+ * before this guidance was written:
+ * - a `.gateforge/endpoints.json` capability rule cannot match: the
+ *   detector emits no route fact for this mount, so there is no
+ *   method/path pair for a rule to select on;
+ * - `gateforge waive` cannot reach it: the finding resolves no obligation
+ *   (`waive: no obligation resolves for …`, exit 2);
+ * - `.gateforge/fastapi.json`'s `importRoots` does not apply: it governs
+ *   absolute imports, and with it configured the same finding stands.
+ *
+ * Args:
+ *   detail: the finding's `why` line (the reason code and its detail).
+ *
+ * Returns:
+ *   string[]: the explanation and the one real fix, or an empty array
+ *     when the detail is not this cause.
+ */
+function fastapiPrefixGuidance(detail: string): string[] {
+  if (!detail.startsWith(`${FASTAPI_PREFIX_UNRESOLVED}:`)) return [];
+  // The detector's detail names the file the unprovable mount is written
+  // in ("include_router prefix in <file> is computed…"), so the owner is
+  // pointed at the exact line to edit.
+  const site = /in (\S+) is computed/.exec(detail)?.[1] ?? '';
+  return [
+    'about this block: this mount writes its prefix from an expression, so the path every route under it ' +
+      'serves cannot be read from the code — a settings attribute, a constant, or a concatenation all ' +
+      'hide the value at scan time. Gateforge will not guess it: a made-up path would describe routes the ' +
+      'application does not serve, so the whole mount stays unresolved until the prefix is provable.',
+    `Fix it in ${site === '' ? 'the file the finding names' : site}: give the mount a literal string prefix ` +
+      '(for example `app.include_router(router, prefix="/api/v1")`). A module-level constant does not help ' +
+      '— the value must be written at the mount site.',
+    'Nothing in Gateforge can close this finding on your behalf: a waiver needs an obligation and this has ' +
+      'none, and a declared endpoint rule has no detected route to attach to. Re-run `gateforge next` after ' +
+      'the edit — the routes then appear with their real prefix.',
   ];
 }
 
@@ -829,9 +880,12 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       : unresolvedRouteGuidance(routeName, unresolvedRoute.name, unresolvedRoute.source, io.cwd);
   // An endpoint whose semantics no detector could prove is answered by
   // the owner-authored capability rule, so the top item carries the exact
-  // entry instead of the read-only dump the fallback `do:` names.
+  // entry instead of the read-only dump the fallback `do:` names. A
+  // FastAPI prefix no detector could read is answered the same way: the
+  // block names the one edit that closes it, never a read-only command.
   const endpointGuidance =
     routeGuidance === null ? endpointSemanticsGuidance(first.why, pipeline.graph) : [];
+  const prefixGuidance = routeGuidance === null ? fastapiPrefixGuidance(first.why) : [];
   const guide = ENVIRONMENT_GUIDES[first.cause as CauseCode] ?? null;
   const scopeNote = observationScopeNote(
     first,
@@ -881,6 +935,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         ...(singletonNote.length === 0 ? {} : { singletonGuidance: singletonNote }),
         ...(taskOffer.length === 0 ? {} : { taskPackOffer: taskOffer }),
         ...(endpointGuidance.length === 0 ? {} : { endpointSemanticsGuidance: endpointGuidance }),
+        ...(prefixGuidance.length === 0 ? {} : { fastapiPrefixGuidance: prefixGuidance }),
       }),
     );
   } else {
@@ -897,6 +952,12 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         `do: declare what this endpoint does in '${ENDPOINTS_CONFIG_PATH}' — the exact entry to add is below`,
       );
       for (const line of endpointGuidance) writeLine(io.stdout, line);
+    } else if (prefixGuidance.length > 0) {
+      writeLine(
+        io.stdout,
+        'do: make the mount prefix a literal at the site named below, then run `gateforge next` again',
+      );
+      for (const line of prefixGuidance) writeLine(io.stdout, line);
     } else {
       writeLine(io.stdout, `do: ${first.do}`);
     }
