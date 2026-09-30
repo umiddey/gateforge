@@ -52,6 +52,7 @@ import {
 } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { expandIncludePaths } from './glob.js';
+import { isEngineGeneratedStatePath } from './state-artifacts.js';
 import {
   isRuntimeReusePath,
   RuntimeReuseBoundaryError,
@@ -778,6 +779,11 @@ function buildFileEntries(
  * digest) is a hole, not an exclusion. Also rejects the state directory
  * aliasing the repo root itself (including through a symlink).
  *
+ * The ENGINE's own generated state is not a hole and is exempted through
+ * the closed-world set in `./state-artifacts.ts`: a tracked file under
+ * `--out` still refuses above, and any other path there still refuses
+ * here.
+ *
  * Args:
  *   cwd: absolute repo root.
  *   stateDir: absolute run-state directory.
@@ -851,9 +857,19 @@ export function assertOutputDisjoint(
     }
   }
   if (prefix === '' || prefix.startsWith('..')) return;
+  // A declared input that hides under --out is the hole this refuses.
+  // The engine's OWN generated state is not a hole: it is the output the
+  // exclusion exists for, and a supervised run writes real source-shaped
+  // files (the synthesized Playwright config) into the state directory —
+  // which made the very next command refuse to run in the repository the
+  // run had just graded. The generated set is closed-world
+  // (./state-artifacts.ts), so a tracked file (refused above), a
+  // hand-written file, and any path the engine never writes all still
+  // refuse with byte-identical wording.
   const hidden = declaredInputs
     .filter((item) => !item.startsWith('absent:'))
     .filter((item) => item === prefix || item.startsWith(`${prefix}/`))
+    .filter((item) => !isEngineGeneratedStatePath(item.slice(prefix.length + 1)))
     .sort(compareStrings);
   if (hidden.length > 0) {
     throw new UsageError(
