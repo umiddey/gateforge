@@ -1064,6 +1064,29 @@ function chaosRunOf(config: ReturnType<typeof loadConfigAt>, seed: number): Chao
   return { seed, maxDelayMs, reorder: config.run?.chaos?.reorder ?? true };
 }
 
+/**
+ * The plain line for a linked twin pair that ran but could not be
+ * compared, because a side sent no request through the witness.
+ *
+ * Args:
+ *   link: the linked pair.
+ *   witnessedObserved: whether the witnessed test's requests were seen.
+ *   rawObserved: whether the raw test's requests were seen.
+ *
+ * Returns:
+ *   string: the stderr line naming the unobserved side and the fix.
+ */
+export function twinPairNotComparedLine(link: TwinLink, witnessedObserved: boolean, rawObserved: boolean): string {
+  const unobserved = [
+    ...(witnessedObserved ? [] : [`the witnessed test '${link.witnessed}'`]),
+    ...(rawObserved ? [] : [`the raw test '${link.raw}'`]),
+  ].join(' and ');
+  const fix = rawObserved
+    ? ''
+    : ' — a raw twin is observed only when it runs with the Gateforge test fixture, which opens an observation-only session for it (it issues no evidence)';
+  return `test-gates: twin pair not compared: ${unobserved} sent no request through the witness${fix}`;
+}
+
 /** One resolved `--test` selector and the planned logical keys it named. */
 export interface NamedTestSelection {
   /** The selector exactly as the operator typed it. */
@@ -4027,10 +4050,19 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               shapes: entry.shapes,
             })),
         );
+        // A pair both of whose tests are in this run but one side sent no
+        // request through the witness was NOT compared; saying nothing
+        // would read as "the twins agree".
+        const inRun = new Set(namedTestIds ?? plannedRows.map((row) => row.planned.logicalKey));
         for (const link of twinLinks) {
           const witnessedShapes = observed.get(link.witnessed);
           const rawShapes = observed.get(link.raw);
-          if (witnessedShapes === undefined || rawShapes === undefined) continue;
+          if (witnessedShapes === undefined || rawShapes === undefined) {
+            if (inRun.has(link.witnessed) && inRun.has(link.raw)) {
+              writeLine(io.stderr, twinPairNotComparedLine(link, witnessedShapes !== undefined, rawShapes !== undefined));
+            }
+            continue;
+          }
           twinDivergences = [
             ...twinDivergences,
             ...twinPathDivergence(

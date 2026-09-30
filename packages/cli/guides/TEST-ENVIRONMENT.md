@@ -932,6 +932,14 @@ Link the pair in one of two ways, both read only when `twinPaths` is set:
   else next to a bare `X`. Two described raw tests under one label link
   nothing: name the pair with `twinOf`.
 
+Both tests must send their requests through the witness, so the raw twin
+runs with the Gateforge test fixture too (`test` from
+`@gate-forge/pack-playwright`); it then opens an observation-only session
+and issues nothing. A raw twin written as a plain Playwright test sends
+nothing through the witness: the pair is not compared, and the run says
+so on one line (`test-gates: twin pair not compared: the raw test '…'
+sent no request through the witness`), never as "the twins agree".
+
 ```bash
 # A run with the pair linked reports the divergence and keeps its verdict:
 gateforge test-gates --changed --format json

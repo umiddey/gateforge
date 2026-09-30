@@ -121,6 +121,7 @@
 
 ### Fixed
 
+- A linked raw/witnessed twin pair that ran but could not be compared is no longer silent. When one side sent no request through the witness — most often a raw twin written as a plain Playwright test, which opens no witness session — the run prints `test-gates: twin pair not compared: the raw test '…' sent no request through the witness` and how to make it observable (run the raw twin with the Gateforge test fixture), instead of reporting no divergence as if the twins agreed.
 - A flag given three or more times keeps every value. `test-gates --test a --test b --test c` used to fuse the first values into one comma-joined selector (`'a,b'`), so naming three or more tests always failed with `TEST_SELECTOR_UNKNOWN`; the same applied to every other repeatable flag.
 - Installing `@gate-forge/witness` no longer pulls in `bullmq` and `ioredis`, and loading it no longer needs them. The queue observer imported them at load time, so every witnessed run of a project without them (every project without a queue) died at start with `Cannot find package 'bullmq'`. They are now optional peers, loaded only when `.gateforge.yml` declares `queueObserver: { kind: bullmq }`; a project that declares it without them fails closed with the install command.
 - The shipped `example/` project checks clean again with its new `webhook/` sub-project: that sub-project's engine-side modules (its evidence adapter, gate script and fixture provider) are excluded from the frontend call scan, like `behavior/`'s.

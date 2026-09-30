@@ -53,10 +53,14 @@ const UNLINKED_TITLE = 'lists open items fast';
  * to link the pair, and a title built from an environment variable is
  * not a title any enumeration can see.
  */
-function twinSpec(witnessedTitle: string, rawTitle: string, rawPath: string): string {
+function twinSpec(witnessedTitle: string, rawTitle: string, rawPath: string, rawPlain = false): string {
   return `import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
+import { test as plainTest } from 'playwright/test';
 
 const test = gateforgeTest;
+// A plain Playwright test opens no witness session: the common way a
+// repository writes its raw twin.
+const rawTest = ${rawPlain ? 'plainTest' : 'gateforgeTest'};
 const appBase = process.env.GATEFORGE_APP_BASE_URL;
 const rawPath = '${rawPath}';
 
@@ -68,7 +72,7 @@ test('${witnessedTitle}', async ({ page }) => {
   await expect(page.locator('#rows')).toContainText('open-row');
 });
 
-test('${rawTitle}', async ({ page }) => {
+rawTest('${rawTitle}', async ({ page }) => {
   await page.goto(appBase + rawPath);
   await page.waitForFunction(() => window.__loaded !== undefined);
   await expect(page.locator('#rows')).toContainText('open-row');
@@ -197,6 +201,8 @@ interface RunShape {
   rawTitle: string;
   /** The witnessed twin's own title. */
   witnessedTitle: string;
+  /** Whether the raw twin is a plain Playwright test (no Gateforge fixture). */
+  rawPlain?: boolean;
 }
 
 /** `advisory` twin coverage: the reported finding, exit code untouched. */
@@ -233,7 +239,7 @@ ${enforcement === null ? '' : `enforcement:\n${enforcement}\n`}`;
 function installRepo(repo: TempRepo, shape: RunShape): void {
   installStrictFixture(repo, {
     'specs/crud.spec.js': CRUD_SPEC,
-    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath),
+    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain),
   });
   repo.git(['add', '-A']);
   repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'twin path fixture']);
@@ -250,7 +256,7 @@ function installRepo(repo: TempRepo, shape: RunShape): void {
 function reshapeRepo(repo: TempRepo, shape: RunShape): void {
   repo.writeFiles({
     '.gateforge.yml': configYaml(shape.enforcement),
-    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath),
+    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain),
   });
 }
 
@@ -358,6 +364,30 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         const shapes = JSON.parse(readFileSync(join(stateDir(repo), 'twin-shapes.json'), 'utf8')) as TwinShapesDocument;
         expect(shapes.twins.length, JSON.stringify(shapes)).toBeGreaterThan(1);
         expect(shapes.twins.filter((twin) => twin.shapes.length > 0).length, JSON.stringify(shapes)).toBeGreaterThan(1);
+      } finally {
+        await proxy.stop();
+        app.stop();
+      }
+    });
+  }, 600_000);
+
+  it('says a pair was not compared when its raw twin is a plain Playwright test', async () => {
+    const plain: RunShape = { ...DIVERGENT, rawPlain: true };
+    await withTempRepo({}, async (repo) => {
+      installRepo(repo, plain);
+      const app = await startTwinApp();
+      const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+      try {
+        const run = await runFixture(repo, proxy.url, plain);
+        const report = parseReport(run);
+        expect(run.code, `the run must stay green\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`).toBe(0);
+        // No finding, because nothing was compared — and the run says so
+        // instead of letting "no divergence" read as "the twins agree".
+        expect(divergences(report)).toEqual([]);
+        expect(run.stderr).toContain(
+          `test-gates: twin pair not compared: the raw test 'playwright:chromium:specs/items.spec.js:${RAW_TITLE}' sent no request through the witness`,
+        );
+        expect(run.stderr).toContain('runs with the Gateforge test fixture');
       } finally {
         await proxy.stop();
         app.stop();
