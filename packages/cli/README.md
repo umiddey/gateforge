@@ -1036,6 +1036,36 @@ container. File-change capture is snapshot-based, not an OS sandbox:
 it guards changes visible at capture points, not a malicious process
 that changes and restores files between snapshots.
 
+### The operator's fixture/actor provider
+
+A declared behavior case names a `fixture` recipe and an `actor`, and the
+witness — not the test suite — must materialize them before it drives the
+case. `GATEFORGE_FIXTURE_PROVIDER` names the module that does that. The
+CLI-spawned witness loads it at startup; a repository that declares no
+behavior cases is unaffected.
+
+The module's default export is `{ prepare(input), release(leaseId),
+resolveCredential(credentialRef) }`:
+
+- `prepare` provisions the case's subjects and actor identities and returns
+  `{ leaseId, namespace, subjects, actors }`. Subjects are server-issued
+  identities; a lease namespace keeps concurrent cases isolated.
+- `release` drops what that lease provisioned.
+- `resolveCredential` turns a lease `credentialRef` into request material.
+  It runs in the witness process, so a secret stays there; a declared
+  `credentialVariant: valid` that cannot resolve fails closed rather than
+  degrading.
+
+The provider is ENGINE-SIDE code and is the only caller of its own
+provisioning HTTP calls — the suite never imports it, and nothing it
+returns can mint evidence, only supply the subjects a case drives. Because
+of that, a repository should exclude the provider from its product scan
+scope (`.gateforge.yml` `project.paths.exclude`, matching
+`classification-policy.yml` `scanRoots`): its calls are fixture
+provisioning, not application call sites, and scanning them reports the
+engine's own traffic as unresolved frontend targets. See
+`example/behavior/fixtures/fixture-provider.mjs` for a working provider.
+
 Fail closed: without the key, or when no envelope validates for the
 expected context, every witnessed record demotes to claimed-tier
 (blocking, never satisfied).
