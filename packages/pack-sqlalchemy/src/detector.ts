@@ -36,6 +36,7 @@ import {
   type PlaneRuleHit,
   type SqlalchemyPlane,
 } from './planes.js';
+import { applySingletonTags } from './singleton.js';
 
 /** Absolute dir of this pack's `python/` tree (the detector package). */
 const PACK_PYTHON_DIR = fileURLToPath(new URL('../python', import.meta.url));
@@ -185,15 +186,33 @@ function mapTablePlanes(outcome: RawOutcome, decide: TablePlaneDecider): RawOutc
  *   RawOutcome: New outcome; tables the rule maps carry `plane`.
  */
 export function applyPlaneMapping(outcome: RawOutcome, plane: PlaneRule): RawOutcome {
-  return mapTablePlanes(outcome, (facts) =>
-    plane({
-      tableName: facts.tableName,
-      classQname: facts.classQname,
-      provenance: facts.provenance,
-    }),
+  return withSingletonTags(
+    mapTablePlanes(outcome, (facts) =>
+      plane({
+        tableName: facts.tableName,
+        classQname: facts.classQname,
+        provenance: facts.provenance,
+      }),
+    ),
   );
 }
 
+
+/**
+ * Rewrites one plane-applied outcome into its per-tenant-singleton form.
+ * Every plane channel funnels through here, so the tag is minted exactly
+ * once per run and a table without both provable facts is untouched
+ * (byte-identical to the pre-tag output).
+ *
+ * Args:
+ *   outcome: The outcome with planes already applied.
+ *
+ * Returns:
+ *   RawOutcome: The same outcome with `singletonPerTenant` added where earned.
+ */
+function withSingletonTags(outcome: RawOutcome): RawOutcome {
+  return { ...outcome, resources: applySingletonTags(outcome.resources) };
+}
 /** The code of the blocking declarative-plane conflict finding. */
 export const PLANE_RULE_CONTRADICTION = 'PLANE_RULE_CONTRADICTION';
 
@@ -279,13 +298,13 @@ export function applyPlanesConfig(outcome: RawOutcome, config: PlanesConfig): Ra
     return { ...resource, attributes: { ...resource.attributes, plane: resolution.plane } };
   });
   contradictionFindings.sort(compareFindings);
-  return {
+  return withSingletonTags({
     resources,
     unresolved: outcome.unresolved,
     findings: [...outcome.findings, ...contradictionFindings],
     classificationSignals: outcome.classificationSignals,
     ...(outcome.scannedPaths !== undefined ? { scannedPaths: outcome.scannedPaths } : {}),
-  };
+  });
 }
 
 /**

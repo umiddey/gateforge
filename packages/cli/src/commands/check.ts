@@ -165,6 +165,7 @@ import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { obligationFingerprint, evaluateRun, scopeBlocking } from '../evaluate.js';
 import { auditAdapters } from '../adapter-audit.js';
+import { singletonPerTenantAdvisories } from '../singleton-guidance.js';
 import { annotationMapSyncAdvisories, findRunnerConfigPath, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
@@ -1773,6 +1774,17 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     evaluated.verdicts,
     stateDir,
   );
+  // Per-tenant singletons (plan Phase 4b item 3): one advisory per tagged
+  // resource that owes a create. Absent the tag this is an empty list, so
+  // a repo without one is byte-identical.
+  const singletonFindings = singletonPerTenantAdvisories(
+    pipeline.graph.resources,
+    new Set(
+      evaluated.verdicts
+        .filter((verdict) => verdict.obligation.contract === 'persistence:create')
+        .map((verdict) => verdict.obligation.resourceId),
+    ),
+  );
   let report = renderRun(reportVerdicts, {
     format,
     blocking: evaluatedBlocking,
@@ -1781,6 +1793,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       ...mockedOnlyAdvisories,
       ...baselineDriftAdvisories,
       ...adapterFindings,
+      ...singletonFindings,
     ],
     waiverCounts: evaluated.waiverCounts,
     baseline: baselineReport,

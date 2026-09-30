@@ -249,6 +249,39 @@ instead of scanning with partial trust). Precedence: the programmatic
 explicit `planesConfig` option overrides the document; the default
 document path can be moved with `planesConfigPath`.
 
+## Per-tenant singletons
+
+A table whose UNIQUE constraint — or whose UNIQUE **index** — includes the
+tenant scope column admits at most ONE row per tenant. A `create` of such a
+resource is therefore provable only on a brand-new tenant, while the
+witness's adapter reads use one process-global login: the create reads as
+"the fixed tenant already has that row". The pack reports that as an
+ADDITIVE fact and never as a verdict:
+
+- `attributes.uniqueConstraints` — every declared
+  `UniqueConstraint("a", "b")`, `Index("ix", "a", "b", unique=True)`, and
+  column-level `unique=True`, as `{name, kind, columns}` (`kind` is
+  `constraint` | `index` | `column`; `name` is `null` when unnamed). The
+  attribute is **absent** when the table declares no unique constraint, and
+  a computed column expression or a non-literal `unique` flag is never
+  guessed.
+- `attributes.singletonPerTenant` — `{constraint, tenantColumn, columns}`,
+  minted only when BOTH facts are provable: the table's plane evidence is
+  `tenant` AND one declared unique constraint includes a recognized
+  tenant-scope column (`TENANT_SCOPE_COLUMNS`: `tenant_id`, `tenant`,
+  `tenantId`, `tenant_uuid`, `tenant_key`). The first qualifying constraint
+  in written order is the one reported; every one of them says the same.
+
+Both are attributes, not signals: nothing blocks on them. The gate turns
+the tag into one non-blocking `RESOURCE_SINGLETON_PER_TENANT` advisory per
+resource that owes a `persistence:create`, naming the constraint, the
+tenant column and how to prove it (create the tenant in the test, then
+register that tenant's login with the witness for that session only — see
+`packages/cli/guides/TEST-ENVIRONMENT.md`). A table on another plane, an
+unreviewed table, or a unique constraint that excludes the tenant scope
+column is left byte-identical to before.
+
+
 ## Plane and resource classification
 
 The detector emits normalized facts, plane evidence (from

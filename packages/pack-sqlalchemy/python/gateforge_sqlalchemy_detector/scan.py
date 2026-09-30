@@ -261,6 +261,26 @@ class ColumnFacts:
         self.soft_delete_candidates: list[str] = []
         #: Every literal column name, in written order (deduplicated).
         self.column_names: list[str] = []
+        #: Declared UNIQUE constraints/indexes in written order, as
+        #: ``{"name": str | None, "kind": "constraint"|"index"|"column",
+        #: "columns": [...]}``. Literal evidence only — a computed column
+        #: expression is never guessed.
+        self.unique_constraints: list[dict] = []
+
+    def add_unique(self, name: str | None, kind: str, columns: list[str]) -> None:
+        """Records one declared UNIQUE constraint/index, deduplicated.
+
+        Args:
+            name: The declared constraint/index name, or None when unnamed.
+            kind: ``constraint`` (UniqueConstraint), ``index`` (a unique
+                Index), or ``column`` (a column declared ``unique=True``).
+            columns: The unique columns, written order.
+        """
+        if not columns:
+            return
+        fact = {"name": name, "kind": kind, "columns": list(columns)}
+        if fact not in self.unique_constraints:
+            self.unique_constraints.append(fact)
 
     @property
     def has_pk_evidence(self) -> bool:
@@ -376,6 +396,8 @@ def _record_column(facts: ColumnFacts, call: ast.Call, target: str | None) -> No
             facts.soft_delete_candidates.append(column_name)
         if column_name not in facts.column_names:
             facts.column_names.append(column_name)
+        if _literal_kwarg_true(call, "unique") is True:
+            facts.add_unique(None, "column", [column_name])
 
 
 def _facts_from_column_calls(calls: list[tuple[ast.Call, str | None]]) -> ColumnFacts:
@@ -405,6 +427,57 @@ def _pk_constraint_columns(node: ast.expr) -> list[str] | None:
         )
     ):
         return [a.value for a in node.args if isinstance(a.value, str)]
+    return None
+
+
+def _literal_string_args(args: list[ast.expr]) -> list[str] | None:
+    """Every argument as a non-empty literal string, or None."""
+    if not args or not all(
+        isinstance(a, ast.Constant) and isinstance(a.value, str) and a.value for a in args
+    ):
+        return None
+    return [a.value for a in args if isinstance(a, ast.Constant)]
+
+
+def _unique_constraint(node: ast.expr) -> dict | None:
+    """One declared UNIQUE constraint or UNIQUE index of a table.
+
+    ``UniqueConstraint("a", "b")`` (name via the ``name=`` keyword) and
+    ``Index("ix", "a", "b", unique=True)`` (name = the first argument)
+    say the same thing about uniqueness. Literal columns only: a computed
+    expression or a non-literal ``unique`` flag yields None (the hole is
+    never filled with a guess).
+
+    Args:
+        node: An ``__table_args__`` tuple element.
+
+    Returns:
+        dict | None: ``{"name", "kind", "columns"}``, or None.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    called = call_name(node.func)
+    if called == "UniqueConstraint":
+        columns = _literal_string_args(node.args)
+        if columns is None:
+            return None
+        name = _literal_string_keyword(node, "name")
+        return {"name": name, "kind": "constraint", "columns": columns}
+    if called == "Index" and _literal_kwarg_true(node, "unique") is True:
+        columns = _literal_string_args(node.args)
+        if columns is None:
+            return None
+        # An Index's first argument is its name, not a column.
+        name = node.args[0].value
+        return {"name": name, "kind": "index", "columns": columns[1:]}
+    return None
+
+
+def _literal_string_keyword(call: ast.Call, name: str) -> str | None:
+    """A literal string keyword value, or None (absent or computed)."""
+    for kw in call.keywords:
+        if kw.arg == name and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return kw.value.value
     return None
 
 
@@ -508,6 +581,9 @@ class ClassRecord:
                 if constraint is not None:
                     self.column_facts.primary_key_columns = constraint
                     self.column_facts.has_pk_constraint = True
+                unique = _unique_constraint(element)
+                if unique is not None:
+                    self.column_facts.add_unique(unique["name"], unique["kind"], unique["columns"])
 
     def _column_call_name(self, call: ast.expr) -> str | None:
         """Whether a call is a column constructor, honoring SQLModel Field().
@@ -1218,6 +1294,11 @@ def _attribute_facts(facts: ColumnFacts, rec: ClassRecord | None) -> dict:
         ]
     if facts.soft_delete_candidates:
         entries["softDeleteCandidateFields"] = sorted(set(facts.soft_delete_candidates))
+    if facts.unique_constraints:
+        entries["uniqueConstraints"] = [
+            {"name": u["name"], "kind": u["kind"], "columns": list(u["columns"])}
+            for u in facts.unique_constraints
+        ]
     if rec is not None and rec.read_only:
         entries["readOnly"] = True
     if rec is not None and rec.updateable_fields_literal is not None:

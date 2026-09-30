@@ -91,6 +91,7 @@ export const CauseCodeSchema = z.enum([
   'MIGRATION_SCRATCH_UNSAFE',
   'ADAPTER_CANNOT_WITNESS',
   'ADAPTER_VOLATILE_FIELD_SKIPPED',
+  'RESOURCE_SINGLETON_PER_TENANT',
 ]);
 
 /** Inferred cause-code union. */
@@ -169,4 +170,8 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
     'Give the adapter a complete paged collection read (or a natural key) so a create can be proven; until then the engine cannot witness that obligation',
   ADAPTER_VOLATILE_FIELD_SKIPPED:
     'Review the adapter: it declares this field server-computed, so the entered value was not echo-checked. Drop the declaration if the app should store what was entered',
+  RESOURCE_SINGLETON_PER_TENANT:
+    'Witness this create on a fresh tenant: the unique constraint admits one row per tenant, so ' +
+    "register the new tenant's login with the witness for THIS session only " +
+    '(POST /sessions/identity) and prove the create there',
 });
