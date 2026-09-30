@@ -72,7 +72,7 @@ import {
   validateRequestedCacheFiles,
 } from '../cache-exclusions.js';
 import {
-  HUMAN_MUST_CHOOSE_PRESET_LINE,
+  CHOOSE_ANOTHER_GOAL_ADVICE,
   INIT_PRESETS,
   isInitPresetName,
   parseGoalAnswer,
@@ -658,10 +658,11 @@ async function resolveRecommended(io: Io, options: Readonly<Record<string, unkno
  *    explicitly.
  * 2. A real terminal — ONE question ("What should Gateforge do for
  *    you?") with three choices, each explained in one line.
- * 3. No terminal and no `--preset` — light only, plus a line saying a
- *    human must choose. Gateforge never guesses normal or strict for
- *    someone who is not there: guessing strict blocks a team, guessing
- *    normal pretends a gate nobody asked for.
+ * 3. No terminal and no `--preset` — light only, stated ONCE on the
+ *    line that also names `--preset <light|normal|strict>`. Gateforge
+ *    never guesses normal or strict for someone who is not there:
+ *    guessing strict blocks a team, guessing normal pretends a gate
+ *    nobody asked for.
  *
  * A run that already carries explicit enforcement flags (`--blocking`,
  * `--strict-e2e`, …) has chosen for itself: no preset is applied and the
@@ -674,15 +675,17 @@ async function resolveRecommended(io: Io, options: Readonly<Record<string, unkno
  *     passed and therefore wins over any preset.
  *
  * Returns:
- *   Promise<{ name: InitPresetName; settings: InitPresetSettings } | null>:
- *   the applied goal, or null when the run kept today's behavior.
+ *   Promise<{ name: InitPresetName; settings: InitPresetSettings;
+ *   autoChosen?: boolean } | null>: the applied goal (with
+ *   `autoChosen` when no human chose it), or null when the run kept
+ *   today's behavior.
  */
 async function resolveGoal(
   io: Io,
   options: Readonly<Record<string, unknown>>,
   enforcementFlagGiven: boolean,
   configExisted: boolean,
-): Promise<{ name: InitPresetName; settings: InitPresetSettings } | null> {
+): Promise<{ name: InitPresetName; settings: InitPresetSettings; autoChosen?: boolean } | null> {
   const explicit = options['preset'];
   if (explicit !== undefined && isInitPresetName(explicit)) {
     if (!enforcementFlagGiven) return { name: explicit, settings: INIT_PRESETS[explicit] };
@@ -695,17 +698,17 @@ async function resolveGoal(
   if (enforcementFlagGiven) return null;
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
   if (!interactive) {
-    // Claim only what the run will do: with an existing config the light
-    // preset's `mode:` is never written, so saying "writing the light
-    // preset" would be a false claim about the owner's own file.
+    // ONE line: which goal this run applied, and the flag that changes
+    // it. The closing summary used to state the same choice a second
+    // time, twenty lines later, in different words.
     writeLine(
       io.stdout,
       configExisted
-        ? 'no terminal: keeping your existing .gateforge.yml — its `mode:` still decides how hard the gate blocks'
-        : 'no terminal: writing the light preset (report everything, block nothing)',
+        ? 'no terminal: keeping your existing .gateforge.yml — its `mode:` still decides how hard the gate blocks (the light goal wrote nothing here); ' +
+          CHOOSE_ANOTHER_GOAL_ADVICE
+        : `no terminal: writing the light preset (report everything, block nothing) — ${CHOOSE_ANOTHER_GOAL_ADVICE}`,
     );
-    writeLine(io.stdout, HUMAN_MUST_CHOOSE_PRESET_LINE);
-    return { name: 'light', settings: INIT_PRESETS.light };
+    return { name: 'light', settings: INIT_PRESETS.light, autoChosen: true };
   }
   writeLine(io.stdout, renderGoalQuestion());
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -1605,6 +1608,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     const ledger = io.initPaths;
     for (const line of renderPresetSummary(goal.name, {
       configExisted: existedConfigAtStart,
+      autoChosen: goal.autoChosen === true,
       created: [...(ledger?.created ?? [])],
       repoHasCommitHook: existsSync(join(cwd, '.git/hooks/pre-commit')),
       repoHasCi: existsSync(join(cwd, '.gitlab-ci.yml')) || existsSync(join(cwd, '.github/workflows/gateforge.yml')),

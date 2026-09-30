@@ -395,7 +395,7 @@ describe('gateforge init', () => {
       expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(false);
       expect(existsSync(repo.path('.pre-commit-config.yaml'))).toBe(false);
       // The tip now names the goal, not the legacy --blocking flag.
-      expect(stdout).toContain('--preset normal|strict');
+      expect(stdout).toContain('--preset <light|normal|strict>');
     });
   });
 

@@ -173,9 +173,14 @@ export function parseGoalAnswer(answer: string): InitPresetName {
   throw new Error(`init: '${answer.trim()}' is not a goal — answer 1 (light), 2 (normal) or 3 (strict)`);
 }
 
-/** The exact advice a non-interactive run prints when no --preset was given. */
-export const HUMAN_MUST_CHOOSE_PRESET_LINE =
-  'a human must choose the preset: gateforge init --preset normal|strict (in a terminal, `gateforge init` asks)';
+/**
+ * How a headless owner changes the goal this run could not ask for.
+ * Printed as part of the ONE line that names the written preset, so
+ * the choice is stated once and the flag that changes it travels with
+ * it.
+ */
+export const CHOOSE_ANOTHER_GOAL_ADVICE =
+  'a human must choose the goal: re-run with --preset <light|normal|strict> (in a terminal, `gateforge init` asks)';
 
 /**
  * What this init run actually did, as the summary needs to report it.
@@ -194,6 +199,13 @@ export interface PresetRunOutcome {
   repoHasCommitHook: boolean;
   /** True when the repo already had a CI file before this run. */
   repoHasCi: boolean;
+  /**
+   * True when no human was there to choose: the run wrote the light
+   * goal and already said so (with the flag that changes it), so the
+   * summary does not state the choice a second time. What the run
+   * wrote is still reported.
+   */
+  autoChosen?: boolean;
 }
 
 /** Repo-relative predicate: the commit-hook files a preset would wire. */
@@ -241,7 +253,7 @@ function hookLine(preset: InitPresetSettings, outcome: PresetRunOutcome): string
  */
 export function renderPresetSummary(name: InitPresetName, outcome: PresetRunOutcome): string[] {
   const preset = INIT_PRESETS[name];
-  const lines = [`preset ${name}: ${preset.explanation}`];
+  const lines = outcome.autoChosen ? [] : [`preset ${name}: ${preset.explanation}`];
   if (outcome.configExisted) {
     lines.push(
       'existing .gateforge.yml left untouched — its `mode:` key still decides how hard the gate blocks; ' +
