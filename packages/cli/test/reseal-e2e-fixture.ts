@@ -758,7 +758,11 @@ export async function fixOrdersSpecAndReseal(
  *   env: the shared run environment.
  *   spec: the spec file to change.
  *   options.carried: the kept-test count the printed line must state.
+ *   options.parentKind: which document the parent is, which the
+ *     printed line names (`run` for a run record, `receipt` otherwise).
  *   options.message: the commit message.
+ *   options.fix: strips a planted `__FAIL__` marker, so the re-run of
+ *     a spec the previous run failed actually passes.
  *   options.expectReseal: false where the run must NOT re-seal.
  *
  * Returns:
@@ -768,13 +772,57 @@ export async function changeEvidenceSpecAndReseal(
   repo: TempRepo,
   env: ResealEnv,
   spec: string,
-  { carried, message, expectReseal = true }: { carried: number; message: string; expectReseal?: boolean },
+  {
+    carried,
+    parentKind = 'receipt',
+    message,
+    fix = false,
+    expectReseal = true,
+  }: {
+    carried: number;
+    parentKind?: 'run' | 'receipt';
+    message: string;
+    fix?: boolean;
+    expectReseal?: boolean;
+  },
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  repo.commitFiles({ [spec]: `${readFileSync(join(repo.root, spec), 'utf8')}// ${message}\n` }, message);
+  const body = readFileSync(join(repo.root, spec), 'utf8')
+    .split('\n')
+    .filter((line) => !fix || !line.includes('__FAIL__'))
+    .join('\n');
+  repo.commitFiles({ [spec]: `${body}// ${message}\n` }, message);
   const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
   if (!expectReseal) return resealed;
   expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
-  expect(resealed.stderr).toContain(`only test files changed: re-ran 1 test(s), kept ${String(carried)} from the previous receipt`);
+  expect(resealed.stderr).toContain(
+    `only test files changed: re-ran 1 test(s), kept ${String(carried)} from the previous ${parentKind}`,
+  );
+  return resealed;
+}
+
+/**
+ * Changes ONE of the non-evidence fixture's spec files and asks for the
+ * re-seal. Kept separate from {@link changeOneSpecAndReseal} so a
+ * chain's SECOND hop can touch a different file, which is what makes
+ * the first re-seal its parent.
+ *
+ * Args:
+ *   repo: the temporary repository.
+ *   env: the shared run environment.
+ *   spec: the spec file to change.
+ *
+ * Returns:
+ *   { code, stdout, stderr }: the re-seal invocation's own result.
+ */
+export async function changeSpecAndReseal(
+  repo: TempRepo,
+  env: ResealEnv,
+  spec: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  repo.commitFiles({ [spec]: `${readFileSync(join(repo.root, spec), 'utf8')}// one more fix\n` }, 'one more fix');
+  const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+  expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
+  expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous receipt');
   return resealed;
 }
 

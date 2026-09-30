@@ -587,4 +587,134 @@ describe('consecutive test-only re-seals', () => {
       }
     });
   }, 300_000);
+
+  it('re-seals twice in a row from a FAILED full parent and still passes check --require-e2e', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndRunFailingEvidenceParent(repo, THREE);
+      try {
+        const record = sealedRunRecord(repo);
+
+        // Hop 1 from the run record the failed run left: orders re-runs,
+        // the other two carry.
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/orders.spec.mjs', {
+          carried: 2,
+          parentKind: 'run',
+          message: 'fix the race in the orders spec',
+          fix: true,
+        });
+        const hopOne = sealedReceipt(repo);
+        expect(hopOne.resealedFromKind).toBe('run-record');
+        expect(hopOne.resealedFrom).toBe(sha256Canonical(record as never));
+
+        const afterOne = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(afterOne.code, `${afterOne.stdout}\n${afterOne.stderr}`).toBe(0);
+
+        // Hop 2 from that re-seal, over the run record beneath it.
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/invoices.spec.mjs', {
+          carried: 2,
+          message: 'touch the invoices spec',
+        });
+        const hopTwo = sealedReceipt(repo);
+        expect(hopTwo.resealedFrom).toBe(sha256Canonical(hopOne as unknown as Record<string, never>));
+        expect(hopTwo.carriedTests).toBe(2);
+
+        const afterTwo = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(afterTwo.code, `${afterTwo.stdout}\n${afterTwo.stderr}`).toBe(0);
+        expect(graded(afterTwo.stdout).map((row) => [row.obligationId, row.verdict, row.trustTier])).toEqual([
+          ['tenant.accounts:persistence:read', 'satisfied', 'witnessed'],
+          ['tenant.invoices:persistence:read', 'satisfied', 'witnessed'],
+          ['tenant.orders:persistence:read', 'satisfied', 'witnessed'],
+        ]);
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
+
+  it('fails closed when the retained SECOND hop evidence was tampered with', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndSealEvidenceParent(repo, THREE);
+      try {
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/orders.spec.mjs', {
+          carried: 2,
+          message: 'touch the orders spec',
+        });
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/invoices.spec.mjs', {
+          carried: 2,
+          message: 'touch the invoices spec',
+        });
+
+        // The DEEPER hop's witness envelope: hop 2 is the first
+        // re-seal, and it is the only envelope that authorizes the
+        // records it carried — so re-macing it with a foreign key is
+        // what a tamperer has to do to keep them.
+        const retained = join(repo.root, '.gateforge/test-gates/reseal-chain/hop-2-attestations.json');
+        const envelopes = JSON.parse(readFileSync(retained, 'utf8')) as Array<Record<string, unknown>>;
+        for (const envelope of envelopes) envelope['mac'] = 'a'.repeat(64);
+        writeFileSync(retained, `${JSON.stringify(envelopes, null, 2)}\n`, 'utf8');
+
+        const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(checked.code).not.toBe(0);
+        expect(checked.stdout).toContain('EVIDENCE_STALE');
+        // Hop 1 authenticates the union against EVERY contributing
+        // run's envelope, so the deeper hop's forged MAC is caught
+        // there, naming the reason exactly.
+        expect(checked.stdout).toContain(
+          "re-seal hop 1's retained evidence does not recompute: its evidence attestation does not verify with this keyring",
+        );
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
+
+  it('refuses the sixth consecutive re-seal and takes the normal changed-scope path', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndSealEvidenceParent(repo, THREE);
+      try {
+        // Five consecutive re-seals: the bound this path chains to.
+        for (let hop = 1; hop <= 5; hop += 1) {
+          await changeEvidenceSpecAndReseal(repo, env, 'e2e/orders.spec.mjs', {
+            carried: 2,
+            message: `hop ${String(hop)} of the orders spec`,
+          });
+        }
+        expect(sealedReceipt(repo).carriedTests).toBe(2);
+        // Seven members per hop, minus the run record a receipt-parent
+        // hop does not carry.
+        expect(readdirSync(join(repo.root, '.gateforge/test-gates/reseal-chain')).filter((name) =>
+          name.startsWith('hop-5-'),
+        )).toEqual([
+          'hop-5-attestations.json',
+          'hop-5-catalog.json',
+          'hop-5-claims.json',
+          'hop-5-execution-result.json',
+          'hop-5-receipt.json',
+          'hop-5-records.json',
+        ]);
+
+        // The sixth: the same test-only change, refused with the bound.
+        const refused = await changeEvidenceSpecAndReseal(
+          repo,
+          env,
+          'e2e/orders.spec.mjs',
+          { carried: 2, message: 'hop 6 of the orders spec', expectReseal: false },
+        );
+        expect(refused.stderr.split('\n').filter((row) => row.startsWith('test-gates: the run state'))).toEqual([
+          'test-gates: the run state already retains 5 consecutive re-seals, the bound this path may chain to → changed-scope run',
+        ]);
+        expect(refused.stderr).not.toContain('only test files changed');
+        // It took the ordinary changed-scope path: the receipt of record
+        // is an ordinary one over HEAD, not a sixth re-seal, and the
+        // chain is gone with it.
+        const sealed = sealedReceipt(repo);
+        expect(sealed.gitSha).toBe(repo.headSha());
+        expect(sealed.changeClass).toBeUndefined();
+        expect(sealed.resealedFrom).toBeUndefined();
+        expect(existsSync(join(repo.root, '.gateforge/test-gates/reseal-chain'))).toBe(false);
+      } finally {
+        await close();
+      }
+    });
+  }, 600_000);
 });

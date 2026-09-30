@@ -9,14 +9,15 @@
  * The authority repository IS the workspace here, so the sealed parent
  * and the compare-and-swap base are the same real commit.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, type TempRepo } from '@gate-forge/core';
+import { sha256Canonical, withTempRepo, type TempRepo } from '@gate-forge/core';
 import { runCli } from './helpers.js';
 import {
   VERIFIER_KEY,
   changeOneSpecAndReseal,
+  changeSpecAndReseal,
   fixFailingSpecAndReseal,
   installAndRunFailingParent,
   installAndSealParent,
@@ -103,6 +104,72 @@ describe('broker recomputation of a re-sealed receipt', () => {
       );
       expect(rejected.code).not.toBe(0);
       expect(rejected.stderr).toContain("parent run record does not authenticate with this keyring");
+      expect(authority.headSha()).toBe(headBefore);
+    });
+  }, 300_000);
+});
+
+/**
+ * A CHAIN of re-seals reaches the broker as one receipt with two hops
+ * beneath it, and the broker recomputes both with its own object store
+ * and key. An honest chain commits; a chain whose deeper hop was
+ * touched is a typed reject with no commit — the broker never believes
+ * a hop because the hop above it vouched for it.
+ */
+describe('broker recomputation of a CHAIN of re-seals', () => {
+  /**
+   * Seals a full parent, then re-seals twice. The receipt of record
+   * names the FIRST re-seal's commit as its parent, so that commit is
+   * the compare-and-swap base the broker must be at.
+   */
+  async function withTwoHopChain(body: (authority: TempRepo) => Promise<void>): Promise<void> {
+    await withTempRepo({}, async (authority) => {
+      const env = await installAndSealParent(authority);
+      await changeOneSpecAndReseal(authority, env);
+      // A second hop: a different spec file, so the second re-seal's
+      // parent is the first re-seal.
+      const firstHop = sealedReceipt(authority);
+      await changeSpecAndReseal(authority, env, 'e2e/orders.spec.mjs');
+      const receipt = sealedReceipt(authority);
+      expect(receipt.changeClass).toBe('test-only');
+      expect(receipt.resealedFrom).toBe(sha256Canonical(firstHop as unknown as Record<string, never>));
+      expect(existsSync(join(authority.root, '.gateforge/test-gates/reseal-chain/hop-2-receipt.json'))).toBe(true);
+      // The authority ref is the commit the chain's immediate parent
+      // sealed, with the candidate bytes in the workspace — the
+      // broker's real posture.
+      authority.git(['reset', '--soft', receipt.carriedFrom as string]);
+      await body(authority);
+    });
+  }
+
+  it('commits an honest two-hop chain after recomputing every hop', async () => {
+    await withTwoHopChain(async (authority) => {
+      const committed = await runCli(
+        authority,
+        ['broker', 'commit', '--workspace', authority.root, '--message', 'honest re-seal chain'],
+        { GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY },
+      );
+      expect(committed.code, `${committed.stdout}\n${committed.stderr}`).toBe(0);
+      expect(committed.stdout).toContain('broker: committed');
+    });
+  }, 300_000);
+
+  it('rejects a chain whose deeper hop receipt was forged, with no commit', async () => {
+    await withTwoHopChain(async (authority) => {
+      // Hop 2 is the FIRST re-seal: the broker walks outward from the
+      // receipt of record and must authenticate it with its own key.
+      const retained = join(authority.root, '.gateforge/test-gates/reseal-chain/hop-2-receipt.json');
+      const forged = JSON.parse(readFileSync(retained, 'utf8')) as Record<string, unknown>;
+      writeFileSync(retained, `${JSON.stringify({ ...forged, mac: 'b'.repeat(64) }, null, 2)}\n`, 'utf8');
+      const headBefore = authority.headSha();
+
+      const rejected = await runCli(
+        authority,
+        ['broker', 'commit', '--workspace', authority.root, '--message', 'forged chain'],
+        { GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY },
+      );
+      expect(rejected.code).not.toBe(0);
+      expect(rejected.stderr).toContain("re-seal hop 2's parent receipt does not authenticate with this keyring");
       expect(authority.headSha()).toBe(headBefore);
     });
   }, 300_000);
