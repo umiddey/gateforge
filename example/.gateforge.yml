@@ -21,6 +21,11 @@ project:
       - '**/dist/**'
       - '**/build/**'
       - 'behavior/scripts/**'
+      # Engine-side modules of the witnessed sub-project: its evidence
+      # adapters and its fixture provider run inside the witness, never in
+      # the app, so their HTTP calls are not frontend call sites.
+      - 'behavior/.gateforge/**'
+      - 'behavior/fixtures/fixture-provider.mjs'
 # Detector plugins. Bundled detectors are preconfigured for the selected
 # languages and are loaded from their trusted package entry points.
 plugins:
