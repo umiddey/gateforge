@@ -1,141 +1,153 @@
-/**
- * First-run fix F7 (plan 2026-09-30): the pack's own pinned
- * `playwright` must not outrank the consumer's `@playwright/test`, and
- * a genuine two-version conflict must be named as one instead of as a
- * missing dependency.
- *
- * `engine` class: the version skew is reproduced with FAKE local CLIs
- * (one that lists, one that fails to load the project) rather than a
- * second installed playwright — no network install, no browser.
- */
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+/** Real module-loading boundaries and runner execution; no network installs or browser needed. */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import {
-  listNativePlaywrightTests,
-  localPlaywrightCliCandidates,
-} from '../src/discovery/index.js';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { listNativePlaywrightTests } from '../src/discovery/reconcile.js';
+import { executeSupervisedPlaywright } from '../src/discovery/supervised-run.js';
 
-/** Temp dirs to remove after each test. */
-const tempDirs: string[] = [];
+const requireFrom = createRequire(import.meta.url);
+const packRoot = fileURLToPath(new URL('..', import.meta.url));
+const fixtureEntry = pathToFileURL(join(packRoot, 'dist/index.js')).href;
+const directories: string[] = [];
 
-function makeTempDir(prefix = 'gateforge-first-run-'): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tempDirs.push(dir);
-  return dir;
+function tempProject(): string {
+  const root = mkdtempSync(join(tmpdir(), 'gateforge-runner-binding-'));
+  directories.push(root);
+  writeTree(root, { 'package.json': '{"type":"module","private":true}' });
+  return root;
 }
 
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
-
-/** Writes a file tree (repo-relative posix keys) into a temp project. */
 function writeTree(root: string, files: Record<string, string>): void {
-  for (const [key, content] of Object.entries(files)) {
-    const absolute = join(root, key);
-    mkdirSync(join(absolute, '..'), { recursive: true });
-    writeFileSync(absolute, content, 'utf8');
+  for (const [name, content] of Object.entries(files)) {
+    const target = join(root, name);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, content);
   }
 }
 
-/** A fake local playwright CLI that honours the reporter output file. */
-function fakeListingCli(version: string, errorMessage: string | null): string {
-  return [
-    `const version = ${JSON.stringify(version)};`,
-    `const errorMessage = ${JSON.stringify(errorMessage)};`,
-    'const fs = require("node:fs");',
-    'const out = process.env.PLAYWRIGHT_JSON_OUTPUT_FILE;',
-    'const report = {',
-    '  config: { rootDir: process.cwd(), version },',
-    '  suites: errorMessage',
-    '    ? []',
-    '    : [{ title: "", file: "e2e/accounts.spec.js", specs: [{',
-    "        title: 't', id: 'spec-1', line: 2, column: 0,",
-    '        tests: [{ projectName: "chromium", projectId: "chromium", expectedStatus: "passed" }],',
-    '      }] }],',
-    '  errors: errorMessage === null ? [] : [{ message: errorMessage }],',
-    '  stats: {},',
-    '};',
-    'const text = JSON.stringify(report);',
-    'if (out) { fs.writeFileSync(out, text); } else { console.log(text); }',
-    'process.exit(0);',
-    '',
-  ].join('\n');
+function copyRealRunner(root: string): string {
+  const manifest = requireFrom.resolve('playwright/package.json');
+  const core = createRequire(manifest).resolve('playwright-core/package.json');
+  const modules = join(root, 'node_modules');
+  mkdirSync(modules, { recursive: true });
+  cpSync(dirname(manifest), join(modules, 'playwright'), { recursive: true, dereference: true });
+  cpSync(dirname(core), join(modules, 'playwright-core'), { recursive: true, dereference: true });
+  return join(modules, 'playwright', 'cli.js');
 }
 
-describe('F7: the consumer\'s own runner outranks the pack\'s pinned playwright', () => {
-  it('prefers @playwright/test over a plain playwright install at the same root', () => {
-    const root = makeTempDir('gateforge-first-run-cli-order-');
-    const candidates = localPlaywrightCliCandidates(root);
-    const test = candidates.findIndex((candidate) => candidate.includes(join('@playwright', 'test')));
-    const plain = candidates.findIndex((candidate) => candidate.endsWith(join('playwright', 'cli.js')));
-    expect(test).toBeGreaterThanOrEqual(0);
-    expect(plain).toBeGreaterThanOrEqual(0);
-    expect(test).toBeLessThan(plain);
+function maliciousRunner(root: string): string {
+  const marker = join(root, 'candidate-executed');
+  writeTree(root, {
+    'node_modules/@playwright/test/package.json': '{"name":"@playwright/test","main":"index.cjs"}',
+    'node_modules/@playwright/test/cli.js': 'throw new Error("A farther runner was selected");',
+    'node_modules/@playwright/test/index.cjs':
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed');\n` +
+      "throw Object.assign(new Error('Broken consumer install'), { code: 'BROKEN_CONSUMER_RUNNER' });\n",
+  });
+  return marker;
+}
+
+const spec = [
+  `import { test, expect } from ${JSON.stringify(fixtureEntry)};`,
+  "test('verifier material stays outside the runner', async () => {",
+  "  expect(Boolean(process.env.GATEFORGE_WITNESS_VERIFIER_KEY)).toBe(false);",
+  '});',
+].join('\n');
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  for (const root of directories.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe('consumer runner binding', () => {
+  it('does not execute a candidate runner when the trusted process imports the pack root', () => {
+    const root = tempProject();
+    const marker = maliciousRunner(root);
+    const env = { ...process.env };
+    delete env['GATEFORGE_PLAYWRIGHT_CONFIG_DIR'];
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(fixtureEntry)});`], {
+      cwd: root, env, encoding: 'utf8', timeout: 30_000,
+    });
+    expect(child.status, child.stderr).toBe(0);
+    expect(existsSync(marker)).toBe(false);
   });
 
-  it('resolves the consumer runner from the config directory upward', () => {
-    const root = makeTempDir('gateforge-first-run-cli-up-');
-    mkdirSync(join(root, 'frontend'), { recursive: true });
-    const candidates = localPlaywrightCliCandidates(join(root, 'frontend'));
-    // The config directory's own install first, then the repo root's.
-    expect(candidates[0]).toBe(join(root, 'frontend', 'node_modules', '@playwright', 'test', 'cli.js'));
-    expect(candidates).toContain(join(root, 'node_modules', '@playwright', 'test', 'cli.js'));
+  it('preserves a selected broken runner error instead of silently loading the pack fallback', () => {
+    const root = tempProject();
+    const marker = maliciousRunner(root);
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', [
+      // Intentional dynamic import: exercise the selected module's actual failure boundary.
+      `try { await import(${JSON.stringify(fixtureEntry)}); }`,
+      "catch (error) { process.exitCode = error.code === 'BROKEN_CONSUMER_RUNNER' ? 77 : 78; }",
+    ].join('\n')], {
+      cwd: root,
+      env: { ...process.env, GATEFORGE_PLAYWRIGHT_CONFIG_DIR: root },
+      encoding: 'utf8', timeout: 30_000,
+    });
+    expect(child.status, child.stderr).toBe(77);
+    expect(existsSync(marker)).toBe(true);
   });
 
-  it('enumerates through the consumer version when the pack pin would fail to load it', async () => {
-    const root = makeTempDir('gateforge-first-run-version-skew-');
+  it('uses an independent non-root runner for both enumeration and supervised fixture execution', async () => {
+    const root = tempProject();
+    const frontend = join(root, 'frontend');
+    const marker = maliciousRunner(root);
+    const cli = copyRealRunner(frontend);
     writeTree(root, {
-      'package.json': '{ "type": "module", "private": true }\n',
-      'playwright.config.js': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-      'e2e/accounts.spec.js': "import { test } from 'playwright/test';\ntest('t', async () => {});\n",
+      'frontend/playwright.config.mjs': "import { defineConfig } from 'playwright/test';\nexport default defineConfig({testDir:'tests',projects:[{name:'chromium'}]});\n",
+      'frontend/tests/binding.spec.mjs': spec,
     });
-    // The consumer's own CLI (1.62.1): lists the project.
-    writeTree(root, {
-      'node_modules/@playwright/test/package.json':
-        '{ "name": "@playwright/test", "version": "1.62.1" }\n',
-      'node_modules/@playwright/test/cli.js': fakeListingCli('1.62.1', null),
+    // Plain Playwright has no engine-set child context; the fixture must reuse its cached runner.
+    const rawEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GATEFORGE_')));
+    const raw = spawnSync(process.execPath, [cli, 'test', '--list', '--reporter=json'], {
+      cwd: frontend, env: rawEnv, encoding: 'utf8', timeout: 30_000,
     });
-    // The pack's hoisted pin (1.58.2) against a 1.62.1 config: the
-    // two-versions conflict the pack's own comment says it must avoid.
-    writeTree(root, {
-      'node_modules/playwright/package.json': '{ "name": "playwright", "version": "1.58.2" }\n',
-      'node_modules/playwright/cli.js': fakeListingCli(
-        '1.58.2',
-        'Error: Playwright Test did not expect test() to be called here.',
-      ),
-    });
-    const result = await listNativePlaywrightTests({ cwd: root });
-    expect(result.status).toBe('discovered');
-    expect(result.instances.map((instance) => instance.title)).toEqual(['t']);
-  });
+    expect(raw.status, raw.stderr).toBe(0);
+    const report = JSON.parse(raw.stdout) as { suites: Array<{ specs: Array<{ title: string }> }> };
+    expect(report.suites.flatMap((suite) => suite.specs.map((entry) => entry.title))).toEqual([
+      'verifier material stays outside the runner',
+    ]);
+    const native = await listNativePlaywrightTests({ cwd: root });
+    expect(native.errors).toEqual([]);
+    expect(native.instances.map((instance) => instance.file)).toEqual(['frontend/tests/binding.spec.mjs']);
+    vi.stubEnv('GATEFORGE_WITNESS_VERIFIER_KEY', 'must-stay-in-the-supervisor');
+    const stateDir = join(root, '.state');
+    mkdirSync(stateDir);
+    const execution = await executeSupervisedPlaywright(
+      { logicalKeys: ['binding'] },
+      { stateDir, runId: 'binding', vars: {} },
+      { cwd: root, testFiles: ['frontend/tests/binding.spec.mjs'], projects: ['chromium'], timeoutMs: 30_000 },
+    );
+    expect(execution.processExit, execution.incompleteDetail).toBe(0);
+    expect(execution.outcomes.map((outcome) => ({ logicalKey: outcome.logicalKey, status: outcome.status }))).toEqual([
+      { logicalKey: 'frontend/tests/binding.spec.mjs#verifier material stays outside the runner', status: 'passed' },
+    ]);
+    expect(existsSync(marker)).toBe(false);
+  }, 90_000);
 
-  it('names both versions and the real cause when the conflict is genuine', async () => {
-    const root = makeTempDir('gateforge-first-run-conflict-');
+  it('executes the fixture through the pinned fallback when the repository installs no runner', async () => {
+    const root = tempProject();
     writeTree(root, {
-      'package.json': '{ "type": "module", "private": true }\n',
-      'playwright.config.js': "export default { testDir: 'e2e' };\n",
-      'e2e/accounts.spec.js': "import { test } from 'playwright/test';\ntest('t', async () => {});\n",
-      'node_modules/@playwright/test/package.json':
-        '{ "name": "@playwright/test", "version": "1.62.1" }\n',
-      'node_modules/@playwright/test/cli.js': fakeListingCli(
-        '1.62.1',
-        'Error: Playwright Test did not expect test() to be called here.',
-      ),
-      'node_modules/playwright/package.json': '{ "name": "playwright", "version": "1.58.2" }\n',
-      'node_modules/playwright/cli.js': fakeListingCli(
-        '1.58.2',
-        'Error: Playwright Test did not expect test() to be called here.',
-      ),
+      'playwright.config.mjs': "export default {testDir:'tests',projects:[{name:'chromium'}]};",
+      'tests/binding.spec.mjs': spec,
     });
-    const result = await listNativePlaywrightTests({ cwd: root });
-    expect(result.status).toBe('discovered');
-    expect(result.errors).toHaveLength(1);
-    const reported = result.errors[0] ?? '';
-    expect(reported).toMatch(/1\.62\.1/);
-    expect(reported).toMatch(/1\.58\.2/);
-    expect(reported).toMatch(/did not expect test\(\) to be called here/);
-    expect(reported).not.toMatch(/missing test dependency/i);
-  });
+    const stateDir = join(root, '.state');
+    mkdirSync(stateDir);
+    const native = await listNativePlaywrightTests({ cwd: root });
+    expect(native.errors).toEqual([]);
+    expect(native.instances.map((instance) => instance.file)).toEqual(['tests/binding.spec.mjs']);
+    const execution = await executeSupervisedPlaywright(
+      { logicalKeys: ['fallback'] },
+      { stateDir, runId: 'fallback', vars: {} },
+      { cwd: root, testFiles: ['tests/binding.spec.mjs'], projects: ['chromium'], timeoutMs: 30_000 },
+    );
+    expect(execution.processExit, execution.incompleteDetail).toBe(0);
+    expect(execution.outcomes.map((outcome) => ({ logicalKey: outcome.logicalKey, status: outcome.status }))).toEqual([
+      { logicalKey: 'tests/binding.spec.mjs#verifier material stays outside the runner', status: 'passed' },
+    ]);
+  }, 90_000);
 });

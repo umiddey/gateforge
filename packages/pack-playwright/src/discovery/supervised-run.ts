@@ -31,15 +31,17 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type {
   RunnerExecutionEnv,
   RunnerExecutionEnvelope,
   RunnerInstanceOutcome,
   RunnerSelection,
 } from '@gate-forge/core';
+import { ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
 import { buildRunnerChildEnv } from './runner-env.js';
-import { localPlaywrightCliCandidates } from './reconcile.js';
+import { findPlaywrightConfig } from './reconcile.js';
+import { localPlaywrightCliCandidates } from '../runner-resolution.js';
 import { synthesizeTrustedConfig, trustedReporterEntry, type ProjectScope } from './trusted-config.js';
 
 /** Default whole-run wall-clock bound for one supervised playwright run. */
@@ -163,6 +165,8 @@ export async function executeSupervisedPlaywright(
 ): Promise<RunnerExecutionEnvelope> {
   void selection; // the run is driven by the file/location options; the supervisor owns the comparison
   const cwd = options.cwd ?? process.cwd();
+  const consumerConfig = findPlaywrightConfig(cwd);
+  const consumerConfigDir = consumerConfig === null ? cwd : dirname(resolve(cwd, consumerConfig));
   const outcomesPath = join(env.stateDir, 'runner-outcomes.json');
   // A stale outcomes file from a previous run must never be readable as
   // this run's result: remove it before spawning.
@@ -183,7 +187,7 @@ export async function executeSupervisedPlaywright(
     ...(options.projects !== undefined ? { projects: options.projects } : {}),
     ...(options.projectScopes !== undefined ? { projectScopes: options.projectScopes } : {}),
   });
-  const baseCommand = options.command ?? defaultPlaywrightCommand(cwd);
+  const baseCommand = options.command ?? commandFromDirectory(consumerConfigDir);
   const isStub = options.command !== undefined;
   const locations = [...new Set(options.testLocations ?? [])].sort();
   const argv = isStub
@@ -197,6 +201,9 @@ export async function executeSupervisedPlaywright(
         '--workers=1',
         ...locations,
       ];
+  // Locate the consumer config without loading it; only the runner child receives this context.
+  const childEnv = buildRunnerChildEnv(env.vars, process.env);
+  childEnv[ENV_PLAYWRIGHT_CONFIG_DIR] = consumerConfigDir;
   const child = spawn(argv[0] ?? '', argv.slice(1), {
     cwd,
     // ALLOWLIST ONLY (enforcement-review fix 1 + execution-authority
@@ -204,7 +211,7 @@ export async function executeSupervisedPlaywright(
     // other unlisted variable never reach the untrusted runner — and NO
     // state paths (spool/outcomes/obligations locations stay parent-side
     // so worker code cannot address them). stdio stdin is 'ignore'.
-    env: buildRunnerChildEnv(env.vars, process.env),
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -401,16 +408,14 @@ export function parseOutcomesText(raw: string, processExit: number | null): Runn
  *   readonly string[]: `[process.execPath, <playwright cli.js>]`.
  */
 export function defaultPlaywrightCommand(cwd?: string): readonly string[] {
-  // CONSUMER-FIRST resolution (consumer migration, E22; install
-  // rehearsal F7): the supervised run must execute under the scanned
-  // repo's OWN playwright — its config and specs load through that
-  // version, and a mismatch dies with the two-versions-of-@playwright/
-  // test conflict, not with a missing dependency. Candidate order is
-  // the nearest install first, `@playwright/test` before the bare
-  // `playwright` pin. Fixture repos symlink the monorepo node_modules,
-  // so the fallback resolves identically.
-  if (cwd !== undefined) {
-    for (const candidate of localPlaywrightCliCandidates(cwd)) {
+  if (cwd === undefined) return commandFromDirectory();
+  const config = findPlaywrightConfig(cwd);
+  return commandFromDirectory(config === null ? cwd : dirname(resolve(cwd, config)));
+}
+
+function commandFromDirectory(startDir?: string): readonly string[] {
+  if (startDir !== undefined) {
+    for (const candidate of localPlaywrightCliCandidates(startDir)) {
       if (existsSync(candidate)) return [process.execPath, candidate];
     }
   }

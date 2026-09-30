@@ -41,7 +41,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 
 import { buildRunnerChildEnv } from './runner-env.js';
-import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
+import { CLAIM_ANNOTATION_TYPE, ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
+import { localPlaywrightCliCandidates } from '../runner-resolution.js';
 import type { Location } from '@gate-forge/core';
 import { PROJECT_GRAPH_PATH_ENV, type ProjectGraphDocument } from '../reporter/project-graph-reporter.js';
 
@@ -180,35 +181,6 @@ function playwrightCliPath(cwd: string, configDir: string): string {
   return cli;
 }
 
-/**
- * The scanned repo's local playwright CLI locations, in preference order.
- *
- * A consumer's config and specs import `@playwright/test`, so THAT
- * package's CLI is the runner they were written for; the bare
- * `playwright` CLI next to it is the pack's own hoisted pin and must
- * never outrank it (running 1.58.2's CLI over a 1.62.1 project dies
- * with the two-versions-of-@playwright/test conflict — install
- * rehearsal F7). Directories are walked from the starting directory
- * UPWARD, the way node resolves a module, so a subdirectory project's
- * own install is found before the repo root's.
- *
- * Args:
- *   cwd: absolute directory to start the upward walk from.
- *
- * Returns:
- *   string[]: absolute CLI paths, nearest install first, the
- *   `@playwright/test` CLI before the bare `playwright` one.
- */
-export function localPlaywrightCliCandidates(cwd: string): string[] {
-  const candidates: string[] = [];
-  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
-    candidates.push(join(dir, 'node_modules', '@playwright', 'test', 'cli.js'));
-    candidates.push(join(dir, 'node_modules', 'playwright', 'cli.js'));
-    const parent = dirname(dir);
-    if (parent === dir) break;
-  }
-  return candidates;
-}
 
 /**
  * Strips every `GATEFORGE_*` variable from the environment for UNTRUSTED
@@ -508,6 +480,12 @@ export async function listNativePlaywrightTests(options: {
       options.wiredEnv === undefined
         ? untrustedEnv(process.env, discoveryStateDir)
         : buildRunnerChildEnv(options.wiredEnv, process.env);
+    // The evidence fixture binds to the CONSUMER's runner, resolved from
+    // the config directory this enumeration just discovered: that is what
+    // makes a non-root config with its own `node_modules` work, not only a
+    // hoisted repository-root install. Set on BOTH the scrubbed and the
+    // wired child so the two registrations can never differ.
+    childEnv[ENV_PLAYWRIGHT_CONFIG_DIR] = childCwd;
     childEnv['PLAYWRIGHT_JSON_OUTPUT_FILE'] = reportPath;
     childEnv[PROJECT_GRAPH_PATH_ENV] = join(reportDir, 'project-graph.json');
     const child = spawn(process.execPath, args, {
