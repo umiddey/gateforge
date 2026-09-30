@@ -5501,7 +5501,7 @@ async function handleRunContext(
       existing.invocationId === invocationId &&
       existing.inputDigest === inputDigest
     ) {
-      sendJson(res, 200, { bound: true, ...existing, applied: appliedOptionsOf(state) });
+      sendJson(res, 200, { bound: true, ...existing, ...appliedEcho(state) });
       return;
     }
     sendJson(res, 409, {
@@ -5550,7 +5550,7 @@ async function handleRunContext(
   }
   state.runContext = { runId, invocationId, inputDigest };
   state.observedSeqAtBind = state.observedSeq;
-  sendJson(res, 200, { bound: true, runId, invocationId, inputDigest, applied: appliedOptionsOf(state) });
+  sendJson(res, 200, { bound: true, runId, invocationId, inputDigest, ...appliedEcho(state) });
 }
 
 /**
@@ -5569,6 +5569,22 @@ function appliedOptionsOf(state: WitnessState): AppliedRunOptions {
     chaos: state.chaos === null ? null : state.chaos.options,
     twinShapes: state.twinShapes,
   };
+}
+
+/**
+ * The bind response's `applied` echo, present only when a run option is
+ * in effect. A plain binding keeps the response it always had; a client
+ * that asked for an option and finds no echo knows it was not applied.
+ *
+ * Args:
+ *   state: running witness state.
+ *
+ * Returns:
+ *   `{ applied }` when chaos or a twin plan is live, else `{}`.
+ */
+function appliedEcho(state: WitnessState): { applied?: AppliedRunOptions } {
+  const applied = appliedOptionsOf(state);
+  return applied.chaos === null && applied.twinShapes === null ? {} : { applied };
 }
 
 /**
