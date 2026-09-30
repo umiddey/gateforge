@@ -35,7 +35,7 @@ import {
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { BehaviorPolicySchema } from '@gate-forge/core';
 import type { GateforgeConfig } from '@gate-forge/core';
 import { parse as parseYaml } from 'yaml';
@@ -67,6 +67,8 @@ import {
   type EngineIdentity,
 } from '../engine-identity.js';
 import { buildRunPreflight, findRunnerManifest, firstFailingCheck, type RunPreflightReport } from '../run-preflight.js';
+import { findPlaywrightConfig } from '@gate-forge/pack-playwright';
+import { browserBuildSummary, defaultBrowsersPath, inspectBrowserBuilds } from '../playwright-browsers.js';
 
 export const ENFORCEMENT_USAGE = 'usage: gateforge enforcement doctor [--json] [--strict-preflight]';
 
@@ -374,24 +376,32 @@ function verifierKeyExposure(cwd: string, env: NodeJS.ProcessEnv): { paths: stri
 /**
  * Cheap playwright readiness probe: package resolvable where the
  * supervised run resolves it (next to the Playwright config, then from
- * the repo root upward) and a nonempty browser registry (default cache
- * or PLAYWRIGHT_BROWSERS_PATH). Never launches anything.
+ * the repo root upward) and the browser builds THAT runner pins present
+ * in the cache (default cache or PLAYWRIGHT_BROWSERS_PATH). Counting
+ * cache entries proves nothing: a cache holding another Playwright
+ * release's builds is nonempty and still fails every test with
+ * `Executable doesn't exist`. Never launches anything.
  *
  * Args:
  *   cwd: repository root.
+ *   env: operator environment (PLAYWRIGHT_BROWSERS_PATH).
  *
  * Returns:
- *   {status, detail}: ok / warn (no browsers) / fail (no package).
+ *   {status, detail}: ok / warn (no browsers at all) / fail (no
+ *   package, or a pinned build the run would launch is missing).
  */
-function playwrightReadiness(cwd: string): { status: DoctorStatus; detail: string } {
-  const packageJson = findRunnerManifest(cwd, 'playwright', ['playwright']);
+function playwrightReadiness(cwd: string, env: NodeJS.ProcessEnv): { status: DoctorStatus; detail: string } {
+  // The SAME resolution order the supervised run uses (see
+  // `runnerCheck`): `@playwright/test` first, so the browser builds
+  // checked are the ones the run will actually launch.
+  const packageJson = findRunnerManifest(cwd, 'playwright', ['@playwright/test', 'playwright']);
   if (packageJson === null) {
     return {
       status: 'fail',
       detail: 'playwright is not installed (no node_modules/playwright found from the repo root); the supervised E2E runner cannot execute',
     };
   }
-  const browsersPath = process.env['PLAYWRIGHT_BROWSERS_PATH'] ?? join(homedir(), '.cache', 'ms-playwright');
+  const browsersPath = defaultBrowsersPath(env);
   let browsers = 'missing';
   try {
     const entries = readdirSafe(browsersPath);
@@ -405,7 +415,57 @@ function playwrightReadiness(cwd: string): { status: DoctorStatus; detail: strin
       detail: `playwright installed; browsers NOT found under '${browsersPath}' — run \`npx playwright install\` before the supervised run`,
     };
   }
-  return { status: 'ok', detail: `playwright installed; browsers ${browsers} under '${browsersPath}'` };
+  // The cache is nonempty; only the builds the RESOLVED runner pins say
+  // whether its tests can launch. A runner that ships no readable
+  // registry keeps the historical line (an unresolvable install never
+  // invents revisions).
+  const configDir = playwrightInstallCwd(cwd);
+  const readiness = inspectBrowserBuilds(packageJson, playwrightConfigText(cwd), env);
+  const builds = browserBuildSummary(readiness, configDir);
+  if (builds === '') {
+    return { status: 'ok', detail: `playwright installed; browsers ${browsers} under '${browsersPath}'` };
+  }
+  if (readiness.missing.length > 0) {
+    return { status: 'fail', detail: `playwright installed; ${builds}` };
+  }
+  return { status: 'ok', detail: `playwright installed; browsers ${browsers} under '${browsersPath}'; ${builds}` };
+}
+
+/**
+ * The directory a `npx playwright install` fix must run in: the one
+ * holding the Playwright config the supervised run resolves the runner
+ * from (a sub-project like `e2e/` owns its own install), else the
+ * repository root.
+ *
+ * Args:
+ *   cwd: repository root.
+ *
+ * Returns:
+ *   string: the absolute directory the install command runs in.
+ */
+function playwrightInstallCwd(cwd: string): string {
+  const config = findPlaywrightConfig(cwd);
+  return config === null ? resolve(cwd) : dirname(resolve(cwd, config));
+}
+
+/**
+ * The resolved Playwright config's source ('' when the repository has
+ * none): the config names the browsers its projects launch.
+ *
+ * Args:
+ *   cwd: repository root.
+ *
+ * Returns:
+ *   string: the config text, or '' when there is no readable config.
+ */
+function playwrightConfigText(cwd: string): string {
+  const config = findPlaywrightConfig(cwd);
+  if (config === null) return '';
+  try {
+    return readFileSync(resolve(cwd, config), 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -430,7 +490,7 @@ function runnerReadiness(
   config: GateforgeConfig,
   env: NodeJS.ProcessEnv,
 ): { status: DoctorStatus; detail: string } {
-  if (config.runner === 'playwright') return playwrightReadiness(cwd);
+  if (config.runner === 'playwright') return playwrightReadiness(cwd, env);
   if (config.runner === 'pytest') return pytestReadiness(cwd, config, env);
   return nodeRunnerReadiness(cwd, config.runner);
 }
