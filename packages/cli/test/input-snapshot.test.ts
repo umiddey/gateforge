@@ -464,15 +464,38 @@ describe('input snapshot (§11.2)', () => {
     });
   });
 
-  it('rejects escaping, broken, and directory symlinks with unsupported-snapshot', async () => {
+  it('records a dangling tracked symlink by its link text and keeps the run usable', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      mkdirSync(join(repo.root, 'skills'), { recursive: true });
+      symlinkSync('../.venv/skills/fastapi', join(repo.root, 'skills/fastapi'));
+      repo.git(['add', '-A']);
+      repo.git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@gateforge.invalid', 'commit', '--quiet', '-m', 'dangling link']);
+      const entries = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      const dangling = entries.find((entry) => entry.path === 'skills/fastapi');
+      expect(dangling?.type).toBe('dangling-symlink');
+      expect(dangling?.linkTarget).toBe('../.venv/skills/fastapi');
+      expect(filesDigest(repo)).toMatch(/^[0-9a-f]{64}$/);
+      // The link text IS the identity: retargeting moves the digest...
+      const baseline = filesDigest(repo);
+      unlinkSync(join(repo.root, 'skills/fastapi'));
+      symlinkSync('../.venv/skills/sqlmodel', join(repo.root, 'skills/fastapi'));
+      expect(filesDigest(repo)).not.toBe(baseline);
+      // ...and bootstrapping the target turns the entry into a real
+      // symlink entry (with target bytes) with a different digest.
+      repo.writeFiles({ '.venv/skills/sqlmodel': 'model\n' });
+      const afterBootstrap = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      expect(afterBootstrap.find((entry) => entry.path === 'skills/fastapi')?.type).toBe('symlink');
+      expect(filesDigest(repo)).not.toBe(baseline);
+    });
+  });
+
+  it('still rejects escaping and directory symlinks with unsupported-snapshot', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       symlinkSync('/etc/hostname', join(repo.root, 'src/escape.txt'));
       expect(() => filesDigest(repo)).toThrow(UnsupportedSnapshotError);
       rmSync(join(repo.root, 'src/escape.txt'));
-      symlinkSync(join(repo.root, 'src/no-such-target.txt'), join(repo.root, 'src/broken.txt'));
-      expect(() => filesDigest(repo)).toThrow(UnsupportedSnapshotError);
-      rmSync(join(repo.root, 'src/broken.txt'));
       mkdirSync(join(repo.root, 'src/subdir'), { recursive: true });
       symlinkSync(join(repo.root, 'src/subdir'), join(repo.root, 'src/dirlink'));
       expect(() => filesDigest(repo)).toThrow(UnsupportedSnapshotError);

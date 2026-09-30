@@ -42,6 +42,7 @@ import type { MappedCoverage } from '@gate-forge/core';
 import {
   collectInputFiles,
   computeInputSnapshot,
+  danglingSymlinkNotices,
   diffInputFiles,
   SnapshotUnavailableError,
   UnsupportedSnapshotError,
@@ -277,6 +278,13 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     } else {
       throw error;
     }
+  }
+  // A dangling symlink is captured by its link text, so the run
+  // continues; one plain notice line names what does not resolve. In
+  // --json mode stdout stays a single JSON document, so the notice
+  // goes to stderr there.
+  for (const notice of danglingSymlinkNotices(preFiles ?? [])) {
+    writeLine(asJson ? io.stderr : io.stdout, notice);
   }
 
   const pipeline = await runPipeline({
