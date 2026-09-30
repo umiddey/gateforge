@@ -249,7 +249,8 @@ export interface TwinLink {
  *   survives a rename of either test, because it names logical keys.
  * - the title convention: a witnessed title that carries
  *   {@link WITNESSED_TITLE_TAG} links to the untagged title with the
- *   same stem, either bare (`X`) or with a `raw` suffix (`X raw`).
+ *   same stem: `X raw`, else the one `X raw: <description>`, else a
+ *   bare `X`.
  *
  * A link is only returned when BOTH tests exist in the catalog: a
  * dangling `twinOf` or a title with no partner names nothing, because
@@ -279,15 +280,20 @@ export function twinLinksFor(
     if (tagIndex === -1) continue;
     const stem = witnessed.title.slice(0, tagIndex).trim();
     if (stem === '') continue;
-    // `X [witnessed]` pairs with `X raw` first, then with a bare `X`:
-    // the explicit raw twin is the owner's clearer statement, and a
-    // same-title bare match is only taken when nothing else claims it.
-    const partner = candidates.find(
-      (candidate) =>
-        candidate.logicalKey !== witnessed.logicalKey &&
-        !candidate.title.includes(WITNESSED_TITLE_TAG) &&
-        candidate.title === `${stem} raw`,
+    // `X [witnessed]` pairs with `X raw` first, then with the ONE
+    // `X raw: <description>`, then with a bare `X`: the explicit raw twin
+    // is the owner's clearer statement, and a same-title bare match is
+    // only taken when nothing else claims it.
+    const untagged = candidates.filter(
+      (candidate) => candidate.logicalKey !== witnessed.logicalKey && !candidate.title.includes(WITNESSED_TITLE_TAG),
     );
+    const described = untagged.filter((candidate) => candidate.title.startsWith(`${stem} raw:`));
+    const partner =
+      untagged.find((candidate) => candidate.title === `${stem} raw`) ??
+      (described.length === 1 ? described[0] : undefined);
+    // Two described raw tests under one label: the twin is the owner's
+    // call (`twinOf`), never a guess — and never a fallback to a bare one.
+    if (partner === undefined && described.length > 1) continue;
     const bare =
       partner ??
       candidates.find(

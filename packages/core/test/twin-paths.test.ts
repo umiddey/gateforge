@@ -152,6 +152,24 @@ describe('twin links', () => {
     ]);
   });
 
+  it('links a `label raw: description` partner, the common way a pair spells its two sides', () => {
+    // `UC-7 [witnessed]: …` and `UC-7 raw: …` share the label before the
+    // tag; each side then describes itself.
+    const candidates = catalog(
+      ['k-witnessed', 'UC-7 [witnessed]: invoice CRUD observed across persistence contracts'],
+      ['k-raw', 'UC-7 raw: invoice CRUD works end to end'],
+      ['k-other', 'UC-70 raw: something else entirely'],
+    );
+    expect(twinLinksFor(candidates)).toEqual([{ witnessed: 'k-witnessed', raw: 'k-raw', source: 'title' }]);
+    // The exact `X raw` title still wins over a described one.
+    expect(twinLinksFor([...candidates, { logicalKey: 'k-exact', title: 'UC-7 raw' }])).toEqual([
+      { witnessed: 'k-witnessed', raw: 'k-exact', source: 'title' },
+    ]);
+    // Two described raw tests under one label: which one is the twin is
+    // the owner's call (`twinOf`), never a guess.
+    expect(twinLinksFor([...candidates, { logicalKey: 'k-raw-2', title: 'UC-7 raw: invoice list only' }])).toEqual([]);
+  });
+
   it('names nothing when either side is missing, rather than a ghost pair', () => {
     const candidates = catalog(['k-witnessed', 'lists the open items [witnessed]']);
     // A dangling `twinOf`: the raw twin is not in the catalog.

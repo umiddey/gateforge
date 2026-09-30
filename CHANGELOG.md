@@ -117,6 +117,7 @@
 
 ### Fixed
 
+- The twin title convention now links the way pairs are usually written: `X [witnessed]: <what it proves>` next to `X raw: <what it does>`. Before, only an exact `X raw` (or a bare `X`) title linked, so a suite that labels both sides and then describes each one got no twin comparison at all and had to spell every pair out with `twinOf`. An exact `X raw` still wins; two described raw tests under one label link nothing (the owner names that pair with `twinOf`).
 - A test-only re-seal now carries the evidence of natively claimed tests. Their records are stamped with the id the runner gave the test while it ran, which is not the enumerated catalog id when the trusted config lives in another directory, so the carry matched none of them: the re-sealed receipt said `carriedEvidence: true` while it carried no parent record, and `check --require-e2e` reported every carried test's obligations `missing` (it never passed wrongly). The execution result's outcomes now keep the runner's own id in the additive `runnerTestId`, and the carry uses it next to the logical key and the catalog id. A re-run test's parent records still never survive.
 - Witness startup waits for the reported proxy URL before proceeding.
 - Fixed a shared-distribution witness spool race between concurrent runs.
