@@ -795,6 +795,48 @@ function renderStagedBlock(io: Io, cause: CauseCode, detail: string, nextAction:
 }
 
 /**
+ * Names the report's exit-code line for what it is when a non-blocking
+ * mode softened the run's exit code.
+ *
+ * The text report always carries the STRICT result's exit code. In
+ * `strict` mode that is the code the process exits with, so the line is
+ * left byte-identical. When a mode softens it, the same bare
+ * `exit code: 1` would contradict `EXIT=0` in a CI log and to an agent
+ * reading the report, so it is relabelled as the value a blocking mode
+ * would have produced. Nothing is invented: a report without that line
+ * is returned untouched.
+ *
+ * Args:
+ *   report: the rendered text report.
+ *   strictExitCode: the exit code the strict result maps to.
+ *   exitCode: the exit code this run actually exits with.
+ *
+ * Returns:
+ *   string: the report with its exit-code line relabelled when softened.
+ */
+export function labelSoftenedExitCode(
+  report: string,
+  strictExitCode: number,
+  exitCode: number,
+): string {
+  if (strictExitCode === exitCode) return report;
+  const lines = report.split('\n');
+  // The LAST such line is the report's own verdict; a fixture or a
+  // quoted payload earlier in the text is never relabelled.
+  let index = -1;
+  for (let at = lines.length - 1; at >= 0; at -= 1) {
+    if (/^exit code: \d+$/.test(lines[at] ?? '')) {
+      index = at;
+      break;
+    }
+  }
+  if (index < 0) return report;
+  lines[index] = `would exit ${String(strictExitCode)} in blocking mode`;
+  return lines.join('\n');
+}
+
+
+/**
  * Validates persisted pytest collection data before it can bypass a child run.
  *
  * Args:
@@ -1781,10 +1823,14 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     }
   } else if (format === 'text') {
     // Text only: SARIF must stay machine-parseable JSON, and the json
-    // document carries the structured blocks above.
-    report = `${report}\n${strictnessSummaryLine(decision)}${
-      quarantineLine === '' ? '' : `\n${quarantineLine}`
-    }`;
+    // document carries the structured blocks above. The report's own
+    // `exit code:` line always carries the strict result; when this mode
+    // softened it, the line is labelled as the value a blocking mode
+    // would have produced, so it can never contradict the code the
+    // process actually exits with.
+    report = `${labelSoftenedExitCode(report, decision.strictExitCode, decision.exitCode)}\n${
+      strictnessSummaryLine(decision)
+    }${quarantineLine === '' ? '' : `\n${quarantineLine}`}`;
   }
   if (format === 'text') {
     // Plan phase 7: the endpoint inventory rides the text report —
