@@ -63,6 +63,13 @@ export interface RunPreflightOptions {
   targetBaseUrl?: string;
   /** Milliseconds allowed for the app probes (target + healthcheck). */
   probeTimeoutMs?: number;
+  /**
+   * The run uses an external witness (`--witness-url`): the target base
+   * URL is that witness's observation proxy, which counts every exchange
+   * and refuses the run-context binding once it has seen one. The target
+   * is then never probed; the witness attests it at binding instead.
+   */
+  externalWitness?: boolean;
 }
 
 /** Load average above this multiple of the CPU count is a warning. */
@@ -690,9 +697,17 @@ export async function buildRunPreflight(io: Io, options: RunPreflightOptions = {
   checks.push(config === null ? skipped('bytecode-safety', 'bytecode-safe settings') : bytecodeSafetyCheck(cwd, config, env));
   const baseUrl = options.targetBaseUrl ?? env['GATEFORGE_TARGET_BASE_URL'] ?? env['GATEFORGE_APP_BASE_URL'] ?? '';
   checks.push(
-    baseUrl === ''
-      ? { id: 'target', status: 'ok', detail: 'no target base URL configured (GATEFORGE_TARGET_BASE_URL): nothing to probe; a supervised run starts its own app' }
-      : await targetCheck(baseUrl, probeTimeoutMs),
+    options.externalWitness === true
+      ? {
+          id: 'target',
+          status: 'ok',
+          detail:
+            'not probed: the run uses an external witness (--witness-url), whose observation proxy fronts the target; ' +
+            'a probe through it would count as an exchange before the run binds it, and the witness attests the target itself',
+        }
+      : baseUrl === ''
+        ? { id: 'target', status: 'ok', detail: 'no target base URL configured (GATEFORGE_TARGET_BASE_URL): nothing to probe; a supervised run starts its own app' }
+        : await targetCheck(baseUrl, probeTimeoutMs),
   );
   checks.push(await appHealthcheckCheck(cwd, env, recipe, probeTimeoutMs));
   checks.push(hostLoadCheck(cwd));
