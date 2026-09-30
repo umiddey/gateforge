@@ -1367,7 +1367,7 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
       [
         'task',
         'queue/job delivery state',
-        // Plan 20260925-2011 Phase 3: task contracts are claims about a
+        // Task contracts are claims about a
         // background queue, so the namespace is unavailable until the
         // owner configures the engine's own queue observer
         // (see test/task-queue-grade.test.ts for the bound case).

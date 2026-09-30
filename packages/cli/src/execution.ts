@@ -159,7 +159,7 @@ export function computeTrustedPolicyDigest(
   const waiverEntries = configPaths.waiverFiles
     .map((path) => entry(path, path, true))
     .sort((a, b) => a.name.localeCompare(b.name));
-  // Flaky-test quarantines (plan 20260925_2013 Phase 2) remove tests from
+  // Flaky-test quarantines remove tests from
   // the REQUIRED set, so their bytes belong to the pinned revision exactly
   // like waiver bytes do: an agent-authored quarantine is a policy change
   // and cannot authorize its own weaker run. A repository with no

@@ -2037,7 +2037,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
  */
 /**
  * Projects every EXPIRED owner quarantine into a blocking finding that
- * names the test and its expiry (plan 20260925_2013 Phase 2). An expired
+ * names the test and its expiry. An expired
  * quarantine is not silently ignored: it is a stale escape hatch, and
  * the required test is back in the run.
  *
@@ -2288,7 +2288,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       );
     }
   }
-  // Owner-chosen strictness (plan 20260925_2013 Phase 1). Absent key =
+  // Owner-chosen strictness. Absent key =
   // `strict` = today's exact behavior; the decision below only ever
   // maps an ALREADY-COMPUTED strict result onto the owner's exit code,
   // never changes what was executed or graded.
@@ -2336,7 +2336,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     options.testSelectors !== undefined ? 'named' : options.scope === 'changed' ? 'changed' : 'full';
   writeRunScopeView(stateDir, runScope);
   const adoptedBaseline = resolveAdoptedBaseline(io.cwd, config.baselines);
-  // Owner quarantine (plan 20260925_2013 Phase 2): loaded against the
+  // Owner quarantine: loaded against the
   // INJECTED run clock, never the wall clock. ACTIVE quarantines remove
   // their test from the REQUIRED set and its evidence is discarded;
   // EXPIRED ones are ignored and each BLOCKS, naming the test.
@@ -3463,7 +3463,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         io.env['GATEFORGE_FIXTURE_PROVIDER'] !== ''
           ? { GATEFORGE_FIXTURE_PROVIDER: io.env['GATEFORGE_FIXTURE_PROVIDER'] }
           : {}),
-        // Engine-owned queue observer (plan 20260925-2011 Phase 3): the
+        // Engine-owned queue observer: the
         // witness reads the delivery queue itself, so a repository with a
         // `queueObserver` block hands it the approved declaration (the
         // connection material stays in the witness process). Without the
@@ -4507,7 +4507,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           },
         }),
   };
-  // Report-side strictness + quarantine (plan 20260925_2013 Phase 3):
+  // Report-side strictness + quarantine:
   // ADDITIVE only. A repository that never softened its gate and never
   // quarantined a test gets exactly the document it got before.
   const renderedReport = renderRun(evaluated.verdicts, {

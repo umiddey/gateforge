@@ -2,7 +2,7 @@
  * `gateforge quarantine <testKey>`: write ONE owner-approved, always
  * expiring flaky-test quarantine.
  *
- * The trust pattern is the waiver's (plan 20260925_2013 Phase 2): the
+ * The trust pattern is the waiver's: the
  * owner (and a named approver) state the reason, the document always
  * expires (14 days maximum), and there is no `--force` — an existing
  * file is the reviewable record and is never silently overwritten.

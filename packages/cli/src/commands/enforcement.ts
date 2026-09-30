@@ -784,7 +784,7 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
   }
   checks.push({ id: 'config', status: configOk ? 'ok' : 'fail', detail: configDetail });
 
-  // Gate strictness (plan 20260925_2013 Phase 1): a softened gate is not
+  // Gate strictness: a softened gate is not
   // a failure — it is an owner decision that must stay LOUD forever, so
   // it is never `ok` while it is not strict.
   checks.push({

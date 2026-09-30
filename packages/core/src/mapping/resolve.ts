@@ -148,8 +148,8 @@ export interface ResolveMappingsInput {
 }
 
 /**
- * Drops every binding whose test is owner-quarantined (plan
- * 20260925_2013 Phase 2). A quarantined test proves nothing, so its
+ * Drops every binding whose test is owner-quarantined. A quarantined
+ * test proves nothing, so its
  * coverage claim disappears from the mapping surface: an obligation it
  * alone covered becomes uncovered and therefore stays `missing`. The
  * problems list is preserved verbatim — a quarantine never hides a

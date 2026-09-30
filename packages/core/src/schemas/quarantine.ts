@@ -1,5 +1,5 @@
 /**
- * Flaky-test quarantine schema (plan 20260925_2013 Phase 2): an
+ * Flaky-test quarantine schema: an
  * owner-approved, ALWAYS-EXPIRING removal of one test from the required
  * set.
  *

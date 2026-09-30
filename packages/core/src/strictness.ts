@@ -1,5 +1,5 @@
 /**
- * Owner-chosen gate strictness (plan 20260925_2013 Phase 1) and the
+ * Owner-chosen gate strictness and the
  * flaky-test quarantine model (Phase 2).
  *
  * `mode` is an OPTIONAL owner-owned config key. Its default is

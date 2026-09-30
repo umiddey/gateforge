@@ -1,6 +1,6 @@
 /**
- * Engine-level end-to-end proof for the `task` namespace (plan
- * 20260925-2011 Phase 3): the real CLI over a real fixture
+ * Engine-level end-to-end proof for the `task` namespace: the real
+ * CLI over a real fixture
  * repository, a REAL BullMQ application (queue + worker processes over
  * a real Redis), the witness `test-gates` spawns itself, and post-suite
  * verdict evaluation through `check --require-e2e`.

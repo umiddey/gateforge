@@ -1,5 +1,5 @@
 /**
- * Example BullMQ application (plan 20260925-2011 Phase 3): a queue plus
+ * Example BullMQ application: a queue plus
  * one or more worker processes over a real Redis, with a supervisor
  * that replaces a worker that died mid-job.
  *

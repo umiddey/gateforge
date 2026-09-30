@@ -223,7 +223,7 @@ export type { Waiver } from './schemas/waiver.js';
 export type { WaiverScope } from './schemas/waiver.js';
 
 /**
- * Flaky-test quarantine (plan 20260925_2013 Phase 2): one owner-approved,
+ * Flaky-test quarantine: one owner-approved,
  * always-expiring removal of a test from the required set. Never proof,
  * never blocking, and an obligation only it covered stays `missing`.
  */
@@ -232,7 +232,7 @@ export { QuarantineSchema } from './schemas/quarantine.js';
 export type { Quarantine } from './schemas/quarantine.js';
 
 /**
- * Owner-chosen gate strictness (plan 20260925_2013 Phase 1): the optional
+ * Owner-chosen gate strictness: the optional
  * `mode` key (`strict` default = today's behavior, `changed`, `warn`) and
  * the pure gate decision derived from it.
  */
@@ -382,7 +382,7 @@ export type {
 } from './schemas/index.js';
 
 /**
- * Engine-owned queue observer (plan 20260925-2011 Phase 3): the
+ * Engine-owned queue observer: the
  * owner-declared `queueObserver` configuration, the normalized
  * vocabulary every queue implementation maps onto, and the sealed
  * observation the engine's own reads are graded against.
@@ -889,7 +889,7 @@ export {
 } from './verdict/index.js';
 
 /**
- * Engine-owned queue observer (plan 20260925-2011 Phase 3): binds the
+ * Engine-owned queue observer: binds the
  * owner-declared `queueObserver` block and moves the `task` contract
  * namespace's availability with it.
  */
@@ -1118,7 +1118,7 @@ export { loadWaivers } from './waivers/index.js';
 export { serializeWaiver, writeWaiver } from './waivers/index.js';
 
 /**
- * Quarantine directory loader (plan 20260925_2013 Phase 2): reads
+ * Quarantine directory loader: reads
  * `.gateforge/quarantine/*.yml` against the INJECTED clock and fails
  * closed on a missing attribution field, a duplicate test key, or a
  * duration beyond the documented 14-day ceiling.

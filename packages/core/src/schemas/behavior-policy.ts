@@ -495,7 +495,7 @@ export const StateRuleSchema = z.discriminatedUnion('kind', [
       count: z.number().int().min(0),
       terminal: z.enum(['succeeded', 'failed', 'rejected']),
       /**
-       * Optional floor (plan 20260925-2011 Phase 3): every job must
+       * Optional floor: every job must
        * have used at least this many attempts, so "retries up to N"
        * cannot be satisfied by a queue that never retried anything.
        */

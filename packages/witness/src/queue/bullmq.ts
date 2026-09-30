@@ -1,6 +1,6 @@
 /**
- * BullMQ implementation of the witness queue channel (plan 20260925-2011
- * Phase 3): the engine reads the queue itself over one Redis
+ * BullMQ implementation of the witness queue channel: the engine reads
+ * the queue itself over one Redis
  * connection, and produces its own deliveries so a task case grades
  * state the ENGINE created, not state the suite claims.
  *

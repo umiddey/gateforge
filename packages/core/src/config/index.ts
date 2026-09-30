@@ -503,7 +503,7 @@ export const GateforgeConfigSchema = z
         }
       }),
     /**
-     * Owner-chosen gate strictness (plan 20260925_2013 Phase 1):
+     * Owner-chosen gate strictness:
      * `strict` (today's behavior, also the default when this key is
      * absent), `changed` (block only on debt this change touches), or
      * `warn` (evaluate and report everything, exit 0). It changes the
@@ -536,7 +536,7 @@ export const GateforgeConfigSchema = z
      */
     behaviorPolicy: z.string().min(1).optional(),
     /**
-     * Engine-owned queue observer (plan 20260925-2011 Phase 3): the
+     * Engine-owned queue observer: the
      * trusted read that lets the engine grade `task:*` contracts from
      * the queue's own job state instead of the test's word. ABSENT = no
      * queue reader exists, the `task` namespace stays unavailable, and

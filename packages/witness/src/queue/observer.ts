@@ -1,5 +1,5 @@
 /**
- * Witness-owned queue-state observer (plan 20260925-2011 Phase 3): the
+ * Witness-owned queue-state observer: the
  * engine's INDEPENDENT trusted read of a background job's delivery
  * state. A task contract is a claim about the queue, so the engine must
  * read the queue itself — a suite-submitted "the job succeeded" is never

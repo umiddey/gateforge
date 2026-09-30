@@ -111,8 +111,8 @@ export interface DiscoverResult {
   /** Static registration sites guarded by Gateforge environment state. */
   registrationWarnings: StaticRegistrationWarning[];
   /**
-   * Coarse per-step wall-clock timings (plan 20260928_1430 Phase 0,
-   * `check --timing`): static scan, native list, pytest collection, and
+   * Coarse per-step wall-clock timings (`check --timing`): static scan,
+   * native list, pytest collection, and
    * the whole discovery in milliseconds. Observability only.
    */
   timings: DiscoveryTimings;

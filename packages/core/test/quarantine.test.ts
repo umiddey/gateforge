@@ -1,5 +1,5 @@
 /**
- * Flaky-test quarantine (plan 20260925_2013 Phase 2): the loader's
+ * Flaky-test quarantine: the loader's
  * fail-closed rules, the expiry partition against the INJECTED clock,
  * and the mapping projection that makes a quarantined test prove
  * nothing.

@@ -98,8 +98,8 @@ export interface EvaluateInput {
    */
   claimInventory?: readonly Claim[];
   /**
-   * Framework test ids whose evidence may never be used (plan
-   * 20260925_2013 Phase 2, owner quarantine). A quarantined test proves
+   * Framework test ids whose evidence may never be used (owner
+   * quarantine). A quarantined test proves
    * nothing: its claims are dropped and its evidence records are
    * discarded before grading, so an obligation only it covered stays
    * `missing` — the quarantine forgives nothing. Unknown ids here are
@@ -544,7 +544,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     changedInputs: input.evidenceContext?.changedInputs,
     carried: input.carriedEvidence ?? null,
   });
-  // Owner quarantine (plan 20260925_2013 Phase 2): a quarantined test's
+  // Owner quarantine: a quarantined test's
   // records are discarded HERE — before any verifier sees them — so its
   // evidence cannot satisfy anything, not even through a claim it shares.
   const excludedTestIds = new Set(input.excludedTestIds ?? []);

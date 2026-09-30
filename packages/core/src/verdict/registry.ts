@@ -191,7 +191,7 @@ export function registerContractCapabilities(capability: ContractCapability): vo
 
 /**
  * Replaces the NAMESPACE-level availability of an already registered
- * capability record (plan 20260925-2011 Phase 3: the `task` namespace is
+ * capability record (the `task` namespace is
  * available only while the engine owns a queue observer). The record
  * itself stays first-wins — only the availability bit moves, and only
  * for a namespace that is already registered, so no caller can invent

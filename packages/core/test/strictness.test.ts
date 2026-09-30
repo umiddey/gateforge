@@ -1,5 +1,5 @@
 /**
- * Strictness modes (plan 20260925_2013 Phase 1): the optional owner-owned
+ * Strictness modes: the optional owner-owned
  * `mode` key, its default, and the pure gate-decision function.
  *
  * A config WITHOUT `mode` must behave exactly like `mode: strict` —

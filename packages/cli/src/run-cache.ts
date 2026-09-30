@@ -1,5 +1,5 @@
 /**
- * Content-addressed run cache (plan 20260928_1430 Phases 2–3): reuse
+ * Content-addressed run cache: reuse
  * unchanged detector and pytest-collection work at commit time.
  *
  * Invariants (the plan's hard rules):

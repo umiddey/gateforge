@@ -1,6 +1,6 @@
 /**
- * Flaky-test quarantine at the CLI boundary (plan 20260925_2013
- * Phase 2): the owner-only write command, its refusals, its place in
+ * Flaky-test quarantine at the CLI boundary: the owner-only write
+ * command, its refusals, its place in
  * the pinned trusted policy, the blocking finding an expired quarantine
  * produces, and the rule that a quarantined test's evidence proves
  * nothing.

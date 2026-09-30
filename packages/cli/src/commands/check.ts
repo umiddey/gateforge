@@ -584,7 +584,7 @@ export interface CheckGateOptions {
   /** Emit per-step wall-clock timings in the report (additive only). */
   timing?: boolean;
   /**
-   * Force a full scan (plan 20260928_1430): no detector or pytest
+   * Force a full scan: no detector or pytest
    * collection cache reads or writes. Also forced by
    * `GATEFORGE_NO_CACHE=1` and CI environments.
    */
@@ -1010,7 +1010,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     const refusal = mergeRequestScopePreflight(config, io.env);
     if (refusal !== null) throw new UsageError(refusal);
   }
-  // Owner-chosen strictness (plan 20260925_2013 Phase 1). A missing key
+  // Owner-chosen strictness. A missing key
   // resolves to `strict`, which is byte-for-byte today's behavior: the
   // decision below is a pure mapping of an ALREADY-COMPUTED strict
   // result, so no mode can change what was evaluated, only what the
@@ -1060,7 +1060,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // unsafe --out overlap fails closed before any evaluation.
   let preFiles: SnapshotFileEntry[] | null = null;
   let snapshotUnavailable = false;
-  // Content-addressed run cache (plan 20260928_1430 Phases 2-3): lives in
+  // Content-addressed run cache: lives in
   // the EXCLUDED run-state dir (never in the input digest), forced off by
   // --no-cache / GATEFORGE_NO_CACHE / CI. A speed-up, never proof.
   const cacheControl = resolveCacheControl(io.env, options.cacheStateDir ?? stateDir, options.noCache === true);
@@ -1085,7 +1085,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     ...(fixedChangedFiles !== undefined ? { changedFilesOverride: fixedChangedFiles } : {}),
     pluginCache: cacheControl,
   });
-  // Owner quarantine population (plan 20260925_2013 Phase 3): check is
+  // Owner quarantine population: check is
   // the debt view, so an owner-quarantined test is reported here too —
   // loaded against the INJECTED run clock, never the wall clock. It is
   // only reported when the population exists, so a repository that never
@@ -1851,7 +1851,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     }
   }
   if (options.timing === true) {
-    // Per-step wall-clock timings (plan 20260928_1430 Phase 0): additive
+    // Per-step wall-clock timings: additive
     // observability behind `--timing`, never an input to any verdict.
     const collectionMs =
       (scopeDiscoveryTimings?.totalMs ?? 0) + (mappingDiscoveryTimings?.totalMs ?? 0);
@@ -1872,7 +1872,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     }
   }
   {
-    // Cache accounting (plan 20260928_1430, additive `cache` key): how
+    // Cache accounting (additive `cache` key): how
     // many detector/pytest results were reused vs recomputed. Never an
     // input to any verdict.
     const cacheCounts: CacheCounts = {
@@ -1886,7 +1886,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       report = `${report}\ncache: ${String(cacheCounts.hits)} hit(s), ${String(cacheCounts.misses)} miss(es)`;
     }
   }
-  // Owner-chosen strictness (plan 20260925_2013 Phase 1): the decision
+  // Owner-chosen strictness: the decision
   // is a pure mapping of the strict result that was ALREADY computed, so
   // no mode can change what was evaluated. Exit 2 (config/usage) keeps
   // its meaning; only the debt exit 1 is ever softened.

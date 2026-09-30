@@ -23,7 +23,7 @@
  *
  * `request` cases grade over the `engine-http` channel, `surface` cases
  * over `engine-browser` (the Phase 6 browser driver), and `deliver`
- * cases over `engine-task` (plan 20260925-2011 Phase 3): the engine
+ * cases over `engine-task`: the engine
  * produces the delivery, reads the queue back until every job settled,
  * and seals that read — `attempts` rules grade from it, and a delivery
  * case without one settles nothing about the background job.
@@ -1442,8 +1442,8 @@ function gradeSurfaceCase(
 type AttemptsGrade = { ok: true } | { ok: false; reason: string; status: 'missing' | 'invalid' };
 
 /**
- * Grades one `attempts` rule over the engine's OWN read of the queue
- * (plan 20260925-2011 Phase 3). Nothing here consults the test: the
+ * Grades one `attempts` rule over the engine's OWN read of the queue.
+ * Nothing here consults the test: the
  * sealed observation carries the delivery identities the engine
  * stamped, the per-job attempt counts the queue reported, and the
  * transition timeline the engine sampled.
@@ -1594,7 +1594,7 @@ function gradeAttemptsRule(
 }
 
 /**
- * Grades one task-driven required case (plan 20260925-2011 Phase 3):
+ * Grades one task-driven required case:
  * the engine produced the delivery itself, read the queue back until
  * every job settled, and sealed that read. Proof is the sealed
  * observation plus the declared state effects — never the suite's

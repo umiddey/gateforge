@@ -1,5 +1,5 @@
 /**
- * Commit-time check reuse (plan 20260928_1430): per-step `--timing`
+ * Commit-time check reuse: per-step `--timing`
  * observability and the spawn-count contract — an unchanged second
  * `check --changed` run must reuse the cached detector and pytest
  * collection results instead of re-spawning the same work. The cache
@@ -106,7 +106,7 @@ function installCountingFixture(repo: TempRepo, counterDir: string): CountingFix
   return { detectorCounter, collectorCounter };
 }
 
-describe('commit-time check reuse (plan 20260928_1430)', () => {
+describe('commit-time check reuse', () => {
   it('reports per-step timings behind --timing (json and text)', async () => {
     const counterDir = mkdtempSync(join(tmpdir(), 'gateforge-cache-timing-'));
     try {

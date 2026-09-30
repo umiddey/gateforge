@@ -255,7 +255,7 @@ export async function main(
     // the witness still starts and every other surface works; the cases
     // then block with a typed cause (never a suite-supplied fallback).
     fixtureProvider: await loadFixtureProvider(env[ENV_FIXTURE_PROVIDER] ?? null),
-    // Engine-owned queue observer (plan 20260925-2011 Phase 3): the
+    // Engine-owned queue observer: the
     // witness reads the delivery queue itself. Absent (no `queueObserver`
     // block in .gateforge.yml) leaves the channel null and every
     // `engine-task` case blocks fail-closed.

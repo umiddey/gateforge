@@ -1,5 +1,5 @@
 /**
- * Engine-read task grading (plan 20260925-2011 Phase 3): `attempts`
+ * Engine-read task grading: `attempts`
  * rules settled from the witness's OWN read of the delivery queue, plus
  * the namespace gate that keeps `task` unavailable until the owner
  * configures a queue observer.

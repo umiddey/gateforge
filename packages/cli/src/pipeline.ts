@@ -84,7 +84,7 @@ export interface PipelineOptions {
    */
   changedFilesOverride?: readonly string[];
   /**
-   * Plugin result cache control (plan 20260928_1430 Phase 2). Absent or
+   * Plugin result cache control. Absent or
    * disabled = full scan (the historical behavior).
    */
   pluginCache?: CacheControl;
@@ -127,8 +127,8 @@ export interface PipelineResult {
   /** Compiled complete-behavior catalog, or null when the document is absent. */
   behaviorCatalog: BehaviorCatalog | null;
   /**
-   * Coarse per-step wall-clock timings (plan 20260928_1430 Phase 0,
-   * `check --timing`): plugin/detector duration and the whole-pipeline
+   * Coarse per-step wall-clock timings (`check --timing`): plugin/detector
+   * duration and the whole-pipeline
    * duration in milliseconds. Observability only — never an input.
    */
   timings: PipelineTimings;

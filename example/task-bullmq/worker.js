@@ -1,5 +1,5 @@
 /**
- * Example BullMQ worker (plan 20260925-2011 Phase 3): a real queue
+ * Example BullMQ worker: a real queue
  * worker in its own process, so a case can prove a LOST worker (the
  * stall scenario exits mid-job) instead of a simulated one.
  *

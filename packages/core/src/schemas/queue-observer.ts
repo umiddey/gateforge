@@ -1,5 +1,5 @@
 /**
- * Queue-observer schemas (plan 20260925-2011 Phase 3): the OWNER
+ * Queue-observer schemas: the OWNER
  * declaration that binds a task resource to the queue the engine
  * reads, plus the SEALED observation vocabulary the engine's own
  * bounded reads are graded against. One schema, parsed by the CLI at

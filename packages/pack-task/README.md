@@ -2,7 +2,7 @@
 
 Background-task discovery pack: a pure-TypeScript GPP/3 in-process detector that finds background-task signatures in `.ts`/`.js`/`.mjs` source — no Python subprocess, no execution, no external deps — plus an audit-trail entity-adapter schema and an example server that proves the five obligation contracts the pack claims.
 
-## Engine-level proof: the queue observer (plan 20260925-2011 Phase 3)
+## Engine-level proof: the queue observer
 
 A background job's attempts, terminal state and idempotency live in the
 QUEUE, so the engine reads the queue itself. A test's own "the job

@@ -1,5 +1,5 @@
 /**
- * Owner-chosen gate strictness (plan 20260925_2013 Phase 1): the
+ * Owner-chosen gate strictness: the
  * optional `mode` key on `check`, its additive report fields, its
  * interaction with the trusted policy digest, and the doctor signal.
  *

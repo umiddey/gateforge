@@ -1,5 +1,5 @@
 /**
- * Flaky-test quarantine loading (plan 20260925_2013 Phase 2).
+ * Flaky-test quarantine loading.
  *
  * Owner-approved, always-expiring files in `.gateforge/quarantine/*.yml`
  * that remove ONE test from the required set. The same trust pattern as

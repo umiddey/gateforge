@@ -958,7 +958,7 @@ function domainCapability(
 }
 
 /**
- * Binds the engine-owned queue observer (plan 20260925-2011 Phase 3) and
+ * Binds the engine-owned queue observer and
  * moves the `task` namespace's availability with it: available while a
  * `queueObserver` block is configured, unavailable (every task contract
  * fails closed) otherwise. Called from the engine's own config load —

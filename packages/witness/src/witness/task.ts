@@ -1,5 +1,5 @@
 /**
- * Engine task-delivery driver (plan 20260925-2011 Phase 3): the
+ * Engine task-delivery driver: the
  * `engine-task` counterpart of the HTTP and browser drivers. It
  * produces the delivery the case declares, then reads the queue back
  * until every produced job settles, sampling each transition on the
