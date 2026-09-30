@@ -183,16 +183,26 @@ export function assertNoStartedConflict(started: AppliedRunOptions, bound: RunOp
     }
   }
   if (bound.twinShapes !== undefined && started.twinShapes !== null) {
-    const startedPlan = started.twinShapes;
-    const same =
-      startedPlan.queryKeys.join(',') === bound.twinShapes.queryKeys.join(',') &&
-      (startedPlan.inventory?.templates ?? []).join(',') ===
-        (bound.twinShapes.inventory?.templates ?? []).join(',');
-    if (!same) {
+    // The plan is a SET (an allowlist and a template list), so the two
+    // sources describe the same run when they name the same members,
+    // not when they happen to list them in the same order: the
+    // environment form reads the inventory from the engine's own file,
+    // which is written deduped and sorted, and the bound form is
+    // whatever order the run compiled its routes in.
+    const samePlan =
+      canonicalSet(started.twinShapes.queryKeys) === canonicalSet(bound.twinShapes.queryKeys) &&
+      canonicalSet(started.twinShapes.inventory?.templates ?? []) ===
+        canonicalSet(bound.twinShapes.inventory?.templates ?? []);
+    if (!samePlan) {
       throw new Error(
         'this witness was started with a different twin path coverage plan than the run binds; one witness ' +
           `serves one plan — start it without ${ENV_TWIN_SHAPES}`,
       );
     }
   }
+}
+
+/** The members of a plan list, deduped and ordered, as one comparable string. */
+function canonicalSet(values: readonly string[]): string {
+  return [...new Set(values)].sort(compareStrings).join(',');
 }
