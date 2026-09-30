@@ -230,6 +230,22 @@ repository. It writes `.github/workflows/gateforge.yml`, which runs
 the verifier key and policy pin as protected secrets. A local hook alone is
 not server enforcement.
 
+The generated GitHub workflow installs the published `@gate-forge/cli` from
+the registry. To gate a release that is not on the registry yet (a local
+`.tgz` or a directory), declare where CI must install it from and
+regenerate:
+
+```sh
+GATEFORGE_CI_ENGINE_SOURCE=vendor/gate-forge-cli-0.7.1.tgz \
+  gateforge enforce --ci github
+```
+
+The workflow then installs that one specifier instead of the registry
+release, so the file it must reach has to be committed with the repository.
+Unset the variable and rerun the generator for the registry install. The
+GitLab template needs no variable: it installs the repository's own declared
+`@gate-forge/cli` dependency.
+
 **You should see:** `installed:`, `updated:`, `verified:`, or a framework-managed hook message, followed by `blocking gate wired`.
 
 **If not:** follow the exact `required action` printed for an incomplete installation. Resolve hook-manager conflicts, then rerun `gateforge init --blocking` and verify the active hook.

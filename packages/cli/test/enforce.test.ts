@@ -3,6 +3,7 @@
  * repos — idempotent, and refuses to run without a gateforge config.
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -10,6 +11,7 @@ import { parse as parseYaml } from 'yaml';
 import { withTempRepo } from '@gate-forge/core';
 import { runCli } from './helpers.js';
 import { VERSION } from '../src/commands/common.js';
+import { renderGithubActionsTemplate } from '../src/commands/blocking.js';
 
 describe('gateforge enforce', () => {
   it('shares the install contract and current version with init --blocking', async () => {
@@ -215,4 +217,48 @@ describe('gateforge enforce', () => {
       expect(existsSync(repo.path('.gateforge/ci/gitlab-gateforge.yml'))).toBe(false);
     });
   }, 120_000);
+
+  it('wires the engine install to a declared tarball/directory source', async () => {
+    await withTempRepo({}, async (repo) => {
+      expect((await runCli(repo, ['init'])).code).toBe(0);
+      const enforced = await runCli(repo, ['enforce', '--ci', 'github'], {
+        GATEFORGE_CI_ENGINE_SOURCE: 'vendor/gate-forge-cli-0.7.1.tgz',
+      });
+      expect(enforced.code).toBe(0);
+      const workflow = readFileSync(repo.path('.github/workflows/gateforge.yml'), 'utf8');
+      // Still a valid workflow, and the install step is the declared
+      // source — a tarball/directory install of an UNPUBLISHED engine.
+      expect(parseYaml(workflow)).toBeDefined();
+      expect(workflow).toContain('GATEFORGE_CI_ENGINE_SOURCE: "vendor/gate-forge-cli-0.7.1.tgz"');
+      expect(workflow).toContain('run: npm install --no-save --package-lock=false "$GATEFORGE_CI_ENGINE_SOURCE"');
+      expect(workflow).not.toContain('@gate-forge/cli@');
+    });
+  }, 120_000);
+
+  it('refuses an engine source that would read as an npm flag', async () => {
+    await withTempRepo({}, async (repo) => {
+      expect((await runCli(repo, ['init'])).code).toBe(0);
+      const enforced = await runCli(repo, ['enforce', '--ci', 'github'], {
+        GATEFORGE_CI_ENGINE_SOURCE: '--registry=https://example.invalid',
+      });
+      expect(enforced.code).toBe(2);
+      expect(existsSync(repo.path('.github/workflows/gateforge.yml'))).toBe(false);
+    });
+  }, 120_000);
+
+  it('generates the registry workflow byte-identically when no source is declared', () => {
+    // Frozen default bytes: the shipped template's every byte, hashed.
+    // A release that never declares a source must keep today's output
+    // exactly, so the golden digest moves only with a deliberate change.
+    expect(createHash('sha256').update(renderGithubActionsTemplate()).digest('hex')).toBe(
+      // The digest of the registry-only workflow as shipped before the
+      // engine-source variable existed — one byte of drift fails here.
+      '3a00711405a80e7246715e1cdce9d53dbc4f8dfd5afd977edcfff6789dd7c957',
+    );
+    expect(renderGithubActionsTemplate()).toContain(
+      '      - name: Install Gateforge\n        run: npm install --no-save --package-lock=false @gate-forge/cli@' +
+        VERSION,
+    );
+    expect(renderGithubActionsTemplate()).not.toContain('GATEFORGE_CI_ENGINE_SOURCE');
+  });
 });
