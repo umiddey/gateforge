@@ -167,6 +167,11 @@ The command prints a key ID, not the secret. Set the app URL and any session sta
 
 **You should see:** `verifier key ring created` and an active key ID.
 
+**If a ring already exists:** the command says so — it names the ring, the active
+key ID and `gateforge key rotate --confirm` — and exits `2` without changing
+anything. That is not a failure to fix: there is nothing to do while that key is
+active.
+
 **If not:** check file permissions, and keep the key file outside `.gateforge/test-gates/` and the repository. `gateforge enforcement doctor` names the ring it resolves (`verifier-key-location`) or the command that creates one.
 
 ## 7. Run the supervised tests
