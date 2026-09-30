@@ -24,7 +24,7 @@ import { policyWeakenedCandidate, type GateforgeConfig } from '@gate-forge/core'
 import { findPlaywrightConfig } from '@gate-forge/pack-playwright';
 import { loadConfigAt } from './commands/common.js';
 import { trustedPolicyDigestForConfig } from './execution.js';
-import { browserBuildSummary, inspectBrowserBuilds } from './playwright-browsers.js';
+import { browserBuildSummary, browserLaunchSummary, inspectBrowserBuilds, unlaunchableBuilds } from './playwright-browsers.js';
 import { resolveVerifierKeyring } from './verifier-keys.js';
 import { describeApprovedPolicyResolution, resolveApprovedPolicyDigest } from './trusted-policy.js';
 import { resolveStateDir } from './state.js';
@@ -361,15 +361,26 @@ function runnerCheck(cwd: string, config: GateforgeConfig, env: NodeJS.ProcessEn
   // release's builds fails every test with "Executable doesn't exist".
   if (config.runner === 'playwright') {
     const readiness = inspectBrowserBuilds(manifest, playwrightConfigText(cwd), env);
+    const configPath = findPlaywrightConfig(cwd);
+    const installCwd = configPath === null ? cwd : dirname(join(cwd, configPath));
     if (readiness.missing.length > 0) {
-      const configPath = findPlaywrightConfig(cwd);
-      const installCwd = configPath === null ? cwd : dirname(join(cwd, configPath));
       return {
         id: 'runner',
         status: 'fail',
         detail:
           `${config.runner} resolves at '${manifest}' (version ${version}), but ` +
           browserBuildSummary(readiness, installCwd),
+      };
+    }
+    // Installed is not startable: the same loader failure the doctor
+    // reports stops the run here, BEFORE the suite spends its hours
+    // failing every test for a reason the operator was never told.
+    const launch = browserLaunchSummary(unlaunchableBuilds(readiness), installCwd);
+    if (launch !== '') {
+      return {
+        id: 'runner',
+        status: 'fail',
+        detail: `${config.runner} resolves at '${manifest}' (version ${version}), but ${launch}`,
       };
     }
   }

@@ -10,10 +10,14 @@
  * `Executable doesn't exist at .../chromium_headless_shell-<rev>/…`.
  *
  * This module reads the resolved runner's own registry and reports the
- * builds the config's own projects would launch, and whether each is
- * installed in the browser cache. It never launches anything and never
- * writes to the cache.
+ * builds the config's own projects would launch, whether each is
+ * installed in the browser cache, and — on Linux, for an INSTALLED
+ * chromium-family build — whether this machine can actually start it.
+ * The launch probe executes the browser's own binary with `--version`
+ * and nothing else: it never writes to the cache, never opens a
+ * browser, and never touches a browser that is not there.
  */
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -64,6 +68,170 @@ export function defaultBrowsersPath(env: NodeJS.ProcessEnv = process.env): strin
  */
 export function browserDirectoryName(build: BrowserBuild): string {
   return `${build.name.replace(/-/g, '_')}-${build.revision}`;
+}
+
+/** Milliseconds allowed for one browser `--version` launch probe. */
+const LAUNCH_PROBE_TIMEOUT_MS = 10_000;
+
+/** Maximum bytes read from the probe's own streams. */
+const LAUNCH_PROBE_BUFFER = 64 * 1024;
+
+/**
+ * Where each chromium-family build keeps its executable inside the
+ * build directory, as the installed Playwright's own registry lays it
+ * out (`playwright-core/lib/server/registry/index.js`,
+ * `EXECUTABLE_PATHS`). x64 first, then arm64: the first entry that
+ * exists is the one this machine installed, and a build with neither is
+ * not probed at all.
+ */
+const CHROMIUM_LINUX_EXECUTABLES: Record<string, readonly string[]> = {
+  chromium: ['chrome-linux64/chrome', 'chrome-linux/chrome'],
+  'chromium-headless-shell': [
+    'chrome-headless-shell-linux64/chrome-headless-shell',
+    'chrome-linux/headless_shell',
+  ],
+  'chromium-tip-of-tree': ['chrome-linux64/chrome', 'chrome-linux/chrome'],
+  'chromium-tip-of-tree-headless-shell': [
+    'chrome-headless-shell-linux64/chrome-headless-shell',
+    'chrome-linux/headless_shell',
+  ],
+};
+
+/** The outcome of launching one installed browser build. */
+export interface BrowserLaunchProbe {
+  /** The build that was launched. */
+  build: BrowserBuild;
+  /** The build directory inside the browser cache. */
+  directory: string;
+  /** The executable that was launched. */
+  executable: string;
+  /** True when the build started and reported a version. */
+  started: boolean;
+  /** The first non-empty stderr line, when the build did not start. */
+  reason: string;
+}
+
+/** Injection points for {@link probeBrowserLaunch} (tests supply both). */
+export interface BrowserLaunchProbeOptions {
+  /** Platform the probe runs on; the loader diagnosis is a Linux one. */
+  platform?: string;
+  /** Millisecond budget for the launch. */
+  timeoutMs?: number;
+}
+
+/**
+ * Launches one INSTALLED chromium-family build with `--version` and
+ * reports whether this machine can actually start it.
+ *
+ * Installed is not startable: a bare Linux image (a container, a CI
+ * image, WSL) has no browser system libraries, and the dynamic loader
+ * then fails before `main` — the browser's own output is empty, the
+ * exit code is 127, and the only diagnostic anywhere is the loader's
+ * own line. The probe reads that one line so the operator is told the
+ * cause instead of a downstream "Target page, context or browser has
+ * been closed".
+ *
+ * It claims NOTHING it did not observe: a non-Linux platform, a
+ * non-chromium-family build, and a build with no executable file all
+ * return `null`, which every caller reports as silence, never as a
+ * failure.
+ *
+ * Args:
+   build: the installed build to launch.
+   browsersPath: the browser cache directory.
+   options: platform and deadline overrides.
+ *
+ * Returns:
+   BrowserLaunchProbe | null: the observed launch, or null when there
+   is nothing to claim.
+ */
+export function probeBrowserLaunch(
+  build: BrowserBuild,
+  browsersPath: string,
+  options: BrowserLaunchProbeOptions = {},
+): BrowserLaunchProbe | null {
+  if ((options.platform ?? process.platform) !== 'linux') return null;
+  const candidates = CHROMIUM_LINUX_EXECUTABLES[build.name];
+  if (candidates === undefined) return null;
+  const directory = join(browsersPath, browserDirectoryName(build));
+  for (const candidate of candidates) {
+    const executable = join(directory, ...candidate.split('/'));
+    if (!existsSync(executable)) continue;
+    const result = spawnSync(executable, ['--version'], {
+      // No shell: the executable is a path inside a browser cache, not
+      // something an operator's config could shape into a command.
+      shell: false,
+      env: process.env,
+      encoding: 'utf8',
+      timeout: options.timeoutMs ?? LAUNCH_PROBE_TIMEOUT_MS,
+      maxBuffer: LAUNCH_PROBE_BUFFER,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const reason =
+      (result.stderr ?? '')
+        .split('\n')
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) ?? '';
+    return {
+      build,
+      directory,
+      executable,
+      started: result.error === undefined && result.status === 0,
+      reason,
+    };
+  }
+  return null;
+}
+
+/**
+ * The builds that are installed but cannot start on this machine.
+ *
+ * Args:
+   readiness: the inspection result.
+   options: platform and deadline overrides.
+ *
+ * Returns:
+   BrowserLaunchProbe[]: one entry per unlaunchable build, in registry
+   order; empty when every installed build starts (or is unprobeable).
+ */
+export function unlaunchableBuilds(
+  readiness: BrowserBuildReadiness,
+  options: BrowserLaunchProbeOptions = {},
+): BrowserLaunchProbe[] {
+  return readiness.installed
+    .map((build) => probeBrowserLaunch(build, readiness.browsersPath, options))
+    .filter((probe): probe is BrowserLaunchProbe => probe !== null && !probe.started);
+}
+
+/**
+ * The one-line summary for builds that are installed but cannot start:
+ * the loader's own first line plus the exact `npx playwright
+ * install-deps` that installs the browser's system libraries (which
+ * needs root or sudo — the reason a bare container is red out of the
+ * box).
+ *
+ * Args:
+   probes: the unlaunchable builds.
+   installCwd: the directory the fix command must run in.
+ *
+ * Returns:
+   string: the sentence for the runner's readiness line; '' when
+   nothing was observed.
+ */
+export function browserLaunchSummary(probes: readonly BrowserLaunchProbe[], installCwd: string): string {
+  const first = probes[0];
+  if (first === undefined) return '';
+  // ONE build is named, with its own loader line: a second broken build
+  // of the same browser fails for the same reason, and repeating the
+  // sentence per build buries the fix. The fix still covers every one.
+  const named =
+    `'${first.directory}' is installed but cannot start on this machine` +
+    (first.reason === '' ? '' : `: ${first.reason}`);
+  return (
+    `the browser build ${named}; ` +
+    `fix: run \`npx playwright install-deps ${installArguments(probes.map((probe) => probe.build))}\` in '${installCwd}' ` +
+    "(installs the browser's system libraries; needs root or sudo)"
+  );
 }
 
 /**

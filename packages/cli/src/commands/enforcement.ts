@@ -68,7 +68,13 @@ import {
 } from '../engine-identity.js';
 import { buildRunPreflight, findRunnerManifest, firstFailingCheck, type RunPreflightReport } from '../run-preflight.js';
 import { findPlaywrightConfig } from '@gate-forge/pack-playwright';
-import { browserBuildSummary, defaultBrowsersPath, inspectBrowserBuilds } from '../playwright-browsers.js';
+import {
+  browserBuildSummary,
+  browserLaunchSummary,
+  defaultBrowsersPath,
+  inspectBrowserBuilds,
+  unlaunchableBuilds,
+} from '../playwright-browsers.js';
 
 export const ENFORCEMENT_USAGE = 'usage: gateforge enforcement doctor [--json] [--strict-preflight]';
 
@@ -427,6 +433,12 @@ function playwrightReadiness(cwd: string, env: NodeJS.ProcessEnv): { status: Doc
   }
   if (readiness.missing.length > 0) {
     return { status: 'fail', detail: `playwright installed; ${builds}` };
+  }
+  // Installed is not startable: on a bare Linux image the dynamic
+  // loader fails before `main`, and the cause never reaches the report.
+  const launch = browserLaunchSummary(unlaunchableBuilds(readiness), configDir);
+  if (launch !== '') {
+    return { status: 'fail', detail: `playwright installed; ${launch}` };
   }
   return { status: 'ok', detail: `playwright installed; browsers ${browsers} under '${browsersPath}'; ${builds}` };
 }
