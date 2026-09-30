@@ -209,6 +209,37 @@ describe('gateforge next', () => {
     });
   });
 
+  it('a tracked DIRECTORY symlink does not block the run (F2)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      // The same template shape after the project's own bootstrap: the
+      // checked-in link now resolves to a directory.
+      mkdirSync(join(repo.root, '.venv/lib/python3.14/site-packages/fastapi'), {
+        recursive: true,
+      });
+      mkdirSync(join(repo.root, '.agents/skills'), { recursive: true });
+      symlinkSync(
+        '../../.venv/lib/python3.14/site-packages/fastapi',
+        join(repo.root, '.agents/skills/fastapi'),
+      );
+      repo.git(['add', '-A']);
+      repo.git([
+        '-c', 'user.name=fixture',
+        '-c', 'user.email=fixture@gateforge.invalid',
+        'commit', '--quiet', '-m', 'directory skill link',
+      ]);
+      const { code, stdout, stderr } = await runCli(repo, ['next']);
+      expect(stderr).not.toContain('unsupported input snapshot');
+      expect(code).toBe(1);
+      expect(stdout).toContain('next:');
+      // One plain notice line, and it says no action is needed: the link
+      // works as it stands and nothing was read through it.
+      expect(stdout).toContain('directory symlink');
+      expect(stdout).toContain('.agents/skills/fastapi');
+      expect(stdout).toContain('no action needed');
+    });
+  });
+
   it('every printed command runs as printed on a fresh initialized repo (F9)', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

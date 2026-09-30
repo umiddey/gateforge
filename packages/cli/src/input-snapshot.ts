@@ -142,10 +142,11 @@ export const GIT_SCOPE_CONTROL_BASENAMES = ['.gitignore', '.gitattributes'];
 
 /**
  * The input tree cannot be captured completely (submodule, escaping
- * symlink, directory symlink, unreadable required input). Evaluation
- * must fail closed with an explicit unsupported-snapshot block — never
- * a partial digest claimed complete. A merely DANGLING symlink is not
- * one of these: it is captured as a `dangling-symlink` entry.
+ * symlink, unreadable required input). Evaluation must fail closed with
+ * an explicit unsupported-snapshot block — never a partial digest
+ * claimed complete. A symlink that is merely DANGLING, or whose target
+ * is a DIRECTORY, is not one of these: it is captured by its link text
+ * as a `dangling-symlink` / `directory-symlink` entry.
  */
 export class UnsupportedSnapshotError extends Error {
   constructor(message: string) {
@@ -170,11 +171,11 @@ export class SnapshotUnavailableError extends Error {
 export interface SnapshotFileEntry {
   /** Repo-root-relative posix path (or config-relative label for absence). */
   path: string;
-  /** `file` = regular bytes, `symlink` = link+target bytes, `dangling-symlink` = link text of a link whose target does not exist, `absent` = missing optional config, `deleted` = tracked but gone. */
-  type: 'file' | 'symlink' | 'dangling-symlink' | 'absent' | 'deleted';
+  /** `file` = regular bytes, `symlink` = link+target bytes, `dangling-symlink` = link text of a link whose target does not exist, `directory-symlink` = link text of a link to a directory, `absent` = missing optional config, `deleted` = tracked but gone. */
+  type: 'file' | 'symlink' | 'dangling-symlink' | 'directory-symlink' | 'absent' | 'deleted';
   /** Hex digest binding path + type + content (or absence marker). */
   contentDigest: string;
-  /** The raw link text of a `symlink`/`dangling-symlink` entry (never resolved). */
+  /** The raw link text of a symlink entry (never resolved). */
   linkTarget?: string;
 }
 
@@ -325,9 +326,11 @@ function hashEntry(kind: string, path: string, content: Buffer | string): string
  *   SnapshotFileEntry: the file, symlink, or deleted entry.
  *
  * Throws:
- *   UnsupportedSnapshotError: escaping/unresolvable/directory symlink,
- *   or a non-ENOENT filesystem failure (fail closed — required inputs
- *   must not silently vanish).
+ *   UnsupportedSnapshotError: an escaping symlink, a link to something
+ *   that is neither a file nor a directory (fifo, socket, device), or a
+ *   non-ENOENT filesystem failure (fail closed — required inputs must
+ *   not silently vanish). A dangling link and a link to a directory are
+ *   captured by their link text instead.
  */
 function entryForPath(cwd: string, path: string): SnapshotFileEntry {
   const absolute = join(cwd, ...path.split('/'));
@@ -391,6 +394,23 @@ function entryForPath(cwd: string, path: string): SnapshotFileEntry {
       );
     }
     if (!targetStat.isFile()) {
+      if (targetStat.isDirectory() || targetStat.isSymbolicLink()) {
+        // A link to a DIRECTORY (including one that only exists after the
+        // project's own bootstrap) is recorded the way a dangling link is:
+        // by its link text alone, exactly as git stores a 120000 blob.
+        // The target is never walked and never read — it can be a whole
+        // virtualenv — so the run continues with one plain notice line.
+        // The entry still moves the digest: retargeting the link, or the
+        // target becoming a regular file, changes its identity and its
+        // type. Anything else (fifo, socket, device) stays fail-closed:
+        // that is not a link into a path.
+        return {
+          path,
+          type: 'directory-symlink',
+          linkTarget: target,
+          contentDigest: hashEntry('directory-symlink', path, `link:${target}\0`),
+        };
+      }
       throw new UnsupportedSnapshotError(
         `input snapshot rejects non-file symlink '${path}' -> '${target}'; ` +
           'explicit unsupported-snapshot block',
@@ -1090,26 +1110,35 @@ export function diffInputFiles(before: readonly SnapshotFileEntry[], after: read
 }
 
 /**
- * One plain notice line per dangling symlink in an inventory.
+ * One plain notice line per symlink captured by link text only.
  *
- * A dangling link is captured, not fatal, so the run must still say
- * what it saw: each line names the link and its target so the owner
- * knows which path is not resolving (e.g. a checked-in link into a
- * virtualenv that only exists after the project's own bootstrap).
+ * A dangling link or a link to a directory is captured, not fatal, so
+ * the run must still say what it saw: each line names the link and its
+ * target, and says whether an action is needed. A dangling link needs
+ * one (the project's own bootstrap, or drop the link); a directory link
+ * needs none — it works as it stands and nothing was read through it.
  *
  * Args:
  *   files: the captured file entries.
- *
  * Returns:
- *   string[]: one notice line per dangling link, in path order (empty
- *   when every link resolves).
+ *   string[]: one notice line per link captured by text, in path order
+ *   (empty when every link resolves to a regular file).
  */
-export function danglingSymlinkNotices(files: readonly SnapshotFileEntry[]): string[] {
-  return files
-    .filter((entry) => entry.type === 'dangling-symlink')
-    .map(
-      (entry) =>
-        `note: dangling symlink '${entry.path}' -> '${entry.linkTarget ?? ''}' is recorded by its link text ` +
-        '(the target does not exist; create it with the project\'s own bootstrap, or remove the link)',
-    );
+export function symlinkNotices(files: readonly SnapshotFileEntry[]): string[] {
+  const notices: string[] = [];
+  for (const entry of files) {
+    const target = entry.linkTarget ?? '';
+    if (entry.type === 'dangling-symlink') {
+      notices.push(
+        `note: dangling symlink '${entry.path}' -> '${target}' is recorded by its link text ` +
+          "(the target does not exist; do: run the project's own bootstrap, or remove the link)",
+      );
+    } else if (entry.type === 'directory-symlink') {
+      notices.push(
+        `note: directory symlink '${entry.path}' -> '${target}' is recorded by its link text ` +
+          '(the target is a directory and was not read; no action needed)',
+      );
+    }
+  }
+  return notices;
 }

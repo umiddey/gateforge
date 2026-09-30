@@ -490,15 +490,58 @@ describe('input snapshot (§11.2)', () => {
     });
   });
 
-  it('still rejects escaping and directory symlinks with unsupported-snapshot', async () => {
+  it('still rejects a symlink escaping the repository with unsupported-snapshot', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       symlinkSync('/etc/hostname', join(repo.root, 'src/escape.txt'));
       expect(() => filesDigest(repo)).toThrow(UnsupportedSnapshotError);
-      rmSync(join(repo.root, 'src/escape.txt'));
-      mkdirSync(join(repo.root, 'src/subdir'), { recursive: true });
-      symlinkSync(join(repo.root, 'src/subdir'), join(repo.root, 'src/dirlink'));
-      expect(() => filesDigest(repo)).toThrow(UnsupportedSnapshotError);
+    });
+  });
+
+  it('records a tracked DIRECTORY symlink by its link text and keeps the run usable (F2)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      mkdirSync(join(repo.root, '.venv/skills/fastapi'), { recursive: true });
+      mkdirSync(join(repo.root, '.agents/skills'), { recursive: true });
+      symlinkSync('../../.venv/skills/fastapi', join(repo.root, '.agents/skills/fastapi'));
+      repo.git(['add', '-A']);
+      repo.git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@gateforge.invalid', 'commit', '--quiet', '-m', 'directory skill link']);
+      const entries = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      const link = entries.find((entry) => entry.path === '.agents/skills/fastapi');
+      // The link text IS the identity; the target directory is never walked.
+      expect(link?.type).toBe('directory-symlink');
+      expect(link?.linkTarget).toBe('../../.venv/skills/fastapi');
+      expect(filesDigest(repo)).toMatch(/^[0-9a-f]{64}$/);
+      // Retargeting the link moves the digest...
+      const baseline = filesDigest(repo);
+      unlinkSync(join(repo.root, '.agents/skills/fastapi'));
+      symlinkSync('../../.venv/skills/sqlmodel', join(repo.root, '.agents/skills/fastapi'));
+      expect(filesDigest(repo)).not.toBe(baseline);
+      // ...and a link whose target is not a directory becomes a plain
+      // `symlink` entry (target bytes in the digest), a different type.
+      repo.writeFiles({ '.venv/skills/sqlmodel': 'model\n' });
+      const afterRetype = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      expect(afterRetype.find((entry) => entry.path === '.agents/skills/fastapi')?.type).toBe('symlink');
+      expect(filesDigest(repo)).not.toBe(baseline);
+    });
+  });
+
+  it('records a tracked link to a NOT-YET-CREATED directory like a dangling link (F2)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      mkdirSync(join(repo.root, '.agents/skills'), { recursive: true });
+      // The template shape after the venv is bootstrapped: the link text
+      // names a directory, and nothing exists at that path yet.
+      symlinkSync('../../.venv/lib/python3.14/site-packages/fastapi', join(repo.root, '.agents/skills/fastapi'));
+      const entries = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      expect(entries.find((entry) => entry.path === '.agents/skills/fastapi')?.type).toBe('dangling-symlink');
+      // The bootstrap turning that path into a directory changes the entry
+      // type (and the digest) instead of failing the run.
+      const baseline = filesDigest(repo);
+      repo.writeFiles({ '.venv/lib/python3.14/site-packages/fastapi/skill.md': 'skill\n' });
+      const after = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      expect(after.find((entry) => entry.path === '.agents/skills/fastapi')?.type).toBe('directory-symlink');
+      expect(filesDigest(repo)).not.toBe(baseline);
     });
   });
 
