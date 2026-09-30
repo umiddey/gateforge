@@ -106,6 +106,84 @@ describe('synthesizeTrustedConfig', () => {
     );
   });
 
+  it('scopes test files per project, leaving unscoped files in the global match', () => {
+    const { cwd, stateDir } = tempDirs();
+    const { configPath } = synthesizeTrustedConfig({
+      cwd,
+      stateDir,
+      runId: 'setup-dep',
+      reporterEntry: '/engine/reporter.js',
+      testFiles: ['tests/auth.setup.ts', 'tests/feature.spec.ts', 'tests/other.spec.ts'],
+      projects: ['chromium', 'setup'],
+      projectScopes: [
+        { name: 'setup', files: ['tests/auth.setup.ts'] },
+        { name: 'chromium', files: ['tests/feature.spec.ts'] },
+      ],
+    });
+    const content = readFileSync(configPath, 'utf8');
+    // Each project carries ONLY the files the plan attributed to it: a
+    // global match would run the whole suite once per project.
+    expect(content).toContain(
+      `projects: [{"name":"chromium","testMatch":["tests/feature.spec.ts"]},{"name":"setup","testMatch":["tests/auth.setup.ts"]}]`,
+    );
+    // The file no project scope claims keeps running, via the global match.
+    expect(content).toContain(`testMatch: ["tests/other.spec.ts"]`);
+    expect(content).not.toContain('null');
+  });
+
+  it('drops a project scope that owns no file instead of running it empty', () => {
+    const { cwd, stateDir } = tempDirs();
+    const { configPath } = synthesizeTrustedConfig({
+      cwd,
+      stateDir,
+      runId: 'empty-scope',
+      reporterEntry: '/engine/reporter.js',
+      testFiles: ['tests/feature.spec.ts'],
+      projects: ['chromium', 'setup'],
+      projectScopes: [
+        { name: 'chromium', files: ['tests/feature.spec.ts'] },
+        { name: 'setup', files: [] },
+      ],
+    });
+    const content = readFileSync(configPath, 'utf8');
+    expect(content).toContain(`projects: [{"name":"chromium","testMatch":["tests/feature.spec.ts"]}]`);
+    expect(content).not.toContain('"setup"');
+  });
+
+  it('selects the same files with or without a scope that owns them all', () => {
+    const { cwd, stateDir } = tempDirs();
+    const plain = synthesizeTrustedConfig({
+      cwd,
+      stateDir,
+      runId: 'no-scope',
+      reporterEntry: '/engine/reporter.js',
+      testFiles: ['specs/a.spec.js', 'specs/b.spec.js'],
+      projects: ['chromium'],
+    });
+    const otherState = mkdtempSync(join(tmpdir(), 'gateforge-trusted-state-'));
+    DIRECTORIES.push(otherState);
+    const scoped = synthesizeTrustedConfig({
+      cwd,
+      stateDir: otherState,
+      runId: 'no-scope',
+      reporterEntry: '/engine/reporter.js',
+      testFiles: ['specs/a.spec.js', 'specs/b.spec.js'],
+      projects: ['chromium'],
+      projectScopes: [{ name: 'chromium', files: ['specs/a.spec.js', 'specs/b.spec.js'] }],
+    });
+    // One project owning every selected file selects exactly the same set a
+    // global testMatch does, so a single-project run is unaffected by the
+    // scoping: only the `projects:` shape differs.
+    const plainContent = readFileSync(plain.configPath, 'utf8');
+    const scopedContent = readFileSync(scoped.configPath, 'utf8');
+    expect(plainContent).toContain('testMatch: ["specs/a.spec.js","specs/b.spec.js"]');
+    expect(scopedContent).toContain(
+      'projects: [{"name":"chromium","testMatch":["specs/a.spec.js","specs/b.spec.js"]}]',
+    );
+    // Every selected file is still selected exactly once.
+    expect(scopedContent.match(/specs\/[ab]\.spec\.js/g)).toHaveLength(2);
+  });
+
   it('trustedReporterEntry resolves to the pack dist reporter', () => {
     const entry = trustedReporterEntry();
     expect(entry.endsWith(join('dist', 'reporter', 'reporter.js'))).toBe(true);

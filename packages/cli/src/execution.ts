@@ -61,7 +61,7 @@ import { normalizeRepoModule } from './input-snapshot.js';
 import { DOCS_EXCLUSIONS_PATH } from './docs-exclusions.js';
 import { CACHE_EXCLUSIONS_PATH } from './cache-exclusions.js';
 import type { GateforgeConfig } from '@gate-forge/core';
-import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
+import type { ProjectScope, RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 import { environmentIdentity } from './input-snapshot.js';
 
@@ -392,6 +392,44 @@ export function planExpectedSet(catalog: TestCatalog): PlannedRow[] {
   }
   rows.sort((a, b) => (a.planned.logicalKey < b.planned.logicalKey ? -1 : 1));
   return rows;
+}
+
+/**
+ * Groups the plan's test files by the project each row belongs to, so the
+ * supervised run can scope files per project instead of collecting every
+ * selected file under every project.
+ *
+ * Project identity is the join key the whole pipeline speaks: catalog rows,
+ * the registered expected set, session opens, and the execution trace all
+ * key on `(project, file, titlePath)`. A project-scoped config — most
+ * importantly the standard Playwright auth pattern, a `setup` project with
+ * `testMatch: /.*\.setup\.ts/` plus a dependent project — therefore needs the
+ * RUN to select files per project too, or the runner executes identities the
+ * expected set never bound (their sessions are refused, so they produce no
+ * evidence) and the executed count outruns the planned total.
+ *
+ * A project-less row contributes to no scope: its file stays in the global
+ * selection so the row still executes.
+ *
+ * Args:
+ *   rows: the planned expected set (fixed before the run).
+ *
+ * Returns:
+ *   ProjectScope[]: one entry per project that owns at least one file,
+ *   sorted by project name.
+ */
+export function plannedProjectScopes(rows: readonly PlannedRow[]): ProjectScope[] {
+  const filesByProject = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const project = row.planned.project;
+    if (project === null || project.length === 0) continue;
+    const files = filesByProject.get(project) ?? new Set<string>();
+    files.add(row.planned.file);
+    filesByProject.set(project, files);
+  }
+  return [...filesByProject.entries()]
+    .map(([name, files]) => ({ name, files: [...files].sort() }))
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
 }
 
 /**
