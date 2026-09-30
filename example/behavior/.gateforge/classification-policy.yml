@@ -1,5 +1,8 @@
 schemaVersion: 1
-scanRoots: ['server.js', 'e2e/**/*.js', 'fixtures/**/*.mjs']
+# The fixture/actor provider is engine-side harness code (loaded through
+# GATEFORGE_FIXTURE_PROVIDER, never by the suite), so it is not classified
+# as product source — see the matching project exclude in .gateforge.yml.
+scanRoots: ['server.js', 'e2e/**/*.js', 'fixtures/fixture-detector.mjs']
 trustedInternalEntryPoints: []
 internalRules: []
 declarations:
