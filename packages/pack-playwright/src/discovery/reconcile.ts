@@ -38,9 +38,12 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } 
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { buildRunnerChildEnv } from './runner-env.js';
 import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
 import type { Location } from '@gate-forge/core';
+import { PROJECT_GRAPH_PATH_ENV, type ProjectGraphDocument } from '../reporter/project-graph-reporter.js';
 
 /** Config file names checked at the repo root and one level deep
  * (first match wins within each directory). */
@@ -108,6 +111,31 @@ export interface NativeListResult {
   instances: NativeInstance[];
   /** Reporter errors from the JSON document (data, not a throw). */
   errors: string[];
+  /**
+   * Project name → the names it depends on, as the RUNNER resolved them
+   * (see {@link projectGraphReporterEntry}). Absent when the enumeration
+   * could not read the graph — never guessed, and never a partial graph
+   * treated as a complete one.
+   */
+  projectDependencies?: Record<string, string[]>;
+}
+
+/**
+ * Resolves the engine-owned project-graph reporter entry.
+ *
+ * Absolute and pack-relative for the same reason the trusted reporter
+ * entry is: the enumeration child must load an ENGINE file by absolute
+ * path, never a candidate-relative one. Resolution works from both the
+ * `src/` and `dist/` layouts.
+ *
+ * @param fromModule: module URL to resolve the pack from (default: this file).
+ *
+ * @returns
+ *   string: absolute `<pack>/dist/reporter/project-graph-reporter.js`.
+ */
+export function projectGraphReporterEntry(fromModule: string = import.meta.url): string {
+  const pkgPath = fileURLToPath(new URL('../../package.json', fromModule));
+  return join(pkgPath.slice(0, -'package.json'.length), 'dist', 'reporter', 'project-graph-reporter.js');
 }
 
 /**
@@ -443,10 +471,6 @@ export async function listNativePlaywrightTests(options: {
   const childCwd = join(options.cwd, configDir);
   const timeoutMs = options.timeoutMs ?? DEFAULT_LIST_TIMEOUT_MS;
   const cli = playwrightCliPath(options.cwd, configDir);
-  const args = [cli, 'test', '--list', '--reporter=json'];
-  if (configDir !== '.') args.push('--config', basename(configPath));
-  const discoveryStateDir =
-    options.wiredEnv === undefined ? mkdtempSync(join(tmpdir(), 'gateforge-discovery-state-')) : undefined;
   // The JSON report is read from a FILE the runner writes, never from
   // stdout: a consumer's playwright config routinely prints at load
   // time (a dotenv/dotenvx banner, a stray `console.log`) and stdout is
@@ -454,17 +478,38 @@ export async function listNativePlaywrightTests(options: {
   // rehearsal F6). The path is absolute, so the reporter's
   // cwd-relative resolution cannot move it, and the JSON reporter's
   // `printsToStdio()` turns false — no part of the report can
-  // interleave with the config's logging.
+  // interleave with the config's logging. The same directory holds the
+  // project-graph document (below) and is removed with the child.
   const reportDir = mkdtempSync(join(tmpdir(), 'gateforge-playwright-report-'));
   const reportPath = join(reportDir, 'reporter.json');
+  // The project graph rides along with the json report through an
+  // ENGINE-OWNED reporter (see {@link projectGraphReporterEntry}): the
+  // json reporter's `config.projects[]` does not carry `dependencies` in
+  // any released playwright (verified against 1.58.2 and 1.62.1), and
+  // reading them out of the consumer config would mean trusting candidate
+  // code. Without the built entry the enumeration runs exactly as before
+  // and reports no graph — the field is optional precisely so a missing
+  // graph is honest absence, never a guessed empty one.
+  const graphReporterEntry = projectGraphReporterEntry();
+  const args = [
+    cli,
+    'test',
+    '--list',
+    `--reporter=json${existsSync(graphReporterEntry) ? `,${graphReporterEntry}` : ''}`,
+  ];
+  if (configDir !== '.') args.push('--config', basename(configPath));
+  const discoveryStateDir =
+    options.wiredEnv === undefined ? mkdtempSync(join(tmpdir(), 'gateforge-discovery-state-')) : undefined;
   let outcome: { code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null };
   let reportText: string | null = null;
+  let graphText: string | null = null;
   try {
     const childEnv: NodeJS.ProcessEnv =
       options.wiredEnv === undefined
         ? untrustedEnv(process.env, discoveryStateDir)
         : buildRunnerChildEnv(options.wiredEnv, process.env);
     childEnv['PLAYWRIGHT_JSON_OUTPUT_FILE'] = reportPath;
+    childEnv[PROJECT_GRAPH_PATH_ENV] = join(reportDir, 'project-graph.json');
     const child = spawn(process.execPath, args, {
       cwd: childCwd,
       env: childEnv,
@@ -510,6 +555,11 @@ export async function listNativePlaywrightTests(options: {
       // captured stream is then the only candidate, and it is read as
       // one document — never scanned for a plausible-looking substring.
       reportText = outcome.stdout;
+    }
+    try {
+      graphText = readFileSync(join(reportDir, 'project-graph.json'), 'utf8');
+    } catch {
+      graphText = null;
     }
   } finally {
     if (discoveryStateDir !== undefined) rmSync(discoveryStateDir, { recursive: true, force: true });
@@ -585,6 +635,27 @@ export async function listNativePlaywrightTests(options: {
   };
   walkSuites(document.suites ?? [], [], null);
   const errors = (document.errors ?? []).map((error) => diagnoseRunnerLoadError(error.message ?? String(error), cli));
+  // The project graph the runner resolved. A document that does not parse
+  // is absence, never a partial graph: a downstream run that emitted a
+  // `dependencies` edge from half a graph would order projects wrongly.
+  let projectDependencies: Record<string, string[]> | undefined;
+  if (graphText !== null) {
+    try {
+      const parsed = JSON.parse(graphText) as Partial<ProjectGraphDocument>;
+      const graph = parsed.projectDependencies;
+      if (parsed.schemaVersion === 1 && graph !== undefined && graph !== null && typeof graph === 'object') {
+        projectDependencies = {};
+        for (const [name, dependencies] of Object.entries(graph)) {
+          if (!Array.isArray(dependencies)) continue;
+          projectDependencies[name] = [
+            ...new Set(dependencies.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)),
+          ].sort();
+        }
+      }
+    } catch {
+      projectDependencies = undefined;
+    }
+  }
   const configDetail = configDir !== '.' ? ` (cwd '${configDir}')` : '';
   const envDetail =
     options.wiredEnv === undefined
@@ -597,6 +668,7 @@ export async function listNativePlaywrightTests(options: {
       `instance(s) as untrusted code (${envDetail})` + configChoiceNote(configs, configPath),
     instances,
     errors,
+    ...(projectDependencies !== undefined ? { projectDependencies } : {}),
   };
 }
 

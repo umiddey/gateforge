@@ -13,6 +13,8 @@ import {
   claimInjectionsFor,
   executedOutcomesOf,
   planExpectedSet,
+  plannedProjectScopes,
+  plannedRowsWithProjectDependencies,
   sealExecutionResult,
   supervisionBlocking,
   type PlannedRow,
@@ -461,5 +463,109 @@ describe('supervisionBlocking (findings become gate blocking entries)', () => {
     expect(entries.every((entry) => typeof entry.nextAction === 'string' && entry.nextAction.length > 0)).toBe(true);
     expect(entries[0]?.name).toBe('k');
     expect(entries[1]?.name).toBeNull();
+  });
+});
+
+describe('project dependency closure (a narrowed run still runs the setup it depends on)', () => {
+  const SETUP_FILE = 'e2e/auth.setup.ts';
+  const SETUP_KEY = 'playwright:setup:e2e/auth.setup.ts:authenticate';
+  const setupRow = (): PlannedRow => ({
+    planned: {
+      logicalKey: SETUP_KEY,
+      project: 'setup',
+      file: SETUP_FILE,
+      titlePath: ['authenticate'],
+      frameworkId: null,
+    },
+    input: {
+      logicalKey: SETUP_KEY,
+      project: 'setup',
+      file: SETUP_FILE,
+      titlePath: ['authenticate'],
+      blockingAnnotations: [],
+    },
+  });
+
+  it('pulls the setup project tests into a plan that selected only a dependent test', () => {
+    const rows = plannedRowsWithProjectDependencies([plannedRow()], [plannedRow(), setupRow()], {
+      chromium: ['setup'],
+    });
+    // Playwright runs a dependency project's tests before the dependent
+    // test's own; a plan that dropped them registers identities the run
+    // executes with no bound session and fails on the missing artifact.
+    expect(rows.map((entry) => entry.planned.logicalKey).sort()).toEqual([KEY, SETUP_KEY]);
+  });
+
+  it('closes transitively and keeps the plan sorted by logical key', () => {
+    const middle: PlannedRow = {
+      planned: {
+        logicalKey: 'playwright:middle:e2e/middle.spec.ts:middle',
+        project: 'middle',
+        file: 'e2e/middle.spec.ts',
+        titlePath: ['middle'],
+        frameworkId: null,
+      },
+      input: {
+        logicalKey: 'playwright:middle:e2e/middle.spec.ts:middle',
+        project: 'middle',
+        file: 'e2e/middle.spec.ts',
+        titlePath: ['middle'],
+        blockingAnnotations: [],
+      },
+    };
+    const rows = plannedRowsWithProjectDependencies([plannedRow()], [plannedRow(), setupRow(), middle], {
+      chromium: ['middle'],
+      middle: ['setup'],
+    });
+    // Sorted by logical key (the plan's own order), so a narrowed run's
+    // row order stays as deterministic as a full run's.
+    expect(rows.map((entry) => entry.planned.project)).toEqual(['chromium', 'middle', 'setup']);
+  });
+
+  it('leaves a single-project plan byte-identical', () => {
+    const rows = plannedRowsWithProjectDependencies([plannedRow()], [plannedRow(), setupRow()], {});
+    expect(rows).toEqual([plannedRow()]);
+    expect(plannedProjectScopes(rows)).toEqual([
+      { name: 'chromium', files: [FILE] },
+    ]);
+  });
+
+  it('never pulls back a file neighbour of the selected test', () => {
+    const sibling: PlannedRow = {
+      planned: {
+        logicalKey: 'playwright:chromium:e2e/accounts.spec.ts:Accounts>lists accounts',
+        project: 'chromium',
+        file: FILE,
+        titlePath: ['Accounts', 'lists accounts'],
+        frameworkId: null,
+      },
+      input: {
+        logicalKey: 'playwright:chromium:e2e/accounts.spec.ts:Accounts>lists accounts',
+        project: 'chromium',
+        file: FILE,
+        titlePath: ['Accounts', 'lists accounts'],
+        blockingAnnotations: [],
+      },
+    };
+    // The selected test's own project contributes NOTHING new: a `--test`
+    // run that named one journey must not have the file's other journeys
+    // restored "because they share a project". Only a project reached
+    // through a dependency edge brings its tests along.
+    const rows = plannedRowsWithProjectDependencies([plannedRow()], [plannedRow(), sibling, setupRow()], {
+      chromium: ['setup'],
+    });
+    expect(rows.map((entry) => entry.planned.logicalKey).sort()).toEqual([KEY, SETUP_KEY]);
+  });
+
+  it('emits the dependency edge the enumeration captured, filtered to planned projects', () => {
+    const scopes = plannedProjectScopes(plannedRowsWithProjectDependencies([plannedRow()], [plannedRow(), setupRow()], {
+      chromium: ['setup'],
+    }), { chromium: ['setup'] });
+    expect(scopes).toEqual([
+      { name: 'chromium', files: [FILE], dependencies: ['setup'] },
+      // A project with no edges carries NO `dependencies` key at all, so
+      // a single-project run's scopes stay byte-identical to before.
+      { name: 'setup', files: [SETUP_FILE] },
+    ]);
   });
 });

@@ -170,6 +170,7 @@ import {
   parentSha,
   planExpectedSet,
   plannedProjectScopes,
+  plannedRowsWithProjectDependencies,
   sealExecutionResult,
   supervisionBlocking,
   SUPERVISED_INVOCATION,
@@ -2422,6 +2423,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   let nativeClaims: Claim[] = [];
   let nativeErrors: string[] = [];
   let nativeInstances: NativeInstance[] = [];
+  // The project dependency graph the enumeration captured from the
+  // RUNNER's resolved config (`setup` depends on nothing, the projects
+  // that read its artifact depend on `setup`). Empty when the
+  // enumeration could not read it — absence, never a guessed empty one.
+  let projectDependencies: Record<string, string[]> = {};
   try {
     // collectPytest is REQUIRED here (GAP 1 fix, server-witnessed
     // channel): the supervised run's expected set, mapping resolution,
@@ -2437,6 +2443,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     nativeClaims = discovered.nativeClaims;
     nativeErrors = discovered.nativeErrors;
     nativeInstances = discovered.nativeInstances;
+    projectDependencies = discovered.projectDependencies ?? {};
     for (const warning of discovered.registrationWarnings) {
       writeLine(
         io.stderr,
@@ -2496,6 +2503,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // finalizes passed sessions against it.
   let observeObligations: string[] = [];
   let fullPlannedCount = 0;
+  // The FULL planned set every narrowing selected from. The dependency
+  // closure below reads it to pull in the tests of a `setup` project a
+  // narrowed plan's dependent tests need (see
+  // `plannedRowsWithProjectDependencies`).
+  let allPlannedRows: PlannedRow[] = [];
   let affectedTestCount = 0;
   // The claimed files' slice (changed scope) a non-Playwright runner
   // plans from — empty in full scope and for `playwright`.
@@ -2554,6 +2566,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       (row) => !quarantinedKeys.has(row.planned.logicalKey),
     );
     fullPlannedCount = fullPlannedRows.length;
+    allPlannedRows = fullPlannedRows;
     plannedRows = fullPlannedRows;
     injections = claimInjectionsFor(gradedResolution, catalog);
     mappedCoverage = mappedCoverageFrom(gradedResolution, pipeline.policy.obligations, pipeline.graph);
@@ -2920,6 +2933,19 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // same file already occupies — the inventory is deduplicated per
     // source location, not per test.)
   }
+  // Dependency closure for a NARROWED plan (`--scope changed` or
+  // `--test`): Playwright runs a dependency project's tests before the
+  // dependent project, so a plan that selected only a `chromium` test
+  // must also carry the `setup` project's tests. Without them the run
+  // executes the dependent test with no auth artifact (it fails), and
+  // the `dependencies` edge the synthesized config would emit names a
+  // project that config does not define — which Playwright refuses to
+  // load at all. The closure reads the FULL planned set, and a FULL run
+  // (or a config with no dependencies) already contains those rows, so
+  // this adds nothing and the plan is byte-identical. The added rows
+  // are part of the plan from here on: they are registered in the
+  // expected set, scoped per project, and counted in the scope line.
+  plannedRows = plannedRowsWithProjectDependencies(plannedRows, allPlannedRows, projectDependencies);
 
   // Per-test narrowing (additive): a named run hands the runner the exact
   // `file:line` of every selected test the catalog located, so a runner
@@ -3752,7 +3778,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           // identities the expected set never bound — refused sessions, no
           // evidence, and a counter past its own total. Project-less plan
           // rows (none here, kept for honesty) keep the global selection.
-          projectScopes: plannedProjectScopes(plannedRows),
+          // ...carrying the dependency EDGES the enumeration captured, so
+          // the synthesized config orders a `setup` project before the
+          // projects that read its artifact (the standard auth pattern).
+          projectScopes: plannedProjectScopes(plannedRows, projectDependencies),
           // Operator-provided whole-run bound for multi-hour suites (default
           // 30 minutes stands when absent — same expected set and
           // completeness rules either way).

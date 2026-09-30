@@ -150,6 +150,53 @@ describe('synthesizeTrustedConfig', () => {
     expect(content).not.toContain('"setup"');
   });
 
+  it('emits a project dependency the consumer config declared, so the setup runs first', () => {
+    const { cwd, stateDir } = tempDirs();
+    const { configPath } = synthesizeTrustedConfig({
+      cwd,
+      stateDir,
+      runId: 'setup-dep-order',
+      reporterEntry: '/engine/reporter.js',
+      testFiles: ['tests/auth.setup.ts', 'tests/feature.spec.ts'],
+      projects: ['chromium', 'setup'],
+      projectScopes: [
+        { name: 'setup', files: ['tests/auth.setup.ts'], dependencies: [] },
+        { name: 'chromium', files: ['tests/feature.spec.ts'], dependencies: ['setup'] },
+      ],
+    });
+    // Without the dependency edge the runner collects `feature.spec.ts`
+    // under both projects and runs the dependent test BEFORE the setup
+    // project produced its artifact — the standard auth pattern fails.
+    expect(readFileSync(configPath, 'utf8')).toContain(
+      `projects: [{"name":"chromium","testMatch":["tests/feature.spec.ts"],"dependencies":["setup"]},` +
+        `{"name":"setup","testMatch":["tests/auth.setup.ts"]}]`,
+    );
+  });
+
+  it('drops a dependency naming a project the synthesized config omits', () => {
+    const { cwd, stateDir } = tempDirs();
+    const { configPath } = synthesizeTrustedConfig({
+      cwd,
+      stateDir,
+      runId: 'setup-dep-missing',
+      reporterEntry: '/engine/reporter.js',
+      testFiles: ['tests/feature.spec.ts'],
+      projects: ['chromium', 'setup'],
+      projectScopes: [
+        { name: 'chromium', files: ['tests/feature.spec.ts'], dependencies: ['setup'] },
+        { name: 'setup', files: [] },
+      ],
+    });
+    const content = readFileSync(configPath, 'utf8');
+    // Playwright refuses to load a config whose `dependencies` entry names
+    // a project it does not define, so the edge is dropped with the
+    // project — never emitted as a dangling name.
+    expect(content).toContain(
+      `projects: [{"name":"chromium","testMatch":["tests/feature.spec.ts"]}]`,
+    );
+    expect(content).not.toContain('dependencies');
+  });
+
   it('selects the same files with or without a scope that owns them all', () => {
     const { cwd, stateDir } = tempDirs();
     const plain = synthesizeTrustedConfig({

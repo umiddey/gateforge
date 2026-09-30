@@ -213,7 +213,16 @@ describe('native enumeration of a subdirectory project (fake CLI contract)', () 
     // naming the config as seen from that cwd.
     expect(invocation.cwd).toBe(e2eDir);
     expect(invocation.argv[0]).toBe(join(e2eDir, 'node_modules', 'playwright', 'cli.js'));
-    expect(invocation.argv.slice(1)).toEqual(['test', '--list', '--reporter=json', '--config', 'playwright.config.ts']);
+    // The reporter LIST is the enumeration's own business (the json
+    // report plus the engine's project-graph reporter); what this test
+    // owns is the runner invocation around it.
+    expect(invocation.argv.slice(1).filter((arg) => !arg.startsWith('--reporter='))).toEqual([
+      'test',
+      '--list',
+      '--config',
+      'playwright.config.ts',
+    ]);
+    expect(invocation.argv.some((arg) => arg.startsWith('--reporter=json'))).toBe(true);
     // Instance paths are repo-relative (config directory prefixed), so
     // they reconcile against the static scan's rows.
     expect(result.instances[0]?.file).toBe('e2e/scenarios/x.spec.js');
@@ -302,7 +311,8 @@ describe('root-level repos unchanged (regression lock)', () => {
     // Repo-root cwd, root CLI, NO --config (auto-discovered config).
     expect(invocation.cwd).toBe(root);
     expect(invocation.argv[0]).toBe(join(root, 'node_modules', 'playwright', 'cli.js'));
-    expect(invocation.argv.slice(1)).toEqual(['test', '--list', '--reporter=json']);
+    expect(invocation.argv.slice(1).filter((arg) => !arg.startsWith('--reporter='))).toEqual(['test', '--list']);
+    expect(invocation.argv.some((arg) => arg.startsWith('--reporter=json'))).toBe(true);
     expect(result.instances[0]?.file).toBe('e2e/x.spec.js');
     expect(result.detail).toContain("over 'playwright.config.ts' enumerated");
     expect(result.detail).not.toContain('(cwd');

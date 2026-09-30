@@ -108,6 +108,12 @@ export interface DiscoverResult {
   /** Playwright JSON reporter errors from native enumeration, verbatim. */
   nativeErrors: string[];
   nativeInstances: NativeInstance[];
+  /**
+   * Playwright project name → the names it depends on, as the RUNNER
+   * resolved them (see `projectGraphReporterEntry`). Absent when the
+   * enumeration could not read the graph.
+   */
+  projectDependencies?: Record<string, string[]>;
   /** Static registration sites guarded by Gateforge environment state. */
   registrationWarnings: StaticRegistrationWarning[];
   /**
@@ -252,6 +258,10 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
       nativeClaims,
       nativeInstances: native.instances,
       nativeErrors: [...native.errors],
+
+      ...(native.projectDependencies !== undefined
+        ? { projectDependencies: native.projectDependencies }
+        : {}),
       registrationWarnings: scan.registrationWarnings,
       timings: {
         scanMs,
