@@ -144,16 +144,22 @@ gateforge tests mark \
 Keep the key outside the repository and run-state folder:
 
 ```sh
-mkdir -p "$HOME/.config/gateforge"
-gateforge key create --file "$HOME/.config/gateforge/keys.json" --confirm
-export GATEFORGE_WITNESS_VERIFIER_KEY_FILE="$HOME/.config/gateforge/keys.json"
+gateforge key create --confirm
 ```
+
+That is the whole ceremony: with no `--file` the CLI creates the key ring at
+`"${XDG_CONFIG_HOME:-$HOME/.config}/gateforge/verifier-keyring.json"` (parent
+directory included, owner-only, mode `0600`) and reads that same path on every
+later command, so nothing has to be exported. Keep a key ring somewhere else
+only on purpose: pass `--file <path>` to the ceremony AND export
+`GATEFORGE_WITNESS_VERIFIER_KEY_FILE=<path>` for the runs that must read it —
+one source, never both.
 
 The command prints a key ID, not the secret. Set the app URL and any session state the suite needs. The application and test environment must already be running; see [Test environment](TEST-ENVIRONMENT.md).
 
 **You should see:** `verifier key ring created` and an active key ID.
 
-**If not:** create the parent directory, check file permissions, and keep the key file outside `.gateforge/test-gates/` and the repository.
+**If not:** check file permissions, and keep the key file outside `.gateforge/test-gates/` and the repository. `gateforge enforcement doctor` names the ring it resolves (`verifier-key-location`) or the command that creates one.
 
 ## 7. Run the supervised tests
 

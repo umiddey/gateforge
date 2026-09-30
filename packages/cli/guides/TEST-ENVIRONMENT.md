@@ -157,10 +157,17 @@ The final comparison must pass. If it fails, find and disable or prewarm the wri
 **Example:**
 
 ```sh
-mkdir -p "$HOME/.config/gateforge"
-gateforge key create --file "$HOME/.config/gateforge/keys.json" --confirm
-export GATEFORGE_WITNESS_VERIFIER_KEY_FILE="$HOME/.config/gateforge/keys.json"
+gateforge key create --confirm
 ```
+
+With no `--file` the CLI creates the key ring at
+`"${XDG_CONFIG_HOME:-$HOME/.config}/gateforge/verifier-keyring.json"`
+(parent directory included, owner-only, mode `0600`) and reads that same
+path on every later command, so no `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`
+export is needed — an export pointing elsewhere is what made a documented
+key ring unreadable on any machine with a non-default `XDG_CONFIG_HOME`.
+Use `--file <path>` together with that export only when the ring really
+lives somewhere else.
 
 The CLI does not print the secret. Keep backups private too.
 
