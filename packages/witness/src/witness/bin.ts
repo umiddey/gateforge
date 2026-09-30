@@ -28,6 +28,7 @@
  *   GATEFORGE_TARGET_BASE_URL                    (attestation subject, GF-10)
  *   GATEFORGE_TARGET_FINGERPRINT                 (expected marker, GF-13)
  *   GATEFORGE_ADAPTER_BASE_URL                   (default adapter read base)
+ *   GATEFORGE_FIXTURE_PROVIDER                 (approved fixture provider)
  *   GATEFORGE_WITNESS_VERIFIER_KEY               (attestation verifier key)
  *
  * SECRETS NEVER TRAVEL ON ARGV (a process's cmdline is world-readable
@@ -43,10 +44,12 @@
  * active; the process serves until SIGTERM/SIGINT.
  */
 import { startWitness, WitnessStartupError } from './server.js';
+import { loadFixtureProvider } from './fixture-provider.js';
 import {
   ENV_ADAPTER_BASE_URL,
   ENV_ADAPTERS_DIR,
   ENV_CLASSIFICATIONS,
+  ENV_FIXTURE_PROVIDER,
   ENV_MOUNT_PATH,
   ENV_PROXY_TARGET,
   ENV_RUN_ID,
@@ -198,6 +201,11 @@ export async function main(
     adapterBaseUrl: flagOrEnv(flags, 'adapter-base-url', env[ENV_ADAPTER_BASE_URL]),
     adapterReadAuthorization:
       flagOrEnv(flags, 'adapter-read-authorization', env['GATEFORGE_ADAPTER_READ_AUTHORIZATION']) ?? null,
+    // Strong behavior cases mint their fixtures and actor credentials
+    // through the operator's approved provider, engine-side. Without one
+    // the witness still starts and every other surface works; the cases
+    // then block with a typed cause (never a suite-supplied fallback).
+    fixtureProvider: await loadFixtureProvider(env[ENV_FIXTURE_PROVIDER] ?? null),
     verifierKey,
     engineBrowserLauncher: resolveEngineBrowserLauncher(),
   });

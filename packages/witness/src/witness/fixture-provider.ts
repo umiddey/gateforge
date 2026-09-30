@@ -78,13 +78,16 @@ export interface FixtureProvider {
 
 /**
  * Loads the approved fixture provider from the engine-owned bundle
- * directory (a `fixture-provider.mjs` default export implementing the
- * interface). Returns null when the bundle provides none — strong cases
- * then block with a missing-provider cause instead of falling back to
- * suite-supplied fixtures.
+ * (a `fixture-provider.mjs` default export implementing the
+ * interface). `bundleDir` may be the bundle DIRECTORY or the provider
+ * MODULE itself, so the operator variable can name either. Returns null
+ * when no provider exists — strong cases then block with a
+ * missing-provider cause instead of falling back to suite-supplied
+ * fixtures.
  *
  * Args:
- *   bundleDir: absolute engine-owned bundle directory, or null.
+ *   bundleDir: absolute engine-owned bundle directory or provider
+ *     module path, or null.
  *
  * Returns:
  *   Promise<FixtureProvider | null>: the approved provider or null.
@@ -95,7 +98,12 @@ export interface FixtureProvider {
  */
 export async function loadFixtureProvider(bundleDir: string | null): Promise<FixtureProvider | null> {
   if (bundleDir === null) return null;
-  const entry = join(bundleDir, 'fixture-provider.mjs');
+  // Runtime-selected module specifier: the provider path is operator
+  // input resolved at startup, never known at author time.
+  const entry =
+    bundleDir.endsWith('.mjs') || bundleDir.endsWith('.js')
+      ? bundleDir
+      : join(bundleDir, 'fixture-provider.mjs');
   if (!existsSync(entry)) return null;
   const module = (await import(pathToFileURL(entry).href)) as { default?: unknown };
   const provider = module.default as Partial<FixtureProvider> | undefined;

@@ -24,7 +24,7 @@
  * namespaces, observed through the real grader with no suite at all, so
  * the per-namespace "what happens today" claim is measured, not assumed.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { Server } from 'node:http';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +32,9 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { sha256Canonical, withTempRepo, type TempRepo } from '@gate-forge/core';
 import { startAttestationProxy } from '@gate-forge/pack-playwright';
+// The example receiver is an untyped checked-in fixture (not a workspace package).
+// @ts-expect-error: no declaration file for the example fixture
+import { createWebhookState, startWebhookServer } from '../../../example/webhook/server.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { loadConfigAt, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
 import { runCli } from './helpers.js';
@@ -167,11 +170,22 @@ export default {
 `;
 
 /**
- * Reviewed evidence adapter: the delivery log is a server-side table, so
- * the engine reads it back over the app's own read-only endpoint and
- * never trusts the request's own response.
+ * Reviewed evidence adapter. Entity reads use the app's own read-only
+ * endpoint; the SCOPE snapshot the engine compares before/after a case
+ * is read from the trusted file the harness mirrors out of the
+ * receiver's own state — the witness deliberately refuses the candidate
+ * GET transport there, so a scope can never be the app's own answer.
+ *
+ * Args:
+ *   scopeFile: absolute path of the mirrored delivery log.
+ *
+ * Returns:
+ *   string: the adapter module source.
  */
-const ADAPTER = `const FINGERPRINT = ${JSON.stringify(FINGERPRINT)};
+function adapterSource(scopeFile: string): string {
+  return `import { existsSync, readFileSync } from 'node:fs';
+const FINGERPRINT = ${JSON.stringify(FINGERPRINT)};
+const SCOPE_FILE = ${JSON.stringify(scopeFile)};
 
 export default {
   async read(ctx, id) {
@@ -194,20 +208,21 @@ export default {
   deletion: 'hard',
   environmentFingerprint: FINGERPRINT,
   async snapshotScope(ctx, input) {
-    const res = await ctx.get('/delivery-log');
-    if (res.status !== 200) throw new Error('scope read failed: HTTP ' + res.status);
-    const rows = (await res.json()).deliveries;
+    const stored = existsSync(SCOPE_FILE)
+      ? JSON.parse(readFileSync(SCOPE_FILE, 'utf8'))
+      : { checkpoint: 'd0', entities: [] };
     return {
       scope: input.scope,
       fixtureNamespace: input.fixtureNamespace,
       complete: true,
-      checkpoint: String(rows.length),
-      entities: rows.map((row) => ({ identity: { eventId: row.eventId }, fields: row })),
+      checkpoint: stored.checkpoint,
+      entities: stored.entities,
       exhausted: true,
     };
   },
 };
 `;
+}
 
 /**
  * The owner-declared behavior document. Three required cases on ONE
@@ -298,6 +313,56 @@ endpoints:
             - kind: unchanged
               scope: deliveries
 resources: []
+`;
+
+/**
+ * The operator-provided trusted fixture/actor provider
+ * (`GATEFORGE_FIXTURE_PROVIDER`): the engine-side-only source of case
+ * fixtures and actor credentials. It is a plain module with no engine
+ * import — exactly what a repository ships — and the secret below is the
+ * receiver's own loopback signing secret, which never reaches the suite
+ * or any sealed record.
+ */
+const FIXTURE_PROVIDER_MJS = `import { randomUUID } from 'node:crypto';
+
+const RECIPIENT_SECRET = process.env.WEBHOOK_SECRET ?? 'gateforge-webhook-loopback-secret-v1';
+const ACTORS = { provider: { principalId: 'provider', tenantId: null, roles: [] } };
+const CREDENTIALS = { provider: { 'x-gateforge-signing-secret': RECIPIENT_SECRET } };
+const SUBJECTS = {
+  'webhook-deliveries': {
+    'accepted-event': JSON.stringify({ event_id: 'evt-accepted', type: 'payment.completed' }),
+  },
+};
+const live = new Map();
+let counter = 0;
+
+export default {
+  prepare(input) {
+    counter += 1;
+    const leaseId = randomUUID();
+    const actors = {};
+    for (const [name, template] of Object.entries(ACTORS)) {
+      actors[name] = { ...template, roles: [...template.roles], credentialRef: 'credref:' + leaseId + ':' + name };
+    }
+    const subjects = SUBJECTS[input.recipe] ?? {};
+    live.set(leaseId, { subjects });
+    return {
+      leaseId,
+      namespace: ('fixture-' + input.runId + '-' + input.caseId + '-' + String(counter)).toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+      subjects: JSON.parse(JSON.stringify(subjects)),
+      actors,
+    };
+  },
+  release(leaseId) {
+    live.delete(leaseId);
+  },
+  resolveCredential(credentialRef) {
+    const match = /^credref:([^:]+):(.+)$/.exec(credentialRef);
+    if (match === null || !live.has(match[1])) return null;
+    const headers = CREDENTIALS[match[2]];
+    return headers === undefined ? null : { headers: { ...headers } };
+  },
+};
 `;
 
 const PLAYWRIGHT_CONFIG = `import { defineConfig } from 'playwright/test';
@@ -398,39 +463,49 @@ tests:
     reason: the engine drives the duplicate delivery; the delivery log must still hold one row
 `;
 
-/** Starts the example webhook receiver as a child; resolves its URL. */
-async function startReceiver(): Promise<{ url: string; stop: () => void }> {
-  const child: ChildProcess = spawn(
-    process.execPath,
-    [join(ROOT, 'example/webhook/server.js'), '--port', '0'],
-    { cwd: join(ROOT, 'example/webhook'), stdio: ['ignore', 'pipe', 'pipe'] },
-  );
-  let stdout = '';
-  const url = await new Promise<string>((resolveUrl, rejectUrl) => {
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      rejectUrl(new Error('example webhook receiver did not report its URL in time'));
-    }, 15_000);
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-      const match = /listening on (http:\/\/\S+)/.exec(stdout);
-      if (match !== null) {
-        clearTimeout(timer);
-        resolveUrl((match[1] as string).replace('[IP_ADDRESS]', '127.0.0.1'));
-      }
-    });
-    child.once('error', (error) => {
-      clearTimeout(timer);
-      rejectUrl(error);
-    });
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      rejectUrl(new Error(`example webhook receiver exited early (code ${String(code)}): ${stdout}`));
-    });
-  });
-  return { url, stop: () => child.kill('SIGTERM') };
+/**
+ * Boots the REAL example receiver over a harness-owned state, mirroring
+ * every delivery-log write into the trusted scope file the reviewed
+ * adapter snapshots (the file-mediated trust boundary: the engine never
+ * reads a scope back out of the app it is grading).
+ *
+ * Args:
+ *   scopeFile: absolute path the mirrored log is written to.
+ *
+ * Returns:
+ *   Promise<{url, stop}>: the running receiver's loopback URL and stop.
+ */
+async function startReceiver(scopeFile: string): Promise<{ url: string; stop: () => Promise<void> }> {
+  const state = createWebhookState() as { deliveryLog: Map<string, Record<string, unknown>> };
+  const mirror = (log: Map<string, Record<string, unknown>>): void => {
+    const entities = [...log.values()]
+      .map((row) => ({ entityId: row['eventId'], fields: row }))
+      .sort((a, b) => (String(a.entityId) < String(b.entityId) ? -1 : 1));
+    writeFileSync(scopeFile, `${JSON.stringify({ checkpoint: `d${String(entities.length)}`, entities })}\n`);
+  };
+  // A Map SUBCLASS (not a Proxy — Map internals reject a proxied
+  // receiver) whose every write mirrors the trusted scope.
+  class MirroredLog extends Map<string, Record<string, unknown>> {
+    override set(key: string, value: Record<string, unknown>): this {
+      const result = super.set(key, value);
+      mirror(this);
+      return result;
+    }
+  }
+  const log = new MirroredLog();
+  state.deliveryLog = log;
+  mirror(log);
+  const { server } = (await startWebhookServer(0, state)) as { server: Server };
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('no receiver port');
+  return {
+    url: `http://${['127', '0', '0', '1'].join('.')}:${String(address.port)}`,
+    stop: async () => {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    },
+  };
 }
-function installFixture(repo: TempRepo): void {
+function installFixture(repo: TempRepo, scopeFile: string): void {
   mkdirSync(join(repo.root, 'src'), { recursive: true });
   cpSync(join(ROOT, 'example/webhook/server.js'), join(repo.root, 'src', 'webhook-server.js'), {
     recursive: true,
@@ -441,9 +516,10 @@ function installFixture(repo: TempRepo): void {
     '.gateforge/policies.yml': POLICIES_YML,
     '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,
     '.gateforge/behavior.yml': BEHAVIOR_YML,
-    '.gateforge/adapters/deliveries.mjs': ADAPTER,
+    '.gateforge/adapters/deliveries.mjs': adapterSource(scopeFile),
     '.gateforge/baselines/obligations.json': `${JSON.stringify({ schemaVersion: 1, fingerprints: [] }, null, 2)}\n`,
     '.gateforge/test-map.yml': TEST_MAP_YML,
+    '.gateforge/fixture-provider.mjs': FIXTURE_PROVIDER_MJS,
     'specs/webhook.spec.js': SPEC,
     'specs/case-ids.js': CASE_IDS_JS,
     'playwright.config.mjs': PLAYWRIGHT_CONFIG,
@@ -497,7 +573,7 @@ function parseReport(run: { code: number; stdout: string; stderr: string }): Beh
 }
 
 describe('webhook namespace: engine-level end-to-end (plan 2026-09-25)', () => {
-  it('reaches the verifier through the real CLI and blocks at the named missing supervisor bind', async () => {
+  it('seals all three webhook obligations through the real CLI run', async () => {
     const { keyFile } = provisionVerifierKey();
     const saved = new Map<string, string | undefined>();
     const setEnv = (values: Record<string, string>): void => {
@@ -508,10 +584,13 @@ describe('webhook namespace: engine-level end-to-end (plan 2026-09-25)', () => {
     };
     try {
       await withTempRepo({}, async (repo) => {
-        installFixture(repo);
+        const scopeRoot = mkdtempSync(join(tmpdir(), 'gateforge-webhook-scope-'));
+        keyDirectories.push(scopeRoot);
+        const scopeFile = join(scopeRoot, 'deliveries.json');
+        installFixture(repo, scopeFile);
         repo.git(['add', '-A']);
         repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'webhook fixture']);
-        const receiver = await startReceiver();
+        const receiver = await startReceiver(scopeFile);
         const proxy = await startAttestationProxy(receiver.url, FINGERPRINT);
         try {
           const config = loadConfigAt(repo.root);
@@ -521,6 +600,9 @@ describe('webhook namespace: engine-level end-to-end (plan 2026-09-25)', () => {
             GATEFORGE_TARGET_BASE_URL: proxy.url,
             GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
             GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
+            // The approved fixture/actor provider is engine-side input:
+            // without it every strong case blocks fail-closed.
+            GATEFORGE_FIXTURE_PROVIDER: join(repo.root, '.gateforge/fixture-provider.mjs'),
           };
           setEnv(env);
           // The change under test: one line of the receiver's source.
@@ -531,27 +613,23 @@ describe('webhook namespace: engine-level end-to-end (plan 2026-09-25)', () => {
           const report = parseReport(run);
           const byId = new Map(report.verdicts.map((entry) => [entry.obligationId, entry]));
           const truth = WEBHOOK_IDS.map((id) => `${id} -> ${byId.get(id)?.verdict ?? '<absent>'}: ${byId.get(id)?.reason ?? '<no verdict>'}`);
-          expect(run.code, `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`).toBe(1);
-          // PHASE 0 TRUTH (measured, not assumed): the owner-declared
-          // behavior document compiles three real webhook obligations
-          // and the grader reaches them — none is `satisfied`, and each
-          // names the case that produced no evidence.
+          expect(run.code, `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`).toBe(0);
+          // The engine drove all three cases itself and read the delivery
+          // log back through the reviewed adapter: the valid signature is
+          // accepted and recorded, the forged one is rejected with the log
+          // UNCHANGED, and the replay leaves exactly one row.
           for (const id of WEBHOOK_IDS) {
             expect(byId.get(id), `${id} is missing from the report:\n${truth.join('\n')}`).toBeDefined();
-            expect(byId.get(id)?.verdict, truth.join('\n')).toBe('missing');
-            expect(byId.get(id)?.reason).toContain('BEHAVIOR_CASE_MISSING');
+            expect(byId.get(id)?.verdict, truth.join('\n')).toBe('satisfied');
           }
-          // The suite itself could not prove: the witness it was pointed
-          // at has no behavior catalog, because no supervisor code path
-          // binds the compiled one. That is the named missing piece, and
-          // the run's own failure artifact says so in words.
-          expect(run.stdout).toContain('RUN_INCOMPLETE');
-          const failures = readFileSync(join(repo.root, '.gateforge/test-gates/failures.json'), 'utf8');
-          expect(failures).toContain('no behavior catalog is bound to this run');
-          expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+          expect(run.stdout).not.toContain('RUN_INCOMPLETE');
+          expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(true);
+          // The engine-side signing secret never reaches a sealed record.
+          const records = readFileSync(join(repo.root, '.gateforge/test-gates/records.json'), 'utf8');
+          expect(records).not.toContain('gateforge-webhook-loopback-secret-v1');
         } finally {
           await proxy.stop();
-          receiver.stop();
+          await receiver.stop();
         }
       });
     } finally {

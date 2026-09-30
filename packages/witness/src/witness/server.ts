@@ -2140,7 +2140,16 @@ async function handleBehaviorExecute(
   if (compiled === undefined) {
     throw new HttpError(400, `behavior/execute names unknown case '${caseId}' — cases resolve by canonical case id only`);
   }
-  const allowed = binding.assignments.get(session.testId);
+  // Assignment keys are the SUPERVISOR-REGISTERED test ids (the same
+  // trusted identity the expected set binds). A runner's own ad-hoc
+  // session id is not that identity, so the session resolves through the
+  // registration it was minted for; a session that carries no
+  // registration (no expected set) can only match its own id literally.
+  const allowed =
+    binding.assignments.get(session.testId) ??
+    (session.registered === null || session.registered.testId === null
+      ? undefined
+      : binding.assignments.get(session.registered.testId));
   if (allowed === undefined || !allowed.has(compiled.caseId)) {
     throw new HttpError(
       403,
