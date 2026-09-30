@@ -241,6 +241,49 @@ export function writeHttpRoutesView(stateDir: string, routes: readonly HttpRoute
 }
 
 /**
+ * Persists the route inventory the twin-shape recorder resolves
+ * request paths against (E64).
+ *
+ * It is the engine's own compiled `http.endpoint` list, written ONLY
+ * when the owner configured `enforcement.twinPaths`: a repository
+ * without that key never grows this file, and its runs stay
+ * byte-identical. The witness reads it so a recorded shape names a
+ * route TEMPLATE (`/accounts/{}`) instead of a concrete id.
+ */
+export function writeTwinInventory(path: string, templates: readonly string[]): void {
+  const document = {
+    schemaVersion: 1,
+    templates: [...new Set(templates)].sort(compareStrings),
+  };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${canonicalJson(document as unknown as JsonValue)}\n`, 'utf8');
+}
+
+/**
+ * Persists the twin shapes this run observed (E64): per test, the
+ * logical key, whether the session was observation-only, and the
+ * request SHAPES it exercised.
+ *
+ * Shapes and logical keys only — never a URL, a body or a
+ * non-allowlisted query value — so the document is safe to read, diff
+ * and paste into a bug. It is diagnostic: no gate reads it, and a
+ * shape in it can satisfy nothing.
+ */
+export function writeTwinShapes(
+  stateDir: string,
+  twins: readonly {
+    logicalKey: string;
+    observationOnly: boolean;
+    shapes: readonly { method: string; route: string; query?: Record<string, string> }[];
+  }[],
+): void {
+  writeStateFile(stateDir, 'twin-shapes.json', {
+    schemaVersion: 1,
+    twins: [...twins].sort((left, right) => compareStrings(left.logicalKey, right.logicalKey)),
+  } as unknown as JsonValue);
+}
+
+/**
  * Persists the run's effective-classification view (plan phase 5) as a
  * derived artifact for the verifier side (e.g. the witness service's
  * `GET /classifications` surface). NEVER authoritative engine input: the

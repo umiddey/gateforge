@@ -2,8 +2,10 @@
  * Witness-side data shapes (pin #7 wire + adapter contract, pin #8).
  */
 import type { Server } from 'node:http';
-import type { EvidenceRecord, TracedSession, TrustTier } from '@gate-forge/core';
+import type { EvidenceRecord, TracedSession, TrustTier, TwinShape } from '@gate-forge/core';
 import type { ChaosOptions } from './chaos.js';
+import type { TwinShapePlan } from './twin-shapes.js';
+
 
 /**
  * Supervisor-issued session credential (plan Phase 1, work item 2): the
@@ -514,6 +516,39 @@ export interface TestSession {
    * suite-named frontend can never become the engine target.
    */
   engineSurface: { surface: Record<string, unknown> } | null;
+  /**
+   * Twin path coverage (E64): true when the supervisor marked this
+   * session OBSERVATION-ONLY (it is a raw twin). Such a session's
+   * requests are recorded as shapes and nothing else: every submission
+   * from it is refused, so it can issue no record, no attestation and
+   * satisfy nothing. Never true for a session with claims.
+   */
+  observationOnly: boolean;
+  /**
+   * The request shapes this session's proxied traffic exercised, in
+   * first-seen order. Computed at record time from the method and
+   * target, so no raw URL and no non-allowlisted query value is ever
+   * stored. Empty in every run that did not ask for twin shapes.
+   */
+  twinShapes: TwinShape[];
+}
+
+/** One test's recorded twin shapes, as the supervisor read surface returns them. */
+export interface TwinShapeReport {
+  /** The supervisor-issued test id (never a credential). */
+  testId: string;
+  /** True when this session was marked observation-only (a raw twin). */
+  observationOnly: boolean;
+  /** The shapes it exercised, in first-seen order. */
+  shapes: readonly TwinShape[];
+}
+
+/** `GET /runs/twin-shapes` response (SUPERVISOR ONLY). */
+export interface TwinShapesResponse {
+  /** True when this run recorded twin shapes at all. */
+  enabled: boolean;
+  /** Per test id, sorted; empty when the run recorded nothing. */
+  twins: readonly TwinShapeReport[];
 }
 
 /**
@@ -581,6 +616,23 @@ export interface WitnessOptions {
    * bytes, status, headers and evidence semantics never move.
    */
   chaos?: ChaosOptions | null;
+  /**
+   * Twin path coverage (E64): the observation-only shape recording the
+   * proxy keeps for every request, so the CLI can compare a raw test
+   * with its witnessed twin by request shape. Null/absent is the
+   * byte-identical path: no shape is computed and none is stored. A
+   * shape is never evidence — it cannot issue a record, satisfy an
+   * obligation, or enter an attestation.
+   */
+  twinShapes?: TwinShapePlan | null;
+  /**
+   * The observation-only test ids the supervisor marked (E64): a raw
+   * twin's session may be observed but issues NOTHING. Every
+   * submission from such a session is refused, so "can satisfy
+   * nothing" is enforced by the witness rather than assumed of the
+   * suite.
+   */
+  observationOnlyTestIds?: readonly string[];
   /**
    * Observation-proxy mount prefix (with `proxyTarget`; e.g. `/api`).
    *

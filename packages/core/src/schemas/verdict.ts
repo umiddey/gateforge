@@ -93,6 +93,7 @@ export const CauseCodeSchema = z.enum([
   'ADAPTER_VOLATILE_FIELD_SKIPPED',
   'RESOURCE_SINGLETON_PER_TENANT',
   'RESPONSE_FIELD_MISSING_FROM_MODEL',
+  'TWIN_PATH_DIVERGENT',
 ]);
 
 /** Inferred cause-code union. */
@@ -179,4 +180,6 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
     'The frontend reads a field the response model does not declare: restore the field on the ' +
     'response model (or read the one it declares). A test that mocks the response proves nothing ' +
     'about this read',
+  TWIN_PATH_DIVERGENT:
+    'Make the raw test and its witnessed twin send the same request: align the shared helper defaults, or map the pair with `twinOf`',
 });

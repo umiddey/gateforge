@@ -109,12 +109,19 @@ import {
   QUARANTINE_DIR,
   resolveStrictnessMode,
   strictnessSummaryLine,
+  twinDivergenceDetail,
+  twinLinksFor,
+  twinPathDivergence,
   withoutQuarantinedBindings,
   type LoadedQuarantine,
   type Obligation,
   type TestCatalog,
   type TestMap,
+  type TestMapEntry,
   type TracedTestInput,
+  type TwinDivergence,
+  type TwinLink,
+  type TwinShape,
 } from '@gate-forge/core';
 import {
   buildWitnessedPytestChildEnv,
@@ -138,6 +145,10 @@ import {
   ENV_CHAOS_REORDER,
   ENV_CHAOS_SEED,
   ENV_PROXY_TARGET,
+  ENV_TWIN_INVENTORY,
+  ENV_TWIN_OBSERVATION_ONLY,
+  ENV_TWIN_QUERY_KEYS,
+  ENV_TWIN_SHAPES,
   type ExpectedSetResponse,
   type NativeInstance,
   type NativeListResult,
@@ -238,6 +249,8 @@ import {
   writeLastFullRunSummary,
   writeReport,
   writeRunRecord,
+  writeTwinInventory,
+  writeTwinShapes,
 } from '../state.js';
 import {
   loadConfigAt,
@@ -2148,6 +2161,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // The schedule the witness actually used (filled in before it stops);
   // null until then, and for every run without `--chaos`.
   let chaosSchedule: ChaosScheduleResponse[] | null = null;
+  // Twin path coverage (E64): the divergences this run found, filled in
+  // from the witness's recorded shapes before it stops. Empty for every
+  // run without `enforcement.twinPaths`, and empty again when a linked
+  // pair did not both run — a divergence needs two sides observed in
+  // the SAME run, never shapes carried over from another.
+  let twinDivergences: TwinDivergence[] = [];
   if (runnerName === 'pytest') {
     const configured = (config.diagnostics?.suites ?? []).filter((suite) => suite.runner === 'pytest');
     if (configured.length > 1) {
@@ -2666,6 +2685,29 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       }
     }
   }
+  // Twin path coverage (E64): the linked raw/witnessed pairs this run
+  // should compare, resolved BEFORE the suite runs so the witness can
+  // wire the proxy and mark the raw twins' sessions observation-only.
+  // Absent `enforcement.twinPaths` this is empty and the run is
+  // byte-identical to a repository that never heard of twins.
+  const twinPathsMode = config.enforcement?.twinPaths ?? null;
+  const twinLinks: TwinLink[] =
+    twinPathsMode === null || catalog === null
+      ? []
+      : twinLinksFor(
+          catalog.entries.map((entry) => ({ logicalKey: entry.logicalKey, title: entry.title })),
+          Object.fromEntries(
+            (behaviorSidecar?.tests ?? [])
+              .filter((entry): entry is TestMapEntry & { twinOf: string } => entry.twinOf !== undefined)
+              .map((entry) => [entry.key, entry.twinOf]),
+          ),
+        );
+  // The raw twin's runner test id: the id the supervisor's lifecycle
+  // spool and the witness's session channel both speak.
+  const twinObservationOnlyTestIds: string[] = twinLinks
+    .map((link) => plannedRows.find((row) => row.planned.logicalKey === link.raw)?.planned.frameworkId)
+    .filter((testId): testId is string => typeof testId === 'string' && testId.length > 0)
+    .sort(compareStrings);
   // Runner-agnostic expected set (plan 2026-09-25): a NON-Playwright
   // runner enumerates through the RunnerAdapter contract — the expected
   // set is fixed BEFORE the run from the runner's own collection, and
@@ -3230,6 +3272,18 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   writeObligations(stateDir, stateObligations(pipeline.policy.obligations, pipeline.graph));
   writeHttpRoutesView(stateDir, httpRoutes);
   writeClassificationsView(stateDir, pipeline.classificationsView);
+  // The route inventory a recorded twin shape resolves against, so a
+  // shape names a route template (`/accounts/{}`) and never a concrete
+  // id. Written ONLY when the owner configured twin coverage: a run
+  // without it never adds a state file.
+  const twinQueryKeys = config.enforcement?.twinQueryKeys ?? [];
+  const twinInventoryPath = join(stateDir, 'twin-inventory.json');
+  if (twinPathsMode !== null) {
+    writeTwinInventory(
+      twinInventoryPath,
+      httpRoutes.map((route) => route.canonicalPath).filter((template) => template.length > 0),
+    );
+  }
   let runToken = options.runToken ?? randomUUID();
   let spawnedWitness: Awaited<ReturnType<typeof startWitnessProcess>> | null = null;
   if (witnessUrl !== undefined) {
@@ -3316,6 +3370,26 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               [ENV_CHAOS_SEED]: String(chaosRun.seed),
               [ENV_CHAOS_MAX_DELAY_MS]: String(chaosRun.maxDelayMs),
               [ENV_CHAOS_REORDER]: chaosRun.reorder ? 'on' : 'off',
+              ...(appBase !== '' ? { [ENV_PROXY_TARGET]: appBase } : {}),
+            }),
+        // Twin path coverage (E64): the observation-only shape
+        // recording, the owner's query-key allowlist, the route
+        // inventory the shapes resolve against, and the raw twins whose
+        // sessions may issue nothing. Like chaos, the Playwright path
+        // needs the observation proxy wired explicitly (its sessions are
+        // engine-browser scoped and therefore proxy-free by default),
+        // because a shape can only come from a request the proxy saw.
+        // Without `enforcement.twinPaths` this spawn is byte-identical
+        // to the one it always was.
+        ...(twinPathsMode === null
+          ? {}
+          : {
+              [ENV_TWIN_SHAPES]: 'on',
+              ...(twinQueryKeys.length > 0 ? { [ENV_TWIN_QUERY_KEYS]: twinQueryKeys.join(',') } : {}),
+              [ENV_TWIN_INVENTORY]: twinInventoryPath,
+              ...(twinObservationOnlyTestIds.length > 0
+                ? { [ENV_TWIN_OBSERVATION_ONLY]: twinObservationOnlyTestIds.join(',') }
+                : {}),
               ...(appBase !== '' ? { [ENV_PROXY_TARGET]: appBase } : {}),
             }),
       });
@@ -3748,6 +3822,59 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         );
       }
     }
+    if (twinPathsMode !== null && effectiveWitnessUrl !== undefined && witnessVerifierKey !== undefined) {
+      // Twin path coverage (E64): the honest comparison. The shapes
+      // come from the witness's own per-session proxies, keyed by the
+      // runner test id the supervisor opened them for; a pair is
+      // compared only when BOTH twins were observed in this run, and a
+      // run that could not read them says so rather than reporting
+      // twins that agree because nobody looked.
+      const shapes = await supervisor.twinShapes();
+      if (shapes === null) {
+        writeLine(
+          io.stderr,
+          'test-gates: the recorded twin shapes could not be read — this run still reports, without the ' +
+            'TWIN_PATH_DIVERGENT check (an unread comparison is never a passing one)',
+        );
+      } else {
+        const logicalKeyByTestId = new Map<string, string>();
+        for (const row of plannedRows) {
+          const frameworkId = row.planned.frameworkId;
+          if (frameworkId !== null && frameworkId.length > 0) {
+            logicalKeyByTestId.set(frameworkId, row.planned.logicalKey);
+          }
+        }
+        const observed = new Map<string, { observationOnly: boolean; shapes: TwinShape[] }>();
+        for (const twin of shapes.twins) {
+          const logicalKey = logicalKeyByTestId.get(twin.testId);
+          if (logicalKey !== undefined) {
+            observed.set(logicalKey, { observationOnly: twin.observationOnly, shapes: [...twin.shapes] });
+          }
+        }
+        writeTwinShapes(
+          stateDir,
+          [...observed.entries()]
+            .sort((left, right) => compareStrings(left[0], right[0]))
+            .map(([logicalKey, entry]) => ({
+              logicalKey,
+              observationOnly: entry.observationOnly,
+              shapes: entry.shapes,
+            })),
+        );
+        for (const link of twinLinks) {
+          const witnessedShapes = observed.get(link.witnessed);
+          const rawShapes = observed.get(link.raw);
+          if (witnessedShapes === undefined || rawShapes === undefined) continue;
+          twinDivergences = [
+            ...twinDivergences,
+            ...twinPathDivergence(
+              { logicalKey: link.witnessed, shapes: witnessedShapes.shapes },
+              { logicalKey: link.raw, shapes: rawShapes.shapes },
+            ),
+          ];
+        }
+      }
+    }
     if (spawnedWitness !== null) {
       // Graceful stop (the same contract as the consumer teardown): the
       // witness appends its attested manifest envelope at shutdown, so
@@ -3946,6 +4073,22 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     cause: 'RUN_INCOMPLETE' as const,
     nextAction: CAUSE_NEXT_ACTIONS['RUN_INCOMPLETE'],
   }));
+  // Twin path coverage (E64): the owner-chosen strictness of the
+  // TWIN_PATH_DIVERGENT finding. `advisory` reports it and leaves the
+  // exit code exactly what the run already decided; `block` makes it a
+  // blocking entry. Absent configuration, or twins that agree, this is
+  // empty and the report keeps exactly the keys it always had.
+  const twinEntries: BlockingEntry[] = twinDivergences.map((divergence) => ({
+    kind: 'finding' as const,
+    resourceId: null,
+    name: null,
+    detail: twinDivergenceDetail(divergence),
+    location: null,
+    cause: 'TWIN_PATH_DIVERGENT' as const,
+    nextAction: CAUSE_NEXT_ACTIONS['TWIN_PATH_DIVERGENT'],
+  }));
+  const twinAdvisories = twinPathsMode === 'block' ? [] : twinEntries;
+  const twinBlocking = twinPathsMode === 'block' ? twinEntries : [];
   // An expired quarantine is ignored AND blocking: the owner let this
   // flake run long enough that nobody renewed it, so the required test
   // is back in the run and the stale escape hatch must be visible.
@@ -4160,6 +4303,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   const renderedReport = renderRun(evaluated.verdicts, {
     format,
     blocking: evaluated.blocking,
+    // Twin path coverage (E64): reported, never blocking, in advisory
+    // mode. An empty list adds no report key, so a run without twin
+    // findings keeps exactly the document it always had.
+    ...(twinAdvisories.length === 0 ? {} : { advisories: twinAdvisories }),
     waiverCounts: evaluated.waiverCounts,
     run: manifest,
     toolVersion: VERSION,
@@ -4185,6 +4332,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         renderRun(evaluated.verdicts, {
           format: 'json',
           blocking: evaluated.blocking,
+          ...(twinAdvisories.length === 0 ? {} : { advisories: twinAdvisories }),
           waiverCounts: evaluated.waiverCounts,
           run: manifest,
           toolVersion: VERSION,

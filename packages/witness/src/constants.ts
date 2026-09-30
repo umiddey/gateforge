@@ -76,6 +76,34 @@ export const ENV_CHAOS_SEED = 'GATEFORGE_CHAOS_SEED';
 export const ENV_CHAOS_MAX_DELAY_MS = 'GATEFORGE_CHAOS_MAX_DELAY_MS';
 /** Whether a later response may be released before an earlier one. */
 export const ENV_CHAOS_REORDER = 'GATEFORGE_CHAOS_REORDER';
+/**
+ * Twin path coverage (E64): the observation-only shape recording a run
+ * turns on with `enforcement.twinPaths`. Set by the orchestrating CLI
+ * on the SPAWNED witness only; absent means no proxy wiring, no
+ * recorded shape and a byte-identical run.
+ */
+export const ENV_TWIN_SHAPES = 'GATEFORGE_TWIN_SHAPES';
+/**
+ * Owner-declared query keys whose VALUES a recorded twin shape may
+ * carry (`enforcement.twinQueryKeys`). Absent or empty = keys only, so
+ * a non-allowlisted value can never reach a report or the state
+ * directory.
+ */
+export const ENV_TWIN_QUERY_KEYS = 'GATEFORGE_TWIN_QUERY_KEYS';
+/**
+ * Absolute path to the engine-written route inventory the shapes
+ * resolve against (so a shape names a route template, never a concrete
+ * id). Absent = the identifier-blind fallback, never a raw path.
+ */
+export const ENV_TWIN_INVENTORY = 'GATEFORGE_TWIN_INVENTORY';
+/**
+ * Comma-separated runner test ids the supervisor marked
+ * OBSERVATION-ONLY (E64): a raw twin's session may be observed but
+ * issues nothing. Set by the orchestrating CLI on the SPAWNED witness
+ * only; a mark can never carry claims, so a witnessed test is never
+ * demoted by it.
+ */
+export const ENV_TWIN_OBSERVATION_ONLY = 'GATEFORGE_TWIN_OBSERVATION_ONLY';
 /** Observation proxy target (loopback base URL the proxy forwards to). */
 export const ENV_PROXY_TARGET = 'GATEFORGE_PROXY_TARGET';
 /**

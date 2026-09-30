@@ -47,6 +47,7 @@ import { startWitness, WitnessStartupError } from './server.js';
 import { loadFixtureProvider } from './fixture-provider.js';
 import { openConfiguredQueueChannel } from '../queue/observer.js';
 import { parseChaosOptions } from './chaos.js';
+import { parseTwinShapePlan, type TwinShapePlan } from './twin-shapes.js';
 import {
   ENV_ADAPTER_BASE_URL,
   ENV_ADAPTERS_DIR,
@@ -62,6 +63,10 @@ import {
   ENV_STATE_DIR,
   ENV_TARGET_BASE_URL,
   ENV_TARGET_FINGERPRINT,
+  ENV_TWIN_INVENTORY,
+  ENV_TWIN_OBSERVATION_ONLY,
+  ENV_TWIN_QUERY_KEYS,
+  ENV_TWIN_SHAPES,
   ENV_WITNESS_VERIFIER_KEY,
 } from '../constants.js';
 import type { WitnessHandle } from './types.js';
@@ -157,6 +162,40 @@ function flagOrEnv(
 }
 
 /**
+ * The twin shape plan, or a fail-closed startup error.
+ *
+ * A malformed switch or an empty allowlist entry is the owner's
+ * configuration speaking nonsense; starting anyway would produce a
+ * run whose findings quietly mean something else.
+ */
+function parseTwinShapePlanOrFail(input: {
+  shapes: string | undefined;
+  queryKeys: string | undefined;
+  inventoryPath: string | undefined;
+}): TwinShapePlan | null {
+  try {
+    return parseTwinShapePlan(input);
+  } catch (error) {
+    throw new WitnessStartupError((error as Error).message);
+  }
+}
+
+/**
+ * The runner test ids the supervisor marked observation-only.
+ *
+ * Split from the engine's own comma-separated value and trimmed, so a
+ * mark can never carry whitespace into an identity. An absent value is
+ * the honest "no raw twin in this run".
+ */
+function observationOnlyTestIdsFrom(raw: string | undefined): string[] {
+  if (raw === undefined || raw === '') return [];
+  return raw
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+}
+
+/**
  * Reads env + argv and starts the witness.
  *
  * Args:
@@ -207,6 +246,18 @@ export async function main(
       maxDelayMs: env[ENV_CHAOS_MAX_DELAY_MS],
       reorder: env[ENV_CHAOS_REORDER],
     }),
+    // Twin path coverage (E64): the observation-only shape recording,
+    // the owner's query-key allowlist, and the raw twins the supervisor
+    // marked observation-only. Environment-only and absent by default,
+    // so a run without `enforcement.twinPaths` is byte-identical; a
+    // malformed switch or allowlist is a startup error the owner must
+    // see rather than a silently key-only run.
+    twinShapes: parseTwinShapePlanOrFail({
+      shapes: env[ENV_TWIN_SHAPES],
+      queryKeys: env[ENV_TWIN_QUERY_KEYS],
+      inventoryPath: env[ENV_TWIN_INVENTORY],
+    }),
+    observationOnlyTestIds: observationOnlyTestIdsFrom(env[ENV_TWIN_OBSERVATION_ONLY]),
     mountPath: flagOrEnv(flags, 'mount-path', env[ENV_MOUNT_PATH]),
     stateDir: flagOrEnv(flags, 'state-dir', env[ENV_STATE_DIR]),
     classificationsPath: flagOrEnv(flags, 'classifications', env[ENV_CLASSIFICATIONS]),
