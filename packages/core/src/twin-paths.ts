@@ -214,3 +214,102 @@ export function twinDivergenceDetail(divergence: TwinDivergence): string {
     `'${divergence.missingFrom}' — the twins do not cover the same request path`
   );
 }
+
+/**
+ * The tag a title carries to declare itself the WITNESSED twin. It is
+ * part of the title convention, not a gate: the link is a naming
+ * convention an owner follows, and the engine only reads it when the
+ * owner switched twin coverage on.
+ */
+export const WITNESSED_TITLE_TAG = '[witnessed]';
+
+/** The one catalog fact a twin link needs: which test, and its title. */
+export interface TwinCandidate {
+  /** Stable logical key (the catalog's `logicalKey`). */
+  logicalKey: string;
+  /** The test's own title (the last segment of its title path). */
+  title: string;
+}
+
+/** One linked raw/witnessed pair, with the reason the link exists. */
+export interface TwinLink {
+  /** The witnessed test: the one the run grades. */
+  witnessed: string;
+  /** The raw test it is the twin of. */
+  raw: string;
+  /** Which rule produced the link (for the run's own explanation). */
+  source: 'test-map' | 'title';
+}
+
+/**
+ * Resolves the raw/witnessed pairs a run should compare.
+ *
+ * Two rules, in that order, and never a guess:
+ * - `twinOf`: the explicit test-map declaration — the only link that
+ *   survives a rename of either test, because it names logical keys.
+ * - the title convention: a witnessed title that carries
+ *   {@link WITNESSED_TITLE_TAG} links to the untagged title with the
+ *   same stem, either bare (`X`) or with a `raw` suffix (`X raw`).
+ *
+ * A link is only returned when BOTH tests exist in the catalog: a
+ * dangling `twinOf` or a title with no partner names nothing, because
+ * a pair with one missing side has no shapes to compare and a finding
+ * about it would be a ghost.
+ *
+ * Args:
+ *   candidates: every test the catalog knows (logical key + title).
+ *   twinOf: explicit `witnessed -> raw` logical-key declarations.
+ *
+ * Returns:
+ *   TwinLink[]: every resolvable pair, deterministic in witnessed key.
+ */
+export function twinLinksFor(
+  candidates: readonly TwinCandidate[],
+  twinOf: Readonly<Record<string, string>> = {},
+): TwinLink[] {
+  const known = new Set(candidates.map((candidate) => candidate.logicalKey));
+  const links = new Map<string, TwinLink>();
+  for (const witnessed of [...candidates].sort((left, right) => compareStrings(left.logicalKey, right.logicalKey))) {
+    const declared = twinOf[witnessed.logicalKey];
+    if (declared !== undefined && known.has(declared) && declared !== witnessed.logicalKey) {
+      links.set(witnessed.logicalKey, { witnessed: witnessed.logicalKey, raw: declared, source: 'test-map' });
+      continue;
+    }
+    const tagIndex = witnessed.title.lastIndexOf(WITNESSED_TITLE_TAG);
+    if (tagIndex === -1) continue;
+    const stem = witnessed.title.slice(0, tagIndex).trim();
+    if (stem === '') continue;
+    // `X [witnessed]` pairs with `X raw` first, then with a bare `X`:
+    // the explicit raw twin is the owner's clearer statement, and a
+    // same-title bare match is only taken when nothing else claims it.
+    const partner = candidates.find(
+      (candidate) =>
+        candidate.logicalKey !== witnessed.logicalKey &&
+        !candidate.title.includes(WITNESSED_TITLE_TAG) &&
+        candidate.title === `${stem} raw`,
+    );
+    const bare =
+      partner ??
+      candidates.find(
+        (candidate) =>
+          candidate.logicalKey !== witnessed.logicalKey &&
+          !candidate.title.includes(WITNESSED_TITLE_TAG) &&
+          candidate.title === stem,
+      );
+    if (partner === undefined && bare !== undefined) {
+      // A bare `X` may also be the stem of another witnessed title's
+      // partner; the first witnessed key (sorted) owns it, so the same
+      // raw test is never reported as the twin of two witnessed ones.
+      const alreadyLinked = [...links.values()].some((link) => link.raw === bare.logicalKey);
+      if (alreadyLinked) continue;
+    }
+    if (bare !== undefined) {
+      links.set(witnessed.logicalKey, {
+        witnessed: witnessed.logicalKey,
+        raw: bare.logicalKey,
+        source: 'title',
+      });
+    }
+  }
+  return [...links.values()].sort((left, right) => compareStrings(left.witnessed, right.witnessed));
+}

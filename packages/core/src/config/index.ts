@@ -184,6 +184,31 @@ export const EnforcementConfigSchema = z
           'resealRuntimeFiles entries must be repo-root-relative globs (no absolute path, no backslash, no "." or ".." segment)',
       })
       .optional(),
+    /**
+     * Twin path coverage (E64, additive; ABSENT = off). A raw test and
+     * its witnessed twin that the catalog/test-map links are compared by
+     * REQUEST SHAPE: the run reports `TWIN_PATH_DIVERGENT` when the two
+     * exercised different request paths (the shared-helper-defaults bug:
+     * `?tab=all` in one, `?tab=open` in the other, so "green" proved
+     * nothing about the path the witnessed twin covered).
+     *
+     * `advisory` reports the finding and leaves the exit code alone;
+     * `block` makes it a blocking entry (exit 1). Absent, no proxy is
+     * wired, no shape is recorded, no finding exists, and the report is
+     * byte-identical to a run without this key.
+     */
+    twinPaths: z.enum(['advisory', 'block']).optional(),
+    /**
+     * Owner-declared query keys whose VALUES a twin shape may carry
+     * (`enforcement.twinQueryKeys`). Absent or empty = keys only: a
+     * shape says a parameter was sent and never says what it said, so
+     * no non-allowlisted value can reach a report or the state
+     * directory. The default is the safe one precisely because a shape
+     * list is something an owner pastes into a bug.
+     */
+    twinQueryKeys: z
+      .array(z.string().min(1, 'twinQueryKeys entries must be non-empty query-key names'))
+      .optional(),
   })
   .strict();
 

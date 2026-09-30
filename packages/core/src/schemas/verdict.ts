@@ -91,6 +91,7 @@ export const CauseCodeSchema = z.enum([
   'MIGRATION_SCRATCH_UNSAFE',
   'ADAPTER_CANNOT_WITNESS',
   'ADAPTER_VOLATILE_FIELD_SKIPPED',
+  'TWIN_PATH_DIVERGENT',
 ]);
 
 /** Inferred cause-code union. */
@@ -169,4 +170,6 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
     'Give the adapter a complete paged collection read (or a natural key) so a create can be proven; until then the engine cannot witness that obligation',
   ADAPTER_VOLATILE_FIELD_SKIPPED:
     'Review the adapter: it declares this field server-computed, so the entered value was not echo-checked. Drop the declaration if the app should store what was entered',
+  TWIN_PATH_DIVERGENT:
+    'Make the raw test and its witnessed twin send the same request: align the shared helper defaults, or map the pair with `twinOf`',
 });

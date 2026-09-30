@@ -149,6 +149,7 @@ import {
   type HttpRouteCandidate,
   type RecordOrigin,
   type TracedSession,
+  type TwinShape,
 } from '@gate-forge/core';
 import { canonicalOf } from '../json.js';
 import {
@@ -225,10 +226,13 @@ import type {
   SessionReleaseRequest,
   SessionResolveRequest,
   TestSession,
+  TwinShapeReport,
+  TwinShapesResponse,
   WitnessHandle,
   WitnessOptions,
 } from './types.js';
 import { ChaosScheduler, chaosRouteKey, type ChaosOptions, type ChaosScheduleEntry } from './chaos.js';
+import { recordTwinShape, type TwinShapePlan } from './twin-shapes.js';
 import type { FixtureLease } from './fixture-provider.js';
 import { validateScopeSnapshot } from './behavior.js';
 import { BEHAVIOR_BODY_LIMIT_BYTES, BehaviorDriverError, driveBehaviorRequest } from './behavior-request.js';
@@ -495,6 +499,13 @@ interface WitnessState {
    */
   chaos: { options: ChaosOptions; entries: ChaosScheduleEntry[] } | null;
   /**
+   * Twin path coverage (E64): the shape plan this run's proxy records
+   * with, plus the supervisor's observation-only marks. Null in every
+   * run that did not configure `enforcement.twinPaths` — the
+   * byte-identical path, where no shape is computed and none is stored.
+   */
+  twinShapes: { plan: TwinShapePlan; observationOnlyTestIds: Set<string> } | null;
+  /**
    * The expected test set the supervisor registered BEFORE the run
    * (enforcement-review fix 2a), keyed by the identity join key
    * (project, file, titlePath). Once bound, `/sessions/open` accepts
@@ -702,6 +713,16 @@ async function startObservedProxy(
         upstream.on('end', () => {
           const seq = (state.observedSeq += 1);
           const method = (req.method ?? 'GET').toUpperCase();
+          // Twin path coverage (E64): the request's SHAPE, computed at
+          // record time from the method and the target the proxy
+          // already saw. Only the shape is kept — a route template and
+          // the allowlisted query values — so the raw URL never enters
+          // the shape list an owner pastes into a bug. Absent a plan
+          // this line does not exist for the run.
+          const twinSession = sessionId === null ? undefined : state.sessions.get(sessionId);
+          if (twinSession !== undefined && state.twinShapes !== null) {
+            recordTwinShape(twinSession.twinShapes, method, forwardUrl, state.twinShapes.plan);
+          }
           const bodySnapshot = Buffer.concat(snapshot);
           state.observed.push({
             method,
@@ -1007,6 +1028,10 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
       options.chaos === undefined || options.chaos === null
         ? null
         : { options: options.chaos, entries: [] },
+    twinShapes:
+      options.twinShapes === undefined || options.twinShapes === null
+        ? null
+        : { plan: options.twinShapes, observationOnlyTestIds: new Set(options.observationOnlyTestIds ?? []) },
     expectedTests: new Map(),
     enumerationDigest: null,
     behaviorCatalog: null,
@@ -1801,6 +1826,25 @@ async function handleRequest(
       sendJson(res, 200, {
         chaos: state.chaos === null ? null : { ...state.chaos.options, schedule: state.chaos.entries },
       });
+      return;
+    }
+    if (req.method === 'GET' && path === '/runs/twin-shapes') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      // Twin path coverage (E64): the request SHAPES each test's
+      // session exercised, and nothing else — no URL, no body, no
+      // non-allowlisted query value. `enabled: false` is the honest
+      // answer for a run that never configured twin coverage, and it
+      // arrives with an empty list rather than a guess.
+      const twins: TwinShapeReport[] = [...state.sessions.values()]
+        .filter((session) => session.twinShapes.length > 0)
+        .map((session) => ({
+          testId: session.testId,
+          observationOnly: session.observationOnly,
+          shapes: session.twinShapes,
+        }))
+        .sort((left, right) => compareStrings(left.testId, right.testId));
+      const response: TwinShapesResponse = { enabled: state.twinShapes !== null, twins };
+      sendJson(res, 200, response);
       return;
     }
     if (req.method === 'GET' && path === '/runs/execution-trace') {
@@ -2979,6 +3023,14 @@ async function handleSessionOpen(
     }
     claims = [...seen].sort(compareStrings);
   }
+  // Twin path coverage (E64): the supervisor marks a RAW twin's session
+  // observation-only, and the mark is decided HERE, engine-side, from
+  // the run's own registered set — never from a suite-supplied flag.
+  // An observation-only session is refused every submission below, so
+  // it can issue no record, no attestation and satisfy nothing; what it
+  // contributes is the request SHAPES its proxy saw.
+  const observationOnly =
+    claims.length === 0 && (state.twinShapes?.observationOnlyTestIds.has(testId) ?? false);
   const sessionId = randomUUID();
   const session: TestSession = {
     sessionId,
@@ -3015,6 +3067,8 @@ async function handleSessionOpen(
     // validated consumer descriptor + loopback app base the engine
     // drives for this session. Null until the fixture registers it.
     engineSurface: null,
+    observationOnly,
+    twinShapes: [],
   };
   // Session attribution channel (plan Phase 1): a dedicated loopback
   // proxy port whose traffic is attributed to THIS session. Exists only
@@ -3247,6 +3301,20 @@ function requireOpenSession(state: WitnessState, body: Record<string, unknown>):
       409,
       `session for testId '${session.testId}' was sealed at tick ${String(session.sealedTick)}: ` +
         'late submissions after session close are rejected (no post-hoc record injection)',
+    );
+  }
+  // Twin path coverage (E64): an OBSERVATION-ONLY session (a raw twin)
+  // is refused every submission. Its requests were recorded as shapes
+  // and that is all it may ever contribute: no record, no attestation,
+  // no interval, nothing that can satisfy an obligation. The refusal
+  // is engine-side, so "the raw twin proves nothing" is enforced
+  // rather than a promise the suite makes about itself.
+  if (session.observationOnly) {
+    throw new HttpError(
+      403,
+      `session for testId '${session.testId}' is OBSERVATION-ONLY (twin path coverage): its requests ` +
+        'were recorded as shapes and it can issue no record, no attestation and satisfy nothing — ' +
+        'a raw twin is a comparison subject, never a witness',
     );
   }
   return session;

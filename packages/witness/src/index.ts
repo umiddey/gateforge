@@ -14,3 +14,6 @@ export * from './adapter/index.js';
 // be recomputed from (seed, session, route key, k) without replaying
 // the whole suite - that is what makes a finding reproducible.
 export * from './witness/chaos.js';
+// The observation-only twin shape plan (E64). Exported so a caller can
+// compute a run's own shapes from the same vocabulary the proxy records.
+export * from './witness/twin-shapes.js';
