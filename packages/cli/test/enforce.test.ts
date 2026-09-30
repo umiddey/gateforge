@@ -288,13 +288,18 @@ describe('gateforge enforce', () => {
   }, 120_000);
 
   it('generates the registry workflow byte-identically when no source is declared', () => {
-    // Frozen default bytes: the shipped template's every byte, hashed.
-    // A release that never declares a source must keep today's output
-    // exactly, so the golden digest moves only with a deliberate change.
-    expect(createHash('sha256').update(renderGithubActionsTemplate()).digest('hex')).toBe(
-      // The digest of the registry-only workflow as shipped before the
-      // engine-source variable existed — one byte of drift fails here.
-      '3a00711405a80e7246715e1cdce9d53dbc4f8dfd5afd977edcfff6789dd7c957',
+    // Frozen default bytes: the shipped template's every byte, hashed with
+    // the release version replaced by a token (the pin moves with every
+    // release; nothing else may). A release that never declares a source
+    // must keep today's output exactly, so the golden digest moves only
+    // with a deliberate change.
+    expect(
+      createHash('sha256').update(renderGithubActionsTemplate().replaceAll(VERSION, '<VERSION>')).digest('hex'),
+    ).toBe(
+      // The registry-only workflow as shipped before the engine-source
+      // variable existed (0.7.1 bytes, version tokenized) — one byte of
+      // drift fails here.
+      '4834bc33bf0206eacf40644c7f6944e897da363d05b469b6223489debbd703b6',
     );
     expect(renderGithubActionsTemplate()).toContain(
       '      - name: Install Gateforge\n        run: npm install --no-save --package-lock=false @gate-forge/cli@' +

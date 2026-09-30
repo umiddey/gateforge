@@ -123,7 +123,7 @@ describe('fastapi detector (subprocess, real python)', () => {
     const computed = await runDiscover(['simple/computed.py']);
     expect(computed.unresolved.map((entry) => entry['code'])).toContain('FASTAPI_PREFIX_UNRESOLVED');
     const literal = await runDetector(['simple/literal_prefix.py']);
-    expect(literal.unresolved.map((entry) => entry['code'])).not.toContain('FASTAPI_PREFIX_UNRESOLVED');
+    expect(literal.unresolved.map((entry) => (entry as Record<string, unknown>)['code'])).not.toContain('FASTAPI_PREFIX_UNRESOLVED');
     expect(effectivePaths(literal)).toEqual(['GET /computed/x']);
   });
 

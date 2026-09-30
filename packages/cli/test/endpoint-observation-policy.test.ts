@@ -166,14 +166,16 @@ const GOLDEN_ABSENT = readFileSync(
 ).trim();
 
 /**
- * The same bytes with the per-invocation (`runId`) and per-machine
- * (engine source path) values normalized, so two runs of the SAME engine
- * on the SAME repository bytes compare exactly.
+ * The same bytes with the per-invocation (`runId`), per-machine (engine
+ * source path) and per-release (engine version) values normalized, so two
+ * runs of engines built from the SAME code on the SAME repository bytes
+ * compare exactly.
  */
 function normalizedReport(stdout: string): string {
   return stdout
     .replace(/"runId":"[^"]+"/, '"runId":"<run-id>"')
     .replace(/"source":"local path [^"]+"/, '"source":"<engine-source>"')
+    .replace(/("engine":\{[^}]*"version":")[^"]+"/, '$1<engine-version>"')
     .trim();
 }
 
