@@ -7,7 +7,11 @@
  *
  * The child env is now built from an explicit allowlist, never from the
  * ambient environment wholesale:
- * - system basics the runner needs (PATH/HOME, locale, temp dirs);
+ * - system basics the runner needs (PATH/HOME, locale, temp dirs) plus
+ *   the operator-set `PLAYWRIGHT_BROWSERS_PATH` cache directory, which
+ *   the readiness check resolves through the same name (without it the
+ *   doctor green-lights one cache while the child launches from
+ *   `$HOME/.cache/ms-playwright`);
  * - the supervisor-supplied run variables (`RunnerExecutionEnv.vars` —
  *   already sanitized by the CLI);
  * - NON-secret `GATEFORGE_*` run flags from the ambient environment.
@@ -109,7 +113,22 @@ export const RUNNER_GATEFORGE_ALLOWLIST: readonly string[] = [
   'GATEFORGE_REPORTER_FAIL_RUN',
 ];
 
-/** System basics (path/home/locale/temp) the runner needs to function. */
+/**
+ * System basics (path/home/locale/temp) the runner needs to function,
+ * plus the one operator-set CACHE PATH the runner resolves through:
+ * `enforcement doctor` reads the browser cache through
+ * `PLAYWRIGHT_BROWSERS_PATH` and falls back to `$HOME/.cache/ms-playwright`
+ * (`cli/playwright-browsers.ts` `defaultBrowsersPath`), so the child
+ * must see the same variable or the doctor green-lights one directory
+ * while the run launches from another (every test then dies with
+ * `Executable doesn't exist`). It is a directory an operator chose, never
+ * a secret — the same class as `HOME` and the XDG names the CLI already
+ * forwards. The witnessed pytest/session children need no such entry:
+ * they inherit the ambient environment minus every `GATEFORGE_*` name
+ * ({@link buildWitnessedPytestChildEnv},
+ * {@link buildWitnessedSessionRunnerEnv}), so this variable already
+ * crosses there.
+ */
 export const RUNNER_SYSTEM_ALLOWLIST: readonly string[] = [
   'PATH',
   'HOME',
@@ -121,6 +140,7 @@ export const RUNNER_SYSTEM_ALLOWLIST: readonly string[] = [
   'TMPDIR',
   'TEMP',
   'TMP',
+  'PLAYWRIGHT_BROWSERS_PATH',
 ];
 
 /**

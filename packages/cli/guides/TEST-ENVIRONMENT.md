@@ -230,6 +230,8 @@ Under `CI=true` the default is already `stderr`; locally it is off, and a local 
 
 **Example:** With your config in `e2e/`, run `cd e2e && npx playwright install chromium` (add `firefox`/`webkit` if your projects use them).
 
+**A cache you choose:** if you set `PLAYWRIGHT_BROWSERS_PATH` (a common way to keep browsers in a CI cache mount), install into THAT directory and leave the variable set for the run. The supervised Playwright child receives it, so `enforcement doctor` and the run read the same cache — the doctor never reports one directory ready while the tests launch from another.
+
 ## Keep the runner quiet
 
 **Rule:** Keep concurrent work below the machine's CPU count. Prefer a quiet runner for witnessed tests.
