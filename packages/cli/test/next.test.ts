@@ -282,6 +282,46 @@ describe('gateforge next', () => {
     });
   });
 
+  it('explains the first real question before asking it (F8)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const plugin = readFileSync(join(repo.root, 'plugin.mjs'), 'utf8');
+      repo.writeFiles({
+        'plugin.mjs': plugin.replace(
+          'return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };',
+          `const httpResource = {
+             schemaVersion: 1,
+             kind: 'http.contract',
+             source: 'src/http.ts',
+             location: { file: 'src/http.ts', line: 1, col: 0 },
+             detectorVersion: '1.0.0',
+             attributes: { role: 'server-route', method: 'DELETE', normalizedPath: '/items/{item_id}', rawPath: '/items/{item_id}', framework: 'express', handlerSymbol: 'deleteItem' },
+             id: 'http.contract:delete',
+           };
+           resources.push(httpResource);
+           return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };`,
+        ),
+      });
+      const result = await runCli(repo, ['next']);
+      expect(result.code).toBe(1);
+      const lines = result.stdout.split('\n');
+      const questionIndex = lines.findIndex((line) => line.startsWith('question: '));
+      expect(questionIndex).toBeGreaterThan(0);
+      // ONE plain line, immediately BEFORE the question, that says what
+      // is asked, why it cannot be read from the code, and what each
+      // answer does.
+      const explanation = lines[questionIndex - 1] ?? '';
+      expect(lines.slice(0, questionIndex).filter((line) => line.startsWith('about this question'))).toHaveLength(1);
+      expect(explanation.startsWith('about this question: ')).toBe(true);
+      expect(explanation).toContain('no data plane');
+      for (const answer of ['tenant', 'master', 'global']) {
+        expect(explanation).toContain(answer);
+      }
+      expect(explanation).toContain('classify plane');
+      expect(explanation).toContain('internal rule');
+    });
+  });
+
 });
 
 describe('gateforge next: behavior ranking (plan §5)', () => {

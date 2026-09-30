@@ -223,6 +223,15 @@ function unresolvedRouteGuidance(
     return `gateforge classify plane ${shellQuote(source)} ${plane} --reason ${shellQuote(reason)} --confirm`;
   });
   return [
+    // One plain line BEFORE the question: a new repo meets this
+    // question first, and no shipped document prepares anyone for it.
+    // It says what is being asked, why only the owner can answer it,
+    // and what each answer does next — so the question is answerable
+    // from the output alone.
+    'about this question: this route has no data plane, so Gateforge cannot tell whether its records are ' +
+      'per-tenant, shared master data, or global — that is an owner decision no detector can read from the ' +
+      'code. Answer once, then run only the `classify plane` command for that answer (tenant / master / ' +
+      'global), or, if the route is not used by real users, the internal rule printed at the end.',
     `question: ${routeName} — is this route used by real users, and which data plane owns its records?`,
     'This edits a classification input; re-approve any approved policy pin before strict gates run.',
     "The plane command below needs the owner-reviewed '.gateforge/planes.json' first — run this once to create it:",
