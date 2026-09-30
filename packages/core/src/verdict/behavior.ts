@@ -389,6 +389,11 @@ function scopeDelta(
 
 type RuleGrade = { ok: true } | { ok: false; reason: string };
 
+/** Whether a declared state rule is an `attempts` rule (graded only over a queue observation). */
+function isAttemptsRule(rule: unknown): boolean {
+  return typeof rule === 'object' && rule !== null && 'kind' in rule && rule.kind === 'attempts';
+}
+
 /** Grades one state rule; records explained identities for atomicity. */
 function gradeStateRule(
   obligationId: string,
@@ -405,7 +410,7 @@ function gradeStateRule(
       ok: false,
       reason:
         `'${obligationId}': 'attempts' rules are graded over the engine's own queue ` +
-        "observation, not a scope snapshot — declare the case on the 'engine-task' channel",
+        "observation, not a scope snapshot — declare the case on the 'engine-task' channel; blocked, never satisfied",
     };
   }
   if (typeof rule['scope'] !== 'string') {
@@ -1059,9 +1064,7 @@ function gradeRequiredCase(
   const explained = new Map<string, ExplainedLedger>();
   const scopeKeyOf = (effectId: string): string | null =>
     compiled.effects.find((effect) => effect.id === effectId)?.scope ?? null;
-  let sawAttemptsRule = false;
   for (const rule of compiled.definition.expect.state) {
-    if ((rule as { kind?: unknown }).kind === 'attempts') sawAttemptsRule = true;
     const graded = gradeStateRule(
       obligationId,
       rule as unknown as Record<string, unknown>,
@@ -1072,13 +1075,14 @@ function gradeRequiredCase(
       scopeKeyOf,
     );
     if (!graded.ok) {
-      if (graded.reason.includes('Phase 8')) {
+      // No queue observation exists on this channel: the evidence is
+      // absent (fail closed), not contradicted.
+      if (isAttemptsRule(rule) || graded.reason.includes('Phase 8')) {
         return { status: 'missing', reason: graded.reason, recordIds: [recordId] };
       }
       return { status: 'invalid', reason: `${graded.reason} (BEHAVIOR_EFFECT_MISMATCH)`, recordIds: [recordId] };
     }
   }
-  void sawAttemptsRule;
 
   const declaredScopes = new Set(compiled.effects.map((effect) => effect.scope));
   // Read contracts additionally require zero delta on every scope.
@@ -1402,7 +1406,7 @@ function gradeSurfaceCase(
       scopeKeyOf,
     );
     if (!graded.ok) {
-      if (graded.reason.includes('Phase 8')) {
+      if (isAttemptsRule(rule) || graded.reason.includes('Phase 8')) {
         return { status: 'missing', reason: graded.reason, recordIds: [recordId] };
       }
       return { status: 'invalid', reason: `${graded.reason} (BEHAVIOR_EFFECT_MISMATCH)`, recordIds: [recordId] };
