@@ -1,0 +1,216 @@
+/**
+ * Twin path coverage (E64): the pure half of "did the raw test and its
+ * witnessed twin actually exercise the same requests?"
+ *
+ * The reported bug is not a red test. It is a GREEN one: a raw test and
+ * its witnessed twin shared a helper whose parameter defaults sent them
+ * down different paths — the list call carried `?tab=all` in one and
+ * `?tab=open` in the other — so "green three times" proved nothing
+ * about the path the witnessed twin covered, and nobody could say so
+ * from the run.
+ *
+ * This module turns two sets of observed requests into the honest
+ * question: which request shapes did one twin exercise that the other
+ * never did? The observation itself lives engine-side (the proxy); the
+ * comparison, the shape vocabulary and the finding text live here, in
+ * core, because they are domain logic and must be testable without a
+ * browser.
+ *
+ * What a shape may contain is deliberately narrow. A shape is a method,
+ * a route TEMPLATE (never a concrete id) and the values of an
+ * owner-declared query-key allowlist. No body, no header, no cookie, no
+ * non-allowlisted value: a shape list is something an owner pastes into
+ * a bug, so it must be impossible for it to carry a secret.
+ */
+import { compareStrings } from './graph/util.js';
+
+/** One observed request, as the observation-only proxy saw it. */
+export interface ObservedRequest {
+  /** Uppercase method (GET, POST, ...). */
+  method: string;
+  /** The request target: path plus query, exactly as it arrived. */
+  url: string;
+}
+
+/** The route inventory a shape resolves against (compiled endpoints). */
+export interface RouteInventory {
+  /** Route templates in the engine's `{}` grammar, e.g. `/accounts/{}`. */
+  templates: readonly string[];
+}
+
+/** Owner-declared query keys whose VALUES a shape may carry. */
+export interface TwinShapeOptions {
+  /** The compiled http.endpoint templates, when the run has them. */
+  inventory?: RouteInventory;
+  /**
+   * Query keys whose values may be recorded (`enforcement.twinQueryKeys`).
+   * Absent or empty = keys only: the shape says `tab` was sent and
+   * nothing about what it said.
+   */
+  queryKeys?: readonly string[];
+}
+
+/** One request shape: comparable, and free of anything identifying. */
+export interface TwinShape {
+  /** Uppercase method. */
+  method: string;
+  /** The route template the request resolved to (never a concrete id). */
+  route: string;
+  /** Allowlisted query values, sorted by key. Absent = keys only. */
+  query?: Record<string, string>;
+}
+
+/** One twin's observed request shapes, with the test that produced them. */
+export interface TwinObservation {
+  /** The logical key of the test that made these requests. */
+  logicalKey: string;
+  /** The shapes it exercised, in observation order. */
+  shapes: readonly TwinShape[];
+}
+
+/** One direction of a divergence between two twins. */
+export interface TwinDivergence {
+  /** The twin that DID exercise the shape. */
+  presentIn: string;
+  /** The twin that never did. */
+  missingFrom: string;
+  /** The shape itself (method, route template, allowlisted values). */
+  shape: TwinShape;
+}
+
+/** Segments that identify nothing: an id is an id wherever it appears. */
+const IDENTIFIER_SEGMENT = /^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+/** Splits a request target into its path and its decoded query pairs. */
+function splitTarget(url: string): { path: string; query: [string, string][] } {
+  const cut = url.search(/[?#]/);
+  const path = cut === -1 ? url : url.slice(0, cut);
+  const search = cut === -1 ? '' : url.slice(cut + 1).split('#')[0] ?? '';
+  const query =
+    search === ''
+      ? []
+      : search.split('&').map((pair) => {
+          const equals = pair.indexOf('=');
+          return equals === -1
+            ? ([pair, ''] as [string, string])
+            : ([pair.slice(0, equals), decodeURIComponent(pair.slice(equals + 1).replace(/\+/g, ' '))] as [
+                string,
+                string,
+              ]);
+        });
+  return { path: path === '' ? '/' : path, query };
+}
+
+/**
+ * Rewrites a concrete path to a template: every numeric or UUID segment
+ * becomes `{}`. Used when the run has no compiled route inventory to
+ * resolve against, so a shape still never carries an identifier.
+ */
+function templatizePath(path: string): string {
+  return path
+    .split('/')
+    .map((segment) => (IDENTIFIER_SEGMENT.test(segment) ? '{}' : segment))
+    .join('/');
+}
+
+/**
+ * Resolves a concrete path against the compiled route inventory: the
+ * first template whose segment count and static segments match wins. A
+ * run with no inventory (or no match) falls back to the identifier-
+ * blind template, never to the raw path.
+ */
+function routeOf(path: string, inventory: RouteInventory | undefined): string {
+  const segments = path.split('/');
+  for (const template of inventory?.templates ?? []) {
+    const parts = template.split('/');
+    if (parts.length !== segments.length) continue;
+    const matches = parts.every((part, index) => part === '{}' || part === segments[index]);
+    if (matches) return template;
+  }
+  return templatizePath(path);
+}
+
+/**
+ * Turns one observed request into its comparable shape.
+ *
+ * Args:
+ *   request: the method and target the proxy observed.
+ *   options: the run's route inventory and owner-declared query keys.
+ *
+ * Returns:
+ *   TwinShape: method + route template + allowlisted query values.
+ */
+export function twinShapeOf(request: ObservedRequest, options: TwinShapeOptions = {}): TwinShape {
+  const { path, query } = splitTarget(request.url);
+  const allowlist = new Set(options.queryKeys ?? []);
+  const values: Record<string, string> = {};
+  for (const [key, value] of [...query].sort((left, right) => compareStrings(left[0], right[0]))) {
+    // The KEY is always recorded; the VALUE only when the owner named
+    // this key. A non-allowlisted value cannot reach a shape, and a
+    // shape is what every report and state document carries.
+    if (allowlist.has(key)) values[key] = value;
+  }
+  return {
+    method: request.method.toUpperCase(),
+    route: routeOf(path, options.inventory),
+    ...(Object.keys(values).length === 0 ? {} : { query: values }),
+  };
+}
+
+/** The stable comparable identity of a shape. */
+function shapeKey(shape: TwinShape): string {
+  const query = Object.keys(shape.query ?? {})
+    .sort(compareStrings)
+    .map((key) => `${key}=${(shape.query as Record<string, string>)[key] as string}`)
+    .join('&');
+  return `${shape.method} ${shape.route}${query === '' ? '' : `?${query}`}`;
+}
+
+/** Renders one shape for a human, naming exactly what it carries. */
+function describeShape(shape: TwinShape): string {
+  const query = Object.keys(shape.query ?? {});
+  if (query.length === 0) return `${shape.method} ${shape.route}`;
+  return `${shape.method} ${shape.route}?${query
+    .sort(compareStrings)
+    .map((key) => `${key}=${(shape.query as Record<string, string>)[key] as string}`)
+    .join('&')}`;
+}
+
+/**
+ * Compares two twins' shapes and returns both directions of the
+ * divergence: what the witnessed twin did that the raw twin never did,
+ * and what the raw twin did that the witnessed twin never did. A shape
+ * both exercised is not reported — twins that agree are the healthy
+ * case and must stay silent.
+ *
+ * Args:
+ *   witnessed: the witnessed twin's shapes.
+ *   raw: the raw twin's shapes.
+ *
+ * Returns:
+ *   TwinDivergence[]: every one-sided shape, witnessed-side first,
+ *   deterministic in shape identity.
+ */
+export function twinPathDivergence(
+  witnessed: TwinObservation,
+  raw: TwinObservation,
+): TwinDivergence[] {
+  const rawKeys = new Set(raw.shapes.map(shapeKey));
+  const witnessedKeys = new Set(witnessed.shapes.map(shapeKey));
+  const oneSided = (shapes: readonly TwinShape[], other: ReadonlySet<string>, presentIn: string, missingFrom: string): TwinDivergence[] =>
+    shapes
+      .filter((shape) => !other.has(shapeKey(shape)))
+      .map((shape) => ({ presentIn, missingFrom, shape }));
+  return [
+    ...oneSided(witnessed.shapes, rawKeys, witnessed.logicalKey, raw.logicalKey),
+    ...oneSided(raw.shapes, witnessedKeys, raw.logicalKey, witnessed.logicalKey),
+  ];
+}
+
+/** The finding text a divergence produces, naming BOTH tests and the shape. */
+export function twinDivergenceDetail(divergence: TwinDivergence): string {
+  return (
+    `${describeShape(divergence.shape)} is exercised by '${divergence.presentIn}' and never by ` +
+    `'${divergence.missingFrom}' — the twins do not cover the same request path`
+  );
+}
