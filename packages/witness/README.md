@@ -70,3 +70,26 @@ An in-process test client (supertest, FastAPI `TestClient`) calls the app
 without going through the proxy. The adapters REFUSE that mode with a typed
 message instead of passing it silently — the request never reaches the witness,
 so it can never be evidence.
+
+## The operator's fixture/actor provider
+
+A declared behavior case names a `fixture` recipe and an `actor`. The witness
+materializes both before it drives the case, through the module named by
+`GATEFORGE_FIXTURE_PROVIDER` (loaded by `witness/bin.ts` at startup; a
+witness started without one simply has no cases to prepare).
+
+The module's default export is `{ prepare(input), release(leaseId),
+resolveCredential(credentialRef) }`. `prepare` returns `{ leaseId, namespace,
+subjects, actors }` with SERVER-ISSUED subject identities; `release` drops what
+that lease provisioned; `resolveCredential` turns a lease `credentialRef` into
+request material and runs in this process, so a secret never leaves it.
+
+The provider is engine-side code and the only caller of its own provisioning
+HTTP calls. The suite never imports it, and nothing it returns can mint
+evidence — it only supplies the subjects a case drives, so a case's proof still
+comes from the request the witness issued and the state it read itself. A
+repository should therefore exclude the provider from its product scan scope
+(`.gateforge.yml` `project.paths.exclude`, matching
+`classification-policy.yml` `scanRoots`), or the engine's own provisioning
+traffic is reported as unresolved application call sites. See
+`example/behavior/fixtures/fixture-provider.mjs` for a working provider.
