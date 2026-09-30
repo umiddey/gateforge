@@ -464,6 +464,21 @@ followed by `→ changed-scope run`. With the path off, or when the run
 state holds no parent document at all, nothing is printed and the run is
 byte-identical to before.
 
+**One re-seal per full parent.** A re-seal seals a `scope: changed`
+receipt, and a carried or sliced run is never a parent again: the next
+test-only push prints
+
+```text
+test-gates: the previous run cannot be re-sealed from: a carried or sliced run never re-seals → changed-scope run
+```
+
+and takes its own changed-scope run — which re-runs the changed slice
+and still leaves `check --changed --require-e2e` green, because that
+run's own evidence is complete for what it re-ran. So the carried
+evidence is retained for exactly **one** hop: the re-seal that consumed
+it. The bound of five below is the verifier's backstop for a retained
+chain, not a promise that five re-seals happen in a row.
+
 **At most five in a row.** Each re-seal carries its parent, so the
 evidence can be walked back at most five hops before it has drifted too
 far to recompute honestly. The sixth consecutive re-seal takes the full
