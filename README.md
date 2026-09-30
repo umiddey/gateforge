@@ -233,6 +233,14 @@ engine now serves, end to end:
   reported as `not graded in a named run`, never blocked), exits 0 only
   when the whole selection is green and proven, 1 otherwise and 2 for an
   unresolvable selector — and never touches a receipt.
+  `test-gates --chaos <seed> --result-only` then makes rare response-order
+  races reproducible on purpose: the witness observation proxy releases
+  proxied app responses on a schedule derived from the seed — a bounded
+  delay, and for requests sharing a route key the option of releasing a
+  later response first. Only timing moves, and because the schedule is a
+  pure function of the seed, the run that found the race is the run you
+  can re-run; the report and the sealed execution result carry the seed
+  and the schedule. A chaos run never seals a receipt.
 - **Evidence model.** Witness-issued per-test sessions bound every record:
   the trusted reporter opens one session per started test, and each UI action
   runs inside a witness-recorded observation interval, so proxy exchanges

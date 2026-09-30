@@ -683,6 +683,7 @@ async function startObservedProxy(
       // made them - never in the order responses happened to complete.
       const chaosSlot =
         chaos === null ? null : chaos.reserve(chaosRouteKey(req.method ?? 'GET', forwardUrl), Date.now());
+      let chaosHeld = chaosSlot !== null && chaosSlot.releaseAt <= Date.now();
       let settledFlight = false;
       const settleFlight = (): void => {
         if (!settledFlight) {
@@ -701,7 +702,7 @@ async function startObservedProxy(
         // The release moment: the schedule records what this run
         // actually did, which is what makes a red run replayable.
         if (chaosSlot !== null && chaos !== null) {
-          state.chaos?.entries.push(chaos.release(chaosSlot, Date.now()));
+          state.chaos?.entries.push(chaos.release(chaosSlot, chaosHeld));
         }
         const status = upstream.statusCode ?? 0;
         const observedPath = normalizeObservedPath(forwardUrl);
@@ -784,6 +785,9 @@ async function startObservedProxy(
               forwardResponse(upstream);
             }, waitMs);
             upstream.once('error', () => clearTimeout(held));
+            // The hold this response actually got: a response whose
+            // upstream overran its slot is recorded with no delay.
+            chaosHeld = waitMs > 0;
             return;
           }
           forwardResponse(upstream);

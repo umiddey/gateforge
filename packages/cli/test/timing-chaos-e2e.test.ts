@@ -18,18 +18,45 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
+import { ChaosScheduler } from '@gate-forge/witness';
 import { startAttestationProxy } from '@gate-forge/pack-playwright';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { loadConfigAt, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
 import { runCli } from './helpers.js';
 import { cleanupWitnessedFixture, installStrictFixture, operatorEnvironment, ROOT, FINGERPRINT } from './witnessed-run-fixture.js';
 
+/** The route the racy page's two list requests share (query ignored). */
+const TAB_ROUTE = 'GET /api/tab';
+
+/** The racy page's own assertion message (streamed by the run on red). */
+const RACY_ASSERTION = 'tab B rows must win even when the tab A response lands last';
+
+/** How much slower the fixture app's beta tab is (see the fixture app). */
+const BETA_BACKEND_DELAY_MS = 5;
+
 /**
- * The pinned seed. Its schedule is what makes the red run replayable:
- * the same integer reproduces the same delays, so the failure below is
- * a finding the owner can reproduce instead of a ghost.
+ * The smallest seed whose plan holds the FIRST tab request open past
+ * the second one, for the session identity a given run reports.
+ *
+ * The plan is a pure function of (seed, session identity, route key,
+ * k), so the seed is not guessed: the run below reports the session it
+ * released under, this recomputes the schedule for that session, and
+ * the first seed that genuinely reorders the two requests is the one
+ * the run uses. Found this way it is seed 4 for the fixture's racy
+ * test; recomputing it keeps the case honest if the fixture's test
+ * identity ever moves.
  */
-const SEED = 11;
+function reorderingSeedFor(session: string): number {
+  for (let seed = 0; seed < 1_000; seed += 1) {
+    const scheduler = new ChaosScheduler({ seed, maxDelayMs: 400, reorder: true }, session);
+    const first = scheduler.reserve(TAB_ROUTE, 0);
+    const second = scheduler.reserve(TAB_ROUTE, 1);
+    // The first request must still be held when the second one is due,
+    // or the reorder is a plan on paper with no effect on the page.
+    if (second.releasedBefore && first.delayMs > BETA_BACKEND_DELAY_MS + 1) return seed;
+  }
+  throw new Error(`no seed under 1000 reorders '${TAB_ROUTE}' for session '${session}'`);
+}
 
 /** The racy page's test: the stale-response bug, on purpose. */
 const RACY_KEY = 'playwright:chromium:specs/tabs.spec.js:tab B rows win the list';
@@ -43,6 +70,7 @@ const keyDirectories: string[] = [];
 
 /** The fixture spec: the witnessed CRUD journey plus the two tab pages. */
 const SPEC = `import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
+const RACY_ASSERTION = '${RACY_ASSERTION}';
 import { accountsSurface } from './accounts-surface.js';
 
 const test = gateforgeTest.extend({ surface: accountsSurface });
@@ -96,7 +124,12 @@ test('tab B rows win the list', async ({ page }) => {
   await page.goto(appBase + '/race');
   await page.locator('#tab-a').click();
   await page.locator('#tab-b').click();
-  await expect(page.locator('#rows')).toContainText('beta-row');
+  // Both list answers have landed before the page is judged: asserting
+  // while the stale one is still in flight would pass by accident.
+  await page.waitForFunction(() => window.__settled === 2);
+  // The named message is what a chaos finding is read from: the run
+  // streams it when the stale answer wins the race.
+  await expect(page.locator('#rows'), RACY_ASSERTION).toContainText('beta-row');
 });
 
 // The twin: the same two requests against a page that renders by
@@ -105,7 +138,8 @@ test('tab B rows win the list without a stale response', async ({ page }) => {
   await page.goto(appBase + '/twin');
   await page.locator('#tab-a').click();
   await page.locator('#tab-b').click();
-  await expect(page.locator('#rows')).toContainText('beta-row');
+  await page.waitForFunction(() => window.__settled === 2);
+  await expect(page.locator('#rows'), 'the race-free twin must never show a stale tab').toContainText('beta-row');
 });
 `;
 
@@ -157,10 +191,22 @@ interface ChaosReport {
 
 /** One recorded chaos release decision, as the report carries it. */
 interface ChaosEntry {
+  session: string;
   routeKey: string;
   k: number;
+  plannedDelayMs: number;
   delayMs: number;
   releasedBefore: boolean;
+}
+
+/**
+ * The half of a schedule that is a pure function of (seed, session,
+ * route key, k): the plan. Two runs of one seed must agree on it
+ * exactly; the applied hold may be a little smaller when a concurrent
+ * request arrived late.
+ */
+function plannedSchedule(schedule: readonly ChaosEntry[]): unknown[] {
+  return schedule.map((entry) => [entry.session, entry.routeKey, entry.k, entry.plannedDelayMs, entry.releasedBefore]);
 }
 
 /** The execution result a run sealed (or, for a chaos run, would explain). */
@@ -195,6 +241,26 @@ function stableReport(report: ChaosReport): unknown {
     verdicts: report.verdicts.map((verdict) => ({ ...verdict, recordIds: verdict.recordIds.length })),
     execution: report.execution === undefined ? undefined : { ...report.execution },
   };
+}
+
+/**
+ * The seed a given test's run must use: one probe run reports the
+ * session identity the witness released that test's traffic under, and
+ * the plan is then recomputed from it (see {@link reorderingSeedFor}).
+ */
+async function seedForRepo(
+  repo: TempRepo,
+  env: Record<string, string>,
+  testKey: string,
+): Promise<number> {
+  const probe = await runCli(
+    repo,
+    ['test-gates', '--test', testKey, '--result-only', '--chaos', '0', '--format', 'json'],
+    env,
+  );
+  const session = parseReport(probe).chaos?.schedule?.[0]?.session ?? '';
+  expect(session, `the probe run must name its session\nstdout:\n${probe.stdout}\nstderr:\n${probe.stderr}`).not.toBe('');
+  return reorderingSeedFor(session);
 }
 
 /** The operator environment a witnessed run needs, per temp repo. */
@@ -262,55 +328,102 @@ describe('timing chaos (E63): a stale-response race, on purpose', () => {
     });
   }, 300_000);
 
-  it('fails the racy page under a fixed seed and replays the identical schedule', async () => {
+  it('fails the racy page under a computed seed and replays the identical schedule', async () => {
     await withTempRepo({}, async (repo) => {
       installRepo(repo);
       const app = await startRaceApp();
       const proxy = await startAttestationProxy(app.url, FINGERPRINT);
       try {
-        const { keyFile, env } = operatorEnv(proxy.url);
+        const { env } = operatorEnv(proxy.url);
         const runEnv = { ...env, GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo) };
+        // The probe run answers one question the test cannot know
+        // before the run: which session identity the witness released
+        // this test's traffic under. The plan is a pure function of it,
+        // so the seed that reorders the two tab requests is computed,
+        // not guessed.
+        const probe = await runCli(
+          repo,
+          ['test-gates', '--test', RACY_KEY, '--result-only', '--chaos', '0', '--format', 'json'],
+          runEnv,
+        );
+        const probeEntries = parseReport(probe).chaos?.schedule ?? [];
+        const session = probeEntries[0]?.session ?? '';
+        expect(session, `the schedule must name the session it released under
+${probe.stderr}`).not.toBe('');
+        const seed = reorderingSeedFor(session);
+
         const first = await runCli(
           repo,
-          ['test-gates', '--test', RACY_KEY, '--result-only', '--chaos', String(SEED), '--format', 'json'],
+          [
+            'test-gates',
+            '--test',
+            RACY_KEY,
+            '--result-only',
+            '--chaos',
+            String(seed),
+            '--progress',
+            'stderr',
+            '--format',
+            'json',
+          ],
           runEnv,
         );
         const firstReport = parseReport(first);
         expect(
           first.code,
-          `the seeded run must surface the race\nstdout:\n${first.stdout}\nstderr:\n${first.stderr}`,
+          `seed ${String(seed)} must surface the race\nstdout:\n${first.stdout}\nstderr:\n${first.stderr}`,
         ).toBe(1);
-        expect(firstReport.chaos?.seed, first.stderr).toBe(SEED);
+        expect(firstReport.chaos?.seed, first.stderr).toBe(seed);
         expect(firstReport.chaos?.reorder, first.stderr).toBe(true);
-        // The failure is the page's own assertion: the stale response
-        // won and the wrong tab's rows are on screen.
-        const text = await runCli(repo, ['test-gates', '--test', RACY_KEY, '--result-only', '--chaos', String(SEED)], runEnv);
-        expect(text.stdout, text.stderr).toContain(`timing chaos: seed ${String(SEED)} (max delay 400 ms, reorder on)`);
-        expect(text.stdout).toContain('replay with --chaos ' + String(SEED));
-        expect(first.stderr, 'the run must name the assertion the racy page failed').toContain('beta-row');
-        expect(first.stderr).toContain('alpha-row');
-        // The schedule explains the failure and never carries a secret.
+        expect(firstReport.execution?.selectedTests?.failed, first.stderr).toBe(1);
+
+        // The schedule is the explanation: the FIRST tab request is
+        // held open past the moment the second one is due, so the stale
+        // response lands last and the page renders the wrong tab.
         const schedule = firstReport.chaos?.schedule ?? [];
-        const tabEntries = schedule.filter((entry) => entry.routeKey === 'GET /api/tab');
-        expect(tabEntries.length, JSON.stringify(schedule)).toBeGreaterThanOrEqual(2);
-        expect(tabEntries[0]?.k).toBe(1);
-        expect(tabEntries[1]?.k).toBe(2);
-        expect(tabEntries[1]?.releasedBefore, JSON.stringify(tabEntries)).toBe(true);
+        const tabEntries = schedule.filter((entry) => entry.routeKey === TAB_ROUTE);
+        expect(tabEntries.map((entry) => entry.k).sort(), JSON.stringify(schedule)).toEqual([1, 2]);
+        const firstTab = tabEntries.find((entry) => entry.k === 1);
+        const secondTab = tabEntries.find((entry) => entry.k === 2);
+        expect(secondTab?.releasedBefore, JSON.stringify(tabEntries)).toBe(true);
+        expect(firstTab?.delayMs ?? 0, JSON.stringify(tabEntries)).toBeGreaterThan(secondTab?.delayMs ?? 0);
+        expect(firstTab?.delayMs ?? 0).toBeGreaterThan(BETA_BACKEND_DELAY_MS);
+        // The released order in the record IS the order the page saw.
+        expect(tabEntries[0]?.k, JSON.stringify(tabEntries)).toBe(2);
+        // The failure is the page's own assertion, streamed by the
+        // runner: the expected row never arrived, the stale one did.
+        // What the run actually streams for a red test: the failing
+        // test and the assertion it died on.
+        expect(first.stderr, 'the run must name the test that failed').toContain(
+          `tab B rows win the list — Error: ${RACY_ASSERTION}`,
+        );
+
+        // No recorded field can carry a query value or a credential.
         expect(JSON.stringify(schedule)).not.toContain('tab=');
+        expect(JSON.stringify(schedule)).not.toContain('token');
 
         // Replay: the SAME seed runs the SAME schedule and fails the
         // same way. A finding nobody can reproduce is a ghost.
         const second = await runCli(
           repo,
-          ['test-gates', '--test', RACY_KEY, '--result-only', '--chaos', String(SEED), '--format', 'json'],
+          ['test-gates', '--test', RACY_KEY, '--result-only', '--chaos', String(seed), '--format', 'json'],
           runEnv,
         );
         const secondReport = parseReport(second);
         expect(second.code, `replay stdout:\n${second.stdout}\nstderr:\n${second.stderr}`).toBe(1);
-        expect(secondReport.chaos?.schedule).toEqual(schedule);
-        expect(stableReport(secondReport)).toEqual(stableReport(firstReport));
+        expect(
+          plannedSchedule(secondReport.chaos?.schedule ?? []),
+          'the same seed must plan the same schedule',
+        ).toEqual(plannedSchedule(schedule));
+        // The replay failed the same way, not merely with the same plan.
+        expect(secondReport.execution?.selectedTests?.failed, second.stderr).toBe(1);
+        // Apart from the timing fields themselves, the two runs are the
+        // same run: same verdicts, same claims, same failures.
+        const { chaos: _firstChaos, ...firstWithoutChaos } = firstReport;
+        const { chaos: _secondChaos, ...secondWithoutChaos } = secondReport;
+        expect(stableReport(secondWithoutChaos as ChaosReport)).toEqual(stableReport(firstWithoutChaos as ChaosReport));
+        // A chaos run is a finding: it seals nothing.
         expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
-        expect(keyFile).not.toBe('');
       } finally {
         await proxy.stop();
         app.stop();
@@ -325,17 +438,18 @@ describe('timing chaos (E63): a stale-response race, on purpose', () => {
       const proxy = await startAttestationProxy(app.url, FINGERPRINT);
       try {
         const { env } = operatorEnv(proxy.url);
+        const seed = await seedForRepo(repo, { ...env, GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo) }, TWIN_KEY);
         const run = await runCli(
           repo,
-          ['test-gates', '--test', TWIN_KEY, '--result-only', '--chaos', String(SEED), '--format', 'json'],
+          ['test-gates', '--test', TWIN_KEY, '--result-only', '--chaos', String(seed), '--format', 'json'],
           { ...env, GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo) },
         );
         const report = parseReport(run);
         expect(
           run.code,
-          `the race-free twin must stay green under seed ${String(SEED)}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
+          `the race-free twin must stay green under seed ${String(seed)}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
         ).toBe(0);
-        expect(report.chaos?.seed).toBe(SEED);
+        expect(report.chaos?.seed).toBe(seed);
         // The same seed really did perturb the twin's traffic — it is
         // the page, not the timing, that made the difference.
         expect((report.chaos?.schedule ?? []).length, JSON.stringify(report.chaos?.schedule)).toBeGreaterThan(0);
@@ -357,9 +471,18 @@ describe('timing chaos (E63): a stale-response race, on purpose', () => {
         const normal = await runCli(repo, ['test-gates', '--test', CREATE_KEY, '--result-only', '--format', 'json'], runEnv);
         const normalReport = parseReport(normal);
         expect(normal.code, `normal stdout:\n${normal.stdout}\nstderr:\n${normal.stderr}`).toBe(0);
+        const seed = reorderingSeedFor(
+          parseReport(
+            await runCli(
+              repo,
+              ['test-gates', '--test', RACY_KEY, '--result-only', '--chaos', '0', '--format', 'json'],
+              runEnv,
+            ),
+          ).chaos?.schedule?.[0]?.session ?? '',
+        );
         const chaosRun = await runCli(
           repo,
-          ['test-gates', '--test', CREATE_KEY, '--result-only', '--chaos', String(SEED), '--format', 'json'],
+          ['test-gates', '--test', CREATE_KEY, '--result-only', '--chaos', String(seed), '--format', 'json'],
           runEnv,
         );
         const chaosReport = parseReport(chaosRun);
@@ -391,7 +514,7 @@ describe('timing chaos (E63): a stale-response race, on purpose', () => {
     await withTempRepo({}, async (repo) => {
       installRepo(repo);
       const { env } = operatorEnv('http://unused.invalid');
-      const noResultOnly = await runCli(repo, ['test-gates', '--changed', '--chaos', String(SEED)], env);
+      const noResultOnly = await runCli(repo, ['test-gates', '--changed', '--chaos', '4'], env);
       expect(noResultOnly.code, noResultOnly.stderr).toBe(2);
       expect(noResultOnly.stderr.trim().split('\n')).toHaveLength(1);
       expect(noResultOnly.stderr).toContain('--chaos requires --result-only');
@@ -430,10 +553,12 @@ describe('timing chaos (E63): a stale-response race, on purpose', () => {
 
         // The chaos run writes the same document shape plus the label
         // and the schedule it used, and seals no receipt.
+        const chaosEnv = { ...env, GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo) };
+        const seed = await seedForRepo(repo, chaosEnv, RACY_KEY);
         const chaosRun = await runCli(
           repo,
-          ['test-gates', '--test', RACY_KEY, '--result-only', '--chaos', String(SEED), '--format', 'json'],
-          { ...env, GATEFORGE_APPROVED_POLICY_DIGEST: approvedPin(repo) },
+          ['test-gates', '--test', RACY_KEY, '--result-only', '--chaos', String(seed), '--format', 'json'],
+          chaosEnv,
         );
         expect(chaosRun.code, `chaos stdout:\n${chaosRun.stdout}\nstderr:\n${chaosRun.stderr}`).toBe(1);
         const report = parseReport(chaosRun);

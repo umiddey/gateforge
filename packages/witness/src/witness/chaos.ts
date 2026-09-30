@@ -37,11 +37,29 @@ export interface ChaosOptions {
 
 /** One recorded release decision (the replayable schedule). */
 export interface ChaosScheduleEntry {
+  /**
+   * The session the plan released under: the supervisor-issued test id
+   * (a logical test key, never a credential). It is what makes a
+   * schedule reproducible — the same seed, session, route key and k
+   * always yield the same delay.
+   */
+  session: string;
   /** `METHOD /pathname` — never a query value, body or header. */
   routeKey: string;
   /** 1-based index of this request under its route key. */
   k: number;
-  /** Milliseconds this response was actually held back. */
+  /**
+   * The PLANNED release offset, in milliseconds from the route's base
+   * instant. This is the half of the record that is a pure function of
+   * (seed, session, route key, k): two runs of the same seed plan the
+   * same offsets, which is what makes a finding replayable.
+   */
+  plannedDelayMs: number;
+  /**
+   * Milliseconds this response was actually held back. It can be
+   * smaller than the plan when a concurrent request arrived late: the
+   * plan never holds a response past its own arrival.
+   */
   delayMs: number;
   /** True when the plan released this response before the previous one. */
   releasedBefore: boolean;
@@ -62,6 +80,8 @@ export interface ChaosSlot {
   k: number;
   /** The planned release offset, in milliseconds from the route's base. */
   delayMs: number;
+  /** The instant this request arrived at the proxy. */
+  arrivedAt: number;
   /** Monotonic instant the response may be released. */
   releaseAt: number;
   /** True when the plan releases this one before the previous one. */
@@ -281,6 +301,7 @@ export class ChaosScheduler {
       routeKey,
       k,
       delayMs: plannedMs,
+      arrivedAt: now,
       releaseAt: baseAt + plannedMs,
       // Strictly before: a plan that could not open a gap (both at
       // zero) never claims a reorder it did not perform.
@@ -296,17 +317,30 @@ export class ChaosScheduler {
    *
    * Args:
    *   slot: the slot returned by {@link ChaosScheduler.reserve}.
-   *   now: instant the response became releasable.
+   *   held: whether the response was actually held for its slot. A
+   *     response whose upstream overran the slot before the proxy could
+   *     hold it is recorded with no delay - the plan extends nothing.
    *
    * Returns:
    *   ChaosScheduleEntry: the recorded decision (route key, k, applied
    *   delay, reorder flag) - the replay record.
    */
-  release(slot: ChaosSlot, now: number): ChaosScheduleEntry {
+  release(slot: ChaosSlot, held: boolean): ChaosScheduleEntry {
     return {
+      session: this.session,
       routeKey: slot.routeKey,
       k: slot.k,
-      delayMs: Math.max(0, Math.min(slot.releaseAt - now, this.options.maxDelayMs)),
+      plannedDelayMs: slot.delayMs,
+      // Measured from ARRIVAL: that is the hold the client actually
+      // felt, and it is the number an owner reads to understand a
+      // schedule. Measuring from the release moment would report ~0 for
+      // every entry and explain nothing.
+      // A request that arrives after the route's base instant can have
+      // a deadline in its own past: the proxy then holds it not at all,
+      // and the record says so rather than reporting a negative hold.
+      delayMs: held
+        ? Math.max(0, Math.min(slot.releaseAt - slot.arrivedAt, this.options.maxDelayMs))
+        : 0,
       releasedBefore: slot.releasedBefore,
     };
   }
