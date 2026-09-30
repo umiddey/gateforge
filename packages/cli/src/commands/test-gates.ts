@@ -2269,7 +2269,22 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           reSealPlan = null;
           reSealParent = null;
         } else {
+          const carriedFiles = new Set(
+            reSealParent.execution.outcomes
+              .filter((outcome) => !reSeal.plan?.affectedFiles.includes(outcome.file))
+              .map((outcome) => outcome.file),
+          );
           const identities = carriedTestIdentities(reSealParent.execution, reSeal.plan.affectedFiles);
+          // A witness-issued record is stamped with the CLAIMING test's
+          // identity, which for a mapped test is the mapping key: the
+          // trusted resolution of this very run, never the record's word.
+          for (const group of gradedResolution?.obligations ?? []) {
+            for (const binding of group.bindings) {
+              if (binding.instances.some((instance) => carriedFiles.has(instance.file))) {
+                identities.add(binding.logicalKey);
+              }
+            }
+          }
           const carriedDocuments = carriedEvidenceDocuments(authenticated.evidence, identities);
           reSealParentEvidence = {
             ...carriedDocuments,

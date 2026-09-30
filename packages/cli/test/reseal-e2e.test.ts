@@ -339,82 +339,97 @@ describe('a re-seal carries the witness EVIDENCE of the tests it carries', () =>
 
   it('keeps a carried obligation satisfied after a run-record re-seal (the consumer case)', async () => {
     await withTempRepo({}, async (repo) => {
-      const env = await installAndRunFailingEvidenceParent(repo);
-      // The parent run witnessed a record for BOTH obligations; the
-      // failing test took its gate verdict, not its evidence, away.
-      expect(stateRecords(repo)).toHaveLength(2);
+      const { env, close } = await installAndRunFailingEvidenceParent(repo);
+            try {
+            // The parent run witnessed a record for BOTH obligations; the
+            // failing test took its gate verdict, not its evidence, away.
+            expect(stateRecords(repo)).toHaveLength(2);
 
-      await fixOrdersSpecAndReseal(repo, env);
-      const receipt = sealedReceipt(repo);
-      expect(receipt.resealedFromKind).toBe('run-record');
-      expect(receipt.carriedTests).toBe(1);
-      expect(receipt.rerunTests).toBe(1);
-      expect(receipt.carriedEvidenceDigest).toMatch(/^[0-9a-f]{64}$/);
+            await fixOrdersSpecAndReseal(repo, env);
+            const receipt = sealedReceipt(repo);
+            expect(receipt.resealedFromKind).toBe('run-record');
+            expect(receipt.carriedTests).toBe(1);
+            expect(receipt.rerunTests).toBe(1);
+            expect(receipt.carriedEvidenceDigest).toMatch(/^[0-9a-f]{64}$/);
 
-      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
-      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
-      // The obligation ONLY the carried test proved stays satisfied: the
-      // state dir's evidence is the union, not this run's three records.
-      expect(verdicts(checked.stdout).find((row) => row.obligationId === 'tenant.accounts:persistence:read')).toEqual({
-        obligationId: 'tenant.accounts:persistence:read',
-        verdict: 'satisfied',
-      });
+            const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+            expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+            // The obligation ONLY the carried test proved stays satisfied: the
+            // state dir's evidence is the union, not this run's three records.
+            expect(
+              verdicts(checked.stdout).find((row) => row.obligationId === 'tenant.accounts:persistence:read')?.verdict,
+            ).toBe('satisfied');
+      } finally {
+        await close();
+      }
     });
   }, 300_000);
 
   it('keeps a carried obligation satisfied after a receipt re-seal', async () => {
     await withTempRepo({}, async (repo) => {
-      const env = await installAndSealEvidenceParent(repo);
-      repo.commitFiles(
-        { 'e2e/orders.spec.mjs': `${EVIDENCE_SPECS['e2e/orders.spec.mjs'] as string}// a comment\n` },
-        'touch one spec',
-      );
-      const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
-      expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
-      expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous receipt');
-      expect(sealedReceipt(repo).resealedFromKind).toBe('receipt');
+      const { env, close } = await installAndSealEvidenceParent(repo);
+            try {
+            repo.commitFiles(
+              { 'e2e/orders.spec.mjs': `${EVIDENCE_SPECS['e2e/orders.spec.mjs'] as string}// a comment\n` },
+              'touch one spec',
+            );
+            const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+            expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
+            expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous receipt');
+            expect(sealedReceipt(repo).resealedFromKind).toBe('receipt');
 
-      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
-      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
-      expect(verdicts(checked.stdout).find((row) => row.obligationId === 'tenant.accounts:persistence:read')?.verdict).toBe(
-        'satisfied',
-      );
+            const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+            expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+            expect(verdicts(checked.stdout).find((row) => row.obligationId === 'tenant.accounts:persistence:read')?.verdict).toBe(
+              'satisfied',
+            );
+      } finally {
+        await close();
+      }
     });
   }, 300_000);
 
   it('never carries a re-run test\'s parent record: a test that stopped proving leaves its obligation missing', async () => {
     await withTempRepo({}, async (repo) => {
-      const env = await installAndRunFailingEvidenceParent(repo);
-      // The fix removes the failing test's persistence intent: the
-      // re-run proves nothing, so the parent's record must NOT survive.
-      await fixOrdersSpecAndReseal(repo, env, { keepEvidence: false });
-      const orders = stateRecords(repo).filter(
-        (row) => (row as { obligationId?: string }).obligationId === 'tenant.orders:persistence:read',
-      );
-      expect(orders).toEqual([]);
+      const { env, close } = await installAndRunFailingEvidenceParent(repo);
+            try {
+            // The fix removes the failing test's persistence intent: the
+            // re-run proves nothing, so the parent's record must NOT survive.
+            await fixOrdersSpecAndReseal(repo, env, { keepEvidence: false });
+            const orders = stateRecords(repo).filter(
+              (row) => (row as { obligationId?: string }).obligationId === 'tenant.orders:persistence:read',
+            );
+            expect(orders).toEqual([]);
 
-      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
-      expect(checked.code).not.toBe(0);
-      const graded = verdicts(checked.stdout);
-      expect(graded.find((row) => row.obligationId === 'tenant.orders:persistence:read')?.verdict).toBe('missing');
-      // The carried test's own evidence still holds.
-      expect(graded.find((row) => row.obligationId === 'tenant.accounts:persistence:read')?.verdict).toBe('satisfied');
+            const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+            expect(checked.code).not.toBe(0);
+            const graded = verdicts(checked.stdout);
+            expect(graded.find((row) => row.obligationId === 'tenant.orders:persistence:read')?.verdict).toBe('missing');
+            // The carried test's own evidence still holds.
+            expect(graded.find((row) => row.obligationId === 'tenant.accounts:persistence:read')?.verdict).toBe('satisfied');
+      } finally {
+        await close();
+      }
     });
   }, 300_000);
 
   it('fails closed when the retained parent evidence was tampered with', async () => {
     await withTempRepo({}, async (repo) => {
-      const env = await installAndRunFailingEvidenceParent(repo);
-      await fixOrdersSpecAndReseal(repo, env);
-      const retained = join(repo.root, '.gateforge/test-gates/reseal-chain/hop-1-records.json');
-      const records = JSON.parse(readFileSync(retained, 'utf8')) as Array<Record<string, unknown>>;
-      const accounts = records.find((row) => row['obligationId'] === 'tenant.accounts:persistence:read');
-      (accounts?.['payload'] as Record<string, unknown>)['found'] = false;
-      writeFileSync(retained, `${JSON.stringify(records, null, 2)}\n`, 'utf8');
+      const { env, close } = await installAndRunFailingEvidenceParent(repo);
+            try {
+            await fixOrdersSpecAndReseal(repo, env);
+            const retained = join(repo.root, '.gateforge/test-gates/reseal-chain/hop-1-records.json');
+            const records = JSON.parse(readFileSync(retained, 'utf8')) as Array<Record<string, unknown>>;
+            const accounts = records.find((row) => row['obligationId'] === 'tenant.accounts:persistence:read');
+            (accounts?.['payload'] as Record<string, unknown>)['found'] = false;
+            writeFileSync(retained, `${JSON.stringify(records, null, 2)}\n`, 'utf8');
 
-      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
-      expect(checked.code).not.toBe(0);
-      expect(checked.stdout).toContain('EVIDENCE_STALE');
+            const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+            expect(checked.code).not.toBe(0);
+            expect(checked.stdout).toContain('EVIDENCE_STALE');
+      } finally {
+        await close();
+      }
     });
   }, 300_000);
 });

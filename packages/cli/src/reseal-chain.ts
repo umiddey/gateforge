@@ -33,12 +33,14 @@ import {
   type TestCatalog,
   testOutcomesDigestOf,
 } from '@gate-forge/core';
+import { loadOptionalTestMap } from './mapping.js';
 import { classifyResealChange, diffSealedTrees, resealRefusalVerdict } from './reseal.js';
 import {
   authenticateParentEvidence,
   carriedEvidenceDigestOf,
   carriedEvidenceDocuments,
   carriedTestIdentities,
+  mappedTestIdentities,
   stringField,
 } from './reseal-evidence.js';
 import { readJsonArray, readStateDocument } from './state.js';
@@ -285,6 +287,26 @@ function stale(detail: string): BlockingEntry[] {
       nextAction: CAUSE_NEXT_ACTIONS['EVIDENCE_STALE'],
     },
   ];
+}
+
+/**
+ * The repository's own test-map entries, read from the candidate tree
+ * this consumer is verifying (a sealed file inside the input digest).
+ * An unreadable or absent sidecar contributes no entries — the union
+ * comparison then fails closed rather than inventing an identity.
+ *
+ * Args:
+ *   cwd: the repository root.
+ *
+ * Returns:
+ *   the entries (empty when the repository declares none).
+ */
+function testMapEntries(cwd: string): readonly { key: string; selector: { file: string } }[] {
+  try {
+    return loadOptionalTestMap(cwd)?.tests ?? [];
+  } catch {
+    return [];
+  }
 }
 
 function names(paths: readonly string[]): string {
@@ -603,7 +625,15 @@ export function resealChainBlocking(input: {
       if (currentReceipt.carriedEvidenceDigest === undefined) {
         return stale(`re-seal hop ${hopNumber} seals no carriedEvidenceDigest (fail closed)`);
       }
+      const carriedFiles = new Set(
+        parentExecution.outcomes
+          .filter((outcome) => !classification.affectedTestFiles.includes(outcome.file))
+          .map((outcome) => outcome.file),
+      );
       const identities = carriedTestIdentities(parentExecution, classification.affectedTestFiles);
+      for (const key of mappedTestIdentities(carriedFiles, testMapEntries(input.cwd))) {
+        identities.add(key);
+      }
       const carried = carriedEvidenceDocuments(authenticated.evidence, identities);
       const stateRecords = readJsonArray(input.stateDir, 'records.json');
       const stateClaims = readJsonArray(input.stateDir, 'claims.json');

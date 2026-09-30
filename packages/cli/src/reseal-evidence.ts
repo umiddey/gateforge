@@ -230,6 +230,30 @@ export function carriedTestIdentities(
 }
 
 /**
+ * The trusted-mapping identity of every carried test: the sidecar (or
+ * native) key a claim for that test uses. A witness-issued record is
+ * stamped with the CLAIMING test's identity, which for a mapped test is
+ * the mapping key — not the runner's own id — so the carry must know it
+ * too. The keys come from the sealed repository's own mapping
+ * (`.gateforge/test-map.yml`, part of the input digest), never from the
+ * records themselves.
+ *
+ * Args:
+ *   files: the carried tests' files.
+ *   entries: the repository's test-map entries (empty when it declares
+ *     none).
+ *
+ * Returns:
+ *   string[]: the mapping keys bound to a carried test's file.
+ */
+export function mappedTestIdentities(
+  files: ReadonlySet<string>,
+  entries: readonly { key: string; selector: { file: string } }[],
+): string[] {
+  return entries.filter((entry) => files.has(entry.selector.file)).map((entry) => entry.key);
+}
+
+/**
  * Reduces the parent evidence to what the carried tests actually proved.
  *
  * Args:

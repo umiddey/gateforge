@@ -600,21 +600,25 @@ export async function evidenceRunEnv(repo: TempRepo): Promise<ResealEnv> {
 /**
  * Installs the evidence repository and seals a CLEAN whole-suite parent
  * receipt whose two obligations are proven by witnessed records.
+ *
+ * Args:
+ *   repo: the temporary repository.
+ *
+ * Returns:
+ *   { env, close }: the shared run environment, and the attested app the
+ *   witness probes — it must stay up for EVERY later run in the test,
+ *   not just the parent.
  */
-export async function installAndSealEvidenceParent(repo: TempRepo): Promise<ResealEnv> {
-  installFixture(repo);
+export async function installAndSealEvidenceParent(repo: TempRepo): Promise<{ env: ResealEnv; close: () => Promise<void> }> {
   const app = await startEvidenceApp();
-  try {
-    installEvidenceRepo(repo, app.url);
-    repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
-    repo.commitFiles({}, 'base');
-    const env = await evidenceRunEnv(repo);
-    const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
-    expect(full.code, `${full.stdout}\n${full.stderr}`).toBe(0);
-    return env;
-  } finally {
-    await app.close();
-  }
+  installFixture(repo);
+  installEvidenceRepo(repo, app.url);
+  repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
+  repo.commitFiles({}, 'base');
+  const env = await evidenceRunEnv(repo);
+  const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+  expect(full.code, `${full.stdout}\n${full.stderr}`).toBe(0);
+  return { env, close: app.close };
 }
 
 /**
@@ -622,23 +626,21 @@ export async function installAndSealEvidenceParent(repo: TempRepo): Promise<Rese
  * ORDERS test fails on a planted test bug: the run seals no receipt and
  * leaves the run record a re-seal may carry from.
  */
-export async function installAndRunFailingEvidenceParent(repo: TempRepo): Promise<ResealEnv> {
-  installFixture(repo);
+export async function installAndRunFailingEvidenceParent(
+  repo: TempRepo,
+): Promise<{ env: ResealEnv; close: () => Promise<void> }> {
   const app = await startEvidenceApp();
-  try {
-    installEvidenceRepo(repo, app.url, {
-      'e2e/orders.spec.mjs': `${EVIDENCE_SPECS['e2e/orders.spec.mjs'] as string}// __FAIL__ a race in this test\n`,
-    });
-    repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
-    repo.commitFiles({}, 'base');
-    const env = await evidenceRunEnv(repo);
-    const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
-    expect(full.code, `${full.stdout}\n${full.stderr}`).not.toBe(0);
-    expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
-    return env;
-  } finally {
-    await app.close();
-  }
+  installFixture(repo);
+  installEvidenceRepo(repo, app.url, {
+    'e2e/orders.spec.mjs': `${EVIDENCE_SPECS['e2e/orders.spec.mjs'] as string}// __FAIL__ a race in this test\n`,
+  });
+  repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });
+  repo.commitFiles({}, 'base');
+  const env = await evidenceRunEnv(repo);
+  const full = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+  expect(full.code, `${full.stdout}\n${full.stderr}`).not.toBe(0);
+  expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+  return { env, close: app.close };
 }
 
 /**
