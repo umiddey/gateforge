@@ -8,14 +8,19 @@
  * as "the fixed tenant already has that row". This module mints the
  * additive `singletonPerTenant` attribute that lets the gate TELL the
  * owner; it never decides a verdict, never blocks, and never guesses.
- *
  * The rule is deliberately narrow and stated in full: BOTH facts must be
  * provable statically — the table must carry plane evidence of `tenant`
  * (the reviewed decision, resolved by the plane channel) AND one of its
- * declared `uniqueConstraints` must include a recognized tenant-scope
- * column. A table on another plane, an unreviewed table, or a unique
- * constraint that excludes the tenant scope column is left untouched, so
- * the output stays byte-identical wherever the tag is not earned.
+ * declared `uniqueConstraints` must include a tenant-scope column. A
+ * table on another plane, an unreviewed table, or a unique constraint
+ * that excludes the tenant scope column is left untouched, so the
+ * output stays byte-identical wherever the tag is not earned.
+ *
+ * WHICH columns carry the tenant scope is the owner's call: the default
+ * is {@link TENANT_SCOPE_COLUMNS}, and an application whose scope column
+ * is spelled differently (`contractor_id`, ...) passes its own list, read
+ * from `.gateforge.yml` (`tenancy.scopeColumns`, see `tenancy.ts`). The
+ * passed list REPLACES the default — it never extends it.
  */
 
 /** Column names that RESEMBLE the tenant scope of a tenant-plane table. */
@@ -78,7 +83,10 @@ function uniqueConstraintOf(value: unknown): UniqueConstraintFact | null {
  * Returns:
  *   SingletonPerTenantFact | null: the deciding constraint's fact, or null.
  */
-export function singletonTagFor(attributes: Attributes): SingletonPerTenantFact | null {
+export function singletonTagFor(
+  attributes: Attributes,
+  scopeColumns: readonly string[] = TENANT_SCOPE_COLUMNS,
+): SingletonPerTenantFact | null {
   // Plane evidence first: an unreviewed table is never a tenant table.
   if (attributes['plane'] !== 'tenant') return null;
   const declared = attributes['uniqueConstraints'];
@@ -89,7 +97,7 @@ export function singletonTagFor(attributes: Attributes): SingletonPerTenantFact 
     // Written order decides which constraint is reported when several
     // qualify — deterministic, and every one of them still says the same.
     for (const column of constraint.columns) {
-      if (!TENANT_SCOPE_COLUMNS.includes(column)) continue;
+      if (!scopeColumns.includes(column)) continue;
       return {
         constraint: constraint.name,
         tenantColumn: column,
@@ -112,14 +120,19 @@ interface DiscoverableResource {
  *
  * Args:
  *   resources: The discovery outcome's resource list.
+ *   scopeColumns: The tenant-scope column names to recognize (default:
+ *     {@link TENANT_SCOPE_COLUMNS}; an owner-declared list REPLACES it).
  *
  * Returns:
  *   DiscoverableResource[]: the same resources, tagged where provable.
  */
-export function applySingletonTags<T extends DiscoverableResource>(resources: readonly T[]): T[] {
+export function applySingletonTags<T extends DiscoverableResource>(
+  resources: readonly T[],
+  scopeColumns: readonly string[] = TENANT_SCOPE_COLUMNS,
+): T[] {
   return resources.map((resource) => {
     if (resource.kind !== 'sqlalchemy.table') return resource;
-    const fact = singletonTagFor(resource.attributes);
+    const fact = singletonTagFor(resource.attributes, scopeColumns);
     if (fact === null) return resource;
     return { ...resource, attributes: { ...resource.attributes, singletonPerTenant: fact } };
   });

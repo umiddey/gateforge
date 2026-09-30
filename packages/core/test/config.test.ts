@@ -143,6 +143,19 @@ clock:
     expect(config.behaviorPolicy).toBe('.gateforge/behavior.yml');
     expect(() => parseConfig({ ...validConfig, behaviorPolicy: '' })).toThrow(GateforgeConfigError);
   });
+
+  it('accepts an owner-declared tenant scope column list, and nothing else', () => {
+    const config = parseConfig({ ...validConfig, tenancy: { scopeColumns: ['contractor_id'] } });
+    expect(config.tenancy?.scopeColumns).toEqual(['contractor_id']);
+    // An empty list declares nothing; it is rejected rather than read as
+    // "this repository has no tenant scope at all".
+    expect(() => parseConfig({ ...validConfig, tenancy: { scopeColumns: [] } })).toThrow(GateforgeConfigError);
+    expect(() => parseConfig({ ...validConfig, tenancy: { scopeColumn: ['contractor_id'] } })).toThrow(
+      GateforgeConfigError,
+    );
+    // ABSENT stays absent: today's behavior, byte-identical.
+    expect(parseConfig({ ...validConfig }).tenancy).toBeUndefined();
+  });
   it('accepts optional harness commands and bounded history retention', () => {
     const config = parseConfig({
       ...validConfig,

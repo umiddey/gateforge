@@ -59,6 +59,10 @@ export {
   type SingletonPerTenantFact,
 } from './singleton.js';
 export {
+  readTenancyScopeColumnsOrNull,
+  CONFIG_PATH as TENANCY_CONFIG_PATH,
+} from './tenancy.js';
+export {
   EntityAdapterSchema,
   validateEntityAdapter,
   type EntityAdapter,

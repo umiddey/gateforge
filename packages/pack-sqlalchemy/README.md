@@ -281,6 +281,34 @@ register that tenant's login with the witness for that session only — see
 unreviewed table, or a unique constraint that excludes the tenant scope
 column is left byte-identical to before.
 
+### Declaring the tenant scope columns
+
+The default list above recognizes the usual spellings only. When the
+scope column is named differently — the ledger table scoped by
+`contractor_id`, unique `(contractor_id, ledger_id, kind)` — the owner
+declares it in `.gateforge.yml`:
+
+```yaml
+# .gateforge.yml
+tenancy:
+  scopeColumns: [contractor_id]
+```
+
+- The declaration **replaces** `TENANT_SCOPE_COLUMNS`; it never extends
+  it. With the block above, `contractor_id` is recognized and `tenant_id`
+  is not, so the recognized scope is exactly what the owner said.
+- **Absent** (no file, no `tenancy` block, no `scopeColumns`) means the
+  default list, byte-identical to a pack without this channel.
+- The block must be a nonempty list of column names; anything else fails
+  closed with `invalid config <path>: …` rather than quietly disabling
+  the tag. The pack validates its own block only — the CLI owns the rest
+  of the config document.
+- The key lives in `.gateforge.yml`, so it is inside the trusted policy
+  digest: widening the recognized tenant scope is an owner-approved
+  policy-revision change, never an agent-editable toggle.
+- Programmatically: `createSqlalchemyDetector({ tenancyScopeColumns: [...] })`
+  (or `{ configPath }`) overrides the document channel entirely.
+
 
 ## Plane and resource classification
 

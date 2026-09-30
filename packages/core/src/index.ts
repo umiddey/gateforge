@@ -533,6 +533,11 @@ export type { GateforgeConfig, AlembicConfig } from './config/index.js';
 export type { ConfigPlugin } from './config/index.js';
 /** Inferred enforcement-section type (mode + strictE2E; off by default). */
 export type { EnforcementConfig } from './config/index.js';
+/**
+ * Inferred `tenancy` section (plan 2026-09-25 Phase 4b item 3a): the
+ * owner-declared tenant scope columns. ABSENT = the pack's default list.
+ */
+export type { TenancyConfig } from './config/index.js';
 
 /**
  * Diagnostics config (plan 2026-09-13 §3.5): explicitly registered

@@ -36,7 +36,8 @@ import {
   type PlaneRuleHit,
   type SqlalchemyPlane,
 } from './planes.js';
-import { applySingletonTags } from './singleton.js';
+import { applySingletonTags, TENANT_SCOPE_COLUMNS } from './singleton.js';
+import { readTenancyScopeColumnsOrNull, CONFIG_PATH } from './tenancy.js';
 
 /** Absolute dir of this pack's `python/` tree (the detector package). */
 const PACK_PYTHON_DIR = fileURLToPath(new URL('../python', import.meta.url));
@@ -90,6 +91,19 @@ export interface SqlalchemyDetectorOptions {
    * byte-identical to `NO_PLANE_MAPPING`; a malformed document throws.
    */
   planesConfigPath?: string;
+  /**
+   * Explicit owner-declared tenant scope columns. Overrides the
+   * `.gateforge.yml` `tenancy.scopeColumns` document entirely when given.
+   */
+  tenancyScopeColumns?: readonly string[];
+  /**
+   * Repo-relative path of the owner config (YAML) the tenant scope
+   * declaration is read from, resolved against the working directory at
+   * discover time (default `.gateforge.yml`). Absence is normal — the
+   * outcome is then byte-identical to the built-in
+   * {@link TENANT_SCOPE_COLUMNS}; a malformed document throws.
+   */
+  configPath?: string;
   /** Subprocess argv (default: `python3 -m gateforge_sqlalchemy_detector`). */
   command?: readonly string[];
   /** Subprocess environment (default: {@link pythonEnvironment}). */
@@ -181,11 +195,17 @@ function mapTablePlanes(outcome: RawOutcome, decide: TablePlaneDecider): RawOutc
  * Args:
  *   outcome: The python discovery outcome.
  *   plane: The plane rule to apply.
+ *   scopeColumns: The tenant-scope column names to recognize (default:
+ *     {@link TENANT_SCOPE_COLUMNS}).
  *
  * Returns:
  *   RawOutcome: New outcome; tables the rule maps carry `plane`.
  */
-export function applyPlaneMapping(outcome: RawOutcome, plane: PlaneRule): RawOutcome {
+export function applyPlaneMapping(
+  outcome: RawOutcome,
+  plane: PlaneRule,
+  scopeColumns: readonly string[] = TENANT_SCOPE_COLUMNS,
+): RawOutcome {
   return withSingletonTags(
     mapTablePlanes(outcome, (facts) =>
       plane({
@@ -194,6 +214,7 @@ export function applyPlaneMapping(outcome: RawOutcome, plane: PlaneRule): RawOut
         provenance: facts.provenance,
       }),
     ),
+    scopeColumns,
   );
 }
 
@@ -206,12 +227,13 @@ export function applyPlaneMapping(outcome: RawOutcome, plane: PlaneRule): RawOut
  *
  * Args:
  *   outcome: The outcome with planes already applied.
+ *   scopeColumns: The tenant-scope column names to recognize.
  *
  * Returns:
  *   RawOutcome: The same outcome with `singletonPerTenant` added where earned.
  */
-function withSingletonTags(outcome: RawOutcome): RawOutcome {
-  return { ...outcome, resources: applySingletonTags(outcome.resources) };
+function withSingletonTags(outcome: RawOutcome, scopeColumns: readonly string[]): RawOutcome {
+  return { ...outcome, resources: applySingletonTags(outcome.resources, scopeColumns) };
 }
 /** The code of the blocking declarative-plane conflict finding. */
 export const PLANE_RULE_CONTRADICTION = 'PLANE_RULE_CONTRADICTION';
@@ -275,11 +297,17 @@ function compareFindings(a: Finding, b: Finding): number {
  * Args:
  *   outcome: The python discovery outcome.
  *   config: The validated declarative plane config.
+ *   scopeColumns: The tenant-scope column names to recognize (default:
+ *     {@link TENANT_SCOPE_COLUMNS}).
  *
  * Returns:
  *   RawOutcome: New outcome with agreed planes and any conflict findings.
  */
-export function applyPlanesConfig(outcome: RawOutcome, config: PlanesConfig): RawOutcome {
+export function applyPlanesConfig(
+  outcome: RawOutcome,
+  config: PlanesConfig,
+  scopeColumns: readonly string[] = TENANT_SCOPE_COLUMNS,
+): RawOutcome {
   const contradictionFindings: Finding[] = [];
   const resources = outcome.resources.map((resource) => {
     const facts = tableFactsOf(resource);
@@ -304,7 +332,7 @@ export function applyPlanesConfig(outcome: RawOutcome, config: PlanesConfig): Ra
     findings: [...outcome.findings, ...contradictionFindings],
     classificationSignals: outcome.classificationSignals,
     ...(outcome.scannedPaths !== undefined ? { scannedPaths: outcome.scannedPaths } : {}),
-  });
+  }, scopeColumns);
 }
 
 /**
@@ -330,6 +358,13 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
   const env = options.env ?? pythonEnvironment();
   const pluginId = options.pluginId ?? PACK_PLUGIN_ID;
   const pluginVersion = options.pluginVersion ?? PACK_VERSION;
+  // The tenant scope channel, resolved once per discover: the explicit
+  // option, else the owner's `.gateforge.yml` declaration, else the
+  // pack's default list (absence → byte-identical).
+  const resolveScopeColumns = (): readonly string[] =>
+    options.tenancyScopeColumns ??
+    readTenancyScopeColumnsOrNull(resolve(process.cwd(), options.configPath ?? CONFIG_PATH)) ??
+    TENANT_SCOPE_COLUMNS;
 
   return {
     async discover(paths) {
@@ -354,8 +389,9 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
           classificationSignals: outcome.classificationSignals,
           ...(outcome.scannedPaths !== undefined ? { scannedPaths: outcome.scannedPaths } : {}),
         };
+        const scopeColumns = resolveScopeColumns();
         if (plane !== undefined) {
-          return planeIsNoop(plane) ? withSignals : applyPlaneMapping(withSignals, plane);
+          return planeIsNoop(plane) ? withSignals : applyPlaneMapping(withSignals, plane, scopeColumns);
         }
         const config =
           options.planesConfig ??
@@ -363,7 +399,7 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
         if (config.rules.length === 0) {
           return withSignals; // no rules: byte-identical to NO_PLANE_MAPPING
         }
-        return applyPlanesConfig(withSignals, config);
+        return applyPlanesConfig(withSignals, config, scopeColumns);
       } finally {
         await session.dispose();
       }

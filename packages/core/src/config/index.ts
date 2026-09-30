@@ -559,11 +559,46 @@ export const GateforgeConfigSchema = z
      * config-error path (exit 2).
      */
     runner: z.enum(['playwright', 'pytest', 'vitest', 'cypress']).default('playwright'),
+    /**
+     * Owner-declared tenant scope (plan 2026-09-25 Phase 4b item 3a).
+     * The sqlalchemy pack recognizes a FIXED default list of tenant
+     * scope column names (`tenant_id`, `tenant`, `tenantId`,
+     * `tenant_uuid`, `tenant_key`); an application whose scope column is
+     * spelled differently (`contractor_id`, `org_id`, ...) declares it
+     * here so a per-tenant singleton table is still recognized. The
+     * declaration REPLACES the default list — it never extends it, so
+     * the recognized scope is exactly what the owner said. ABSENT = the
+     * default list, byte-identical to today's behavior for every
+     * repository that has no opinion. Security-sensitive: the key lives
+     * in `.gateforge.yml`, so it is inside the trusted policy digest —
+     * an agent cannot widen the recognized tenant scope without the
+     * owner repinning the policy revision.
+     */
+    tenancy: z
+      .object({
+        /**
+         * The column names that carry the tenant scope in this
+         * repository. A nonempty list is required when the key is
+         * present: an empty list is a claim ("nothing is tenant
+         * scoped") that would silently disable the tag, so it is
+         * rejected instead.
+         */
+        scopeColumns: z.array(z.string().min(1)).min(1).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
 /** Inferred `.gateforge.yml` shape. */
 export type GateforgeConfig = z.infer<typeof GateforgeConfigSchema>;
+
+/**
+ * Inferred `.gateforge.yml` `tenancy` section (plan Phase 4b item 3a):
+ * the owner-declared tenant scope columns. ABSENT means the pack's
+ * default list — today's behavior, byte-identical.
+ */
+export type TenancyConfig = NonNullable<GateforgeConfig['tenancy']>;
 
 /**
  * One actionable config diagnostic: where, what, and expected-vs-got.
