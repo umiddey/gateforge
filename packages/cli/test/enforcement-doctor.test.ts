@@ -116,7 +116,12 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(result.code).toBe(0);
       expect(mutation.status).toBe('warn');
       expect(mutation.detail).toContain('mutation-marker.txt');
-      expect(mutation.detail).toContain('gateforge-check first');
+      // The advice has to be actionable in the ORDER the owner meets
+      // it: the hook does not exist yet, so it must name the command
+      // that installs it and the position to give it.
+      expect(mutation.detail).toContain('gateforge init --blocking');
+      expect(mutation.detail).toContain('FIRST in .pre-commit-config.yaml');
+      expect(mutation.detail).not.toContain('put gateforge-check first');
     });
   });
 

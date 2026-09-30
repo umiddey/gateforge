@@ -243,10 +243,17 @@ function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv): { status: 
       }
     }
     if (mutations.size > 0) {
+      // These are the REPOSITORY's own hooks, and the doctor runs
+      // before (or without) any Gateforge hook — so the advice has to
+      // be ordered the way the owner meets it: install the hook first,
+      // then give it the first position. Telling someone to reorder a
+      // hook they do not have yet is not actionable.
       const recommendation =
         hookIds[0] === 'gateforge-check'
           ? ''
-          : '; put gateforge-check first so later file-mutating hooks cannot invalidate its receipt';
+          : '; these are your repo\'s own hooks, not Gateforge\'s — run `gateforge init --blocking` ' +
+            '(or `gateforge enforce`) to install gateforge-check, then move its entry to the ' +
+            'FIRST in .pre-commit-config.yaml, above these hooks, so a file-mutating hook cannot invalidate its receipt';
       return {
         status: 'warn',
         detail: `pre-commit hooks modified workspace files on repeated runs: ${summarizePaths([...mutations].sort(), 5)}${recommendation}`,

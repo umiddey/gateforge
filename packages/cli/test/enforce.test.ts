@@ -191,6 +191,47 @@ describe('gateforge enforce', () => {
     });
   });
 
+  it('announces the pre-commit edit as an action, with the undo command', async () => {
+    await withTempRepo({}, async (repo) => {
+      expect((await runCli(repo, ['init'])).code).toBe(0);
+      // A repo that already has its own hooks: the wiring EDITS that file.
+      const existing = ['repos:', '  - repo: local', '    hooks:', '      - id: lint', '        name: lint', '        entry: true', '        language: system', ''].join('\n');
+      writeFileSync(repo.path('.pre-commit-config.yaml'), existing);
+      repo.stage(['.pre-commit-config.yaml']);
+      repo.commit('repo hooks');
+      const enforced = await runCli(repo, ['enforce']);
+      expect(enforced.code).toBe(0);
+      // ONE plain line: what changed, and the exact command that takes
+      // it back — runnable as printed.
+      const line = enforced.stdout
+        .split('\n')
+        .find((entry) => entry.startsWith('updated: ') && entry.includes('.pre-commit-config.yaml'));
+      expect(line).toBeDefined();
+      expect(line).toContain('gateforge-check hook appended');
+      expect(line).toContain('undo: git restore -- .pre-commit-config.yaml');
+      const restore = spawnSync('git', ['restore', '--', '.pre-commit-config.yaml'], { cwd: repo.root, encoding: 'utf8' });
+      expect(restore.status).toBe(0);
+      expect(readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8')).toBe(existing);
+    });
+  }, 120_000);
+
+  it('never prints an undo command that cannot run (untracked config)', async () => {
+    await withTempRepo({}, async (repo) => {
+      expect((await runCli(repo, ['init'])).code).toBe(0);
+      writeFileSync(repo.path('.pre-commit-config.yaml'), 'repos: []\n');
+      const enforced = await runCli(repo, ['enforce']);
+      expect(enforced.code).toBe(0);
+      const line = enforced.stdout
+        .split('\n')
+        .find((entry) => entry.startsWith('updated: ') && entry.includes('.pre-commit-config.yaml'));
+      // An untracked file has nothing for `git restore` to restore, so
+      // the line must not tell the owner to run it.
+      expect(line).not.toContain('git restore');
+      expect(line).toContain('undo:');
+      expect(line).toContain('not tracked by git');
+    });
+  }, 120_000);
+
   it('refuses to run without a gateforge config', async () => {
     await withTempRepo({}, async (repo) => {
       const { code, stderr } = await runCli(repo, ['enforce']);
