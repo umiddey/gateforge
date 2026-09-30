@@ -62,8 +62,10 @@ import {
   AttestationSchema,
   BEHAVIOR_CASE_KIND,
   BehaviorCasePayloadSchema,
+  BehaviorCatalogRegistrationSchema,
   CAUSE_NEXT_ACTIONS,
   canonicalJson,
+  compareStrings,
   caseExecutionDigestOf,
   EMPTY_BEHAVIOR_CATALOG_DIGEST,
   engineBundleDigestOf,
@@ -83,9 +85,11 @@ import {
   verifyAttestationMac,
   type Attestation,
   type BehaviorCatalog,
+  type BehaviorCatalogRegistration,
   type BlockingEntry,
   type ExecutionResult,
   type GateforgeConfig,
+  type HttpRouteCandidate,
   type GateReceipt,
   type Claim,
   type JsonValue,
@@ -108,6 +112,7 @@ import {
   type LoadedQuarantine,
   type Obligation,
   type TestCatalog,
+  type TestMap,
   type TracedTestInput,
 } from '@gate-forge/core';
 import {
@@ -1963,6 +1968,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // Hoisted: a named run grades the obligations its selection declares,
   // which the mapping resolution below is the only trusted source for.
   let gradedResolution: ResolvedMappings | null = null;
+  // Hoisted: the validated sidecar, the only declaration source the
+  // witness-side case assignments are built from.
+  let behaviorSidecar: TestMap | null = null;
   if (catalog !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
@@ -1974,6 +1982,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       nativeErrors,
       nativeInstances,
     });
+    behaviorSidecar = mapped.sidecar;
     mappingBlockers = mappingBlocking(mapped.resolution.problems);
     // Quarantined tests prove nothing: their declarations and their
     // coverage bindings leave the mapping surface BEFORE planning, so an
@@ -2709,6 +2718,14 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         ...(io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== undefined && io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== ''
           ? { GATEFORGE_PROBE_DB_CONTAINER: io.env['GATEFORGE_PROBE_DB_CONTAINER'] }
           : {}),
+        // Trusted fixture/actor provider (non-secret path): strong
+        // behavior cases mint their fixtures and actor credentials from
+        // the operator's approved module, engine-side. The suite never
+        // sees it, and without it the cases block fail-closed.
+        ...(io.env['GATEFORGE_FIXTURE_PROVIDER'] !== undefined &&
+        io.env['GATEFORGE_FIXTURE_PROVIDER'] !== ''
+          ? { GATEFORGE_FIXTURE_PROVIDER: io.env['GATEFORGE_FIXTURE_PROVIDER'] }
+          : {}),
         // Session-proxy tag channel: the pytest, vitest and cypress
         // adapters publish a per-test session proxy origin, so the
         // witness must front the app with an observation proxy or every
@@ -2738,6 +2755,27 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       runId: manifest.runId,
       invocationId,
       inputDigest: expectedDigest,
+    });
+  }
+  // The compiled behavior catalog is a PRE-run fact, so the witness binds
+  // it now — before any session opens — exactly like the run context. A
+  // repository with no behavior document makes no call and runs
+  // byte-identical; a refused bind fails the run instead of leaving every
+  // behavior obligation silently unprovable.
+  if (
+    effectiveWitnessUrl !== undefined &&
+    witnessVerifierKey !== undefined &&
+    pipeline.behaviorCatalog !== null &&
+    pipeline.behaviorCatalog.cases.length > 0
+  ) {
+    await registerWitnessBehaviorCatalog({
+      witnessUrl: effectiveWitnessUrl,
+      runToken,
+      verifierKey: witnessVerifierKey,
+      catalog: pipeline.behaviorCatalog,
+      assignments: behaviorCaseAssignments(catalog ?? EMPTY_CATALOG, behaviorSidecar),
+      routes: httpRoutes,
+      authorityProfileDigest: engineBundleDigestOf(VERSION, trustedPolicy),
     });
   }
   writeManifest(stateDir, manifest);
@@ -4147,6 +4185,148 @@ async function bindWitnessContext(
     if (error instanceof Error && error.message.startsWith('test-gates: witness')) throw error;
     throw new Error(
       `test-gates: witness ${witnessUrl} run-context binding failed (transport): ${(error as Error).message}`,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Builds the witness-side case assignments for this run: which compiled
+ * behavior cases a given test may execute, keyed by the identity the
+ * runner opens its session with (its own framework id, falling back to
+ * the derived logical key exactly like the expected set does).
+ *
+ * The witness resolves `/behavior/execute` through this binding alone,
+ * so it is supervisor-authenticated run input, never a suite-supplied
+ * claim. A declaration whose test is absent from the current catalog
+ * contributes no assignment (its test cannot open a session anyway);
+ * a declaration without `caseIds` declares nothing.
+ *
+ * Args:
+ *   catalog: the current discovered test catalog.
+ *   sidecar: the validated `.gateforge/test-map.yml`, or null.
+ *
+ * Returns:
+ *   Record<string, string[]>: session test id → sorted case ids.
+ */
+function behaviorCaseAssignments(
+  catalog: TestCatalog,
+  sidecar: TestMap | null,
+): Record<string, string[]> {
+  if (sidecar === null) return {};
+  const identityByKey = new Map<string, string>();
+  for (const row of catalog.entries) {
+    // A catalog row without a runner-native identity is keyed by the
+    // derived logical key, exactly like the registered expected set.
+    const identity = row.parameterIdentity === null || row.parameterIdentity.length === 0
+      ? row.logicalKey
+      : row.parameterIdentity;
+    identityByKey.set(row.logicalKey, identity);
+  }
+  const assignments: Record<string, string[]> = {};
+  for (const entry of sidecar.tests) {
+    if (entry.caseIds === undefined || entry.caseIds.length === 0) continue;
+    const identity = identityByKey.get(entry.key);
+    if (identity === undefined) continue;
+    const merged = new Set(assignments[identity] ?? []);
+    for (const caseId of entry.caseIds) merged.add(caseId);
+    assignments[identity] = [...merged].sort(compareStrings);
+  }
+  return assignments;
+}
+
+/**
+ * Binds the compiled behavior catalog to a wired witness (plan
+ * 2026-09-19 §4.7): supervisor-authenticated
+ * `POST /runs/behavior-catalog`, carrying the catalog, the case
+ * assignments, the COMPLETE route inventory principal attribution needs,
+ * and the engine-bundle authority-profile digest — all compiled by this
+ * run, never read from the suite.
+ *
+ * Called only when a `behaviorPolicy` compiled at least one case: a
+ * repository without one makes no call and its run is byte-identical.
+ *
+ * Args:
+ *   witnessUrl: the wired witness base URL.
+ *   runToken: the witness run token (outer auth gate).
+ *   verifierKey: the witness verifier key (supervisor capability).
+ *   catalog: this run's compiled behavior catalog.
+ *   assignments: session test id → allowed case ids.
+ *   routes: the complete derived `http.endpoint` inventory.
+ *   authorityProfileDigest: the engine bundle + trusted policy digest.
+ *
+ * Throws:
+ *   Error: fail closed when the witness refuses the registration or is
+ *   unreachable. Without a bound catalog every behavior obligation stays
+ *   `missing`, so a silent skip would be a lie; diagnostics name only
+ *   the failure class, never verifier material.
+ */
+async function registerWitnessBehaviorCatalog(input: {
+  witnessUrl: string;
+  runToken: string;
+  verifierKey: string;
+  catalog: BehaviorCatalog;
+  assignments: Record<string, string[]>;
+  routes: readonly HttpRouteCandidate[];
+  authorityProfileDigest: string;
+}): Promise<void> {
+  if (input.routes.length === 0) {
+    throw new Error(
+      'test-gates: the compiled behavior catalog cannot be bound — no http.endpoint route was ' +
+        'discovered and principal attribution has no any-endpoint fallback; no behavior case can execute without it',
+    );
+  }
+  let body: BehaviorCatalogRegistration;
+  try {
+    body = BehaviorCatalogRegistrationSchema.parse({
+      catalog: input.catalog,
+      assignments: input.assignments,
+      routes: input.routes.map((route) => ({
+        resourceId: route.resourceId,
+        method: route.method,
+        canonicalPath: route.canonicalPath,
+      })),
+      authorityProfileDigest: input.authorityProfileDigest,
+    });
+  } catch (error) {
+    const first = (error as Error).message.split('\n')[0] ?? 'unknown schema error';
+    throw new Error(
+      `test-gates: the compiled behavior catalog is not registrable (${first}); no behavior case can execute without it`,
+    );
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const response = await fetch(`${input.witnessUrl}/runs/behavior-catalog`, {
+      method: 'POST',
+      headers: {
+        'x-gateforge-run': input.runToken,
+        'x-gateforge-verifier': input.verifierKey,
+        'content-type': 'application/json',
+        accept: 'application/json',
+        connection: 'close',
+      },
+      body: canonicalJson(body),
+      signal: controller.signal,
+    });
+    if (response.ok) return;
+    const status = response.status;
+    let detail = '';
+    try {
+      const errorBody = (await response.json()) as { error?: unknown };
+      if (typeof errorBody.error === 'string') detail = `: ${errorBody.error}`;
+    } catch {
+      detail = '';
+    }
+    throw new Error(
+      `test-gates: witness ${input.witnessUrl} refused the behavior-catalog bind (HTTP ${String(status)})${detail}; ` +
+        'no behavior case can execute without it',
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('test-gates: witness')) throw error;
+    throw new Error(
+      `test-gates: witness ${input.witnessUrl} behavior-catalog bind failed (transport): ${(error as Error).message}`,
     );
   } finally {
     clearTimeout(timer);

@@ -80,6 +80,17 @@ export const ENV_MOUNT_PATH = 'GATEFORGE_MOUNT_PATH';
  * CLI reads (`gateforge test-gates`).
  */
 export const ENV_WITNESS_VERIFIER_KEY = 'GATEFORGE_WITNESS_VERIFIER_KEY';
+/**
+ * Operator-provided trusted fixture/actor provider (plan 2026-09-25
+ * Phase 2): an absolute path to a `fixture-provider.mjs` module (or the
+ * directory holding it) whose default export implements the
+ * `FixtureProvider` interface. It is the ONLY source of case fixtures
+ * and actor credentials, so it is read engine-side here and never
+ * travels to the suite. Absent (the default) strong behavior cases
+ * block with a typed cause instead of falling back to suite-supplied
+ * fixtures.
+ */
+export const ENV_FIXTURE_PROVIDER = 'GATEFORGE_FIXTURE_PROVIDER';
 
 /** Opt-in reporter exit-code semantics (standalone runs only). */
 export const ENV_REPORTER_FAIL_RUN = 'GATEFORGE_REPORTER_FAIL_RUN';
