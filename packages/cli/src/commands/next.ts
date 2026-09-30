@@ -30,6 +30,7 @@ import {
   FASTAPI_PREFIX_UNRESOLVED,
 } from '@gate-forge/http-contract';
 import { PLANES_CONFIG_PATH } from '@gate-forge/pack-sqlalchemy';
+import { FASTAPI_SCAN_CONFIG_PATH } from '@gate-forge/pack-fastapi';
 import {
   discoverTestCatalog,
   TestDiscoveryError,
@@ -361,50 +362,194 @@ function endpointSemanticsGuidance(detail: string, graph: ResourceGraph): string
 
 /**
  * Builds the answer for a `FASTAPI_PREFIX_UNRESOLVED` finding: an
- * `include_router(...)`/router prefix the detector cannot read
- * statically, so no route fact is emitted for that mount at all.
+ * `include_router(...)` mount the detector cannot follow, so no route
+ * fact is emitted for it at all.
  *
- * The block exists because the effective path cannot be proven, and
- * Gateforge never guesses one (a fabricated path is a route the app does
- * not serve). What the block must therefore do is name the ONE way the
- * finding closes today: make the prefix a literal at the mount site.
+ * Gateforge never guesses the effective path (a fabricated path is a
+ * route the app does not serve), so the block names the ONE mechanism
+ * that closes the reason it is actually reporting. The cause code covers
+ * several DISTINCT reasons, and the guidance therefore keys on the
+ * REASON in the detail, never on the code:
  *
- * Nothing else is printed, and that is a verified statement, not an
- * omission — each alternative was run against the real in-process pack
- * before this guidance was written:
- * - a `.gateforge/endpoints.json` capability rule cannot match: the
- *   detector emits no route fact for this mount, so there is no
- *   method/path pair for a rule to select on;
- * - `gateforge waive` cannot reach it: the finding resolves no obligation
- *   (`waive: no obligation resolves for …`, exit 2);
- * - `.gateforge/fastapi.json`'s `importRoots` does not apply: it governs
- *   absolute imports, and with it configured the same finding stands.
+ * - a COMPUTED prefix (`include_router prefix in <file> is computed`,
+ *   `router '<x>' in <file> declares a computed prefix`): the value is
+ *   hidden in an expression, so the fix is a literal at the mount site.
+ *   Nothing else reaches it, and that is verified, not assumed — a
+ *   `.gateforge/endpoints.json` capability rule cannot match (no route
+ *   fact is emitted for this mount, so a rule has no method/path to
+ *   select on) and `gateforge waive` cannot resolve it (`waive: no
+ *   obligation resolves for …`, exit 2).
+ * - an UNRESOLVABLE or AMBIGUOUS target (`include_router target '<x>' in
+ *   <file> cannot be resolved in the scanned set`, and the import-alias
+ *   form of the same thing): the mount names a router the scanner cannot
+ *   follow, so NO prefix edit can apply — the mount may carry no prefix
+ *   at all. The remedy is a declaration,
+ *   `.gateforge/fastapi.json`'s `importRoots`, naming the directory the
+ *   absolute imports in that file are written relative to. Verified
+ *   against the real python detector on the canonical template shape
+ *   (`backend/app/main.py` including `app.api.main.api_router`, which
+ *   includes `app.api.routes.<module>.router`): with the roots declared
+ *   the whole mount resolves and every route carries its real prefix,
+ *   with NO application edit — see
+ *   `pack-fastapi/test/template-mount.test.ts`.
+ * - an include CYCLE: no declaration reaches it, so the block says only
+ *   that.
  *
  * Args:
  *   detail: the finding's `why` line (the reason code and its detail).
+ *   cwd: the repository root, used to derive the import root from the
+ *     file the finding names — and to print none when it cannot.
  *
  * Returns:
- *   string[]: the explanation and the one real fix, or an empty array
+ *   string[]: the explanation and the real fix, or an empty array
  *     when the detail is not this cause.
  */
-function fastapiPrefixGuidance(detail: string): string[] {
+function fastapiPrefixGuidance(detail: string, cwd: string): string[] {
   if (!detail.startsWith(`${FASTAPI_PREFIX_UNRESOLVED}:`)) return [];
-  // The detector's detail names the file the unprovable mount is written
-  // in ("include_router prefix in <file> is computed…"), so the owner is
-  // pointed at the exact line to edit.
-  const site = /in (\S+) is computed/.exec(detail)?.[1] ?? '';
-  return [
-    'about this block: this mount writes its prefix from an expression, so the path every route under it ' +
-      'serves cannot be read from the code — a settings attribute, a constant, or a concatenation all ' +
-      'hide the value at scan time. Gateforge will not guess it: a made-up path would describe routes the ' +
-      'application does not serve, so the whole mount stays unresolved until the prefix is provable.',
-    `Fix it in ${site === '' ? 'the file the finding names' : site}: give the mount a literal string prefix ` +
-      '(for example `app.include_router(router, prefix="/api/v1")`). A module-level constant does not help ' +
-      '— the value must be written at the mount site.',
-    'Nothing in Gateforge can close this finding on your behalf: a waiver needs an obligation and this has ' +
-      'none, and a declared endpoint rule has no detected route to attach to. Re-run `gateforge next` after ' +
-      'the edit — the routes then appear with their real prefix.',
-  ];
+  // Every detail names the file the unprovable mount is written in, so
+  // the owner is pointed at the exact file rather than at a guess.
+  const site = /\bin (\S+) (?:is computed|declares a computed prefix|is an import alias)\b/.exec(
+    detail,
+  )?.[1] ?? '';
+  if (/is computed|declares a computed prefix/.test(detail)) {
+    return [
+      'about this block: this mount writes its prefix from an expression, so the path every route under it ' +
+        'serves cannot be read from the code — a settings attribute, a constant, or a concatenation all ' +
+        'hide the value at scan time. Gateforge will not guess it: a made-up path would describe routes the ' +
+        'application does not serve, so the whole mount stays unresolved until the prefix is provable.',
+      `Fix it in ${site === '' ? 'the file the finding names' : site}: give the mount a literal string prefix ` +
+        '(for example `app.include_router(router, prefix="/api/v1")`). A module-level constant does not help ' +
+        '— the value must be written at the mount site.',
+      'Nothing in Gateforge can close this finding on your behalf: a waiver needs an obligation and this has ' +
+        'none, and a declared endpoint rule has no detected route to attach to. Re-run `gateforge next` after ' +
+        'the edit — the routes then appear with their real prefix.',
+    ];
+  }
+  const ambiguousRoots = ambiguousImportRoots(detail);
+  const unresolvedSite =
+    ambiguousRoots !== null
+      ? site
+      : (/\bin (\S+) (?:cannot be resolved in the scanned set|matches multiple scanned files)\b/.exec(
+            detail,
+          )?.[1] ?? site);
+  if (ambiguousRoots !== null || /cannot be resolved in the scanned set/.test(detail)) {
+    const derived = importRootForMountSite(unresolvedSite, cwd);
+    const roots = ambiguousRoots ?? (derived === '' ? null : [derived]);
+    const file = unresolvedSite === '' ? 'the file the finding names' : unresolvedSite;
+    return [
+      'about this block: this mount includes a router the scanner cannot follow, so the path every route under it',
+      'serves is unknown — the module it names is not one of the scanned files. Gateforge will not guess it: a',
+      'made-up path would describe routes the application does not serve. Making the prefix literal cannot help',
+      'here: this mount is not written with a computed prefix, so there is no prefix expression to replace.',
+      `Fix it with a declaration and NO application edit: the import roots tell the scanner which directory the`,
+      `absolute imports in ${file} are written relative to.`,
+      `Write this file — '${FASTAPI_SCAN_CONFIG_PATH}' — and run \`gateforge next\` again:`,
+      '[CODE]',
+      JSON.stringify(
+        roots === null
+          ? { importRoots: ['<the source directory that file is imported from>'] }
+          : { importRoots: roots },
+        null,
+        2,
+      ),
+      '[CODE]',
+      roots === null
+        ? 'Replace the placeholder with that directory (one entry per import root). A root that does not hold the'
+        : 'The routes under this mount then carry their real prefix and this finding is gone. A root that does not hold the',
+      'unresolved module changes nothing — the scanned set stays closed, never guessed.',
+    ];
+  }
+  if (/include cycle through/.test(detail)) {
+    return [
+      'about this block: the routers under this mount include each other in a cycle, so no order of mounts gives one',
+      `effective path. No declaration reaches this: break the cycle at the include sites in ${site === '' ? 'the file the finding names' : site},`,
+      'then re-run `gateforge next`.',
+    ];
+  }
+  return [];
+}
+
+/**
+ * The one-line `do:` that opens a `FASTAPI_PREFIX_UNRESOLVED` block. It
+ * states the action of the reason {@link fastapiPrefixGuidance} explains:
+ * a computed prefix is an application edit, an unfollowable target is a
+ * declaration. `''` when the detail is not this cause.
+ *
+ * Args:
+ *   detail: the finding's `why` line.
+ *
+ * Returns:
+ *   string: the `do:` text, or `''`.
+ */
+function fastapiPrefixDo(detail: string): string {
+  if (!detail.startsWith(`${FASTAPI_PREFIX_UNRESOLVED}:`)) return '';
+  if (/is computed|declares a computed prefix/.test(detail)) {
+    return 'make the mount prefix a literal at the site named below, then run `gateforge next` again';
+  }
+  if (ambiguousImportRoots(detail) !== null || /cannot be resolved in the scanned set/.test(detail)) {
+    return `declare the import roots in '${FASTAPI_SCAN_CONFIG_PATH}' — the exact entry to add is below`;
+  }
+  return 'break the include cycle at the site named below, then run `gateforge next` again';
+}
+
+/**
+ * The import roots an AMBIGUOUS-target detail already names, one per
+ * conflicting file, sorted. `null` when the detail is not ambiguous — the
+ * roots are then derived from the file the finding names instead.
+ */
+function ambiguousImportRoots(detail: string): string[] | null {
+  const files = /\(([^)]*)\); the target router cannot be proven uniquely/.exec(detail)?.[1];
+  if (files === undefined) return null;
+  const roots = new Set<string>();
+  for (const file of files.split(',')) {
+    const trimmed = file.trim();
+    const cut = trimmed.lastIndexOf('/');
+    if (cut > 0) roots.add(trimmed.slice(0, cut));
+  }
+  return roots.size === 0 ? null : [...roots].sort();
+}
+
+/**
+ * The source directory the finding's file is imported from, derived from
+ * that file alone: the SHORTEST directory prefix under which one of its
+ * own absolute imports is a real path on disk (`backend/app/api/main.py`
+ * importing `app.api.routes` → `backend`). `''` when it cannot be
+ * derived — the file is absent, has no absolute import, or every
+ * candidate is the repository root itself — so the guidance then names
+ * the declaration without inventing a directory.
+ *
+ * Args:
+ *   file: the repo-relative file the finding names.
+ *   cwd: the repository root.
+ *
+ * Returns:
+ *   string: the repo-relative import root, or `''`.
+ */
+function importRootForMountSite(file: string, cwd: string): string {
+  if (file === '' || file.startsWith('/')) return '';
+  let source: string;
+  try {
+    source = readFileSync(join(cwd, file), 'utf8');
+  } catch {
+    return '';
+  }
+  const modules = new Set<string>();
+  for (const match of source.matchAll(/^\s*from\s+([A-Za-z_][A-Za-z0-9_.]*)\s+import\b/gmu)) {
+    const dotted = match[1] as string;
+    if (dotted !== '') modules.add(dotted);
+  }
+  if (modules.size === 0) return '';
+  const segments = file.split('/');
+  // Longest prefix first so the FIRST hit is the shortest root.
+  for (let depth = segments.length - 1; depth >= 1; depth -= 1) {
+    const root = segments.slice(0, depth).join('/');
+    const holds = [...modules].some((dotted) => {
+      const base = join(cwd, root, dotted.replaceAll('.', '/'));
+      return existsSync(`${base}.py`) || existsSync(join(base, '__init__.py'));
+    });
+    if (holds) return root;
+  }
+  return '';
 }
 
 /**
@@ -885,7 +1030,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   // block names the one edit that closes it, never a read-only command.
   const endpointGuidance =
     routeGuidance === null ? endpointSemanticsGuidance(first.why, pipeline.graph) : [];
-  const prefixGuidance = routeGuidance === null ? fastapiPrefixGuidance(first.why) : [];
+  const prefixGuidance = routeGuidance === null ? fastapiPrefixGuidance(first.why, io.cwd) : [];
   const guide = ENVIRONMENT_GUIDES[first.cause as CauseCode] ?? null;
   const scopeNote = observationScopeNote(
     first,
@@ -953,10 +1098,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       );
       for (const line of endpointGuidance) writeLine(io.stdout, line);
     } else if (prefixGuidance.length > 0) {
-      writeLine(
-        io.stdout,
-        'do: make the mount prefix a literal at the site named below, then run `gateforge next` again',
-      );
+      writeLine(io.stdout, `do: ${fastapiPrefixDo(first.why)}`);
       for (const line of prefixGuidance) writeLine(io.stdout, line);
     } else {
       writeLine(io.stdout, `do: ${first.do}`);
