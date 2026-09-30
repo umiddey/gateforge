@@ -574,3 +574,60 @@ describe('gateforge next: the task pack offer and the singleton guidance', () =>
     });
   });
 });
+
+describe('gateforge next: copy-pasteable output and honest prerequisites', () => {
+  /**
+   * The standard fixture plus one route with no data plane — the block
+   * that prints the owner commands (and, only while it is missing, the
+   * prerequisite that creates the planes file).
+   *
+   * @param repo the temp repository under test
+   */
+  async function withUnresolvedRoute(repo: Parameters<typeof installFixture>[0]): Promise<void> {
+    installFixture(repo);
+    const plugin = readFileSync(join(repo.root, 'plugin.mjs'), 'utf8');
+    repo.writeFiles({
+      'plugin.mjs': plugin.replace(
+        'return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };',
+        `const httpResource = {
+           schemaVersion: 1,
+           kind: 'http.contract',
+           source: 'src/http.ts',
+           location: { file: 'src/http.ts', line: 1, col: 0 },
+           detectorVersion: '1.0.0',
+           attributes: { role: 'server-route', method: 'DELETE', normalizedPath: '/items/{item_id}', rawPath: '/items/{item_id}', framework: 'express', handlerSymbol: 'deleteItem' },
+           id: 'http.contract:delete',
+         };
+         resources.push(httpResource);
+         return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };`,
+      ),
+    });
+  }
+
+  it('the plane block prints no bare unsubstituted token', async () => {
+    await withTempRepo({}, async (repo) => {
+      await withUnresolvedRoute(repo);
+      const { code, stdout } = await runCli(repo, ['next']);
+      expect(code).toBe(1);
+      expect(stdout).toContain('question:');
+      expect(stdout.split('\n').map((line) => line.trim())).not.toContain('[CODE]');
+    });
+  });
+
+  it('prints the planes prerequisite only while the planes file is absent', async () => {
+    await withTempRepo({}, async (repo) => {
+      await withUnresolvedRoute(repo);
+      rmSync(join(repo.root, '.gateforge/planes.json'), { force: true });
+      const first = await runCli(repo, ['next']);
+      expect(first.stdout).toContain('gateforge init --planes');
+    });
+    await withTempRepo({}, async (repo) => {
+      await withUnresolvedRoute(repo);
+      expect((await runCli(repo, ['init', '--planes'])).code).toBe(0);
+      expect(existsSync(join(repo.root, '.gateforge/planes.json'))).toBe(true);
+      const second = await runCli(repo, ['next']);
+      expect(second.stdout).toContain('question:');
+      expect(second.stdout).not.toContain('gateforge init --planes');
+    });
+  });
+});

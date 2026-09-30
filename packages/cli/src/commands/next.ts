@@ -25,6 +25,7 @@ import {
   type ObligationVerdict,
   type ResourceGraph,
 } from '@gate-forge/core';
+import { PLANES_CONFIG_PATH } from '@gate-forge/pack-sqlalchemy';
 import {
   discoverTestCatalog,
   TestDiscoveryError,
@@ -226,15 +227,18 @@ function shellQuote(value: string): string {
 /**
  * Builds owner-directed advice for an endpoint with no resolved plane.
  *
- * Every printed command runs exactly as printed: the prerequisite that
- * creates the owner-reviewed planes file is printed FIRST, because the
- * plane command below it exits 2 without that file — the omission this
- * guidance used to have.
+ * Every printed command runs exactly as printed, and no line printed
+ * with it is something a user could paste into a shell by mistake: the
+ * prerequisite that creates the owner-reviewed planes file is printed
+ * FIRST (the plane command below it exits 2 without that file) and ONLY
+ * while that file is absent — repeating "run this once" on every route
+ * makes the sentence false for everyone but the first.
  *
  * Args:
  *   routeName: canonical method and path shown to the user.
  *   resourceName: detector identity used by the owner-only policy edit.
  *   source: router source file used by the plane writer.
+ *   cwd: absolute repository root (the planes file is repo-relative).
  *
  * Returns:
  *   string[]: ordered question, runnable commands, and exact policy edit.
@@ -243,12 +247,14 @@ function unresolvedRouteGuidance(
   routeName: string,
   resourceName: string,
   source: string,
+  cwd: string,
 ): string[] {
   const choices = ['tenant', 'master', 'global'] as const;
   const commands = choices.map((plane) => {
     const reason = `Owner review confirms the ${plane} plane for ${routeName}.`;
     return `gateforge classify plane ${shellQuote(source)} ${plane} --reason ${shellQuote(reason)} --confirm`;
   });
+  const planesMissing = !existsSync(join(cwd, PLANES_CONFIG_PATH));
   return [
     // One plain line BEFORE the question: a new repo meets this
     // question first, and no shipped document prepares anyone for it.
@@ -261,17 +267,19 @@ function unresolvedRouteGuidance(
       'global), or, if the route is not used by real users, the internal rule printed at the end.',
     `question: ${routeName} — is this route used by real users, and which data plane owns its records?`,
     'This edits a classification input; re-approve any approved policy pin before strict gates run.',
-    "The plane command below needs the owner-reviewed '.gateforge/planes.json' first — run this once to create it:",
-    'gateforge init --planes',
-    '[CODE]',
+    ...(planesMissing
+      ? [
+          `The plane command below needs the owner-reviewed '${PLANES_CONFIG_PATH}' first — run this once to create it:`,
+          'gateforge init --planes',
+        ]
+      : []),
     'Then choose only the command for the boundary confirmed by the owner:',
-    ...commands.flatMap((command) => [command, '[CODE]']),
+    ...commands,
     'Owner-only alternative: only if this route is genuinely internal, edit `.gateforge/classification-policy.yml` under `internalRules`:',
     '  - match:',
     '      resourceKind: http.endpoint',
     `      resourceName: ${JSON.stringify(resourceName)}`,
     '    reason: "<owner-written reason and evidence for treating this route as internal>"',
-    '[CODE]',
     'An internal rule is certificate-checked; it is not an override.',
   ];
 }
@@ -746,7 +754,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   const routeGuidance =
     unresolvedRoute === undefined || routeName === undefined
       ? null
-      : unresolvedRouteGuidance(routeName, unresolvedRoute.name, unresolvedRoute.source);
+      : unresolvedRouteGuidance(routeName, unresolvedRoute.name, unresolvedRoute.source, io.cwd);
   const guide = ENVIRONMENT_GUIDES[first.cause as CauseCode] ?? null;
   const scopeNote = observationScopeNote(
     first,
