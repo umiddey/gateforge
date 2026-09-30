@@ -16,6 +16,7 @@
 import {
   AttestationSchema,
   BLOCKING_VERDICTS,
+  BASELINE_VERDICT_REASON,
   blockingEntryFingerprint,
   CAUSE_NEXT_ACTIONS,
   ClaimSchema,
@@ -700,7 +701,7 @@ function applyBaseline(
     return {
       ...entry,
       verdict: 'waived' as const,
-      reason: `baselined: adopted as forgiven (was ${entry.verdict}); baseline is shrink-only`,
+      reason: `${BASELINE_VERDICT_REASON} adopted as forgiven (was ${entry.verdict}); baseline is shrink-only`,
     };
   });
   const blocking: BlockingEntry[] = [];

@@ -1154,6 +1154,9 @@ export type { EngineMetadata } from './report/index.js';
 export type { ScopeMetadata } from './report/index.js';
 /** Measured supervised work and repository debt carried by run reports. */
 export type { RunExecutionSummary } from './report/index.js';
+export type { RepositoryDebt } from './report/index.js';
+/** The one repository-debt definition every surface reports from. */
+export { BASELINE_VERDICT_REASON, repositoryDebtOf } from './report/index.js';
 export type { DiagnosticContext } from './report/index.js';
 export type { LifecycleDerivationReportEntry } from './report/index.js';
 

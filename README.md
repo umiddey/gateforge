@@ -301,12 +301,17 @@ and response bodies are never included.
 **Two numbers, one meaning.** Reports used to print
 `repository debt: 192 blocking` next to a gate line that said zero
 blockers: both were true and neither was actionable. `repositoryDebt`
-gained `baselined` and `newlyBlocking` beside the frozen `blocking`
-total, and the text now reads `192 known (baselined), 0 new blocking`.
-A named or changed run never verdicts debt it did not observe — the
-in-runner reporter prints `GATEFORGE GATE: SELECTION (N satisfied, 0
-blocking; repository verdict not graded here)` instead of contradicting
-the CLI's exit code.
+now derives its split from ONE definition, the graded verdicts, so
+`baselined` and `newlyBlocking` are the same two numbers in the text and
+in the JSON, and `newlyBlocking` is what the gate actually blocks on —
+the frozen `blocking` total, never a subtraction that reached zero while
+blockers remained. A run is never printed twice: the in-runner reporter
+grades claims only, so it names no debt count of its own
+(`repository debt: graded by gateforge after the run`) instead of
+contradicting the CLI's line seconds later. A named or changed run never
+verdicts debt it did not observe — the in-runner reporter prints
+`GATEFORGE GATE: SELECTION (N satisfied, 0 blocking; repository verdict
+not graded here)` instead of contradicting the CLI's exit code.
 
 **A merge-request pipeline with no base commit** used to resolve the
 `auto` changed-file provider to the local staged diff — zero changed

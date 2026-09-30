@@ -76,6 +76,7 @@ import {
   isWitnessedRecord,
   renderRun,
   requiredCaseSetDigestOf,
+  repositoryDebtOf,
   runExitCode,
   sha256Canonical,
   selectionDigestOf,
@@ -224,7 +225,7 @@ import {
 } from '../run-reliability.js';
 import { pruneRunHistory, recordRunHistory } from '../history.js';
 import { ProgressStream, resolveProgressTarget, type ProgressOutcome, type ProgressTarget } from '../progress.js';
-import { writeDebtBaselineView, writeRunScopeView, writeTestFailures } from '../state.js';
+import { writeRunScopeView, writeTestFailures } from '../state.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
@@ -1769,24 +1770,14 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       ? { changedFilesOverride: options.fixedChangedFiles }
       : {}),
   });
-  // The scope and the adopted-baseline split, published to the
-  // in-runner reporter BEFORE the suite starts: a reporter that graded
-  // a selection must not print a repository verdict, and a reporter
-  // that does not know the baseline must not fold forgiven debt into its
-  // blocking count (one number, one meaning).
+  // The graded scope, published to the in-runner reporter BEFORE the
+  // suite starts: a reporter that graded a selection must not print a
+  // repository verdict. Debt itself is the gate's alone — the reporter
+  // has no waivers, no scope and no baseline, so it never grades it.
   const runScope: 'full' | 'changed' | 'named' =
     options.testSelectors !== undefined ? 'named' : options.scope === 'changed' ? 'changed' : 'full';
   writeRunScopeView(stateDir, runScope);
   const adoptedBaseline = resolveAdoptedBaseline(io.cwd, config.baselines);
-  writeDebtBaselineView(
-    stateDir,
-    adoptedBaseline === null
-      ? []
-      : pipeline.policy.obligations
-          .filter((obligation) => adoptedBaseline.fingerprints.has(obligationFingerprint(obligation)))
-          .map((obligation) => obligation.id)
-          .sort(),
-  );
   // Owner quarantine (plan 20260925_2013 Phase 2): loaded against the
   // INJECTED run clock, never the wall clock. ACTIVE quarantines remove
   // their test from the REQUIRED set and its evidence is discarded;
@@ -4011,12 +4002,11 @@ function runExecutionSummaryOf(input: {
   const blockingSelected = input.selectedVerdicts.filter(
     (verdict) => verdict.verdict !== 'satisfied' && verdict.verdict !== 'waived',
   ).length;
-  const blockingRepository = input.repositoryVerdicts.filter(
-    (verdict) => verdict.verdict !== 'satisfied' && verdict.verdict !== 'waived',
-  ).length;
-  const baselinedRepository = input.repositoryVerdicts.filter(
-    (verdict) => verdict.verdict === 'waived' && (verdict.reason ?? '').startsWith('baselined:'),
-  ).length;
+  const debt = repositoryDebtOf({
+    verdicts: input.repositoryVerdicts,
+    findings: input.repositoryBlocking,
+    unclaimed: input.unclaimed,
+  });
   return {
     scope: input.scope,
     mode: input.mode,
@@ -4035,19 +4025,9 @@ function runExecutionSummaryOf(input: {
       blockingEntries: input.selectedBlocking.length,
       waived: input.selectedVerdicts.filter((verdict) => verdict.verdict === 'waived').length,
     },
-    repositoryDebt: {
-      obligations: input.repositoryVerdicts.length,
-      // The legacy total, unchanged: blocking claims + repository
-      // findings, baselined debt included.
-      blocking: blockingRepository + input.repositoryBlocking.length,
-      blockingEntries: input.repositoryBlocking.length,
-      unclaimed: input.unclaimed,
-      // The adopted baseline re-grades a blocking verdict to `waived`
-      // with this exact reason, so the split is read back from what the
-      // evaluator actually did rather than recomputed beside it.
-      baselined: baselinedRepository,
-      newlyBlocking: Math.max(0, blockingRepository + input.repositoryBlocking.length - baselinedRepository),
-    },
+    // The one definition: the split is read back from what the
+    // evaluator actually graded, never recomputed beside it.
+    repositoryDebt: debt,
   };
 }
 
