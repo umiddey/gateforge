@@ -24,10 +24,10 @@
 3. Keep the verifier key in a protected environment variable or an external key ring. For example, create a current-user-owned key ring outside the repository and state directory:
 
    ```sh
-   mkdir -p "$HOME/.config/gateforge"
-   gateforge key create --file "$HOME/.config/gateforge/keys.json" --confirm
-   export GATEFORGE_WITNESS_VERIFIER_KEY_FILE="$HOME/.config/gateforge/keys.json"
+   gateforge key create --confirm
    ```
+
+   With no `--file` the CLI creates the ring at `"${XDG_CONFIG_HOME:-$HOME/.config}/gateforge/verifier-keyring.json"` (owner-only, mode `0600`) and reads that path on every later command; keep `--file <path>` plus a `GATEFORGE_WITNESS_VERIFIER_KEY_FILE` export only when the ring really lives elsewhere.
 
 4. Run the suite under Gateforge after upgrading:
 
