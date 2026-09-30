@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig, withTempRepo } from '@gate-forge/core';
 import {
-  HUMAN_MUST_CHOOSE_PRESET_LINE,
+  CHOOSE_ANOTHER_GOAL_ADVICE,
   INIT_PRESETS,
   parseGoalAnswer,
   renderGoalQuestion,
@@ -90,11 +90,29 @@ describe('init without a preset, without a terminal', () => {
       const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
       expect(code, stdout).toBe(0);
       expect(stdout).toContain('no terminal: writing the light preset');
-      expect(stdout).toContain(HUMAN_MUST_CHOOSE_PRESET_LINE);
+      expect(stdout).toContain(CHOOSE_ANOTHER_GOAL_ADVICE);
       // Light means warn: the report lists untested code, nothing blocks.
       expect(loadConfig(join(repo.root, '.gateforge.yml')).mode).toBe('warn');
       expect(existsSync(repo.path('.git/hooks/pre-commit'))).toBe(false);
       expect(existsSync(repo.path('.pre-commit-config.yaml'))).toBe(false);
+    });
+  });
+
+  it('states the chosen preset once, on the line that names --preset (F5)', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
+      expect(code, stdout).toBe(0);
+      const advice = stdout.split('\n').filter((line) => line.includes('--preset'));
+      // Exactly ONE line tells a headless owner how to choose another
+      // preset, and it is the same line that names the one written.
+      expect(advice).toHaveLength(1);
+      expect(advice[0]).toContain('writing the light preset');
+      expect(advice[0]).toContain('--preset <');
+      // The closing summary no longer restates the choice a second time.
+      expect(stdout).not.toContain('preset light:');
+      // What the run actually did is still reported.
+      expect(stdout).toContain('wrote mode: warn');
+      expect(stdout).toContain('undo: rm -rf');
     });
   });
 });
