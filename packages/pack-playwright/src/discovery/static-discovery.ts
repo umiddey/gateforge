@@ -34,6 +34,7 @@ import { join, posix } from 'node:path';
 import ts from 'typescript';
 import { pathInScope, type Location } from '@gate-forge/core';
 import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
+import { gitIgnoredPaths } from './git-ignore.js';
 
 /** Default cap on files pulled in through import traversal. */
 export const DEFAULT_MAX_TRAVERSED_FILES = 200;
@@ -362,8 +363,16 @@ function registrationWarningsForCall(
 
 /**
  * Walks the repo (pruning VCS/deps/build dirs) and returns the sorted
- * repo-relative posix files matching the include globs and no exclude
- * glob. Pure filesystem listing — no content is read here.
+ * repo-relative posix files matching the include globs, no exclude glob,
+ * and no git ignore rule. Pure filesystem listing — no content is read
+ * here.
+ *
+ * A path the repository ignores (e.g. the built, git-ignored bundle a
+ * frontend build writes into the tree) can never be enumerated by the
+ * runner, so a row from it would be a permanent `unenumeratedReason`
+ * gap. Where git cannot answer — outside a work tree, or git
+ * unavailable — every candidate is kept exactly as before
+ * (see {@link gitIgnoredPaths}).
  */
 function collectCandidateFiles(cwd: string, include: readonly string[], exclude: readonly string[]): string[] {
   const found: string[] = [];
@@ -396,7 +405,9 @@ function collectCandidateFiles(cwd: string, include: readonly string[], exclude:
     }
   };
   walk(cwd, '');
-  return found.sort();
+  const ignored = gitIgnoredPaths(cwd, found);
+  if (ignored === null) return found.sort();
+  return found.filter((file) => !ignored.has(file)).sort();
 }
 
 /** The callee shape `{base, names}` of `a.b.c(...)`, else null. */
