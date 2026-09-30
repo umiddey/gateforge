@@ -251,6 +251,7 @@ describe('executedOutcomesOf (reporter rows join the planned set; rows outside k
         status: 'passed',
         attempt: 1,
         expectedFailure: false,
+        runnerTestId: 'spec-1',
       },
     ]);
   });

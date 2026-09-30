@@ -296,10 +296,13 @@ export function authenticateContributingEvidence(
 
 /**
  * The witness-issued identities of every test this re-seal CARRIES:
- * the parent outcomes whose file the change set cannot affect. Both
- * identities the parent's own execution result holds are included (the
- * logical key and the framework id), because a record is stamped with
- * whichever identity its session carried.
+ * the parent outcomes whose file the change set cannot affect. Every
+ * identity the parent's own execution result holds is included (the
+ * logical key, the enumerated framework id, and the id the runner gave
+ * the test while it ran), because a record is stamped with whichever
+ * identity its session carried — natively claimed evidence carries the
+ * runner's own id, which differs from the enumerated one whenever the
+ * trusted config lives in another directory.
  *
  * Args:
  *   parentExecution: the parent run's sealed execution result.
@@ -319,6 +322,7 @@ export function carriedTestIdentities(
     const planned = parentExecution.planned.find((entry) => entry.logicalKey === row.logicalKey);
     identities.add(row.logicalKey);
     if (planned !== undefined && planned.frameworkId !== null) identities.add(planned.frameworkId);
+    if (row.runnerTestId !== undefined) identities.add(row.runnerTestId);
   }
   return identities;
 }
