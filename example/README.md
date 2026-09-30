@@ -110,10 +110,17 @@ die, and the doctor says so by name:
 $ npx playwright install --with-deps chromium   # needs root or sudo
 ```
 
-`gateforge enforcement doctor` reports a build in exactly this state as
-`the browser build '<cache>/chromium-<revision>' is installed but cannot start
-on this machine: …libnss3.so…` with the `npx playwright install-deps chromium`
-command that fixes it, so the cause and the fix are never something to guess.
+`gateforge enforcement doctor` reports a build in exactly this state by name,
+with the loader's own line and the command that fixes it:
+
+```text
+[FAIL] runner: playwright installed; the browser build '<cache>/chromium-<revision>' is installed but
+cannot start on this machine: …/chrome: error while loading shared libraries: libnss3.so: cannot open
+shared object file; fix: run `npx playwright install-deps chromium` in '<this directory>' (installs the
+browser's system libraries; needs root or sudo)
+```
+
+(`gateforge run` stops at that same line before the suite starts, with exit 1.)
 
 `npm run gate` (`scripts/gate.mjs`) does what a supervised run needs around it:
 
