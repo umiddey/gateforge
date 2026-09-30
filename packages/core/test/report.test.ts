@@ -191,7 +191,13 @@ describe('renderRun — json format', () => {
       }),
       entry(makeObligation('tenant.audit'), 'waived', { reason: 'GF-17: owner-stale waiver' }),
     ];
-    const debt = repositoryDebtOf({ verdicts, findings: [], unclaimed: 4 });
+    const debt = repositoryDebtOf({
+      verdicts,
+      findings: [],
+      gradedVerdicts: verdicts,
+      gradedFindings: [],
+      unclaimed: 4,
+    });
     expect(debt).toEqual({
       obligations: 6,
       blocking: 2,
@@ -199,6 +205,7 @@ describe('renderRun — json format', () => {
       unclaimed: 4,
       baselined: 2,
       newlyBlocking: 2,
+      notGradedBlocking: 0,
     });
     const execution: RunExecutionSummary = {
       scope: 'full',
@@ -215,12 +222,55 @@ describe('renderRun — json format', () => {
   });
 
   it('counts every repository finding as debt the gate blocks on', () => {
+    const verdicts = [entry(makeObligation('tenant.accounts'), 'satisfied')];
     const debt = repositoryDebtOf({
-      verdicts: [entry(makeObligation('tenant.accounts'), 'satisfied')],
+      verdicts,
       findings: BLOCKING,
+      gradedVerdicts: verdicts,
+      gradedFindings: BLOCKING,
       unclaimed: 0,
     });
     expect(debt).toMatchObject({ obligations: 1, blocking: 1, blockingEntries: 1, newlyBlocking: 1 });
+  });
+
+  it('a slice run blocks on nothing it did not grade, and names that debt apart', () => {
+    // A changed-scope run whose own slice is clean exits 0. Calling the
+    // repository's untouched blocking debt "new blocking" would put a
+    // non-zero number next to a zero exit code.
+    const slice = [
+      entry(makeObligation('tenant.accounts'), 'satisfied'),
+      entry(makeObligation('tenant.orders'), 'waived', {
+        reason: `${BASELINE_VERDICT_REASON} adopted as forgiven (was missing); baseline is shrink-only`,
+      }),
+    ];
+    const repository = [...slice, entry(makeObligation('tenant.widgets'), 'missing')];
+    const debt = repositoryDebtOf({
+      verdicts: repository,
+      findings: [],
+      gradedVerdicts: slice,
+      gradedFindings: [],
+      unclaimed: 2,
+    });
+    expect(debt).toEqual({
+      obligations: 3,
+      blocking: 1,
+      blockingEntries: 0,
+      unclaimed: 2,
+      baselined: 1,
+      newlyBlocking: 0,
+      notGradedBlocking: 1,
+    });
+    const execution: RunExecutionSummary = {
+      scope: 'changed',
+      mode: 'executed',
+      testsPerformedThisInvocation: 1,
+      selectedTests: { selected: 1, passed: 1, failed: 0, skipped: 0, expectedFailures: 0 },
+      selectedClaims: { selected: 1, satisfied: 1, blocking: 0, blockingEntries: 0, waived: 0 },
+      repositoryDebt: debt,
+    };
+    const text = renderRun(slice, { format: 'text', execution });
+    expect(text).toContain('repository debt: 1 known (baselined), 0 new blocking');
+    expect(text).toContain('not graded by this changed-scope run: 1 blocking obligation(s)');
   });
 
   it('labels a selected result as partial and leaves the receipt explicitly unsealed', () => {
@@ -237,6 +287,7 @@ describe('renderRun — json format', () => {
         unclaimed: 2,
         baselined: 2,
         newlyBlocking: 4,
+        notGradedBlocking: 0,
       },
     };
     const verdicts = [entry(accounts, 'satisfied')];

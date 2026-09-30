@@ -4478,9 +4478,14 @@ function runExecutionSummaryOf(input: {
   const blockingSelected = input.selectedVerdicts.filter(
     (verdict) => verdict.verdict !== 'satisfied' && verdict.verdict !== 'waived',
   ).length;
+  // The one definition, over both halves this run evaluated: the
+  // graded surface (what the exit code blocks on) and the whole
+  // repository (what the report describes).
   const debt = repositoryDebtOf({
     verdicts: input.repositoryVerdicts,
     findings: input.repositoryBlocking,
+    gradedVerdicts: input.selectedVerdicts,
+    gradedFindings: input.selectedBlocking,
     unclaimed: input.unclaimed,
   });
   return {
