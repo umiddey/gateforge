@@ -3134,6 +3134,18 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         io.env['GATEFORGE_FIXTURE_PROVIDER'] !== ''
           ? { GATEFORGE_FIXTURE_PROVIDER: io.env['GATEFORGE_FIXTURE_PROVIDER'] }
           : {}),
+        // Engine-owned queue observer (plan 20260925-2011 Phase 3): the
+        // witness reads the delivery queue itself, so a repository with a
+        // `queueObserver` block hands it the approved declaration (the
+        // connection material stays in the witness process). Without the
+        // block nothing is passed and every `engine-task` case blocks
+        // fail-closed — the spawn environment stays byte-identical.
+        ...(config.queueObserver === undefined
+          ? {}
+          : {
+              GATEFORGE_QUEUE_OBSERVER: config.queueObserver.kind,
+              GATEFORGE_QUEUE_OBSERVER_CONFIG: JSON.stringify(config.queueObserver),
+            }),
         // Session-proxy tag channel: the pytest, vitest and cypress
         // adapters publish a per-test session proxy origin, so the
         // witness must front the app with an observation proxy or every

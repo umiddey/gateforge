@@ -137,6 +137,8 @@ import {
   ATTESTATION_VERSION,
   attestationMac,
   behaviorActionDigestOf,
+  DEFAULT_QUEUE_POLL_INTERVAL_MS,
+  DEFAULT_QUEUE_TERMINAL_TIMEOUT_MS,
   BehaviorCatalogSchema,
   BEHAVIOR_CASE_KIND,
   enumerationDigestOf,
@@ -147,6 +149,7 @@ import {
   type BehaviorCatalog,
   type Classification,
   type HttpRouteCandidate,
+  type QueueObservation,
   type RecordOrigin,
   type TracedSession,
 } from '@gate-forge/core';
@@ -232,6 +235,8 @@ import type { FixtureLease } from './fixture-provider.js';
 import { validateScopeSnapshot } from './behavior.js';
 import { BEHAVIOR_BODY_LIMIT_BYTES, BehaviorDriverError, driveBehaviorRequest } from './behavior-request.js';
 import { OBSERVE_CHANNEL, OBSERVED_E2E_TEST_KIND, SERVER_CHANNEL, SERVER_E2E_TEST_KIND } from '../constants.js';
+import { QueueObserverError } from '../queue/observer.js';
+import { driveTaskDelivery, TaskDriverError, type TaskDeliverAction } from './task.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const OBLIGATION_ID_PATTERN = /^[^:]+:.+$/;
@@ -2515,6 +2520,7 @@ async function handleBehaviorPrincipal(
   let browserObservation:
     | { url: string; entityId: string; visibleFields: Record<string, unknown> }
     | undefined = undefined;
+  let queueObservation: QueueObservation | undefined = undefined;
   let submittedValues: unknown;
   let operationId: string;
   execution.state = 'principal-executing';
@@ -2617,9 +2623,54 @@ async function handleBehaviorPrincipal(
     browserObservation = driven.browserObservation;
     submittedValues = driven.submittedValues;
     execution.state = 'principal-captured';
+  } else if (action.kind === 'deliver') {
+    if (compiled.definition.channel !== 'engine-task') {
+      throw failExecution(
+        `delivery case '${compiled.definition.id}' requires the engine-task channel — blocked, never satisfied`,
+      );
+    }
+    const queueChannel = state.options.queueChannel ?? null;
+    if (queueChannel === null) {
+      throw failExecution(
+        `case '${compiled.definition.id}' needs the engine's queue observer, and this repository declares no ` +
+          '`queueObserver` block — the engine reads the delivery queue itself (fail closed)',
+      );
+    }
+    const attemptsRule = compiled.definition.expect.state.find((rule) => rule.kind === 'attempts') as
+      | { kind: 'attempts'; count: number }
+      | undefined;
+    if (attemptsRule === undefined) {
+      throw failExecution(
+        `case '${compiled.definition.id}' declares no 'attempts' rule — the engine cannot stamp an attempt bound (BEHAVIOR_BINDING_MISMATCH)`,
+      );
+    }
+    const deliverAction = action as unknown as TaskDeliverAction;
+    let driven;
+    try {
+      driven = await driveTaskDelivery({
+        action: deliverAction,
+        attemptBound: attemptsRule.count,
+        subjects: execution.lease.subjects as Record<string, unknown>,
+        channel: queueChannel,
+        pollIntervalMs: DEFAULT_QUEUE_POLL_INTERVAL_MS,
+        terminalTimeoutMs: DEFAULT_QUEUE_TERMINAL_TIMEOUT_MS,
+      });
+    } catch (error) {
+      if (error instanceof QueueObserverError) {
+        throw failExecution(`queue observer: ${error.message}`);
+      }
+      if (error instanceof TaskDriverError) {
+        throw failExecution(`task driver: ${error.message}`);
+      }
+      throw failExecution(`task driver failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    queueObservation = driven.observation;
+    submittedValues = driven.submittedValues;
+    operationId = String(driven.submittedValues['deliveryId']);
+    execution.state = 'principal-captured';
   } else {
     throw failExecution(
-      `case '${compiled.definition.id}' uses a '${action.kind}' action — the Phase 8 task driver produces that evidence`,
+      `case '${compiled.definition.id}' uses a '${action.kind}' action — that driver does not exist yet`,
     );
   }
   // Completion barrier: immediate effects resolve at once; barrier
@@ -2735,6 +2786,7 @@ async function handleBehaviorPrincipal(
     attempts,
     requestObservations,
     ...(browserObservation === undefined ? {} : { browserObservation }),
+    ...(queueObservation === undefined ? {} : { queueObservation }),
     fixtureValues: { ...(execution.lease.subjects as Record<string, unknown>) },
     before: execution.beforeSnapshots.map(stripSnapshot),
     after: afterSnapshots.map(stripSnapshot),
@@ -5236,6 +5288,19 @@ async function stopWitness(state: WitnessState): Promise<void> {
         } catch {
           // Best-effort: shutdown must complete.
         }
+      }
+    }
+  }
+  // The queue channel holds Redis connections the engine opened; a
+  // shutdown that leaks them can outlive the witness process.
+  {
+    const channel = state.options.queueChannel ?? null;
+    if (channel !== null) {
+      try {
+        await channel.observer.close();
+        await channel.deliverer.close();
+      } catch {
+        // Best-effort: shutdown must complete.
       }
     }
   }

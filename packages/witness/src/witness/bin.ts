@@ -45,6 +45,7 @@
  */
 import { startWitness, WitnessStartupError } from './server.js';
 import { loadFixtureProvider } from './fixture-provider.js';
+import { openConfiguredQueueChannel } from '../queue/observer.js';
 import {
   ENV_ADAPTER_BASE_URL,
   ENV_ADAPTERS_DIR,
@@ -206,6 +207,11 @@ export async function main(
     // the witness still starts and every other surface works; the cases
     // then block with a typed cause (never a suite-supplied fallback).
     fixtureProvider: await loadFixtureProvider(env[ENV_FIXTURE_PROVIDER] ?? null),
+    // Engine-owned queue observer (plan 20260925-2011 Phase 3): the
+    // witness reads the delivery queue itself. Absent (no `queueObserver`
+    // block in .gateforge.yml) leaves the channel null and every
+    // `engine-task` case blocks fail-closed.
+    queueChannel: await openConfiguredQueueChannel(env),
     verifierKey,
     engineBrowserLauncher: resolveEngineBrowserLauncher(),
   });

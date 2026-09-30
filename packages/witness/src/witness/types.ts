@@ -666,6 +666,14 @@ export interface WitnessOptions {
    * never a fallback.
    */
   fixtureProvider?: import('./fixture-provider.js').FixtureProvider | null;
+  /**
+   * Engine-owned queue channel (plan 20260925-2011 Phase 3): the
+   * witness's own read of a background queue plus the write side that
+   * produces the deliveries it grades. Null (default) means the
+   * repository declares no `queueObserver`, so every `engine-task` case
+   * blocks with a naming cause — never a suite-supplied substitute.
+   */
+  queueChannel?: import('../queue/observer.js').QueueChannel | null;
 }
 
 /**
