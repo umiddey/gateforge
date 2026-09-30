@@ -135,13 +135,21 @@ The model is deliberately small:
 - a `let` holder (reassigned before the read), a computed key
   (`d[key]`), and a JavaScript member (`data.map`, `data.length`,
   `status`) are never reads;
-- a read inside a branch that opens on the call's OWN envelope
-  (`if (!res.ok)`, `if (res.status >= 400)`, `res.ok ? … : …`) is **not**
-  collected. Which side of such a guard runs is not statically known, and
-  the body a failure branch reads (`res.data?.detail`) is the server's
-  ERROR envelope, never the success model. A read after the guard is
-  collected as usual, so the check still names a field the success path
-  reads and the model dropped;
+- a branch that opens on the call's OWN envelope (`ok`, `status`) is read
+  for its POLARITY, and only the failure arm is dropped: the body a
+  failure branch reads (`res.data?.detail`) is the server's ERROR
+  envelope, never the success model. `if (res.ok)`, `if (res.ok ===
+  true)`, `if (res.status >= 400)`, `> 399`, `!== 200`, `!== 201`, `< 400`,
+  `=== 200`, `<= 299` and their `!` negations all decide which arm runs,
+  so the success arm keeps its reads — `if (res.ok) setItems(res.data.
+  items)` is exactly the shape where a dropped field hides. A compound
+  condition (`!res.ok || res.status >= 500`), a comparison this pass
+  cannot read (`>= Math.min(400, limit)`) and a `statusText` test are
+  undecidable, so NEITHER arm is collected. A ternary on the envelope
+  keeps both arms unread as well: the arm that produced the value is a
+  runtime choice, not a proven success path. A read after an early-return
+  guard (`if (!res.ok) { throw … }` … then the code) is collected as
+  usual;
 - a read that is one operand of a `||` / `??` chain carries that chain's
   index, so the check judges the chain as the ONE decision it is:
   `res.data?.invoice_id || res.data?.invoice?.id` is silent when the

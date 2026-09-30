@@ -241,6 +241,34 @@ describe('response-field advisory', () => {
     ).toEqual(['invoice_id', 'invoice']);
   });
 
+  it('names only the success-path field of the real error-envelope shapes', () => {
+    // The reads a real call site produces once pack-http has judged its
+    // guards: the failure arm's `detail` and the fallback chain are not in
+    // the fact at all / are silenced, and the success path's dropped field
+    // is the one finding.
+    const declaredRoute = route(['id', 'invoice_id', 'detail']);
+    const reads = [
+      // `if (!res.ok) { res.data?.detail }` — the failure arm: not a read.
+      // `res.data?.invoice_id || res.data?.invoice?.id` — one chain, and
+      // `invoice_id` is declared, so `invoice` is its fallback.
+      { field: 'invoice_id', location: at('frontend/src/jobs.ts', 9), chain: 0 },
+      { field: 'invoice', location: at('frontend/src/jobs.ts', 9), chain: 0 },
+      // `setDue(res.data.dueDate)` after the guard: the real drift.
+      { field: 'dueDate', location: at('frontend/src/jobs.ts', 16) },
+    ];
+    const advisories = responseFieldAdvisories([endpoint([declaredRoute], [call(reads)])]);
+    expect(advisories).toHaveLength(1);
+    expect(advisories[0]?.detail).toContain("'dueDate'");
+
+    // A stray `detail` read is not a gap either: pack-fastapi declares
+    // `detail` on every route it reports (FastAPI's own error body).
+    expect(
+      responseFieldAdvisories([
+        endpoint([route(['id', 'detail'])], [call([{ field: 'detail', location: at('frontend/src/jobs.ts', 4) }])]),
+      ]),
+    ).toEqual([]);
+  });
+
   it('finds the gap through the real endpoint join, not just hand-built facts', () => {
     // The wire shape the two packs actually emit: pack-http's
     // frontend-call resource (with `responseReads`) and pack-fastapi's

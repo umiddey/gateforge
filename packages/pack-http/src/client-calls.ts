@@ -320,7 +320,7 @@ const NEVER_MODEL_FIELDS: Readonly<Record<string, boolean>> = {
  * Members of the response envelope that decide whether the call
  * SUCCEEDED. A branch that opens on one of them of the call's own result
  * is a guard: the error body a failure branch reads is the framework's,
- * never the success model, so nothing inside such a branch is collected.
+ * never the success model.
  */
 const ENVELOPE_MEMBERS: Readonly<Record<string, boolean>> = {
   ok: true,
@@ -328,9 +328,36 @@ const ENVELOPE_MEMBERS: Readonly<Record<string, boolean>> = {
   statusText: true,
 };
 
+/** The `ok` envelope member; its polarity is the whole verdict. */
+const OK_MEMBER = 'ok';
+
+/** The last status a successful call answers with (2xx/3xx). */
+const SUCCESS_STATUS = 299;
+
+/** The first status a failing call answers with. */
+const FAILURE_STATUS = 400;
+
 /** `||` and `??` are the two ways code writes a fallback chain. */
 function chainOperator(kind: ts.SyntaxKind): boolean {
   return kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken;
+}
+
+/**
+ * Which arm of a guard runs on the call SUCCEEDING, on it FAILING, or
+ * neither being statically known.
+ */
+type GuardPolarity = 'success' | 'failure' | 'unknown';
+
+/** The numeric value of a boolean or numeric literal, else null. */
+function literalValue(node: ts.Expression): number | null {
+  const expression = unwrapExpression(node);
+  if (expression.kind === ts.SyntaxKind.TrueKeyword) return 1;
+  if (expression.kind === ts.SyntaxKind.FalseKeyword) return 0;
+  if (ts.isNumericLiteral(expression)) {
+    const value = Number(expression.text);
+    return Number.isFinite(value) ? value : null;
+  }
+  return null;
 }
 
 /** The names a binding pattern binds, in source order. */
@@ -463,30 +490,114 @@ function responseReadsOf(
   // branch is a proven read of the success model — see the failure-path
   // note in the module doc.
   const guarded = new Set<ts.Node>();
-  /** Whether a condition opens on this call's own response envelope. */
-  const opensEnvelopeGuard = (condition: ts.Expression): boolean => {
+  const isHolderName = (node: ts.Node): boolean =>
+    ts.isIdentifier(node) && responseNames.has(node.text);
+  /** The envelope member of this call's own result an expression reads. */
+  const envelopeMember = (node: ts.Node): string | null =>
+    ts.isPropertyAccessExpression(node) &&
+    isHolderName(node.expression) &&
+    ENVELOPE_MEMBERS[node.name.text] === true
+      ? node.name.text
+      : null;
+  const mentionsEnvelope = (node: ts.Node): boolean => {
+    if (envelopeMember(node) !== null) return true;
     let found = false;
-    const inspect = (node: ts.Node): void => {
-      if (
-        ts.isPropertyAccessExpression(node) &&
-        ENVELOPE_MEMBERS[node.name.text] === true &&
-        ts.isIdentifier(node.expression) &&
-        responseNames.has(node.expression.text)
-      ) {
+    const inspect = (at: ts.Node): void => {
+      if (found) return;
+      if (envelopeMember(at) !== null) {
         found = true;
         return;
       }
-      ts.forEachChild(node, inspect);
+      ts.forEachChild(at, inspect);
     };
-    inspect(condition);
+    ts.forEachChild(node, inspect);
     return found;
   };
-  const markGuards = (node: ts.Node): void => {
-    if (ts.isIfStatement(node) && opensEnvelopeGuard(node.expression)) {
-      guarded.add(node.thenStatement);
-      if (node.elseStatement !== undefined) guarded.add(node.elseStatement);
+  /**
+   * The polarity of an envelope guard, or null when the condition does not
+   * test this call's envelope at all.
+   *
+   * `if (res.ok)` / `if (res.ok === true)` / `if (res.status >= 400)` /
+   * `if (res.status !== 201)` and their negations are decided here, so the
+   * SUCCESS arm keeps its reads — the error envelope belongs to the
+   * failure arm only. A compound condition, a comparison this cannot
+   * read, or a `statusText`/`headers` test is `unknown`: neither arm is a
+   * proven read of the success model.
+   */
+  const guardPolarity = (condition: ts.Expression): GuardPolarity | null => {
+    const expression = unwrapExpression(condition);
+    if (ts.isPrefixUnaryExpression(expression) && expression.operator === ts.SyntaxKind.ExclamationToken) {
+      const inner = guardPolarity(expression.operand);
+      if (inner === null || inner === 'unknown') return inner;
+      return inner === 'success' ? 'failure' : 'success';
     }
-    if (ts.isConditionalExpression(node) && opensEnvelopeGuard(node.condition)) {
+    const bare = envelopeMember(expression);
+    if (bare !== null) return bare === OK_MEMBER ? 'success' : 'unknown';
+    if (!ts.isBinaryExpression(expression)) {
+      return mentionsEnvelope(expression) ? 'unknown' : null;
+    }
+    const member = envelopeMember(expression.left);
+    if (member === null) return mentionsEnvelope(expression) ? 'unknown' : null;
+    const expected = literalValue(expression.right);
+    if (expected === null) return 'unknown';
+    const isOk = member === OK_MEMBER;
+    const kind = expression.operatorToken.kind;
+    const equality = kind === ts.SyntaxKind.EqualsEqualsToken || kind === ts.SyntaxKind.EqualsEqualsEqualsToken;
+    const inequality =
+      kind === ts.SyntaxKind.ExclamationEqualsToken || kind === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+    if (isOk) {
+      // A boolean compared with a boolean literal: `!==` is the negated
+      // equality, so `ok !== true` is the failure arm.
+      if (!equality && !inequality) return 'unknown';
+      const satisfied = (succeeded: boolean): boolean => {
+        const same = (succeeded ? 1 : 0) === expected;
+        return inequality ? !same : same;
+      };
+      if (satisfied(true) && !satisfied(false)) return 'success';
+      if (!satisfied(true) && satisfied(false)) return 'failure';
+      return 'unknown';
+    }
+    if (inequality) {
+      // `status !== 200` reads as "not the success I expected", which is
+      // the failure arm even though a 404 satisfies it too.
+      if (expected >= 200 && expected <= SUCCESS_STATUS) return 'failure';
+      if (expected >= FAILURE_STATUS) return 'success';
+      return 'unknown';
+    }
+    const succeeded = expected >= 200 && expected <= SUCCESS_STATUS;
+    const failed = expected >= FAILURE_STATUS;
+    switch (kind) {
+      case ts.SyntaxKind.EqualsEqualsToken:
+      case ts.SyntaxKind.EqualsEqualsEqualsToken:
+        if (succeeded) return 'success';
+        if (failed) return 'failure';
+        return 'unknown';
+      case ts.SyntaxKind.LessThanToken:
+        return SUCCESS_STATUS < expected ? 'success' : FAILURE_STATUS < expected ? 'failure' : 'unknown';
+      case ts.SyntaxKind.LessThanEqualsToken:
+        return SUCCESS_STATUS <= expected ? 'success' : FAILURE_STATUS <= expected ? 'failure' : 'unknown';
+      case ts.SyntaxKind.GreaterThanToken:
+        return SUCCESS_STATUS > expected ? 'success' : FAILURE_STATUS > expected ? 'failure' : 'unknown';
+      case ts.SyntaxKind.GreaterThanEqualsToken:
+        return SUCCESS_STATUS >= expected ? 'success' : FAILURE_STATUS >= expected ? 'failure' : 'unknown';
+      default:
+        return 'unknown';
+    }
+  };
+  const markGuards = (node: ts.Node): void => {
+    if (ts.isIfStatement(node)) {
+      const polarity = guardPolarity(node.expression);
+      if (polarity === 'failure') guarded.add(node.thenStatement);
+      else if (polarity === 'success' && node.elseStatement !== undefined) {
+        guarded.add(node.elseStatement);
+      } else if (polarity === 'unknown') {
+        guarded.add(node.thenStatement);
+        if (node.elseStatement !== undefined) guarded.add(node.elseStatement);
+      }
+    }
+    if (ts.isConditionalExpression(node) && guardPolarity(node.condition) !== null) {
+      // A ternary on the envelope keeps both arms unread: the arm that
+      // produced the value is a runtime choice, not a proven success path.
       guarded.add(node.whenTrue);
       guarded.add(node.whenFalse);
     }

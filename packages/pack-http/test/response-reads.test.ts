@@ -185,7 +185,7 @@ describe('bounded response field reads', () => {
     ]);
   });
 
-  it('collects nothing inside an envelope guard, and still the success path', () => {
+  it('collects nothing inside the FAILURE arm of a guard, and still the success path', () => {
     // The real shape that produced the false positives: the error body
     // read inside the failure branch of the same call result.
     const guarded = [
@@ -198,6 +198,8 @@ describe('bounded response field reads', () => {
     ].join('\n');
     expect(readsOf('src/guarded.ts', guarded)).toEqual([{ field: 'dueDate', line: 6 }]);
 
+    // A status guard decides its own arms: the failure arm's error body
+    // is skipped, the success arm keeps its reads.
     const byStatus = [
       `const res = await apiClient.get('/invoices/1');`,
       `if (res.status >= 400) {`,
@@ -206,7 +208,7 @@ describe('bounded response field reads', () => {
       `  report(res.data.dueDate);`,
       `}`,
     ].join('\n');
-    expect(readsOf('src/by-status.ts', byStatus)).toEqual([]);
+    expect(readsOf('src/by-status.ts', byStatus)).toEqual([{ field: 'dueDate', line: 5 }]);
 
     const ternary = [
       `const res = await apiClient.get('/invoices/1');`,
@@ -223,6 +225,69 @@ describe('bounded response field reads', () => {
       `}`,
     ].join('\n');
     expect(readsOf('src/caught.ts', caught)).toEqual([]);
+  });
+
+  it('collects the success arm of a simple guard and skips only the failure arm', () => {
+    // `if (res.ok) setDue(res.data.dueDate)` — the most common success
+    // path, and exactly where a dropped field hides.
+    const positive = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `if (res.ok) setDue(res.data.dueDate);`,
+    ].join('\n');
+    expect(readsOf('src/positive.ts', positive)).toEqual([{ field: 'dueDate', line: 2 }]);
+
+    const elseIsFailure = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `if (res.ok) {`,
+      `  setDue(res.data.dueDate);`,
+      `} else {`,
+      `  report(res.data?.detail);`,
+      `}`,
+    ].join('\n');
+    expect(readsOf('src/else.ts', elseIsFailure)).toEqual([{ field: 'dueDate', line: 3 }]);
+
+    const explicitElseIsSuccess = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `if (!res.ok) {`,
+      `  report(res.data?.detail);`,
+      `} else {`,
+      `  setDue(res.data.dueDate);`,
+      `}`,
+    ].join('\n');
+    expect(readsOf('src/else2.ts', explicitElseIsSuccess)).toEqual([{ field: 'dueDate', line: 5 }]);
+
+    const statusForms: Array<{ source: string; line: number }> = [
+      { source: `if (res.status >= 400) { report(res.data.detail); } else { use(res.data.dueDate); }`, line: 2 },
+      { source: `if (res.status > 399) { report(res.data.detail); } else { use(res.data.dueDate); }`, line: 2 },
+      { source: `if (res.status !== 200) { report(res.data.detail); } else { use(res.data.dueDate); }`, line: 2 },
+      { source: `if (res.status !== 201) { report(res.data.detail); } else { use(res.data.dueDate); }`, line: 2 },
+      { source: `if (res.status < 400) { use(res.data.dueDate); } else { report(res.data.detail); }`, line: 2 },
+      { source: `if (res.status === 200) { use(res.data.dueDate); } else { report(res.data.detail); }`, line: 2 },
+      { source: `if (res.status === 201) { use(res.data.dueDate); } else { report(res.data.detail); }`, line: 2 },
+      { source: `if (res.status <= 299) { use(res.data.dueDate); } else { report(res.data.detail); }`, line: 2 },
+      { source: `if (res.ok === true) { use(res.data.dueDate); } else { report(res.data.detail); }`, line: 2 },
+      { source: `if (res.ok === false) { report(res.data.detail); } else { use(res.data.dueDate); }`, line: 2 },
+      { source: `if (res.ok !== true) { report(res.data.detail); } else { use(res.data.dueDate); }`, line: 2 },
+    ];
+    for (const [index, form] of statusForms.entries()) {
+      const file = `src/status-${String(index)}.ts`;
+      const source = [`const res = await apiClient.get('/invoices/1');`, form.source].join('\n');
+      expect(readsOf(file, source)).toEqual([{ field: 'dueDate', line: form.line }]);
+    }
+
+    // A compound condition, a comparison this pass cannot read and a
+    // `statusText` test are all undecidable: neither arm is collected.
+    const undecidable: string[] = [
+      `if (!res.ok || res.status >= 500) { report(res.data.detail); } else { use(res.data.dueDate); }`,
+      `if (res.ok && res.data) { use(res.data.dueDate); } else { report(res.data.detail); }`,
+      `if (res.status >= Math.min(400, limit)) { report(res.data.detail); } else { use(res.data.dueDate); }`,
+      `if (res.statusText === 'OK') { use(res.data.dueDate); } else { report(res.data.detail); }`,
+    ];
+    for (const [index, condition] of undecidable.entries()) {
+      const file = `src/undecidable-${String(index)}.ts`;
+      const source = [`const res = await apiClient.get('/invoices/1');`, condition].join('\n');
+      expect(readsOf(file, source)).toEqual([]);
+    }
   });
 
   it('marks the operands of a `||` / `??` fallback chain as one chain', () => {
