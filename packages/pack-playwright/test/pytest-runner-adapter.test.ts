@@ -350,11 +350,11 @@ describe.skipIf(!PYTEST_AVAILABLE)('the pytest plugin announces the reconciliati
           ...process.env,
           PYTHONPATH: pytestPluginDir(),
           PYTHONDONTWRITEBYTECODE: '1',
-          GATEFORGE_WITNESS_URL: 'http://[IP_ADDRESS]:1',
+          GATEFORGE_WITNESS_URL: 'http://127.0.0.1:1',
           GATEFORGE_RUN_TOKEN: 'token',
           GATEFORGE_STATE_DIR: stateDir,
           GATEFORGE_RUN_ID: 'identity-run',
-          GATEFORGE_APP_BASE_URL: 'http://[IP_ADDRESS]:2',
+          GATEFORGE_APP_BASE_URL: 'http://127.0.0.1:2',
         },
       },
     );

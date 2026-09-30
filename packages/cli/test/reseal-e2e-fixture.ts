@@ -555,14 +555,14 @@ export async function startEvidenceApp(): Promise<EvidenceApp> {
     response.end('{}');
   });
   await new Promise<void>((resolve) => {
-    server.listen(0, '[IP_ADDRESS]', () => {
+    server.listen(0, '127.0.0.1', () => {
       resolve();
     });
   });
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : 0;
   return {
-    url: `http://[IP_ADDRESS]:${String(port)}`,
+    url: `http://127.0.0.1:${String(port)}`,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => {

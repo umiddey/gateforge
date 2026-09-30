@@ -265,23 +265,23 @@ describe('playwright behind the runner-adapter contract', () => {
     const first = adapter.childEnv(
       { logicalKey: 'a#one', frameworkId: 'one', project: null },
       {
-        witnessUrl: 'http://[IP_ADDRESS]:1',
+        witnessUrl: 'http://127.0.0.1:1',
         runToken: 'token',
         sessionId: 'session-one',
         sessionToken: 'session-token-one',
-        sessionProxyUrl: 'http://[IP_ADDRESS]:1',
-        appBaseUrl: 'http://[IP_ADDRESS]:2',
+        sessionProxyUrl: 'http://127.0.0.1:1',
+        appBaseUrl: 'http://127.0.0.1:2',
       },
     );
     const second = adapter.childEnv(
       { logicalKey: 'a#two', frameworkId: 'two', project: null },
       {
-        witnessUrl: 'http://[IP_ADDRESS]:1',
+        witnessUrl: 'http://127.0.0.1:1',
         runToken: 'token',
         sessionId: 'session-two',
         sessionToken: 'session-token-two',
-        sessionProxyUrl: 'http://[IP_ADDRESS]:2',
-        appBaseUrl: 'http://[IP_ADDRESS]:2',
+        sessionProxyUrl: 'http://127.0.0.1:2',
+        appBaseUrl: 'http://127.0.0.1:2',
       },
     );
     expect(first.tagChannel).toBe('session-proxy');
