@@ -2,6 +2,81 @@
 
 Background-task discovery pack: a pure-TypeScript GPP/3 in-process detector that finds background-task signatures in `.ts`/`.js`/`.mjs` source — no Python subprocess, no execution, no external deps — plus an audit-trail entity-adapter schema and an example server that proves the five obligation contracts the pack claims.
 
+## Engine-level proof: the queue observer (plan 20260925-2011 Phase 3)
+
+A background job's attempts, terminal state and idempotency live in the
+QUEUE, so the engine reads the queue itself. A test's own "the job
+succeeded" is never proof — exactly like a test's own HTTP status. A
+repository opts in with an engine-owned `queueObserver` block in
+`.gateforge.yml`:
+
+```yaml
+queueObserver:
+  kind: bullmq                       # or a module path whose default export is a factory
+  connection:
+    urlEnv: GATEFORGE_QUEUE_REDIS_URL   # host/port form: {host, port}
+  queues:
+    - name: mailer                   # the queue the engine reads
+      taskResourceId: task.email.send
+  pollIntervalMs: 100                # transition-sampling interval (default 200)
+  terminalTimeoutMs: 30000           # bound on waiting for the delivery to settle
+```
+
+- The block lives in `.gateforge.yml`, so it is inside the trusted policy
+  digest: a candidate cannot point the engine at a queue it controls.
+- Connection material never carries a secret inline — the URL form names
+  an environment variable the WITNESS process resolves privately; the
+  value is never sealed into a record, a report or argv.
+- WITHOUT the block the `task` namespace is **unavailable** (every
+  `task:*` contract fails closed, cause `VERIFIER_UNSUPPORTED`) and every
+  `engine-task` case blocks with a naming diagnostic. `gateforge init`
+  therefore recommends this pack's cases only when the block is
+  configured.
+- `test-gates` hands the declaration to the witness it spawns
+  (`GATEFORGE_QUEUE_OBSERVER` + `GATEFORGE_QUEUE_OBSERVER_CONFIG`); a
+  repository without the block passes nothing and its spawn environment
+  is byte-identical.
+
+### What a `deliver` case does
+
+The engine produces the delivery, not the suite: it stamps the delivery
+identity, the idempotency key and the attempt bound (taken from the
+case's own `attempts` rule, so the policy declares the retry bound
+exactly once), then polls the queue until every produced job settles and
+seals what it read. `count` deliveries of one case share ONE idempotency
+key — that is what makes a duplicate-key case a duplicate — while each
+delivery gets its own identity.
+
+### What an `attempts` rule settles
+
+| Field | Meaning |
+| --- | --- |
+| `resourceId` | the task resource the case delivers to (must match the action) |
+| `count` | the declared attempt bound: no job may exceed it, and the queue's own declared bound may not exceed it |
+| `terminal` | `succeeded` (every job `completed`), `failed` (every job `failed`), `rejected` (every job failed on its FIRST attempt) |
+| `minAttempts` (optional) | every job used at least this many attempts — "retries up to N" cannot be satisfied by a queue that never retried |
+| `recoveredFromStall` (optional) | the engine's own timeline must show a lost-worker reclaim: the same job handed out again with UNCHANGED attempts and no failure reason (an error retry raises both) — and the delivery still settles |
+
+A delivery case that declares no `attempts` rule settles nothing and is
+blocked (`BEHAVIOR_BINDING_MISMATCH`), and a case that carries HTTP
+attempts or a browser observation is rejected outright: those prove a
+transport claim, not a background job.
+
+### Proving it
+
+`packages/cli/test/task-queue-behavior-e2e.test.ts` runs the real CLI,
+the real witness and a REAL BullMQ application (`example/task-bullmq/`:
+a queue plus worker processes, one of which is genuinely lost mid-job)
+against a disposable Redis. Each contract ships a fail variant the engine
+must block. The suite SKIPS unless `GATEFORGE_TEST_REDIS_URL` names a
+live Redis — the engine's queue reader needs a real queue, and a fake one
+would be a mock as proof:
+
+```sh
+docker run -d --rm --name gateforge-queue-redis -p 127.0.0.1:6379 redis:7-alpine
+GATEFORGE_TEST_REDIS_URL=redis://127.0.0.1:6379 npm test -- task-queue-behavior-e2e
+```
+
 ## How discovery works
 
 The detector scans `.ts`/`.tsx`/`.js`/`.mjs` files with regex-based AST-light patterns (matching `pack-auth`'s strategy). It recognizes the task constructs below and reports its verdict through the discovery outcome's typed blocking vocabulary — the pack emits no resources and no classification signals of its own:
