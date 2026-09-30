@@ -92,6 +92,7 @@ export const CauseCodeSchema = z.enum([
   'ADAPTER_CANNOT_WITNESS',
   'ADAPTER_VOLATILE_FIELD_SKIPPED',
   'RESOURCE_SINGLETON_PER_TENANT',
+  'RESPONSE_FIELD_MISSING_FROM_MODEL',
 ]);
 
 /** Inferred cause-code union. */
@@ -174,4 +175,8 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
     'Witness this create on a fresh tenant: the unique constraint admits one row per tenant, so ' +
     "register the new tenant's login with the witness for THIS session only " +
     '(POST /sessions/identity) and prove the create there',
+  RESPONSE_FIELD_MISSING_FROM_MODEL:
+    'The frontend reads a field the response model does not declare: restore the field on the ' +
+    'response model (or read the one it declares). A test that mocks the response proves nothing ' +
+    'about this read',
 });

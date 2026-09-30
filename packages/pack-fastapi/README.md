@@ -145,6 +145,40 @@ handler names these very facts carry, and blocks ambiguity with typed
 detection remains for genuinely stale authority signals (declaration
 markers, adapter bindings, read-only declarations).
 
+## Response-model wire names
+
+Each server-route fact carries `attributes.responseModelFields`: the wire
+names its response model answers to, in declaration order — every pydantic
+field name plus every `Field(alias=...)` it declares, including the fields
+it inherits from a base class the scanned set also proves. The model is
+the decorator's `response_model=` when it declares one and the handler's
+return annotation otherwise (FastAPI's own default), with the containers
+FastAPI unwraps peeled off: `list[InvoiceOut]`, `Optional[MoneyOut]` and
+`MoneyOut | None` all report the element model.
+
+The attribute is **absent** whenever the wire names are not statically
+computable, never partial:
+
+- a model configuring alias generation (`model_config = ConfigDict(...)`
+  or a pydantic v1 `class Config`) — every name differs;
+- a base class outside the scanned set — inherited fields unknown;
+- a shape that is not one model: `dict`, a union of two models, a
+  computed annotation, no annotation at all.
+
+The existing `responseModel` attribute keeps its exact previous meaning
+(the decorator declaration only) and its exact previous bytes; a return
+annotation is a new fact, never a change of the old one.
+
+`gateforge check` cross-checks these names against the fields a frontend
+actually reads (reported by `@gate-forge/pack-http` as `responseReads`)
+and emits one **non-blocking** `RESPONSE_FIELD_MISSING_FROM_MODEL`
+advisory per field a joined endpoint's model does not declare — naming the
+endpoint, the field, the frontend file and line, and the names the model
+does declare. A field counts as present under its own name, under the other
+case style (`due_date` ≡ `dueDate`) or under a declared alias. A
+repository whose routes declare no provable response model produces no
+advisory and a byte-identical report.
+
 ## Setup
 
 ```yaml

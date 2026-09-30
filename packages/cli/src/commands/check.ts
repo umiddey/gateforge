@@ -166,6 +166,7 @@ import { trustedPolicyDigestForConfig } from '../execution.js';
 import { obligationFingerprint, evaluateRun, scopeBlocking } from '../evaluate.js';
 import { auditAdapters } from '../adapter-audit.js';
 import { singletonPerTenantAdvisories } from '../singleton-guidance.js';
+import { responseFieldAdvisories } from '../response-field-guidance.js';
 import { annotationMapSyncAdvisories, findRunnerConfigPath, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
@@ -1794,6 +1795,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       ...baselineDriftAdvisories,
       ...adapterFindings,
       ...singletonFindings,
+      // Frontend reads a response field the model does not declare (plan
+      // Phase 4b item 5). One non-blocking advisory per gap; empty unless
+      // a joined endpoint pairs a proven response model with a read, so
+      // a repository without both packs renders byte-identically.
+      ...responseFieldAdvisories(pipeline.endpointInventory.endpoints),
     ],
     waiverCounts: evaluated.waiverCounts,
     baseline: baselineReport,

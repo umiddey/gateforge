@@ -109,6 +109,39 @@ wrapper's paths fully, or use a builder with `base`). The
 `urlBuilders[].base` channel is unchanged: it is configuration-declared,
 so the builder's base is part of the resolved value itself.
 
+### Response field reads (bounded, file-local)
+
+Every frontend-call fact carries `attributes.responseReads`: the fields
+the call site reads off that call's own response, each with the location
+of the read. It is the frontend half of the dropped-response-field proof
+(a merged frontend read `invoice.dueDate` after the FastAPI model had
+dropped it; every test mocked the response and the screen showed
+nothing), and it is collected by the same bounded pass that resolves the
+call target — no execution, no type checker, no cross-file inference.
+
+The model is deliberately small:
+
+- the call's own awaited result is followed through `await` and
+  parentheses; `<result>.data` is the payload (the axios/kit envelope) and
+  `<result>` alone is the envelope, so `res.status`/`res.headers` are not
+  fields;
+- a name bound from either of those (`const r = await call`,
+  `const { data: d } = await call`, `const d = (await call).data`) is
+  followed by name inside the enclosing function-like — nested
+  function-likes included, so a `useEffect` callback still counts;
+- `holder.<field>`, `holder.data.<field>`, `holder.data['<field>']` and
+  `holder['<field>']` are reads, as is every key of an object
+  destructuring of a holder or of `<holder>.data`;
+- a `let` holder (reassigned before the read), a computed key
+  (`d[key]`), and a JavaScript member (`data.map`, `data.length`,
+  `status`) are never reads.
+
+`gateforge check` compares these reads against the response model the
+joined backend route declares and emits one **non-blocking**
+`RESPONSE_FIELD_MISSING_FROM_MODEL` advisory per undeclared field. A call
+nobody consumes emits no attribute at all, so it stays byte-identical to
+before.
+
 ### Scan scoping (optional, strict, back-compatible)
 
 All scoping keys are OPTIONAL; a config without them scans exactly as

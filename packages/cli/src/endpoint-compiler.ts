@@ -448,7 +448,14 @@ function contractFactCandidate(resource: Resource): Record<string, unknown> {
     framework: attributes['framework'],
     source: resource.location,
   };
-  for (const key of ['handlerSymbol', 'requestSchemaSymbols', 'responseSchemaSymbols', 'callsites']) {
+  for (const key of [
+    'handlerSymbol',
+    'requestSchemaSymbols',
+    'responseSchemaSymbols',
+    'responseModelFields',
+    'responseReads',
+    'callsites',
+  ]) {
     const value = attributes[key];
     if (Array.isArray(value)) {
       if (value.length > 0) candidate[key] = value;

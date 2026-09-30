@@ -128,6 +128,11 @@ class RouteDef:
     handler: str                 # function name
     is_async: bool
     response_model: str | None
+    # The model FastAPI actually answers with: the decorator's explicit
+    # `response_model=` when present, else the handler's return annotation
+    # (FastAPI's own default). Additive: `response_model` above keeps its
+    # exact previous meaning and emission.
+    effective_response_model: str | None
     request_schemas: list[str]
     tags: list[str]
     operation_id: str | None
@@ -223,6 +228,32 @@ class ImportRef:
 
 
 @dataclass
+class ModelDef:
+    """One class definition whose response fields are statically provable.
+
+    Plan 2026-09-25 Phase 4b item 5: a dropped response-model field is
+    invisible from the frontend (every test mocks it), so the pack proves
+    the wire names a model answers to. ``proven`` is the fail-closed
+    switch: a model that configures alias generation (pydantic v1
+    ``class Config`` / v2 ``model_config``) has wire names this AST pass
+    cannot compute, so it is reported as NOT proven and contributes no
+    field list at all — silence, never a wrong answer.
+    """
+
+    name: str
+    fields: list[str] = field(default_factory=list)      # declared names, written order
+    aliases: dict[str, str] = field(default_factory=dict)  # field name -> declared alias
+    bases: list[str] = field(default_factory=list)      # base class names
+    proven: bool = True
+
+
+# Base classes that carry no response fields of their own. Any OTHER base
+# must resolve inside the scanned set: an unresolvable base means inherited
+# fields are unknown, so the model is not proven.
+_FIELDLESS_BASES = frozenset({"BaseModel", "BaseModelRoot", "RootModel", "object"})
+
+
+@dataclass
 class FileIndex:
     """Everything one parsed file contributes to the mount graph."""
 
@@ -234,6 +265,7 @@ class FileIndex:
     functions: dict[str, FunctionIncludes] = field(default_factory=dict)
     helper_calls: list[HelperCall] = field(default_factory=list)
     unsupported: list[tuple[ast.AST, list[str]]] = field(default_factory=list)
+    models: dict[str, ModelDef] = field(default_factory=dict)
 
 
 def loc(relpath: str, node: ast.AST) -> dict:
@@ -258,6 +290,42 @@ def _dotted_name(node: ast.AST | None) -> str | None:
     return None
 
 
+# Containers whose single element type IS the response model
+# (``-> list[InvoiceOut]``); anything else (``dict[str, X]``, a union of
+# two models, a computed expression) is an unknown shape.
+_MODEL_CONTAINERS = frozenset({
+    "list", "List", "Sequence", "Iterable", "set", "Set", "frozenset",
+    "Optional", "Union", "tuple", "Tuple",
+})
+
+
+def _model_name(node: ast.AST | None) -> str | None:
+    """The model class a response annotation or ``response_model=`` names.
+
+    Unwraps the containers FastAPI itself unwraps (``list[X]``,
+    ``Optional[X]``, ``X | None``) and returns the dotted class name. Any
+    other shape — a dict, a union of different models, a computed
+    expression — returns None: an unknown shape has no field list, and the
+    advisory must never guess one.
+    """
+    if node is None:
+        return None
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        return _dotted_name(node)
+    if isinstance(node, ast.Subscript):
+        base = _dotted_name(node.value)
+        if base is None or base.split(".")[-1] not in _MODEL_CONTAINERS:
+            return None
+        elements = _elements(node.slice) or [node.slice]
+        names = {_model_name(element) for element in elements}
+        names.discard(None)
+        return names.pop() if len(names) == 1 else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left, right = _model_name(node.left), _model_name(node.right)
+        return left if left is not None and left == right else None
+    return None
+
+
 def _keyword(call: ast.Call, name: str) -> ast.AST | None:
     for keyword in call.keywords:
         if keyword.arg == name:
@@ -269,6 +337,61 @@ def _elements(node: ast.AST | None) -> list[ast.AST] | None:
     if isinstance(node, (ast.List, ast.Tuple)):
         return list(node.elts)
     return None
+
+
+def _declared_alias(value: ast.AST | None) -> str | None:
+    """The static alias a ``Field(alias=...)`` declaration carries."""
+    if not isinstance(value, ast.Call):
+        return None
+    for keyword in value.keywords:
+        if keyword.arg in {"alias", "validation_alias", "serialization_alias"}:
+            return _static_string(keyword.value)
+    return None
+
+
+def _is_class_var(annotation: ast.AST | None) -> bool:
+    """``ClassVar[...]`` annotations are not response fields."""
+    if not isinstance(annotation, ast.Subscript):
+        return False
+    base = _dotted_name(annotation.value)
+    return base is not None and base.split(".")[-1] == "ClassVar"
+
+
+def _model_def(node: ast.ClassDef) -> ModelDef:
+    """The statically provable field list of one class definition.
+
+    Alias generation (``model_config = ConfigDict(alias_generator=...)``
+    or a pydantic v1 ``class Config``) makes the wire names
+    uncomputable here, so the model is reported as NOT proven rather than
+    as a partial list. ``ClassVar`` members and private names are not
+    pydantic fields and are skipped.
+    """
+    model = ModelDef(name=node.name)
+    for base in node.bases:
+        name = _dotted_name(base)
+        model.bases.append(name if name is not None else "?")
+    for statement in node.body:
+        if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+            name = statement.target.id
+            if name.startswith("_") or _is_class_var(statement.annotation):
+                continue
+            if name == "model_config":
+                model.proven = False
+                continue
+            model.fields.append(name)
+            alias = _declared_alias(statement.value)
+            if alias is not None:
+                model.aliases[name] = alias
+        elif isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                    if target.id == "model_config":
+                        model.proven = False
+                    else:
+                        model.fields.append(target.id)
+        elif isinstance(statement, ast.ClassDef) and statement.name in {"Config", "model_config"}:
+            model.proven = False
+    return model
 
 
 class _ModuleVisitor(ast.NodeVisitor):
@@ -319,6 +442,12 @@ class _ModuleVisitor(ast.NodeVisitor):
                             var=target.id, prefix=prefix,
                             prefix_node=prefix_node if prefix_node is not None else node.value,
                         )
+        self.generic_visit(node)
+
+    # -- response models -----------------------------------------------------
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.index.models[node.name] = _model_def(node)
         self.generic_visit(node)
 
     # -- functions: route decorators -----------------------------------------
@@ -394,7 +523,8 @@ class _ModuleVisitor(ast.NodeVisitor):
             if owner_ref is not None:
                 owner_ref.routes.append(RouteDef(
                     methods=[], path=None, node=node, file=self.index.relpath, handler=fn.name,
-                    is_async=is_async, response_model=None, request_schemas=[],
+                    is_async=is_async, response_model=None,
+                    effective_response_model=None, request_schemas=[],
                     tags=[], operation_id=None,
                 ))
             return
@@ -414,6 +544,9 @@ class _ModuleVisitor(ast.NodeVisitor):
             handler=fn.name,
             is_async=is_async,
             response_model=_dotted_name(_keyword(node, "response_model")),
+            effective_response_model=(
+                _model_name(_keyword(node, "response_model")) or _model_name(fn.returns)
+            ),
             request_schemas=_request_schema_names(fn, path),
             tags=[
                 s for s in (
@@ -656,6 +789,94 @@ def _resolve_import(
     return ImportResolution(module=None)
 
 
+class _ModelIndex:
+    """Resolves a response-model symbol to the wire names it answers to.
+
+    Bounded like every other channel here: the defining class must be in
+    the scanned set, reachable as a same-file definition or through one
+    resolved import, and every base class must resolve too. Anything the
+    AST pass cannot compute (an alias generator, an unresolvable base, an
+    unknown shape) yields ``None`` — the caller then reports no fields at
+    all rather than a partial list.
+    """
+
+    def __init__(self, indexes: dict[str, FileIndex], import_roots: tuple[str, ...] = ()) -> None:
+        self.models: dict[str, dict[str, ModelDef]] = {
+            relpath: index.models for relpath, index in indexes.items()
+        }
+        self.indexes = indexes
+        self.import_roots = import_roots
+        self.scanned: frozenset[str] = frozenset(indexes)
+        self.module_map = {_module_of(rel): rel for rel in indexes}
+
+    def fields_for(self, relpath: str, model: str | None) -> list[str] | None:
+        """Every wire name one response model answers to, or None."""
+        if model is None or model == "":
+            return None
+        name = model
+        prefix = ""
+        if "." in model:
+            prefix, name = model.rsplit(".", 1)
+            if prefix not in self.module_map:
+                return None
+        located = self._locate(relpath, name)
+        if located is None:
+            return None
+        found = self._collect(relpath, name, set())
+        if found is None or not found:
+            return None
+        return found
+
+    def _locate(self, relpath: str, name: str) -> ModelDef | None:
+        """The class definition a name refers to, or None."""
+        own = self.models.get(relpath, {}).get(name)
+        if own is not None:
+            return own
+        ref = self.indexes.get(relpath)
+        if ref is None:
+            return None
+        imported = ref.imports.get(name)
+        if imported is None or imported.name is None:
+            return None
+        resolution = _resolve_import(
+            relpath,
+            (imported.module, imported.level, imported.name),
+            self.module_map,
+            self.import_roots,
+            self.scanned,
+        )
+        if resolution.module is None:
+            return None
+        target = self.module_map.get(resolution.module)
+        return None if target is None else self.models.get(target, {}).get(name)
+
+    def _collect(self, relpath: str, name: str, seen: set[tuple[str, str]]) -> list[str] | None:
+        """Field and alias names of one model plus its provable bases."""
+        key = (relpath, name)
+        if key in seen:
+            return None
+        seen.add(key)
+        located = self._locate(relpath, name)
+        if located is None or not located.proven:
+            return None
+        names: list[str] = []
+        for base in located.bases:
+            if base in _FIELDLESS_BASES:
+                continue
+            if base == "?":
+                return None
+            inherited = self._collect(relpath, base, seen)
+            if inherited is None:
+                return None
+            names.extend(inherited)
+        for field in located.fields:
+            alias = located.aliases.get(field)
+            for value in (alias, field) if alias is not None else (field,):
+                if value not in names:
+                    names.append(value)
+        return names
+
+
 class _Resolver:
     """Composes effective mounted paths over the cross-file mount graph."""
 
@@ -664,6 +885,7 @@ class _Resolver:
         self.import_roots = import_roots
         self.scanned: frozenset[str] = frozenset(indexes)
         self.module_map = {_module_of(rel): rel for rel in indexes}
+        self.models = _ModelIndex(indexes, import_roots)
         self.facts: list[dict] = []
         self.unresolved: list[dict] = []
 
@@ -1257,33 +1479,49 @@ class _Resolver:
                 continue
             for method in route.methods:
                 self.facts.append(
-                    _fact(route.file, route, method, prefix + route.path, mount)
+                    _fact(route.file, route, method, prefix + route.path, mount, self.models)
                 )
 
 
-def _fact(relpath: str, route: RouteDef, method: str, effective_path: str, mount: str) -> dict:
+def _fact(
+    relpath: str,
+    route: RouteDef,
+    method: str,
+    effective_path: str,
+    mount: str,
+    models: _ModelIndex,
+) -> dict:
     handler_qname = f"{relpath[:-3].replace('/', '.')}:{route.handler}"
+    attributes = {
+        "role": "server-route",
+        "method": method,
+        "rawPath": route.path or "",
+        "normalizedPath": "",  # canonicalized by the TS wrapper (single impl)
+        "effectivePath": effective_path,
+        "framework": FRAMEWORK,
+        "handlerSymbol": handler_qname,
+        "isAsync": route.is_async,
+        "responseModel": route.response_model,
+        "requestSchemaSymbols": route.request_schemas,
+        "tags": route.tags,
+        "operationId": route.operation_id,
+        "mountProvenance": mount,
+    }
+    # Wire names the response model answers to (plan 2026-09-25 Phase 4b
+    # item 5). Absent whenever the model is not statically provable — an
+    # unresolvable symbol, an alias generator, an unprovable base, a
+    # non-model shape — so the frontend-read check has nothing to compare
+    # against and stays silent.
+    fields = models.fields_for(route.file, route.effective_response_model)
+    if fields is not None:
+        attributes["responseModelFields"] = fields
     return {
         "schemaVersion": 1,
         "kind": CONTRACT_KIND,
         "source": relpath,
         "location": loc(relpath, route.node),
         "detectorVersion": VERSION,
-        "attributes": {
-            "role": "server-route",
-            "method": method,
-            "rawPath": route.path or "",
-            "normalizedPath": "",  # canonicalized by the TS wrapper (single impl)
-            "effectivePath": effective_path,
-            "framework": FRAMEWORK,
-            "handlerSymbol": handler_qname,
-            "isAsync": route.is_async,
-            "responseModel": route.response_model,
-            "requestSchemaSymbols": route.request_schemas,
-            "tags": route.tags,
-            "operationId": route.operation_id,
-            "mountProvenance": mount,
-        },
+        "attributes": attributes,
         "id": f"http.contract:{relpath}:{route.handler}:{method}:{effective_path}",
     }
 
