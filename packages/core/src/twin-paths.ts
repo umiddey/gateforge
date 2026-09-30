@@ -288,12 +288,17 @@ export function twinLinksFor(
       (candidate) => candidate.logicalKey !== witnessed.logicalKey && !candidate.title.includes(WITNESSED_TITLE_TAG),
     );
     const described = untagged.filter((candidate) => candidate.title.startsWith(`${stem} raw:`));
-    const partner =
-      untagged.find((candidate) => candidate.title === `${stem} raw`) ??
-      (described.length === 1 ? described[0] : undefined);
-    // Two described raw tests under one label: the twin is the owner's
-    // call (`twinOf`), never a guess — and never a fallback to a bare one.
-    if (partner === undefined && described.length > 1) continue;
+    // A described partner is only unambiguous when the label names ONE
+    // test on each side: two witnessed tests under one label (or two
+    // described raw ones) leave the pairing to the owner (`twinOf`) —
+    // never a guess, and never a fallback to a bare title.
+    const witnessedUnderLabel = candidates.filter((candidate) => {
+      const index = candidate.title.lastIndexOf(WITNESSED_TITLE_TAG);
+      return index !== -1 && candidate.title.slice(0, index).trim() === stem;
+    }).length;
+    const describedPartner = described.length === 1 && witnessedUnderLabel === 1 ? described[0] : undefined;
+    const partner = untagged.find((candidate) => candidate.title === `${stem} raw`) ?? describedPartner;
+    if (partner === undefined && described.length > 0) continue;
     const bare =
       partner ??
       candidates.find(
