@@ -14,8 +14,11 @@
  *
  * This module owns that carry, and it owns it honestly:
  *
- * - The evidence documents are read from the run state BEFORE the
- *   re-seal's own run overwrites them.
+ * - The evidence documents are the ones the run RETAINED when it
+ *   sealed its own receipt or run record, never the live state: an
+ *   intermediate run (a materialization pre-step that rewrites the
+ *   run manifest, a hand-picked selection) would take the witness
+ *   envelope away from a re-seal that still has to authenticate it.
  * - A CHAIN of re-seals has more than one contributing run: the state
  *   holds a union whose records were issued under different run
  *   identities, each with its own witness envelope. Every envelope is
@@ -30,14 +33,16 @@
  *   fresh record replaced it, and a re-run that stopped proving
  *   anything leaves its obligation unproven.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   AttestationSchema,
   sha256Canonical,
   verifyAttestationMac,
   type ExecutionResult,
+  type JsonValue,
 } from '@gate-forge/core';
+import { writeStateFile } from './state.js';
 
 /** The evidence documents a run's state holds, before any carry. */
 export interface ParentEvidenceDocuments {
@@ -100,15 +105,6 @@ export type ParentEvidenceResult =
   | { ok: true; evidence: CarriedEvidenceSet }
   | { ok: false; reason: string };
 
-function readJsonArrayFile(path: string): unknown[] {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 function readJsonFile(path: string): unknown {
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as unknown;
@@ -127,26 +123,95 @@ export function stringField(value: unknown, field: string): string | null {
   return typeof raw === 'string' && raw.length > 0 ? raw : null;
 }
 
+/** Run-state subdirectory holding the retained copy of the parent evidence. */
+export const RESEAL_PARENT_EVIDENCE_DIRECTORY = 'reseal-parent';
+
 /**
- * Reads the evidence documents a run's state holds. Called BEFORE
- * the re-seal's own run overwrites them.
+ * The parent run's evidence, RETAINED at the moment that run sealed its
+ * receipt or wrote its run record: its witness-issued records, its
+ * claims, and the exact witness envelope its own document binds by
+ * digest.
+ *
+ * The live state documents cannot serve the re-seal: every consumer
+ * runs something between the parent and the re-seal (a materialization
+ * pre-step that rewrites `manifest.json`, a hand-picked selection), and
+ * the first thing that rewrites the manifest takes the witness envelope
+ * with it. The retained copy is the run's own, written once, and is
+ * authenticated exactly like the live one was.
+ */
+export interface RetainedParentEvidence extends ParentEvidenceDocuments {
+  /** The witness envelope the parent document seals, or null for a run that witnessed nothing. */
+  attestation: unknown;
+}
+
+/**
+ * Retains the parent evidence a run just sealed, replacing whatever the
+ * previous parent left: the copy always describes the run record or
+ * receipt now in the state, never an older one.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   evidence: the documents and envelope the run just sealed.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeRetainedParentEvidence(stateDir: string, evidence: RetainedParentEvidence): void {
+  writeStateFile(stateDir, join(RESEAL_PARENT_EVIDENCE_DIRECTORY, 'evidence.json'), {
+    schemaVersion: 1,
+    records: evidence.records,
+    claims: evidence.claims,
+    attestation: evidence.attestation,
+  } as unknown as JsonValue);
+}
+
+/**
+ * Removes the retained parent evidence. It belongs to the run record
+ * or receipt it was written for, so it goes exactly when that document
+ * is cleared.
  *
  * Args:
  *   stateDir: absolute run-state directory.
  *
  * Returns:
- *   ParentEvidenceDocuments: the raw documents (empty arrays when absent).
+ *   void.
  */
-export function readParentEvidenceDocuments(stateDir: string): ParentEvidenceDocuments {
+export function clearRetainedParentEvidence(stateDir: string): void {
+  try {
+    rmSync(join(stateDir, RESEAL_PARENT_EVIDENCE_DIRECTORY), { recursive: true, force: true });
+  } catch {
+    // Best-effort removal: an undeletable copy can only leave a re-seal
+    // reading evidence it must refuse anyway, never the reverse.
+  }
+}
+
+/**
+ * Reads the retained copy of the parent evidence. Absent, malformed or
+ * unreadable is null: the caller fails closed with one plain line.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   RetainedParentEvidence | null: the retained evidence, or null.
+ */
+export function readRetainedParentEvidence(stateDir: string): RetainedParentEvidence | null {
+  const document = readJsonFile(join(stateDir, RESEAL_PARENT_EVIDENCE_DIRECTORY, 'evidence.json'));
+  if (typeof document !== 'object' || document === null) return null;
+  const retained = document as Record<string, unknown>;
+  if (!Array.isArray(retained['records']) || !Array.isArray(retained['claims'])) return null;
   return {
-    records: readJsonArrayFile(join(stateDir, 'records.json')),
-    claims: readJsonArrayFile(join(stateDir, 'claims.json')),
+    records: retained['records'],
+    claims: retained['claims'],
+    attestation: retained['attestation'] ?? null,
   };
 }
 
 /**
- * The witness envelope the run in this state fetched, from its run
- * manifest. Null when the run witnessed nothing.
+ * The witness envelope the run in this state holds in its run
+ * manifest. The witness appends that envelope to the manifest itself
+ * when it shuts down, so it is already there for a run whose own live
+ * fetch came too late to see it. Null when the run witnessed nothing.
  *
  * Args:
  *   stateDir: absolute run-state directory.

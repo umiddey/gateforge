@@ -29,7 +29,7 @@
  * never a silent skip.
  */
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   canonicalJson,
@@ -174,17 +174,26 @@ export function readJsonArray(stateDir: string, name: string): unknown[] {
 }
 
 /**
- * Writes one JSON document into the state dir (creating it).
+ * Writes one JSON document into the state dir (creating it), or into
+ * a subdirectory of it when `name` carries one.
  *
  * The state dir is shared with the witness and later `check` runs, and a
  * run's processes can be killed at any point (a container exiting ends
  * everything in it). The document goes to a temporary file first and
  * replaces the old one by rename, so a kill leaves the previous document
  * or the new one, never a truncated file.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   name: the document name, optionally inside a subdirectory.
+ *   value: the document to write.
+ *
+ * Returns:
+ *   void.
  */
-function writeStateFile(stateDir: string, name: string, value: JsonValue): void {
-  mkdirSync(stateDir, { recursive: true });
+export function writeStateFile(stateDir: string, name: string, value: JsonValue): void {
   const target = join(stateDir, name);
+  mkdirSync(dirname(target), { recursive: true });
   const temporary = `${target}.tmp-${String(process.pid)}`;
   writeFileSync(temporary, `${canonicalJson(value)}\n`, 'utf8');
   renameSync(temporary, target);

@@ -190,9 +190,11 @@ import {
   carriedEvidenceDigestOf,
   carriedEvidenceDocuments,
   carriedTestIdentities,
-  readParentEvidenceDocuments,
+  clearRetainedParentEvidence,
+  readRetainedParentEvidence,
   readRunAttestation,
   stringField,
+  writeRetainedParentEvidence,
   type CarriedEvidenceContribution,
 } from '../reseal-evidence.js';
 import {
@@ -2426,26 +2428,40 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       if (reSealPlan !== null && reSealCarried !== null) {
         reSealPlan = { ...reSealPlan, carriedTests: reSealCarried.count };
       }
-      // The parent's witness EVIDENCE is retained BEFORE this run
-      // overwrites `records.json`, `claims.json` and the run manifest: a
-      // re-seal carries a carried test's outcomes AND the records those
-      // outcomes were witnessed with — and in a chain, the records
-      // EVERY contributing run witnessed, each under its own envelope.
+      // The parent's witness EVIDENCE is the copy the run RETAINED when
+      // it sealed its own receipt or run record — never the live state
+      // documents, which any run in between (a materialization
+      // pre-step that rewrites `manifest.json`, a hand-picked
+      // selection) has already overwritten. A re-seal carries a carried
+      // test's outcomes AND the records those outcomes were witnessed
+      // with — and in a chain, the records EVERY contributing run
+      // witnessed, each under its own envelope.
       if (reSeal.plan !== null && reSealParent !== null) {
-        const contributors = retainedEvidenceContributors({
-          stateDir,
-          parent: { kind: reSealParent.kind, receipt: reSealParent.receipt, record: reSealParent.record },
-          parentAttestation: readRunAttestation(stateDir),
-          verifierKeyring,
-        });
+        const retained = readRetainedParentEvidence(stateDir);
+        const contributors =
+          retained === null
+            ? null
+            : retainedEvidenceContributors({
+                stateDir,
+                parent: { kind: reSealParent.kind, receipt: reSealParent.receipt, record: reSealParent.record },
+                parentAttestation: retained.attestation,
+                verifierKeyring,
+              });
         const authenticated =
-          contributors.reason === null
-            ? authenticateContributingEvidence(
-                readParentEvidenceDocuments(stateDir),
-                contributors.contributors,
-                verifierKeyring === null ? [] : verifierKeyring.keys.map((entry) => entry.key),
-              )
-            : { ok: false as const, reason: contributors.reason };
+          retained === null || contributors === null
+            ? { ok: false as const, reason: 'it retains no copy of the evidence its own document sealed' }
+            : contributors.reason === null
+              ? authenticateContributingEvidence(
+                  retained,
+                  contributors.contributors,
+                  verifierKeyring === null ? [] : verifierKeyring.keys.map((entry) => entry.key),
+                )
+              : { ok: false as const, reason: contributors.reason };
+        // The envelopes of every contributing run, kept for the chain
+        // hop this re-seal writes: each run's records are authorized by
+        // its own envelope and by nobody else's.
+        const contributorAttestations =
+          contributors?.contributors.map((contributor) => contributor.attestation) ?? [];
         if (!authenticated.ok) {
           writeLine(
             io.stderr,
@@ -2474,7 +2490,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           const carriedDocuments = carriedEvidenceDocuments(authenticated.evidence, identities);
           reSealParentEvidence = {
             ...carriedDocuments,
-            attestations: contributors.contributors.map((contributor) => contributor.attestation),
+            attestations: contributorAttestations,
             contributions: authenticated.evidence.contributions,
             contributingRunIds: [...new Set(authenticated.evidence.contributions.map((entry) => entry.runId))],
           };
@@ -4070,6 +4086,32 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         );
   const resultTreeId = resultTreeSnapshot?.treeId ?? null;
   /**
+   * Retains this run's own witness evidence for the re-seal that may
+   * come for it: the records and claims it just produced, plus the
+   * exact envelope the document it is about to seal binds by digest.
+   *
+   * The copy exists because the LIVE state cannot be trusted to still
+   * hold them: a materialization pre-step rewrites `manifest.json`
+   * (and the witness envelope with it) between this run and the re-seal,
+   * and a run that writes records of its own replaces the documents.
+   * It is retained only when the owner opted into the re-seal, so a
+   * state directory without that opt-in is byte-identical to before.
+   * It is replaced by the next run that seals a document here, and
+   * removed with the one it belongs to.
+   */
+  const retainParentEvidence = (): void => {
+    if (config.enforcement?.reseal !== true) return;
+    writeRetainedParentEvidence(stateDir, {
+      records: readJsonArray(stateDir, 'records.json'),
+      claims: readJsonArray(stateDir, 'claims.json'),
+      // The witness appends its envelope to the run manifest as it
+      // shuts down, so the manifest is the honest source for a run
+      // whose own live fetch was too late to see it: prefer the
+      // fetched one, fall back to what the run state holds.
+      attestation: liveAttestation ?? readRunAttestation(stateDir),
+    });
+  };
+  /**
    * Writes the run record of a whole-suite run that sealed no gate
    * receipt.
    *
@@ -4126,6 +4168,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         issuedAt: pipeline.now,
       }),
     );
+    // The record and the evidence copy a re-seal reads from it are
+    // written together, or neither is: a record whose own evidence is
+    // not beside it would be refused for a reason the owner cannot fix.
+    retainParentEvidence();
   };
   if (namedTestIds !== null) {
     // A named run is a REPORT, never a gate. It exits 0 only when the
@@ -4152,6 +4198,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       // longer there, and its evidence was already overwritten by this
       // run's own. Leaving it behind would be read as a chain.
       clearResealChain(stateDir);
+      // The retained parent evidence belongs to the receipt this run
+      // just invalidated, exactly as the chain does: it is cleared here
+      // and written again below, together with the run record that
+      // replaces it.
+      clearRetainedParentEvidence(stateDir);
     }
     // The run sealed no receipt; the evidence it DID produce is
     // retained as a run record, which only the test-only re-seal path
@@ -4291,6 +4342,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // left behind as a stale parent (the re-seal's own copy of the parent
   // it consumed lives in the retained chain below).
   clearRunRecord(stateDir);
+  // This receipt is now the parent, so the evidence copy a re-seal reads
+  // is this run's own: written from the same envelope the receipt binds
+  // by digest, and replacing whatever the previous parent left behind.
+  retainParentEvidence();
   // The re-seal chain is additive run state: a re-sealed receipt keeps
   // its parent (receipt or run record, plus its execution result) and
   // the catalog its classification used, so a consumer can recompute

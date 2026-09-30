@@ -594,8 +594,12 @@ run, and nothing is printed.
 
 **What a carried test brings with it.** A carried test brings its
 **outcomes and the evidence those outcomes were witnessed with**: the
-parent run's `records.json` and `claims.json`, retained before the
-re-seal's own run overwrites them and bound to the parent run's
+parent run's `records.json` and `claims.json`, **retained by the parent
+run itself the moment it sealed** — into
+`.gateforge/test-gates/reseal-parent/`, so the runs a pipeline does in
+between (a materialization pre-step that rewrites `manifest.json`, a
+hand-picked `--result-only` selection) cannot take the witness envelope
+away from the re-seal — and bound to the parent run's
 attestation — the envelope must carry the parent document's own run id
 and input digest, hash to the `evidenceAttestationDigest` that document
 seals, and verify with your keyring, or the re-seal is refused like any
