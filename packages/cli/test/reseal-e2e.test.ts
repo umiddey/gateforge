@@ -93,6 +93,9 @@ describe('test-only re-seal (real CLI, end to end)', () => {
       // and a SLICE run never leaves a run record either.
       expect(existsSync(join(stateDir, 'receipt.json'))).toBe(false);
       expect(existsSync(join(stateDir, 'run-record.json'))).toBe(false);
+      // Nothing of the re-seal machinery is written without the
+      // opt-in, not even the retained evidence copy.
+      expect(existsSync(join(stateDir, 'reseal-parent'))).toBe(false);
     });
   }, 180_000);
 });
@@ -717,4 +720,89 @@ describe('consecutive test-only re-seals', () => {
       }
     });
   }, 600_000);
+});
+
+/**
+ * The parent's WITNESS EVIDENCE is retained at the moment the run that
+ * witnessed it seals its receipt or writes its run record — not read
+ * back out of the live run state at re-seal time. Every consumer runs
+ * something in between: a materialization pre-step that rewrites
+ * `manifest.json` without the witness envelope, a hand-picked
+ * result-only selection. None of that may take the envelope away from
+ * the re-seal, and a retained copy nobody can authenticate refuses
+ * exactly as a missing one does.
+ */
+describe('the parent evidence survives an intermediate run', () => {
+  const STATE_DIR = join('.gateforge', 'test-gates');
+
+  it('re-seals from a failing parent after a pre-step run rewrote the run manifest', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      const parentRunId = sealedRunRecord(repo)['runId'];
+
+      // The consumer's gate script materializes its state with a legacy
+      // suite run into the SAME state dir before every run. It rewrites
+      // `manifest.json` — and therefore erases the witness envelope the
+      // failing run's own manifest held — while the run record it wrote
+      // and the records/claims beside it stay exactly where they were.
+      await runCli(repo, ['test-gates', '--suite', 'true', '--out', STATE_DIR, '--format', 'json'], env);
+      const rewritten = JSON.parse(
+        readFileSync(join(repo.root, STATE_DIR, 'manifest.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(rewritten['attestation']).toBeUndefined();
+      expect(sealedRunRecord(repo)['runId']).toBe(parentRunId);
+
+      // The re-seal still authenticates the parent's evidence, and what
+      // it carries is graded by a consumer as usual.
+      await fixFailingSpecAndReseal(repo, env);
+      expect(sealedReceipt(repo).resealedFromKind).toBe('run-record');
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 240_000);
+
+  it('re-seals from a failing parent after a hand-picked result-only run', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+
+      const selection = await runCli(
+        repo,
+        ['test-gates', '--test', 'playwright:chromium:e2e/orders.spec.mjs:reads an order', '--result-only', '--format', 'json'],
+        env,
+      );
+      expect(selection.code, `${selection.stdout}\n${selection.stderr}`).toBe(0);
+      // A report seals nothing and clears nothing, so the parent's run
+      // record is still the parent the re-seal must read.
+      expect(sealedRunRecord(repo)['runId']).toBeTruthy();
+
+      await fixFailingSpecAndReseal(repo, env);
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 240_000);
+
+  it('refuses a tampered retained copy with the same plain line, and takes the normal path', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      const retained = join(repo.root, STATE_DIR, 'reseal-parent', 'evidence.json');
+      const copy = JSON.parse(readFileSync(retained, 'utf8')) as { attestation?: { mac?: string } };
+      copy.attestation = { ...(copy.attestation ?? {}), mac: 'a'.repeat(64) };
+      writeFileSync(retained, `${JSON.stringify(copy, null, 2)}\n`, 'utf8');
+
+      repo.commitFiles(
+        { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
+        'fix the race in the one failing spec',
+      );
+      const refused = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(refused.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'))).toEqual([
+        'test-gates: the previous run cannot be re-sealed from: its evidence attestation does not verify with this keyring → changed-scope run',
+      ]);
+      expect(refused.stderr).not.toContain('only test files changed');
+      // The ordinary changed-scope path ran instead, and it sealed an
+      // ORDINARY receipt: the fixed spec is proven, nothing is carried.
+      const sealed = sealedReceipt(repo);
+      expect(sealed.changeClass).toBeUndefined();
+      expect(sealed.resealedFrom).toBeUndefined();
+    });
+  }, 240_000);
 });
