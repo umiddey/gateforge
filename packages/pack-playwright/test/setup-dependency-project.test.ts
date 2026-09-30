@@ -241,7 +241,7 @@ describe('a setup dependency project keeps every executed test inside the expect
         files: [
           ...new Set(enumeration.instances.filter((i) => i.project === name).map((i) => i.file)),
         ].sort(),
-        dependencies: [...(enumeration.projectDependencies[name] ?? [])].sort(),
+        dependencies: [...(enumeration.projectDependencies?.[name] ?? [])].sort(),
       }));
       const envelope = await executeSupervisedPlaywright(
         { logicalKeys: [] },
