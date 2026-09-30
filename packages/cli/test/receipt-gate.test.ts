@@ -347,6 +347,21 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
     });
   });
 
+  it('the missing-receipt block names the run command and never appends the read-only discover fallback', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      const line = result.stdout.split('\n').find((row) => row.includes('no gate receipt exists'));
+      expect(line, `stdout:\n${result.stdout}`).toBeDefined();
+      // The copyable command that actually closes this block is the last
+      // thing on the line: `discover --json` is read-only and would send
+      // the user in a terminal loop.
+      expect(line).toContain('Run `gateforge test-gates --changed`. [RUN_INCOMPLETE]');
+      expect(line).not.toContain('discover --json');
+    });
+  });
+
   it('a valid complete receipt for the current input digest passes require-e2e', async () => {
     await withTempRepo({}, async (repo) => {
       installReceiptFixture(repo);

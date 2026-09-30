@@ -302,11 +302,15 @@ export function receiptGateBlocking(load: ReceiptLoad): BlockingEntry[] {
   });
   switch (load.status) {
     case 'absent':
+      // The one command that closes this block runs the suite. Without it
+      // `humanMessage` substitutes the read-only `discover --json`, and a
+      // block that ends in a no-op is a terminal loop for a new user.
       return [
         block(
           'RUN_INCOMPLETE',
           'require-e2e: no gate receipt exists for the current state — run `gateforge test-gates --changed` ' +
             'to execute the configured E2E suite; record bundles saved without a complete-run receipt are rejected (fail closed)',
+          'gateforge test-gates --changed',
         ),
       ];
     case 'unverified':
