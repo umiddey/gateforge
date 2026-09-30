@@ -26,6 +26,12 @@ import { loadConfigAt } from './commands/common.js';
 import { trustedPolicyDigestForConfig } from './execution.js';
 import { browserBuildSummary, browserLaunchSummary, inspectBrowserBuilds, unlaunchableBuilds } from './playwright-browsers.js';
 import { resolveVerifierKeyring } from './verifier-keys.js';
+import {
+  engineBrowserRequirement,
+  engineBrowserSummary,
+  inspectEngineBrowserBuilds,
+  resolveEngineBrowserInstall,
+} from './engine-browser.js';
 import { describeApprovedPolicyResolution, resolveApprovedPolicyDigest } from './trusted-policy.js';
 import { resolveStateDir } from './state.js';
 import { sampleHostLoad } from './host-load.js';
@@ -392,6 +398,65 @@ function runnerCheck(cwd: string, config: GateforgeConfig, env: NodeJS.ProcessEn
 }
 
 /**
+ * The engine-owned browser precondition, for repositories that declare
+ * engine-controlled browser evidence.
+ *
+ * It is a SEPARATE line from `runner` because the two answer different
+ * questions and routinely disagree: `runner` reports the browser the
+ * CONSUMER's tests launch, this one the browser the ENGINE drives
+ * through `EngineBrowserManager`. A consumer on `@playwright/test`
+ * 1.62.1 with Chromium 1234 installed makes `runner` say `ok` while the
+ * pack's own pinned 1.58.2 wants 1208 — and the run then dies inside the
+ * witness with `Executable doesn't exist`. This line refuses that run
+ * first and names the engine's OWN install command, because
+ * `npx playwright install` resolves the consumer's release and installs
+ * the revision the cache already holds.
+ *
+ * The check is CONSERVATIVE: it inspects nothing and demands nothing for
+ * a repository that declares no `engine-browser` case, so a pytest /
+ * API-only setup is never told to install a Chromium it cannot open.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   config: loaded repository config.
+ *   env: operator environment (`PLAYWRIGHT_BROWSERS_PATH`).
+ *
+ * Returns:
+ *   RunCheck: the engine-owned browser precondition line.
+ */
+function engineBrowserCheck(cwd: string, config: GateforgeConfig, env: NodeJS.ProcessEnv): RunCheck {
+  const requirement = engineBrowserRequirement(cwd, config.runner, config.behaviorPolicy);
+  if (!requirement.required) {
+    return { id: 'engine-browser', status: 'ok', detail: `engine browser not required — ${requirement.reason}` };
+  }
+  const resolution = resolveEngineBrowserInstall(cwd);
+  if (resolution.kind === 'not-installed') {
+    return {
+      id: 'engine-browser',
+      status: 'warn',
+      detail:
+        `${requirement.reason}, but @gate-forge/pack-playwright is not installed under this repository — ` +
+        'the engine browser could not be inspected',
+    };
+  }
+  if (resolution.kind === 'no-pinned-playwright') {
+    return {
+      id: 'engine-browser',
+      status: 'warn',
+      detail:
+        `${requirement.reason}, but the installed @gate-forge/pack-playwright resolves no readable pinned ` +
+        'playwright release — the engine browser could not be inspected',
+    };
+  }
+  const readiness = inspectEngineBrowserBuilds(resolution.install, env);
+  const summary = engineBrowserSummary(readiness);
+  if (readiness.missing.length > 0 || readiness.unlaunchable.length > 0) {
+    return { id: 'engine-browser', status: 'fail', detail: summary };
+  }
+  return { id: 'engine-browser', status: 'ok', detail: summary };
+}
+
+/**
  * The resolved Playwright config's source ('' when the repository has
  * none): the config names the browsers its projects launch.
  *
@@ -742,6 +807,11 @@ export async function buildRunPreflight(io: Io, options: RunPreflightOptions = {
   checks.push(verifierKeyCheck(cwd, env));
   checks.push(config === null ? skipped('approved-policy', 'approved policy digest') : approvedPolicyCheck(cwd, config, env));
   checks.push(config === null ? skipped('runner', 'runner binary + version') : runnerCheck(cwd, config, env));
+  // The engine-owned browser is a SEPARATE precondition from `runner`:
+  // on a real install the consumer's Chromium and the engine's are
+  // different Playwright releases, so `runner: ok` beside a missing
+  // engine build is the exact false all-clear this line refuses.
+  checks.push(config === null ? skipped('engine-browser', 'engine-owned browser build') : engineBrowserCheck(cwd, config, env));
   checks.push(config === null ? skipped('interpreter', 'configured interpreter paths') : interpreterCheck(cwd, config, env));
   checks.push(config === null ? skipped('bytecode-safety', 'bytecode-safe settings') : bytecodeSafetyCheck(cwd, config, env));
   const baseUrl = options.targetBaseUrl ?? env['GATEFORGE_TARGET_BASE_URL'] ?? env['GATEFORGE_APP_BASE_URL'] ?? '';

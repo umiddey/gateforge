@@ -55,6 +55,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'ci',
         'config',
         'enforcement-mode',
+        'engine-browser',
         'hook',
         'hook-mutation',
         'managed-guarantee',

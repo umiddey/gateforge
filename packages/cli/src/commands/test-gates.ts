@@ -3482,6 +3482,18 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         ...(io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== undefined && io.env['GATEFORGE_PROBE_DB_CONTAINER'] !== ''
           ? { GATEFORGE_PROBE_DB_CONTAINER: io.env['GATEFORGE_PROBE_DB_CONTAINER'] }
           : {}),
+        // Browser cache the ENGINE's own Chromium comes from. The
+        // doctor and the run preflight read this same variable through
+        // `io.env`, so it is forwarded explicitly rather than inherited
+        // from `process.env`: an injected Io environment would
+        // otherwise let the readiness checks inspect one cache while the
+        // witness child launched from another, and the engine browser
+        // would fail with "Executable doesn't exist" for a directory the
+        // operator was just told was ready. An operator-chosen directory,
+        // never a secret (same class as HOME).
+        ...(io.env['PLAYWRIGHT_BROWSERS_PATH'] !== undefined && io.env['PLAYWRIGHT_BROWSERS_PATH'] !== ''
+          ? { PLAYWRIGHT_BROWSERS_PATH: io.env['PLAYWRIGHT_BROWSERS_PATH'] }
+          : {}),
         // Trusted fixture/actor provider (non-secret path): strong
         // behavior cases mint their fixtures and actor credentials from
         // the operator's approved module, engine-side. The suite never
