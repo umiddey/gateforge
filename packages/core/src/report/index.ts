@@ -80,10 +80,11 @@ export interface RunExecutionSummary {
   /**
    * The whole-repository debt, defined once by `repositoryDebtOf`
    * (never recomputed beside it). `blocking` is the FROZEN legacy
-   * total — blocking verdicts + repository findings, exactly as it has
-   * always been computed — and `newlyBlocking` is what the gate
-   * actually blocks on: the same count, named for the report line.
-   * `baselined` is how much of the debt the adopted baseline forgave.
+   * total — repository blocking verdicts + repository findings, exactly
+   * as it has always been computed. `newlyBlocking` is what THIS run's
+   * exit code blocks on, which for a slice run is its own surface and
+   * not the repository total; `notGradedBlocking` names the difference.
+   * `baselined` is how much debt the adopted baseline forgave.
    */
   repositoryDebt: RepositoryDebt;
 }
@@ -107,8 +108,24 @@ export interface RepositoryDebt {
   unclaimed: number;
   /** Obligations the adopted baseline forgave (claimed or not). */
   baselined: number;
-  /** What the gate actually blocks on — the number the line reports. */
+  /**
+   * What THIS run's exit code blocks on: the blocking verdicts and
+   * findings of the surface it graded. A changed- or named-scope run
+   * grades a slice, so out-of-scope debt is not in this number — it is
+   * `notGradedBlocking` instead.
+   */
   newlyBlocking: number;
+  /**
+   * Whole-repository debt that blocks but that this run never graded
+   * (always 0 in a full-scope run). Reported, never counted as new:
+   * a green changed-scope run must not look like a green repository.
+   */
+  notGradedBlocking: number;
+}
+
+/** Whether one graded verdict blocks the run (exit 1). */
+function isBlockingVerdict(verdict: ObligationVerdict): boolean {
+  return BLOCKING_VERDICTS.includes(verdict.verdict);
 }
 
 /**
@@ -118,13 +135,21 @@ export interface RepositoryDebt {
  * verdicts, so a run can never show two different counts: the split is
  * what the evaluator did, never a recount beside it. `baselined` is
  * read back from the reason the baseline forgiveness stamped on the
- * verdicts it re-graded, and `newlyBlocking` is the count the gate
- * blocks on — a subtraction of the baselined count from the total is
- * what let a run print `0 new blocking` next to real blockers.
+ * verdicts it re-graded, and `newlyBlocking` is exactly what THIS
+ * run's exit code blocks on — the graded surface, never the whole
+ * repository. A changed- or named-scope run that grades nothing
+ * blocking therefore reports 0, with the debt it never observed named
+ * apart as `notGradedBlocking`; a full-scope run reports 0 only when
+ * nothing blocks. Two subtractions are deliberately absent: total minus
+ * baselined (which printed `0 new blocking` next to real blockers) and
+ * total minus scope (which would call a green slice's untouched debt
+ * new).
  *
  * Args:
- *   verdicts: the whole-repository verdicts this run graded.
- *   findings: the whole-repository blocking entries this run graded.
+ *   verdicts: the whole-repository verdicts the report describes.
+ *   findings: the whole-repository blocking entries the report describes.
+ *   gradedVerdicts: the verdicts this run graded (the graded surface).
+ *   gradedFindings: the blocking entries this run graded.
  *   unclaimed: registered obligations with no claim row.
  *
  * Returns:
@@ -133,20 +158,25 @@ export interface RepositoryDebt {
 export function repositoryDebtOf(input: {
   readonly verdicts: readonly ObligationVerdict[];
   readonly findings: readonly BlockingEntry[];
+  readonly gradedVerdicts: readonly ObligationVerdict[];
+  readonly gradedFindings: readonly BlockingEntry[];
   readonly unclaimed: number;
 }): RepositoryDebt {
-  const blocking = input.verdicts.filter((verdict) => BLOCKING_VERDICTS.includes(verdict.verdict)).length;
-  const baselined = input.verdicts.filter(
-    (verdict) => verdict.verdict === 'waived' && (verdict.reason ?? '').startsWith(BASELINE_VERDICT_REASON),
+  const gradedIds = new Set(input.gradedVerdicts.map((verdict) => verdict.obligation.id));
+  const notGradedBlocking = input.verdicts.filter(
+    (verdict) => isBlockingVerdict(verdict) && !gradedIds.has(verdict.obligation.id),
   ).length;
   const blockingEntries = input.findings.length;
   return {
     obligations: input.verdicts.length,
-    blocking: blocking + blockingEntries,
+    blocking: input.verdicts.filter(isBlockingVerdict).length + blockingEntries,
     blockingEntries,
     unclaimed: input.unclaimed,
-    baselined,
-    newlyBlocking: blocking + blockingEntries,
+    baselined: input.verdicts.filter(
+      (verdict) => verdict.verdict === 'waived' && (verdict.reason ?? '').startsWith(BASELINE_VERDICT_REASON),
+    ).length,
+    newlyBlocking: input.gradedVerdicts.filter(isBlockingVerdict).length + input.gradedFindings.length,
+    notGradedBlocking,
   };
 }
 
@@ -625,12 +655,22 @@ function textReport(
         `${execution.selectedClaims.waived} waived)`,
     );
     // The line never prints a bare "blocking" count that differs from
-    // the gate line: the baselined and the new debt are named apart.
+    // the gate line: the baselined and the new debt are named apart,
+    // and "new blocking" is what THIS run's exit code blocks on.
     lines.push(
       `repository debt: ${execution.repositoryDebt.baselined} known (baselined), ` +
         `${execution.repositoryDebt.newlyBlocking} new blocking / ${execution.repositoryDebt.obligations} obligations ` +
         `(${execution.repositoryDebt.unclaimed} unclaimed; ${execution.repositoryDebt.blockingEntries} blocking entries)`,
     );
+    // A slice run grades only its own surface. Debt outside it is real
+    // and reported, but it is not what this run blocks on — say so with
+    // its own words instead of counting it as new.
+    if (execution.repositoryDebt.notGradedBlocking > 0) {
+      lines.push(
+        `not graded by this ${execution.scope}-scope run: ${execution.repositoryDebt.notGradedBlocking} blocking obligation(s) — ` +
+          'this run never observed them; a full run grades them',
+      );
+    }
     // A named run grades ONLY the selection it executed. Say the
     // remainder out loud, so a green named run is never misread as a
     // whole-repository verdict.

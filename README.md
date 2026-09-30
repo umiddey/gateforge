@@ -303,11 +303,13 @@ and response bodies are never included.
 blockers: both were true and neither was actionable. `repositoryDebt`
 now derives its split from ONE definition, the graded verdicts, so
 `baselined` and `newlyBlocking` are the same two numbers in the text and
-in the JSON, and `newlyBlocking` is what the gate actually blocks on —
-the frozen `blocking` total, never a subtraction that reached zero while
-blockers remained. A run is never printed twice: the in-runner reporter
-grades claims only, so it names no debt count of its own
-(`repository debt: graded by gateforge after the run`) instead of
+in the JSON, and `newlyBlocking` is exactly what this run's exit code
+blocks on. A changed- or named-scope run grades a slice, so debt outside
+it is reported in its own words — `not graded by this changed-scope run:
+96 blocking obligation(s) — this run never observed them; a full run
+grades them` — and never counted as new. A run is never printed twice:
+the in-runner reporter grades claims only, so it names no debt count of
+its own (`repository debt: graded by gateforge after the run`) instead of
 contradicting the CLI's line seconds later. A named or changed run never
 verdicts debt it did not observe — the in-runner reporter prints
 `GATEFORGE GATE: SELECTION (N satisfied, 0 blocking; repository verdict
