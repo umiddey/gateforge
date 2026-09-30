@@ -475,6 +475,49 @@ describe('gateforge init', () => {
       );
     });
   });
+
+  it('--plugins adds detectors to an initialized config, additively (F10)', async () => {
+    await withTempRepo({}, async (repo) => {
+      const first = await runCli(repo, ['init', '--plugins', 'gateforge.pack-fastapi']);
+      expect(first.code).toBe(0);
+      expect(loadConfig(join(repo.root, '.gateforge.yml')).plugins.map((plugin) => plugin.id)).toEqual([
+        'gateforge.pack-fastapi',
+      ]);
+      // Owner edits the merge must not clobber: a comment and a
+      // hand-set `runner:` key.
+      const edited = readFileSync(repo.path('.gateforge.yml'), 'utf8')
+        .replace('# gateforge project configuration (schemaVersion 1)', '# owner note: keep me')
+        .replace('policies: .gateforge/policies.yml', 'policies: .gateforge/policies.yml\nrunner: vitest');
+      repo.writeFiles({ '.gateforge.yml': edited });
+
+      const second = await runCli(repo, ['init', '--plugins', 'gateforge.pack-sqlalchemy']);
+      expect(second.code, second.stdout).toBe(0);
+      // The documented tip now works: the detector is really added...
+      expect(loadConfig(join(repo.root, '.gateforge.yml')).plugins.map((plugin) => plugin.id).sort()).toEqual([
+        'gateforge.pack-fastapi',
+        'gateforge.pack-sqlalchemy',
+      ]);
+      // ...the owner's own edits survive, and the run says what it added.
+      const merged = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      expect(merged).toContain('# owner note: keep me');
+      expect(merged).toContain('runner: vitest');
+      expect(second.stdout).toMatch(/gateforge\.pack-sqlalchemy/);
+      expect(second.stdout).toMatch(/added/);
+    });
+  });
+
+  it('--plugins never removes a detector the owner already configured', async () => {
+    await withTempRepo({}, async (repo) => {
+      await runCli(repo, ['init', '--plugins', 'gateforge.pack-fastapi,gateforge.pack-sqlalchemy']);
+      const second = await runCli(repo, ['init', '--plugins', 'gateforge.pack-fastapi']);
+      expect(second.code).toBe(0);
+      expect(loadConfig(join(repo.root, '.gateforge.yml')).plugins.map((plugin) => plugin.id).sort()).toEqual([
+        'gateforge.pack-fastapi',
+        'gateforge.pack-sqlalchemy',
+      ]);
+    });
+  });
+
 });
 
 describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', () => {

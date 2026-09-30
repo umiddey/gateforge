@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { join } from 'node:path';
-import { parse as parseYaml } from 'yaml';
+import { parse as parseYaml, parseDocument, isSeq as isYamlSeq, isMap as isYamlMap } from 'yaml';
 import {
   ClassificationPolicySchema,
   PolicyFileSchema,
@@ -166,6 +166,63 @@ function pluginsTemplate(pluginIds: readonly string[]): string {
         `  - id: ${id}\n    version: '${BUNDLED_PLUGIN_VERSIONS[id]}'\n    transport: in-process\n    module: '${BUNDLED_PLUGIN_MODULES[id]}'`,
     )
     .join('\n');
+}
+
+/**
+ * Adds the requested bundled detectors to an existing `.gateforge.yml`
+ * without touching anything else in the owner's file.
+ *
+ * The merge is ADDITIVE: an id already present keeps its owner's entry
+ * (version pin, transport, module) byte for byte, an id that is absent
+ * is appended with the bundled module/version, and no entry is ever
+ * removed — `--plugins` chooses what to ADD, and the plugin list is the
+ * one config section the product's own tip tells a user to change.
+ * Everything outside the `plugins:` sequence (keys, comments, the
+ * owner's own edits) is preserved exactly.
+ *
+ * Args:
+ *   existingText: the current `.gateforge.yml` contents.
+ *   pluginIds: the bundled detector ids to ensure are present.
+ *
+ * Returns:
+ *   string | null: the merged document, or null when every requested id
+ *   is already present (nothing to write).
+ *
+ * Throws:
+ *   UsageError: the merged document would not satisfy the pinned
+ *   config schema (a broken merge must fail here, not at the next run).
+ */
+function mergePluginsIntoConfig(existingText: string, pluginIds: readonly string[]): string | null {
+  const document = parseDocument(existingText);
+  const pluginsNode = document.get('plugins');
+  if (!isYamlSeq(pluginsNode)) {
+    throw new UsageError(
+      'init --plugins: the existing .gateforge.yml has no `plugins:` list to add to; ' +
+        'add the entry by hand (one block per detector: `id`, `version`, `transport`, `module`)',
+    );
+  }
+  const present = new Set<string>();
+  for (const item of pluginsNode.items) {
+    // A `plugins:` entry is a YAML mapping node, not a plain object.
+    if (!isYamlMap(item)) continue;
+    const id = item.get('id');
+    if (typeof id === 'string') present.add(id);
+  }
+  const missing = pluginIds.filter((id) => !present.has(id));
+  if (missing.length === 0) return null;
+  for (const id of missing) {
+    pluginsNode.add({
+      id,
+      version: BUNDLED_PLUGIN_VERSIONS[id],
+      transport: 'in-process',
+      module: BUNDLED_PLUGIN_MODULES[id],
+    });
+  }
+  const merged = document.toString();
+  // Self-check against the pinned schema BEFORE writing (the same
+  // contract the fresh-config path keeps).
+  parseConfig(parseYaml(merged), { file: '.gateforge.yml' });
+  return merged;
 }
 
 /**
@@ -580,7 +637,10 @@ request sent), not "the engine typed the form".`;
 async function resolveRecommended(io: Io, options: Readonly<Record<string, unknown>>): Promise<boolean> {
   if (options['accept-recommended'] === true) return true;
   if (!process.stdin.isTTY) {
-    writeLine(io.stdout, 'tip: re-run with --plugins <comma,list> to change detectors');
+    writeLine(
+      io.stdout,
+      'tip: re-run with --plugins <comma,list> to add detectors (entries already in .gateforge.yml are kept; nothing else in the file changes)',
+    );
     return true;
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -1284,6 +1344,35 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       writeLine(
         io.stdout,
         'note: existing .gateforge.yml left untouched — add `behaviorPolicy: .gateforge/behavior.yml` to enable the profile',
+      );
+    }
+  }
+
+  // An EXPLICIT `--plugins` on an initialized repository ADDS the
+  // requested detectors to the owner's config instead of being ignored.
+  // The merge is additive (an existing entry keeps the owner's version
+  // pin; nothing is removed) and touches only the `plugins:` list, so
+  // the product's own tip — "re-run with --plugins … to change
+  // detectors" — is finally true. Every other key, comment, and edit in
+  // the file is preserved byte for byte, and the schema is checked
+  // before anything is written.
+  if (explicitPlugins !== null && existsSync(join(cwd, '.gateforge.yml'))) {
+    const configPath = join(cwd, '.gateforge.yml');
+    const merged = mergePluginsIntoConfig(readFileSync(configPath, 'utf8'), explicitPlugins);
+    if (merged === null) {
+      writeLine(
+        io.stdout,
+        `${explicitPlugins.join(', ')} already configured in ${configPath}; leaving it untouched`,
+      );
+    } else {
+      writeFileSync(configPath, merged, 'utf8');
+      const added = loadConfig(configPath).plugins
+        .map((plugin) => plugin.id)
+        .filter((id) => explicitPlugins.includes(id));
+      recordInitPath(io, cwd, configPath, 'preserved');
+      writeLine(
+        io.stdout,
+        `updated: ${configPath} (added detector(s): ${added.join(', ')} — every other key left as it was)`,
       );
     }
   }
