@@ -17,6 +17,14 @@ export interface HumanMessageEntry {
 }
 
 /**
+ * Prefix of the refusal a receipt sealed by an older engine produces. The
+ * receipt records the version that sealed it, so a version disagreement is
+ * reportable fact, and it is the one cause a user acts on by re-sealing.
+ */
+export const ENGINE_UPGRADE_REFUSAL_PREFIX =
+  'require-e2e: this receipt was sealed by Gateforge ';
+
+/**
  * Builds the common sentence, copyable command, and final cause marker for a report entry.
  *
  * Args:

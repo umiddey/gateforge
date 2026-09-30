@@ -894,13 +894,14 @@ function authorizeRecords(
       : null;
 
   const evidenceBlocking: BlockingEntry[] = [];
-  const block = (detail: string): void => {
+  const block = (detail: string, nextAction?: string): void => {
     evidenceBlocking.push({
       kind: 'finding',
       resourceId: null,
       name: null,
       detail,
       location: null,
+      ...(nextAction === undefined ? {} : { nextAction }),
     });
   };
 
@@ -1150,9 +1151,14 @@ function authorizeRecords(
           'prove issuance and witnessed records demote (fail closed)',
       );
     } else if (!legacyOnly) {
+      // A missing envelope is repaired by a fresh supervised run: the
+      // witness writes the envelope at shutdown, so the message names the
+      // re-seal instead of the read-only `discover --json` dump (which
+      // changes nothing).
       block(
         'evidence-context: no evidence attestation envelope found (missing); ' +
           'witnessed records demote (fail closed)',
+        'gateforge test-gates --changed',
       );
     }
   }
