@@ -1,0 +1,5 @@
+# Generated run state (receipts, catalogs, ledgers) is never committed.
+.gateforge/test-gates/
+node_modules/
+test-results/
+playwright-report/
