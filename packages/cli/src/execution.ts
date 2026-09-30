@@ -697,9 +697,36 @@ export interface SealExecutionResultInput {
    * the execution result so receipts bind the enforced expected set.
    */
   enumerationDigest?: string;
+  /**
+   * The timing-chaos plan this run executed under (E63), plus the
+   * schedule the witness proxy used. Additive and optional: without
+   * `--chaos` the sealed result has no `chaos` key at all.
+   */
+  chaos?: {
+    /** The `--chaos <seed>` the owner replayed. */
+    seed: number;
+    /** Upper bound of every applied delay, in whole milliseconds. */
+    maxDelayMs: number;
+    /** Whether a later response may be released before an earlier one. */
+    reorder: boolean;
+    /** Per-response release decisions (method + pathname, k, delay). */
+    schedule: readonly ExecutionResultChaosEntry[];
+  };
   /** Run start/end instants (ISO-8601). */
   startedAt: string;
   finishedAt: string;
+}
+
+/** One recorded chaos release decision (method + pathname, k, delay). */
+export interface ExecutionResultChaosEntry {
+  /** `METHOD /pathname` (query stripped) — never a secret. */
+  routeKey: string;
+  /** 1-based index of the request under its route key. */
+  k: number;
+  /** Milliseconds the response was actually held back. */
+  delayMs: number;
+  /** True when the plan released this response before the previous one. */
+  releasedBefore: boolean;
 }
 
 /** The sealed execution result plus its digest. */
@@ -771,6 +798,7 @@ export function sealExecutionResult(input: SealExecutionResultInput): SealedExec
     ...(input.sessionTrace !== undefined && input.sessionTrace !== null
       ? { sessionTrace: input.sessionTrace }
       : {}),
+    ...(input.chaos !== undefined ? { chaos: input.chaos } : {}),
     runnerExit: input.envelope.processExit,
     complete: supervision.complete,
     causes: supervision.findings.map((finding) => ({

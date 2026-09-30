@@ -242,6 +242,7 @@ import type {
   WitnessHandle,
   WitnessOptions,
 } from './types.js';
+import { ChaosScheduler, chaosRouteKey, type ChaosOptions, type ChaosScheduleEntry } from './chaos.js';
 import type { FixtureLease } from './fixture-provider.js';
 import { validateScopeSnapshot } from './behavior.js';
 import { BEHAVIOR_BODY_LIMIT_BYTES, BehaviorDriverError, driveBehaviorRequest } from './behavior-request.js';
@@ -511,6 +512,13 @@ interface WitnessState {
   /** Proxy exchanges currently in flight (request received, response open). */
   proxyInFlight: number;
   /**
+   * Timing chaos (E63): the seeded release plan the observation proxy
+   * applies, plus the schedule it actually used. Null in every run that
+   * did not ask for chaos - the byte-identical path. The recorded
+   * entries are the replay record a finding is explained with.
+   */
+  chaos: { options: ChaosOptions; entries: ChaosScheduleEntry[] } | null;
+  /**
    * The expected test set the supervisor registered BEFORE the run
    * (enforcement-review fix 2a), keyed by the identity join key
    * (project, file, titlePath). Once bound, `/sessions/open` accepts
@@ -561,6 +569,13 @@ interface WitnessState {
 function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
+
+/**
+ * Chaos session identity of the SHARED (unattributed) proxy: one
+ * stable name, so a schedule that lands on the shared port is still
+ * reproducible instead of keyed by a random session uuid.
+ */
+const SHARED_PROXY_CHAOS_SESSION = 'shared-proxy';
 
 /** The expected-set identity join key (project, file, titlePath). */
 function expectedKey(project: string | null, file: string, titlePath: readonly string[]): string {
@@ -636,8 +651,17 @@ function stripMountPath(rawUrl: string, mountPath: string | null): string {
  * Throws:
  *   Error: when the server fails to bind.
  */
-async function startObservedProxy(state: WitnessState, sessionId: string | null): Promise<Server> {
+async function startObservedProxy(
+  state: WitnessState,
+  sessionId: string | null,
+  chaosSession: string,
+): Promise<Server> {
   const proxyTargetUrl = new URL(state.options.proxyTarget as string);
+  // One scheduler per proxy port: a session's `k` and its recorded
+  // schedule are its own, so two tests in one run can never shift each
+  // other's timing. `chaosSession` is the supervisor-issued test id
+  // (stable across replays), never the random session uuid.
+  const chaos = state.chaos === null ? null : new ChaosScheduler(state.chaos.options, chaosSession);
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -654,6 +678,11 @@ async function startObservedProxy(state: WitnessState, sessionId: string | null)
       // traffic from an older invocation could be signed under the new
       // context.
       state.proxyInFlight += 1;
+      // Timing chaos (E63): the release slot is reserved at ARRIVAL, so
+      // the per-route key `k` counts requests in the order the suite
+      // made them - never in the order responses happened to complete.
+      const chaosSlot =
+        chaos === null ? null : chaos.reserve(chaosRouteKey(req.method ?? 'GET', forwardUrl), Date.now());
       let settledFlight = false;
       const settleFlight = (): void => {
         if (!settledFlight) {
@@ -664,10 +693,74 @@ async function startObservedProxy(state: WitnessState, sessionId: string | null)
       // b59/b60 lesson (phase7-runtime e22ec24): `agent: false` is
       // load-bearing. On Node >=19 the default global agent keeps sockets
       // alive while dev servers close idle keep-alive sockets at their
-      // keepAliveTimeout — reusing a socket the target closed mid-handshake
+      // keepAliveTimeout - reusing a socket the target closed mid-handshake
       // intermittently killed exactly one browser exchange per batch. A
       // fresh loopback connection per forwarded exchange costs nothing and
       // removes the reuse race.
+      const forwardResponse = (upstream: IncomingMessage): void => {
+        // The release moment: the schedule records what this run
+        // actually did, which is what makes a red run replayable.
+        if (chaosSlot !== null && chaos !== null) {
+          state.chaos?.entries.push(chaos.release(chaosSlot, Date.now()));
+        }
+        const status = upstream.statusCode ?? 0;
+        const observedPath = normalizeObservedPath(forwardUrl);
+        // Bounded response-body snapshot: the tap is attached BEFORE
+        // piping so both consumers receive the stream; forwarding to
+        // the browser stays unbuffered (the snapshot never gates the
+        // response). Total bytes are counted even beyond the snapshot
+        // limit; only the snapshot is hashed.
+        const snapshot: Buffer[] = [];
+        let snapshotBytes = 0;
+        let totalBytes = 0;
+        upstream.on('data', (chunk: Buffer) => {
+          totalBytes += chunk.length;
+          if (snapshotBytes < OBSERVED_BODY_SNAPSHOT_BYTES) {
+            const room = OBSERVED_BODY_SNAPSHOT_BYTES - snapshotBytes;
+            const taken = chunk.length > room ? chunk.subarray(0, room) : chunk;
+            snapshot.push(Buffer.from(taken)); // copy: detach from the stream pool
+            snapshotBytes += taken.length;
+          }
+        });
+        upstream.on('end', () => {
+          const seq = (state.observedSeq += 1);
+          const method = (req.method ?? 'GET').toUpperCase();
+          const bodySnapshot = Buffer.concat(snapshot);
+          state.observed.push({
+            method,
+            path: observedPath,
+            status,
+            seq,
+            bodySha256: createHash('sha256').update(bodySnapshot).digest('hex'),
+            bodyBytes: totalBytes,
+            requestBody: body.length === 0 ? null : Buffer.from(body.subarray(0, OBSERVED_REQUEST_BODY_BYTES)),
+            requestTruncated: body.length > OBSERVED_REQUEST_BODY_BYTES,
+            requestBytes: body.length,
+            requestContentType: contentTypeOf(req.headers['content-type']),
+            sessionId,
+            tick: (state.tick += 1),
+          });
+          // Response attribution (Observe channel): what the response
+          // NAMED, kept even after the exchange is consumed, so a
+          // create finalize can tell a concurrent observed create
+          // apart from a writer outside every session channel.
+          state.observedResponses.push({
+            seq,
+            method,
+            path: observedPath,
+            status,
+            ...responseAttribution(
+              bodySnapshot,
+              contentTypeOf(upstream.headers['content-type']),
+              totalBytes > OBSERVED_BODY_SNAPSHOT_BYTES,
+            ),
+          });
+          settleFlight();
+        });
+        upstream.on('error', settleFlight);
+        res.writeHead(status, upstream.headers);
+        upstream.pipe(res);
+      };
       const forward = request(
         {
           protocol: proxyTargetUrl.protocol,
@@ -679,63 +772,21 @@ async function startObservedProxy(state: WitnessState, sessionId: string | null)
           agent: false,
         },
         (upstream) => {
-          const status = upstream.statusCode ?? 0;
-          const observedPath = normalizeObservedPath(forwardUrl);
-          // Bounded response-body snapshot: the tap is attached BEFORE
-          // piping so both consumers receive the stream; forwarding to
-          // the browser stays unbuffered (the snapshot never gates the
-          // response). Total bytes are counted even beyond the snapshot
-          // limit; only the snapshot is hashed.
-          const snapshot: Buffer[] = [];
-          let snapshotBytes = 0;
-          let totalBytes = 0;
-          upstream.on('data', (chunk: Buffer) => {
-            totalBytes += chunk.length;
-            if (snapshotBytes < OBSERVED_BODY_SNAPSHOT_BYTES) {
-              const room = OBSERVED_BODY_SNAPSHOT_BYTES - snapshotBytes;
-              const taken = chunk.length > room ? chunk.subarray(0, room) : chunk;
-              snapshot.push(Buffer.from(taken)); // copy: detach from the stream pool
-              snapshotBytes += taken.length;
-            }
-          });
-          upstream.on('end', () => {
-            const seq = (state.observedSeq += 1);
-            const method = (req.method ?? 'GET').toUpperCase();
-            const bodySnapshot = Buffer.concat(snapshot);
-            state.observed.push({
-              method,
-              path: observedPath,
-              status,
-              seq,
-              bodySha256: createHash('sha256').update(bodySnapshot).digest('hex'),
-              bodyBytes: totalBytes,
-              requestBody: body.length === 0 ? null : Buffer.from(body.subarray(0, OBSERVED_REQUEST_BODY_BYTES)),
-              requestTruncated: body.length > OBSERVED_REQUEST_BODY_BYTES,
-              requestBytes: body.length,
-              requestContentType: contentTypeOf(req.headers['content-type']),
-              sessionId,
-              tick: (state.tick += 1),
-            });
-            // Response attribution (Observe channel): what the response
-            // NAMED, kept even after the exchange is consumed, so a
-            // create finalize can tell a concurrent observed create
-            // apart from a writer outside every session channel.
-            state.observedResponses.push({
-              seq,
-              method,
-              path: observedPath,
-              status,
-              ...responseAttribution(
-                bodySnapshot,
-                contentTypeOf(upstream.headers['content-type']),
-                totalBytes > OBSERVED_BODY_SNAPSHOT_BYTES,
-              ),
-            });
-            settleFlight();
-          });
-          upstream.on('error', settleFlight);
-          res.writeHead(status, upstream.headers);
-          upstream.pipe(res);
+          // Chaos holds a response back by PAUSING the upstream stream:
+          // the browser receives the same bytes, the same status and
+          // the same headers, only later. With no plan this is exactly
+          // the unheld path below.
+          if (chaosSlot !== null) {
+            const waitMs = Math.max(0, chaosSlot.releaseAt - Date.now());
+            upstream.pause();
+            const held = setTimeout(() => {
+              upstream.resume();
+              forwardResponse(upstream);
+            }, waitMs);
+            upstream.once('error', () => clearTimeout(held));
+            return;
+          }
+          forwardResponse(upstream);
         },
       );
       forward.on('error', () => {
@@ -782,7 +833,7 @@ async function startSessionProxy(state: WitnessState, session: TestSession): Pro
     session.proxyUrl = null;
     return;
   }
-  const server = await startObservedProxy(state, session.sessionId);
+  const server = await startObservedProxy(state, session.sessionId, session.testId);
   session.proxyServer = server;
   session.proxyUrl = proxyUrlOf(state, server);
 }
@@ -972,6 +1023,10 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     runContext: null,
     observedSeqAtBind: 0,
     proxyInFlight: 0,
+    chaos:
+      options.chaos === undefined || options.chaos === null
+        ? null
+        : { options: options.chaos, entries: [] },
     expectedTests: new Map(),
     enumerationDigest: null,
     behaviorCatalog: null,
@@ -1032,7 +1087,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   let proxyUrl: string | null = null;
   if (typeof state.options.proxyTarget === 'string' && state.options.proxyTarget.length > 0) {
     await assertLoopback(state.options.proxyTarget, 'observation proxy target');
-    state.proxyServer = await startObservedProxy(state, null);
+    state.proxyServer = await startObservedProxy(state, null, SHARED_PROXY_CHAOS_SESSION);
     proxyUrl = proxyUrlOf(state, state.proxyServer);
   }
 
@@ -1756,6 +1811,17 @@ async function handleRequest(
         req.headers[VERIFIER_HEADER],
         (await readBody(req)) as ObserveFinalizeRequest,
       );
+      return;
+    }
+    if (req.method === 'GET' && path === '/runs/chaos-schedule') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      // The replay record: which route key, which request index, how
+      // long it was held, and whether it went out before its
+      // predecessor. `chaos: null` is the honest answer for a run that
+      // never asked for chaos.
+      sendJson(res, 200, {
+        chaos: state.chaos === null ? null : { ...state.chaos.options, schedule: state.chaos.entries },
+      });
       return;
     }
     if (req.method === 'GET' && path === '/runs/execution-trace') {

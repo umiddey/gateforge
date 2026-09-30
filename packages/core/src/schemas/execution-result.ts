@@ -146,6 +146,24 @@ export type TracedTest = z.infer<typeof TracedTestSchema>;
  * The sealed execution result. Strict: unknown keys are rejected so a
  * hostile run-state edit cannot smuggle extra authority in.
  */
+/**
+ * One timing-chaos release decision (E63): what the observation proxy
+ * did to one proxied response. The route key is method + pathname, so
+ * the record can never carry a query value, a body or a credential.
+ */
+const ChaosScheduleEntrySchema = z
+  .object({
+    /** `METHOD /pathname` (query stripped). */
+    routeKey: z.string().min(1),
+    /** 1-based index of the request under its route key. */
+    k: z.number().int().min(1),
+    /** Milliseconds the response was actually held back. */
+    delayMs: z.number().int().min(0),
+    /** True when the plan released this response before the previous one. */
+    releasedBefore: z.boolean(),
+  })
+  .strict();
+
 export const ExecutionResultSchema = z
   .object({
     schemaVersion: SchemaVersionField,
@@ -225,6 +243,26 @@ export const ExecutionResultSchema = z
     browsers: z.record(z.string().min(1), z.string()),
     /** 64-hex domain-separated environment identity (node/platform/arch/engines). */
     environmentIdentity: z.string().regex(HEX64, 'environmentIdentity must be 64-char lowercase hex'),
+    /**
+     * Timing chaos (E63): the seeded release plan this run executed
+     * under, plus the schedule the proxy actually used. Additive and
+     * optional, so every run without `--chaos` stays byte-identical.
+     * A chaos run is a FINDING tool: it never seals a receipt, so this
+     * label explains a red run instead of authorizing anything.
+     */
+    chaos: z
+      .object({
+        /** The `--chaos <seed>` the owner replayed. */
+        seed: z.number().int().min(0),
+        /** Upper bound of every applied delay, in whole milliseconds. */
+        maxDelayMs: z.number().int().min(0),
+        /** Whether a later response may be released before an earlier one. */
+        reorder: z.boolean(),
+        /** Per-response release decisions (method + pathname, k, delay). */
+        schedule: z.array(ChaosScheduleEntrySchema),
+      })
+      .strict()
+      .optional(),
     /** Run start instant (ISO-8601). */
     startedAt: z.string().datetime(),
     /** Run end instant (ISO-8601). */

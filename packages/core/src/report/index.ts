@@ -203,6 +203,30 @@ export interface DiagnosticContext {
   };
 }
 
+/** What a timing-chaos run did to the app's responses (E63). */
+export interface ChaosReport {
+  /** The `--chaos <seed>` the owner can replay. */
+  seed: number;
+  /** Upper bound of every applied delay, in whole milliseconds. */
+  maxDelayMs: number;
+  /** Whether a later response may be released before an earlier one. */
+  reorder: boolean;
+  /** Per-response release decisions (method + pathname, k, delay, reorder). */
+  schedule?: readonly ChaosScheduleEntryReport[];
+}
+
+/** One recorded chaos release decision (never a secret: no query value). */
+export interface ChaosScheduleEntryReport {
+  /** `METHOD /pathname` (query stripped). */
+  routeKey: string;
+  /** 1-based index of the request under its route key. */
+  k: number;
+  /** Milliseconds the response was actually held back. */
+  delayMs: number;
+  /** True when the plan released this response before the previous one. */
+  releasedBefore: boolean;
+}
+
 /** Engine installation identity shown in human and machine reports. */
 export interface EngineMetadata {
   /** Engine package version. */
@@ -255,6 +279,14 @@ export interface RenderRunOptions {
   classificationTraces?: Record<string, ClassificationDecisionTrace>;
   /** Lifecycle decisions derived from detector facts, visible in every report format. */
   lifecycleDerivation?: readonly LifecycleDerivationReportEntry[];
+  /**
+   * Timing chaos (E63): the seeded release plan this run executed
+   * under. Present only for `test-gates --chaos <seed>`, and never
+   * authority: a chaos run finds timing bugs, it never seals a
+   * receipt. Omitted entirely without the flag, so a normal run's
+   * report keeps exactly the keys it always had.
+   */
+  chaos?: ChaosReport;
   /**
    * Adoption-baseline forgiveness counts (phase 8 C), included in the
    * json summary and the text report when provided. Baselined debt is
@@ -485,6 +517,14 @@ function jsonReport(
   if (options.diagnosticContext !== undefined) report['diagnosticContext'] = options.diagnosticContext;
   if (options.engine !== undefined) report['engine'] = options.engine;
   if (options.outcome !== undefined) report['outcome'] = options.outcome;
+  if (options.chaos !== undefined) {
+    report['chaos'] = {
+      seed: options.chaos.seed,
+      maxDelayMs: options.chaos.maxDelayMs,
+      reorder: options.chaos.reorder,
+      ...(options.chaos.schedule !== undefined ? { schedule: options.chaos.schedule } : {}),
+    };
+  }
   if (options.selectors !== undefined) report['selectors'] = options.selectors;
   return report;
 }
@@ -631,6 +671,15 @@ function textReport(
   if (options.engine !== undefined) {
     lines.push(`engine: ${options.engine.version} from ${options.engine.source}`);
     if (options.engine.unpublished) lines.push('unpublished engine: CI will not have this code');
+  }
+  if (options.chaos !== undefined) {
+    // The one line that makes a red chaos run explainable and
+    // replayable: the seed IS the schedule, and the owner never has to
+    // guess which run produced the failure they are looking at.
+    lines.push(
+      `timing chaos: seed ${String(options.chaos.seed)} (max delay ${String(options.chaos.maxDelayMs)} ms, ` +
+        `reorder ${options.chaos.reorder ? 'on' : 'off'}) — replay with --chaos ${String(options.chaos.seed)}`,
+    );
   }
   const scope = options.scope;
   if (scope !== undefined && scope.expandedBecause.length > 0) {

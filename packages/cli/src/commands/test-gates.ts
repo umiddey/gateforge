@@ -132,7 +132,11 @@ import {
   TestDiscoveryError,
   VitestRunnerAdapter,
   RUN_HEADER,
+  VERIFIER_HEADER,
   DEFAULT_RUN_TIMEOUT_MS,
+  ENV_CHAOS_MAX_DELAY_MS,
+  ENV_CHAOS_REORDER,
+  ENV_CHAOS_SEED,
   ENV_PROXY_TARGET,
   type ExpectedSetResponse,
   type NativeInstance,
@@ -265,6 +269,10 @@ export const TEST_GATES_USAGE =
   '       testable declared mapping blocks (EVIDENCE_SCOPE_INCOMPLETE) — narrower selection is never guessed\n' +
   '       --result-only (requires --changed --scope changed, or --test): report selected results without gate\n' +
   '       authority or receipt changes; external witnesses require a separate --out directory and --run-token\n' +
+  '       --chaos <seed> (requires --result-only): make the witness proxy delay and reorder app responses\n' +
+  '       from a seeded schedule, so rare response-order races fail on purpose. The seed IS the schedule:\n' +
+  '       the same seed replays it exactly. Bounds come from run.chaos (maxDelayMs, reorder). A chaos run is a\n' +
+  '       finding tool: it never seals a receipt and never writes the run record\n' +
   '       --test <selector> (repeatable, requires --result-only): run only the named tests, witnessed. A\n' +
   '       selector is a logical key or a unique substring of one. A hand-picked test list never seals a\n' +
   '       receipt, so it is refused without --result-only. An unknown or ambiguous selector exits 2 with\n' +
@@ -290,7 +298,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
   }
   rejectUnknownFlags(
     options,
-    ['suite', 'out', 'format', 'witness-url', 'run-token', 'run-timeout-min', 'progress', 'changed', 'scope', 'result-only', 'test', 'help'],
+    ['suite', 'out', 'format', 'witness-url', 'run-token', 'run-timeout-min', 'progress', 'changed', 'scope', 'result-only', 'test', 'chaos', 'help'],
     TEST_GATES_USAGE,
   );
   const compatibilityError = installedPlaywrightCompatibilityError();
@@ -341,6 +349,13 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
       'test-gates: --test runs through the supervised runner adapter and cannot be combined with --suite',
     );
   }
+  // --chaos <seed>: the timing-chaos switch. Same authority contract as
+  // --test - a chaos run FINDS races, it never seals - and the seed is
+  // the whole configuration: one non-negative integer replays one
+  // schedule exactly.
+  const chaosSeed = stringFlag(options, 'chaos');
+  const chaos =
+    chaosSeed === undefined ? null : parseChaosSeed(chaosSeed, resultOnly, stringFlag(options, 'witness-url'));
   // A named run builds its plan from the FULL planned rows and then
   // narrows to the named keys, so it relaxes the diff-linked
   // `--changed --scope changed` requirement --result-only otherwise has.
@@ -398,6 +413,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
         scope,
         resultOnly,
         testSelectors,
+        chaos,
         verifierKeyring,
       });
     } finally {
@@ -833,6 +849,13 @@ export interface SupervisedOptions {
    * never seals.
    */
   testSelectors?: readonly string[];
+  /**
+   * The resolved timing-chaos plan (`--chaos <seed>` with the
+   * `run.chaos` bounds). Present only for an explicit chaos run, and
+   * only ever together with `resultOnly`: a chaos run reports, it
+   * never seals.
+   */
+  chaos?: { seed: number } | null;
   /** Trusted key ring resolved before candidate materialization, when provided. */
   verifierKeyring?: VerifierKeyring | null;
   /** Trusted staged-candidate changed paths supplied by the pre-commit orchestrator. */
@@ -847,6 +870,98 @@ export interface SupervisedOptions {
   runtimeReuseMounts?: readonly RuntimeReuseMount[];
   /** Recomputes the external reuse digest at the end of a staged run. */
   runtimeReuseCheck?: () => string | null;
+}
+
+/** One recorded chaos release decision, exactly as the witness reports it. */
+export interface ChaosScheduleResponse {
+  /** `METHOD /pathname` (query stripped) — never a secret. */
+  routeKey: string;
+  /** 1-based index of the request under its route key. */
+  k: number;
+  /** Milliseconds the response was actually held back. */
+  delayMs: number;
+  /** True when the plan released this response before the previous one. */
+  releasedBefore: boolean;
+}
+
+/** The timing-chaos plan one `--chaos <seed>` run executes under (E63). */
+export interface ChaosRun {
+  /** The seed the owner typed; the whole schedule is a function of it. */
+  seed: number;
+  /** Upper bound of every applied delay, in whole milliseconds. */
+  maxDelayMs: number;
+  /** Whether a later response may be released before an earlier one. */
+  reorder: boolean;
+}
+
+/** The documented default bound when `run.chaos.maxDelayMs` is unset. */
+const CHAOS_DEFAULT_MAX_DELAY_MS = 400;
+
+/** The hard ceiling on a configured bound (a chaos run is a finding tool). */
+const CHAOS_MAX_DELAY_CEILING_MS = 5_000;
+
+/**
+ * Validates `--chaos <seed>` against the same authority contract as
+ * `--test`: a chaos run reports, it never seals, and a seed that is not
+ * a non-negative integer is refused in seconds — before a witness, a
+ * browser or a suite is spawned.
+ *
+ * Args:
+ *   raw: the value the operator typed.
+ *   resultOnly: whether `--result-only` was given.
+ *   witnessUrl: the external witness origin, when one was wired.
+ *
+ * Returns:
+ *   { seed: number }: the accepted seed (the bounds are resolved later,
+ *   from the trusted config).
+ *
+ * @throws UsageError: without `--result-only`, on a seed that is not a
+ *   non-negative integer, or against an external witness (whose proxy
+ *   the run does not own, so the schedule could not be applied).
+ */
+function parseChaosSeed(raw: string, resultOnly: boolean, witnessUrl: string | undefined): { seed: number } {
+  if (!resultOnly) {
+    throw new UsageError(
+      'test-gates: --chaos requires --result-only — a run whose timing was perturbed on purpose finds races, ' +
+        'it never proves a commit; run the normal gate to issue a receipt',
+    );
+  }
+  if (!/^\d+$/.test(raw)) {
+    throw new UsageError(
+      `test-gates: --chaos takes a non-negative integer seed (0, 1, 2, ...), got '${raw}'`,
+    );
+  }
+  if (witnessUrl !== undefined) {
+    throw new UsageError(
+      'test-gates: --chaos needs the witness this run spawns: the release plan lives in the observation proxy, ' +
+        'and --witness-url points at one this run does not own',
+    );
+  }
+  return { seed: Number(raw) };
+}
+
+/**
+ * Resolves the tuned bounds of a chaos run from the trusted config. The
+ * config only TUNES: `run.chaos` present without `--chaos` leaves every
+ * byte of a normal run exactly as it was.
+ *
+ * Args:
+ *   config: the trusted configuration.
+ *   seed: the accepted `--chaos` seed.
+ *
+ * Returns:
+ *   ChaosRun: the plan the witness proxy will execute.
+ *
+ * @throws UsageError: when `run.chaos.maxDelayMs` exceeds the ceiling.
+ */
+function chaosRunOf(config: ReturnType<typeof loadConfigAt>, seed: number): ChaosRun {
+  const maxDelayMs = config.run?.chaos?.maxDelayMs ?? CHAOS_DEFAULT_MAX_DELAY_MS;
+  if (maxDelayMs > CHAOS_MAX_DELAY_CEILING_MS) {
+    throw new UsageError(
+      `test-gates: run.chaos.maxDelayMs must be at most ${String(CHAOS_MAX_DELAY_CEILING_MS)} (got ${String(maxDelayMs)})`,
+    );
+  }
+  return { seed, maxDelayMs, reorder: config.run?.chaos?.reorder ?? true };
 }
 
 /** One resolved `--test` selector and the planned logical keys it named. */
@@ -2021,6 +2136,14 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // RunnerAdapter contract behind the SAME witness session, run token,
   // supervision, receipts, and strictness machinery.
   const runnerName = config.runner;
+  // The timing-chaos plan for THIS run (E63). Null without the flag:
+  // then the witness is spawned with no plan and every byte of the run
+  // is exactly what it was before chaos existed.
+  const chaosRun: ChaosRun | null =
+    options.chaos === undefined || options.chaos === null ? null : chaosRunOf(config, options.chaos.seed);
+  // The schedule the witness actually used (filled in before it stops);
+  // null until then, and for every run without `--chaos`.
+  let chaosSchedule: ChaosScheduleResponse[] | null = null;
   if (runnerName === 'pytest') {
     const configured = (config.diagnostics?.suites ?? []).filter((suite) => suite.runner === 'pytest');
     if (configured.length > 1) {
@@ -3064,7 +3187,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         candidateTreeId: frozenTreeId,
         inputDigest: expectedDigest,
         evidenceState: snapshotUnavailable ? 'snapshot-unavailable' : 'not-executed',
+      // Nothing ran, so nothing was delayed: the seed is still named,
+      // with an empty schedule, rather than a run that quietly forgets
+      // it was asked to perturb timing.
+      ...(chaosRun === null ? {} : { chaos: { ...chaosRun, schedule: [] } }),
         authority: options.resultOnly ? 'non-authoritative' : 'authoritative',
+
         ...(cacheExclusions.length === 0
           ? {}
           : {
@@ -3173,6 +3301,19 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
             ? { [ENV_PROXY_TARGET]: appBase }
             : {}
           : {}),
+        // Timing chaos (E63): the seeded release plan, plus — for the
+        // Playwright path, whose sessions are engine-browser scoped and
+        // therefore proxy-free by default — the observation proxy the
+        // plan delays. Both are strictly opt-in: without `--chaos` this
+        // spawn is byte-identical to the one it always was.
+        ...(chaosRun === null
+          ? {}
+          : {
+              [ENV_CHAOS_SEED]: String(chaosRun.seed),
+              [ENV_CHAOS_MAX_DELAY_MS]: String(chaosRun.maxDelayMs),
+              [ENV_CHAOS_REORDER]: chaosRun.reorder ? 'on' : 'off',
+              ...(appBase !== '' ? { [ENV_PROXY_TARGET]: appBase } : {}),
+            }),
       });
     } catch (error) {
       throw new UsageError(`test-gates: the observer (witness service) could not start: ${(error as Error).message}`);
@@ -3579,6 +3720,30 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     if (runnerName !== 'playwright' && effectiveWitnessUrl !== undefined) {
       await writeWitnessLedgerDocument(io, stateDir, effectiveWitnessUrl, runToken);
     }
+    if (chaosRun !== null && effectiveWitnessUrl !== undefined && witnessVerifierKey !== undefined) {
+      // The replay record, read while the witness is still alive. A
+      // chaos run that cannot explain its own schedule is a finding
+      // nobody can reproduce, so a failed read says so out loud.
+      try {
+        const response = await fetch(`${effectiveWitnessUrl}/runs/chaos-schedule`, {
+          headers: { [RUN_HEADER]: runToken, [VERIFIER_HEADER]: witnessVerifierKey },
+        });
+        if (response.ok) {
+          const body = (await response.json()) as { chaos?: { schedule?: ChaosScheduleResponse[] } | null };
+          chaosSchedule = body.chaos?.schedule ?? null;
+        } else {
+          writeLine(
+            io.stderr,
+            `test-gates: the chaos schedule could not be read (HTTP ${String(response.status)}) — this run still reports, without a replay record`,
+          );
+        }
+      } catch (error) {
+        writeLine(
+          io.stderr,
+          `test-gates: the chaos schedule could not be read (${(error as Error).message}) — this run still reports, without a replay record`,
+        );
+      }
+    }
     if (spawnedWitness !== null) {
       // Graceful stop (the same contract as the consumer teardown): the
       // witness appends its attested manifest envelope at shutdown, so
@@ -3708,6 +3873,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     outcomesDoc,
     sessionTrace,
     enumerationDigest: registered.enumerationDigest,
+    // Timing chaos (E63): the seed, its bounds and the schedule the
+    // proxy used, so a red chaos run can be explained and replayed from
+    // the sealed result alone. Absent without `--chaos`.
+    ...(chaosRun === null
+      ? {}
+      : { chaos: { ...chaosRun, schedule: chaosSchedule ?? [] } }),
     startedAt: pipeline.now,
     finishedAt: pipeline.now,
   });
@@ -3994,6 +4165,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     diagnosticContext,
     ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
     ...(namedSelections !== null ? { selectors: namedSelections } : {}),
+    ...(chaosRun === null
+      ? {}
+      : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
   });
   /**
    * The persisted json document: the same report shape stdout shows for a
@@ -4016,6 +4190,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           diagnosticContext,
           ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
           ...(namedSelections !== null ? { selectors: namedSelections } : {}),
+          ...(chaosRun === null
+            ? {}
+            : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
         }),
       ) as Record<string, unknown>),
       ...(gateMode === 'strict'
