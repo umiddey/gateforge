@@ -563,6 +563,18 @@ describe('humanMessage', () => {
       }),
     ).toBe('Resource widgets need a classification. Run `gateforge tests suggest`. [TEST_MAPPING_MISSING]');
   });
+
+  it('a detail that ends in a period still prints one sentence end, not `..`', () => {
+    expect(
+      humanMessage({
+        cause: 'EVIDENCE_STALE',
+        detail: 'require-e2e: the sealed run is not this run. changed inputs: src/app.ts.',
+        nextAction: 'gateforge test-gates --changed',
+      }),
+    ).toBe(
+      'require-e2e: the sealed run is not this run. changed inputs: src/app.ts. Run `gateforge test-gates --changed`. [EVIDENCE_STALE]',
+    );
+  });
 });
 describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR 0005)', () => {
   const caused = entry(accounts, 'missing', {

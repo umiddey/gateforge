@@ -34,7 +34,9 @@ export const ENGINE_UPGRADE_REFUSAL_PREFIX =
  *   string: one deterministic sentence followed by a runnable command and `[CODE]`.
  */
 export function humanMessage(entry: HumanMessageEntry): string {
-  const sentence = (entry.reason ?? entry.detail ?? 'Gateforge found an unresolved item').trim();
+  // The sentence gets its own period below; a detail that already ends in
+  // one would print `.. Run`.
+  const sentence = (entry.reason ?? entry.detail ?? 'Gateforge found an unresolved item').trim().replace(/\.$/, '');
   const command =
     entry.nextAction?.startsWith('gateforge ')
       ? entry.nextAction

@@ -1728,24 +1728,16 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
                     io.env,
                   )
                 : '';
-            // The refusal names the ONE command that re-seals (a
-            // read-only `discover --json` dump changes nothing), so the
-            // full-scope variant stays advice in the sentence itself.
-            const revalidation = 'gateforge test-gates --changed --scope full --run-timeout-min 5';
             // The engine-upgrade refusal is already one complete sentence
             // naming the cause and the fix; the changed-input summary
-            // belongs to the digest line beside it.
+            // belongs to the digest line beside it. Both name the same one
+            // command that re-seals.
             receiptBlocking = receiptBlocking.map((entry) =>
               entry.detail.startsWith(ENGINE_UPGRADE_REFUSAL_PREFIX)
                 ? entry
                 : {
                     ...entry,
-                    // No trailing period: humanMessage supplies the
-                    // sentence's own, and a detail ending in one printed
-                    // `.. Run`.
-                    detail:
-                      `${entry.detail}${changedSummary}${treeDiff} ` +
-                      `Revalidate the full configured scope within five minutes with \`${revalidation}\``,
+                    detail: `${entry.detail}${changedSummary}${treeDiff}`,
                     nextAction: 'gateforge test-gates --changed',
                   },
             );
