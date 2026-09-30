@@ -58,7 +58,13 @@ import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { resolveStateDir } from '../state.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { describeApprovedPolicyResolution, resolveApprovedPolicyDigest } from '../trusted-policy.js';
-import { engineIdentity, type EngineIdentity } from '../engine-identity.js';
+import {
+  engineIdentity,
+  engineInstallProvenance,
+  enginePackageRoot,
+  engineSourceLine,
+  type EngineIdentity,
+} from '../engine-identity.js';
 
 export const ENFORCEMENT_USAGE = 'usage: gateforge enforcement doctor [--json]';
 
@@ -1001,7 +1007,7 @@ export async function enforcementCommand(io: Io, argv: readonly string[]): Promi
           : 'To reach level 1, run `gateforge init --blocking`.',
   );
   writeLine(io.stdout, `gateforge enforcement doctor (mode ${report.mode}, strictE2E ${String(report.strictE2E)})`);
-  writeLine(io.stdout, `engine: ${report.engine.version} from ${report.engine.source}`);
+  writeLine(io.stdout, engineSourceLine(report.engine, engineInstallProvenance(enginePackageRoot())));
   if (report.engine.unpublished) writeLine(io.stdout, 'unpublished engine: CI will not have this code');
   for (const check of report.checks) {
     writeLine(io.stdout, `  [${check.status.toUpperCase()}] ${check.id}: ${check.detail}`);
