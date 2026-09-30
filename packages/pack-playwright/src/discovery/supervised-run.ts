@@ -422,7 +422,15 @@ export function defaultPlaywrightCommand(cwd?: string): readonly string[] {
   // `playwright` pin. Fixture repos symlink the monorepo node_modules,
   // so the fallback resolves identically.
   if (cwd !== undefined) {
-    for (const candidate of localPlaywrightCliCandidates(cwd)) {
+    // Start from the consumer's CONFIG directory, not the repository root:
+    // the executable, the native enumeration and the evidence fixture must
+    // all resolve the runner from the same nearest install, or a non-root
+    // config that ships its own `node_modules` binds one runner while
+    // another executes. Walking up from the config directory still finds a
+    // root install when the config directory has none.
+    const consumerConfig = findPlaywrightConfig(cwd);
+    const startDir = consumerConfig === null ? cwd : dirname(resolve(cwd, consumerConfig));
+    for (const candidate of localPlaywrightCliCandidates(startDir)) {
       if (existsSync(candidate)) return [process.execPath, candidate];
     }
   }
