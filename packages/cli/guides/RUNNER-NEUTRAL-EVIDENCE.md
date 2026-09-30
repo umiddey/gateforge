@@ -109,10 +109,14 @@ runner: vitest   # playwright (the default) | pytest | vitest | cypress
   repository (Playwright plus something else, or several others) keeps the
   default and tells you to set the key yourself. An existing config is never
   rewritten.
-- `gateforge doctor` — reports runner readiness without launching anything:
-  for `vitest`/`cypress`, the runner's config file at the repository root and
-  an installed package; for `pytest`, a configured `diagnostics.suites` entry
-  and a `pytest` executable on `PATH`.
+- `gateforge enforcement doctor` — reports runner readiness without
+  launching anything: its `runner` check looks for the `vitest`/`cypress`
+  config file at the repository root and an installed package, for an
+  installed `playwright`, and for `pytest` a configured
+  `diagnostics.suites` entry plus a `pytest` executable on `PATH`. It is
+  diagnostic only: it exits 0 either way, and its `runner` line is the one
+  to read. (There is no `gateforge doctor` command — that name exits 2 with
+  `unknown command 'doctor'`.)
 - `gateforge test-gates --changed` — runs the mapped selection under the
   configured runner and seals the receipt.
 - `gateforge check --changed --require-e2e` — the gate; `receipt-verified`
