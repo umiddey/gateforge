@@ -52,8 +52,13 @@ export const DEFAULT_QUEUE_LIST_LIMIT = 200;
 /** Hard bound for one bounded list read (over it, fail closed). */
 export const MAX_QUEUE_LIST_LIMIT = 1000;
 
-/** Hard bound on the sealed transition samples of one delivery. */
-export const MAX_QUEUE_SAMPLES = 256;
+/**
+ * Hard bound on the sealed observations of one delivery. One sample per
+ * polling tick, so a default 200 ms sampling interval and a 30 s settle
+ * bound sit well inside it; a longer wait fails closed rather than
+ * truncating the timeline a stall claim reads.
+ */
+export const MAX_QUEUE_SAMPLES = 2048;
 
 /** One engine-read job observation (bounded fields only). */
 export const QueueJobObservationSchema = z
@@ -81,11 +86,11 @@ export const QueueJobObservationSchema = z
 export type QueueJobObservation = z.infer<typeof QueueJobObservationSchema>;
 
 /**
- * One transition sample: a distinct (state, attemptsMade, failedReason)
- * the observer saw for a job, with the engine's own elapsed time. Only
- * CHANGES are kept, so a long retry storm cannot grow the record, and
- * the bound fails closed rather than truncating a timeline a stall rule
- * reads.
+ * One sampled observation of a job with the engine's own elapsed time.
+ * Samples are NOT deduplicated: a queue that hands the same job out a
+ * second time (a lost-worker reclaim) is exactly the transition a
+ * "changed only" filter would hide. The record stays bounded by
+ * {@link MAX_QUEUE_SAMPLES}, over which the engine fails closed.
  */
 export const QueueJobSampleSchema = z
   .object({

@@ -1557,28 +1557,31 @@ function gradeAttemptsRule(
     }
   }
   if (rule['recoveredFromStall'] === true) {
+    // A lost-worker reclaim, as the engine's own timeline saw it: the
+    // same job was handed out AGAIN with UNCHANGED attempts and no
+    // failure reason recorded between the two hand-outs (an error retry
+    // raises attemptsMade and sets a reason before the re-queue). A
+    // reclaim back onto the wait list is accepted too, for a queue that
+    // parked the job before another worker took it.
     const reclaims = new Set<string>();
     const activeAt = new Map<string, number>();
     for (const sample of observation.samples) {
+      if (sample.failedReason !== null) continue;
       if (sample.state === 'active') {
-        activeAt.set(`${sample.jobId} ${String(sample.attemptsMade)}`, sample.atMs);
+        const key = `${sample.jobId}|${String(sample.attemptsMade)}`;
+        if (activeAt.has(key)) reclaims.add(sample.jobId);
+        else activeAt.set(key, sample.atMs);
         continue;
       }
       if (sample.state !== 'waiting' && sample.state !== 'delayed') continue;
-      if (sample.failedReason !== null) continue;
-      const key = `${sample.jobId} ${String(sample.attemptsMade)}`;
-      const startedAt = activeAt.get(key);
-      // Unchanged attempts + no failure reason: the job came BACK
-      // without having errored, i.e. the queue reclaimed it from a
-      // worker that stopped holding it (BullMQ's stalled path). An
-      // error retry raises attemptsMade before it re-queues.
+      const startedAt = activeAt.get(`${sample.jobId}|${String(sample.attemptsMade)}`);
       if (startedAt !== undefined && sample.atMs > startedAt) reclaims.add(sample.jobId);
     }
     const settled = observation.jobs.filter((job) => reclaims.has(job.jobId));
     if (settled.length === 0) {
       return fail(
-        `'${obligationId}': no job was observed being reclaimed from a lost worker (sampled active, then ` +
-        'non-terminal with unchanged attempts) — nothing proves the queue recovers a killed worker ' +
+        `'${obligationId}': no job was observed being reclaimed from a lost worker (handed out again with ` +
+        'unchanged attempts and no failure reason) — nothing proves the queue recovers a killed worker ' +
         '(BEHAVIOR_EFFECT_MISMATCH)',
       );
     }

@@ -190,7 +190,6 @@ export async function driveTaskDelivery(input: {
   const receipts = [...produced, ...(await Promise.all(pending))];
   const startedAt = Date.now();
   const samples: QueueJobSample[] = [];
-  const lastSeen = new Map<string, string>();
   const jobIds = receipts.map((receipt) => receipt.jobId);
   let settled = false;
   while (!settled && Date.now() - startedAt < terminalTimeoutMs) {
@@ -200,21 +199,22 @@ export async function driveTaskDelivery(input: {
       if (job === null) {
         throw new TaskDriverError(`produced job '${jobId}' vanished from queue '${queue}' before it settled`);
       }
-      const signature = `${job.state}|${String(job.attemptsMade)}|${job.failedReason ?? ''}`;
-      if (lastSeen.get(jobId) !== signature) {
-        samples.push({
-          jobId: job.jobId,
-          state: job.state,
-          attemptsMade: job.attemptsMade,
-          failedReason: job.failedReason,
-          atMs: Math.max(0, Date.now() - startedAt),
-        });
-        lastSeen.set(jobId, signature);
-        if (samples.length > MAX_QUEUE_SAMPLES) {
-          throw new TaskDriverError(
-            `the delivery produced more than ${String(MAX_QUEUE_SAMPLES)} state transitions — the observation is unbounded (fail closed)`,
-          );
-        }
+      // Every sample is sealed, not only changed ones: a queue that
+      // hands the SAME job out again (a lost-worker reclaim) is exactly
+      // the transition a "changed only" filter would hide. The record is
+      // bounded by MAX_QUEUE_SAMPLES, over which the engine fails
+      // closed rather than truncating a timeline.
+      samples.push({
+        jobId: job.jobId,
+        state: job.state,
+        attemptsMade: job.attemptsMade,
+        failedReason: job.failedReason,
+        atMs: Math.max(0, Date.now() - startedAt),
+      });
+      if (samples.length > MAX_QUEUE_SAMPLES) {
+        throw new TaskDriverError(
+          `the delivery produced more than ${String(MAX_QUEUE_SAMPLES)} observations — the timeline is unbounded (fail closed)`,
+        );
       }
       if (!TERMINAL_QUEUE_JOB_STATES.has(job.state)) settled = false;
     }

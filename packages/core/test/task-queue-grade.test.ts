@@ -398,12 +398,30 @@ describe('stall recovery claims', () => {
       sealedPayload({
         stateRule: STALL_RULE,
         jobs: [job({ attemptsMade: 1 })],
+        // The queue handed the same job out twice with no error between.
         samples: [
-          sample({ state: 'waiting', atMs: 10 }),
-          sample({ state: 'active', atMs: 200 }),
+          sample({ state: 'active', atMs: 10 }),
           sample({ state: 'waiting', atMs: 1400 }),
           sample({ state: 'active', atMs: 1500 }),
-          sample({ state: 'completed', atMs: 1600 }),
+          sample({ state: 'completed', atMs: 2100 }),
+        ],
+      }),
+    );
+    expect(outcome).toEqual({ status: 'satisfied', recordIds: ['rec-1'] });
+  });
+
+  it('satisfies a reclaim the engine only sampled as a hand-out twice', () => {
+    const outcome = grade(
+      STALL_RULE,
+      sealedPayload({
+        stateRule: STALL_RULE,
+        jobs: [job({ attemptsMade: 1 })],
+        // Sampling can miss the wait-list step: two `active` samples
+        // with unchanged attempts and no reason are the reclaim itself.
+        samples: [
+          sample({ state: 'active', atMs: 10 }),
+          sample({ state: 'active', atMs: 1600 }),
+          sample({ state: 'completed', atMs: 2200 }),
         ],
       }),
     );

@@ -11,6 +11,8 @@
  */
 import { randomUUID } from 'node:crypto';
 import { Queue, type Job } from 'bullmq';
+import type { RedisOptions } from 'ioredis';
+import { Redis } from 'ioredis';
 import {
   DEFAULT_QUEUE_LIST_LIMIT,
   MAX_QUEUE_FIELD_CHARS,
@@ -138,6 +140,7 @@ function observeJob(job: Job, state: QueueJobState): QueueJobObservation {
  *   QueueChannel: the opened observer + deliverer.
  */
 export function createBullmqChannel(config: QueueObserverConfig, connection: BullmqConnection): QueueChannel {
+  const clientsByName = new Map<string, Redis>();
   const queueByName = new Map<string, Queue>();
   const bindings = new Map<string, string>();
   for (const binding of config.queues) {
@@ -151,14 +154,27 @@ export function createBullmqChannel(config: QueueObserverConfig, connection: Bul
   const queueFor = (name: string): Queue => {
     const existing = queueByName.get(name);
     if (existing !== undefined) return existing;
-    const created = new Queue(name, { connection: connection as BullmqConnection });
+    // An explicit client instance: BullMQ's CJS dynamic require of
+    // ioredis does not resolve in this ESM package, and a constructed
+    // client is the documented ESM form.
+    // ioredis takes the URL as its first argument (a `{url}` option is
+    // ignored and silently falls back to localhost).
+    const client =
+      'url' in connection
+        ? new Redis(connection.url, { maxRetriesPerRequest: null })
+        : new Redis({ ...connection, maxRetriesPerRequest: null } as RedisOptions);
+    clientsByName.set(name, client);
+    const created = new Queue(name, { connection: client });
     queueByName.set(name, created);
     return created;
   };
   const close = async (): Promise<void> => {
     const handles = [...queueByName.values()];
+    const clients = [...clientsByName.values()];
     queueByName.clear();
+    clientsByName.clear();
     await Promise.all(handles.map((handle) => handle.close()));
+    await Promise.all(clients.map((client) => client.quit()));
   };
   const observer: QueueStateObserver = {
     kind: 'bullmq',
