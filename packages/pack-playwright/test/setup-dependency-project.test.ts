@@ -85,6 +85,56 @@ function writeSetupDependencyProject(cwd: string): void {
   );
 }
 
+/**
+ * Writes the same layout with a setup that PRODUCES an artifact after a
+ * delay and a dependent test that reads it — the standard auth pattern
+ * (a `setup` project writes `user.json`, the dependent project loads it
+ * as `storageState`). The artifact is the only witness of ordering: run
+ * without the dependency edge and the dependent test reads a file that
+ * does not exist yet.
+ *
+ * @param cwd: the consumer repo root.
+ */
+function writeDelayedSetupDependencyProject(cwd: string): void {
+  writeFileSync(
+    join(cwd, 'playwright.config.mjs'),
+    [
+      `export default {`,
+      `  testDir: './tests',`,
+      `  projects: [`,
+      `    { name: 'setup', testMatch: /.*\\.setup\\.ts/ },`,
+      `    { name: 'chromium', dependencies: ['setup'] },`,
+      `  ],`,
+      `};`,
+      '',
+    ].join('\n'),
+  );
+  mkdirSync(join(cwd, 'tests'), { recursive: true });
+  writeFileSync(
+    join(cwd, 'tests', 'auth.setup.ts'),
+    [
+      `import { writeFileSync } from 'node:fs';`,
+      `import { test as setup } from 'playwright/test';`,
+      `setup('authenticate', async () => {`,
+      `  await new Promise((resolve) => setTimeout(resolve, 800));`,
+      `  writeFileSync('user.json', '{}');`,
+      `});`,
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(cwd, 'tests', 'feature.spec.ts'),
+    [
+      `import { existsSync } from 'node:fs';`,
+      `import { expect, test } from 'playwright/test';`,
+      `test('feature works', async () => {`,
+      `  expect(existsSync('user.json')).toBe(true);`,
+      `});`,
+      '',
+    ].join('\n'),
+  );
+}
+
 describe('a setup dependency project keeps every executed test inside the expected set', () => {
   it('opens a session for every test the supervised run executes', async () => {
     const cwd = tempDir('run');
@@ -150,6 +200,77 @@ describe('a setup dependency project keeps every executed test inside the expect
       // ...and the run's executions cannot outrun the enumeration it planned.
       expect(executed).toBe(enumeration.instances.length);
       expect(envelope.complete).toBe(true);
+    } finally {
+      await witness.stop();
+    }
+  });
+
+  it('runs the setup project before the dependent project that reads its artifact', async () => {
+    const cwd = tempDir('ordered');
+    const stateDir = tempDir('ordered-state');
+    writeDelayedSetupDependencyProject(cwd);
+
+    const enumeration = await listNativePlaywrightTests({ cwd });
+    // The enumeration is the ONLY trusted source of the dependency edge:
+    // the runner's json reporter does not carry it, so the pack asks the
+    // runner for it through its own reporter.
+    expect(enumeration.projectDependencies).toEqual({ setup: [], chromium: ['setup'] });
+
+    const runId = 'ordered-run';
+    const witness = await startWitness({ runId, token: RUN_TOKEN, verifierKey: VERIFIER_KEY, host: LOOPBACK });
+    const supervisor = new SupervisorClient(witness.url, RUN_TOKEN, VERIFIER_KEY);
+    await supervisor.registerExpectedSet({
+      tests: enumeration.instances.map((instance) => ({
+        testId: instance.frameworkId,
+        project: instance.project.length > 0 ? instance.project : null,
+        file: instance.file,
+        titlePath: instance.titlePath,
+      })),
+    });
+    const drain = startSupervisorSpoolDrain({
+      stateDir,
+      runId,
+      witnessUrl: witness.url,
+      runToken: RUN_TOKEN,
+      verifierKey: VERIFIER_KEY,
+    });
+    try {
+      const names = [...new Set(enumeration.instances.map((instance) => instance.project))].sort();
+      const projectScopes: ProjectScope[] = names.map((name) => ({
+        name,
+        files: [
+          ...new Set(enumeration.instances.filter((i) => i.project === name).map((i) => i.file)),
+        ].sort(),
+        dependencies: [...(enumeration.projectDependencies[name] ?? [])].sort(),
+      }));
+      const envelope = await executeSupervisedPlaywright(
+        { logicalKeys: [] },
+        { stateDir, runId, vars: {} },
+        {
+          cwd,
+          timeoutMs: 120_000,
+          testFiles: enumeration.instances.map((instance) => instance.file),
+          projects: names,
+          projectScopes,
+        },
+      );
+      const { conflicts } = await drain.stop();
+      expect(conflicts).toEqual([]);
+      expect(envelope.complete).toBe(true);
+      // Both tests ran and PASSED — the dependent one read the artifact
+      // the setup test wrote, which is only true when it ran second.
+      expect(envelope.outcomes.map((outcome) => [outcome.project, outcome.status])).toEqual([
+        ['setup', 'passed'],
+        ['chromium', 'passed'],
+      ]);
+      // The lifecycle spool is the record of what really ran, in order.
+      const events = readFileSync(spoolPathFor(stateDir, runId), 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { kind: string; project: string | null });
+      expect(
+        events.filter((event) => event.kind === 'testBegin').map((event) => event.project),
+      ).toEqual(['setup', 'chromium']);
     } finally {
       await witness.stop();
     }

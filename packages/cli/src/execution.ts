@@ -411,14 +411,26 @@ export function planExpectedSet(catalog: TestCatalog): PlannedRow[] {
  * A project-less row contributes to no scope: its file stays in the global
  * selection so the row still executes.
  *
+ * `projectDependencies` (the graph the enumeration captured from the
+ * RUNNER's own resolved config) is carried through as ordering data: the
+ * synthesized config emits the edge so Playwright runs a `setup` project's
+ * tests before the dependent project. With no graph, or for a project that
+ * declares no edges, the emitted scopes are exactly what they were before —
+ * a single-project run stays byte-identical.
+ *
  * Args:
  *   rows: the planned expected set (fixed before the run).
+ *   projectDependencies: project name → the names it depends on, as the
+ *     enumeration captured them.
  *
  * Returns:
  *   ProjectScope[]: one entry per project that owns at least one file,
  *   sorted by project name.
  */
-export function plannedProjectScopes(rows: readonly PlannedRow[]): ProjectScope[] {
+export function plannedProjectScopes(
+  rows: readonly PlannedRow[],
+  projectDependencies?: Readonly<Record<string, readonly string[]>>,
+): ProjectScope[] {
   const filesByProject = new Map<string, Set<string>>();
   for (const row of rows) {
     const project = row.planned.project;
@@ -428,8 +440,92 @@ export function plannedProjectScopes(rows: readonly PlannedRow[]): ProjectScope[
     filesByProject.set(project, files);
   }
   return [...filesByProject.entries()]
-    .map(([name, files]) => ({ name, files: [...files].sort() }))
+    .map(([name, files]) => {
+      const dependencies = [...new Set(projectDependencies?.[name] ?? [])].sort();
+      return {
+        name,
+        files: [...files].sort(),
+        ...(dependencies.length > 0 ? { dependencies } : {}),
+      };
+    })
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+}
+
+/**
+ * Expands a narrowed plan with the tests of every project its selected
+ * projects depend on, transitively.
+ *
+ * A `--scope changed` or `--test` plan that selects only a DEPENDENT
+ * project's test would otherwise leave the dependency out entirely, and
+ * Playwright then runs that test without the setup step it needs (the auth
+ * artifact it reads was never produced). The runner also REJECTS a
+ * synthesized config whose `dependencies` names a project the config omits,
+ * so the plan must carry the dependency's rows before the edge can be
+ * emitted at all. This is the closure Playwright performs itself when
+ * running that project — the plan mirrors the run, so the registered
+ * expected set binds every identity the run will execute.
+ *
+ * A FULL run already contains every project's rows, so the closure adds
+ * nothing and the plan is unchanged; the same holds for a config with no
+ * dependencies.
+ *
+ * Rows already present are never duplicated, and the result is sorted by
+ * logical key — the plan's own order — so a narrowed run's row order stays
+ * as deterministic as a full run's.
+ *
+ * @param rows: the narrowed plan (what the run will execute).
+ * @param allRows: the full planned set the narrowing selected from.
+ * @param projectDependencies: project name → dependency names, as the
+ *   enumeration captured them from the runner's resolved config.
+ *
+ * @returns
+ *   PlannedRow[]: the narrowed rows plus every dependency project's rows.
+ */
+export function plannedRowsWithProjectDependencies(
+  rows: readonly PlannedRow[],
+  allRows: readonly PlannedRow[],
+  projectDependencies: Readonly<Record<string, readonly string[]>>,
+): PlannedRow[] {
+  // Seed the walk with the plan's OWN projects, but remember which
+  // projects were reached only THROUGH AN EDGE: those, and only those,
+  // contribute their whole row set. A project the selection already
+  // named contributes nothing new — a `--test` run that picked ONE test
+  // of a three-test file must not have its two file neighbours pulled
+  // back in "because they share a project".
+  const seeded = new Set<string>();
+  const reachedByEdge = new Set<string>();
+  const queue: string[] = [];
+  for (const row of rows) {
+    const project = row.planned.project;
+    if (project === null || project.length === 0 || seeded.has(project)) continue;
+    seeded.add(project);
+    queue.push(project);
+  }
+  while (queue.length > 0) {
+    const project = queue.shift() as string;
+    for (const dependency of projectDependencies[project] ?? []) {
+      if (seeded.has(dependency)) continue;
+      seeded.add(dependency);
+      reachedByEdge.add(dependency);
+      queue.push(dependency);
+    }
+  }
+  if (reachedByEdge.size === 0) return [...rows];
+  const selected = new Set(rows.map((row) => row.planned.logicalKey));
+  const added = allRows.filter(
+    (row) =>
+      row.planned.project !== null &&
+      reachedByEdge.has(row.planned.project) &&
+      !selected.has(row.planned.logicalKey),
+  );
+  if (added.length === 0) return [...rows];
+  return [...rows, ...added].sort((left, right) =>
+    left.planned.logicalKey < right.planned.logicalKey
+      ? -1
+      : left.planned.logicalKey > right.planned.logicalKey
+        ? 1
+        : 0,
+  );
 }
 
 /**

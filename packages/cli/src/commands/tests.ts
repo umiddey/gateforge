@@ -315,6 +315,15 @@ async function discoverSubcommand(
   for (const summary of catalog.runnerSummaries) {
     writeLine(io.stdout, `runner ${summary.runner}/${summary.name}: ${summary.status} — ${summary.detail}`);
   }
+  const edges = Object.entries(discovered.projectDependencies ?? {})
+    .filter(([, dependencies]) => dependencies.length > 0)
+    .map(([name, dependencies]) => `${name} → ${dependencies.join(', ')}`)
+    .sort();
+  if (edges.length > 0) {
+    // The runner's OWN resolved graph, not a reading of the consumer
+    // config: a supervised run orders its projects by exactly these edges.
+    writeLine(io.stdout, `project dependencies: ${edges.join('; ')}`);
+  }
   writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests discover');
   if (catalog.unresolved.length > 0) {
     writeLine(io.stdout, `unresolved (${String(catalog.unresolved.length)}):`);
