@@ -92,6 +92,16 @@ $ npm install
 $ npm run gate
 ```
 
+Once per machine, before the first run: the runner's browsers are a Playwright
+download, not an npm one, and an empty cache fails every test with
+`browserType.launch: Executable doesn't exist`. Install them once in this
+directory — `gateforge enforcement doctor` prints this exact command and this
+exact directory when they are missing:
+
+```sh
+$ npx playwright install chromium
+```
+
 `npm run gate` (`scripts/gate.mjs`) does what a supervised run needs around it:
 
 1. picks a free loopback port and starts the app on it (a supervised
