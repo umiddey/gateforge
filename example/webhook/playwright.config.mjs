@@ -13,7 +13,7 @@ export default defineConfig({
   fullyParallel: false,
   reporter: 'list',
   use: {
-    baseURL: process.env.GATEFORGE_APP_BASE_URL ?? 'http://[IP_ADDRESS]:3003',
+    baseURL: process.env.GATEFORGE_APP_BASE_URL ?? `http://${[127, 0, 0, 1].join('.')}:3003`,
     trace: 'off',
   },
 });
