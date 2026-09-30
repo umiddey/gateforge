@@ -145,11 +145,11 @@ The model is deliberately small:
   items)` is exactly the shape where a dropped field hides. A compound
   condition (`!res.ok || res.status >= 500`), a comparison this pass
   cannot read (`>= Math.min(400, limit)`) and a `statusText` test are
-  undecidable, so NEITHER arm is collected. A ternary on the envelope
-  keeps both arms unread as well: the arm that produced the value is a
-  runtime choice, not a proven success path. A read after an early-return
-  guard (`if (!res.ok) { throw … }` … then the code) is collected as
-  usual;
+  undecidable, so NEITHER arm is collected. A ternary is the same guard as
+  an `if` — `res.ok ? res.data.items : res.data?.detail` keeps the
+  success arm — and a ternary on anything else is not a guard at all: both
+  arms are ordinary success-path reads. A read after an early-return guard
+  (`if (!res.ok) { throw … }` … then the code) is collected as usual;
 - a read that is one operand of a `||` / `??` chain carries that chain's
   index, so the check judges the chain as the ONE decision it is:
   `res.data?.invoice_id || res.data?.invoice?.id` is silent when the

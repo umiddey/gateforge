@@ -423,11 +423,13 @@ interface ReadHolder {
  *   destructuring of a holder or of `<holder>.data`;
  * - computed access (`d[key]`), a reassigned (`let`) holder, and a read
  *   of a JavaScript member (`data.map`, `data.length`, …) yield nothing;
- * - a read inside a branch that opens on the call's OWN envelope
- *   (`if (!res.ok)`, `if (res.status >= 400)`, `res.ok ? … : …`) is not
- *   collected: which side of such a guard runs is not statically known,
- *   and the body a failure branch reads is the error envelope, not the
- *   success model. A read AFTER the guard is collected as usual;
+ * - a branch that opens on the call's OWN envelope (`if (res.ok)`,
+ *   `if (!res.ok)`, `if (res.status >= 400)`, `res.ok ? … : …`) is read
+ *   for its POLARITY, and only its FAILURE arm is not collected: the
+ *   body a failure branch reads is the error envelope, not the success
+ *   model. An undecidable condition (a compound test, a comparison this
+ *   pass cannot read) drops BOTH arms. A read AFTER the guard is
+ *   collected as usual;
  * - a read that is one operand of a `||` / `??` chain carries the chain's
  *   index, so the response-model check can judge the whole chain at once
  *   instead of flagging a defensive fallback.
@@ -595,11 +597,16 @@ function responseReadsOf(
         if (node.elseStatement !== undefined) guarded.add(node.elseStatement);
       }
     }
-    if (ts.isConditionalExpression(node) && guardPolarity(node.condition) !== null) {
-      // A ternary on the envelope keeps both arms unread: the arm that
-      // produced the value is a runtime choice, not a proven success path.
-      guarded.add(node.whenTrue);
-      guarded.add(node.whenFalse);
+    if (ts.isConditionalExpression(node)) {
+      // A ternary on the envelope is the same guard as an `if`: only its
+      // failure arm is the error envelope.
+      const polarity = guardPolarity(node.condition);
+      if (polarity === 'failure') guarded.add(node.whenTrue);
+      else if (polarity === 'success') guarded.add(node.whenFalse);
+      else if (polarity === 'unknown') {
+        guarded.add(node.whenTrue);
+        guarded.add(node.whenFalse);
+      }
     }
     ts.forEachChild(node, markGuards);
   };

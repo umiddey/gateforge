@@ -290,6 +290,43 @@ describe('bounded response field reads', () => {
     }
   });
 
+  it('reads a ternary on the envelope for the same polarity as an `if`', () => {
+    const positive = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `const shown = res.ok ? res.data.dueDate : res.data?.detail;`,
+    ].join('\n');
+    expect(readsOf('src/ternary-ok.ts', positive)).toEqual([{ field: 'dueDate', line: 2 }]);
+
+    const negative = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `const shown = !res.ok ? res.data?.detail : res.data.dueDate;`,
+    ].join('\n');
+    expect(readsOf('src/ternary-not-ok.ts', negative)).toEqual([{ field: 'dueDate', line: 2 }]);
+
+    const byStatus = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `const shown = res.status >= 400 ? res.data.detail : res.data.dueDate;`,
+    ].join('\n');
+    expect(readsOf('src/ternary-status.ts', byStatus)).toEqual([{ field: 'dueDate', line: 2 }]);
+
+    const undecidable = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `const shown = res.ok && ready ? res.data.dueDate : res.data?.detail;`,
+    ].join('\n');
+    expect(readsOf('src/ternary-unknown.ts', undecidable)).toEqual([]);
+
+    // A ternary on something else is not a guard at all: both arms are
+    // ordinary success-path reads.
+    const unrelated = [
+      `const res = await apiClient.get('/invoices/1');`,
+      `const shown = ready ? res.data.dueDate : res.data.paidAt;`,
+    ].join('\n');
+    expect(readsOf('src/ternary-other.ts', unrelated)).toEqual([
+      { field: 'dueDate', line: 2 },
+      { field: 'paidAt', line: 2 },
+    ]);
+  });
+
   it('marks the operands of a `||` / `??` fallback chain as one chain', () => {
     const source = [
       `const res = await apiClient.post('/invoices', payload);`,
