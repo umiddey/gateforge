@@ -621,13 +621,13 @@ function withDelegatedRoute(repo: Parameters<typeof installFixture>[0]): void {
   });
 }
 
-/** The first `[CODE]`-fenced block of a printed step list. */
+/** The first fenced block of a printed step list. */
 function firstCodeBlock(stdout: string): string {
   const lines = stdout.split('\n');
-  const start = lines.findIndex((line) => line.trim() === '[CODE]');
+  const start = lines.findIndex((line) => /^```[a-z]*$/.test(line.trim()));
   if (start < 0) return '';
   const rest = lines.slice(start + 1);
-  const end = rest.findIndex((line) => line.trim() === '[CODE]');
+  const end = rest.findIndex((line) => line.trim() === '```');
   return (end < 0 ? rest : rest.slice(0, end)).join('\n');
 }
 

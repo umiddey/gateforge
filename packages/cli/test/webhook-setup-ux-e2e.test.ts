@@ -38,19 +38,20 @@ function copyExample(repoRoot: string): void {
 }
 
 /**
- * The `[CODE]`-delimited blocks of a printed step list, in print order.
+ * The fenced blocks of a printed step list, in print order.
  *
  * @param stdout the command's stdout
- * @returns string[] each block between a `[CODE]` marker
+ * @returns string[] each block between a ``` fence
  */
 function codeBlocks(stdout: string): string[] {
   const blocks: string[] = [];
   const lines = stdout.split('\n');
   for (let index = 0; index < lines.length; index += 1) {
-    if ((lines[index] as string).trim() !== '[CODE]') continue;
+    const opening = (lines[index] as string).trim();
+    if (!/^```[a-z]*$/.test(opening)) continue;
     const body: string[] = [];
     index += 1;
-    while (index < lines.length && (lines[index] as string).trim() !== '[CODE]') {
+    while (index < lines.length && (lines[index] as string).trim() !== '```') {
       body.push(lines[index] as string);
       index += 1;
     }
