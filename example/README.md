@@ -14,6 +14,32 @@ and a read-only JSON API (trusted-adapter surface).
 
 ## Gateforge first run
 
+Install the CLI and the packs first — this app needs the CLI, the HTTP
+detector pack (its config loads it) and the Playwright pack (the witnessed
+run in `behavior/` is driven through it). Keep every direct
+`@gate-forge/*` package on the SAME release; a mixed set exits 2 with
+`GATEFORGE_PACKAGE_INCOMPATIBLE`.
+
+```sh
+npm i -D \
+  @gate-forge/cli@0.7.1 \
+  @gate-forge/pack-playwright@0.7.1 \
+  @gate-forge/pack-http@0.7.1
+```
+
+**If your release is not on the registry yet** (a pre-publish set of
+tarballs), install every tarball of that release in ONE command — npm
+resolves the packages' own dependencies from the files themselves, so the
+CLI, the shared packages and every pack end up on one consistent version:
+
+```sh
+npm i -D ./gate-forge-*.tgz
+```
+
+Then put the project-local binary on your `PATH` (`export
+PATH="$PWD/node_modules/.bin:$PATH"`) or prefix the commands below with
+`npx `.
+
 Run these commands from `example/`. The checked-in `.gateforge/planes.json` and `.gateforge/endpoints.json` make the sample's route classification and endpoint behavior explicit; the verification script is excluded from product-source scanning.
 
 ```sh
