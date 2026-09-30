@@ -26,6 +26,7 @@
 ### Fixed
 
 - `--scope changed` in a merge-request CI pipeline with no base commit no longer falls back to the local staged diff (zero changed files, and a failure an hour later on debt nobody changed). `test-gates --scope changed` and `check --changed` refuse in seconds with exit 2 and the fix; an explicitly configured provider, a pipeline that is not a merge request, a present base commit, and every local run are unchanged.
+- A run killed at the wrong moment (a CI container exiting while the witness shuts down) no longer leaves an empty `manifest.json`. The witness and the CLI write every run-state document to a temporary file and replace the old one by rename, so a later `check` sees the previous document or the new one, never a truncated file that fails closed with `no evidence attestation envelope found`.
 
 ### Fixed
 

@@ -131,7 +131,7 @@
  */
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   ATTESTATION_VERSION,
@@ -5269,7 +5269,12 @@ function appendRecordIdsToManifest(state: WitnessState): void {
       }),
     };
   }
-  writeFileSync(manifestPath, `${canonicalOf(updated)}\n`, 'utf8');
+  // Temporary file + rename: this runs at shutdown, where a container
+  // exit can kill the process mid-write; an in-place write would leave a
+  // truncated manifest and every later grade would fail closed on it.
+  const temporary = `${manifestPath}.tmp-${String(process.pid)}`;
+  writeFileSync(temporary, `${canonicalOf(updated)}\n`, 'utf8');
+  renameSync(temporary, manifestPath);
 }
 
 export type { WitnessHandle } from './types.js';

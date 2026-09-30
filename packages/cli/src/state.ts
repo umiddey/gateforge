@@ -28,7 +28,7 @@
  * state file that exists but is not valid JSON is a usage error (exit 2),
  * never a silent skip.
  */
-import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -173,10 +173,21 @@ export function readJsonArray(stateDir: string, name: string): unknown[] {
   return document;
 }
 
-/** Writes one JSON document into the state dir (creating it). */
+/**
+ * Writes one JSON document into the state dir (creating it).
+ *
+ * The state dir is shared with the witness and later `check` runs, and a
+ * run's processes can be killed at any point (a container exiting ends
+ * everything in it). The document goes to a temporary file first and
+ * replaces the old one by rename, so a kill leaves the previous document
+ * or the new one, never a truncated file.
+ */
 function writeStateFile(stateDir: string, name: string, value: JsonValue): void {
   mkdirSync(stateDir, { recursive: true });
-  writeFileSync(join(stateDir, name), `${canonicalJson(value)}\n`, 'utf8');
+  const target = join(stateDir, name);
+  const temporary = `${target}.tmp-${String(process.pid)}`;
+  writeFileSync(temporary, `${canonicalJson(value)}\n`, 'utf8');
+  renameSync(temporary, target);
 }
 
 /** Persists the validated run manifest. */
