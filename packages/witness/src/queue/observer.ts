@@ -25,6 +25,7 @@
  * `queueObserver` block). With no configuration there is no channel and
  */
 import { pathToFileURL } from 'node:url';
+import type * as BullmqChannel from './bullmq.js';
 import {
   DEFAULT_QUEUE_LIST_LIMIT,
   DEFAULT_QUEUE_POLL_INTERVAL_MS,
@@ -49,7 +50,8 @@ export interface QueueJobList {
   /** Engine-side count of jobs read. */
   count: number;
 }
-import { createBullmqChannel } from './bullmq.js';
+
+type BullmqChannelModule = typeof BullmqChannel;
 
 /** Blocking queue-channel failure (always a diagnostic, never proof). */
 export class QueueObserverError extends Error {
@@ -171,6 +173,37 @@ export function resolveQueueConnection(
 export type QueueChannelFactory = (config: QueueObserverConfig) => Promise<QueueChannel> | QueueChannel;
 
 /**
+ * Loads the built-in BullMQ channel on first use. `bullmq` and `ioredis`
+ * are optional peers: a repository that declares no BullMQ observer
+ * never installs or loads them, so the witness itself never needs them.
+ *
+ * Returns:
+ *   Promise<BullmqChannelModule>: the channel module.
+ *
+ * @throws QueueObserverError when the packages are not installed in the
+ *   project (fail closed, naming the install command).
+ */
+async function loadBullmqChannelModule(): Promise<BullmqChannelModule> {
+  try {
+    // Dynamic on purpose: `bullmq`/`ioredis` are optional peers that a
+    // project without a BullMQ observer never installs; a static import
+    // would make loading the witness itself require them.
+    return await import('./bullmq.js');
+  } catch (error) {
+    const missing =
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'ERR_MODULE_NOT_FOUND' &&
+      /'(bullmq|ioredis)'/.test(error.message);
+    if (!missing) throw error;
+    throw new QueueObserverError(
+      "queueObserver kind 'bullmq' needs the 'bullmq' and 'ioredis' packages in this project — " +
+        'install them next to the app (npm install --save-dev bullmq ioredis) (fail closed)',
+    );
+  }
+}
+
+/**
  * Opens the configured queue channel. Built-in `bullmq` first; any
  * other value is a module path whose default export is a factory.
  *
@@ -189,6 +222,7 @@ export async function openQueueChannel(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<QueueChannel> {
   if (config.kind === 'bullmq') {
+    const { createBullmqChannel } = await loadBullmqChannelModule();
     return createBullmqChannel(config, resolveQueueConnection(config, env));
   }
   // The module path is operator-supplied at run time, so no static

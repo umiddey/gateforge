@@ -62,20 +62,28 @@
   },
   "dependencies": {
     "@gate-forge/core": "^0.7.1",
-    "bullmq": "^6.3.10",
-    "ioredis": "^6.0.0",
     "yaml": "^2.8.1"
   },
   "peerDependencies": {
-    "playwright": ">=1.40.0"
+    "playwright": ">=1.40.0",
+    "bullmq": "^6.3.10",
+    "ioredis": "^6.0.0"
   },
   "peerDependenciesMeta": {
     "playwright": {
       "optional": true
+    },
+    "bullmq": {
+      "optional": true
+    },
+    "ioredis": {
+      "optional": true
     }
   },
   "devDependencies": {
-    "playwright": "1.58.2"
+    "playwright": "1.58.2",
+    "bullmq": "^6.3.10",
+    "ioredis": "^6.0.0"
   },
   "publishConfig": {
     "access": "public"

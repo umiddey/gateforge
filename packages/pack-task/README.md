@@ -27,6 +27,11 @@ queueObserver:
 - Connection material never carries a secret inline — the URL form names
   an environment variable the WITNESS process resolves privately; the
   value is never sealed into a record, a report or argv.
+- `kind: bullmq` reads the queue with the project's own `bullmq` and
+  `ioredis` (optional peers of `@gate-forge/witness`: install them next
+  to the app, `npm install --save-dev bullmq ioredis`). A project that
+  declares no BullMQ observer never installs or loads them; one that
+  declares it without them fails closed with that install command.
 - WITHOUT the block the `task` namespace is **unavailable** (every
   `task:*` contract fails closed, cause `VERIFIER_UNSUPPORTED`) and every
   `engine-task` case blocks with a naming diagnostic. `gateforge init`
