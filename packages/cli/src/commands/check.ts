@@ -226,7 +226,7 @@ import { renderEndpointInventory } from '../endpoint-report.js';
 import { computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
 import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
 import { CACHE_EXCLUSIONS_GUARANTEE, loadCacheExclusions } from '../cache-exclusions.js';
-import { engineIdentity } from '../engine-identity.js';
+import { engineIdentity, reportEngineLine } from '../engine-identity.js';
 
 /**
  * Compares sealed candidate entries with the current tree and explains the files behind a mismatch.
@@ -1806,6 +1806,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     run: pipeline.manifest,
     toolVersion: VERSION,
     engine: engineIdentity(),
+    engineLine: reportEngineLine(),
     lifecycleDerivation: pipeline.lifecycleDerivation,
     scope: reportScope,
     diagnosticContext: {

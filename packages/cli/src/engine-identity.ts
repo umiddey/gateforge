@@ -205,3 +205,19 @@ export function engineIdentity(): EngineIdentity {
     ? { version: VERSION, source: 'registry', unpublished: false }
     : { version: VERSION, source: `local path ${packageRoot}`, unpublished: true };
 }
+
+/**
+ * The engine line a human-readable REPORT prints: the same provenance
+ * the enforcement doctor's engine line uses, so one install never
+ * produces two contradictory claims. The receipt-bound
+ * `engine.source` keeps its exact meaning and is untouched.
+ *
+ * Args:
+ *   none.
+ *
+ * Returns:
+ *   string: the printed line.
+ */
+export function reportEngineLine(): string {
+  return engineSourceLine(engineIdentity(), engineInstallProvenance(enginePackageRoot()));
+}
