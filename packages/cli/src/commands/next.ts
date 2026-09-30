@@ -25,6 +25,7 @@ import {
   type ObligationVerdict,
   type ResourceGraph,
 } from '@gate-forge/core';
+import { ENDPOINT_SEMANTICS_UNRESOLVED } from '@gate-forge/http-contract';
 import { PLANES_CONFIG_PATH } from '@gate-forge/pack-sqlalchemy';
 import {
   discoverTestCatalog,
@@ -71,6 +72,7 @@ import {
   type BehaviorEffectFacts,
   type BehaviorEndpointFacts,
 } from '../behavior-setup.js';
+import { ENDPOINT_CAPABILITIES, ENDPOINTS_CONFIG_PATH } from '../endpoint-config.js';
 
 export const NEXT_USAGE = 'usage: gateforge next [--changed] [--json]';
 
@@ -281,6 +283,76 @@ function unresolvedRouteGuidance(
     `      resourceName: ${JSON.stringify(resourceName)}`,
     '    reason: "<owner-written reason and evidence for treating this route as internal>"',
     'An internal rule is certificate-checked; it is not an override.',
+  ];
+}
+
+/**
+ * Builds the owner-authored capability declaration for an endpoint whose
+ * semantics no detector could prove, so the block that otherwise ends in
+ * a read-only `discover --json` dump becomes answerable from the output
+ * alone.
+ *
+ * The printed document IS the schema the compiler reads (see
+ * `endpoint-config.ts`): one rule, scoped to THIS endpoint by its exact
+ * method and canonical path, with the two owner-chosen fields marked and
+ * their allowed values named. Nothing else is invented — the selectors
+ * and the rule shape are the product's own, so a declaration copied out
+ * of this block parses and applies.
+ *
+ * Args:
+ *   detail: the blocking entry's detail (the compiler's own sentence).
+ *   graph: the run's resource graph (the endpoint identity comes from it).
+ *
+ * Returns:
+ *   string[]: the explanation, the exact entry, and the verify command;
+ *   an empty array when the detail is not an unresolved endpoint or the
+ *   graph carries no matching identity.
+ */
+function endpointSemanticsGuidance(detail: string, graph: ResourceGraph): string[] {
+  if (!detail.startsWith(`${ENDPOINT_SEMANTICS_UNRESOLVED}:`)) return [];
+  const route = graph.resources.find((resource) => {
+    if (resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) return false;
+    const identity = resource.attributes['identity'];
+    return typeof identity === 'string' && detail.includes(`endpoint '${identity}'`);
+  });
+  if (route === undefined) return [];
+  const method = route.attributes['method'];
+  const canonicalPath = route.attributes['canonicalPath'];
+  if (typeof method !== 'string' || typeof canonicalPath !== 'string') return [];
+  // A DELETE is asked one question (archive or really delete); every
+  // other verb is asked what the endpoint DOES at all.
+  const choices =
+    method === 'DELETE'
+      ? [
+          "'crud-archive' (the record survives — the handler only sets an archived/deactivated state)",
+          "'crud-delete' (the record is really removed)",
+        ]
+      : [`one of: ${ENDPOINT_CAPABILITIES.join(', ')}`];
+  return [
+    `about this block: ${method} ${canonicalPath} is discovered, but nothing Gateforge can read in the code says what it DOES —`,
+    'its logic sits behind a service call, and a method alone never decides semantics. Only the owner can',
+    `answer, and the answer is one rule in the owner-reviewed '${ENDPOINTS_CONFIG_PATH}'. Add it to that file`,
+    '(create the file with exactly these contents if it does not exist yet; append the rule to "rules" if it does):',
+    '[CODE]',
+    '{',
+    '  "rules": [',
+    '    {',
+    `      "method": ${JSON.stringify(method)},`,
+    `      "paths": [${JSON.stringify(canonicalPath)}],`,
+    '      "capability": "<owner choice>",',
+    '      "reason": "<owner-written reason and evidence: what this handler really does>"',
+    '    }',
+    '  ]',
+    '}',
+    '[CODE]',
+    `Then replace <owner choice> with the capability the handler really has — ${choices.join(', or ')} —`,
+    'and write the reason as the evidence you read (the code, service contract or table that proves it).',
+    ...(route.id === null
+      ? []
+      : [
+          'Then prove the declaration applied — the capabilities line names the capability and the trace says endpoints.json:',
+          `gateforge explain ${shellQuote(route.id)}`,
+        ]),
   ];
 }
 
@@ -755,6 +827,11 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     unresolvedRoute === undefined || routeName === undefined
       ? null
       : unresolvedRouteGuidance(routeName, unresolvedRoute.name, unresolvedRoute.source, io.cwd);
+  // An endpoint whose semantics no detector could prove is answered by
+  // the owner-authored capability rule, so the top item carries the exact
+  // entry instead of the read-only dump the fallback `do:` names.
+  const endpointGuidance =
+    routeGuidance === null ? endpointSemanticsGuidance(first.why, pipeline.graph) : [];
   const guide = ENVIRONMENT_GUIDES[first.cause as CauseCode] ?? null;
   const scopeNote = observationScopeNote(
     first,
@@ -803,6 +880,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         ...(scopeNote.length === 0 ? {} : { scopeNote }),
         ...(singletonNote.length === 0 ? {} : { singletonGuidance: singletonNote }),
         ...(taskOffer.length === 0 ? {} : { taskPackOffer: taskOffer }),
+        ...(endpointGuidance.length === 0 ? {} : { endpointSemanticsGuidance: endpointGuidance }),
       }),
     );
   } else {
@@ -810,11 +888,17 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     writeLine(io.stdout, `cause: ${first.cause}`);
     writeLine(io.stdout, `why: ${first.why}`);
     if (guide !== null) writeLine(io.stdout, `guide: ${guide}`);
-    if (routeGuidance === null) {
-      writeLine(io.stdout, `do: ${first.do}`);
-    } else {
+    if (routeGuidance !== null) {
       writeLine(io.stdout, 'do: confirm the route owner and run only the matching plane command below');
       for (const line of routeGuidance) writeLine(io.stdout, line);
+    } else if (endpointGuidance.length > 0) {
+      writeLine(
+        io.stdout,
+        `do: declare what this endpoint does in '${ENDPOINTS_CONFIG_PATH}' — the exact entry to add is below`,
+      );
+      for (const line of endpointGuidance) writeLine(io.stdout, line);
+    } else {
+      writeLine(io.stdout, `do: ${first.do}`);
     }
     for (const line of behaviorGuidance) writeLine(io.stdout, line);
     for (const line of scopeNote) writeLine(io.stdout, line);

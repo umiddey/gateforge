@@ -858,6 +858,42 @@ The vocabulary is the compiler's own: `health-operations`,
 having the channel; a malformed document fails the run closed at startup
 (exit 2).
 
+### Answering `ENDPOINT_SEMANTICS_UNRESOLVED`
+
+When `gateforge next` prints that code, the run has found an endpoint and
+cannot tell what it DOES; the remedy is an owner-authored rule, not
+another read-only command. The printed block carries the whole answer for
+THAT endpoint: its own method and canonical path as the selectors, the two
+owner-chosen fields (`capability`, `reason`) marked in the snippet, and the
+allowed values. Answer it by replacing the two marked fields and writing
+the file (append the rule to `rules` when the file already exists), then
+prove it applied with the printed `gateforge explain <endpoint-id>` — its
+`capabilities:` line names the capability and its trace says
+`endpoints.json`.
+
+The shortest useful file — one exact endpoint, no glob at all — is:
+
+```json
+{
+  "rules": [
+    {
+      "method": "DELETE",
+      "paths": ["/items/{item_id}"],
+      "capability": "crud-archive",
+      "reason": "The handler sets archived_at; the row is never removed."
+    }
+  ]
+}
+```
+
+`paths` patterns are globs on the canonical path (`*` within a segment,
+`**` across segments, `?` one character); a path with no wildcard is an
+exact selector, which is what you want for one route. On a `DELETE`, the
+capability is the archive-vs-hard answer (`crud-archive` /
+`crud-delete`) and nothing else resolves that block; on any other verb it
+is the closed vocabulary above. A rule left with a placeholder capability
+fails the run closed at startup (exit 2) with the allowed values named.
+
 ## Proposing planes at init (`gateforge init --planes`)
 
 `gateforge init --planes` runs discovery over the repo's own include and
