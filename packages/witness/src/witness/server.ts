@@ -67,6 +67,16 @@
  * - `POST /sessions/resolve` — the worker-side fixture proves WHICH open
  *   session it runs under by the exact (workerIndex, testId) pair; only
  *   an open session answers, with the session credential.
+ * - `POST /sessions/identity` — SESSION-AUTHENTICATED: the running
+ *   test registers the login of the tenant it just created, for ITSELF
+ *   and only while its own session is OPEN (`{sessionId, sessionToken,
+ *   seat, values}`). The identity lives in witness memory, is keyed by
+ *   that session id, is dropped when the session closes or is released,
+ *   and never reaches a record, the run state, a log or a report. It
+ *   changes only WHO the engine reads as — the engine still performs
+ *   every read, and a wrong tenant makes the row unfound (fail closed).
+ *   Without a registration the adapter reads through the process-global
+ *   witness environment seat, exactly as before.
  * - `POST /sessions/intervals/{open,close}` — the fixture marks a
  *   witness-recorded observation interval per UI action (start/end ticks
  *   from the witness's monotonic clock). Proxy exchanges observed
@@ -224,6 +234,7 @@ import type {
   ServerPersistenceResponse,
   ServerPreObservationResponse,
   SessionCloseRequest,
+  SessionIdentity,
   SessionOpenRequest,
   SessionReleaseRequest,
   SessionResolveRequest,
@@ -478,6 +489,14 @@ interface WitnessState {
   sessions: Map<string, TestSession>;
   /** workerIndex → the OPEN session on that worker (one at a time). */
   workerSessions: Map<number, string>;
+  /**
+   * Per-session adapter identities (plan Phase 4b item 3b), keyed by
+   * sessionId. Witness MEMORY only: the credential a test registered for
+   * itself, dropped with its session (close, release, shutdown), never
+   * serialized into a record, the run state or a report, and never
+   * consulted for a read that belongs to another session.
+   */
+  sessionIdentities: Map<string, SessionIdentity>;
   /**
    * Trusted run context bound via `POST /run-context` (plan §11.4): the
    * frozen `{runId, invocationId, inputDigest}` the witness attests.
@@ -960,6 +979,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     tick: 0,
     sessions: new Map(),
     workerSessions: new Map(),
+    sessionIdentities: new Map(),
     // The engine browser is OPTIONAL here and required only by the
     // ENGINE-BROWSER proof channel: this package is runner-neutral and
     // must not assume a browser is installed. A witness started without
@@ -1760,6 +1780,10 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/sessions/resolve') {
       await handleSessionResolve(state, res, (await readBody(req)) as SessionResolveRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/identity') {
+      await handleSessionIdentity(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
     if (req.method === 'POST' && path === '/sessions/intervals/open') {
@@ -3091,6 +3115,7 @@ async function handleSessionClose(
     // finally recorded, so an unreleased session's before-state can
     // never be consumed by a later call.
     state.observeSnapshots.delete(sessionId);
+    state.sessionIdentities.delete(sessionId);
     sendJson(res, 200, { sealed: true as const });
     return;
   }
@@ -3105,6 +3130,9 @@ async function handleSessionClose(
     // here belongs to a test that never finalized — unsealed evidence
     // must not linger for a later call to consume.
     state.observeSnapshots.delete(sessionId);
+    // The registered identity dies with the session: a later read has no
+    // credential of this session's to inherit, ever.
+    state.sessionIdentities.delete(session.sessionId);
     // The dedicated channel dies with the session: nothing can observe
     // (or submit) through it afterwards. The engine browser context dies
     // too — a sealed session's pages are never driven again.
@@ -3112,6 +3140,83 @@ async function handleSessionClose(
     await state.engineBrowser?.closeSession(session.sessionId);
   }
   sendJson(res, 200, { sealed: true as const });
+}
+
+/**
+ * `POST /sessions/identity` — SESSION-AUTHENTICATED (plan Phase 4b item
+ * 3b): the running test registers the login of the tenant it just
+ * created, for ITS OWN open session.
+ *
+ * The authority here is one sentence long: a registration changes WHO the
+ * engine reads as, for one session. The engine still performs every
+ * read, a wrong tenant makes the row unfound (the app answers 403/404 and
+ * the entity grades absent — fail closed, never an open verdict), and the
+ * identity cannot touch another session or a record it did not cause.
+ *
+ * Refusals are the load-bearing part:
+ * - no session credential, or one this witness never issued → 400/403
+ *   (the same posture as every other session-authenticated call);
+ * - a sealed or released session → 409 (no identity can outlive its
+ *   session, so none can be registered after the end);
+ * - a malformed seat or values bag → 400, so a half credential is never
+ *   stored and silently completed from the process-global seat later.
+ *
+ * The credential stays in witness memory: the response echoes the seat
+ * NAME only, and nothing here writes to a record, the run state, a log or
+ * a report.
+ */
+async function handleSessionIdentity(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session identity body must be an object');
+  }
+  // Authenticated as the session it names: a caller can only ever
+  // register an identity for the session whose secret it presents.
+  const session = requireOpenSession(state, body);
+  const seat = body['seat'];
+  if (typeof seat !== 'string' || seat.length === 0) {
+    throw new HttpError(400, "session identity requires a seat (the adapter seat it authenticates)");
+  }
+  const values = body['values'];
+  if (!isPlainObject(values) || Object.keys(values).length === 0) {
+    throw new HttpError(
+      400,
+      'session identity requires values: the seat\'s credential variables keyed by the same ' +
+        'witness env var names the adapter seat declares',
+    );
+  }
+  const credential: Record<string, string> = {};
+  for (const [name, value] of Object.entries(values)) {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new HttpError(
+        400,
+        `session identity value for '${name}' must be a non-empty string ` +
+          '(credential VALUES stay in witness memory; the adapter seat still names them)',
+      );
+    }
+    credential[name] = value;
+  }
+  state.sessionIdentities.set(session.sessionId, { seat, values: Object.freeze(credential) });
+  sendJson(res, 200, { registered: true as const, seat });
+}
+
+/**
+ * The adapter identity one session registered for itself, or null (the
+ * process-global environment seat). Only the session's OWN reads may
+ * resolve it.
+ *
+ * Args:
+ *   state: the running witness state.
+ *   session: the session the read runs under.
+ *
+ * Returns:
+ *   SessionIdentity | null: the registered identity, or null.
+ */
+function sessionIdentityOf(state: WitnessState, session: TestSession): SessionIdentity | null {
+  return state.sessionIdentities.get(session.sessionId) ?? null;
 }
 
 /**
@@ -3592,9 +3697,15 @@ async function handlePersistence(
   const adapterHeaders = state.options.adapterReadAuthorization
     ? { authorization: state.options.adapterReadAuthorization }
     : undefined;
-  const ctx = makeAdapterContext(baseUrl, resourceId, (path: string) =>
-    adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+  const ctx = makeAdapterContext(
+    baseUrl,
+    resourceId,
+    (path: string) =>
+      adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
     adapterHeaders,
+    // This read belongs to THIS session: it may use the identity THAT
+    // session registered for itself, and no other.
+    { sessionId: session.sessionId, sessionIdentity: sessionIdentityOf(state, session) },
   );
   let bodyRaw: unknown;
   try {
@@ -3761,9 +3872,13 @@ async function takePreObservation(
   const adapterHeaders = state.options.adapterReadAuthorization
     ? { authorization: state.options.adapterReadAuthorization }
     : undefined;
-  const ctx = makeAdapterContext(baseUrl, resourceId, (path: string) =>
-    adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+  const ctx = makeAdapterContext(
+    baseUrl,
+    resourceId,
+    (path: string) =>
+      adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
     adapterHeaders,
+    { sessionId: session.sessionId, sessionIdentity: sessionIdentityOf(state, session) },
   );
   const observationId = randomUUID();
 

@@ -23,10 +23,21 @@ import {
   type KitProbeResult,
   type SessionStore,
 } from './session.js';
-import type { AdapterContext, EvidenceAdapter } from '../witness/types.js';
+import type { AdapterContext, EvidenceAdapter, SessionIdentity } from '../witness/types.js';
 
 /** The context a probe read runs under (the audit passes just a base URL). */
-export type KitProbeContext = { baseUrl: string; headers?: Record<string, string> };
+export type KitProbeContext = {
+  baseUrl: string;
+  headers?: Record<string, string>;
+  /**
+   * The session a witnessed read belongs to, and the identity THAT
+   * session registered (plan Phase 4b item 3b). A probe (no session)
+   * carries neither and reads through the environment seat, exactly as
+   * before.
+   */
+  sessionId?: string;
+  sessionIdentity?: SessionIdentity | null;
+};
 
 /** Default page cap for every bounded collection walk. */
 export const DEFAULT_MAX_PAGES = 100;

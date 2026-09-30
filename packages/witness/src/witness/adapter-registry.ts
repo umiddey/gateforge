@@ -34,7 +34,7 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { AdapterContext, EvidenceAdapter } from './types.js';
+import type { AdapterContext, EvidenceAdapter, SessionIdentity } from './types.js';
 
 /**
  * Loads every `.mjs` adapter in `dir` into a frozen registry.
@@ -289,13 +289,36 @@ export function validateObserveBinding(value: unknown): string | null {
   }
   return null;
 }
-
-/** The transport the witness hands to adapter `read` calls (GET-only). */
+/**
+ * The transport the witness hands to adapter `read` calls (GET-only).
+ *
+ * Args:
+ *   baseUrl: the resolved read base.
+ *   resourceId: the resource this adapter serves.
+ *   get: the mediated GET primitive.
+ *   headers: engine-side read headers, when the run issues one.
+ *   session: the test session the read belongs to and the identity THAT
+ *     session registered (plan Phase 4b item 3b). Omitted for
+ *     engine-driven, probe and supervisor reads — those are not a test
+ *     session's read and must never inherit one.
+ *
+ * Returns:
+ *   AdapterContext: the frozen read context.
+ */
 export function makeAdapterContext(
   baseUrl: string,
   resourceId: string,
   get: AdapterContext['get'],
   headers?: Record<string, string>,
+  session?: { sessionId: string; sessionIdentity: SessionIdentity | null },
 ): AdapterContext {
-  return Object.freeze({ baseUrl, resourceId, get, ...(headers ? { headers } : {}) });
+  return Object.freeze({
+    baseUrl,
+    resourceId,
+    get,
+    ...(session !== undefined
+      ? { sessionId: session.sessionId, sessionIdentity: session.sessionIdentity }
+      : {}),
+    ...(headers ? { headers } : {}),
+  });
 }

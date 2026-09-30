@@ -26,6 +26,70 @@
 
 **Example:** Create `.cache/gateforge-session.json` against `http://app.example.test`, then set `GATEFORGE_SESSION_STATE=.cache/gateforge-session.json`.
 
+### Per-session login identity (why a test may hand the witness its own tenant)
+
+**Rule:** A test that creates a new tenant — or any row that only exists
+inside a tenant it just made — registers THAT tenant's login with the
+witness for ITS OWN session, through the session-authenticated
+`evidence.registerSessionIdentity({ seat, values })` call (the witness
+endpoint is `POST /sessions/identity`). The values are keyed by the same
+witness environment variable names the adapter's seat already declares;
+the seat name is the one the adapter reads through.
+
+**Why — the trust argument.** A registration is a statement about
+*who the engine reads as*, for one session. That is the whole of its
+authority:
+
+- **The engine still performs every read.** Nothing about a
+  registration lets the suite answer for itself. The adapter's GET, the
+  persistence echo and the record are the engine's own work; the
+  registered credential only chooses the account those GETs are made
+  with. A test that supplies data instead of a credential produces no
+  record at all, exactly as before.
+- **A wrong tenant makes the row unfound.** The credential can only
+  change which rows the app is willing to return. If the registered
+  login belongs to another tenant, the app answers 403/404 (or returns
+  that tenant's rows), and the engine records what the app said: the
+  created entity reads as **absent** and the create is graded
+  **failed**, not passed. The failure mode of a wrong identity is a
+  closed door, never an open verdict.
+- **It can never affect another session.** The endpoint authenticates
+  the caller as the session it names (`sessionId` + `sessionToken`), so
+  a test cannot register an identity for a foreign session; the identity
+  is keyed by that session id alone, is dropped when the session closes
+  or is released, and never outlives it.
+- **It can never affect a record it did not cause.** A record is issued
+  by the engine for its own read, stamped with the session's
+  supervisor-registered test identity. A registration neither issues,
+  edits, nor transfers a record, and the run manifest, state directory
+  and report contain no credential value at all — the credential lives
+  in witness memory for the length of the session and nowhere else.
+
+Without a registration the engine reads as the process-global seat
+credentials in the environment, byte-identically to today's behavior.
+
+**Example:** A per-tenant singleton table (`unique (contractor_id,
+ledger_id, kind)` — see the `RESOURCE_SINGLETON_PER_TENANT` advisory)
+cannot be proven by a read that uses the fixed seat: that seat's tenant
+already has its row. The test creates the tenant first, registers that
+tenant's login, then performs the read:
+
+```js
+test('creates the first ledger entry for a fresh contractor', async ({ evidence }) => {
+  await createContractorAndLogin({ evidence });   // your own fixture step
+  await evidence.registerSessionIdentity({
+    seat: 'contractor',
+    values: {
+      GATEFORGE_ADAPTER_CONTRACTOR_USER: contractorUser,
+      GATEFORGE_ADAPTER_CONTRACTOR_PASSWORD: contractorPassword,
+    },
+  });
+  const receipt = await evidence.ui.create({ fields: { ledger: 'opening', kind: 'debit' } });
+  await evidence.persistence.verify(receipt);
+  await evidence.finalize();
+});
+```
+
 ## Run containers as your user
 
 **Rule:** Give containers your user and group IDs.

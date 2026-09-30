@@ -27,6 +27,8 @@ import type {
   RecordsRequest,
   RecordsResponse,
   SessionCredential,
+  SessionIdentityRequest,
+  SessionIdentityResponse,
   SessionResolveRequest,
   SessionResolveResponse,
 } from '../witness/types.js';
@@ -160,6 +162,20 @@ export class WitnessClient {
       if (error instanceof WitnessRequestError && error.status === 404) return null;
       throw error;
     }
+  }
+
+  /**
+   * POST /sessions/identity (plan Phase 4b item 3b): registers the login
+   * of the tenant this test just created, for THIS session only.
+   *
+   * It changes who the engine reads as — nothing else: the engine still
+   * performs every read, a wrong tenant makes the row unfound (fail
+   * closed), and the credential never reaches a record, the run state, a
+   * log or a report. The call carries the session credential, so it can
+   * only ever register for the session the caller is running under.
+   */
+  async registerSessionIdentity(request: SessionIdentityRequest): Promise<SessionIdentityResponse> {
+    return this.request<SessionIdentityResponse>('/sessions/identity', request);
   }
 
   /**

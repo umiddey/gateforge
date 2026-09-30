@@ -146,6 +146,28 @@ export interface EvidenceApi {
     recordIds: string[];
     state: string;
   }>;
+  /**
+   * Registers the login of the tenant this test just created, for THIS
+   * session only (plan Phase 4b item 3b). Adapter reads that must happen
+   * inside a fresh tenant (a per-tenant singleton row) then run as that
+   * tenant.
+   *
+   * It changes WHO the engine reads as and nothing else: the engine
+   * still performs every read, a wrong tenant makes the row unfound (the
+   * entity grades absent — fail closed), it cannot affect another
+   * session, and it cannot cause a record. The credential never reaches
+   * a record, the run state, a log or a report. Without a registration
+   * the adapter reads through the process-global witness environment
+   * seat, exactly as before.
+   *
+   * @param request.seat the adapter seat this identity authenticates.
+   * @param request.values the seat's credential VALUES, keyed by the
+   *   same witness env var names the adapter seat declares.
+   */
+  registerSessionIdentity(request: {
+    seat: string;
+    values: Record<string, string>;
+  }): Promise<{ registered: true; seat: string }>;
 }
 
 /** One witness-issued record as the finalize ledger reports it. */
@@ -600,6 +622,19 @@ export async function createEvidence({
     };
   }
 
+  // ---------- per-session adapter identity (plan Phase 4b item 3b) ----------
+
+  async function registerSessionIdentity(request: {
+    seat: string;
+    values: Record<string, string>;
+  }): Promise<{ registered: true; seat: string }> {
+    return witness().registerSessionIdentity({
+      ...sessionChannel,
+      seat: request.seat,
+      values: request.values,
+    });
+  }
+
   // ---------- finalize (fail-fast + ledger cross-check) ----------
 
   async function finalize(): Promise<{ claims: string[]; records: WitnessRecord[] }> {
@@ -638,6 +673,7 @@ export async function createEvidence({
     persistence: Object.freeze(persistence),
     http: Object.freeze({ observe: observeHttp }),
     prove,
+    registerSessionIdentity,
     finalize,
   });
 }

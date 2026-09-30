@@ -184,6 +184,28 @@ What the kit guarantees, so you do not have to re-derive it:
   and then only GETs, re-logging in once on a 401. Set the variables in
   the environment that runs the gate; they never go into the repo, into
   argv, into a report, or into the suite.
+- **A read that must happen inside a tenant the test just created**
+  registers that tenant's login for the running session (plan Phase 4b
+  item 3b), instead of reading as the fixed environment seat:
+  ```js
+  await evidence.registerSessionIdentity({
+    seat: 'admin',
+    values: {
+      GATEFORGE_ADAPTER_ADMIN_USER: freshTenantUser,
+      GATEFORGE_ADAPTER_ADMIN_PASSWORD: freshTenantPassword,
+    },
+  });
+  ```
+  `values` is keyed by the SAME witness env var names the seat declares
+  and must carry every variable that seat declares. The registration is
+  per session (it dies with the session, and a test can only register for
+  its own), changes only WHO the engine reads as — the engine still
+  performs every read, and a wrong tenant makes the row unfound — and the
+  credential never reaches a record, the run state, a log or a report.
+  A kit adapter resolves the identity by `ctx.sessionId` before the
+  process-global seat, so a cookie logged in as one session is never
+  served to another session's read. The full trust argument is in
+  `TEST-ENVIRONMENT.md` ("Per-session login identity").
 - **Fan-out collections** (members only reachable per parent) use
   `listCollection(readAll)`, which composes several paged reads.
 

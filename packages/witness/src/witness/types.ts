@@ -953,7 +953,63 @@ export interface BarrierInput {
 }
 
 /** The transport handed to `read` (GET-only, engine-mediated). */
+
+/**
+ * A per-session adapter identity (plan 2026-09-25 Phase 4b item 3b):
+ * the credential one OPEN session registered for ITSELF through
+ * `POST /sessions/identity`, so an adapter read that must happen inside a
+ * tenant the test just created can run as that tenant.
+ *
+ * It changes WHO the engine reads as — nothing else. The engine still
+ * performs every read; a wrong tenant simply makes the row unfound
+ * (the app answers 403/404 and the entity grades absent), so the failure
+ * mode is a closed door, never an open verdict. The values live in
+ * witness memory for the length of the session and are never written to
+ * a record, the run state, a log or a report.
+ */
+export interface SessionIdentity {
+  /** The adapter seat this identity serves (must be a declared seat). */
+  readonly seat: string;
+  /**
+   * The seat's credential VALUES, keyed by the same witness environment
+   * variable names the seat declares (`auth.seats.<seat>.credentials`
+   * maps login field to env var). Every variable the seat declares must
+   * be present: a partial identity fails closed instead of silently
+   * completing itself from the process-global seat.
+   */
+  readonly values: Readonly<Record<string, string>>;
+}
+
+/** `POST /sessions/identity` request (session-authenticated). */
+export interface SessionIdentityRequest extends SessionIdentity {
+  /** The session the identity belongs to (its own, never another's). */
+  sessionId: string;
+  /** The session's witness-issued secret; authorizes this call alone. */
+  sessionToken: string;
+}
+
+/**
+ * `POST /sessions/identity` response. It echoes the SEAT NAME only — the
+ * credential itself never leaves the witness process.
+ */
+export interface SessionIdentityResponse {
+  registered: true;
+  seat: string;
+}
+
+/** The transport handed to `read` (GET-only, engine-mediated). */
 export interface AdapterContext {
+  /**
+   * The supervisor-opened session this read runs under, when the caller
+   * is a test session (absent for engine-driven and probe reads). It is
+   * what a {@link SessionIdentity} is scoped to.
+   */
+  sessionId?: string;
+  /**
+   * The identity THAT session registered for itself, or null. Present
+   * only while the read belongs to the registering session.
+   */
+  sessionIdentity?: SessionIdentity | null;
   /** The resolved read base for this adapter. */
   baseUrl: string;
   /** The resource this adapter serves. */

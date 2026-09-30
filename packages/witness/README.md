@@ -71,6 +71,26 @@ without going through the proxy. The adapters REFUSE that mode with a typed
 message instead of passing it silently — the request never reaches the witness,
 so it can never be evidence.
 
+## Per-session adapter identity
+
+A per-tenant singleton row (a table whose UNIQUE constraint includes the
+tenant scope column) cannot be read from the fixed witness-environment
+seat: that seat's tenant already has the row. A test that creates the
+tenant first registers that tenant's login for ITS OWN session through
+the session-authenticated `POST /sessions/identity` (`seat` plus the
+credential `values`, keyed by the same witness env var names the adapter
+seat declares). Kit adapters resolve the seat by `ctx.sessionId` first and
+the process-global environment seat otherwise.
+
+The whole of its authority is *who the engine reads as, for one session*.
+The engine still performs every read; a wrong tenant makes the row unfound
+(the app answers 403/404 and the entity grades absent); the identity is
+keyed by that session id, cannot be registered for a foreign or ended
+session, and is dropped when the session closes or is released; and the
+credential never reaches a record, the run state, a log or a report. The
+full argument is in `packages/cli/guides/TEST-ENVIRONMENT.md`. Without a
+registration the read is byte-identical to today's behavior.
+
 ## The operator's fixture/actor provider
 
 A declared behavior case names a `fixture` recipe and an `actor`. The witness

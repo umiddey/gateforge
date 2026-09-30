@@ -14,6 +14,7 @@
  * declared login POST and GETs.
  */
 import type { BearerSeat, CookieLoginSeat, HttpAdapterAuth } from './config.js';
+import type { SessionIdentity } from '../witness/types.js';
 
 /** One cached seat session (per base URL). */
 interface SeatSession {
@@ -32,6 +33,12 @@ interface ResolvedSeat {
   bearer?: BearerSeat;
   /** Cookie-login seat. */
   login?: CookieLoginSeat;
+  /**
+   * The credential VALUES this seat reads with for one session (the
+   * identity that session registered), or null for the process-global
+   * environment seat.
+   */
+  values: Readonly<Record<string, string>> | null;
 }
 
 /** Sessions keyed by `<baseUrl>|<seat>`, shared by every read of one kit adapter. */
@@ -93,20 +100,34 @@ export class KitRedirectError extends Error {
 }
 
 /**
- * Resolves the configured seat (or fails closed naming the ones there
- * are).
+ * Resolves the seat one read authenticates with: the identity THIS
+ * session registered (plan Phase 4b item 3b) when it names a declared
+ * seat, else the adapter's configured seat with the process-global
+ * environment credentials — today's behavior, byte-identical when no
+ * identity is registered.
  *
  * Args:
  *   auth: the adapter's declared auth.
+ *   identity: the reading session's registered identity, or null.
  *
  * Returns:
- *   ResolvedSeat | null: the seat, or null for `kind: 'none'`.
- * @throws KitAuthError when the named seat does not exist.
+ *   ResolvedSeat | null: the seat plus its credential source, or null
+ *   for `kind: 'none'`.
+ * @throws KitAuthError when the named seat does not exist, or when an
+ *   identity names a seat this adapter does not declare.
  */
-function resolveSeat(auth: HttpAdapterAuth): ResolvedSeat | null {
+function resolveSeat(auth: HttpAdapterAuth, identity: SessionIdentity | null): ResolvedSeat | null {
   if (auth.kind === 'none') return null;
   const seats: Readonly<Record<string, BearerSeat | CookieLoginSeat>> = auth.seats;
-  const name = auth.seat ?? Object.keys(seats)[0];
+  if (identity !== null && seats[identity.seat] === undefined) {
+    throw new KitAuthError(
+      `session identity seat '${identity.seat}' is not declared by this adapter (available: ` +
+        `${Object.keys(seats).sort().join(', ')})`,
+    );
+  }
+  // The registered identity WINS for the seat it names; every other seat
+  // keeps reading through the process-global environment.
+  const name = identity?.seat ?? auth.seat ?? Object.keys(seats)[0];
   if (name === undefined) {
     throw new KitAuthError(
       'auth declares no seats: add a named seat (credentials are read from the witness environment)',
@@ -118,12 +139,15 @@ function resolveSeat(auth: HttpAdapterAuth): ResolvedSeat | null {
       `auth seat '${name}' is not declared (available: ${Object.keys(seats).sort().join(', ')})`,
     );
   }
+  // Credential source: the session's own values for the seat it named,
+  // else the witness process environment.
+  const values = identity !== null && identity.seat === name ? identity.values : null;
   if (auth.kind === 'bearer') {
     const bearer = seat as BearerSeat;
     if (typeof bearer.tokenEnv !== 'string') {
       throw new KitAuthError(`auth seat '${name}' must declare tokenEnv (a witness env var)`);
     }
-    return { kind: 'bearer', name, bearer };
+    return { kind: 'bearer', name, bearer, values };
   }
   const login = seat as CookieLoginSeat;
   if (typeof login.loginPath !== 'string' || typeof login.credentials !== 'object') {
@@ -131,11 +155,18 @@ function resolveSeat(auth: HttpAdapterAuth): ResolvedSeat | null {
       `auth seat '${name}' must declare loginPath and credentials (field -> witness env var)`,
     );
   }
-  return { kind: 'cookie-login', name, login };
+  return { kind: 'cookie-login', name, login, values };
 }
 
 /**
  * The credential header one GET carries, logging in first when needed.
+ *
+ * The values come from the session's REGISTERED identity when it named
+ * this seat (every declared variable must be present — a partial
+ * identity fails closed instead of completing itself from the
+ * process-global seat), otherwise from the witness process environment
+ * exactly as before. Either way a diagnostic names the variables, never
+ * their values.
  *
  * Args:
  *   seat: the resolved seat.
@@ -159,27 +190,33 @@ async function credentialHeaders(
   const config: BearerSeat | CookieLoginSeat =
     seat.kind === 'bearer' ? (seat.bearer as BearerSeat) : (seat.login as CookieLoginSeat);
   const envVars = 'tokenEnv' in config ? [config.tokenEnv] : Object.values(config.credentials);
+  const identity = seat.values;
+  const valueOf = (name: string): string | undefined =>
+    (identity === null ? undefined : identity[name]) ?? process.env[name];
   const missing = envVars.filter((name) => {
-    const value = process.env[name];
+    const value = valueOf(name);
     return value === undefined || value === '';
   });
   if (missing.length > 0) {
     throw new KitAuthError(
-      `adapter seat '${seat.name}' needs ${missing.join(', ')} in the WITNESS process ` +
-        'environment (never in the repo, argv, or the suite)',
+      identity === null
+        ? `adapter seat '${seat.name}' needs ${missing.join(', ')} in the WITNESS process ` +
+          'environment (never in the repo, argv, or the suite)'
+        : `session identity for seat '${seat.name}' is missing ${missing.join(', ')}: a ` +
+          'registered identity must carry EVERY credential the seat declares',
       { seat: seat.name, envVars: missing },
     );
   }
   if ('tokenEnv' in config) {
     const scheme = config.scheme ?? 'Bearer';
-    return { authorization: `${scheme} ${String(process.env[config.tokenEnv])}` };
+    return { authorization: `${scheme} ${String(valueOf(config.tokenEnv))}` };
   }
   const login = config;
   const cached = sessions.get(seatKey);
   if (cached?.cookie != null) return { cookie: cached.cookie };
   const body: Record<string, string> = {};
   for (const [field, envVar] of Object.entries(login.credentials)) {
-    body[field] = String(process.env[envVar]);
+    body[field] = String(valueOf(envVar));
   }
   const response = await fetch(`${baseUrl}${login.loginPath}`, {
     method: 'POST',
@@ -224,8 +261,17 @@ export interface SessionReaderOptions {
   auth?: HttpAdapterAuth;
   /** Registry identity, for diagnostics. */
   resourceId: string;
-  /** The witness-adapter context the read runs under. */
-  ctx: { baseUrl: string; headers?: Record<string, string> };
+  /**
+   * The witness-adapter context the read runs under, carrying the
+   * session the read belongs to and the identity THAT session
+   * registered (plan Phase 4b item 3b).
+   */
+  ctx: {
+    baseUrl: string;
+    headers?: Record<string, string>;
+    sessionId?: string;
+    sessionIdentity?: SessionIdentity | null;
+  };
   /** Per-request timeout in ms (default 10000). */
   timeoutMs?: number;
   /** Session store shared across reads (one login, then reused). */
@@ -248,8 +294,14 @@ export function createSessionReader(options: SessionReaderOptions): (path: strin
   const { auth, resourceId, ctx } = options;
   const timeoutMs = options.timeoutMs ?? 10_000;
   const baseUrl = ctx.baseUrl.replace(/\/$/, '');
-  const seat = auth === undefined || auth.kind === 'none' ? null : resolveSeat(auth);
-  const seatKey = `${baseUrl}|${seat?.name ?? ''}`;
+  const identity = ctx.sessionIdentity ?? null;
+  const seat = auth === undefined || auth.kind === 'none' ? null : resolveSeat(auth, identity);
+  // The cache key carries the seat AND the session it was read under: a
+  // cookie logged in as one session's identity is never served to
+  // another session's read, even through the same adapter instance.
+  const seatKey = `${baseUrl}|${seat?.name ?? ''}|${
+    identity === null ? 'env' : `session:${ctx.sessionId ?? 'unattributed'}`
+  }`;
   // One store per kit adapter: the first read logs in, later reads
   // reuse the session until the app rejects it with 401.
   const sessions: SessionStore = options.sessions ?? new Map();
