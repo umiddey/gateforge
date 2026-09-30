@@ -240,6 +240,10 @@ function buildHandler({ store, clock }) {
         store.clear();
         return jsonResponse(res, 200, { reset: true });
       }
+      // Every request gets an answer: an unrouted path used to leave the
+      // connection open, which hangs any liveness probe (and the
+      // witness's startup attestation) instead of reporting 404.
+      return jsonResponse(res, 404, { error: 'not found' });
     } catch (err) {
       return jsonResponse(res, 400, { error: err instanceof Error ? err.message : 'bad request' });
     }
