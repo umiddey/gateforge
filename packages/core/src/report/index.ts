@@ -78,20 +78,75 @@ export interface RunExecutionSummary {
   selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
   selectedClaims: { selected: number; satisfied: number; blocking: number; blockingEntries: number; waived: number };
   /**
-   * `blocking` is the LEGACY total: it stays exactly as it has always
-   * been computed (blocking claims + repository findings) and it
-   * INCLUDES baselined debt, so it is not the number the gate line
-   * reports. Read `newlyBlocking` for that. `baselined` and `newlyBlocking` are the two numbers an
-   * operator can act on: how much of the debt the adopted baseline
-   * already forgave, and how much is genuinely new.
+   * The whole-repository debt, defined once by `repositoryDebtOf`
+   * (never recomputed beside it). `blocking` is the FROZEN legacy
+   * total — blocking verdicts + repository findings, exactly as it has
+   * always been computed — and `newlyBlocking` is what the gate
+   * actually blocks on: the same count, named for the report line.
+   * `baselined` is how much of the debt the adopted baseline forgave.
    */
-  repositoryDebt: {
-    obligations: number;
-    blocking: number;
-    blockingEntries: number;
-    unclaimed: number;
-    baselined: number;
-    newlyBlocking: number;
+  repositoryDebt: RepositoryDebt;
+}
+
+/**
+ * The reason prefix the baseline forgiveness stamps on every verdict it
+ * re-grades. Shared so the split is read back from what the evaluator
+ * actually did, never from a second baseline-loading path.
+ */
+export const BASELINE_VERDICT_REASON = 'baselined:';
+
+/** Whole-repository debt, one definition, shared by every surface. */
+export interface RepositoryDebt {
+  /** Every obligation this run graded over the repository. */
+  obligations: number;
+  /** Frozen legacy total: blocking verdicts + repository findings. */
+  blocking: number;
+  /** Repository findings (policy, mapping, inventory, coverage). */
+  blockingEntries: number;
+  /** Registered obligations this run saw no claim row for. */
+  unclaimed: number;
+  /** Obligations the adopted baseline forgave (claimed or not). */
+  baselined: number;
+  /** What the gate actually blocks on — the number the line reports. */
+  newlyBlocking: number;
+}
+
+/**
+ * THE repository-debt definition (plan §2, "One blocking number").
+ *
+ * Every surface that reports debt derives it here, from the GRADED
+ * verdicts, so a run can never show two different counts: the split is
+ * what the evaluator did, never a recount beside it. `baselined` is
+ * read back from the reason the baseline forgiveness stamped on the
+ * verdicts it re-graded, and `newlyBlocking` is the count the gate
+ * blocks on — a subtraction of the baselined count from the total is
+ * what let a run print `0 new blocking` next to real blockers.
+ *
+ * Args:
+ *   verdicts: the whole-repository verdicts this run graded.
+ *   findings: the whole-repository blocking entries this run graded.
+ *   unclaimed: registered obligations with no claim row.
+ *
+ * Returns:
+ *   RepositoryDebt: the debt every surface must report.
+ */
+export function repositoryDebtOf(input: {
+  readonly verdicts: readonly ObligationVerdict[];
+  readonly findings: readonly BlockingEntry[];
+  readonly unclaimed: number;
+}): RepositoryDebt {
+  const blocking = input.verdicts.filter((verdict) => BLOCKING_VERDICTS.includes(verdict.verdict)).length;
+  const baselined = input.verdicts.filter(
+    (verdict) => verdict.verdict === 'waived' && (verdict.reason ?? '').startsWith(BASELINE_VERDICT_REASON),
+  ).length;
+  const blockingEntries = input.findings.length;
+  return {
+    obligations: input.verdicts.length,
+    blocking: blocking + blockingEntries,
+    blockingEntries,
+    unclaimed: input.unclaimed,
+    baselined,
+    newlyBlocking: blocking + blockingEntries,
   };
 }
 

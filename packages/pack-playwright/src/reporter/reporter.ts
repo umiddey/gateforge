@@ -116,16 +116,17 @@ interface ReporterRunSummary {
   /**
    * `blocking` is the LEGACY total (blocking claims + every unclaimed
    * obligation, baselined or not) and stays exactly as it was.
-   * `baselined` and `newlyBlocking` are the two numbers an operator can
-   * act on: how much of the debt the adopted baseline already forgave,
-   * and how much is genuinely new.
+   *
+   * There is deliberately NO baselined/newlyBlocking split here: the
+   * reporter grades claims only. It has no waivers, no scope and no
+   * adopted baseline, so any split it printed was a guess beside the
+   * gate's — a real run showed `87 new blocking` here and `0` from the
+   * CLI for the same run. The gate grades debt and owns its numbers.
    */
   repositoryDebt: {
     obligations: number;
     unclaimed: number;
     blocking: number;
-    baselined: number;
-    newlyBlocking: number;
   };
 }
 
@@ -142,11 +143,6 @@ interface RunScopeDocument {
   readonly scope?: unknown;
 }
 
-/** The CLI-written baselined-obligation view (`<stateDir>/debt-baseline.json`). */
-interface DebtBaselineDocument {
-  readonly obligationIds?: unknown;
-}
-
 /** Reads a state-dir JSON document, or null when it is absent or unusable. */
 function readStateView(stateDir: string, name: string): unknown {
   try {
@@ -158,19 +154,12 @@ function readStateView(stateDir: string, name: string): unknown {
 
 /**
  * The scope the CLI graded for this run. Absent or unreadable means a
- * whole-repository run, which is the only scope whose debt the reporter
- * may judge — the conservative reading.
+ * whole-repository run — the conservative reading, since anything
+ * narrower means the reporter observed no repository-wide debt.
  */
 function runScopeOf(stateDir: string): ReporterRunScope {
   const scope = (readStateView(stateDir, 'run-scope.json') as RunScopeDocument | null)?.scope;
   return scope === 'named' || scope === 'changed' ? scope : 'full';
-}
-
-/** The obligation ids the adopted baseline already forgives. */
-function baselinedObligationIds(stateDir: string): ReadonlySet<string> {
-  const ids = (readStateView(stateDir, 'debt-baseline.json') as DebtBaselineDocument | null)?.obligationIds;
-  if (!Array.isArray(ids)) return new Set();
-  return new Set(ids.filter((id): id is string => typeof id === 'string'));
 }
 
 /** The claim-injections document the orchestrating CLI writes. */
@@ -519,7 +508,7 @@ export class GateforgeReporter {
               .map((entry) => entry.id),
           );
     const unclaimed = unclaimedIds.size;
-    const summary = this.runSummary(ledger, obligations, unclaimed, baselinedObligationIds(stateDir));
+    const summary = this.runSummary(ledger, obligations, unclaimed);
     writeJson(stateDir, 'run-summary.json', summary);
     console.log(
       `selected tests: ${String(summary.selectedTests.passed)} passed, ${String(summary.selectedTests.failed)} failed ` +
@@ -530,11 +519,10 @@ export class GateforgeReporter {
       `selected claims: ${String(summary.selectedClaims.satisfied)} satisfied, ${String(summary.selectedClaims.blocking)} blocking ` +
         `(selected: ${String(summary.selectedClaims.selected)}, waived: ${String(summary.selectedClaims.waived)})`,
     );
-    console.log(
-      `repository debt: ${String(summary.repositoryDebt.baselined)} known (baselined), ` +
-        `${String(summary.repositoryDebt.newlyBlocking)} new blocking / ` +
-        `${String(summary.repositoryDebt.obligations)} obligations (${String(summary.repositoryDebt.unclaimed)} unclaimed)`,
-    );
+    // Debt is the gate's to grade: the reporter cannot see the waivers,
+    // the scope or the adopted baseline it graded against, so it names
+    // no debt count (one run, one number).
+    console.log('repository debt: graded by gateforge after the run');
     this.printLedger(ledger, unclaimed, runScopeOf(stateDir));
     this.printRegistryMismatches(obligations, records);
 
@@ -551,11 +539,16 @@ export class GateforgeReporter {
 
   /** Builds non-authoritative counts from the runner events and ledger.
    *
+   * The debt here is the LEGACY, reporter-observable total only
+   * (blocking claims + every unclaimed obligation, baselined or not).
+   * How much of it the adopted baseline forgave is NOT derivable here —
+   * the reporter never loads the baseline, the waivers or the graded
+   * scope — so the gate owns that number alone.
+   *
    * Args:
    *   ledger: selected claimed-obligation results from the real engine.
    *   obligations: the complete repository obligation registry, when valid.
    *   unclaimed: unique registered obligations without any claim row.
-   *   baselinedIds: obligation ids the adopted baseline already forgives.
    *
    * Returns:
    *   ReporterRunSummary: distinct counts for runner work, claims, and repository debt.
@@ -564,7 +557,6 @@ export class GateforgeReporter {
     ledger: readonly LedgerRow[],
     obligations: ReturnType<typeof parseObligationsDocument>,
     unclaimed: number,
-    baselinedIds: ReadonlySet<string>,
   ): ReporterRunSummary {
     const latestByTest = new Map<string, RunnerOutcomeRow>();
     for (const outcome of this.runnerOutcomes) {
@@ -580,10 +572,9 @@ export class GateforgeReporter {
     const blockingClaims = ledger.filter((row) => isBlocking(row.verdict));
     const waived = ledger.filter((row) => row.verdict === 'waived').length;
     const distinctBlockingClaims = new Set(blockingClaims.map((row) => row.claim)).size;
-    // The unclaimed debt splits by what the adopted baseline already
-    // forgave. Without that split the same number (192) is reported
-    // next to a gate line that says zero blockers.
-    const baselined = baselinedIds.size;
+    // No debt split is computed here: the reporter cannot know which
+    // obligations the adopted baseline forgave, and a guessed split
+    // contradicts the gate line printed seconds later.
     return {
       schemaVersion: 1,
       selectedTests: { selected: outcomes.length, passed, failed, skipped, expectedFailures },
@@ -594,8 +585,6 @@ export class GateforgeReporter {
         // Legacy total, unchanged: blocking claims + every unclaimed
         // obligation, baselined or not.
         blocking: distinctBlockingClaims + unclaimed,
-        baselined: Math.min(baselined, unclaimed),
-        newlyBlocking: distinctBlockingClaims + Math.max(0, unclaimed - baselined),
       },
     };
   }

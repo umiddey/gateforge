@@ -5,12 +5,14 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  BASELINE_VERDICT_REASON,
   ObligationSchema,
   canonicalJson,
   fingerprint,
   renderRun,
   runExitCode,
   CAUSE_NEXT_ACTIONS,
+  repositoryDebtOf,
   humanMessage,
   type BlockingEntry,
   type Obligation,
@@ -173,31 +175,52 @@ describe('renderRun — json format', () => {
   });
 
   it('names baselined debt apart from new debt, in the text and in the JSON', () => {
-    // The same run reported `blocking: 192` next to a gate line saying
-    // zero blockers. The split is additive: the legacy total stays, and
-    // the two numbers an operator can act on are named.
+    // A run whose debt is part baselined and part new: the line and the
+    // JSON must report the SAME two numbers, and "new blocking" must be
+    // what the gate blocks on — never a subtraction that reaches zero
+    // while the gate still blocks.
+    const verdicts = [
+      entry(makeObligation('tenant.accounts'), 'satisfied'),
+      entry(makeObligation('tenant.orders'), 'missing'),
+      entry(makeObligation('tenant.widgets'), 'missing'),
+      entry(makeObligation('tenant.invoices'), 'waived', {
+        reason: `${BASELINE_VERDICT_REASON} adopted as forgiven (was missing); baseline is shrink-only`,
+      }),
+      entry(makeObligation('tenant.ledger'), 'waived', {
+        reason: `${BASELINE_VERDICT_REASON} adopted as forgiven (was missing); baseline is shrink-only`,
+      }),
+      entry(makeObligation('tenant.audit'), 'waived', { reason: 'GF-17: owner-stale waiver' }),
+    ];
+    const debt = repositoryDebtOf({ verdicts, findings: [], unclaimed: 4 });
+    expect(debt).toEqual({
+      obligations: 6,
+      blocking: 2,
+      blockingEntries: 0,
+      unclaimed: 4,
+      baselined: 2,
+      newlyBlocking: 2,
+    });
     const execution: RunExecutionSummary = {
       scope: 'full',
       mode: 'executed',
       testsPerformedThisInvocation: 0,
       selectedTests: { selected: 0, passed: 0, failed: 0, skipped: 0, expectedFailures: 0 },
       selectedClaims: { selected: 0, satisfied: 0, blocking: 0, blockingEntries: 0, waived: 0 },
-      repositoryDebt: {
-        obligations: 512,
-        blocking: 192,
-        blockingEntries: 0,
-        unclaimed: 192,
-        baselined: 192,
-        newlyBlocking: 0,
-      },
+      repositoryDebt: debt,
     };
-    const options = { format: 'text', execution } as unknown as Parameters<typeof renderRun>[1];
-    const text = renderRun([], options);
-    expect(text).toContain('repository debt: 192 known (baselined), 0 new blocking');
-    const json = JSON.parse(
-      renderRun([], { format: 'json', execution } as unknown as Parameters<typeof renderRun>[1]),
-    );
-    expect(json.execution.repositoryDebt).toMatchObject({ blocking: 192, baselined: 192, newlyBlocking: 0 });
+    const text = renderRun(verdicts, { format: 'text', execution });
+    expect(text).toContain('repository debt: 2 known (baselined), 2 new blocking');
+    const json = JSON.parse(renderRun(verdicts, { format: 'json', execution }));
+    expect(json.execution.repositoryDebt).toEqual(debt);
+  });
+
+  it('counts every repository finding as debt the gate blocks on', () => {
+    const debt = repositoryDebtOf({
+      verdicts: [entry(makeObligation('tenant.accounts'), 'satisfied')],
+      findings: BLOCKING,
+      unclaimed: 0,
+    });
+    expect(debt).toMatchObject({ obligations: 1, blocking: 1, blockingEntries: 1, newlyBlocking: 1 });
   });
 
   it('labels a selected result as partial and leaves the receipt explicitly unsealed', () => {
@@ -212,8 +235,8 @@ describe('renderRun — json format', () => {
         blocking: 4,
         blockingEntries: 0,
         unclaimed: 2,
-        baselined: 4,
-        newlyBlocking: 0,
+        baselined: 2,
+        newlyBlocking: 4,
       },
     };
     const verdicts = [entry(accounts, 'satisfied')];

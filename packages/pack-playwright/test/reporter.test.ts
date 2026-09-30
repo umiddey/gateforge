@@ -825,7 +825,7 @@ describe('aggregate honesty (plan Phase 4 item 7): the reporter is never the fin
     expect(line).toMatch(/never this reporter/);
   });
 
-  it('reports runner work, selected claims, and full-repository debt as separate results', async () => {
+  it('reports runner work and selected claims, and defers repository debt to the gate', async () => {
     saveEnv('GATEFORGE_WITNESS_URL', 'GATEFORGE_RUN_TOKEN', 'GATEFORGE_STATE_DIR', 'GATEFORGE_OBLIGATIONS');
     const run = await setupRun();
     const output: string[] = [];
@@ -854,18 +854,13 @@ describe('aggregate honesty (plan Phase 4 item 7): the reporter is never the fin
         });
       }
       writeFileSync(obligationsPath, `${JSON.stringify(document)}\n`);
-      // The CLI publishes the scope and the adopted-baseline split into
-      // the run state BEFORE the suite starts; the reporter reads both.
+      // The CLI publishes the graded scope into the run state BEFORE
+      // the suite starts; the reporter reads it. It also publishes no
+      // debt view: the reporter grades claims only, so it has no
+      // baseline, no waivers and no scope to split debt with.
       writeFileSync(
         join(run.stateDir, 'run-scope.json'),
         `${JSON.stringify({ schemaVersion: 1, scope: 'named' })}\n`,
-      );
-      writeFileSync(
-        join(run.stateDir, 'debt-baseline.json'),
-        `${JSON.stringify({
-          schemaVersion: 1,
-          obligationIds: Array.from({ length: 500 }, (_, index) => `tenant.debt-${String(index)}:persistence:create`),
-        })}\n`,
       );
 
       const client = new WitnessClient(run.witness.url, TOKEN);
@@ -890,30 +885,21 @@ describe('aggregate honesty (plan Phase 4 item 7): the reporter is never the fin
       const result = JSON.parse(readFileSync(join(run.stateDir, 'run-summary.json'), 'utf8')) as {
         selectedTests: { selected: number; passed: number; failed: number };
         selectedClaims: { selected: number; satisfied: number; blocking: number };
-        repositoryDebt: {
-          obligations: number;
-          unclaimed: number;
-          blocking: number;
-          baselined: number;
-          newlyBlocking: number;
-        };
+        repositoryDebt: Record<string, number>;
       };
       expect(result.selectedTests).toMatchObject({ selected: 1, passed: 1, failed: 0 });
       expect(result.selectedClaims).toMatchObject({ selected: 1, satisfied: 1, blocking: 0 });
-      // `blocking` is the legacy total and is unchanged; the split is
-      // additive and is what the text now reports.
-      expect(result.repositoryDebt).toMatchObject({
-        obligations: 512,
-        unclaimed: 511,
-        blocking: 511,
-        baselined: 500,
-        newlyBlocking: 11,
-      });
+      // The legacy reporter-observable total, unchanged; no guessed
+      // split of it (a real run printed `11 new blocking` here and `0`
+      // from the gate for the same 512 obligations).
+      expect(result.repositoryDebt).toEqual({ obligations: 512, unclaimed: 511, blocking: 511 });
       expect(output.join('\n')).toMatch(/selected tests: 1 passed, 0 failed/);
       expect(output.join('\n')).toMatch(/selected claims: 1 satisfied, 0 blocking/);
-      expect(output.join('\n')).toMatch(
-        /repository debt: 500 known \(baselined\), 11 new blocking \/ 512 obligations \(511 unclaimed\)/,
-      );
+      // Debt is named by nobody but the gate, so a run can never show
+      // two different counts for it.
+      expect(output.join('\n')).toMatch(/^repository debt: graded by gateforge after the run$/m);
+      expect(output.join('\n')).not.toMatch(/known \(baselined\)/);
+      expect(output.join('\n')).not.toMatch(/new blocking/);
       // A named run never prints a repository verdict it cannot own.
       expect(output.join('\n')).toMatch(/GATEFORGE GATE: SELECTION \(1 satisfied, 0 blocking/);
       expect(output.join('\n')).not.toMatch(/GATEFORGE GATE: NOT PASSED/);

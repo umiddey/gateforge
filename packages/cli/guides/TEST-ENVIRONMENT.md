@@ -149,7 +149,7 @@ gateforge test-gates --changed --progress file:.gateforge/test-gates/progress.lo
 
 Under `CI=true` the default is already `stderr`; locally it is off, and a local run's output is byte-identical either way. When a test fails, its error message and a short `file:line` stack land in `.gateforge/test-gates/failures.json` behind the same credential guard — publish THAT artifact, not the runner log.
 
-**Reading the numbers:** `repository debt: N known (baselined), M new blocking` names the two numbers separately. The frozen `repositoryDebt.blocking` total still includes baselined debt; `M` is what this repository has newly failed to cover.
+**Reading the numbers:** `repository debt: N known (baselined), M new blocking` names the two numbers separately, and only the gate prints them. `N` is the debt the adopted baseline forgave (those obligations grade `waived`, so they are not in `M`); `M` is what the gate actually blocks on — the same count as the frozen `repositoryDebt.blocking` total and as the exit decision, never a subtraction that can reach zero while blockers remain. The in-runner reporter prints `repository debt: graded by gateforge after the run`: it grades claims only, so it has no waivers, scope or baseline to split debt with, and one run can never show two different counts.
 
 ## Keep the runner quiet
 
