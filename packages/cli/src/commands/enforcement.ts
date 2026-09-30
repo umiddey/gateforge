@@ -66,7 +66,7 @@ import {
   engineSourceLine,
   type EngineIdentity,
 } from '../engine-identity.js';
-import { buildRunPreflight, firstFailingCheck, type RunPreflightReport } from '../run-preflight.js';
+import { buildRunPreflight, findRunnerManifest, firstFailingCheck, type RunPreflightReport } from '../run-preflight.js';
 
 export const ENFORCEMENT_USAGE = 'usage: gateforge enforcement doctor [--json] [--strict-preflight]';
 
@@ -372,9 +372,10 @@ function verifierKeyExposure(cwd: string, env: NodeJS.ProcessEnv): { paths: stri
 }
 
 /**
- * Cheap playwright readiness probe: package resolvable in the repo's
- * node_modules and a nonempty browser registry (default cache or
- * PLAYWRIGHT_BROWSERS_PATH). Never launches anything.
+ * Cheap playwright readiness probe: package resolvable where the
+ * supervised run resolves it (next to the Playwright config, then from
+ * the repo root upward) and a nonempty browser registry (default cache
+ * or PLAYWRIGHT_BROWSERS_PATH). Never launches anything.
  *
  * Args:
  *   cwd: repository root.
@@ -383,19 +384,7 @@ function verifierKeyExposure(cwd: string, env: NodeJS.ProcessEnv): { paths: stri
  *   {status, detail}: ok / warn (no browsers) / fail (no package).
  */
 function playwrightReadiness(cwd: string): { status: DoctorStatus; detail: string } {
-  let packageJson: string | null = null;
-  let cursor = resolve(cwd);
-  // Walk up like Node resolution: the CLI may run from a workspace root.
-  for (let depth = 0; depth < 6; depth += 1) {
-    const candidate = join(cursor, 'node_modules', 'playwright', 'package.json');
-    if (existsSync(candidate)) {
-      packageJson = candidate;
-      break;
-    }
-    const parent = resolve(cursor, '..');
-    if (parent === cursor) break;
-    cursor = parent;
-  }
+  const packageJson = findRunnerManifest(cwd, 'playwright', ['playwright']);
   if (packageJson === null) {
     return {
       status: 'fail',

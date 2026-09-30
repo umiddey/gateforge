@@ -149,6 +149,25 @@ describe('doctor run section (report-only by default)', () => {
   });
 });
 
+describe('doctor runner line (where the runner really resolves)', () => {
+  it('finds Playwright installed next to its config in a sub-directory, as the supervised run does', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      // No node_modules at the repository root: the e2e project owns its
+      // own install, next to its own config.
+      repo.writeFiles({
+        'e2e/playwright.config.ts': 'export default {};\n',
+        'e2e/node_modules/@playwright/test/package.json': '{"name":"@playwright/test","version":"1.58.2"}\n',
+      });
+      const report = await runCli(repo, ['enforcement', 'doctor', '--json']);
+      const runner = line(runSection(report.stdout), 'runner');
+      expect(runner.status, runner.detail).toBe('ok');
+      expect(runner.detail).toContain('e2e/node_modules/@playwright/test');
+      expect(runner.detail).toContain('1.58.2');
+    });
+  });
+});
+
 describe('doctor run preconditions (each mistake its own line)', () => {
   it('a missing verifier key is a FAIL naming the fix, and --strict-preflight exits 1', async () => {
     await withTempRepo({}, async (repo) => {
