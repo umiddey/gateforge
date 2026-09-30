@@ -102,6 +102,21 @@ UPDATEABLE_FIELDS_ATTR = "__gateforge_updateable_fields__"
 # Column-call constructors carrying column facts.
 COLUMN_CALL_NAMES = ("Column", "mapped_column")
 
+# SQLModel declares tables with the class keyword ``table=True`` on a
+# class deriving from ``SQLModel`` — no declarative base, no
+# ``__tablename__``. SQLModel derives the table name at runtime by
+# lowercasing the class name, which the AST CAN see, so the name is a
+# fact (``sqlmodel-class-name`` provenance), not a guess. The root is
+# recognized by import provenance (``from sqlmodel import SQLModel``,
+# including aliases) or the exact conventional name ``SQLModel``; a
+# denylisted provenance (Pydantic's ``BaseModel`` family) never matches.
+SQLMODEL_MODULES = ("sqlmodel",)
+SQLMODEL_ROOT_NAME = "SQLModel"
+
+# Tablename provenance label for a name SQLModel derives at runtime from
+# the class name.
+SQLMODEL_CLASS_NAME_PROVENANCE = "sqlmodel-class-name"
+
 # Import provenance that can NEVER make a base name a declarative root
 # (phase 2 denylist). The conventional-name rule ("Base") is a flat-file
 # heuristic: most projects do ``from app.db import Base`` (cross-file,
@@ -270,8 +285,16 @@ def _literal_kwarg_true(call: ast.Call, name: str) -> bool | None:
     return None
 
 
+
+
 def _column_call_name(call: ast.expr) -> str | None:
-    """Simple name of a call, when it is a column constructor."""
+    """Simple name of a call, when it is a plain column constructor.
+
+    The unqualified SQLAlchemy constructors only. SQLModel's ``Field`` is
+    recognized per class in `ClassRecord._column_call_name`, which can see
+    the import provenance; it never appears in ``__table_args__`` or in a
+    ``Table(...)`` argument list.
+    """
     name = call_name(call.func) if isinstance(call, ast.Call) else None
     return name if name in COLUMN_CALL_NAMES else None
 
@@ -292,7 +315,13 @@ def _column_name(call: ast.Call, target: str | None) -> str | None:
 
 
 def _foreign_key_reference(call: ast.Call) -> str | None:
-    """Finds a literal ``ForeignKey("<table>.<column>")`` argument."""
+    """Finds a literal foreign-key target, by ``ForeignKey("t.c")`` or by string.
+
+    SQLModel spells the target as a literal string instead of a call:
+    ``hero_id: int | None = Field(foreign_key="hero.id")``. A declarative
+    ``Column`` never takes that keyword, so reading it changes nothing for
+    the existing styles.
+    """
     for arg in call.args:
         if (
             isinstance(arg, ast.Call)
@@ -311,6 +340,13 @@ def _foreign_key_reference(call: ast.Call) -> str | None:
             and isinstance(kw.value.args[0].value, str)
         ):
             return kw.value.args[0].value
+    for kw in call.keywords:
+        if (
+            kw.arg == "foreign_key"
+            and isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, str)
+        ):
+            return kw.value.value
     return None
 
 
@@ -371,10 +407,21 @@ def _pk_constraint_columns(node: ast.expr) -> list[str] | None:
 class ClassRecord:
     """AST facts about one class definition, at any lexical scope."""
 
-    def __init__(self, qname: str, node: ast.ClassDef, scope: str):
+    def __init__(
+        self,
+        qname: str,
+        node: ast.ClassDef,
+        scope: str,
+        imports: "dict[str, ImportRef] | None" = None,
+    ):
         self.qname = qname
         self.node = node
         self.scope = scope  # "" at module level, enclosing dotted scope otherwise
+        # Import bindings of the OWNING file (complete before any class is
+        # recorded): the only provenance evidence for a SQLModel ``Field``
+        # column, whose spelling alone proves nothing (dataclasses and
+        # SQLAlchemy itself export one).
+        self.imports: dict[str, ImportRef] = imports if imports is not None else {}
         self.bases: list[str] = [b for b in (base_name(b) for b in node.bases) if b is not None]
         self.keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
         self.tablename_literal: str | None = None
@@ -404,7 +451,11 @@ class ClassRecord:
                 )
                 names = [t.id for t in targets if isinstance(t, ast.Name)]
                 value = stmt.value
-                if value is not None and isinstance(value, ast.Call) and _column_call_name(value) is not None:
+                if (
+                    value is not None
+                    and isinstance(value, ast.Call)
+                    and self._column_call_name(value) is not None
+                ):
                     for name in names:
                         column_calls.append((value, name))
                 if TABULAR_ATTR in names and self.tablename_expr is None:
@@ -454,6 +505,61 @@ class ClassRecord:
                     self.column_facts.primary_key_columns = constraint
                     self.column_facts.has_pk_constraint = True
 
+    def _column_call_name(self, call: ast.expr) -> str | None:
+        """Whether a call is a column constructor, honoring SQLModel Field().
+
+        ``Column``/``mapped_column`` are unqualified column constructors.
+        ``Field`` is not: ``dataclasses`` and SQLAlchemy export one too, so
+        it counts only when this file imports it from ``sqlmodel`` (the
+        SQLModel table style). Facts attach only to emitted tables, so the
+        gate never sees a column from a non-model class.
+
+        Args:
+            call: The candidate call expression.
+
+        Returns:
+            str | None: The simple constructor name, or None.
+        """
+        if not isinstance(call, ast.Call):
+            return None
+        name = call_name(call.func)
+        if name is None:
+            return None
+        if name in COLUMN_CALL_NAMES:
+            return name
+        if name == "Field":
+            ref = self.imports.get(name)
+            provenance = ref.module.split(".")[0] if ref is not None else None
+            return name if provenance in SQLMODEL_MODULES else None
+        return None
+
+    @property
+    def table_keyword_true(self) -> bool:
+        """Whether the class keyword ``table=True`` is literally present.
+
+        Only the literal True marks a SQLModel table; ``table=False`` (and
+        a computed value) marks a class that is NOT one, and guessing True
+        there would invent tables.
+        """
+        value = self.keywords.get("table")
+        return isinstance(value, ast.Constant) and value.value is True
+
+    def is_sqlmodel_table(self, idx: "FileIndex", sqlmodel_names: frozenset[str]) -> bool:
+        """Whether this class is a SQLModel table (``table=True`` on a SQLModel base).
+
+        Args:
+            idx: The owning file index (import provenance).
+            sqlmodel_names: Simple names of classes derived from SQLModel
+                across ALL scanned files (the SQLModel closure `scan`
+                computes before emission, e.g. a shared ``UserBase``).
+
+        Returns:
+            bool: True only for ``class X(<SQLModel base>, table=True)``.
+        """
+        if not self.table_keyword_true:
+            return False
+        return any(idx.base_is_sqlmodel(base, sqlmodel_names) for base in self.bases)
+
     # -- Classification ----------------------------------------------------
 
     def is_pure_base(self, idx: "FileIndex") -> bool:
@@ -492,7 +598,7 @@ class ClassRecord:
             self.tablename_literal is not None
             or self.tablename_expr is not None
             or self.tablename_func is not None
-            or "table" in self.keywords
+            or self.table_keyword_true
         )
         if has_facts:
             return True
@@ -765,6 +871,32 @@ class FileIndex:
             return True
         return name in model_names
 
+    def base_is_sqlmodel(self, name: str, sqlmodel_names: frozenset[str]) -> bool:
+        """Whether one base simple name makes its class a SQLModel class.
+
+        The same fail-closed shape as `base_is_declarative`: a denylisted
+        provenance or a locally defined namesake vetoes the SQLModel
+        reading; otherwise the name is a SQLModel root when it is imported
+        from ``sqlmodel`` (alias-aware — ``from sqlmodel import SQLModel as
+        Model``), is the exact conventional name ``SQLModel``, or belongs
+        to the cross-file SQLModel closure.
+
+        Args:
+            name: The base's simple name.
+            sqlmodel_names: Simple names of SQLModel-derived classes so far.
+
+        Returns:
+            bool: True only when the base derives from ``SQLModel``.
+        """
+        if self._import_denied(name) or name in self.locally_denied_base_names:
+            return False
+        ref = self.imports.get(name)
+        if ref is not None and ref.name == SQLMODEL_ROOT_NAME:
+            return ref.module.split(".")[0] in SQLMODEL_MODULES
+        if name == SQLMODEL_ROOT_NAME:
+            return True
+        return name in sqlmodel_names
+
     @staticmethod
     def _literal_name_arg(call: ast.Call) -> bool:
         return bool(call.args) and isinstance(call.args[0], ast.Constant) and isinstance(
@@ -778,7 +910,9 @@ class FileIndex:
                     visit(child, stack + [child.name])
                 elif isinstance(child, ast.ClassDef):
                     qname = ".".join(stack + [child.name])
-                    self.classes.append(ClassRecord(qname, child, ".".join(stack)))
+                    self.classes.append(
+                        ClassRecord(qname, child, ".".join(stack), self.imports)
+                    )
                     visit(child, stack + [child.name])
                 else:
                     visit(child, stack)
@@ -819,7 +953,9 @@ def loc(relpath: str, node: ast.AST) -> dict:
     return {"file": relpath, "line": node.lineno, "col": node.col_offset}
 
 
-def _symbol_resource(relpath: str, rec: ClassRecord, name_unresolved: bool) -> dict:
+def _symbol_resource(
+    relpath: str, rec: ClassRecord, name_unresolved: bool, table_name: str | None = None
+) -> dict:
     """The graph class-symbol resource for one declarative class.
 
     Args:
@@ -828,6 +964,8 @@ def _symbol_resource(relpath: str, rec: ClassRecord, name_unresolved: bool) -> d
         name_unresolved: Detector assertion that this class's tablename is
             unresolved (true for table candidates the detector cannot name;
             false for pure bases and literal-named classes).
+        table_name: The resolved table name when the detector has one
+            (a declared literal, or the name SQLModel derives at runtime).
 
     Returns:
         dict: A ``gateforge.class`` resource consumed by the symbol table.
@@ -840,8 +978,10 @@ def _symbol_resource(relpath: str, rec: ClassRecord, name_unresolved: bool) -> d
     }
     if rec.bases:
         attrs["baseNames"] = list(rec.bases)
-    if rec.tablename_literal is not None:
-        attrs["tableName"] = rec.tablename_literal
+    if table_name is None:
+        table_name = rec.tablename_literal
+    if table_name is not None:
+        attrs["tableName"] = table_name
     return {
         "schemaVersion": 1,
         "id": f"sqlalchemy.class:{relpath}:{rec.qname}",
@@ -853,17 +993,24 @@ def _symbol_resource(relpath: str, rec: ClassRecord, name_unresolved: bool) -> d
     }
 
 
-def _table_resource(relpath: str, rec: ClassRecord, provenance: str) -> dict:
-    """The business table resource for a class with a literal tablename.
+def _table_resource(
+    relpath: str, rec: ClassRecord, provenance: str, table_name: str | None = None
+) -> dict:
+    """The business table resource for a class with a resolved tablename.
 
     Args:
         relpath: Repo-root-relative source path.
         rec: The class record.
-        provenance: Tablename provenance label (always ``literal`` here).
+        provenance: Tablename provenance label: ``literal`` for a declared
+            ``__tablename__``, ``sqlmodel-class-name`` for the name
+            SQLModel derives from the class name.
+        table_name: The resolved name (defaults to the declared literal).
 
     Returns:
         dict: A ``sqlalchemy.table`` resource.
     """
+    if table_name is None:
+        table_name = rec.tablename_literal
     return {
         "schemaVersion": 1,
         "id": f"sqlalchemy.table:{relpath}:{rec.qname}",
@@ -872,14 +1019,14 @@ def _table_resource(relpath: str, rec: ClassRecord, provenance: str) -> dict:
         "location": loc(relpath, rec.node),
         "detectorVersion": VERSION,
         "attributes": {
-            "resourceName": rec.tablename_literal,
+            "resourceName": table_name,
             "classQname": rec.qname,
             "scope": rec.scope or "module",
-            "tableName": rec.tablename_literal,
+            "tableName": table_name,
             "tablenameProvenance": provenance,
             "hasTableArgs": rec.has_table_args,
             "tableArgsSchema": rec.table_args_schema,
-            "tableKeywordTrue": "table" in rec.keywords,
+            "tableKeywordTrue": rec.table_keyword_true,
             "abstract": False,
             "baseNames": list(rec.bases),
             **_attribute_facts(rec.column_facts, rec),
@@ -1607,26 +1754,68 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
                     model_names.add(simple)
                     changed = True
 
+    # Pass 0b: the SQLModel closure, to a fixpoint over ALL scanned
+    # files. A class deriving from ``SQLModel`` (or from another
+    # SQLModel-derived class in any file) enters it; the same
+    # fail-closed provenance rules apply, so a Pydantic namesake never
+    # does. Needed for the split-base style the FastAPI template ships:
+    # ``class UserBase(SQLModel)`` + ``class User(UserBase, table=True)``.
+    sqlmodel_names: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for idx in indexes.values():
+            for rec in idx.classes:
+                simple = rec.qname.rsplit(".", 1)[-1]
+                if simple in sqlmodel_names:
+                    continue
+                if any(idx.base_is_sqlmodel(base, sqlmodel_names) for base in rec.bases):
+                    sqlmodel_names.add(simple)
+                    changed = True
+
+    sqlmodel_closure = frozenset(sqlmodel_names)
+
     # Pass 1: class symbols + business tables + typed unresolved + signals.
     for relpath in sorted(indexes):
         idx = indexes[relpath]
         for rec in idx.classes:
-            if rec.is_table_candidate(idx, model_names) or rec.is_pure_base(idx):
-                last_segment_unresolved = (
-                    rec.tablename_literal is None and not rec.is_pure_base(idx)
+            candidate = rec.is_table_candidate(idx, model_names)
+            # SQLModel derives an undeclared table name at runtime by
+            # lowercasing the class name — a name the AST can see, so it
+            # is a fact, not a guess (any OTHER declared name source —
+            # a literal, an expression, a method — stays unresolved).
+            derived_name = (
+                rec.qname.rsplit(".", 1)[-1].lower()
+                if rec.is_sqlmodel_table(idx, sqlmodel_closure)
+                and rec.tablename_literal is None
+                and rec.tablename_expr is None
+                and rec.tablename_func is None
+                else None
+            )
+            table_name = rec.tablename_literal or derived_name
+            if candidate or rec.is_pure_base(idx):
+                resources.append(
+                    _symbol_resource(
+                        relpath,
+                        rec,
+                        table_name is None and not rec.is_pure_base(idx),
+                        table_name,
+                    )
                 )
-                resources.append(_symbol_resource(relpath, rec, last_segment_unresolved))
             if rec.is_pure_base(idx):
                 continue  # bases never materialize; the symbol table owns them
-            if rec.tablename_literal is not None:
-                resources.append(_table_resource(relpath, rec, "literal"))
-                table_name = rec.tablename_literal
+            if table_name is not None:
+                provenance = (
+                    "literal" if rec.tablename_literal is not None
+                    else SQLMODEL_CLASS_NAME_PROVENANCE
+                )
+                resources.append(_table_resource(relpath, rec, provenance, table_name))
                 identity = _identity_signal(rec, relpath, table_name, rec.node)
                 if identity is not None:
                     signals.append(identity)
                 signals.extend(_declaration_signals(rec, relpath, table_name))
                 unresolved.extend(_signal_unresolved_entries(rec, relpath, identity is not None))
-            elif rec.is_table_candidate(idx, model_names):
+            elif candidate:
                 unresolved.append(_unresolved_entry(relpath, rec))
 
     # Pass 2: direct Table("name", ...) declarations.

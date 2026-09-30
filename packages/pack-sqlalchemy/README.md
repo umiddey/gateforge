@@ -22,9 +22,11 @@ with `ast.parse` and reports:
 | Source construct | Emitted as |
 | --- | --- |
 | Declarative class with literal `__tablename__` (legacy `declarative_base()` and 2.0 `DeclarativeBase` styles) | `sqlalchemy.table` resource + class symbol |
+| SQLModel class (`class X(SQLModel, table=True)` or a shared `SQLModel` base) with no `__tablename__` | `sqlalchemy.table` resource named by SQLModel's own rule (the lowercased class name, provenance `sqlmodel-class-name`) + class symbol |
+| SQLModel class WITHOUT `table=True` (a plain class, or `table=False`) | nothing — it is not a table |
 | Direct `Table("name", ...)` call | `sqlalchemy.table` resource (provenance `table-call-first-arg`) |
 | Abstract base (`__abstract__ = True`) or `DeclarativeBase` subclass with no table facts | class symbol only (`abstract: true` / base); never a business resource |
-| Class whose tablename is a decorated function, f-string, call, name ref, or SQLModel `table=True` | class symbol with `tablenameUnresolved: true` + typed `unresolved` entry |
+| Class whose tablename is a decorated function, f-string, call, name ref, or `table=True` on a non-SQLModel base | class symbol with `tablenameUnresolved: true` + typed `unresolved` entry |
 | Class with bases but no literal tablename anywhere | class symbol + `no_tablename_source` unresolved entry (the graph resolves through its repo-wide symbol table when a base carries a literal — same-file AND cross-file) |
 | Plain classes (mixins, no bases, no table facts) | nothing |
 | Malformed Python file | `PARSE_ERROR` finding with a line number; the file contributes no resources (GF-19) |
@@ -33,7 +35,8 @@ with `ast.parse` and reports:
 
 - **Business table resource** — `kind: "sqlalchemy.table"`, identity in
   `attributes.resourceName`, plus `classQname`, `scope`, `tableName`,
-  `tablenameProvenance` (`literal` | `table-call-first-arg`),
+  `tablenameProvenance` (`literal` | `table-call-first-arg` |
+  `sqlmodel-class-name`),
   `hasTableArgs`/`tableArgsSchema` (literal `schema` from
   `__table_args__`), `tableKeywordTrue`, `abstract`, `baseNames`.
 - **Class-symbol resource** — `kind: "gateforge.class"` with the graph's
@@ -43,9 +46,9 @@ with `ast.parse` and reports:
 - **Unresolved entries** — `{code, detail, location}` at the class
   statement; codes: `computed_tablename` (decorator count + return
   expression kind retained in full, GF-02), `table_name_derived_runtime`
-  (`table=True`), `no_tablename_source`. The graph retires an entry it
-  resolves and synthesizes `inherited_tablename_unresolved` when it
-  cannot.
+  (`table=True` on a non-SQLModel base), `no_tablename_source`. The graph
+  retires an entry it resolves and synthesizes
+  `inherited_tablename_unresolved` when it cannot.
 - **Findings** — `DUPLICATE_TABLE_NAME` (GF-20, **base-qualified**:
   a same-name group is flagged unless every pair provably sits on a
   different declarative Base root — separate `MetaData` at runtime — so
