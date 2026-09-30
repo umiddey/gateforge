@@ -694,10 +694,14 @@ What the job does, in order:
    narrows what the run grades;
 4. runs `gateforge run -- --changed --scope full`, so your recipe owns
    reset/seed/services and the engine still owns every verdict. **Full scope
-   is the default**: narrowing the run is your edit, not the template's;
+   is the default**: narrowing the run is your edit, not the template's. The
+   run prints straight into the job log, so the progress stream shows each
+   test as it finishes;
 5. reads the verdict out of `report.json` (never out of a parsed log line);
 6. uploads `report.json`, `receipt.json`, `execution-result.json` and
-   `ci-run.log` as artifacts, `when: always` / `if: always()`.
+   `failures.json` as artifacts, `when: always` / `if: always()`. The
+   suite's raw output is never written to a file or uploaded: it passes
+   through the run and can carry your app's secrets.
 
 You fill in two things: the recipe (`.gateforge/runtime.yml`, above) and the
 secret variables. On GitLab they are protected, masked CI variables; on

@@ -166,8 +166,11 @@ describe('gateforge enforce --witnessed', () => {
       // The verdict comes from the report json, not from a parsed log.
       expect(script).toContain('.gateforge/test-gates/report.json');
       expect(script).toContain('summary');
-      // The run log is a file, so the job can upload it.
-      expect(script).toContain('.gateforge/test-gates/ci-run.log');
+      // The run prints straight into the job log, so the progress stream
+      // is visible while the suite runs; nothing captures the runner's raw
+      // output into a file (it can carry the app's secrets).
+      expect(script).not.toContain('ci-run.log');
+      expect(script).not.toMatch(/gateforge run[^\n]*>/);
 
       const artifacts = job?.['artifacts'] as { when?: string; paths?: string[] };
       expect(artifacts.when).toBe('always');
@@ -175,9 +178,12 @@ describe('gateforge enforce --witnessed', () => {
         expect.arrayContaining([
           '.gateforge/test-gates/report.json',
           '.gateforge/test-gates/receipt.json',
-          '.gateforge/test-gates/ci-run.log',
+          '.gateforge/test-gates/failures.json',
         ]),
       );
+      // The runner's raw output is never an artifact: the secret-screened
+      // failures.json is what a reviewer downloads.
+      expect(artifacts.paths?.some((path) => path.endsWith('.log'))).toBe(false);
       // The recipe log may hold secrets: never an artifact by default.
       expect(artifacts.paths).not.toContain('.gateforge/test-gates/run-recipe');
 
@@ -209,7 +215,8 @@ describe('gateforge enforce --witnessed', () => {
 
       expect(runs).toContain('gateforge run -- --changed --scope full');
       expect(runs).toContain('.gateforge/test-gates/report.json');
-      expect(runs).toContain('.gateforge/test-gates/ci-run.log');
+      expect(runs).not.toContain('ci-run.log');
+      expect(runs).not.toMatch(/gateforge run[^\n]*>/);
       // The base branch is what the scope provider diffs against.
       const forwarding = steps.find((step) => (step.run ?? '').includes('GITHUB_BASE_REF'));
       expect(forwarding, 'a step must forward the pull-request base ref').toBeDefined();
@@ -224,7 +231,8 @@ describe('gateforge enforce --witnessed', () => {
       expect(upload, 'the witnessed job must upload its evidence').toBeDefined();
       expect(upload?.if).toBe('always()');
       expect(String(upload?.with?.['path'])).toContain('.gateforge/test-gates/receipt.json');
-      expect(String(upload?.with?.['path'])).toContain('.gateforge/test-gates/ci-run.log');
+      expect(String(upload?.with?.['path'])).toContain('.gateforge/test-gates/failures.json');
+      expect(String(upload?.with?.['path'])).not.toContain('.log');
       expect(String(upload?.with?.['path'])).not.toContain('run-recipe');
 
       const source = readFileSync(repo.path(PATHS.github), 'utf8');
@@ -335,10 +343,16 @@ describe('gateforge enforce --witnessed', () => {
         ) as { verifierKeyId: string; verdictSummary: { blocking: number } };
         expect(receipt.verifierKeyId).toBe('managed-run-key');
         expect(receipt.verdictSummary.blocking).toBe(0);
-        // The artifacts the job promises really exist.
-        for (const artifact of ['report.json', 'receipt.json', 'ci-run.log']) {
+        // The progress stream reached the job log live (the run is not
+        // captured into a file and re-printed afterwards).
+        expect(output).toContain('gateforge: run started');
+        expect(output).toMatch(/gateforge: run finished — \d+ passed/);
+        // The artifacts the job promises really exist, and no file of
+        // raw run output was written for anyone to upload.
+        for (const artifact of ['report.json', 'receipt.json', 'execution-result.json']) {
           expect(existsSync(join(repo.root, '.gateforge/test-gates', artifact)), artifact).toBe(true);
         }
+        expect(existsSync(join(repo.root, '.gateforge/test-gates/ci-run.log'))).toBe(false);
       } finally {
         await proxy.stop();
         app.stop();

@@ -31,7 +31,11 @@ export const GITHUB_WITNESSED_PATH = '.github/workflows/gateforge-witnessed.yml'
 
 /**
  * The job-scoped shell block: private workspace, base-sha forwarding
- * into BOTH supervised commands, the managed run, and the run log.
+ * into BOTH supervised commands, and the managed run. The run prints
+ * straight into the job log, so the progress stream (on by default
+ * under CI=true) is visible while the suite runs. Nothing captures that
+ * output into a file: the suite's own output passes through it and may
+ * carry the app's secrets, so it must never become an artifact.
  * Unindented, so each provider indents it into its own YAML.
  */
 const WITNESSED_RUN_SCRIPT: readonly string[] = [
@@ -51,12 +55,11 @@ const WITNESSED_RUN_SCRIPT: readonly string[] = [
   "# The app lifecycle lives in .gateforge/runtime.yml (reset, seed,",
   '# services, teardown). Full scope is the default: narrowing the run',
   "# is the owner's edit, not the template's.",
-  'if run_gateforge run -- --changed --scope full > .gateforge/test-gates/ci-run.log 2>&1; then',
+  'if run_gateforge run -- --changed --scope full; then',
   '  run_status=0',
   'else',
   '  run_status=$?',
   'fi',
-  'cat .gateforge/test-gates/ci-run.log',
 ];
 
 /**
@@ -90,8 +93,9 @@ export function renderGitlabWitnessedTemplate(): string {
 # the app's stack — that is the recipe's job.
 #
 # Secret variables come from protected, masked CI variables; this job
-# never prints one. The recipe log (.gateforge/test-gates/run-recipe/)
-# is NOT an artifact: it may contain the app's own secrets.
+# never prints one. Neither the recipe log (.gateforge/test-gates/run-recipe/)
+# nor the suite's raw output is an artifact: both may contain the app's own
+# secrets. failures.json is the secret-screened failure diagnosis.
 #
 # GATEFORGE_WITNESS_VERIFIER_KEY and GATEFORGE_APPROVED_POLICY_DIGEST are
 # required; \`gateforge run\` fails preflight and names the missing one.
@@ -118,7 +122,7 @@ ${ciScriptBlock(WITNESSED_VERDICT_SCRIPT)}
       - .gateforge/test-gates/report.json
       - .gateforge/test-gates/receipt.json
       - .gateforge/test-gates/execution-result.json
-      - .gateforge/test-gates/ci-run.log
+      - .gateforge/test-gates/failures.json
     expire_in: 90 days
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -184,8 +188,7 @@ jobs:
           # check. Full scope is the default: narrowing the run is the
           # owner's edit, not the template's.
           run_status=0
-          ./node_modules/.bin/gateforge run -- --changed --scope full > .gateforge/test-gates/ci-run.log 2>&1 || run_status=$?
-          cat .gateforge/test-gates/ci-run.log
+          ./node_modules/.bin/gateforge run -- --changed --scope full || run_status=$?
           if [ -f .gateforge/test-gates/report.json ]; then
             node -e 'const fs=require("node:fs");const report=JSON.parse(fs.readFileSync(".gateforge/test-gates/report.json","utf8"));const summary=report.summary||{};console.log("Gateforge CI: verdict "+String(summary.satisfied)+" satisfied, "+String(summary.waived)+" waived, "+String(summary.blocking)+" blocking of "+String(summary.obligations)+" obligations (scope "+String((report.scope||{}).mode)+")");for(const entry of (report.blocking||[]).slice(0,20)){console.log("::error::"+entry.kind+": "+(entry.detail||""))}'
           else
@@ -198,13 +201,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gateforge-witnessed
-          # The recipe log (.gateforge/test-gates/run-recipe/) is NOT
-          # uploaded: it may contain the app's own secrets.
+          # Neither the recipe log (.gateforge/test-gates/run-recipe/) nor
+          # the suite's raw output is uploaded: both may contain the app's
+          # own secrets. failures.json is the secret-screened diagnosis.
           path: |
             .gateforge/test-gates/report.json
             .gateforge/test-gates/receipt.json
             .gateforge/test-gates/execution-result.json
-            .gateforge/test-gates/ci-run.log
+            .gateforge/test-gates/failures.json
           if-no-files-found: warn
           retention-days: 90
 `;
