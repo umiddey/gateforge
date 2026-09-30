@@ -334,4 +334,4 @@ npx gateforge test-gates --test "creates an account" --result-only
 
 Next: `QUICKSTART.md` for the shortest path, `TEST-ENVIRONMENT.md` for
 the environment rules, `RUNNER-NEUTRAL-EVIDENCE.md` for a non-Playwright
-runner, and `UPGRADE-0.6-to-0.7.md` when you move versions.
+runner, and `UPGRADE-0.7-to-0.8.md` when you move versions.

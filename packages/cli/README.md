@@ -4,12 +4,13 @@ The gateforge command-line interface: initialize a project, discover
 resources and classification signals, inspect automatic decisions, reuse a
 repository's existing tests, evaluate obligations, run the supervised E2E
 gate, enforce the exact staged candidate, and maintain baselines.
-**0.7.0 vs. published 0.6.3:** external key ring, owner-approved docs exclusions, result-only runs, surface-doctor, protocol-based package-compatibility guard, diagnostic context, trusted `baseURL`/`storageState`, and the shared-dist spool race fix.
+**0.8.0 vs. published 0.7.1:** one-command local proof (`gateforge run`), witnessed single tests (`--test`), test-only re-seal, owner-chosen strictness and quarantine, a strict run preflight in the doctor, CI progress stream and witnessed CI templates, adapter kit and scaffold, an engine-owned queue observer for `task` cases, timing chaos and twin path coverage. Upgrading: [UPGRADE-0.7-to-0.8](guides/UPGRADE-0.7-to-0.8.md).
 
 ## Start here
 
 - [Quickstart](guides/QUICKSTART.md)
 - [Test environment](guides/TEST-ENVIRONMENT.md)
+- [Upgrade from 0.7 to 0.8](guides/UPGRADE-0.7-to-0.8.md)
 - [Upgrade from 0.6 to 0.7](guides/UPGRADE-0.6-to-0.7.md)
 - [Runners other than Playwright](guides/RUNNER-NEUTRAL-EVIDENCE.md)
 
