@@ -247,6 +247,26 @@ is installed but cannot start on this machine: <the loader's line>` and prints
 
 **A cache you choose:** if you set `PLAYWRIGHT_BROWSERS_PATH` (a common way to keep browsers in a CI cache mount), install into THAT directory and leave the variable set for the run. The supervised Playwright child receives it, so `enforcement doctor` and the run read the same cache — the doctor never reports one directory ready while the tests launch from another.
 
+## Install the browsers the ENGINE pins
+
+**Rule:** Before the first witnessed run, make sure the Chromium that `@gate-forge/pack-playwright` pins is installed too. `gateforge enforcement doctor` reports it on its own `engine-browser` line and prints the exact command; the run preflight refuses the run on the same line.
+
+**Why:** Your tests and the engine do not share a browser. Gateforge drives its OWN Chromium for every `evidence.ui.action`, `evidence.visible.confirm` and `evidence.persistence.verify` receipt, and for every behavior case on the `engine-browser` channel — that browser comes from the Playwright release the evidence pack pins, which is usually a different release from the one you installed. Your runner's readiness can be fully green while the engine's build is absent, and then the run dies inside the witness with `Executable doesn't exist` instead of failing where you could fix it.
+
+**Example:** Run the command the `engine-browser` line prints, verbatim:
+
+```text
+engine-browser: the engine-owned browser (playwright 1.58.2 pinned by @gate-forge/pack-playwright) is NOT ready:
+its pinned builds chromium-1208, chromium_headless_shell-1208 are missing from '<cache>' — your test runner's own
+Chromium is a different Playwright release and cannot serve it, so every engine-browser case fails with
+"Executable doesn't exist"; fix: run `PLAYWRIGHT_BROWSERS_PATH='<cache>' PLAYWRIGHT_SKIP_BROWSER_GC=1 node
+'<repo>/node_modules/playwright/cli.js' install chromium`
+```
+
+Two details in that command are load-bearing. It names the engine's OWN `cli.js` by absolute path because `npx playwright install` resolves the Playwright your command's directory reaches — YOURS — and would install the revision your cache already holds, leaving the engine exactly as broken. And `PLAYWRIGHT_SKIP_BROWSER_GC=1` is required: Playwright's installer otherwise garbage-collects every build its own registry does not list, so it would DELETE your Chromium out of a shared cache and trade one broken run for another.
+
+**Which repositories need it:** only those that actually open the engine browser — a Playwright runner (its evidence receipts are all engine-driven) or a behavior policy declaring an `engine-browser` case. A pytest or API-only repository is told `engine browser not required` and is never asked to install anything.
+
 ## Keep the runner quiet
 
 **Rule:** Keep concurrent work below the machine's CPU count. Prefer a quiet runner for witnessed tests.

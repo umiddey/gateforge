@@ -122,6 +122,7 @@ describe('doctor run section (report-only by default)', () => {
         'verifier-key',
         'approved-policy',
         'runner',
+        'engine-browser',
         'interpreter',
         'bytecode-safety',
         'target',

@@ -75,6 +75,12 @@ import {
   inspectBrowserBuilds,
   unlaunchableBuilds,
 } from '../playwright-browsers.js';
+import {
+  engineBrowserRequirement,
+  engineBrowserSummary,
+  inspectEngineBrowserBuilds,
+  resolveEngineBrowserInstall,
+} from '../engine-browser.js';
 
 export const ENFORCEMENT_USAGE = 'usage: gateforge enforcement doctor [--json] [--strict-preflight]';
 
@@ -458,6 +464,66 @@ function playwrightReadiness(cwd: string, env: NodeJS.ProcessEnv): { status: Doc
 function playwrightInstallCwd(cwd: string): string {
   const config = findPlaywrightConfig(cwd);
   return config === null ? resolve(cwd) : dirname(resolve(cwd, config));
+}
+
+/**
+ * Readiness of the ENGINE-OWNED browser — the Chromium
+ * `@gate-forge/pack-playwright` pins and `EngineBrowserManager` drives
+ * for every `engine-browser` case, `ui.action` and `visible.confirm`.
+ *
+ * This is a separate fact from the `runner` line on purpose. The runner
+ * line answers "can the CONSUMER's tests launch a browser"; this one
+ * answers "can the ENGINE drive its own". A consumer whose Playwright is
+ * a different release from the pack's pin makes those two answers
+ * disagree — the consumer's Chromium 1234 installed and correct, the
+ * engine's 1208 absent — and reporting only the first is what let a
+ * first witnessed run die in the witness on `Executable doesn't exist`
+ * after the runner line said `ok`.
+ *
+ * The line is additive and leaves `runner` unchanged. A Playwright runner
+ * conservatively requires the engine browser; other runners without an
+ * `engine-browser` behavior case report that it is not required.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   config: the loaded repository config.
+ *   env: operator environment (`PLAYWRIGHT_BROWSERS_PATH`).
+ *
+ * Returns:
+ *   {status, detail}: fail when a required engine build is missing or
+ *   cannot start, warn when the requirement exists but cannot be
+ *   observed, ok otherwise.
+ */
+function engineBrowserReadiness(
+  cwd: string,
+  config: GateforgeConfig,
+  env: NodeJS.ProcessEnv,
+): { status: DoctorStatus; detail: string } {
+  const requirement = engineBrowserRequirement(cwd, config.runner, config.behaviorPolicy);
+  if (!requirement.required) return { status: 'ok', detail: `engine browser not required — ${requirement.reason}` };
+  const resolution = resolveEngineBrowserInstall(cwd);
+  if (resolution.kind === 'not-installed') {
+    return {
+      status: 'warn',
+      detail:
+        `${requirement.reason}, but @gate-forge/pack-playwright is not installed under this repository — ` +
+        'the engine browser could not be inspected',
+    };
+  }
+  if (resolution.kind === 'no-pinned-playwright') {
+    return {
+      status: 'warn',
+      detail:
+        `${requirement.reason}, but the installed @gate-forge/pack-playwright resolves no readable pinned ` +
+        'playwright release — the engine browser could not be inspected',
+    };
+  }
+  const readiness = inspectEngineBrowserBuilds(resolution.install, env);
+  const summary = engineBrowserSummary(readiness);
+  if (readiness.missing.length > 0 || readiness.unlaunchable.length > 0) {
+    return { status: 'fail', detail: summary };
+  }
+  return { status: 'ok', detail: summary };
 }
 
 /**
@@ -863,6 +929,23 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
       : {
           status: 'fail' as DoctorStatus,
           detail: 'runner readiness was not checked: .gateforge.yml could not be loaded, so the configured runner is unknown',
+        }),
+  });
+
+  // 2b. The ENGINE-OWNED browser, when this repository actually
+  //     declares engine-controlled browser evidence. The `runner` line
+  //     above reports the CONSUMER's builds and stays exactly as it was:
+  //     a consumer on a different Playwright release is precisely the
+  //     case where the two answers disagree, so collapsing them would
+  //     reproduce the false all-clear this line exists to end.
+  checks.push({
+    id: 'engine-browser',
+    ...(configOk
+      ? engineBrowserReadiness(io.cwd, loadConfigAt(io.cwd), io.env)
+      : {
+          status: 'warn' as DoctorStatus,
+          detail:
+            'engine browser readiness was not checked: .gateforge.yml could not be loaded, so no engine-browser requirement is known',
         }),
   });
 
