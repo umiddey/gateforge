@@ -63,6 +63,10 @@
 - **Engine-owned browser readiness:** the doctor and the run preflight also carry a new `engine-browser` line, separate from `runner`. `runner` reports the browser YOUR tests launch; `engine-browser` reports the one the ENGINE drives for every `evidence.ui.action` / `visible.confirm` / `persistence.verify` receipt and every `engine-browser` behavior case — the Chromium `@gate-forge/pack-playwright` pins, which is usually a different release from yours. A FAIL names that release's pinned builds and the exact command to install them: the engine's own `cli.js` by absolute path (not `npx playwright install`, which resolves YOUR release and installs the revision your cache already holds), with `PLAYWRIGHT_SKIP_BROWSER_GC=1` so the install cannot delete your own builds from a shared cache. The line demands a browser only from a repository that opens one — a Playwright runner, or a behavior policy declaring an `engine-browser` case; a pytest or API-only repository reads `engine browser not required`. No config key is added and no existing check id or wording changes.
 - **Reports** gain additive fields only (`strictness`, `quarantine`, `run`, `engine` provenance in text reports). Existing JSON keys, cause codes and exit codes are unchanged.
 - **Queue observation** needs `bullmq` and `ioredis` only when you configure `queueObserver`; they are optional peers of `@gate-forge/witness`.
+- **Declared test-service environment:** names your runtime document already lists in `envAllowlist` now reach the supervised tests and the wired test enumeration; no other variable does, and the values come only from your environment. Engine `GATEFORGE_*` names and process-loader controls (`NODE_OPTIONS`, `NODE_PATH`, `LD_*`, `DYLD_*`, `PYTHONPATH`, `PYTHONHOME`, `BASH_ENV`, `ENV`) are refused even when listed, naming the entry. The document is part of the trusted policy digest, so adding a name is an owner approval. No list forwards nothing new, and you do not need to add the key: see `TEST-ENVIRONMENT.md`, "Declare test-service environment variables".
+- **A Playwright project that declares `use.storageState` now gets that session.** A supervised run uses a synthesized config, never yours, so until now a `setup` project's saved state was silently omitted and every authenticated journey ran logged out. The declared path is handed to that project alone and must stay inside the repository: containment is checked on the real filesystem from the nearest existing ancestor, so a file your setup test creates during the run is fine, while a path that escapes directly or through a symlink, a dangling link, a URL and an empty value stop the run and name the project, the value and the fix. A relative path resolves against the runner's working directory; the setup project keeps no state of its own; an operator-set `GATEFORGE_SESSION_STATE` still outranks every project declaration, and the declarations it outranks are not read. If you already set that variable, nothing changes for you: see `TEST-ENVIRONMENT.md`, "Or let a setup project save its own state".
+- **Reads from a rendered list:** a `read` may name its entities in the response rows instead of the path, with the new `collection: { rowsKey?, idKey }` shape in the new-options table below. The shape is declared, never inferred, and it is opt-in: without it a read binds `{id}` from the path exactly as in 0.7.x. See `CONNECT-YOUR-PROJECT.md`.
+- **Declared volatile fields are honored:** an adapter that already declared `volatileFields` had the list accepted and then dropped before the run, so a field the server rewrites failed the exact-value echo as `EVIDENCE_VALUE_MISMATCH`. The declaration now survives admission, so those keys are skipped by the echo and named in the report. An undeclared key still blocks, a malformed list is refused at load, and an adapter that declares nothing is unchanged.
 
 ## New options (all off by default)
 
@@ -79,6 +83,17 @@
 | `.gateforge/runtime.yml` recipe for `gateforge run` | file | none; `gateforge run` works without it |
 | `test-gates --test <selector> --result-only`, `--chaos <seed>` | flags | not used |
 | `enforce --ci gitlab\|github --witnessed` | command | static CI job only |
+| `collection: { rowsKey?, idKey }` on an adapter `read` | evidence adapter | absent: a read binds `{id}` from the path |
+
+## Existing keys that changed meaning
+
+No repository has to write any of them. A key you have not declared behaves
+exactly as in 0.7.x; a key you already declared gets the effect below.
+
+| Key | Where | Absent (unchanged) |
+|---|---|---|
+| `envAllowlist` | `.gateforge/runtime.yml` | no extra variable reaches tests or enumeration |
+| `volatileFields` | evidence adapter | no key is exempt from the exact-value echo |
 
 ## If something breaks
 
@@ -91,4 +106,8 @@
 | A doctor `runner` FAIL naming browser builds | Run the printed `npx playwright install …` in the printed directory. |
 | A doctor `runner` FAIL saying an installed browser cannot start | Run the printed `npx playwright install-deps …` command with root or sudo available, then run the doctor again. |
 | A doctor `engine-browser` FAIL naming the engine's pinned builds | Run the printed command verbatim. Do not substitute `npx playwright install` — it installs YOUR Playwright release, not the engine's, and leaves the engine browser just as broken. Keep `PLAYWRIGHT_SKIP_BROWSER_GC=1` in the command so your own cached builds are not garbage-collected. |
+| A run stops naming a project, its `storageState` value and the fix | The declared path must stay inside the repository; the file itself need not exist yet, your setup test may create it during the run. Fix the path, not the timing — never point it outside the repository or inline the cookies. |
 | Exit 2 on `--scope changed` in a merge-request pipeline | Provide the base commit (for example a deeper clone) or configure the change provider explicitly, as the message says. |
+| `runtime envAllowlist cannot grant '…' to test code` | Remove that entry. Engine `GATEFORGE_*` names and process-loader controls are never forwarded to test code, listed or not; the run refuses before any test starts. |
+| `observe.read.collection requires method 'GET'`, or `must not be declared on a path carrying '{id}'` | The collection shape belongs on a `read` + `GET` whose path carries no `{id}`. A by-id read keeps its own shape; move the declaration to the read that actually renders the list. |
+| `EVIDENCE_VALUE_MISMATCH` on a field the server rewrites on its own | Declare that field in the adapter's `volatileFields`. The declaration is now honored end to end; it is never inferred from the response. |
