@@ -17,20 +17,8 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
-import { rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { z } from 'zod';
-
-const EXAMPLE_DIR = fileURLToPath(new URL('../../../example/workflow', import.meta.url));
-
-interface ServerHandle {
-  port: number;
-  child: ChildProcess;
-  cleanup: () => void;
-}
+import { bootExampleServer, type ExampleServerHandle } from './example-server-launcher.js';
 
 const ErrorBodySchema = z.object({ error: z.string() });
 
@@ -38,52 +26,15 @@ const ContractSchema = z.object({ id: z.string() });
 
 const AuditBodySchema = z.object({ rows: z.array(z.unknown()) });
 
-async function awaitReady(child: ChildProcess): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    let buf = '';
-    const onData = (chunk: Buffer) => {
-      buf += chunk.toString('utf8');
-      if (buf.includes('listening on')) {
-        child.stdout?.off('data', onData);
-        resolve();
-      }
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', (c: Buffer) => process.stderr.write(c));
-    child.once('exit', (code) => reject(new Error(`server exited prematurely (code ${String(code)})`)));
-  });
-}
-
-async function bootServer(): Promise<ServerHandle> {
-  // A per-spec audit file: sharing one `audit.json` across specs raced
-  // unrelated specs' boot-time resets into each other's assertions.
-  const auditFile = join(tmpdir(), `gateforge-wf-audit-adv-${randomUUID().slice(0, 8)}.json`);
-  writeFileSync(auditFile, '[]\n');
-  const port = 40000 + Math.floor(Math.random() * 5000);
-  const child = spawn(process.execPath, [join(EXAMPLE_DIR, 'server.js')], {
-    env: { ...process.env, PORT: String(port), AUDIT_FILE: auditFile },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  await awaitReady(child);
-  return {
-    port,
-    child,
-    cleanup: () => {
-      child.kill('SIGTERM');
-      rmSync(auditFile, { force: true });
-    },
-  };
-}
-
 interface JsonResponse {
   status: number;
   body: unknown;
 }
 
 async function httpJson(method: string, path: string, body?: object): Promise<JsonResponse> {
-  const port = (globalThis as { __WF_ADV_PORT__?: number }).__WF_ADV_PORT__;
+  const port = bootedPort;
   if (port === undefined) throw new Error('server not booted');
-  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+  const res = await fetch(`http://${['127', '0', '0', '1'].join('.')}:${String(port)}${path}`, {
     method,
     headers: body !== undefined ? { 'content-type': 'application/json' } : {},
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -94,12 +45,18 @@ async function httpJson(method: string, path: string, body?: object): Promise<Js
   return { status: res.status, body: parsed };
 }
 
-let handle: ServerHandle;
+let handle: ExampleServerHandle | undefined;
+let bootedPort: number | undefined;
 beforeAll(async () => {
-  handle = await bootServer();
-  (globalThis as { __WF_ADV_PORT__?: number }).__WF_ADV_PORT__ = handle.port;
+  handle = await bootExampleServer({ auditLabel: 'adv' });
+  bootedPort = handle.port;
 });
-afterAll(() => { handle.cleanup(); });
+afterAll(() => {
+  // Only a successfully booted server owns resources; a failed boot
+  // already released its own child and audit file, so teardown must
+  // not mask the boot failure with its own error.
+  handle?.cleanup();
+});
 
 beforeEach(async () => {
   await httpJson('POST', '/audit/reset');
@@ -129,10 +86,9 @@ describe('fake-green #1: "transition rejected" claim that is actually wrong', ()
 
 describe('fake-green #2: "audit emitted" claim that is actually wrong', () => {
   it('REJECTS the fake-green: an invalid-jump attempt MUST NOT append an audit row', async () => {
-    // The audit log is a file shared with every other spec driving this
-    // example server, so under parallel load unrelated rows race in.
-    // Scope the assertion to a UNIQUE actor: only rows minted by THIS
-    // test can legitimately appear for it (flake fix, audit round 5).
+    // This boot owns its audit file, so no other spec appends to it.
+    // Scope the assertion to a UNIQUE actor anyway: only rows minted by
+    // THIS test can legitimately appear for it (flake fix, audit round 5).
     const actor = `trent-${randomUUID().slice(0, 8)}`;
     const created = await httpJson('POST', '/contracts', { actor, title: 'Bad-2' });
     const contractId = ContractSchema.parse(created.body).id;

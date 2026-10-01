@@ -502,9 +502,12 @@ npm run typecheck  # tsc --noEmit per package
 
 Node >= 20. TypeScript strict, ESM (NodeNext). Testing policy: retries 0,
 no skips on required flows, red-probe proof for gates, deterministic offline
-runs. Known deviation: pack-workflow carries 2
-skipped cases (a shared-audit e2e flake and a malformed-FSM detector case),
-documented in its test files pending fixes.
+runs.
+
+Workflow test fixtures boot the real example app in an isolated child on an
+OS-assigned loopback port (`listen(0)`) and give every boot its own audit
+file, so parallel specs never collide on a port or on an audit log. No
+consumer-facing default, port, or audit path changes.
 
 Runner budget: the root config caps outer test-file workers at `maxWorkers: 2`
 (`minWorkers: 1`). Each file worker may boot several real browser and runner
