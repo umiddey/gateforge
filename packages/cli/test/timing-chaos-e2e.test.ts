@@ -734,6 +734,8 @@ describe('timing chaos with your own witness: the run owns the plan', () => {
           '--result-only',
           '--chaos',
           String(agreed),
+          '--progress',
+          'stderr',
           '--format',
           'json',
           ...externalPrefix(witness),

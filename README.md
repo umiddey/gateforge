@@ -506,3 +506,9 @@ runs. Known deviation: pack-workflow carries 2
 skipped cases (a shared-audit e2e flake and a malformed-FSM detector case),
 documented in its test files pending fixes.
 
+Runner budget: the root config caps outer test-file workers at `maxWorkers: 2`
+(`minWorkers: 1`). Each file worker may boot several real browser and runner
+children, so a CPU-count-sized outer pool can oversubscribe the CPUs and
+starve them. Files still run in parallel, two at a time. This bounds the test
+runner only — no consumer-facing default, timeout, or retry changes.
+
