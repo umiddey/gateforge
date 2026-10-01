@@ -55,6 +55,7 @@
 import { CAUSE_NEXT_ACTIONS, type CauseCode } from '@gate-forge/core';
 import { WitnessRequestError } from '../fixture/witness-client.js';
 import { SupervisorClient } from './client.js';
+import { readFreezeRequest } from '../discovery/prepare-barrier.js';
 import {
   persistenceIntentsPathFor,
   readPersistenceIntents,
@@ -112,6 +113,16 @@ export interface SpoolDrainHandle {
    *     with a descriptive Error when the bound elapses first.
    */
   whenIntentsForwarded: (count: number, timeoutMs?: number) => Promise<void>;
+  /**
+   * Records what the trusted CLI accepted when it froze and released the
+   * candidate. The final audit then requires the spool to carry EXACTLY
+   * ONE accepted-freeze marker, bound to the same prepared tree and the
+   * same pinned control-spec digest, with every body project's
+   * `testBegin` AFTER it in append order.
+   *
+   * @param marker: the prepared tree and pinned spec digest of that release.
+   */
+  markFreezeRelease: (marker: { preparedTreeId: string; specDigest: string }) => void;
 }
 
 /**
@@ -147,6 +158,25 @@ export function startSupervisorSpoolDrain(options: {
    */
   onTestEvent?: (event: SpoolEvent) => void;
   observeObligations?: readonly string[];
+  /**
+   * The GLOBAL preparation freeze, when this run armed one.
+   *
+   * The drain is the only async pump inside the supervised window, so it
+   * is also where the controller's request is noticed: the trusted CLI
+   * validates the request, validates the prerequisites against the
+   * witness trace, freezes, signs the release and hands back the exact
+   * marker line it appended to this same append-only spool.
+   */
+  freeze?: {
+    /** The engine-owned controller project name. */
+    controllerProject: string;
+    /** Planned projects that must not start before the freeze exists. */
+    bodyProjects: readonly string[];
+    /** Absolute path of the controller's request document. */
+    requestPath: string;
+    /** The trusted CLI's freeze handler; a refusal is recorded as a conflict. */
+    onRequest: (request: unknown) => Promise<void>;
+  };
 }): SpoolDrainHandle {
   const client = new SupervisorClient(options.witnessUrl, options.runToken, options.verifierKey);
   const spoolFile = spoolPathFor(options.stateDir, options.runId);
@@ -191,6 +221,18 @@ export function startSupervisorSpoolDrain(options: {
   let offset = 0;
   let intentsOffset = 0;
   let running = true;
+  // The accepted preparation-freeze marker line, remembered so the final
+  // audit can require the spool to hold exactly that line and every body
+  let freezeMarker: { preparedTreeId: string; specDigest: string } | null = null;
+  let freezeRequestSeen = false;
+  // The freeze handler is deliberately NOT chained onto `settling`. It
+  // waits for the supervisor to seal the prerequisite sessions, and those
+  // seals are produced by THIS drain: chaining the wait in front of them
+  // would put it ahead of the very lifecycle ends it waits for, and the
+  // run could then only leave by timing out. Off-chain, the drain keeps
+  // opening and sealing while the handler polls. `stop` awaits the settled
+  // promise so a late refusal still lands in the conflicts.
+  let freezeSettled: Promise<void> = Promise.resolve();
 
   let settling: Promise<void> = Promise.resolve();
 
@@ -367,6 +409,11 @@ const releaseReachedWaiters = (): void => {
     } catch (error) {
       console.warn(`[gateforge] test event observer failed: ${(error as Error).message}`);
     }
+    // The accepted-freeze marker is the trusted CLI's own line in this
+    // append-only file. It is ORDERING evidence, never a lifecycle: it
+    // opens nothing, seals nothing, and the audit at stop reads it
+    // against the exact line the CLI appended.
+    if (event.kind === 'freezeRelease') return;
     if (event.kind === 'testBegin') {
       await openSessionFor(event);
       return;
@@ -542,6 +589,33 @@ const releaseReachedWaiters = (): void => {
           );
         });
     }
+    // The preparation-freeze request (global snapshot barrier): the
+    // controller worker writes it once it has finished every prerequisite
+    // and is about to ask for the snapshot. The trusted handler validates
+    // the identities, the prerequisite sessions and the workspace diff,
+    // then signs the release; a refusal is recorded as a run conflict and
+    // the controller's own bounded wait fails it from there.
+    //
+    // The request is served EXACTLY ONCE. The document stays on disk for
+    // the rest of the run, so without this latch every later poll would
+    // re-serve it and append a second accepted-freeze marker — which the
+    // final audit is right to treat as a duplicated line. A malformed or
+    // partially written document is likewise not re-read: `readFreezeRequest`
+    // answers null for both, and a missing answer is caught by the audit,
+    // which fails the run closed because no accepted release exists.
+    if (options.freeze !== undefined && !freezeRequestSeen) {
+      const request = readFreezeRequest(options.freeze.requestPath);
+      if (request !== null) {
+        freezeRequestSeen = true;
+        freezeSettled = options.freeze.onRequest(request).catch((error: unknown) => {
+          const message =
+            `preparation freeze refused: ${(error as Error).message} — no body project may run ` +
+            'against an unprepared candidate';
+          conflicts.push(message);
+          console.warn(`[gateforge] ${message}`);
+        });
+      }
+    }
     // Persistence claim intents (server-witnessed channel): forwarded in
     // file order under the same serialization as the lifecycle events,
     // so per-claim sequences are enforced in order.
@@ -627,14 +701,78 @@ const releaseReachedWaiters = (): void => {
       await loop.catch(() => undefined);
       await drainOnce();
       await settling;
+      // A freeze handler still polling when the runner exits is given its
+      // own bound before grading, so a late refusal lands as a recorded
+      // conflict instead of a silently dropped promise.
+      await freezeSettled.catch(() => undefined);
       // Force-close anything the runner left open (crash, lost contact):
       // sealed with NO outcome — the trace grades it not-passed. No
       // observe finalize here: unfinished work gets no evidence.
       const leftover = [...openByWorker.values()];
       openByWorker.clear();
       await Promise.all(leftover.map((slot) => sealQuietly(slot, undefined)));
+      // The preparation-freeze ORDERING audit, read from the file rather
+      // than from processed counts: the whole spool is re-read in file
+      // order and the accepted marker must appear exactly once, with every
+      // body project's begin AFTER it. A body begin that reached the file
+      // earlier — even when it was only processed now, behind a busy worker
+      // slot — started before the candidate was prepared.
+      if (options.freeze !== undefined) {
+        const { events: wholeSpool } = readSpoolEvents(spoolFile, 0);
+        const bodies = new Set(options.freeze.bodyProjects);
+        // ONE ordered pass over the whole spool: every line's position
+        // relative to the accepted marker is decided by the order the
+        // lines are IN, never by when the drain got round to processing
+        // them. A body begin physically before the marker started before
+        // the candidate was prepared, however late it was processed.
+        const markers: SpoolEvent[] = [];
+        let markerIndex = -1;
+        const earlyBodies: string[] = [];
+        for (let index = 0; index < wholeSpool.length; index += 1) {
+          const event = wholeSpool[index] as SpoolEvent;
+          if (event.kind === 'freezeRelease') {
+            markers.push(event);
+            if (markerIndex < 0) markerIndex = index;
+            continue;
+          }
+          if (event.kind !== 'testBegin') continue;
+          const project = event.project ?? '';
+          if (!bodies.has(project)) continue;
+          if (markerIndex < 0 || index < markerIndex) {
+            earlyBodies.push(`${project}#${event.testId}`);
+          }
+        }
+        // A run that armed the barrier must carry EXACTLY ONE marker, and
+        // it must be the release this run itself signed (same prepared
+        // tree, same pinned spec digest) for THIS run's own controller
+        // project. A line the suite appended into the same spool can
+        // therefore never stand in for the real one.
+        if (
+          markers.length !== 1 ||
+          markers[0]?.preparedTreeId !== freezeMarker?.preparedTreeId ||
+          markers[0]?.specDigest !== freezeMarker?.specDigest ||
+          markers[0]?.project !== options.freeze.controllerProject
+        ) {
+          conflicts.push(
+            freezeMarker === null
+              ? 'preparation freeze: this run accepted no prepared-candidate release, so no body project was ' +
+                'allowed to start against a frozen candidate (fail closed)'
+              : `preparation freeze: the lifecycle spool carries ${String(markers.length)} accepted-freeze marker(s) ` +
+                'and none of them is the release this run signed — a forged or duplicated marker never orders a run',
+          );
+        }
+        for (const body of earlyBodies) {
+          conflicts.push(
+            `preparation freeze: body '${body}' began BEFORE the accepted prepared-candidate release was appended — ` +
+              'a body project may never run against an unprepared candidate',
+          );
+        }
+      }
       return { conflicts: [...conflicts], intentFailures: [...intentFailures], observeNotes: [...observeNotes] };
     },
     whenIntentsForwarded,
+    markFreezeRelease: (marker): void => {
+      freezeMarker = marker;
+    },
   };
 }

@@ -105,6 +105,96 @@ function committedPaths(gitDir: string, env: NodeJS.ProcessEnv, treeId: string):
   return new Set(out.split('\0').filter((path) => path.length > 0));
 }
 
+/**
+ * The git modes a candidate tree records. Only an ordinary blob is
+ * generated OUTPUT: a symlink (`120000`) and a submodule/gitlink
+ * (`160000`) are links, not bytes this run may have produced, and a
+ * missing entry is a path that is not in the sealed tree at all.
+ */
+const REGULAR_FILE_MODE: Record<string, true> = { '100644': true, '100755': true };
+
+/**
+ * Every path a sealed candidate tree records, with its git mode. The
+ * candidate tree carries the workspace's untracked bytes too — that is
+ * what makes it a candidate — so this listing is what tells a generated
+ * artifact apart from a link.
+ *
+ * Args:
+ *   gitDir: the absolute git dir holding the tree object.
+ *   env: the process environment (Git redirectors are stripped).
+ *   treeId: the sealed candidate tree.
+ *
+ * Returns:
+ *   Map<string, string>: repo-relative posix path → git mode; null when
+ *   the listing cannot be read (never a partial answer).
+ */
+function sealedTreeModes(
+  gitDir: string,
+  env: NodeJS.ProcessEnv,
+  treeId: string,
+): Map<string, string> | null {
+  const out = run(gitDir, env, ['ls-tree', '-r', '-z', treeId]);
+  if (out === null) return null;
+  const modes = new Map<string, string>();
+  for (const record of out.split('\0')) {
+    if (record.length === 0) continue;
+    const tab = record.indexOf('\t');
+    if (tab < 0) return null;
+    const mode = record.slice(0, tab).split(/\s+/)[0];
+    if (mode === undefined) return null;
+    modes.set(record.slice(tab + 1), mode);
+  }
+  return modes;
+}
+
+/**
+ * Why a changed path the SEALED runner config declares as a browser state
+ * is NOT generated output this run may have produced, or null when it is.
+ *
+ * A declaration is a READ statement first: it names where a project reads
+ * a session, never which bytes preparation owns. Only a path that is
+ * untracked in BOTH sealed commits, outside the run's input inventory, an
+ * ordinary file in the sealed tree and not a deletion is generated output,
+ * so a repository that COMMITS its fixture session keeps a perfectly valid
+ * read declaration whose bytes stay immutable.
+ *
+ * Args:
+ *   entry: the changed path, with its tree-diff status.
+ *   mode: the path's git mode in the sealed candidate tree.
+ *   parentTracked: every path the parent's commit tracks.
+ *   currentTracked: every path this run's commit tracks.
+ *   inputFiles: the paths this run's input snapshot binds, or null when
+ *     the caller has no inventory (never a guess).
+ *
+ * Returns:
+ *   string | null: the plain refusal, or null when admissible.
+ */
+function generatedStateRefusal(
+  entry: ChangedPath,
+  mode: string | undefined,
+  parentTracked: ReadonlySet<string>,
+  currentTracked: ReadonlySet<string>,
+  inputFiles: ReadonlySet<string> | null,
+): string | null {
+  const named = `declared browser state changed: ${entry.path}`;
+  if (parentTracked.has(entry.path) || currentTracked.has(entry.path)) {
+    return (
+      `${named} — it is tracked by git, so it is source: a use.storageState declaration is a READ path, ` +
+      'never a write permission over tracked bytes'
+    );
+  }
+  if (inputFiles !== null && inputFiles.has(entry.path)) {
+    return `${named} — it is bound by this run's input snapshot, so preparation may not redefine what the run tested`;
+  }
+  if (entry.status === 'D') {
+    return `${named} — a removal is never preparation output, so it cannot be carried as a state change`;
+  }
+  if (mode === undefined || !Object.hasOwn(REGULAR_FILE_MODE, mode)) {
+    return `${named} — it is not an ordinary file inside the sealed candidate, so it is never generated output`;
+  }
+  return null;
+}
+
 /** Extensions whose import statements the graph resolves. */
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py']);
 
@@ -748,7 +838,7 @@ function runnerConfigText(
   gitDir: string,
   env: NodeJS.ProcessEnv,
   treeId: string,
-): { text: string; directory: string } | null {
+): { text: string; directory: string; name: string; runner: string } | null {
   const root = run(gitDir, env, ['ls-tree', '-z', treeId]);
   if (root === null) return null;
   const rootPaths = new Set<string>();
@@ -775,7 +865,7 @@ function runnerConfigText(
   for (const name of RUNNER_CONFIG_NAMES[runner] ?? []) {
     if (!rootPaths.has(name)) continue;
     const text = run(gitDir, env, ['cat-file', 'blob', `${treeId}:${name}`]);
-    return text === null ? null : { text, directory: '.' };
+    return text === null ? null : { text, directory: '.', name, runner };
   }
   if (runner !== 'playwright' || nested.length === 0) return null;
   nested.sort();
@@ -788,7 +878,7 @@ function runnerConfigText(
       const path = `${directory}/${name}`;
       if (!paths.has(path)) continue;
       const text = run(gitDir, env, ['cat-file', 'blob', `${treeId}:${path}`]);
-      return text === null ? null : { text, directory };
+      return text === null ? null : { text, directory, name, runner };
     }
   }
   return null;
@@ -906,6 +996,367 @@ function setupStage(
   return { files: [...files].sort(), dependencyFiles: [...dependencyFiles].sort(), unresolved: false };
 }
 
+/** One project as the sealed config's own bytes declare it. */
+interface SealedProjectDeclaration {
+  /** The project's literal `name`. */
+  name: string;
+  /** Its effective `testDir` (its own, else the config-level one). */
+  testDir: string | null;
+  /** Its effective `testMatch` patterns, or null when neither level declares one. */
+  testMatch: string[] | null;
+  /** Its literal `dependencies` names, or null when the key is absent. */
+  dependencies: readonly string[] | null;
+  /** Its effective `use.storageState` declaration, or null when it has none. */
+  state: string | null;
+}
+
+/** The sealed runner config's projects, plus whatever the bytes could not pin down. */
+interface SealedConfigDeclaration {
+  /** The directory the config file lives in — what a relative path resolves from. */
+  directory: string;
+  /** Every declared project, in declaration order. */
+  projects: SealedProjectDeclaration[];
+  /**
+   * Non-null when the bytes declare something this resolver cannot pin
+   * down. It is never a silent empty list: an unreadable declaration is
+   * a refusal, because guessing who reads a generated state file is
+   * exactly the guess that must not be made.
+   */
+  problem: string | null;
+}
+
+/**
+ * The name of one object-literal member, or null when the key is
+ * computed and therefore names nothing this resolver can read.
+ */
+function configPropertyName(member: ts.ObjectLiteralElementLike): string | null {
+  if (ts.isIdentifier(member.name)) return member.name.text;
+  if (ts.isStringLiteral(member.name) || ts.isNoSubstitutionTemplateLiteral(member.name)) return member.name.text;
+  return null;
+}
+
+/**
+ * One object literal's member by name, distinguishing three states that
+ * must never be collapsed: the key is ABSENT, the key is present with a
+ * readable initializer, or the key cannot be read at all.
+ *
+ * A spread only blocks a value when it comes AFTER the literal member,
+ * because a later spread can overwrite it. A spread BEFORE the literal
+ * member is overwritten BY it, which is what keeps the common
+ * `defineConfig({ …devices['Desktop Chrome'], projects: […] })` shape
+ * readable. An absent key is reported absent even beside a spread: a
+ * spread that really did supply it can only make this resolver
+ * UNDER-report a declaration, and an unreported declaration classifies as
+ * app code and is refused by name — never the other way round, which is
+ * the direction that would matter.
+ */
+function configProperty(
+  object: ts.ObjectLiteralExpression,
+  name: string,
+): { present: boolean; node: ts.Expression | null } {
+  let found: ts.Expression | null = null;
+  for (const member of object.properties) {
+    if (ts.isSpreadAssignment(member)) {
+      if (found !== null) return { present: true, node: null };
+      continue;
+    }
+    const key = configPropertyName(member);
+    if (key === null) {
+      // A computed key could be this very property, in this very place.
+      if (found !== null) return { present: true, node: null };
+      continue;
+    }
+    if (key !== name) continue;
+    if (!ts.isPropertyAssignment(member)) return { present: true, node: null };
+    found = member.initializer;
+  }
+  return { present: found !== null, node: found };
+}
+
+/**
+ * A fixed string value, or null when the expression computes one. This is
+ * the narrowing the whole declaration resolver rests on, exactly as it is
+ * for the import graph above: a string literal or a no-substitution
+ * template is fixed at parse time, and everything else computes.
+ */
+function sealedString(node: ts.Expression): string | null {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  return null;
+}
+
+/**
+ * A fixed array of strings, or null when the expression is not one. An
+ * empty array IS a fixed value (`dependencies: []`), which is why callers
+ * read presence separately from emptiness.
+ */
+function sealedStringArray(node: ts.Expression): string[] | null {
+  if (!ts.isArrayLiteralExpression(node)) return null;
+  const values: string[] = [];
+  for (const element of node.elements) {
+    if (ts.isSpreadElement(element)) return null;
+    const value = sealedString(element);
+    if (value === null) return null;
+    values.push(value);
+  }
+  return values;
+}
+
+/** A fixed string OR a fixed array of strings, or null when computed. */
+function sealedStringPatterns(node: ts.Expression): string[] | null {
+  const single = sealedString(node);
+  return single === null ? sealedStringArray(node) : [single];
+}
+
+/**
+ * Whether a normalized repo-relative posix path stays inside the
+ * repository: not absolute, not the parent, not under it.
+ */
+function withinRepository(path: string): boolean {
+  return path.length > 0 && !path.startsWith('/') && path !== '..' && !path.startsWith('../');
+}
+
+/**
+ * One `testMatch` pattern against a path relative to the project's own
+ * `testDir`. A pattern with no `/` matches a basename, exactly as the
+ * runner's own default matching does.
+ */
+function matchesTestPattern(pattern: string, relativePath: string): boolean {
+  return picomatch(pattern, { dot: true, matchBase: !pattern.includes('/') })(relativePath);
+}
+
+/**
+ * The configuration object a runner config module default-exports, or
+ * null when the module exports anything else (a call this resolver
+ * cannot fold, a re-export, or nothing at all).
+ */
+function sealedConfigObject(sourceFile: ts.SourceFile): ts.ObjectLiteralExpression | null {
+  for (const statement of sourceFile.statements) {
+    if (!ts.isExportAssignment(statement) || statement.isExportEquals) continue;
+    let expression: ts.Expression = statement.expression;
+    // `defineConfig({ … })` is the one call the runner's own shape uses,
+    // and it takes exactly the object literal this resolver reads.
+    if (ts.isCallExpression(expression)) {
+      if (expression.arguments.length !== 1) return null;
+      const [only] = expression.arguments;
+      if (only === undefined) return null;
+      expression = only;
+    }
+    while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
+    return ts.isObjectLiteralExpression(expression) ? expression : null;
+  }
+  return null;
+}
+
+/**
+ * Resolves the sealed runner config's projects, honouring root/global
+ * inheritance the way the runner honours it.
+ *
+ * Every field is reported as ABSENT, FIXED or UNRESOLVED and never
+ * guessed. A declaration the bytes compute (a variable, a concatenation,
+ * a template with `${…}`, a call) is a doubt: it refuses, because the
+ * classifier's whole job is to know who reads a declared state file.
+ */
+function sealedConfigProjects(text: string, name: string, directory: string): SealedConfigDeclaration {
+  const unresolvable = (problem: string): SealedConfigDeclaration => ({ directory, projects: [], problem });
+  const source = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const sourceFile = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, scriptKindFor(name));
+  const parseDiagnostics = (sourceFile as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] })
+    .parseDiagnostics;
+  if ((parseDiagnostics ?? []).length > 0) {
+    return unresolvable(`the runner config '${name}' does not parse, so its declarations cannot be read`);
+  }
+  const config = sealedConfigObject(sourceFile);
+  if (config === null) {
+    return unresolvable(`the runner config '${name}' exports no configuration object literal`);
+  }
+  // The root/global values a project inherits unless it declares its own.
+  const rootUse = configProperty(config, 'use');
+  if (rootUse.present && (rootUse.node === null || !ts.isObjectLiteralExpression(rootUse.node))) {
+    return unresolvable(`the runner config '${name}' computes its root 'use' block`);
+  }
+  let rootState: string | null = null;
+  if (rootUse.node !== null && ts.isObjectLiteralExpression(rootUse.node)) {
+    const state = configProperty(rootUse.node, 'storageState');
+    if (state.present && state.node === null) {
+      return unresolvable(`the runner config '${name}' computes its root 'use.storageState'`);
+    }
+    // An INLINE state (`{ cookies, origins }`) names no file at all, so
+    // it nominates nothing; a computed value names an unknown file,
+    // which is a doubt and refuses.
+    if (state.node !== null && !ts.isObjectLiteralExpression(state.node)) {
+      rootState = sealedString(state.node);
+      if (rootState === null) {
+        return unresolvable(`the runner config '${name}' computes its root 'use.storageState'`);
+      }
+    }
+  }
+  const rootTestDir = configProperty(config, 'testDir');
+  if (rootTestDir.present && (rootTestDir.node === null || sealedString(rootTestDir.node) === null)) {
+    return unresolvable(`the runner config '${name}' declares a root 'testDir' that is not a fixed path`);
+  }
+  const rootTestMatch = configProperty(config, 'testMatch');
+  if (rootTestMatch.present && (rootTestMatch.node === null || sealedStringPatterns(rootTestMatch.node) === null)) {
+    return unresolvable(`the runner config '${name}' declares a root 'testMatch' that is not a fixed pattern list`);
+  }
+  const projectsProperty = configProperty(config, 'projects');
+  if (!projectsProperty.present) return { directory, projects: [], problem: null };
+  if (projectsProperty.node === null || !ts.isArrayLiteralExpression(projectsProperty.node)) {
+    return unresolvable(`the runner config '${name}' computes its 'projects' list`);
+  }
+  const projects: SealedProjectDeclaration[] = [];
+  const seen = new Set<string>();
+  for (const element of projectsProperty.node.elements) {
+    if (!ts.isObjectLiteralExpression(element)) {
+      return unresolvable(`the runner config '${name}' computes one of its project declarations`);
+    }
+    const nameProperty = configProperty(element, 'name');
+    const projectName = nameProperty.node === null ? null : sealedString(nameProperty.node);
+    if (!nameProperty.present || projectName === null || projectName.length === 0) {
+      return unresolvable(`a project in the runner config '${name}' has no fixed name`);
+    }
+    if (seen.has(projectName)) {
+      return unresolvable(`the runner config '${name}' declares project '${projectName}' twice`);
+    }
+    seen.add(projectName);
+    const testDirProperty = configProperty(element, 'testDir');
+    if (testDirProperty.present && (testDirProperty.node === null || sealedString(testDirProperty.node) === null)) {
+      return unresolvable(`project '${projectName}' in the runner config '${name}' declares a 'testDir' that is not a fixed path`);
+    }
+    const testMatchProperty = configProperty(element, 'testMatch');
+    if (testMatchProperty.present && (testMatchProperty.node === null || sealedStringPatterns(testMatchProperty.node) === null)) {
+      return unresolvable(`project '${projectName}' in the runner config '${name}' declares a 'testMatch' that is not a fixed pattern list`);
+    }
+    const dependenciesProperty = configProperty(element, 'dependencies');
+    if (dependenciesProperty.present && (dependenciesProperty.node === null || sealedStringArray(dependenciesProperty.node) === null)) {
+      return unresolvable(`project '${projectName}' in the runner config '${name}' declares 'dependencies' that are not a fixed name list`);
+    }
+    const useProperty = configProperty(element, 'use');
+    if (useProperty.present && (useProperty.node === null || !ts.isObjectLiteralExpression(useProperty.node))) {
+      return unresolvable(`project '${projectName}' in the runner config '${name}' declares a 'use' that is not an object literal`);
+    }
+    let state: string | null = null;
+    if (useProperty.node !== null && ts.isObjectLiteralExpression(useProperty.node)) {
+      const stateProperty = configProperty(useProperty.node, 'storageState');
+      if (stateProperty.present && stateProperty.node === null) {
+        return unresolvable(`project '${projectName}' in the runner config '${name}' computes its 'use.storageState'`);
+      }
+      if (stateProperty.node !== null && !ts.isObjectLiteralExpression(stateProperty.node)) {
+        state = sealedString(stateProperty.node);
+        if (state === null) {
+          return unresolvable(`project '${projectName}' in the runner config '${name}' computes its 'use.storageState'`);
+        }
+      }
+    }
+    const ownTestDir = testDirProperty.node === null ? null : sealedString(testDirProperty.node);
+    const ownTestMatch = testMatchProperty.node === null ? null : sealedStringPatterns(testMatchProperty.node);
+    projects.push({
+      name: projectName,
+      testDir: ownTestDir ?? (rootTestDir.node === null ? null : sealedString(rootTestDir.node)),
+      testMatch: ownTestMatch ?? (rootTestMatch.node === null ? null : sealedStringPatterns(rootTestMatch.node)),
+      dependencies: dependenciesProperty.node === null ? null : sealedStringArray(dependenciesProperty.node),
+      state: state ?? rootState,
+    });
+  }
+  return { directory, projects, problem: null };
+}
+
+/**
+ * The GENERATED STATE a runner's own configuration declares, and the test
+ * files that CONSUME it — read from the SEALED config's own SYNTAX, never
+ * from a candidate-supplied document, never from an unsigned diagnostic
+ * and never from an environment variable.
+ *
+ * A `use.storageState` token anywhere in the file proves nothing: a
+ * comment, nested metadata, a spread or a computed value can all carry
+ * the same three words with no project reading a browser state at all. So
+ * the declarations come from the parsed tree, with the same conventions
+ * this file's import graph uses.
+ *
+ * The consumer set is the declaring project plus every project that
+ * DEPENDS ON it, transitively — the DOWNSTREAM closure, walked over
+ * reverse dependency edges. Walking the declaring project's own
+ * `dependencies` instead reaches its UPSTREAM prerequisites, which
+ * produce artifacts rather than consume them, and silently omits the very
+ * bodies whose saved session the file carries.
+ */
+function generatedStateConsumers(
+  gitDir: string,
+  env: NodeJS.ProcessEnv,
+  treeId: string,
+  testFiles: readonly string[],
+): { consumers: Map<string, string[]>; problem: string | null } {
+  const source = runnerConfigText(gitDir, env, treeId);
+  // No runner config in this sealed tree means nothing declares a
+  // generated state, which is a fact rather than a doubt.
+  if (source === null) return { consumers: new Map(), problem: null };
+  // Only the Playwright shape declares projects and a per-project state;
+  // every other runner's config keeps its classification untouched.
+  if (source.runner !== 'playwright') return { consumers: new Map(), problem: null };
+  const declaration = sealedConfigProjects(source.text, source.name, source.directory);
+  if (declaration.problem !== null) return { consumers: new Map(), problem: declaration.problem };
+  const byName = new Map<string, { declaration: SealedProjectDeclaration; files: string[] }>();
+  for (const project of declaration.projects) {
+    const testRoot = posix.normalize(posix.join(declaration.directory, project.testDir ?? '.'));
+    if (!withinRepository(testRoot)) {
+      return {
+        consumers: new Map(),
+        problem: `project '${project.name}' collects from outside the repository ('${testRoot}')`,
+      };
+    }
+    const prefix = testRoot === '.' ? '' : `${testRoot}/`;
+    const owned = testFiles.filter((file) => {
+      if (!file.startsWith(prefix)) return false;
+      if (project.testMatch === null) return true;
+      const relativePath = file.slice(prefix.length);
+      return project.testMatch.some((pattern) => matchesTestPattern(pattern, relativePath));
+    });
+    byName.set(project.name, { declaration: project, files: [...new Set(owned)].sort() });
+  }
+  // Reverse edges: the projects each declared project is a prerequisite
+  // of. A name that resolves to no declared project leaves the graph
+  // incomplete, so it is a doubt rather than an empty edge.
+  const dependents = new Map<string, string[]>();
+  for (const [name, entry] of byName) {
+    for (const dependency of entry.declaration.dependencies ?? []) {
+      if (!byName.has(dependency)) {
+        return {
+          consumers: new Map(),
+          problem: `project '${name}' depends on '${dependency}', which the sealed runner config does not declare`,
+        };
+      }
+      const list = dependents.get(dependency) ?? [];
+      list.push(name);
+      dependents.set(dependency, list);
+    }
+  }
+  const consumers = new Map<string, string[]>();
+  for (const entry of byName.values()) {
+    if (entry.declaration.state === null) continue;
+    const declared = posix.normalize(posix.join(declaration.directory, entry.declaration.state));
+    // A declaration that resolves outside the repository names no path
+    // in either sealed tree, so it can never be a changed candidate.
+    if (!withinRepository(declared)) continue;
+    const reached = new Set<string>([entry.declaration.name]);
+    const queue = [entry.declaration.name];
+    while (queue.length > 0) {
+      const current = queue.shift() as string;
+      for (const dependent of dependents.get(current) ?? []) {
+        if (reached.has(dependent)) continue;
+        reached.add(dependent);
+        queue.push(dependent);
+      }
+    }
+    const files = new Set<string>();
+    for (const name of reached) {
+      for (const file of byName.get(name)?.files ?? []) files.add(file);
+    }
+    const existing = consumers.get(declared) ?? [];
+    for (const file of files) existing.push(file);
+    consumers.set(declared, [...new Set(existing)].sort());
+  }
+  return { consumers, problem: null };
+}
+
 /** Every directory the catalog's test files live in or under. */
 function testRoots(testFiles: readonly string[]): string[] {
   return [...new Set(testFiles.map((file) => posix.dirname(file)))].filter((dir) => dir.length > 0).sort();
@@ -940,6 +1391,15 @@ export function classifyResealChange(input: {
   runtimeFileGlobs?: readonly string[];
   parentCommitTreeId?: string;
   currentCommitTreeId?: string;
+  /**
+   * Repo-relative paths this run's input snapshot binds, or absent when
+   * the caller holds no inventory. A declared browser state that IS an
+   * input is authority, not output, so it can never be carried as a
+   * generated-state change. An independent recomputation that holds no
+   * inventory still refuses such a path as app code, so the two sides
+   * never disagree about the ones that matter.
+   */
+  inputFiles?: ReadonlySet<string>;
 }): ResealChangeClassification {
   const changed = diffSealedTrees(input.gitDir, input.env, input.parentTreeId, input.currentTreeId);
   const changedPaths = (changed ?? []).map((entry) => entry.path);
@@ -960,6 +1420,49 @@ export function classifyResealChange(input: {
       `the sealed trees could not be diffed (${input.parentTreeId} → ${input.currentTreeId})`,
     );
   }
+  // The GENERATED STATE the SEALED runner config declares (the standard
+  // auth pattern's saved session above all), read from that config's own
+  // syntax. A change in one of those paths is a change in the INPUTS of
+  // the tests that consume it — never app code — so it is kept out of the
+  // app/helper classification and instead demands exactly those consumers
+  // re-execute. Deriving it here, from the sealed config bytes, is what
+  // lets the sealing run and an independent consumer recompute the
+  // identical affected set with no extra receipt field and no owner
+  // declaration.
+  //
+  // A declaration the bytes COMPUTE is a refusal, not an empty list: a
+  // guess about who reads a state file is precisely the guess that must
+  // not be made, and an unreadable declaration that fell through to the
+  // app-code branch would only hide that doubt behind a worse message.
+  const stateGraph = generatedStateConsumers(
+    input.gitDir,
+    input.env,
+    input.currentTreeId,
+    input.testFiles,
+  );
+  // The two sealed COMMIT trees say which paths are TRACKED source. One
+  // reading serves both decisions that need exactly that fact: an owner
+  // declaration may hide only an untracked path, and a declared browser
+  // state counts as generated output only when it is untracked too.
+  // Without both commit trees neither decision can be made, so both fail
+  // closed — an unreadable listing refuses, and an absent one classifies
+  // nothing as ignorable and nothing as generated.
+  let trackedness: { parent: Set<string>; current: Set<string> } | null = null;
+  if (
+    input.parentCommitTreeId !== undefined &&
+    input.currentCommitTreeId !== undefined &&
+    (declared.length > 0 || stateGraph.consumers.size > 0)
+  ) {
+    const parent = committedPaths(input.gitDir, input.env, input.parentCommitTreeId);
+    const current = committedPaths(input.gitDir, input.env, input.currentCommitTreeId);
+    if (parent === null || current === null) {
+      return refuse(
+        `the files tracked by the two sealed commits could not be read ` +
+          `(${input.parentCommitTreeId}, ${input.currentCommitTreeId})`,
+      );
+    }
+    trackedness = { parent, current };
+  }
   // The owner may declare runtime state the run itself rewrites (a
   // witnessed login stage's storage state, a runner's own cache): the
   // bytes are gitignored workspace state, so EVERY sealed candidate
@@ -972,21 +1475,14 @@ export function classifyResealChange(input: {
   // the two commit trees to check trackedness against, nothing is
   // disregarded (fail closed).
   let disregarded: string[] = [];
-  if (declared.length > 0 && input.parentCommitTreeId !== undefined && input.currentCommitTreeId !== undefined) {
-    const parentTracked = committedPaths(input.gitDir, input.env, input.parentCommitTreeId);
-    const currentTracked = committedPaths(input.gitDir, input.env, input.currentCommitTreeId);
-    if (parentTracked === null || currentTracked === null) {
-      return refuse(
-        `the files tracked by the two sealed commits could not be read ` +
-          `(${input.parentCommitTreeId}, ${input.currentCommitTreeId})`,
-      );
-    }
+  if (declared.length > 0 && trackedness !== null) {
+    const { parent, current } = trackedness;
     const matchers = declared.map((glob) => picomatch(glob, { dot: true }));
     disregarded = changed
       .filter(
         (entry) =>
-          !parentTracked.has(entry.path) &&
-          !currentTracked.has(entry.path) &&
+          !parent.has(entry.path) &&
+          !current.has(entry.path) &&
           matchers.some((matcher) => matcher(entry.path)),
       )
       .map((entry) => entry.path);
@@ -999,16 +1495,59 @@ export function classifyResealChange(input: {
   }
   const testFileSet = new Set(input.testFiles);
   const roots = testRoots(input.testFiles);
-  const testFiles = changes.filter((entry) => testFileSet.has(entry.path)).map((entry) => entry.path);
+  // A sealed config whose declarations the bytes COMPUTE cannot say who
+  // reads a declared state file. That is a refusal the moment the change
+  // set holds a non-test path, because such a path may be exactly the
+  // generated state — never a silent empty dependency set that would let
+  // it through as app code nobody looked at.
+  if (stateGraph.problem !== null) {
+    const undecomposed = classifiedPaths.find((path) => !testFileSet.has(path));
+    if (undecomposed !== undefined) {
+      return refuse(`${stateGraph.problem}, so '${undecomposed}' cannot be shown to be test code`);
+    }
+  }
+  // A declared state path is generated OUTPUT only when it is untracked
+  // in both sealed commits, outside the input inventory, an ordinary file
+  // in the sealed candidate and not a deletion. Anything else keeps the
+  // ordinary app-code classification — which refuses it by name — so a
+  // TRACKED app/config/source file can never escape that refusal merely
+  // by being named in the runner config.
+  const stateChanged: ChangedPath[] = [];
+  const stateConsumers = new Map<string, string[]>();
+  const stateConsumerFiles = new Set<string>();
+  if (stateGraph.problem === null && trackedness !== null && stateGraph.consumers.size > 0) {
+    const modes = sealedTreeModes(input.gitDir, input.env, input.currentTreeId);
+    if (modes === null) {
+      return refuse(`the sealed candidate tree's entry modes could not be read (${input.currentTreeId})`);
+    }
+    for (const entry of changes) {
+      const consumers = stateGraph.consumers.get(entry.path);
+      if (consumers === undefined) continue;
+      const refusal = generatedStateRefusal(
+        entry,
+        modes.get(entry.path),
+        trackedness.parent,
+        trackedness.current,
+        input.inputFiles ?? null,
+      );
+      if (refusal !== null) return refuse(refusal);
+      stateChanged.push(entry);
+      stateConsumers.set(entry.path, consumers);
+      for (const file of consumers) stateConsumerFiles.add(file);
+    }
+  }
+  const statePaths = new Set(stateConsumers.keys());
+  const codeChanges = changes.filter((entry) => !statePaths.has(entry.path));
+  const testFiles = codeChanges.filter((entry) => testFileSet.has(entry.path)).map((entry) => entry.path);
   // A deleted path is classified by the SAME catalog: a deleted test
   // file simply leaves the expected set, while a deleted anything-else is
   // app code by definition and its importers break at run time.
-  for (const entry of changes) {
+  for (const entry of codeChanges) {
     if (entry.status === 'D' && !testFileSet.has(entry.path)) {
       return refuse(`app file deleted: ${entry.path}`);
     }
   }
-  const candidates = changes.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);
+  const candidates = codeChanges.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);
   // A changed path outside every test root is app code whatever the
   // import graph says, so it refuses first and by its own name: the
   // reason a user needs is "you changed app code", not a doubt about
@@ -1132,7 +1671,27 @@ export function classifyResealChange(input: {
   if (!stage.unresolved) {
     for (const file of stage.dependencyFiles) affected.add(file);
   }
-  for (const path of [...testFiles, ...candidates]) {
+  // A changed declared-state path demands exactly its consumers: the test
+  // files whose own project reads it, plus every project ordered after it
+  // (its upstream prerequisites, which produce the state, are already in
+  // the dependency stage above). The consumers SEED the importer closure
+  // below rather than only joining its result: a consumer that other
+  // specs reach through a shared fixture must drag those importers with
+  // it, or the run would carry proof for specs whose browser state
+  // changed underneath them. A changed state target with NO consumer this
+  // run can name is a refusal, not a silent pass: the bytes that changed
+  // would otherwise reach a body nobody re-ran.
+  for (const entry of stateChanged) {
+    const consumers = stateConsumers.get(entry.path) ?? [];
+    if (consumers.length === 0) {
+      return refuse(
+        `generated state changed: ${entry.path} has no consumer this run can name from the sealed runner ` +
+          'config, so nothing proves which test reads it (fail closed)',
+      );
+    }
+    for (const file of consumers) affected.add(file);
+  }
+  for (const path of [...new Set([...testFiles, ...candidates, ...stateConsumerFiles])]) {
     const isTestFile = testFileSet.has(path);
     // Importers re-run transitively: a shared fixture declared in a
     // helper OR in another spec file reaches every spec that imports it

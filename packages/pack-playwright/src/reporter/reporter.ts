@@ -271,6 +271,22 @@ export interface GateforgeReporterOptions {
    * root for that case.
    */
   candidateRoot?: string;
+
+  /**
+   * Absolute path of the engine's own generated preparation-freeze
+   * controller spec, when the trusted CLI armed the global native
+   * freeze. A test whose location file IS this file is the engine's
+   * control, not a candidate case: it produces no lifecycle event, no
+   * outcome row and no claim, so the native count and the registered
+   * expected set speak about the candidate's own tests only.
+   *
+   * The comparison is on the resolved absolute path (never a title, a
+   * basename or a project-name prefix), so a candidate test that merely
+   * borrows the controller's name — or lives beside it — is never
+   * excluded. Absent means every reported test is a candidate case,
+   * exactly as before.
+   */
+  controlSpecPath?: string;
 }
 
 /**
@@ -300,6 +316,15 @@ export class GateforgeReporter {
   private readonly candidateRoot: string | null;
   /** Resolved run-state paths (options win, env is the legacy fallback). */
   private readonly resolved: { stateDir: string | null; runId: string | null; outcomesPath: string | null; obligationsPath: string | null };
+  /**
+   * Absolute path of the engine's own generated preparation-freeze
+   * controller spec, or null when this run armed no freeze. A test
+   * located exactly at this path is the engine's control: it reaches
+   * neither the lifecycle spool, nor the outcomes document, nor the
+   * claim registry, so the native count and the registered expected set
+   * speak about the candidate's own tests only.
+   */
+  private readonly controlSpecPath: string | null;
 
   constructor(options: GateforgeReporterOptions = {}) {
     const stateDir = options.stateDir ?? process.env[ENV_STATE_DIR];
@@ -315,6 +340,14 @@ export class GateforgeReporter {
     this.candidateRoot =
       options.candidateRoot !== undefined && options.candidateRoot.length > 0
         ? resolve(options.candidateRoot)
+        : null;
+    // Resolved once, in this process, from TRUSTED CONSTRUCTOR DATA: the
+    // exact control file the CLI pinned before the run. A candidate test
+    // can never name it, and one that merely borrows the controller's
+    // title or lives in the same directory is untouched.
+    this.controlSpecPath =
+      options.controlSpecPath !== undefined && options.controlSpecPath.length > 0
+        ? resolve(options.controlSpecPath)
         : null;
     const wired =
       (process.env[ENV_WITNESS_URL] ?? '') !== '' ||
@@ -349,6 +382,11 @@ export class GateforgeReporter {
     test: ReporterTest,
     result: { workerIndex?: number },
   ): void {
+    // The engine's own freeze controller is NOT a candidate case: it
+    // opens no session, so the registered expected set never has to
+    // contain it and the drain never tries. The exclusion is by the
+    // pinned absolute control file, never by title or project name.
+    if (this.isFreezeControl(test)) return;
     if (this.spoolFile === null) return;
     const workerIndex = typeof result.workerIndex === 'number' ? result.workerIndex : 0;
     const claims = [...new Set([...this.annotationClaimsOf(test), ...this.injectedClaimsFor(test)])].sort();
@@ -379,6 +417,14 @@ export class GateforgeReporter {
       errors?: SerializedFailure[];
     },
   ): void {
+    // Same absolute-file exclusion as onTestBegin: the engine's own
+    // controller contributes NO outcome row, so it never enters the
+    // runner-outcomes document supervision compares against the planned
+    // expected set, nor the selected-test counts it prints. A refused
+    // release still fails the run honestly: the runner's own final status
+    // becomes 'failed', the drain records the refusal as a conflict, and
+    // the sealed receipt is never written.
+    if (this.isFreezeControl(test)) return;
     const titlePath = this.titlePathOf(test);
     const file = this.repoRelativeOf(test);
     const finishedAt = new Date().toISOString();
@@ -692,7 +738,30 @@ export class GateforgeReporter {
     if (test.location?.file === undefined || test.location.file === null) return null;
     const raw = test.location.file;
     if (raw.length === 0) return null;
+
     return relative(this.candidateRoot ?? process.cwd(), raw).split(sep).join('/');
+  }
+
+  /**
+   * Whether this test IS the engine's own freeze controller.
+   *
+   * The answer is the resolved ABSOLUTE location file against the
+   * resolved absolute control path the trusted CLI pinned — nothing
+   * else. A test title, a project name, a directory or a basename is
+   * never a sufficient identity, so a candidate test that happens to be
+   * called `gateforge global preparation freeze`, or that sits beside
+   * the control file, is still a candidate case.
+   *
+   * @param test: the reported test.
+   *
+   * @returns
+   *   boolean: true only for the pinned control file itself.
+   */
+  private isFreezeControl(test: ReporterTest): boolean {
+    if (this.controlSpecPath === null) return false;
+    const file = test.location?.file;
+    if (typeof file !== 'string' || file.length === 0) return false;
+    return resolve(file) === this.controlSpecPath;
   }
 
   /** Native annotation claims of one test (`{type: 'gateforge'}`). */

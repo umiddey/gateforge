@@ -102,6 +102,7 @@ export { gateforgeGlobalSetup, gateforgeGlobalTeardown, startWitnessProcess } fr
  * records for obligations registered `kind: server-e2e`.
  */
 export {
+  appendFreezeReleaseEvent,
   appendSpoolEvent,
   readSpoolEvents,
   spoolPathFor,
@@ -140,6 +141,34 @@ export {
   TRUSTED_REPORTER_OPTIONS_FILE,
 } from './discovery/trusted-config.js';
 export type { ProjectScope, TrustedConfigInput, TrustedReporterOptions } from './discovery/trusted-config.js';
+export {
+  FREEZE_CONTROL_DIR,
+  FREEZE_CONTROL_SPEC_FILE,
+  FREEZE_CONTROLLER_PROJECT,
+  FREEZE_REFUSAL_FILE,
+  FREEZE_ENV_EXEMPT,
+  FREEZE_RELEASE_FILE,
+  FREEZE_REQUEST_FILE,
+  armFreezeControl,
+  canonicalFreezeJson,
+  freezeControllerSpecSource,
+  freezeProjectScopes,
+  mintFreezeSigningKeyPair,
+  projectBaselineEnv,
+  readFreezeRequest,
+  signFreezeRelease,
+  writeFreezeRefusal,
+  verifyFreezeRelease,
+} from './discovery/prepare-barrier.js';
+export type {
+  ArmedFreezeControl,
+  FreezeArmInput,
+  FreezeControl,
+  FreezeReleaseDocument,
+  FreezeReleasePayload,
+  FreezeRequest,
+  FreezeSigningKeyPair,
+} from './discovery/prepare-barrier.js';
 
 /**
  * Test discovery (plan 2026-09-13 phase 2): bounded static scanning,
@@ -166,6 +195,11 @@ export {
   collectPytestSuite,
   executePytestSuite,
   executeSupervisedPlaywright,
+  defaultPlaywrightCommand,
+  isPlaywrightRunnerInstall,
+  nativeConfigDirOf,
+  playwrightTestModulePath,
+  supervisedRunnerChildEnv,
   readRunnerOutcomes,
   playwrightVersion,
   PlaywrightAdapter,

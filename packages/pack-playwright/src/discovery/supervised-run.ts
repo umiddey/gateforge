@@ -36,6 +36,7 @@
  *   / sharding are NOT honored. See `discovery/trusted-config.ts`.
  */
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -50,6 +51,8 @@ import { buildRunnerChildEnv } from './runner-env.js';
 import { findPlaywrightConfig } from './reconcile.js';
 import { localPlaywrightCliCandidates } from '../runner-resolution.js';
 import { synthesizeTrustedConfig, trustedReporterEntry, type ProjectScope } from './trusted-config.js';
+
+import { freezeProjectScopes, type FreezeControl } from './prepare-barrier.js';
 
 /** Default whole-run wall-clock bound for one supervised playwright run. */
 export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60 * 1000;
@@ -140,6 +143,82 @@ export interface SupervisedRunOptions {
    * production resolves the pack's own dist entry).
    */
   reporterEntry?: string;
+  /**
+   * Carries the GLOBAL native preparation freeze the trusted CLI already
+   * armed (see `discovery/prepare-barrier.ts`): the controller project,
+   * the pinned control-spec digest's owner, and the per-invocation
+   * signature the CLI keeps in its own memory.
+   *
+   * `prerequisiteProjects` is the CLI's classification of the planned
+   * captured graph — the full upstream closure, never the roots. Those
+   * projects keep their captured edges exactly as they were; every other
+   * planned project gets the controller as its FIRST dependency, followed
+   * by its own edges in their original emitted order. Absent (a non-native
+   * or stub runner) the run stays byte-identical to before.
+   */
+  freeze?: {
+    /** The armed controller (paths, pinned identities, public key). */
+    control: FreezeControl;
+    /** Planned projects classified as upstream prerequisites by the CLI. */
+    prerequisiteProjects: readonly string[];
+  };
+}
+
+/**
+ * The `<playwright>/test.js` module the generated freeze controller
+ * imports its `test`/`expect` from — resolved from the CLI THIS run
+ * actually spawns, so a repository whose own playwright differs from the
+ * pack's pinned fallback still gets one consistent runner.
+ *
+ * @param baseCommand: the runner argv (see {@link commandFromDirectory}).
+ *
+ * @returns
+ *   string: absolute path to the playwright package's `test.js`.
+ */
+export function playwrightTestModulePath(baseCommand: readonly string[]): string {
+  const cli = baseCommand[1] ?? '';
+  if (cli.endsWith('cli.js')) return join(dirname(cli), 'test.js');
+  const require = createRequire(import.meta.url);
+  return require.resolve('playwright/test');
+}
+
+/**
+ * Whether the resolved runner argv is a REAL Playwright installation.
+ *
+ * The global preparation freeze needs the genuine runner: its own phase
+ * scheduler, its worker host and its `playwright/test` module are what
+ * order the controller between the prerequisites and the bodies. A file
+ * that merely occupies a `node_modules/playwright/cli.js` path is not
+ * that, and a barrier wired into such a child could only ever fake its
+ * own protocol.
+ *
+ * The test is therefore STRUCTURAL and generic: the runner script's own
+ * package manifest must exist and declare the package as `playwright` or
+ * `@playwright/test`. Every real install satisfies it (it is what npm
+ * writes); nothing about a stub can satisfy it without becoming an
+ * install. The same predicate is used by the trusted CLI before it arms
+ * a freeze, so both sides agree on whether a barrier is possible.
+ *
+ * @param baseCommand: the runner argv (see {@link commandFromDirectory}).
+ *
+ * @returns
+ *   boolean: true only for a genuine Playwright package installation.
+ */
+export function isPlaywrightRunnerInstall(baseCommand: readonly string[]): boolean {
+  const cli = baseCommand[1] ?? '';
+  if (!cli.endsWith('cli.js')) return false;
+  let manifest: string;
+  try {
+    manifest = readFileSync(join(dirname(cli), 'package.json'), 'utf8');
+  } catch {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(manifest) as { name?: unknown };
+    return parsed.name === 'playwright' || parsed.name === '@playwright/test';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -155,6 +234,47 @@ export function playwrightVersion(): string {
   } catch {
     return 'unknown';
   }
+}
+
+/**
+ * The directory the runner child runs from: the directory of the
+ * selected native config, or the repo root when there is none. Exported
+ * because the trusted CLI resolves the SAME directory when it arms the
+ * global preparation freeze — a barrier whose baseline environment came
+ * from a different resolution than the spawn would project nothing.
+ *
+ * @param cwd: the absolute repo root.
+ *
+ * @returns
+ *   string: absolute native config directory.
+ */
+export function nativeConfigDirOf(cwd: string): string {
+  const consumerConfig = findPlaywrightConfig(cwd);
+  return consumerConfig === null ? cwd : dirname(resolve(cwd, consumerConfig));
+}
+
+/**
+ * The exact environment the supervised runner child starts with: the
+ * ALLOWLISTED set (never a wholesale `process.env` merge) plus the
+ * non-secret native-config-dir context. The freeze controller projects
+ * body workers back to precisely this map, so it is exported for the one
+ * caller that must know it before the spawn.
+ *
+ * @param vars: supervisor-supplied run variables (already child-safe).
+ * @param cwd: the absolute repo root.
+ * @param ambient: the ambient environment to fall back to (tests only).
+ *
+ * @returns
+ *   Record<string, string>: the child's own environment.
+ */
+export function supervisedRunnerChildEnv(
+  vars: Readonly<Record<string, string>>,
+  cwd: string,
+  ambient: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const child = buildRunnerChildEnv(vars, ambient);
+  child[ENV_PLAYWRIGHT_CONFIG_DIR] = nativeConfigDirOf(cwd);
+  return child;
 }
 
 /**
@@ -191,39 +311,81 @@ export async function executeSupervisedPlaywright(
 ): Promise<RunnerExecutionEnvelope> {
   void selection; // the run is driven by the file/location options; the supervisor owns the comparison
   const cwd = options.cwd ?? process.cwd();
-  const consumerConfig = findPlaywrightConfig(cwd);
-  const consumerConfigDir = consumerConfig === null ? cwd : dirname(resolve(cwd, consumerConfig));
+  const consumerConfigDir = nativeConfigDirOf(cwd);
   const outcomesPath = join(env.stateDir, 'runner-outcomes.json');
   // A stale outcomes file from a previous run must never be readable as
   // this run's result: remove it before spawning.
   rmSync(outcomesPath, { force: true });
+  const baseCommand = options.command ?? commandFromDirectory(consumerConfigDir);
+  const isStub = options.command !== undefined;
+  // Locate the consumer config without loading it; only the runner child
+  // receives this context.
+  const childEnv = supervisedRunnerChildEnv(env.vars, cwd);
+  // The GLOBAL preparation freeze (see `discovery/prepare-barrier.ts`),
+  // already ARMED by the trusted CLI: the CLI owns the per-invocation
+  // signing key, the nonce and the baseline child environment, and it
+  // needs the control's paths BEFORE the spawn to poll for the request.
+  // A runner that is NOT a genuine Playwright installation never carries
+  // the barrier: there is no native scheduler, no worker host and no
+  // `playwright/test` module, so the controller project could only fake
+  // its own protocol and the ordering audit could only ever fail the run
+  // for a handshake that was never possible. This is the same structural
+  // predicate the trusted CLI applies before it arms a freeze
+  // ({@link isPlaywrightRunnerInstall}), so both sides agree.
+  const freeze = isStub || !isPlaywrightRunnerInstall(baseCommand) ? null : (options.freeze ?? null);
   // Trusted-config synthesis (execution-authority fix): the consumer
   // config is data at most, never code. The synthesized config forces
   // the engine reporter (absolute entry, parent-side paths as options)
   // over the exact selected files. A hostile consumer config never
   // executes, so it cannot fabricate spool/outcomes and exit early.
+  // The freeze controller enters here as one more PROJECT SCOPE: the
+  // engine gives every body project it as the first dependency and gives
+  // it the full prerequisite closure, so the runner's own scheduler puts
+  // one prepared snapshot between the prerequisites and every body.
   const { configPath } = synthesizeTrustedConfig({
     cwd,
     nativeConfigDir: consumerConfigDir,
     stateDir: env.stateDir,
     runId: env.runId,
     reporterEntry: options.reporterEntry ?? trustedReporterEntry(),
+    // The engine's own freeze controller is excluded from the reporter's
+    // outcome rows, claims and lifecycle events by its ABSOLUTE pinned
+    // path — never by title or project name. Unarmed, the field is absent
+    // and the reporter records every test exactly as before.
+    ...(freeze === null ? {} : { controlSpecPath: freeze.control.specPath }),
     ...(options.appBaseUrl !== undefined ? { appBaseUrl: options.appBaseUrl } : {}),
     ...(options.storageState !== undefined ? { storageState: options.storageState } : {}),
     ...(options.testFiles !== undefined ? { testFiles: options.testFiles } : {}),
     ...(options.projects !== undefined ? { projects: options.projects } : {}),
-    ...(options.projectScopes !== undefined ? { projectScopes: options.projectScopes } : {}),
+    ...(freeze === null
+      ? options.projectScopes === undefined
+        ? {}
+        : { projectScopes: options.projectScopes }
+      : {
+          projectScopes: freezeProjectScopes(
+            freeze.control,
+            options.projectScopes ?? [],
+            freeze.prerequisiteProjects,
+          ),
+        }),
   });
-  const baseCommand = options.command ?? commandFromDirectory(consumerConfigDir);
-  const isStub = options.command !== undefined;
   // Positional location filters are resolved against the repo root
   // BEFORE the spawn: the child runs from the config directory, so a
   // repo-relative argument would be filtered from the wrong base.
   const locations = [...new Set(options.testLocations ?? [])]
     .sort()
     .map((location) => absoluteLocation(cwd, location));
+  // Positional filters REPLACE the runner's own selection, so a named run
+  // that filtered only candidate tests would also filter the engine's own
+  // controller out — the barrier would never run and the audit would
+  // (correctly) fail the run. The control spec's ABSOLUTE path is
+  // therefore appended, and ONLY when filters are present: with zero
+  // filters the whole trusted config runs, adding the file on its own
+  // would narrow a full suite to the control alone. The reporter still
+  // excludes that file by identity, so it contributes no case.
+  const controlLocation = freeze === null || locations.length === 0 ? [] : [freeze.control.specPath];
   const argv = isStub
-    ? [...baseCommand, 'test', '--retries=0', ...locations]
+    ? [...baseCommand, 'test', '--retries=0', ...locations, ...controlLocation]
     : [
         ...baseCommand,
         'test',
@@ -232,10 +394,16 @@ export async function executeSupervisedPlaywright(
         '--retries=0',
         '--workers=1',
         ...locations,
+        ...controlLocation,
       ];
-  // Locate the consumer config without loading it; only the runner child receives this context.
-  const childEnv = buildRunnerChildEnv(env.vars, process.env);
-  childEnv[ENV_PLAYWRIGHT_CONFIG_DIR] = consumerConfigDir;
+  // The synthesized trusted config is PINNED before the spawn: it is the
+  // whole authority the runner executes, and a replaced one would steer
+  // every body. The digest is compared again after the child exits, so a
+  // same-UID swap during the run is detected rather than trusted. What
+  // this does NOT claim is physical immutability: an attacker who both
+  // replaces the file and restores it between the two reads stays outside
+  // this boundary, exactly like every other local control file here.
+  const configDigestBefore = createHash('sha256').update(readFileSync(configPath)).digest('hex');
   const child = spawn(argv[0] ?? '', argv.slice(1), {
     // The NATIVE CONFIG DIRECTORY, the same one enumeration ran from:
     // the repo root stays the identity/testDir root, while the child's
@@ -282,6 +450,21 @@ export async function executeSupervisedPlaywright(
       });
     },
   );
+  // The pinned trusted config must still be the file the runner executed.
+  // A swap during the run (the runner child can address the state dir
+  // through the config path the CLI itself passed) is an integrity
+  // failure, not a recoverable run: the bodies that just produced
+  // evidence ran under rules nobody pinned.
+  if (!isStub) {
+    const configDigestAfter = createHash('sha256').update(readFileSync(configPath)).digest('hex');
+    if (configDigestAfter !== configDigestBefore) {
+      return incomplete(
+        outcome.code,
+        'the synthesized trusted runner config changed during the supervised run — the run executed ' +
+          'under rules the supervisor did not pin (fail closed)',
+      );
+    }
+  }
   void stdout;
   if (outcome.error !== null) {
     return incomplete(

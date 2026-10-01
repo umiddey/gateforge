@@ -690,13 +690,16 @@ export function resealChainBlocking(input: {
         `re-sealed receipt names changed paths ${names(claimed)} but the trees differ in ${names(diffPaths)}`,
       );
     }
-    // The owner declaration the candidate config carries is applied to
-    // the recomputation too, so CI reaches the identical decision with
-    // its own engine: the two commit trees say which paths are
-    // TRACKED, and a tracked path never matches, whatever the glob reads.
-    // A document that names no commit has no committed file list, so
+    // The two commit trees say which paths are TRACKED, and that single
+    // reading serves both decisions this recomputation makes: the owner
+    // declaration may hide only an untracked path, and a declared browser
+    // state counts as generated output only when neither commit tracks
+    // it. Both are applied here exactly as the sealing run applied them,
+    // so CI reaches the identical decision with its own engine. A
+    // document that names no commit has no committed file list, so
     // nothing can be proven untracked: the classifier then disregards
-    // nothing and a receipt that claims otherwise is stale below.
+    // nothing, treats no state as generated, and a receipt that claims
+    // either is stale below.
     const commitTrees =
       parentSha !== null && currentReceipt.gitSha !== null
         ? { parentCommitTreeId: `${parentSha}^{tree}`, currentCommitTreeId: `${currentReceipt.gitSha}^{tree}` }

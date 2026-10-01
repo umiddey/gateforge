@@ -173,6 +173,15 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
             docsExclusions,
             cacheExclusions,
           );
+    // The PREPARED candidate identity the supervised run freezes behind its
+    // native prerequisite stage, captured in THIS process's memory through
+    // a typed callback. It never becomes a state document: the strict check
+    // below must bind the exact tree that was tested, which for a native
+    // repository is the prepared tree rather than the pre-run one. Absent a
+    // freeze (a non-native runner, or a run that planned no project) it
+    // stays null and the check keeps the pre-run identity exactly as
+    // before.
+    let preparedTreeId: string | null = null;
     const runCode = await runSupervisedTestGates(candidateIo, {
       out: undefined,
       format: 'text',
@@ -188,6 +197,9 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
       runtimeReuseMounts,
       runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
       verifierKeyring,
+      onPreparedCandidate: (identity) => {
+        preparedTreeId = identity.preparedTreeId;
+      },
     });
     if (runtimeDoc !== null && runtimeDoc.health !== undefined) {
       const healthFailure = await probeHealth(
@@ -214,7 +226,10 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
             requireE2E: true,
             format: 'text',
             fixedChangedFiles: frozen.changedPaths,
-            fixedCandidateTreeId: candidateTreeId ?? null,
+            // The identity of the bytes the supervised run actually tested
+            // inside THIS isolated checkout. It is never copied back to the
+            // user workspace, and it never authorizes a different tree.
+            fixedCandidateTreeId: preparedTreeId ?? candidateTreeId ?? null,
             runtimeReuseDigest,
       runtimeReuseMounts,
       runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),

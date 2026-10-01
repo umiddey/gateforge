@@ -19,8 +19,21 @@ import { join } from 'node:path';
 import { canonicalOf } from '../json.js';
 import { SPOOL_DIR_NAME, SPOOL_EVENTS_FILE, SPOOL_INTENTS_FILE } from '../constants.js';
 
-/** Which runner lifecycle transition the event represents. */
-export type SpoolEventKind = 'testBegin' | 'testEnd';
+/**
+ * Which runner lifecycle transition the event represents.
+ *
+ * `freezeRelease` is NOT a lifecycle: it is the trusted CLI's own marker,
+ * written to the SAME file the runner writes its lifecycle events to, so
+ * both share one ordering. That ordering is the ORDINARY
+ * append semantics of the local filesystem under cooperative writers — it
+ * is not an OS-enforced append-only log and not a physical immutability
+ * claim: a same-UID overwrite, or a restore of an earlier file state,
+ * stays outside this boundary exactly like every other local control file
+ * here. What the marker buys is narrower and real: a body `testBegin` the
+ * suite appended BEFORE the accepted release is still visible as such to
+ * the final audit, however late the drain gets round to processing it.
+ */
+export type SpoolEventKind = 'testBegin' | 'testEnd' | 'freezeRelease';
 
 /** One runner lifecycle event (spool line). */
 export interface SpoolEvent {
@@ -56,6 +69,20 @@ export interface SpoolEvent {
    * tested tree and never a frame's source text.
    */
   stackFrames?: string[];
+  /**
+   * `freezeRelease` only: the prepared candidate tree the trusted CLI
+   * froze and released. Carried inside the marker's own line, so the
+   * ordering guard and the final integrity check read one fact from one
+   * append-only file.
+   */
+  preparedTreeId?: string;
+  /**
+   * `freezeRelease` only: sha256 of the controller spec bytes the CLI
+   * pinned before the run. The final integrity check compares it with
+   * the spec still on disk, so a replaced control file fails the run
+   * instead of quietly steering the bodies.
+   */
+  specDigest?: string;
 }
 
 /**
@@ -128,6 +155,47 @@ export function appendSpoolEvent(spoolFile: string, event: SpoolEvent): void {
   } catch (error) {
     console.warn(`[gateforge] cannot append to the lifecycle spool: ${(error as Error).message}`);
   }
+}
+
+/**
+ * Appends the trusted CLI's ACCEPTED preparation-freeze marker to the run's
+ * spool and returns the exact line it wrote.
+ *
+ * The marker shares the runner's append-only file on purpose: file order
+ * is append order, so a body project's `testBegin` that is physically in
+ * the file BEFORE this marker was appended before the freeze existed — no
+ * matter when the drain gets round to processing it. The returned line is
+ * the only marker the drain accepts, so a line forged by the suite (which
+ * can write this file) can never stand in for the real one.
+ *
+ * @param spoolFile: absolute spool events file (see {@link spoolPathFor}).
+ * @param marker: the controller project, the prepared tree and the pinned spec digest.
+ *
+ * @returns
+ *   string: the canonical marker line, without its terminating newline.
+ */
+export function appendFreezeReleaseEvent(
+  spoolFile: string,
+  marker: { project: string; preparedTreeId: string; specDigest: string },
+): string {
+  const line = canonicalOf({
+    kind: 'freezeRelease',
+    testId: marker.project,
+    workerIndex: 0,
+    file: null,
+    titlePath: [],
+    project: marker.project,
+    preparedTreeId: marker.preparedTreeId,
+    specDigest: marker.specDigest,
+  } as unknown as Record<string, unknown>);
+  mkdirSync(join(spoolFile, '..'), { recursive: true });
+  const fd = openSync(spoolFile, 'a');
+  try {
+    writeSync(fd, `${line}\n`, undefined, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+  return line;
 }
 
 /**

@@ -49,7 +49,14 @@
  * The Playwright pack's generated names are imported from the pack
  * itself, so a rename there cannot leave this list stale.
  */
-import { TRUSTED_CONFIG_FILE, TRUSTED_REPORTER_OPTIONS_FILE } from '@gate-forge/pack-playwright';
+import {
+  FREEZE_CONTROL_DIR,
+  FREEZE_CONTROL_SPEC_FILE,
+  FREEZE_RELEASE_FILE,
+  FREEZE_REQUEST_FILE,
+  TRUSTED_CONFIG_FILE,
+  TRUSTED_REPORTER_OPTIONS_FILE,
+} from '@gate-forge/pack-playwright';
 
 /**
  * Generated file names. A name at the state root matches the
@@ -86,6 +93,17 @@ export const ENGINE_GENERATED_STATE_FILES: readonly string[] = [
   // (pack-playwright `synthesizeTrustedConfig`).
   TRUSTED_CONFIG_FILE,
   TRUSTED_REPORTER_OPTIONS_FILE,
+  // The global native preparation freeze's generated control files
+  // (pack-playwright `discovery/prepare-barrier.ts`). The controller
+  // spec is a `.ts` file the ENGINE generates inside the state
+  // directory — exactly the shape that became a declared input for the
+  // synthesized runner config above, so its name must be registered here
+  // or the documented `check` → `next` sequence would exit 2 in the very
+  // repository that had just run.
+  FREEZE_CONTROL_SPEC_FILE,
+  FREEZE_REFUSAL_FILE,
+  FREEZE_RELEASE_FILE,
+  FREEZE_REQUEST_FILE,
   // The Cypress runner adapter's generated config, written into its own
   // per-run directory (`cypress/<runId>/`).
   'gateforge.config.cjs',
@@ -104,6 +122,13 @@ export const ENGINE_GENERATED_STATE_SUBTREES: readonly string[] = [
   'cache',
   'diagnostics',
   'history',
+  // The freeze barrier's control directory (pack-playwright
+  // `FREEZE_CONTROL_DIR` = `native-freeze`): the generated controller
+  // spec, the controller's request document and the CLI's signed
+  // release. The engine owns every byte below here, so the subtree is
+  // the honest registration even though the three fixed names above
+  // already cover today's files.
+  FREEZE_CONTROL_DIR,
   'playwright-artifacts',
   'pytest',
   'reseal-chain',

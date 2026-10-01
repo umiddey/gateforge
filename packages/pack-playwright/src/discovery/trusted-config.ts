@@ -75,6 +75,8 @@ import { lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { FREEZE_CONTROLLER_PROJECT } from './prepare-barrier.js';
+
 /** File name of the synthesized trusted config inside the run-state dir. */
 export const TRUSTED_CONFIG_FILE = 'trusted.playwright.config.mjs';
 
@@ -100,6 +102,22 @@ export interface TrustedReporterOptions {
    * happens to run in.
    */
   candidateRoot: string;
+
+  /**
+   * ABSOLUTE path of the engine's own generated preparation-freeze
+   * controller spec, when this run armed the global native freeze.
+   *
+   * The controller is a real Playwright test inside the runner, so the
+   * reporter would otherwise report it as a native case: it would append
+   * a lifecycle event (opening a witness session for a test the
+   * registered expected set never contained), record an outcome row (so
+   * the run's native count carries a non-native case), and collect its
+   * claims. The exclusion is therefore by ABSOLUTE FILE IDENTITY — the
+   * exact control bytes the trusted CLI pinned — never by title, never
+   * by a project-name prefix, and never by anything the candidate
+   * controls.
+   */
+  controlSpecPath?: string;
 }
 
 /** Inputs for one trusted config synthesis. */
@@ -146,6 +164,16 @@ export interface TrustedConfigInput {
    * is byte-identical to the pre-scope behavior for a single-project run.
    */
   projectScopes?: readonly ProjectScope[];
+  /**
+   * ABSOLUTE path of the generated preparation-freeze controller spec,
+   * when this run armed the global native freeze. It crosses to the
+   * engine reporter as TRUSTED CONSTRUCTOR DATA (never env, never a
+   * candidate-relative path) so the reporter can exclude exactly that one
+   * file from its outcome rows, claims and lifecycle events. Unarmed, the
+   * field is absent and the reporter records every test, exactly as
+   * before.
+   */
+  controlSpecPath?: string;
   /** Per-test timeout ms (default 60_000). */
   testTimeoutMs?: number;
 }
@@ -184,6 +212,15 @@ export interface ProjectScope {
    * all in that case.
    */
   storageState?: string;
+  /**
+   * This project's OWN `testDir` (absolute), when it collects files from
+   * somewhere other than the config's `testDir`. Only the engine's freeze
+   * controller uses it: its spec is GENERATED code inside the excluded
+   * run-state subtree, which is not necessarily under the repo root the
+   * config pins as `testDir`. A consumer project never gets one — the
+   * files it runs are always repo-relative to the identity root.
+   */
+  testDir?: string;
 }
 
 /** Thrown when a project-declared browser state may not be read. */
@@ -337,6 +374,10 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
     outcomesPath: join(input.stateDir, 'runner-outcomes.json'),
     obligationsPath: join(input.stateDir, 'obligations.json'),
     candidateRoot: input.cwd,
+    // The engine's own freeze controller is excluded by ABSOLUTE FILE
+    // IDENTITY, handed here as trusted constructor data. Unarmed, the
+    // field is absent and the reporter records every test as before.
+    ...(input.controlSpecPath !== undefined ? { controlSpecPath: input.controlSpecPath } : {}),
   };
   const testFiles = [...new Set(input.testFiles ?? [])].sort();
   const projects = [...new Set(input.projects ?? [])].sort();
@@ -382,6 +423,10 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
     .map((scope) => ({
       name: scope.name,
       files: [...new Set(scope.files)].sort(),
+      // Carried through so the synthesized project can actually collect
+      // from it; a dropped field would make the engine's freeze controller
+      // look for its spec under the repo root and find nothing.
+      ...(scope.testDir === undefined ? {} : { testDir: scope.testDir }),
       dependencies: scope.dependencies ?? [],
       ...(operatorState === undefined && scope.storageState !== undefined
         ? { storageState: scope.storageState }
@@ -408,13 +453,36 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
   // edges at all emit no `dependencies` key, so a single-project run
   // stays byte-identical.
   const scopedNames = new Set(projectScopes.map((scope) => scope.name));
+  // Whether this config carries the engine's preparation-freeze
+  // controller. Its presence is what makes the dependency emission below
+  // order-aware; every config without it emits exactly what it always did.
+  const freezeArmed = projectScopes.some((scope) => scope.name === FREEZE_CONTROLLER_PROJECT);
   const synthesizedProjects = projectScopes.map((scope) => {
-    const edges = [
+    const captured = [
       ...new Set(scope.dependencies.filter((name) => scopedNames.has(name) && name !== scope.name)),
     ].sort();
+    // ARMED (the global preparation freeze is in this config): the
+    // controller is emitted FIRST, explicitly, and the project's own
+    // captured edges follow in their existing sorted order. Sorting the
+    // whole array instead would silently move the controller behind any
+    // prerequisite that sorts before it, and the extra-environment union
+    // the native scheduler builds over `project.deps` is positional with
+    // later entries winning — so where the controller lands decides which
+    // environment a body actually starts with. UNARMED keeps the exact
+    // pre-existing emission, so every run without the barrier stays
+    // byte-identical.
+    const edges = freezeArmed
+      ? captured.includes(FREEZE_CONTROLLER_PROJECT)
+        ? [FREEZE_CONTROLLER_PROJECT, ...captured.filter((name) => name !== FREEZE_CONTROLLER_PROJECT)]
+        : captured
+      : captured;
     return {
       name: scope.name,
       testMatch: scope.files,
+      // A project with its OWN `testDir` (the engine's freeze controller)
+      // collects from there; every consumer project stays on the config's
+      // repo-root `testDir`, exactly as before.
+      ...(scope.testDir === undefined ? {} : { testDir: scope.testDir }),
       ...(edges.length > 0 ? { dependencies: edges } : {}),
       // The declared state, for THIS project only. It rides in `use`
       // rather than at the top level so the `setup` project that writes

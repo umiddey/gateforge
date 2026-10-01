@@ -529,6 +529,36 @@ export function candidateTreeCoversCommit(
   }
   return true;
 }
+
+/**
+ * Lists every path Git TRACKS in the work tree, as repo-relative posix
+ * paths.
+ *
+ * A native preparation stage may legitimately create or modify a
+ * GENERATED artifact, never a tracked byte: the standard auth pattern's
+ * `playwright/.auth/user.json` is normally untracked (and ignored), while
+ * a repository that COMMITS a fixture session is shipping source, not
+ * output. Reading this set is how the freeze tells those two apart
+ * without ever asking the candidate which bytes it owns.
+ *
+ * @param gitDir: absolute git dir of the authority object store.
+ * @param env: sanitized child-process environment.
+ *
+ * @returns
+ *   Set<string> | null: the tracked paths, or null when the listing could
+ *   not be read (fail closed — the caller treats null as "nothing is
+ *   eligible", never as "everything is").
+ */
+export function listTrackedPaths(gitDir: string, env: NodeJS.ProcessEnv): Set<string> | null {
+  const result = plumbing(gitDir, env, ['ls-files', '-z']);
+  if (result.status !== 0) return null;
+  const tracked = new Set<string>();
+  for (const record of result.stdout.split('\0')) {
+    if (record.length > 0) tracked.add(record);
+  }
+  return tracked;
+}
+
 /**
  * Builds the candidate tree and avoids the snapshot allocation for id-only callers.
  *

@@ -54,8 +54,9 @@
  * Without the flag the mode stays `full` — byte-identical behavior.
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
@@ -124,12 +125,23 @@ import {
   type TwinShape,
 } from '@gate-forge/core';
 import {
+  appendFreezeReleaseEvent,
+  armFreezeControl,
   buildWitnessedPytestChildEnv,
-  CypressRunnerAdapter,
+  canonicalFreezeJson,
+  defaultPlaywrightCommand,
   diffNativePlaywrightTests,
   discoverTestCatalog,
   findPlaywrightConfig,
+  isPlaywrightRunnerInstall,
   listNativePlaywrightTests,
+  mintFreezeSigningKeyPair,
+  nativeConfigDirOf,
+  playwrightTestModulePath,
+  signFreezeRelease,
+  spoolPathFor,
+  supervisedRunnerChildEnv,
+  writeFreezeRefusal,
   resolveProjectStorageState,
   PlaywrightAdapter,
   PytestRunnerAdapter,
@@ -149,6 +161,8 @@ import {
   ENV_TWIN_INVENTORY,
   ENV_TWIN_QUERY_KEYS,
   ENV_TWIN_SHAPES,
+  type FreezeSigningKeyPair,
+  type SpoolDrainHandle,
   type ExpectedSetResponse,
   type NativeInstance,
   type NativeListResult,
@@ -225,7 +239,18 @@ import {
 } from '../reseal-chain.js';
 import { obligationFingerprint } from '../evaluate.js';
 import { computeEvaluationScope } from '../scope.js';
-import { candidateTreeCoversCommit, computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
+import { candidateTreeCoversCommit, computeCandidateTreeSnapshot, listTrackedPaths, resolveGitDir, sanitizedAuthorityEnv, type CandidateTreeSnapshot } from '../candidate-tree.js';
+import {
+  acceptedFreezeRequest,
+  classifyGeneratedTargets,
+  planNativeFreeze,
+  preparedCandidateViolations,
+  unfrozenPrerequisiteState,
+  type GeneratedTargetClass,
+  type NativeFreezePlan,
+  type PreparedCandidateIdentity,
+  type PrerequisiteIdentity,
+} from '../native-freeze.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
 import { loadRuntimeConfigAt } from '../runtime.js';
 import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
@@ -890,6 +915,19 @@ export interface SupervisedOptions {
   runtimeReuseMounts?: readonly RuntimeReuseMount[];
   /** Recomputes the external reuse digest at the end of a staged run. */
   runtimeReuseCheck?: () => string | null;
+  /**
+   * Receives the PREPARED candidate identity the moment the global native
+   * preparation freeze accepts it.
+   *
+   * It exists because that identity must never leave this process as a
+   * state document: the staged pre-commit orchestrator needs the exact
+   * tree the supervised run actually tested in order to hand the same
+   * identity to the strict check that follows inside the isolated
+   * checkout. A callback keeps it a typed in-memory value instead of a
+   * file a later run could have rewritten. A run that never freezes
+   * anything simply never calls it.
+   */
+  onPreparedCandidate?: (identity: PreparedCandidateIdentity) => void;
 }
 
 /** One recorded chaos release decision, exactly as the witness reports it. */
@@ -1751,12 +1789,21 @@ export function decideTestOnlyReseal(input: {
    */
   runtimeFileGlobs?: readonly string[];
   /**
-   * The tree of the commit this run froze (`<baseSha>^{tree}`). The
-   * declaration may only hide a path NEITHER sealed commit tracks, so
-   * the classifier needs both commit trees; without them it
-   * disregards nothing (fail closed).
+   * The tree of the commit this run froze (`<baseSha>^{tree}`). Both
+   * commit trees — this one and the parent's — say which paths are
+   * tracked source, which is what an owner declaration may never hide
+   * and what a declared browser state must be to count as generated
+   * output; without them the classifier disregards nothing and treats
+   * no state as generated (fail closed).
    */
   currentCommitTreeId?: string;
+  /**
+   * Repo-relative paths this run's input snapshot binds. A declared
+   * browser state inside it is authority, not output, so it is never
+   * carried as a generated-state change. Absent when the caller holds no
+   * inventory, which only ever makes the classifier stricter elsewhere.
+   */
+  inputFiles?: ReadonlySet<string>;
   /**
    * How many parent outcomes the WHOLE retained chain carries, read
    * from the run state. A parent that is itself a re-seal planned
@@ -1819,16 +1866,17 @@ export function decideTestOnlyReseal(input: {
     parentTreeId: parent.treeId,
     currentTreeId: input.currentTreeId,
     testFiles: [...new Set(input.catalog.entries.map((entry) => entry.file))],
-    ...(input.runtimeFileGlobs !== undefined &&
-    input.currentCommitTreeId !== undefined &&
-    parent.sha.length > 0
-      ? {
-          runtimeFileGlobs: input.runtimeFileGlobs,
-          parentCommitTreeId: `${parent.sha}^{tree}`,
-          currentCommitTreeId: input.currentCommitTreeId,
-        }
+    // The two sealed COMMIT trees say which paths are tracked SOURCE, and
+    // the classifier needs them for a decision that has nothing to do with
+    // an owner declaration: a declared browser state counts as generated
+    // output only when neither commit tracks it. So they travel on their
+    // own terms, whenever both exist — an owner declaration merely adds
+    // the second use of the same reading.
+    ...(input.currentCommitTreeId !== undefined && parent.sha.length > 0
+      ? { parentCommitTreeId: `${parent.sha}^{tree}`, currentCommitTreeId: input.currentCommitTreeId }
       : {}),
-
+    ...(input.runtimeFileGlobs !== undefined ? { runtimeFileGlobs: input.runtimeFileGlobs } : {}),
+    ...(input.inputFiles !== undefined ? { inputFiles: input.inputFiles } : {}),
   });
   if (!classification.eligible) {
     return { plan: null, reason: classification.reason };
@@ -2408,12 +2456,16 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // EVALUATED are pinned before any suite execution. At seal time the
   // same values are recomputed — a live-workspace edit mid-run is an
   // explicit drift block, never a mixed-bytes seal.
+  //
+  // The walk is taken ONCE with its ENTRIES, not just its id: the global
+  // preparation freeze below compares those exact baseline bytes against
+  // the prepared candidate, so the baseline assertion and the index
+  // guard keep reading the same raw inventory the freeze reads.
   const freezeGitDir = resolveGitDir(io.cwd, io.env);
-  const frozenTreeId =
-    options.fixedCandidateTreeId ??
-    (freezeGitDir === null
+  const baselineSnapshot: CandidateTreeSnapshot | null =
+    freezeGitDir === null
       ? null
-      : computeCandidateTreeId(
+      : computeCandidateTreeSnapshot(
           freezeGitDir,
           io.cwd,
           io.env,
@@ -2422,7 +2474,8 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           runtimeReuseMounts,
           docsExclusions,
           cacheExclusions,
-        ));
+        );
+  const frozenTreeId = options.fixedCandidateTreeId ?? baselineSnapshot?.treeId ?? null;
   const frozenParentSha = options.fixedParentSha !== undefined ? options.fixedParentSha : parentSha(io.cwd);
 
   // 2. Catalog + mappings (Phase 3 resolver) → expected set + claim
@@ -2438,6 +2491,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // that read its artifact depend on `setup`). Empty when the
   // enumeration could not read it — absence, never a guessed empty one.
   let projectDependencies: Record<string, string[]> = {};
+  // Whether the enumeration actually READ the runner's resolved project
+  // graph. The map itself is defaulted to `{}` so every existing caller
+  // keeps working, but `{}` and "unreadable" are different facts: the
+  // global preparation freeze may only derive an ordering from a graph it
+  // really captured, so absence is carried separately and never guessed.
+  let projectGraphCaptured = false;
   // The `use.storageState` path each project declared, as the RUNNER
   // resolved it: the standard auth pattern's dependent project reads the
   // state its setup project saved. Empty when the enumeration captured
@@ -2460,6 +2519,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     nativeInstances = discovered.nativeInstances;
     projectDependencies = discovered.projectDependencies ?? {};
     projectStorageStates = discovered.projectStorageStates ?? {};
+    projectGraphCaptured = discovered.projectDependencies !== undefined;
     for (const warning of discovered.registrationWarnings) {
       writeLine(
         io.stderr,
@@ -2705,6 +2765,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               ...(pipeline.manifest.gitSha !== null
                 ? { currentCommitTreeId: `${pipeline.manifest.gitSha}^{tree}` }
                 : {}),
+              // The input inventory is what separates generated output from
+              // authority: a declared browser state the digest binds is
+              // never carried as a generated-state change. Absent (no
+              // usable snapshot) the classifier simply holds no inventory.
+              ...(preFiles !== null ? { inputFiles: new Set(preFiles.map((entry) => entry.path)) } : {}),
             });
       if (reSeal.reason !== null) writeLine(io.stderr, `test-gates: ${reSeal.reason}`);
       // A parent document the run state holds but cannot be re-sealed
@@ -3816,45 +3881,6 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // constructor (runnerAdapterFor below), and their registration comes
   // from the contract enumeration (4.6), so there is no Playwright
   // --list to re-diff.
-  const adapter = runnerName === 'playwright'
-    ? new PlaywrightAdapter({
-        config,
-        run: {
-          testFiles: plannedRows.map((row) => row.planned.file),
-          // A named run executes exactly the named tests, not their
-          // whole spec files.
-          ...(namedTestLocations.length > 0 ? { testLocations: namedTestLocations } : {}),
-          ...(io.env['GATEFORGE_APP_BASE_URL'] ? { appBaseUrl: io.env['GATEFORGE_APP_BASE_URL'] } : {}),
-          ...(io.env['GATEFORGE_SESSION_STATE'] ? { storageState: io.env['GATEFORGE_SESSION_STATE'] } : {}),
-          projects: [
-            ...new Set(
-              plannedRows.map((row) => row.planned.project).filter((project): project is string => project !== null),
-            ),
-          ],
-          // Per-project file selection (setup-dependency fix): the plan
-          // already knows which files belong to which project, and project
-          // identity is the join key the registered expected set speaks. A
-          // single global testMatch collects every selected file under EVERY
-          // project, so a standard `{ name: 'setup', testMatch: /.*\.setup\.ts/ }`
-          // config would run the whole suite once per project and execute
-          // identities the expected set never bound — refused sessions, no
-          // evidence, and a counter past its own total. Project-less plan
-          // rows (none here, kept for honesty) keep the global selection.
-          // ...carrying the dependency EDGES the enumeration captured, so
-          // the synthesized config orders a `setup` project before the
-          // projects that read its artifact (the standard auth pattern),
-          // and the `use.storageState` PATH each project declared, so the
-          // project that reads the saved session is handed it while the
-          // setup project keeps running unauthenticated. An operator's
-          // GATEFORGE_SESSION_STATE still outranks both (above).
-          projectScopes: plannedProjectScopes(plannedRows, projectDependencies, projectStorageStates),
-          // Operator-provided whole-run bound for multi-hour suites (default
-          // 30 minutes stands when absent — same expected set and
-          // completeness rules either way).
-          ...(runTimeoutMs !== undefined ? { timeoutMs: runTimeoutMs } : {}),
-        },
-      })
-    : null;
   const suiteEnv: Record<string, string> = {
     GATEFORGE_RUN_TOKEN: envRecord.GATEFORGE_RUN_TOKEN,
     GATEFORGE_CLI_VERSION: VERSION,
@@ -3876,6 +3902,140 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       if (value !== undefined && value !== '') suiteEnv[name] = value;
     }
   }
+
+  // 6.1 The GLOBAL native preparation freeze: ONE native process, ONE
+  // prepared candidate. A native prerequisite stage produces its
+  // artifacts — the standard auth pattern's saved session above all —
+  // WHILE the behavioral projects are already scheduled, so a candidate
+  // frozen only before the spawn can never equal the workspace the bodies
+  // actually run against. The engine therefore adds ONE controller
+  // project, gives it the full upstream prerequisite closure of the
+  // planned captured graph, gives every other planned project that
+  // controller as a dependency, and freezes the candidate exactly once in
+  // between. Nothing else moves: an operator's whole-run state still
+  // outranks every declaration and bypasses this path exactly as before, a
+  // run that planned no project has nothing to freeze, and a non-native
+  // runner never enters it.
+  const plannedScopes = plannedProjectScopes(plannedRows, projectDependencies, projectStorageStates);
+  let freezePlan: NativeFreezePlan | null = null;
+  let freezeTargets: GeneratedTargetClass | null = null;
+  let freezePrerequisites: PrerequisiteIdentity[] = [];
+  let freezeKeys: FreezeSigningKeyPair | null = null;
+  let freezeNonce: string | null = null;
+  // The barrier needs a REAL Playwright child: its own phase scheduler,
+  // worker host and `playwright/test` module are what order the
+  // controller between the prerequisites and the bodies. The predicate
+  // is the same one the pack applies before it emits the controller
+  // project, so both sides agree on whether a barrier is possible.
+  const nativeRunnerCommand =
+    runnerName === 'playwright' ? defaultPlaywrightCommand(io.cwd) : null;
+  if (
+    nativeRunnerCommand !== null &&
+    plannedScopes.length > 0 &&
+    isPlaywrightRunnerInstall(nativeRunnerCommand) &&
+    io.env['GATEFORGE_SESSION_STATE'] === undefined
+  ) {
+    try {
+      const plan = planNativeFreeze({
+        projectScopes: plannedScopes,
+        projectDependencies: projectGraphCaptured ? projectDependencies : undefined,
+      });
+      // An unavailable or ambiguous captured graph is refused BEFORE the
+      // spawn: a half-known graph would order this run wrongly while
+      // looking complete.
+      if ('problem' in plan) throw new Error(plan.problem);
+      freezePlan = plan.plan;
+      const trackedPaths = freezeGitDir === null ? null : listTrackedPaths(freezeGitDir, io.env);
+      if (trackedPaths === null) {
+        throw new Error(
+          'the tracked-path inventory could not be read, so no generated target can be told apart from source',
+        );
+      }
+      freezeTargets = classifyGeneratedTargets({
+        root: io.cwd,
+        nativeConfigDir: nativeConfigDirOf(io.cwd),
+        storageStates: projectStorageStates,
+        tracked: trackedPaths,
+        inputFiles: new Set((preFiles ?? []).map((entry) => entry.path)),
+        docsExclusions,
+        cacheExclusions,
+      });
+      freezeKeys = mintFreezeSigningKeyPair();
+      freezeNonce = randomUUID();
+      freezePrerequisites = plannedRows
+        .filter(
+          (row) =>
+            row.planned.project !== null &&
+            (freezePlan?.prerequisiteProjects.includes(row.planned.project) ?? false),
+        )
+        .map((row) => ({ file: row.planned.file, titlePath: [...row.planned.titlePath] }));
+    } catch (error) {
+      if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+      throw new UsageError(
+        `test-gates: the global native preparation freeze refuses this run — ${(error as Error).message}`,
+      );
+    }
+  }
+  const armedFreeze =
+    freezePlan === null || freezeTargets === null || freezeKeys === null || freezeNonce === null
+      ? null
+      : armFreezeControl({
+          runId: manifest.runId,
+          invocationId,
+          nonce: freezeNonce,
+          stateDir,
+          // The SAME runner this run spawns, so the generated controller
+          // imports one consistent `playwright/test`.
+          testModulePath: playwrightTestModulePath(defaultPlaywrightCommand(io.cwd)),
+          releasePublicKey: freezeKeys.publicKeyBase64,
+          // The runner child's OWN environment, captured before any project
+          // worker exists — the only honest baseline a body worker's
+          // inherited preparation environment can be projected back to.
+          baseEnv: supervisedRunnerChildEnv(suiteEnv, io.cwd),
+          timeoutMs: Math.min(Math.max(runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS, 120_000), 900_000),
+        });
+  let preparedIdentity: PreparedCandidateIdentity | null = null;
+
+  // Per-project file selection (setup-dependency fix): the plan already
+  // knows which files belong to which project, and project identity is
+  // the join key the registered expected set speaks — so a
+  // `{ name: 'setup', testMatch: … }` config cannot collect every selected
+  // file under every project. Each scope also carries the dependency EDGES
+  // the enumeration captured and the `use.storageState` PATH each project
+  // declared, so the project that reads the saved session is handed it
+  // while the setup project keeps running unauthenticated. An operator's
+  // GATEFORGE_SESSION_STATE still outranks both (above).
+  const adapter = runnerName === 'playwright'
+    ? new PlaywrightAdapter({
+        config,
+        run: {
+          testFiles: plannedRows.map((row) => row.planned.file),
+          // A named run executes exactly the named tests, not their
+          // whole spec files.
+          ...(namedTestLocations.length > 0 ? { testLocations: namedTestLocations } : {}),
+          ...(io.env['GATEFORGE_APP_BASE_URL'] ? { appBaseUrl: io.env['GATEFORGE_APP_BASE_URL'] } : {}),
+          ...(io.env['GATEFORGE_SESSION_STATE'] ? { storageState: io.env['GATEFORGE_SESSION_STATE'] } : {}),
+          projects: [
+            ...new Set(
+              plannedRows.map((row) => row.planned.project).filter((project): project is string => project !== null),
+            ),
+          ],
+          projectScopes: plannedScopes,
+          ...(armedFreeze === null || freezePlan === null
+            ? {}
+            : {
+                freeze: {
+                  control: armedFreeze.control,
+                  prerequisiteProjects: freezePlan.prerequisiteProjects,
+                },
+              }),
+          // Operator-provided whole-run bound for multi-hour suites (default
+          // 30 minutes stands when absent — same expected set and
+          // completeness rules either way).
+          ...(runTimeoutMs !== undefined ? { timeoutMs: runTimeoutMs } : {}),
+        },
+      })
+    : null;
 
   if (adapter !== null) {
     // Registration must be identical under planning's scrubbed env and
@@ -3938,8 +4098,215 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     writeLine: (line: string) => writeLine(io.stderr, line),
     warn: (line: string) => writeLine(io.stderr, line),
   });
+  // The trusted freeze handler. It runs OFF the drain's own serialization
+  // (see `supervisor/drain.ts`): it waits for the supervisor to seal the
+  // prerequisite sessions, and those seals are produced by that same
+  // drain, so chaining this wait in front of them would deadlock.
+  let drainHandle: SpoolDrainHandle | null = null;
+  const handleFreezeRequest = async (request: unknown): Promise<void> => {
+    if (
+      freezePlan === null ||
+      freezeTargets === null ||
+      freezeKeys === null ||
+      freezeNonce === null ||
+      armedFreeze === null
+    ) {
+      throw new Error('this run armed no preparation freeze to serve');
+    }
+    // Every refusal this handler raises is ALSO written to the control
+    // directory's refusal document. That document is failure-only by
+    // construction — no controller path treats it as permission to
+    // continue — so publishing it can only end the controller's wait
+    // sooner, never satisfy it. Without it a permanent refusal (a
+    // prerequisite that sealed failed, skipped, retried or duplicated)
+    // would burn the controller's whole bound before failing anyway.
+    try {
+      await serveFreezeRequest(request);
+    } catch (error) {
+      writeFreezeRefusal(armedFreeze.control, (error as Error).message);
+      throw error;
+    }
+  };
+  const serveFreezeRequest = async (request: unknown): Promise<void> => {
+    if (
+      freezePlan === null ||
+      freezeTargets === null ||
+      freezeKeys === null ||
+      freezeNonce === null ||
+      armedFreeze === null
+    ) {
+      throw new Error('this run armed no preparation freeze to serve');
+    }
+    const accepted = acceptedFreezeRequest(request, {
+      runId: manifest.runId,
+      invocationId,
+      nonce: freezeNonce,
+      project: freezePlan.controllerProject,
+    });
+    if (typeof accepted === 'string') throw new Error(accepted);
+    // (1) Every prerequisite must already be PROVEN passed under the
+    // AUTHENTICATED supervisor trace. A genuine sealed pass with zero
+    // witness activity counts: a setup project's honest job is to produce
+    // an artifact, and admitting that artifact is exactly what the diff
+    // below is for. No activity threshold is invented here.
+    //
+    // Only genuinely PENDING prerequisites are waited for (no session
+    // yet). A prerequisite that already sealed as failed/skipped, that
+    // opened more than one session, or whose trace cannot be read is
+    // TERMINAL and refuses at once — waiting cannot change it, so the
+    // bound is only there for a prerequisite the runner has not reached.
+    const bound = Date.now() + Math.max(600_000, 120_000);
+    let pending = ['the witness has not reported the prerequisite stage yet'];
+    while (pending.length > 0) {
+      if (Date.now() >= bound) {
+        throw new Error(
+          `the prerequisite stage did not report within the freeze's own bound (${pending.join('; ')})`,
+        );
+      }
+      const trace = await supervisor.executionTrace();
+      const state = unfrozenPrerequisiteState({
+        trace: trace?.tests ?? null,
+        prerequisites: freezePrerequisites,
+      });
+      if (state.refused.length > 0) throw new Error(state.refused.join('; '));
+      pending = state.pending;
+      if (pending.length > 0) await delay(100);
+    }
+    // (2) The input inventory must not have moved while the prerequisites
+    // ran: this run will seal against the digest it pinned at discovery.
+    if (!snapshotUnavailable && preFiles !== null) {
+      const nowFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions, cacheExclusions);
+      const drift = diffInputFiles(preFiles, nowFiles);
+      if (drift.length > 0) {
+        throw new Error(
+          `the input inventory moved during native preparation (${drift.slice(0, 3).join('; ')})`,
+        );
+      }
+    }
+    // (3) The control spec the CLI pinned BEFORE the run must still be
+    // the bytes on disk, and the release document must not exist yet.
+    // Both are checked BEFORE anything is snapshotted or signed: they
+    // are inputs to the release decision, not consequences of it.
+    //
+    // The spec is GENERATED engine code in the excluded run-state
+    // subtree and the controller can rewrite its own file (it runs
+    // inside the same boundary), so a release signed over a digest
+    // nothing re-checks would bind a control file nobody verified. The
+    // CLI therefore compares the file itself, never the file's own
+    // report of itself.
+    const specBytesNow = readFileSync(armedFreeze.control.specPath);
+    const specDigestNow = createHash('sha256').update(specBytesNow).digest('hex');
+    if (specDigestNow !== armedFreeze.specDigest) {
+      throw new Error(
+        `the generated freeze controller spec no longer matches the bytes this run pinned (expected ` +
+          `${armedFreeze.specDigest.slice(0, 12)}…, found ${specDigestNow.slice(0, 12)}…)`,
+      );
+    }
+    // The publisher is ONE-SHOT per invocation and has not run yet: this
+    // handler is the only writer of the release document, and it writes
+    // it at the END of this function. A release file that already exists
+    // when the request is accepted was therefore NOT written by this run
+    // — it is a leftover, a replay of an earlier invocation's document,
+    // or a forgery.
+    //
+    // Signing anyway would let the publisher OVERWRITE a planted
+    // document, so a controller that read the planted bytes and a
+    // controller that read the genuine ones would reach opposite
+    // conclusions about one and the same run. Refusing here makes the
+    // handshake deterministic instead: an unexpected release document
+    // ends the barrier through the FAILURE-ONLY channel, naming its
+    // path, and is never mistaken for the one positive signal that
+    // unblocks a body. It grants no authority — the ephemeral signature
+    // is still the only thing that can unblock a controller, and the
+    // worker still verifies the release cryptographically.
+    if (existsSync(armedFreeze.control.releasePath)) {
+      throw new Error(
+        `a freeze release document already existed at '${armedFreeze.control.releasePath}' when the controller ` +
+          'asked to be frozen, so this run did not write it — an unexpected (planted, stale or replayed) release ' +
+          'is never overwritten into a genuine one (fail closed)',
+      );
+    }
+    // (4) ONE prepared snapshot, admitted against the frozen baseline:
+    // only admissible generated-target additions and modifications pass.
+    if (freezeGitDir === null || baselineSnapshot === null) {
+      throw new Error('this run pinned no candidate baseline, so no prepared candidate can be frozen');
+    }
+    const preparedSnapshot = computeCandidateTreeSnapshot(
+      freezeGitDir,
+      io.cwd,
+      io.env,
+      stateDir,
+      'record',
+      runtimeReuseMounts,
+      docsExclusions,
+      cacheExclusions,
+    );
+    const violations = preparedCandidateViolations({
+      root: io.cwd,
+      baseline: baselineSnapshot.entries,
+      prepared: preparedSnapshot.entries,
+      targets: freezeTargets,
+    });
+    if (violations.length > 0) throw new Error(violations.join('; '));
+    // (5) Publish. The ordering marker is appended FIRST so that every
+    // body project's begin is provably later than the accepted freeze, then
+    // the SIGNED release the controller verifies before it proceeds. The
+    // private key never leaves this function's closure.
+    appendFreezeReleaseEvent(spoolPathFor(stateDir, manifest.runId), {
+      project: freezePlan.controllerProject,
+      preparedTreeId: preparedSnapshot.treeId,
+      specDigest: armedFreeze.specDigest,
+    });
+    drainHandle?.markFreezeRelease({
+      preparedTreeId: preparedSnapshot.treeId,
+      specDigest: armedFreeze.specDigest,
+    });
+    const sealedAt = new Date().toISOString();
+    writeFileSync(
+      armedFreeze.control.releasePath,
+      `${canonicalFreezeJson(
+        signFreezeRelease(freezeKeys.privateKey, {
+          schemaVersion: 1,
+          project: freezePlan.controllerProject,
+          runId: manifest.runId,
+          invocationId,
+          nonce: freezeNonce,
+          preparedTreeId: preparedSnapshot.treeId,
+          specDigest: armedFreeze.specDigest,
+          sealedAt,
+        }),
+      )}\n`,
+      'utf8',
+    );
+    preparedIdentity = {
+      preparedTreeId: preparedSnapshot.treeId,
+      runId: manifest.runId,
+      invocationId,
+      nonce: freezeNonce,
+      sealedAt,
+    };
+    options.onPreparedCandidate?.(preparedIdentity);
+    writeLine(
+      io.stderr,
+      `prepared candidate frozen at ${preparedSnapshot.treeId.slice(0, 12)}… ` +
+        `(${String(freezeTargets.eligible.size)} generated target(s) admitted)`,
+    );
+  };
   progress.start();
   const drain = startSupervisorSpoolDrain({
+    // The GLOBAL preparation freeze rides the same pump: the controller's
+    // request is noticed here, and the handler above owns every authority
+    // decision the release depends on.
+    ...(freezePlan === null || armedFreeze === null
+      ? {}
+      : {
+          freeze: {
+            controllerProject: freezePlan.controllerProject,
+            bodyProjects: freezePlan.bodyProjects,
+            requestPath: armedFreeze.control.requestPath,
+            onRequest: handleFreezeRequest,
+          },
+        }),
     stateDir,
     runId: manifest.runId,
     witnessUrl: effectiveWitnessUrl,
@@ -3965,6 +4332,10 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       });
     },
   });
+  // The handler closes over the handle so an accepted freeze can record
+  // its own ordering marker identity; the assignment happens before the
+  // first poll, and the handler only ever runs later.
+  drainHandle = drain;
   let envelope: RunnerExecutionEnvelope;
   // The witness-side execution trace (review fix 2b) — THE execution
   // authority supervision grades completeness from. Fetched while the
@@ -4593,9 +4964,137 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       durationMs: executionDurationMs,
     });
   }
+  // The tree this run actually TESTED. Without the global native
+  // preparation freeze that is the frozen pre-run tree, exactly as before;
+  // with it, it is the ONE prepared candidate the freeze accepted after
+  // the prerequisite stage — never a rebound baseline, and never a second
+  // snapshot. Both the final drift check and the receipt bind this value.
+  const testedTreeId = preparedIdentity?.preparedTreeId ?? frozenTreeId;
+
+  // The FINAL control-spec pin. The request-time check proved the pinned
+  // bytes were intact before the release was signed; the bodies then ran
+  // against that control. This is the same guard the synthesized runner
+  // config gets in the pack (`supervised-run.ts`, pinned before the
+  // spawn and compared again after the child exits) and it is deliberately
+  // SEPARATE from it: the trusted config is the whole authority the runner
+  // executes, while the control SPEC is the handshake document, and one
+  // check does not cover the other.
+  //
+  // It runs here, after the run and before ANY receipt, result or carried
+  // re-seal is accepted, because everything downstream of this point
+  // claims the prepared candidate was frozen under control nobody
+  // replaced. A control file that moved during the run is an integrity
+  // failure, not a recoverable outcome: fail closed, name the path, and
+  // write nothing. As everywhere else here, this is a same-UID
+  // replace-and-restore LIMIT, not a physical sandbox: an attacker who
+  // restores the file between the two reads stays outside this boundary.
+  let controlSpecDrift: string | null = null;
+  if (armedFreeze !== null) {
+    let finalSpecDigest: string | null;
+    try {
+      finalSpecDigest = createHash('sha256').update(readFileSync(armedFreeze.control.specPath)).digest('hex');
+    } catch {
+      finalSpecDigest = null;
+    }
+    if (finalSpecDigest !== armedFreeze.specDigest) {
+      controlSpecDrift =
+        `the generated freeze controller spec at '${armedFreeze.control.specPath}' no longer matches the bytes ` +
+        `this run pinned (expected ${armedFreeze.specDigest.slice(0, 12)}…, found ` +
+        `${finalSpecDigest === null ? 'no readable file' : `${finalSpecDigest.slice(0, 12)}…`}), so the ` +
+        'prepared candidate this run would seal cannot be shown to come from the control it froze under (fail closed)';
+    }
+  }
+
+  // The test-only re-seal must be recomputed against the tree this run
+  // actually TESTED. Before the global preparation freeze that tree is
+  // the pre-run baseline the plan was decided from; with the freeze it is
+  // the PREPARED candidate, and a native preparation stage that rewrote a
+  // parent state target after the plan was made would otherwise leave a
+  // receipt whose signed `changedPaths` describe bytes nobody graded.
+  //
+  // So the classification is recomputed here from the SAME two sealed
+  // trees a consumer recomputes from, and the seal binds THAT result. A
+  // recomputation that no longer holds — or whose affected set demands a
+  // test this run did not freshly execute — is a targeted refusal naming
+  // the files, never a silent carry of proof that no longer applies.
+  let preparedReseal: ResealPlan | null = reSealPlan;
+  let preparedResealRefusal: string | null = null;
+  if (reSealPlan !== null && testedTreeId !== null && testedTreeId !== frozenTreeId && freezeGitDir !== null) {
+    const recomputed = classifyResealChange({
+      gitDir: freezeGitDir,
+      env: io.env,
+      cwd: io.cwd,
+      parentTreeId: reSealPlan.parentTreeId,
+      currentTreeId: testedTreeId,
+      testFiles: catalog === null ? [] : [...new Set(catalog.entries.map((entry) => entry.file))],
+      // The two commit trees travel whenever both exist: they say which
+      // paths are tracked SOURCE, which is what decides whether a
+      // declared browser state the preparation stage rewrote counts as
+      // generated output at all. An owner declaration only adds the
+      // second use of the same reading, so it no longer gates them.
+      ...(reSealPlan.parentSha.length > 0 && pipeline.manifest.gitSha !== null
+        ? {
+            parentCommitTreeId: `${reSealPlan.parentSha}^{tree}`,
+            currentCommitTreeId: `${pipeline.manifest.gitSha}^{tree}`,
+          }
+        : {}),
+      ...(config.enforcement?.resealRuntimeFiles !== undefined
+        ? { runtimeFileGlobs: config.enforcement.resealRuntimeFiles }
+        : {}),
+      ...(preFiles !== null ? { inputFiles: new Set(preFiles.map((entry) => entry.path)) } : {}),
+    });
+    if (!recomputed.eligible) {
+      // A change set that no longer classifies against the PREPARED tree
+      // is refused the same actionable way an uncovered carry is: the
+      // offending path the classifier named, and the explicit full-fresh
+      // command that re-runs everything against the prepared candidate.
+      // The feature is never disabled and nothing is silently carried.
+      preparedResealRefusal =
+        `${recomputed.reason ?? 'the change set no longer classifies'} — the prepared candidate tree ` +
+        `${testedTreeId.slice(0, 12)}… differs from the pre-run tree this re-seal was planned from; ` +
+        're-run the full relevant suite (`gateforge test-gates --changed --scope full`) so every ' +
+          'affected test executes against the prepared candidate';
+      preparedReseal = null;
+    } else {
+      const freshFiles = new Set(plannedRows.map((row) => row.planned.file));
+      const uncovered = recomputed.affectedTestFiles.filter((file) => !freshFiles.has(file)).sort();
+      if (uncovered.length > 0) {
+        preparedResealRefusal =
+          `native preparation changed the tested bytes in a way that affects test file(s) this re-seal ` +
+          `carried instead of re-running (${uncovered.join(', ')}) — re-run the full relevant suite ` +
+          '(`gateforge test-gates --changed --scope full`) so every affected test executes against the ' +
+          'prepared candidate';
+        preparedReseal = null;
+      } else {
+        preparedReseal = { ...reSealPlan, classification: recomputed };
+      }
+    }
+  }
+  if (preparedResealRefusal !== null) {
+    writeLine(io.stderr, `test-gates: ${resealRefusal(preparedResealRefusal)}`);
+    // No receipt: a test-only seal over this prepared tree would claim
+    // evidence for bytes the change set no longer supports.
+    clearGateReceipt(stateDir);
+    clearResealChain(stateDir);
+    return 1;
+  }
+  if (controlSpecDrift !== null) {
+    writeLine(io.stderr, `test-gates: ${controlSpecDrift}`);
+    // Nothing downstream of this point may be accepted: the graded
+    // report, the receipt, and the carried re-seal all claim this run
+    // froze its candidate under a control nobody replaced. An
+    // authoritative run therefore invalidates the receipt and the chain
+    // it was about to extend; a result-only run owns neither, so its
+    // precedence is untouched.
+    if (!options.resultOnly) {
+      clearGateReceipt(stateDir);
+      clearResealChain(stateDir);
+    }
+    return 1;
+  }
   const diagnosticContext = {
     scope: namedTestIds !== null ? ('named' as const) : options.scope,
-    candidateTreeId: frozenTreeId,
+    candidateTreeId: testedTreeId,
     inputDigest: expectedDigest,
     evidenceState: snapshotUnavailable
       ? 'snapshot-unavailable'
@@ -4798,7 +5297,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       snapshotUnavailable ||
       changedInputs ||
       resultTreeId === null ||
-      resultTreeId !== frozenTreeId ||
+      resultTreeId !== testedTreeId ||
       catalog === null
     ) {
       return;
@@ -4884,11 +5383,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // reads, writes, or clears the configured authoritative receipt.
   // Confirm the same candidate-tree drift check before returning a
   // descriptive pass.
-  if (resultTreeId !== frozenTreeId) {
+  if (resultTreeId !== testedTreeId) {
     writeLine(
       io.stderr,
       'test-gates: the workspace changed during the run ' +
-        `(${frozenTreeId ?? 'unborn'} → ${resultTreeId ?? 'unborn'}); ` +
+        `(${testedTreeId ?? 'unborn'} → ${resultTreeId ?? 'unborn'}); ` +
         'no result is reported for mixed bytes (fail closed)',
     );
     return 1;
@@ -4950,23 +5449,23 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     // `resealedFromKind` — how many outcomes it carried, how many
     // tests it re-ran, and the change set Gateforge itself computed.
     // CI recomputes every one of them from the two sealed trees.
-    ...(reSealPlan === null
+    ...(preparedReseal === null
       ? {}
       : {
-          ...(reSealPlan.parentKind === 'receipt'
+          ...(preparedReseal.parentKind === 'receipt'
             ? { carriedFrom: reSealPlan.parentSha, parentReceiptDigest: reSealPlan.parentDigest }
             : {}),
-          resealedFrom: reSealPlan.parentDigest,
-          resealedFromKind: reSealPlan.parentKind,
+          resealedFrom: preparedReseal.parentDigest,
+          resealedFromKind: preparedReseal.parentKind,
           changeClass: 'test-only' as const,
-          carriedTests: reSealPlan.carriedTests,
+          carriedTests: preparedReseal.carriedTests,
           rerunTests: plannedRows.length,
-          changedPaths: reSealPlan.classification.changedPaths,
+          changedPaths: preparedReseal.classification.changedPaths,
           // Which of those paths the owner's runtime-file declaration
           // hid, and the consumer recomputes the list from the same
           // declaration — a difference is EVIDENCE_STALE.
-          ...((reSealPlan.classification.disregardedPaths ?? []).length > 0
-            ? { resealDisregarded: reSealPlan.classification.disregardedPaths }
+          ...((preparedReseal.classification.disregardedPaths ?? []).length > 0
+            ? { resealDisregarded: preparedReseal.classification.disregardedPaths }
             : {}),
           // The graded evidence union — the carried parent records and
           // claims plus this run's own — bound by the receipt MAC, so a
@@ -5013,7 +5512,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // the catalog its classification used, so a consumer can recompute
   // the re-seal with its own engine and key. Any other seal leaves no
   // chain behind.
-  if (reSealPlan !== null && reSealParent !== null && catalog !== null) {
+  if (preparedReseal !== null && reSealParent !== null && catalog !== null) {
     writeResealChainHop(stateDir, {
       ...(reSealParent.receipt === null
         ? { runRecord: reSealParent.record, receipt: null }
@@ -5029,13 +5528,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   }
   writeCandidateTreeEntries(stateDir, resultTreeSnapshot?.entries ?? []);
   writeLine(io.stderr, `receipt ${receipt.receiptId} sealed (complete run, evidence graded, inputs bound)`);
-  if (reSealPlan !== null) {
-    const disregarded = reSealPlan.classification.disregardedPaths ?? [];
+  if (preparedReseal !== null) {
+    const disregarded = preparedReseal.classification.disregardedPaths ?? [];
     if (disregarded.length > 0) writeLine(io.stderr, `test-gates: ${resealDisregardNotice(disregarded)}`);
     writeLine(
       io.stderr,
-      `only test files changed: re-ran ${String(plannedRows.length)} test(s), kept ${String(reSealPlan.carriedTests)} ` +
-        `from the previous ${reSealPlan.parentKind === 'run-record' ? 'run' : 'receipt'}`,
+      `only test files changed: re-ran ${String(plannedRows.length)} test(s), kept ${String(preparedReseal.carriedTests)} ` +
+        `from the previous ${preparedReseal.parentKind === 'run-record' ? 'run' : 'receipt'}`,
     );
   }
   return 0;
