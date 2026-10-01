@@ -124,8 +124,12 @@ test('archives the account through the rendered UI', {
 // request is slower, the wrong tab's rows are on screen.
 test('tab B rows win the list', async ({ page }) => {
   await page.goto(appBase + '/race');
-  await page.locator('#tab-a').click();
-  await page.locator('#tab-b').click();
+  // Start both requests in one browser turn. Separate actionability waits
+  // can let the first response settle before the second request even starts.
+  await page.evaluate(() => {
+    document.getElementById('tab-a').click();
+    document.getElementById('tab-b').click();
+  });
   // Both list answers have landed before the page is judged: asserting
   // while the stale one is still in flight would pass by accident.
   await page.waitForFunction(() => window.__settled === 2);
@@ -138,8 +142,10 @@ test('tab B rows win the list', async ({ page }) => {
 // request id. No timing may ever turn this red.
 test('tab B rows win the list without a stale response', async ({ page }) => {
   await page.goto(appBase + '/twin');
-  await page.locator('#tab-a').click();
-  await page.locator('#tab-b').click();
+  await page.evaluate(() => {
+    document.getElementById('tab-a').click();
+    document.getElementById('tab-b').click();
+  });
   await page.waitForFunction(() => window.__settled === 2);
   await expect(page.locator('#rows'), 'the race-free twin must never show a stale tab').toContainText('beta-row');
 });
