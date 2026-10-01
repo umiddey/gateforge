@@ -857,14 +857,44 @@ export interface EvidenceAdapter {
  * One observe-eligible mutation shape: the HTTP method (uppercase) and
  * the backend-facing path template. `{id}` matches exactly one non-
  * empty path segment and binds the entity id for read/update/delete.
+ * A read may instead declare `collection`, naming its entities in the
+ * returned rows instead of in the path.
  */
 export interface ObserveMutation {
   /** Concrete uppercase HTTP method, e.g. `'POST'`. */
   method: string;
   /** Backend-facing absolute path, e.g. `'/api/v2/accounts/{id}'`. */
   path: string;
-}
 
+  /**
+   * Optional COLLECTION read declaration (read + GET only): the
+   * entities this operation names come from the returned rows of the
+   * response the witness proxied, resolved against the witness's own
+   * session-open snapshot. Forbidden on create/update/delete and on
+   * any read whose path carries `{id}`; absent, the read keeps binding
+   * `{id}` from the path exactly as before.
+   */
+  collection?: ObserveCollection;
+
+}
+/**
+ * The COLLECTION shape of an observe read: the response the real UI
+ * rendered lists its entities, so the entity ids come from the rows
+ * themselves rather than from a path template. `rowsKey` names the
+ * object property holding the row array; omitting it declares that the
+ * response ROOT is the row array. `idKey` names the row property
+ * carrying the entity id — the only field the witness reads out of a
+ * returned row.
+ *
+ * Declared, never inferred: an adapter whose read binding carries no
+ * `collection` keeps the by-`{id}` behavior unchanged.
+ */
+export interface ObserveCollection {
+  /** Property holding the row array; absent = the root is the array. */
+  rowsKey?: string;
+  /** Row property carrying the entity id. */
+  idKey: string;
+}
 /** Per-operation observe bindings for one resource adapter. */
 export interface ObserveBinding {
   create?: ObserveMutation;

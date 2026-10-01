@@ -642,7 +642,15 @@ export { resolve };
  */
 export function writeObserveAdapter(
 	dir: string,
-	options: { list?: boolean; observe?: boolean; fingerprint?: string } = {},
+	options: {
+		list?: boolean;
+		observe?: boolean;
+		fingerprint?: string;
+		/** Overrides the read binding: a by-id path, or a collection route. */
+		read?: { path: string; collection?: { rowsKey?: string; idKey: string } };
+		/** Server-computed fields the adapter declares (never inferred). */
+		volatileFields?: readonly string[];
+	} = {},
 ): void {
 	const fingerprint = options.fingerprint ?? FINGERPRINT;
 	const lines = [
@@ -676,15 +684,69 @@ export function writeObserveAdapter(
 		`  environmentFingerprint: '${fingerprint}',`,
 	);
 	if (options.observe !== false) {
+		const read = options.read ?? { path: '/api/accounts/{id}' };
+		const collection =
+			read.collection === undefined
+				? ''
+				: `, collection: { ${
+						read.collection.rowsKey === undefined ? '' : `rowsKey: '${read.collection.rowsKey}', `
+					}idKey: '${read.collection.idKey}' }`;
 		lines.push(
 			'  observe: {',
 			"    create: { method: 'POST', path: '/api/accounts' },",
-			"    read: { method: 'GET', path: '/api/accounts/{id}' },",
+			`    read: { method: 'GET', path: '${read.path}'${collection} },`,
 			"    update: { method: 'PATCH', path: '/api/accounts/{id}' },",
 			"    delete: { method: 'POST', path: '/api/accounts/{id}/archive' },",
 			'  },',
 		);
 	}
+	if (options.volatileFields !== undefined) {
+		lines.push(`  volatileFields: [${options.volatileFields.map((field) => `'${field}'`).join(', ')}],`);
+	}
 	lines.push('};', '');
 	writeFileSync(join(dir, '.gateforge/adapters/tenant.accounts.mjs'), lines.join('\n'));
+}
+
+/**
+ * Writes a SECOND reviewed adapter (`tenant.orders`) whose observe read
+ * is a collection over the SAME `GET /api/accounts` route the accounts
+ * adapter declares. Used to prove that two claimed resources sharing
+ * one route with DIFFERENT declared shapes credit neither, and that
+ * an identical shape still yields single-use consumption.
+ */
+export function writeSecondCollectionAdapter(
+	dir: string,
+	collection: { rowsKey: string; idKey: string },
+): void {
+	writeFileSync(
+		join(dir, '.gateforge/adapters/tenant.orders.mjs'),
+		[
+			'// Reviewed evidence adapter for tenant.orders (same list route, own collection shape).',
+			'export default {',
+			'  async read(ctx, id) {',
+			'    const res = await ctx.get(`/api/accounts/${encodeURIComponent(String(id))}`);',
+			'    if (res.status === 404) return null;',
+			"    if (res.status !== 200) throw new Error('adapter read failed');",
+			'    return res.json();',
+			'  },',
+			'  async list(ctx) {',
+			"    const res = await ctx.get('/api/accounts');",
+			"    if (res.status !== 200) throw new Error('adapter list failed');",
+			'    return (await res.json()).accounts;',
+			'  },',
+			'  normalize(body) {',
+			'    return {',
+			'      entityId: body.id,',
+			'      fields: { first_name: body.first_name, last_name: body.last_name, status: body.status },',
+			'    };',
+			'  },',
+			"  deletion: 'archive',",
+			`  environmentFingerprint: '${FINGERPRINT}',`,
+			'  observe: {',
+			`    read: { method: 'GET', path: '/api/accounts', collection: { rowsKey: '${collection.rowsKey}', idKey: '${collection.idKey}' } },`,
+			'  },',
+			'};',
+			'',
+		].join('\n'),
+	);
 }

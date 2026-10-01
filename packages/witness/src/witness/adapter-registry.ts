@@ -150,6 +150,14 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
   ) {
     problems.push('fields must be an array of unique non-empty field names when present');
   }
+  if (
+    adapter['volatileFields'] !== undefined &&
+    (!Array.isArray(adapter['volatileFields']) ||
+      adapter['volatileFields'].some((field) => typeof field !== 'string' || field.length === 0) ||
+      new Set(adapter['volatileFields']).size !== adapter['volatileFields'].length)
+  ) {
+    problems.push('volatileFields must be an array of unique non-empty field names when present');
+  }
   // Server probe (server-witnessed persistence channel): OPTIONAL — an
   // adapter without it simply cannot serve the channel and every server
   // intent for the resource resolves to a typed
@@ -189,6 +197,9 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
     baseUrl: adapter['baseUrl'] as string | undefined,
     ...(adapter['fields'] !== undefined
       ? { fields: [...(adapter['fields'] as string[])] }
+      : {}),
+    ...(adapter['volatileFields'] !== undefined
+      ? { volatileFields: [...(adapter['volatileFields'] as string[])] }
       : {}),
     ...(adapter['list'] !== undefined
       ? { list: adapter['list'] as EvidenceAdapter['list'] }
@@ -283,9 +294,83 @@ export function validateObserveBinding(value: unknown): string | null {
     if (operation === 'create' && idSegments > 0) {
       return `observe.create.path must not template '{id}' (create ids come from the adapter list-diff, got '${path}')`;
     }
-    if (operation !== 'create' && idSegments !== 1) {
+    // Optional COLLECTION read shape (declared, never inferred): a
+    // real UI renders a LIST, so a read may name its entities in the
+    // returned rows instead of in the path. Only a read may declare
+    // it, only over GET, and never alongside the `{id}` template the
+    // by-id reader binds — every shape violation fails here, at load.
+    const collection = (entry as Record<string, unknown>)['collection'];
+    const declaresCollection = collection !== undefined;
+    if (declaresCollection) {
+      const problem = validateObserveCollection(collection, operation, method, path);
+      if (problem !== null) return problem;
+    }
+    if (operation !== 'create' && idSegments !== 1 && !declaresCollection) {
       return `observe.${operation}.path must carry exactly one '{id}' segment binding the entity id (got '${path}')`;
     }
+  }
+  return null;
+}
+
+/**
+ * Validates one operation's optional `collection` declaration: the
+ * response shape whose ROWS name the entities an observe read credits.
+ * A collection read must be a `read` over `GET` on a path that carries
+ * no `{id}` template (the by-id reader owns that), and must declare the
+ * row `idKey`; `rowsKey` is optional and its absence declares that the
+ * response root is the row array. Every failure is a load-time
+ * contract violation — an adapter can never quietly fall back to
+ * inferring a collection from an arbitrary response body.
+ *
+ * Args:
+ *   value: the operation entry's `collection` export.
+ *   operation: the observe operation the declaration sits on.
+ *   method: the operation's already-validated HTTP method.
+ *   path: the operation's already-validated path template.
+ *
+ * Returns:
+ *   string | null: the contract-violation description, or null when valid.
+ */
+export function validateObserveCollection(
+  value: unknown,
+  operation: string,
+  method: string,
+  path: string,
+): string | null {
+  if (operation !== 'read') {
+    return (
+      `observe.${operation}.collection is not supported — only a read renders a collection ` +
+      `(${operation} ids come from the list-diff or the '{id}' path segment)`
+    );
+  }
+  if (method !== 'GET') {
+    return `observe.read.collection requires method 'GET' (got '${method}') — a collection is read, never written`;
+  }
+  if (path.split('/').includes('{id}')) {
+    return (
+      `observe.read.collection must not be declared on a path carrying '{id}' (got '${path}') — a ` +
+      'by-id read and a collection read are two shapes, never one'
+    );
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return `observe.read.collection must be an object {idKey, rowsKey?}`;
+  }
+  const declaration = value as Record<string, unknown>;
+  for (const key of Object.keys(declaration)) {
+    if (key !== 'idKey' && key !== 'rowsKey') {
+      return `observe.read.collection carries unknown key '${key}' (allowed: idKey, rowsKey)`;
+    }
+  }
+  const idKey = declaration['idKey'];
+  if (typeof idKey !== 'string' || idKey.length === 0 || /[\s]/.test(idKey)) {
+    return "observe.read.collection.idKey must be a non-empty property name (the row field carrying the entity id)";
+  }
+  const rowsKey = declaration['rowsKey'];
+  if (rowsKey !== undefined && (typeof rowsKey !== 'string' || rowsKey.length === 0 || /[\s]/.test(rowsKey))) {
+    return (
+      "observe.read.collection.rowsKey must be a non-empty property name when present (omit it when the " +
+      'response root is the row array)'
+    );
   }
   return null;
 }

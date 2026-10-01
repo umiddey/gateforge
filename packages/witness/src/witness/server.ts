@@ -218,6 +218,7 @@ import type {
   ExpectedSetResponse,
   ExecutionTraceResponse,
   IssuedRecord,
+  ObserveCollection,
   ObserveDeclarationsRequest,
   ObserveFinalizeRequest,
   ObserveFinalizeResponse,
@@ -286,6 +287,40 @@ const OBSERVED_REQUEST_BODY_BYTES = 65536;
  * (the attribution set stays a handful of small strings per exchange).
  */
 const OBSERVED_RESPONSE_ID_CHARS = 128;
+
+/**
+ * The declared collection-read rows the WITNESS itself parsed out of
+ * ONE proxied 2xx response body: the entity ids the returned rows
+ * named (in response order), or the typed reason no usable row was
+ * named. Captured ONLY for a route a claimed adapter's observe read
+ * declares as a collection, so no other response body is parsed or
+ * retained — the snapshot the ids came from is otherwise hashed and
+ * discarded.
+ */
+interface ObservedCollectionRows {
+  /** The declared rowsKey the ids were read under (null = response root). */
+  rowsKey: string | null;
+  /** The declared idKey every id was read from. */
+  idKey: string;
+  /** The declared id field of every returned row, in response order. */
+  ids: Array<string | number>;
+  /** Why no usable rows were named (typed note text), or null. */
+  error: string | null;
+}
+
+/**
+ * One collection-read route this session may parse a response for.
+ * `shape` is the single declared collection every claiming resource
+ * agreed on, or null once two of them disagree — a route whose shape
+ * is ambiguous is never parsed, so a body is never read under a
+ * contract that did not declare it. `declarations` keeps one label per
+ * claiming resource, in claim order, so the refusal can NAME what
+ * disagreed instead of reporting a missing parse.
+ */
+interface CollectionRoute {
+  shape: ObserveCollection | null;
+  declarations: string[];
+}
 /** One engine-observed proxied exchange (arrival order via `seq`). */
 interface ObservedExchange {
   method: string;
@@ -316,6 +351,20 @@ interface ObservedExchange {
   sessionId: string | null;
   /** Witness-monotonic tick stamped when the exchange completed. */
   tick: number;
+
+  /**
+   * Declared collection-read rows parsed from THIS exchange's 2xx
+   * response body, present only when an adapter's observe read
+   * declares the route as a collection. Absent means nothing was
+   * captured — never an empty row set, never an inferred one.
+   */
+  collectionRows?: ObservedCollectionRows;
+  /**
+   * The competing collection declarations this exchange's route
+   * carries, when two claimed reads declared DIFFERENT shapes for it.
+   * The body was not parsed at all; the finalize names the conflict.
+   */
+  collectionConflict?: string[];
 }
 
 /**
@@ -663,6 +712,175 @@ function stripMountPath(rawUrl: string, mountPath: string | null): string {
 }
 
 /**
+ * The collection-read routes the proxy must parse a response body
+ * for, keyed by `<METHOD> <normalized path>`: every `read` binding a
+ * session actually CLAIMS and the supervisor actually declared, whose
+ * observe binding names a collection. Built from the loaded adapter
+ * map, the session's claims and the bound declarations only — so the
+ * proxy parses nothing, copies nothing and retains nothing for any
+ * other route, however large those response bodies are.
+ *
+ * Two claimed reads may share one route only by declaring the SAME
+ * collection shape. When they disagree the route keeps `shape: null`
+ * and every label, so the proxy parses that body for NEITHER of them
+ * and the refusal can name what conflicted — one resource's rows can
+ * never be read under another resource's `rowsKey`/`idKey`.
+ *
+ * A session's claims are fixed at open and the declarations are bound
+ * before the run, so the caller builds this once per proxy port and
+ * reuses it for every exchange on it.
+ */
+function collectionReadRoutes(state: WitnessState, sessionId: string | null): Map<string, CollectionRoute> {
+  const routes = new Map<string, CollectionRoute>();
+  if (sessionId === null || state.observeDeclarations === null) return routes;
+  const session = state.sessions.get(sessionId);
+  if (session === undefined) return routes;
+  for (const claim of session.claims) {
+    if (!state.observeDeclarations.has(claim)) continue;
+    const resourceId = resourceIdOfObligation(claim);
+    if (observeOperation(claim.slice(resourceId.length + 1)) !== 'read') continue;
+    const adapterName = state.classifications[resourceId]?.evidenceAdapter ?? resourceId;
+    const read = state.adapters.get(adapterName)?.observe?.read;
+    if (read?.collection === undefined) continue;
+    const route = `${read.method} ${normalizeObservedPath(read.path)}`;
+    const declared = read.collection;
+    const label = `${resourceId} (rowsKey=${JSON.stringify(declared.rowsKey ?? null)}, idKey=${JSON.stringify(declared.idKey)})`;
+    const existing = routes.get(route);
+    if (existing === undefined) {
+      routes.set(route, { shape: declared, declarations: [label] });
+      continue;
+    }
+    const agrees =
+      existing.shape !== null &&
+      (existing.shape.rowsKey ?? null) === (declared.rowsKey ?? null) &&
+      existing.shape.idKey === declared.idKey;
+    if (agrees) continue;
+    existing.shape = null;
+    existing.declarations.push(label);
+  }
+  return routes;
+}
+
+/**
+ * Reads the DECLARED row ids out of one bounded response-body snapshot
+ * for a collection-read binding: a non-empty row array (at the
+ * declared `rowsKey`, or at the root when none was declared) whose
+ * every row is an object carrying a short, scalar, unique `idKey`.
+ *
+ * Only that one field is read. Counts, totals, metadata and any other
+ * arbitrary scalar in the body are never examined — a response that
+ * names no usable row therefore names nothing, and the finalize path
+ * turns that into a typed note rather than evidence.
+ *
+ * Args:
+ *   snapshot: the bounded response bytes already hashed into the
+ *     exchange's body digest (nothing larger is retained anywhere).
+ *   contentType: lowercased response media type, or null.
+ *   truncated: whether the body exceeded the snapshot cap.
+ *   collection: the adapter's declared collection shape.
+ *
+ * Returns:
+ *   ObservedCollectionRows: the declared row ids, or the typed reason
+ *   the body named none.
+ */
+function parseCollectionRows(
+  snapshot: Buffer,
+  contentType: string | null,
+  truncated: boolean,
+  collection: ObserveCollection,
+): ObservedCollectionRows {
+  // Every exit carries the declared shape these ids were read under,
+  // so a finalize can refuse a capture another declaration produced.
+  const declared = { rowsKey: collection.rowsKey ?? null, idKey: collection.idKey };
+  if (truncated) {
+    return {
+      ...declared,
+      ids: [],
+      error:
+        `the collection response exceeded the ${String(OBSERVED_BODY_SNAPSHOT_BYTES)}-byte witness ` +
+        'snapshot cap — a truncated body names no complete rows',
+    };
+  }
+  if (contentType !== 'application/json') {
+    return {
+      ...declared,
+      ids: [],
+      error: `the collection response is '${contentType ?? '<none>'}', not JSON — no row can be read from it`,
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(snapshot.toString('utf8'));
+  } catch {
+    return { ...declared, ids: [], error: 'the collection response is not parseable JSON' };
+  }
+  let rows: unknown[];
+  if (collection.rowsKey === undefined) {
+    if (!Array.isArray(parsed)) {
+      return {
+        ...declared,
+        ids: [],
+        error: 'the binding declares no rowsKey, so the collection response root must be the row array',
+      };
+    }
+    rows = parsed;
+  } else {
+    const container = isPlainObject(parsed) ? parsed[collection.rowsKey] : undefined;
+    if (!Array.isArray(container)) {
+      return {
+        ...declared,
+        ids: [],
+        error: `the collection response carries no row array at the declared rowsKey '${collection.rowsKey}'`,
+      };
+    }
+    rows = container;
+  }
+  if (rows.length === 0) {
+    return { ...declared, ids: [], error: 'the collection response returned no rows' };
+  }
+  const ids: Array<string | number> = [];
+  // Prototype-free: an id is arbitrary candidate data, so `'constructor'`
+  // must count as a fresh id and never as an already-seen one.
+  const seen: Record<string, true> = Object.create(null) as Record<string, true>;
+  for (let index = 0; index < rows.length; index++) {
+    const row: unknown = rows[index];
+    if (!isPlainObject(row)) {
+      return { ...declared, ids: [], error: `row ${String(index)} of the collection response is not an object` };
+    }
+    const id = row[collection.idKey];
+    if (typeof id === 'number') {
+      if (!Number.isFinite(id)) {
+        return {
+          ...declared,
+          ids: [],
+          error: `row ${String(index)} carries a non-finite '${collection.idKey}' id`,
+        };
+      }
+    } else if (typeof id !== 'string' || id.length === 0 || id.length > OBSERVED_RESPONSE_ID_CHARS) {
+      return {
+        ...declared,
+        ids: [],
+        error:
+          `row ${String(index)} carries no usable '${collection.idKey}' id (a short string or a finite ` +
+          'number)',
+      };
+    }
+    // One id names one row: a repeat makes the response ambiguous
+    // about what it listed, so the whole capture is refused.
+    if (seen[String(id)] !== undefined) {
+      return {
+        ...declared,
+        ids: [],
+        error: `the collection response names '${String(id)}' more than once — its rows are ambiguous`,
+      };
+    }
+    seen[String(id)] = true;
+    ids.push(id);
+  }
+  return { ...declared, ids, error: null };
+}
+
+/**
  * Starts one loopback reverse-proxy server forwarding to the run's
  * attested proxy target. `sessionId` names the session the port belongs
  * to (null = the shared unattributed proxy): every exchange completing
@@ -704,6 +922,23 @@ async function startObservedProxy(
       chaosPlan = state.chaos.options;
     }
     return chaos;
+  };
+  // The collection-read routes THIS port must parse a response for,
+  // resolved from the session's claims and the bound declarations on
+  // first use and reused for every exchange after — a session's claims
+  // are fixed at open, and the declaration set is replaced (never
+  // mutated) on a rebind, so its identity is the whole invalidation
+  // key. Empty for the shared proxy and for every run that declared no
+  // collection read: the common case then parses nothing at all.
+  let collectionRoutes: Map<string, CollectionRoute> | null = null;
+  let collectionRoutesFor: Set<string> | null = null;
+  const collectionFor = (method: string, path: string): CollectionRoute | null => {
+    if (collectionRoutes === null || collectionRoutesFor !== state.observeDeclarations) {
+      collectionRoutesFor = state.observeDeclarations;
+      collectionRoutes = collectionReadRoutes(state, sessionId);
+    }
+    if (collectionRoutes.size === 0) return null;
+    return collectionRoutes.get(`${method} ${path}`) ?? null;
   };
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -781,6 +1016,17 @@ async function startObservedProxy(
             recordTwinShape(twinSession.twinShapes, method, forwardUrl, state.twinShapes);
           }
           const bodySnapshot = Buffer.concat(snapshot);
+          const responseContentType = contentTypeOf(upstream.headers['content-type']);
+          // Collection reads (declared, never inferred): only a route
+          // this session actually claimed as a collection read has its
+          // response parsed here, and only the declared row id field is
+          // kept — every other route's body is hashed and dropped. A
+          // route two claims declare DIFFERENT shapes for is not parsed
+          // at all; the conflict travels so the finalize can name it.
+          const collectionRoute = status >= 200 && status <= 299 ? collectionFor(method, observedPath) : null;
+          const collectionShape = collectionRoute === null ? null : collectionRoute.shape;
+          const collectionConflict =
+            collectionRoute !== null && collectionRoute.shape === null ? collectionRoute.declarations : null;
           state.observed.push({
             method,
             path: observedPath,
@@ -794,6 +1040,18 @@ async function startObservedProxy(
             requestContentType: contentTypeOf(req.headers['content-type']),
             sessionId,
             tick: (state.tick += 1),
+            ...(collectionShape !== null
+              ? {
+                  collectionRows: parseCollectionRows(
+                    bodySnapshot,
+                    responseContentType,
+                    totalBytes > OBSERVED_BODY_SNAPSHOT_BYTES,
+                    collectionShape,
+                  ),
+                }
+              : collectionConflict !== null
+                ? { collectionConflict }
+                : {}),
           });
           // Response attribution (Observe channel): what the response
           // NAMED, kept even after the exchange is consumed, so a
@@ -806,7 +1064,7 @@ async function startObservedProxy(
             status,
             ...responseAttribution(
               bodySnapshot,
-              contentTypeOf(upstream.headers['content-type']),
+              responseContentType,
               totalBytes > OBSERVED_BODY_SNAPSHOT_BYTES,
             ),
           });
@@ -4758,7 +5016,12 @@ function attributeCreatedEntity(
  *   verified against the after-list (a concurrent observed create
  *   named by its OWN response is not ambiguity; a new entity no
  *   observed exchange names — a writer outside the proxy — is);
- *   read/update/delete bind `{id}` from the path against the snapshot;
+ *   read/update/delete bind `{id}` from the path against the snapshot,
+ *   except a read that declares `collection`: it resolves the rows its
+ *   own proxied response returned against that same snapshot and reads
+ *   one of them deterministically, never a path id and never a count;
+ *   two claimed reads on one route with DIFFERENT declared shapes
+ *   credit neither and the note names both declarations;
  * - create/update echo the parsed request-body scalars against the
  *   adapter read (the record carries both; the ENGINE grades the echo);
  * - the matched exchange is consumed single-use.
@@ -4891,6 +5154,56 @@ async function finalizeObserveClaim(
     const created = after.get(attributed.key) as FreshEntity;
     entityIdForRead = created.entityId;
     before = { entityAbsent: true };
+  } else if (binding.collection !== undefined) {
+    // Collection read: the entities are the rows the response ACTUALLY
+    // returned, resolved against the witness's own session-open
+    // snapshot. A row the app returned but the snapshot never held was
+    // written after this session opened, and a response naming no
+    // such row names nothing to prove — both are typed notes.
+    const conflict = matched.exchange.collectionConflict;
+    if (conflict !== undefined) {
+      return note(
+        `this session claims more than one read on ${binding.method} ${binding.path} and they declare ` +
+          `DIFFERENT collection shapes (${conflict.join(' vs ')}) — the witness parses that response for ` +
+          'neither of them, so no record is issued',
+      );
+    }
+    const rows = matched.exchange.collectionRows;
+    if (rows === undefined) {
+      return note(
+        'the matched collection response carried no parsed rows — a collection read resolves only from ' +
+          'the body the witness proxied for this exchange',
+      );
+    }
+    if (rows.error !== null) return note(rows.error);
+    const declared = binding.collection;
+    if (rows.rowsKey !== (declared.rowsKey ?? null) || rows.idKey !== declared.idKey) {
+      return note(
+        'the rows parsed for this exchange were read under a different declared collection shape — a ' +
+          'collection read resolves only from rows read under its OWN rowsKey/idKey',
+      );
+    }
+    // One pass, one seen-table: every returned id that the witness
+    // already held when the session opened, deduplicated by canonical
+    // key.
+    const held: Record<string, true> = Object.create(null) as Record<string, true>;
+    for (const id of rows.ids) {
+      const key = beforeKeyForSegment(snapshot.before, String(id));
+      if (key !== null) held[key] = true;
+    }
+    const returned = Object.keys(held).sort(compareStrings);
+    if (returned.length === 0) {
+      return note(
+        `the collection response named no entity that existed when this session opened — a read proves ` +
+          'only rows the witness already held, never rows a later writer added',
+      );
+    }
+    // Several rows is the ordinary case for a rendered list, so the
+    // target is the canonically-first one — deterministic, and never
+    // the response's own order — and it is then read through the
+    // adapter exactly like a by-id read.
+    const chosen = snapshot.before.get(returned[0] as string) as { entityId: unknown; fields: unknown };
+    entityIdForRead = chosen.entityId;
   } else {
     if (matched.id === null) {
       return note('the observe binding carries no {id} segment for a non-create operation');

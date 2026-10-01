@@ -14,6 +14,19 @@
  *   unparsable/oversized/unsupported bodies, unknown entities, missing
  *   bindings/lists, undeclared claims, and sealed sessions;
  * - single-use exchange consumption;
+ * - collection reads: a read binding that declares `collection`
+ *   resolves the rows its own proxied response returned against the
+ *   session-open snapshot — wrapped or root-array, deterministic
+ *   across several rows, and a typed note for every body that names
+ *   no usable row;
+ * - one route claimed by two resources with DIFFERENT declared shapes
+ *   credits neither and names both declarations; with the SAME shape
+ *   the one exchange still credits exactly one claim;
+ * - a returned row that is gone by finalize time is stamped as the
+ *   absence the engine's own read observed, and grades as such;
+ * - declared `volatileFields` on a real observed record: the engine
+ *   skips a server-rewritten field the adapter declared and still
+ *   blocks one it did not.
  * - proxy-bypass traffic is invisible to finalize.
  */
 import { describe, expect, it } from 'vitest';
@@ -21,13 +34,22 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { startWitness } from '../src/witness/server.js';
-import { recordIdOf } from '@gate-forge/core';
+import {
+  evaluateObligation,
+  ObligationSchema,
+  volatileEchoSkips,
+  volatileFieldsOf,
+  recordIdOf,
+  type Obligation,
+  type VerdictOutcome,
+} from '@gate-forge/core';
 import {
   makeTempProject,
   writeFixtureProject,
   writeObserveAdapter,
   openSupervisorSession,
   closeSupervisorSession,
+  writeSecondCollectionAdapter,
   type SupervisorSession,
 } from './helpers.js';
 import { startMarkerServer } from './marker-server.js';
@@ -40,6 +62,7 @@ const CREATE_CLAIM = 'tenant.accounts:persistence:create';
 const READ_CLAIM = 'tenant.accounts:persistence:read';
 const UPDATE_CLAIM = 'tenant.accounts:persistence:update';
 const DELETE_CLAIM = 'tenant.accounts:persistence:delete';
+const ORDERS_READ_CLAIM = 'tenant.orders:persistence:read';
 
 function supervisorHeaders(): Record<string, string> {
   return { [RUN_HEADER]: TOKEN, [VERIFIER_HEADER]: VERIFIER_KEY, 'content-type': 'application/json' };
@@ -60,11 +83,18 @@ async function post(
 }
 
 /** Starts a witness bound to a temp fixture project + stateful marker target. */
-async function startFixturedWitness(options: { list?: boolean; observe?: boolean } = {}) {
+async function startFixturedWitness(
+  options: Parameters<typeof writeObserveAdapter>[1] & {
+    /** A SECOND resource's collection read over the SAME list route. */
+    ordersCollection?: { rowsKey: string; idKey: string };
+  } = {},
+) {
+  const { ordersCollection, ...adapterOptions } = options;
   const runId = randomUUID();
   const project = makeTempProject('observe-finalize');
   writeFixtureProject(project);
-  writeObserveAdapter(project, options);
+  writeObserveAdapter(project, adapterOptions);
+  if (ordersCollection !== undefined) writeSecondCollectionAdapter(project, ordersCollection);
   const target = await startMarkerServer('example-v1');
   const stateDir = join(project, '.gateforge/test-gates');
   mkdirSync(stateDir, { recursive: true });
@@ -116,8 +146,9 @@ async function openClaimedSession(
   url: string,
   claims: string[],
   testId = TEST_ID,
+  workerIndex = 0,
 ): Promise<SupervisorSession> {
-  return openSupervisorSession(url, TOKEN, testId, 0, VERIFIER_KEY, claims);
+  return openSupervisorSession(url, TOKEN, testId, workerIndex, VERIFIER_KEY, claims);
 }
 
 /** Sends one HTTP exchange through a session's dedicated proxy port. */
@@ -636,5 +667,422 @@ describe('observe finalize (concurrent observed creates)', () => {
       await fixture.witness.stop();
       await fixture.target.stop();
     }
+  });
+});
+
+/** A collection read binding over the marker app's wrapped list route. */
+const WRAPPED_COLLECTION_READ = {
+  path: '/api/accounts',
+  collection: { rowsKey: 'accounts', idKey: 'id' },
+} as const;
+
+/** The same route with no rowsKey: the response ROOT is the row array. */
+const ROOT_ARRAY_READ = { path: '/api/accounts', collection: { idKey: 'id' } } as const;
+
+const LIFECYCLE = {
+  create: true,
+  read: true,
+  update: true,
+  delete: true,
+  deleteSemantics: 'hard',
+  updateableFields: ['first_name', 'last_name', 'status'],
+} as const;
+
+const CLASSIFICATION = {
+  exposure: 'user-facing',
+  plane: 'tenant',
+  lifecycle: LIFECYCLE,
+  primaryKey: ['id'],
+  evidenceAdapter: 'tenant.accounts',
+} as const;
+
+/** The obligation the real engine grades one witnessed record against. */
+function obligationFor(claimId: string, contract: string): Obligation {
+  return ObligationSchema.parse({
+    schemaVersion: 1,
+    id: claimId,
+    resourceId: 'tenant.accounts',
+    contract,
+    policyId: 'user-facing-lifecycle',
+    lifecycle: LIFECYCLE,
+  });
+}
+
+/** Grades witnessed records through the real verdict engine, as the gate does. */
+function gradeClaim(
+  obligation: Obligation,
+  records: Array<Record<string, unknown>>,
+): VerdictOutcome {
+  return evaluateObligation(obligation, {
+    claims: [{ schemaVersion: 1, obligationId: obligation.id, testId: TEST_ID }],
+    records,
+    waivers: [],
+    classification: CLASSIFICATION,
+    now: '2026-08-30T12:00:01.000Z',
+  });
+}
+
+/** Seeds one account straight into the app (no proxy, no witness record). */
+async function seedAccount(targetUrl: string, firstName: string): Promise<string> {
+  const response = await fetch(`${targetUrl}/api/accounts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ first_name: firstName, last_name: 'Seeded' }),
+  });
+  expect(response.status).toBe(200);
+  return ((await response.json()) as { id: string }).id;
+}
+
+describe('observe finalize (collection read)', () => {
+  it('resolves a read from the rows a wrapped collection actually returned', async () => {
+    const fixture = await startFixturedWitness({ read: WRAPPED_COLLECTION_READ });
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+      const got = await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts');
+      expect(got.status).toBe(200);
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['notes']).toEqual([]);
+      expect(done.body['finalized']).toEqual([
+        { obligationId: READ_CLAIM, recordId: expect.any(String), operation: 'read', entityId: 'acc-1' },
+      ]);
+      const records = await ledgerRecords(fixture.witness.url);
+      const payload = (records.find((entry) => entry['kind'] === 'persistence.observed')?.['payload']) as Record<string, unknown>;
+      // The entity came from the RETURNED row, and its fields from the
+      // independent adapter read — never from the response body.
+      expect(payload['entityId']).toBe('acc-1');
+      expect(payload['found']).toBe(true);
+      expect(payload['fields']).toMatchObject({ first_name: 'Ada', last_name: 'Lovelace' });
+      expect(payload['exchange']).toMatchObject({ method: 'GET', path: '/api/accounts', status: 200 });
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('resolves the same read from a root-array response (no rowsKey declared)', async () => {
+    const fixture = await startFixturedWitness({ read: ROOT_ARRAY_READ });
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+      const got = await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts?shape=array');
+      expect(got.status).toBe(200);
+      expect(JSON.parse(got.text)).toEqual([
+        { id: 'acc-1', first_name: 'Ada', last_name: 'Lovelace', status: 'active' },
+      ]);
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['notes']).toEqual([]);
+      expect(done.body['finalized']).toMatchObject([{ operation: 'read', entityId: 'acc-1' }]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('picks the target deterministically when the app returned several rows', async () => {
+    const fixture = await startFixturedWitness({ read: WRAPPED_COLLECTION_READ });
+    try {
+      const bea = await seedAccount(fixture.target.url, 'Bea');
+      const cleo = await seedAccount(fixture.target.url, 'Cleo');
+      await declare(fixture.witness.url, [READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+      // The app answered newest-first — the opposite of the order the
+      // resolution uses to pick its target.
+      const got = await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts?shape=reversed');
+      expect(got.status).toBe(200);
+      const rows = (JSON.parse(got.text) as { accounts: Array<{ id: string }> }).accounts;
+      expect(rows.map((row) => row.id)).toEqual([cleo, bea, 'acc-1']);
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['notes']).toEqual([]);
+      // Canonical-key order decides the target, not response order: the
+      // first row returned was '3', and the entity actually read is the
+      // canonically-first id among the rows the app returned.
+      expect(done.body['finalized']).toMatchObject([{ operation: 'read', entityId: '2' }]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('notes a collection read whose body named no usable row', async () => {
+    const refusals: ReadonlyArray<{ shape: string; expected: string }> = [
+      { shape: 'summary', expected: "no row array at the declared rowsKey 'accounts'" },
+      { shape: 'empty', expected: 'returned no rows' },
+      { shape: 'malformed', expected: "row 0 carries no usable 'id' id" },
+      { shape: 'duplicate', expected: "names 'acc-1' more than once" },
+      { shape: 'notjson', expected: 'not parseable JSON' },
+      { shape: 'large', expected: 'exceeded the 16384-byte witness snapshot cap' },
+      { shape: 'foreign', expected: 'named no entity that existed when this session opened' },
+    ];
+    for (const refusal of refusals) {
+      const fixture = await startFixturedWitness({ read: WRAPPED_COLLECTION_READ });
+      try {
+        await declare(fixture.witness.url, [READ_CLAIM]);
+        const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+        const got = await proxyExchange(
+          session.proxyUrl as string,
+          'GET',
+          `/api/accounts?shape=${refusal.shape}`,
+        );
+        expect(got.status).toBe(200);
+        const done = await finalize(fixture.witness.url, session.sessionId);
+        expect(done.body['finalized']).toEqual([]);
+        expect(String((done.body['notes'] as string[])[0])).toContain(refusal.expected);
+        const observed = (await ledgerRecords(fixture.witness.url)).filter(
+          (entry) => entry['kind'] === 'persistence.observed',
+        );
+        expect(observed).toEqual([]);
+        await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+      } finally {
+        await fixture.witness.stop();
+        await fixture.target.stop();
+      }
+    }
+  });
+
+  it('notes a collection that returned only a row created after the session opened', async () => {
+    const fixture = await startFixturedWitness({ read: WRAPPED_COLLECTION_READ });
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+      await seedAccount(fixture.target.url, 'Late');
+      await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts?shape=newest');
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['finalized']).toEqual([]);
+      expect(String((done.body['notes'] as string[])[0])).toContain(
+        'named no entity that existed when this session opened',
+      );
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('notes traffic on another route, another session, or outside the proxy entirely', async () => {
+    const fixture = await startFixturedWitness({ read: WRAPPED_COLLECTION_READ });
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM]);
+      const mine = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+      const other = await openClaimedSession(fixture.witness.url, [READ_CLAIM], `${TEST_ID} second`, 1);
+      // A by-id route is not the declared collection route.
+      await proxyExchange(mine.proxyUrl as string, 'GET', '/api/accounts/acc-1');
+      // Another session's list read never joins this one's traffic.
+      await proxyExchange(other.proxyUrl as string, 'GET', '/api/accounts');
+      // And a direct call never reaches any session channel at all.
+      await fetch(`${fixture.target.url}/api/accounts`);
+      const done = await finalize(fixture.witness.url, mine.sessionId);
+      expect(done.body['finalized']).toEqual([]);
+      expect(String((done.body['notes'] as string[])[0])).toContain(
+        'no GET /api/accounts exchange (2xx) for this session',
+      );
+      await closeSupervisorSession(fixture.witness.url, TOKEN, other.sessionId, 'passed', VERIFIER_KEY);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, mine.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('consumes the matched collection exchange single-use', async () => {
+    const fixture = await startFixturedWitness({ read: WRAPPED_COLLECTION_READ });
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+      await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts');
+      const first = await finalize(fixture.witness.url, session.sessionId);
+      expect(first.body['finalized']).toHaveLength(1);
+      const second = await finalize(fixture.witness.url, session.sessionId);
+      expect(second.body['finalized']).toEqual([]);
+      expect(String((second.body['notes'] as string[])[0])).toContain(
+        'no GET /api/accounts exchange (2xx) for this session',
+      );
+      const observed = (await ledgerRecords(fixture.witness.url)).filter(
+        (entry) => entry['kind'] === 'persistence.observed',
+      );
+      expect(observed).toHaveLength(1);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('keeps the by-id read binding unchanged beside a collection adapter', async () => {
+    const fixture = await startFixturedWitness();
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+      // The list route is NOT declared for this adapter, so only the
+      // by-id exchange can credit the read.
+      await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts');
+      await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts/acc-1');
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['notes']).toEqual([]);
+      expect(done.body['finalized']).toMatchObject([{ operation: 'read', entityId: 'acc-1' }]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('credits NEITHER claim when two resources declare different shapes for one route', async () => {
+    const fixture = await startFixturedWitness({
+      read: WRAPPED_COLLECTION_READ,
+      ordersCollection: { rowsKey: 'items', idKey: 'itemId' },
+    });
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM, ORDERS_READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM, ORDERS_READ_CLAIM]);
+      const got = await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts');
+      expect(got.status).toBe(200);
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['finalized']).toEqual([]);
+      const notes = (done.body['notes'] as string[]).join(' | ');
+      // Every refusal NAMES the two declarations that disagreed, so the
+      // owner sees which rowsKey/idKey pair to make consistent.
+      expect(notes.match(/DIFFERENT collection shapes/g)).toHaveLength(2);
+      expect(notes).toContain('tenant.accounts (rowsKey="accounts", idKey="id")');
+      expect(notes).toContain('tenant.orders (rowsKey="items", idKey="itemId")');
+      const observed = (await ledgerRecords(fixture.witness.url)).filter(
+        (entry) => entry['kind'] === 'persistence.observed',
+      );
+      expect(observed).toEqual([]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('credits exactly one claim when two resources declare the SAME shape for one route', async () => {
+    const fixture = await startFixturedWitness({
+      read: WRAPPED_COLLECTION_READ,
+      ordersCollection: { rowsKey: 'accounts', idKey: 'id' },
+    });
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM, ORDERS_READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM, ORDERS_READ_CLAIM]);
+      await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts');
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      // ONE proxied exchange credits ONE claim: the second claim finds
+      // it already consumed, exactly like any other single-use match.
+      expect(done.body['finalized']).toMatchObject([
+        { obligationId: READ_CLAIM, operation: 'read', entityId: 'acc-1' },
+      ]);
+      expect(done.body['notes']).toHaveLength(1);
+      expect(String((done.body['notes'] as string[])[0])).toContain(
+        'no GET /api/accounts exchange (2xx) for this session',
+      );
+      const observed = (await ledgerRecords(fixture.witness.url)).filter(
+        (entry) => entry['kind'] === 'persistence.observed',
+      );
+      expect(observed).toHaveLength(1);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('stamps the honest absence when the row disappears before the read finalizes', async () => {
+    const fixture = await startFixturedWitness({ read: WRAPPED_COLLECTION_READ });
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+      await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts');
+      // The app loses the row AFTER the session opened and AFTER the
+      // read the suite observed, outside every session channel.
+      const removed = await fetch(`${fixture.target.url}/api/accounts/acc-1`, { method: 'DELETE' });
+      expect(removed.status).toBe(200);
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['notes']).toEqual([]);
+      expect(done.body['finalized']).toMatchObject([{ obligationId: READ_CLAIM, operation: 'read' }]);
+      const record = (await ledgerRecords(fixture.witness.url)).find(
+        (entry) => entry['kind'] === 'persistence.observed',
+      ) as Record<string, unknown>;
+      const payload = record['payload'] as Record<string, unknown>;
+      // The returned row named the entity, but the engine's OWN read
+      // proves it is gone — so the record stamps that absence rather
+      // than a presence the engine cannot back.
+      expect(payload['entityId']).toBe('acc-1');
+      expect(payload['found']).toBe(false);
+      expect(payload['fields']).toBe(undefined);
+      const outcome = gradeClaim(obligationFor(READ_CLAIM, 'persistence:read'), [record]);
+      expect(outcome.verdict).toBe('invalid');
+      expect(outcome.reason).toContain('entity absent');
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+});
+
+describe('observe records (declared volatile fields)', () => {
+  const CREATE_OBLIGATION = obligationFor(CREATE_CLAIM, 'persistence:create');
+
+  /**
+ * Drives one real create through the proxy where the app REWRITES the
+ * submitted `status` (the marker app computes it), and returns the
+ * witnessed record the finalize issued.
+ */
+  async function createWithRewrittenStatus(
+    volatileFields: readonly string[] | undefined,
+  ): Promise<Record<string, unknown>> {
+    const fixture = await startFixturedWitness(
+      volatileFields === undefined ? {} : { volatileFields },
+    );
+    try {
+      await declare(fixture.witness.url, [CREATE_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [CREATE_CLAIM]);
+      const created = await proxyExchange(
+        session.proxyUrl as string,
+        'POST',
+        '/api/accounts',
+        JSON.stringify({ first_name: 'Zed', last_name: 'Unknown', status: 'pending' }),
+      );
+      expect(created.status).toBe(200);
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['notes']).toEqual([]);
+      expect(done.body['finalized']).toHaveLength(1);
+      const observed = (await ledgerRecords(fixture.witness.url)).filter(
+        (entry) => entry['kind'] === 'persistence.observed',
+      );
+      expect(observed).toHaveLength(1);
+      const payload = (observed[0] as Record<string, unknown>)['payload'] as Record<string, unknown>;
+      expect(payload['observedFields']).toMatchObject({ status: 'pending' });
+      expect(payload['fields']).toMatchObject({ status: 'active' });
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+      return observed[0] as Record<string, unknown>;
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  }
+
+  it('skips a declared server-computed field and reports the skip', async () => {
+    const record = await createWithRewrittenStatus(['status']);
+    expect(gradeClaim(CREATE_OBLIGATION, [record])).toMatchObject({ verdict: 'satisfied' });
+    expect(volatileFieldsOf(record)).toEqual(['status']);
+    // The journey's entered values, paired with the record exactly as
+    // the report does: the skip is a visible fact, never a silent one.
+    const payload = record['payload'] as Record<string, unknown>;
+    expect(volatileEchoSkips({ payload: { fields: payload['observedFields'] } }, record)).toEqual([
+      { field: 'status', entered: 'pending', persisted: 'active' },
+    ]);
+  });
+
+  it('still blocks an ordinary field the adapter did not declare', async () => {
+    const record = await createWithRewrittenStatus(undefined);
+    const outcome = gradeClaim(CREATE_OBLIGATION, [record]);
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('EVIDENCE_VALUE_MISMATCH');
+    expect(outcome.reason).toContain('status');
+    expect(volatileFieldsOf(record)).toEqual([]);
   });
 });

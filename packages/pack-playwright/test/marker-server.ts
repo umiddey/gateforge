@@ -2,11 +2,14 @@
  * A tiny loopback STATEFUL accounts target for witness/fixture tests.
  *
  * Serves the same surface the example app exposes:
- * - `GET /api/accounts` → `{accounts: [...]}` (adapter `list` probe)
+ * - `GET /api/accounts` → `{accounts: [...]}` (adapter `list` probe);
+ *   `?shape=array|summary|empty|duplicate|malformed|large|notjson` serves
+ *   the other list bodies a collection-read proof must distinguish
  * - `GET /api/accounts/:id` → the entity, or 404 when absent
  * - `POST /api/accounts` `{first_name, last_name}` → mints + returns the
  *   entity (the app-side effect of a UI create)
  * - `POST /api/accounts/:id/archive` → flips status to 'archived'
+ * - `DELETE /api/accounts/:id` → hard-removes the row, or 404 when absent
  *
  * Every response stamps `x-gateforge-env-fingerprint` when `fingerprint`
  * is non-null — the fixture analog of the attestation proxy: bare
@@ -32,7 +35,12 @@ const INITIAL: Account[] = [
 export async function startMarkerServer(
   fingerprint: string | null,
 ): Promise<{ url: string; stop: () => Promise<void> }> {
-  const accounts = new Map<string, Account>(INITIAL.map((account) => [account.id, account]));
+  // Fresh row OBJECTS per server: the seed is module state, and a test
+  // that archives or renames a row must never leak that row into the
+  // next test's app.
+  const accounts = new Map<string, Account>(
+    INITIAL.map((account) => [account.id, { ...account }]),
+  );
   let nextId = INITIAL.length + 1;
 
   const server = createServer((req, res) => {
@@ -73,8 +81,15 @@ function handle(
       req.on('end', () => resolve(raw));
     });
 
-  if (req.method === 'GET' && url === '/api/accounts') {
-    res.end(JSON.stringify({ accounts: [...accounts.values()] }));
+  const listUrl = new URL(url, 'http://marker.invalid');
+  if (req.method === 'GET' && listUrl.pathname === '/api/accounts') {
+    const rows = [...accounts.values()];
+    const shape = listUrl.searchParams.get('shape') ?? 'wrapped';
+    if (shape === 'notjson') {
+      res.end('<html>not json</html>');
+      return;
+    }
+    res.end(JSON.stringify(listShape(shape, rows)));
     return;
   }
   if (req.method === 'POST' && url === '/api/accounts') {
@@ -140,6 +155,61 @@ function handle(
     res.end(JSON.stringify(account));
     return;
   }
+  if (req.method === 'DELETE' && entityMatch !== null) {
+    const id = decodeURIComponent(entityMatch[1] as string);
+    if (!accounts.delete(id)) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'not found' }));
+      return;
+    }
+    res.end(JSON.stringify({ deleted: id }));
+    return;
+  }
   res.statusCode = 404;
   res.end(JSON.stringify({ error: 'not found' }));
+}
+
+/**
+ * The list-response bodies `GET /api/accounts?shape=…` can serve, so a
+ * collection-read proof can tell a real rendered list from the bodies
+ * that must never stand in for one: an envelope, a root array, a
+ * metadata-only summary, an empty page, a page naming one row twice, a
+ * reversed page, a page of ids the app never held, a row with no id
+ * field, and a page larger than the witness response-snapshot cap.
+ * `notjson` is served by the caller as raw non-JSON text.
+ *
+ * @param shape - the requested response shape
+ * @param rows - the accounts the app currently holds
+ * @returns the JSON body the list route serializes
+ */
+function listShape(shape: string, rows: Account[]): unknown {
+  switch (shape) {
+    case 'array':
+      return rows;
+    case 'summary':
+      return { total: rows.length, accounts: rows.length };
+    case 'empty':
+      return { accounts: [] };
+    case 'duplicate':
+      return { accounts: rows.length > 1 ? [rows[1], rows[1]] : [rows[0], rows[0]] };
+    case 'reversed':
+      return { accounts: [...rows].reverse() };
+    case 'foreign':
+      return { accounts: [{ id: 'acc-elsewhere', first_name: 'Remote', last_name: 'Row', status: 'active' }] };
+    case 'newest':
+      return { accounts: rows.slice(-1) };
+    case 'malformed':
+      return { accounts: [{ first_name: 'Nameless', last_name: 'Row', status: 'active' }] };
+    case 'large':
+      return {
+        accounts: Array.from({ length: 200 }, (_unused, index) => ({
+          id: `bulk-${String(index)}`,
+          first_name: 'Bulk'.repeat(20),
+          last_name: 'Filler'.repeat(20),
+          status: 'active',
+        })),
+      };
+    default:
+      return { accounts: rows };
+  }
 }

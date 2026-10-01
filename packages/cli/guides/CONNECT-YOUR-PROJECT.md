@@ -226,6 +226,36 @@ What the kit guarantees, so you do not have to re-derive it:
   `TEST-ENVIRONMENT.md` ("Per-session login identity").
 - **Fan-out collections** (members only reachable per parent) use
   `listCollection(readAll)`, which composes several paged reads.
+- **A read whose entities live in the LIST the UI renders.** A real UI
+  usually lists before it opens one row, so an observe read can name its
+  entities in the response rows instead of in the path:
+  ```js
+  observe: {
+    read: {
+      method: 'GET',
+      path: '/api/accounts',
+      collection: { rowsKey: 'accounts', idKey: 'id' },
+    },
+  },
+  ```
+  `rowsKey` is optional — omit it when the response ROOT is the row
+  array. The engine reads only the declared `idKey`, only out of the
+  declared rows, only from the 2xx response it proxied itself, and
+  credits only the entities it already held when the test session
+  opened, read back through the adapter and graded as before. A count
+  or total, a metadata-only body, a duplicate id, a row with no id, a
+  non-JSON or an oversized body, and a row created after the session
+  opened all REFUSE the obligation with a typed note instead of
+  satisfying it. It is opt-in: without `collection` a read binds
+  `{id}` from the path exactly as before, and a collection may only be
+  declared on a read + `GET` whose path carries no `{id}` — anything
+  else is refused when the adapter loads.
+  Two resources one test claims may share a route only by declaring the
+  SAME shape. When they disagree, neither is read: the note names both
+  declarations and no record is issued, because one resource's rows can
+  never be read under another resource's `rowsKey`/`idKey`. With an
+  identical shape the route is read once and that one response credits
+  exactly one claim.
 
 Adapters are read-only by construction. If your app has state only the
 database can answer, the frozen contract has a `probeServer` channel —
