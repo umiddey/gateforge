@@ -98,6 +98,13 @@ export interface NativeListResult {
    * treated as a complete one.
    */
   projectDependencies?: Record<string, string[]>;
+  /**
+   * Project name → the `use.storageState` STRING the runner resolved for
+   * it (the standard auth pattern's declared state file). Absent when no
+   * project declares one, and absent together with
+   * {@link projectDependencies} whenever the graph itself was unreadable.
+   */
+  projectStorageStates?: Record<string, string>;
 }
 
 /**
@@ -316,6 +323,24 @@ interface ReporterDocument {
   config?: { rootDir?: string };
   suites?: ReporterSuite[];
   errors?: Array<{ message?: string }>;
+}
+
+/**
+ * True when a parsed graph field is a plain object (never an array, never
+ * null): the container both project-graph maps are.
+ */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** True when a parsed field is an object whose values are all strings. */
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isPlainRecord(value) && Object.values(value).every((entry) => typeof entry === 'string');
+}
+
+/** True when a parsed dependency list is an array of strings. */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry: unknown) => typeof entry === 'string');
 }
 
 /** Converts an absolute path to repo-root-relative posix form. */
@@ -592,25 +617,56 @@ export async function listNativePlaywrightTests(options: {
   };
   walkSuites(document.suites ?? [], [], null);
   const errors = (document.errors ?? []).map((error) => diagnoseRunnerLoadError(error.message ?? String(error), cli));
-  // The project graph the runner resolved. A document that does not parse
-  // is absence, never a partial graph: a downstream run that emitted a
-  // `dependencies` edge from half a graph would order projects wrongly.
+  // The project graph the runner resolved, plus the storage states its
+  // projects declare. A document that does not parse — or that carries a
+  // field this reader does not understand — is absence, never a partial
+  // graph: a downstream run that emitted a `dependencies` edge from half
+  // a graph would order projects wrongly, and one that honored half the
+  // declared states would authenticate the wrong projects.
   let projectDependencies: Record<string, string[]> | undefined;
+  let projectStorageStates: Record<string, string> | undefined;
   if (graphText !== null) {
     try {
       const parsed = JSON.parse(graphText) as Partial<ProjectGraphDocument>;
-      const graph = parsed.projectDependencies;
-      if (parsed.schemaVersion === 1 && graph !== undefined && graph !== null && typeof graph === 'object') {
-        projectDependencies = {};
-        for (const [name, dependencies] of Object.entries(graph)) {
-          if (!Array.isArray(dependencies)) continue;
-          projectDependencies[name] = [
-            ...new Set(dependencies.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)),
-          ].sort();
+      // Untrusted input: everything below is checked at runtime, and one
+      // bad field discards the WHOLE document rather than half of it.
+      const graph: unknown = parsed.projectDependencies;
+      const states: unknown = parsed.projectStorageStates;
+      if (parsed.schemaVersion === 2 && isPlainRecord(graph)) {
+        // Null-prototype: a project NAME is candidate data and `__proto__`
+        // is a legal one, so the maps keyed by it must not inherit.
+        const dependencies = Object.create(null) as Record<string, string[]>;
+        const storageStates = Object.create(null) as Record<string, string>;
+        let wellFormed = true;
+        for (const [name, edges] of Object.entries(graph)) {
+          if (!isStringArray(edges)) {
+            wellFormed = false;
+            break;
+          }
+          dependencies[name] = [...new Set(edges.filter((edge) => edge.length > 0))].sort();
+        }
+        if (wellFormed && states !== undefined) {
+          if (!isStringRecord(states)) {
+            wellFormed = false;
+          } else {
+            for (const [name, value] of Object.entries(states)) {
+              // An empty string is carried, not filtered: whether it may
+              // be read is the planner's refusal, never this reader's
+              // silent omission.
+              storageStates[name] = value;
+            }
+          }
+        }
+        if (wellFormed) {
+          projectDependencies = dependencies;
+          // Omitted when nothing declared a state — an empty map would
+          // read as "every project runs with an empty state".
+          if (Object.keys(storageStates).length > 0) projectStorageStates = storageStates;
         }
       }
     } catch {
       projectDependencies = undefined;
+      projectStorageStates = undefined;
     }
   }
   const configDetail = configDir !== '.' ? ` (cwd '${configDir}')` : '';
@@ -626,6 +682,7 @@ export async function listNativePlaywrightTests(options: {
     instances,
     errors,
     ...(projectDependencies !== undefined ? { projectDependencies } : {}),
+    ...(projectStorageStates !== undefined ? { projectStorageStates } : {}),
   };
 }
 

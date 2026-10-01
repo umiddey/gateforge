@@ -45,6 +45,74 @@ Engine `GATEFORGE_*` names and process-loader controls (`NODE_OPTIONS`, `NODE_PA
 
 **Example:** Create `.cache/gateforge-session.json` against `http://app.example.test`, then set `GATEFORGE_SESSION_STATE=.cache/gateforge-session.json`.
 
+### Or let a setup project save its own state
+
+**Rule:** A Playwright project that declares `use.storageState` is handed
+that file for its own tests only. Nothing else about the consumer config
+is honored, and the state a project does not declare is never inherited
+from another project.
+
+**Why:** The supervised run never loads your config — it runs a
+synthesized one, because a consumer config is arbitrary code in the
+runner's main process. Before this, the standard auth pattern therefore
+stopped at that boundary: the `setup` project signed in and saved
+`playwright/.auth/user.json`, the dependent project that reads the file
+was handed nothing, and every assertion on a signed-in page failed
+against a run that was otherwise green. Declaring the state is what
+crosses the boundary, and it crosses as a path — never as code, and
+never as an inline cookie document.
+
+**Example:** the upstream pattern, unchanged:
+
+```js
+// playwright.config.ts
+export default defineConfig({
+  projects: [
+    { name: 'setup', testMatch: /.*\.setup\.ts/ },
+    {
+      name: 'chromium',
+      dependencies: ['setup'],
+      use: { storageState: 'playwright/.auth/user.json' },
+    },
+  ],
+});
+```
+
+```ts
+// e2e/auth.setup.ts — runs FIRST and with no session of its own
+import { mkdirSync } from 'node:fs';
+import { test as setup } from '@playwright/test';
+
+setup('authenticate', async ({ page }) => {
+  await page.goto('/login');
+  await page.locator('#name').fill('Ada');
+  await page.locator('button[type=submit]').click();
+  mkdirSync('playwright/.auth', { recursive: true });
+  await page.context().storageState({ path: 'playwright/.auth/user.json' });
+});
+```
+
+Four rules decide what a run does with a declared state:
+
+- **The file must be inside the repository.** Containment is checked on
+  the real filesystem, not on the spelling: a path that resolves outside
+  it, one that escapes through a symlink, a link that leads nowhere, a
+  URL and an empty value all stop the run before anything is spawned and
+  name the project, the value and the fix. None of them is ever dropped,
+  because a dropped state is a logged-out run that still reports green.
+- **A relative path is relative to the runner's working directory** —
+  the repository root — which is the same directory the setup test wrote
+  it from. The file need not exist before the run; the setup project
+  creates it.
+- **The setup project keeps no state**, so a stale file from an earlier
+  run can never make it start signed in and skip the sign-in it exists to
+  perform.
+- **`GATEFORGE_SESSION_STATE` outranks every project declaration.** An
+  operator who sets it gets the whole-run session in every project,
+  exactly as before; the declarations it outranks are then not read, not
+  checked and not embedded anywhere in the run. Leave it unset to let the
+  projects use their own.
+
 ### Per-session login identity (why a test may hand the witness its own tenant)
 
 **Rule:** A test that creates a new tenant — or any row that only exists

@@ -17,9 +17,17 @@
  * itself schedules from — so the graph is the runner's own truth, not
  * the candidate's claim about it.
  *
- * It records NAMES ONLY: the project name and the names it depends on.
- * Every other project option is consumer configuration a supervised run
- * deliberately does not honor, so none of it crosses this boundary.
+ * It records the project graph and, alongside it, the RESOLVED
+ * `use.storageState` of each project — but only when that value is a
+ * plain string path. That is DATA the runner already resolved from the
+ * consumer config (a file location), not consumer code, and it is what
+ * the standard auth pattern needs: a `setup` project signs in and saves
+ * `playwright/.auth/user.json`, and the dependent project is the one
+ * that must be handed that file. Every other project option is
+ * consumer configuration a supervised run deliberately does not honor,
+ * so none of it crosses this boundary — including a `storageState`
+ * given as an inline `{cookies, origins}` document, which is a value
+ * this boundary does not carry.
  *
  * The output path arrives in the environment, exactly like the json
  * reporter's own `PLAYWRIGHT_JSON_OUTPUT_FILE`: the reporter list a CLI
@@ -37,6 +45,8 @@ export const PROJECT_GRAPH_PATH_ENV = 'PLAYWRIGHT_GATEFORGE_PROJECT_GRAPH_FILE';
 interface RunnerProject {
   name?: string;
   dependencies?: readonly string[];
+  /** The RESOLVED per-project `use`; only its `storageState` is read. */
+  use?: { storageState?: unknown };
 }
 
 /** Minimal shape of the runner's resolved full config. */
@@ -44,17 +54,33 @@ interface RunnerFullConfig {
   projects?: readonly RunnerProject[];
 }
 
-/** The document this reporter writes: project name → dependency names. */
+/**
+ * The document this reporter writes: the resolved project graph plus
+ * each project's declared storage state.
+ *
+ * `schemaVersion` is 2 since the storage-state field was added. It is a
+ * clean cutover, never a partial accept: a reader that does not
+ * understand version 2 must take the whole document as absent, because
+ * half a graph orders projects wrongly and half a state set
+ * authenticates the wrong ones.
+ */
 export interface ProjectGraphDocument {
-  schemaVersion: 1;
+  schemaVersion: 2;
   /** Project name to the (sorted, deduplicated) names it depends on. */
   projectDependencies: Record<string, string[]>;
+  /**
+   * Project name to the `use.storageState` STRING the runner resolved
+   * for it. Absent when no project declares one — never an empty map
+   * that would read as "every project has an empty state".
+   */
+  projectStorageStates?: Record<string, string>;
 }
 
 /**
  * The Playwright reporter that records the resolved project dependency
- * graph. Written for the v2 reporter protocol (`version()` returning
- * `'v2'`), whose `onConfigure` receives the resolved full config.
+ * graph and the storage states its projects declare. Written for the
+ * v2 reporter protocol (`version()` returning `'v2'`), whose
+ * `onConfigure` receives the resolved full config.
  */
 export class ProjectGraphReporter {
   /** Opts into the v2 reporter protocol (config arrives in onConfigure). */
@@ -63,14 +89,18 @@ export class ProjectGraphReporter {
   }
 
   /**
-   * Records the graph the RUNNER resolved.
+   * Records the graph, and the declared storage states, the RUNNER
+   * resolved.
    *
    * @param config: the resolved full config, exactly as the runner has it.
    */
   public onConfigure(config: RunnerFullConfig): void {
     const graphPath = process.env[PROJECT_GRAPH_PATH_ENV];
     if (graphPath === undefined || graphPath.length === 0) return;
-    const projectDependencies: Record<string, string[]> = {};
+    // Null-prototype: a project NAME is candidate data and `__proto__` is
+    // a legal one, so a map keyed by it must not inherit anything.
+    const projectDependencies = Object.create(null) as Record<string, string[]>;
+    const projectStorageStates = Object.create(null) as Record<string, string>;
     for (const project of config.projects ?? []) {
       if (typeof project.name !== 'string' || project.name.length === 0) continue;
       projectDependencies[project.name] = [
@@ -80,8 +110,22 @@ export class ProjectGraphReporter {
           ),
         ),
       ].sort();
+      // Only a plain path string crosses. An inline `{cookies, origins}`
+      // document is a value this boundary does not carry, and a
+      // function-valued state is consumer code, not data. Every STRING
+      // crosses verbatim — an empty one included: a project that asked
+      // for no state at all is a refusal the planner owes, not a
+      // silently-dropped declaration that would run logged out.
+      const storageState = project.use?.storageState;
+      if (typeof storageState === 'string') {
+        projectStorageStates[project.name] = storageState;
+      }
     }
-    const document: ProjectGraphDocument = { schemaVersion: 1, projectDependencies };
+    const document: ProjectGraphDocument = {
+      schemaVersion: 2,
+      projectDependencies,
+      ...(Object.keys(projectStorageStates).length > 0 ? { projectStorageStates } : {}),
+    };
     writeFileSync(graphPath, `${JSON.stringify(document)}\n`, 'utf8');
   }
 }

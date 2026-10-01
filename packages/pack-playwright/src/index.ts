@@ -134,6 +134,8 @@ export {
 export {
   synthesizeTrustedConfig,
   trustedReporterEntry,
+  resolveProjectStorageState,
+  ProjectStorageStateError,
   TRUSTED_CONFIG_FILE,
   TRUSTED_REPORTER_OPTIONS_FILE,
 } from './discovery/trusted-config.js';

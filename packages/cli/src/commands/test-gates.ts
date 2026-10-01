@@ -130,6 +130,7 @@ import {
   discoverTestCatalog,
   findPlaywrightConfig,
   listNativePlaywrightTests,
+  resolveProjectStorageState,
   PlaywrightAdapter,
   PytestRunnerAdapter,
   readRunnerOutcomes,
@@ -2425,6 +2426,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // that read its artifact depend on `setup`). Empty when the
   // enumeration could not read it — absence, never a guessed empty one.
   let projectDependencies: Record<string, string[]> = {};
+  // The `use.storageState` path each project declared, as the RUNNER
+  // resolved it: the standard auth pattern's dependent project reads the
+  // state its setup project saved. Empty when the enumeration captured
+  // none — absence, never a guessed empty one.
+  let projectStorageStates: Record<string, string> = {};
   try {
     // collectPytest is REQUIRED here (GAP 1 fix, server-witnessed
     // channel): the supervised run's expected set, mapping resolution,
@@ -2441,6 +2447,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     nativeErrors = discovered.nativeErrors;
     nativeInstances = discovered.nativeInstances;
     projectDependencies = discovered.projectDependencies ?? {};
+    projectStorageStates = discovered.projectStorageStates ?? {};
     for (const warning of discovered.registrationWarnings) {
       writeLine(
         io.stderr,
@@ -2451,6 +2458,23 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     }
   } catch (error) {
     discoveryError = error instanceof TestDiscoveryError ? error.message : (error as Error).message;
+  }
+  // A declared state is honored as DATA, and only when it names a file
+  // inside the candidate. Refused here, loudly and before anything is
+  // spawned, because dropping it instead would run the project logged
+  // out and report a green gate over a suite that never really
+  // exercised the authenticated UI. With an operator's whole-run
+  // GATEFORGE_SESSION_STATE set, no declaration is used at all, so none
+  // is read or checked either — precedence means the losing value never
+  // reaches the filesystem.
+  if (io.env['GATEFORGE_SESSION_STATE'] === undefined) {
+    for (const [project, declared] of Object.entries(projectStorageStates)) {
+      try {
+        resolveProjectStorageState(declared, io.cwd, project);
+      } catch (error) {
+        throw new UsageError(`test-gates: ${(error as Error).message}`);
+      }
+    }
   }
   const trustedPolicy = trustedPolicyDigestForConfig(io.cwd, config);
   // Policy-revision ownership (review 2026-09-13 P1 #5, ADR 0005 D6):
@@ -3802,8 +3826,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           // rows (none here, kept for honesty) keep the global selection.
           // ...carrying the dependency EDGES the enumeration captured, so
           // the synthesized config orders a `setup` project before the
-          // projects that read its artifact (the standard auth pattern).
-          projectScopes: plannedProjectScopes(plannedRows, projectDependencies),
+          // projects that read its artifact (the standard auth pattern),
+          // and the `use.storageState` PATH each project declared, so the
+          // project that reads the saved session is handed it while the
+          // setup project keeps running unauthenticated. An operator's
+          // GATEFORGE_SESSION_STATE still outranks both (above).
+          projectScopes: plannedProjectScopes(plannedRows, projectDependencies, projectStorageStates),
           // Operator-provided whole-run bound for multi-hour suites (default
           // 30 minutes stands when absent — same expected set and
           // completeness rules either way).

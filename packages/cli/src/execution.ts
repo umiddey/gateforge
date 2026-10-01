@@ -414,14 +414,20 @@ export function planExpectedSet(catalog: TestCatalog): PlannedRow[] {
  * `projectDependencies` (the graph the enumeration captured from the
  * RUNNER's own resolved config) is carried through as ordering data: the
  * synthesized config emits the edge so Playwright runs a `setup` project's
- * tests before the dependent project. With no graph, or for a project that
- * declares no edges, the emitted scopes are exactly what they were before —
- * a single-project run stays byte-identical.
+ * tests before the dependent project. `projectStorageStates` is carried
+ * the same way, as the path each project declared to read: the standard
+ * auth pattern's dependent project is handed the state its setup project
+ * saved, while the setup project itself keeps no state. With no graph, or
+ * for a project that declares no edges and no state, the emitted scopes
+ * are exactly what they were before — a single-project run stays
+ * byte-identical.
  *
  * Args:
  *   rows: the planned expected set (fixed before the run).
  *   projectDependencies: project name → the names it depends on, as the
  *     enumeration captured them.
+ *   projectStorageStates: project name → the `use.storageState` path it
+ *     declared, as the enumeration captured it.
  *
  * Returns:
  *   ProjectScope[]: one entry per project that owns at least one file,
@@ -430,6 +436,7 @@ export function planExpectedSet(catalog: TestCatalog): PlannedRow[] {
 export function plannedProjectScopes(
   rows: readonly PlannedRow[],
   projectDependencies?: Readonly<Record<string, readonly string[]>>,
+  projectStorageStates?: Readonly<Record<string, string>>,
 ): ProjectScope[] {
   const filesByProject = new Map<string, Set<string>>();
   for (const row of rows) {
@@ -442,10 +449,14 @@ export function plannedProjectScopes(
   return [...filesByProject.entries()]
     .map(([name, files]) => {
       const dependencies = [...new Set(projectDependencies?.[name] ?? [])].sort();
+      const storageState = projectStorageStates?.[name];
       return {
         name,
         files: [...files].sort(),
         ...(dependencies.length > 0 ? { dependencies } : {}),
+        // Absent for a project that declares no state — that project runs
+        // with no session, which is what the `setup` project needs.
+        ...(storageState === undefined ? {} : { storageState }),
       };
     })
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));

@@ -114,6 +114,13 @@ export interface DiscoverResult {
    * enumeration could not read the graph.
    */
   projectDependencies?: Record<string, string[]>;
+  /**
+   * Playwright project name → the `use.storageState` STRING the runner
+   * resolved for it. Absent when no project declares one, and absent
+   * together with {@link projectDependencies} whenever the graph itself
+   * was unreadable.
+   */
+  projectStorageStates?: Record<string, string>;
   /** Static registration sites guarded by Gateforge environment state. */
   registrationWarnings: StaticRegistrationWarning[];
   /**
@@ -261,6 +268,9 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
 
       ...(native.projectDependencies !== undefined
         ? { projectDependencies: native.projectDependencies }
+        : {}),
+      ...(native.projectStorageStates !== undefined
+        ? { projectStorageStates: native.projectStorageStates }
         : {}),
       registrationWarnings: scan.registrationWarnings,
       timings: {
