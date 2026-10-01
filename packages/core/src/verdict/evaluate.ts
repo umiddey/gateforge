@@ -599,13 +599,53 @@ export function volatileFieldsOf(record: unknown): string[] {
 }
 
 /**
+ * The entered keys of the echo check, whichever channel carried them.
+ * Both are engine-issued sealed record payloads, never suite-authored:
+ * - browser: the `ui.action` anchor's DECLARED INPUT `fields`;
+ * - observe: there is no anchor, so the witness-observed request
+ *   `observedFields` ride the persistence record itself (the same
+ *   source observedEchoFailure grades against).
+ *
+ * An anchor's `fields` always wins when it is a plain object, empty or
+ * not: an anchor that declares no input is not an invitation to read
+ * another source. Either way, a declared volatile key is only reported
+ * when the source actually carries a value for it.
+ *
+ * Args:
+ *   anchorOrNull: the witnessed UI-action record, or null when the
+ *     evidence came from the observe channel.
+ *   persistence: the matched persistence record (observed values).
+ *
+ * Returns:
+ *   Record<string, unknown> | null: the entered keys, or null when the
+ *   record carries neither source.
+ */
+function enteredFieldsOf(anchorOrNull: unknown, persistence: RecordLike): Record<string, unknown> | null {
+  const anchor = asRecord(anchorOrNull);
+  if (anchor !== null) {
+    const declared = payloadOf(anchor)?.['fields'];
+    if (isPlainObject(declared)) return declared;
+  }
+  const observed = payloadOf(persistence)?.['observedFields'];
+  return isPlainObject(observed) ? observed : null;
+}
+
+/**
  * The entered keys the echo check SKIPPED because the adapter declared
  * them volatile, with the values the engine actually observed. The
  * caller turns this into a visible report note — a skip is a fact the
  * owner must see, never a quietly dropped mismatch.
  *
+ * A satisfied obligation is evidence on either channel: with a
+ * `ui.action` anchor the entered values are the anchor's declared
+ * input fields, and on the observe channel (suite-driven browser over
+ * the session proxy) they are the witness-observed request fields the
+ * persistence record itself carries. Only keys the journey actually
+ * entered are reported — a declared field nobody sent is never a skip.
+ *
  * Args:
- *   actionRecord: the witnessed UI-action record (entered values).
+ *   actionRecord: the witnessed UI-action record, or null when the
+ *     evidence came from the observe channel.
  *   persistenceRecord: the matched persistence record (observed values).
  *
  * Returns:
@@ -616,11 +656,10 @@ export function volatileEchoSkips(
   actionRecord: unknown,
   persistenceRecord: unknown,
 ): Array<{ field: string; entered: unknown; persisted: unknown }> {
-  const action = asRecord(actionRecord);
   const persistence = asRecord(persistenceRecord);
-  if (action === null || persistence === null) return [];
-  const entered = payloadOf(action)?.['fields'];
-  if (!isPlainObject(entered)) return [];
+  if (persistence === null) return [];
+  const entered = enteredFieldsOf(actionRecord, persistence);
+  if (entered === null) return [];
   const persisted = payloadOf(persistence)?.['fields'];
   const observed = isPlainObject(persisted) ? persisted : {};
   return volatileFieldsOf(persistence)

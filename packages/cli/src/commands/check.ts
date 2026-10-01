@@ -1,4 +1,7 @@
 
+/** No `ui.action` anchor to pair with: the observe channel's record is its own anchor. */
+const OBSERVE_ANCHORS: readonly unknown[] = [null];
+
 /**
  * The two adapter advisories a run reports, neither of which blocks:
  *
@@ -8,13 +11,18 @@
  *   or missing list proves nothing (E4). A finding, not a new blocking
  *   default: the obligation still fails on its own evidence.
  * - ADAPTER_VOLATILE_FIELD_SKIPPED: the exact-value echo skipped a
- *   field the adapter DECLARES server-computed (E18a). The owner must
- *   see every skip, so it is reported rather than silently honoured.
+ *   field the adapter DECLARES server-computed (E18a). Either evidence
+ *   channel qualifies: the browser channel's `ui.action` entered input,
+ *   or the observe channel's witness-observed request fields (a
+ *   `persistence.observed` record has no `ui.action` anchor). Only keys
+ *   the journey actually sent are reported. The owner must see every
+ *   skip, so it is reported rather than silently honoured.
  *
  * Args:
  *   cwd: repo root (the adapters directory lives under it).
  *   pipeline: the completed pipeline run.
  *   verdicts: the evaluated verdicts (for the volatile skips).
+ *   stateDir: run-state directory holding the sealed records.
  *
  * Returns:
  *   Promise<BlockingEntry[]>: non-blocking report entries, sorted.
@@ -71,12 +79,15 @@ async function adapterAdvisories(
     if (verdict.verdict !== 'satisfied') continue;
     const used = verdict.recordIds.map((id) => byId.get(id) ?? null);
     const actions = used.filter((record) => record !== null && record['kind'] === 'ui.action');
-    if (actions.length === 0) continue;
     const skipped: string[] = [];
     for (const record of used) {
       if (record === null) continue;
-      for (const action of actions) {
-        for (const skip of volatileEchoSkips(action, record)) {
+      // The browser channel declares the entered values on its ui.action
+      // anchor; an observe persistence record has no anchor and carries
+      // the witness-observed request fields itself.
+      const anchors = actions.length > 0 ? actions : OBSERVE_ANCHORS;
+      for (const anchor of anchors) {
+        for (const skip of volatileEchoSkips(anchor, record)) {
           if (!skipped.includes(skip.field)) skipped.push(skip.field);
         }
       }

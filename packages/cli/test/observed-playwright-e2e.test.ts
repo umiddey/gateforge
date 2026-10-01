@@ -28,12 +28,12 @@ async function startApp() {
     res.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
     if (req.method === 'GET' && req.url === '/') {
       res.setHeader('content-type', 'text/html');
-      res.end(`<form><input name="first_name"><input name="last_name"><button>Create</button></form><p id="saved"></p>
+      res.end(`<form><input name="first_name"><input name="last_name"><input type="hidden" name="status" value="pending"><button>Create</button></form><p id="saved"></p>
 <script>document.querySelector('form').onsubmit = async event => {
   event.preventDefault();
   const form = new FormData(event.target);
   const result = await fetch('/api/accounts', { method: 'POST', headers: {'content-type':'application/json'},
-    body: JSON.stringify({first_name: form.get('first_name'), last_name: form.get('last_name')}) });
+    body: JSON.stringify({first_name: form.get('first_name'), last_name: form.get('last_name'), status: form.get('status')}) });
   if (result.status === 201) document.getElementById('saved').textContent = 'saved';
 };</script>`);
       return;
@@ -70,9 +70,9 @@ async function startApp() {
 }
 
 /** A separate CLI process proves the published command boundary, not a forwarded mock. */
-async function runCliProcess(cwd: string, env: Record<string, string>) {
+async function runCliProcess(cwd: string, env: Record<string, string>, args = ['test-gates', '--test', TITLE, '--result-only', '--format', 'json']) {
   const entry = process.env['GATEFORGE_TEST_BASELINE_CLI'] ?? `${ROOT}/packages/cli/bin/gateforge.js`;
-  const child = spawn(process.execPath, [entry, 'test-gates', '--test', TITLE, '--result-only', '--format', 'json'], {
+  const child = spawn(process.execPath, [entry, ...args], {
     cwd, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -98,14 +98,15 @@ describe('Playwright Observe declarations through the actual CLI', () => {
           '.gateforge.yml': `${GATEFORGE_YML}runtime: .gateforge/runtime.yml\n`,
           '.gateforge/runtime.yml': 'schemaVersion: 1\nenvAllowlist: [TEST_SERVICE_URL]\n',
           '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: persistence\n    when: {}\n    require: [persistence:create]\n',
-          '.gateforge/adapters/tenant.accounts.mjs': ADAPTER.replace('  deletion:', "  observe: { create: { method: 'POST', path: '/api/accounts' } },\n  deletion:"),
+          '.gateforge/adapters/tenant.accounts.mjs': ADAPTER.replace('  deletion:', "  observe: { create: { method: 'POST', path: '/api/accounts' } },\n  volatileFields: ['status'],\n  deletion:"),
           '.gateforge/test-map.yml': `schemaVersion: 1\ntests:\n  - key: playwright:chromium:specs/native.spec.js:${TITLE}\n    selector:\n      runner: playwright\n      project: chromium\n      file: specs/native.spec.js\n      titlePath: ['${TITLE}']\n    kind: observed-e2e\n    claims: ['${CLAIM}']\n    reason: Native UI writes an account; independent engine reads verify its persisted fields.\n`,
         });
         repo.git(['add', '-A']);
         repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'native observed UI fixture']);
         repo.writeFiles({ 'src/accounts.js': '// accounts resource\n// changed source\n' });
+        repo.git(['add', 'src/accounts.js']);
         const { env } = operatorEnvironment();
-        const run = await runCliProcess(repo.root, {
+        const runEnv = {
           ...env,
           TEST_SERVICE_URL: app.url,
           UNLISTED_SERVICE_URL: app.url,
@@ -113,12 +114,24 @@ describe('Playwright Observe declarations through the actual CLI', () => {
           GATEFORGE_TARGET_BASE_URL: app.url,
           GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
           GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
-        });
+        };
+        const run = await runCliProcess(repo.root, runEnv, ['test-gates', '--changed', '--format', 'json']);
         const report = JSON.parse(run.stdout) as { verdicts: Array<{ obligationId: string; verdict: string }>; execution: { selectedTests: { passed: number; failed: number } } };
         expect(report.verdicts.find(verdict => verdict.obligationId === CLAIM), `${run.stdout}\n${run.stderr}`).toMatchObject({ verdict: 'satisfied' });
         expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(0);
         expect(report.execution.selectedTests).toMatchObject({ passed: 1, failed: 0 });
         expect([...app.rows.values()]).toEqual([{ id: 'account-1', first_name: 'Ada', last_name: 'Lovelace', status: 'active' }]);
+        const checked = await runCliProcess(repo.root, runEnv, ['check', '--changed', '--require-e2e', '--format', 'json']);
+        expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+        const checkReport = JSON.parse(checked.stdout) as { advisories?: Array<{ cause: string; resourceId: string; detail: string }> };
+        // The declared skip is disclosed by NAME only: one advisory for
+        // this resource, naming the skipped key, never a value.
+        expect(
+          checkReport.advisories?.filter(entry => entry.cause === 'ADAPTER_VOLATILE_FIELD_SKIPPED'),
+          `${checked.stdout}\n${checked.stderr}`,
+        ).toEqual([
+          expect.objectContaining({ resourceId: 'tenant.accounts', detail: expect.stringContaining('status') }),
+        ]);
       });
     } finally {
       await app.stop();

@@ -172,3 +172,65 @@ describe('declared volatile fields (E18a)', () => {
     expect(volatileEchoSkips(ACTION, persistence)).toEqual([]);
   });
 });
+
+/**
+ * The observe channel (suite-driven browser over the session proxy)
+ * carries no `ui.action` anchor: the witness-observed request fields
+ * ride the persistence record itself. A satisfied obligation there
+ * must disclose exactly the entered keys the adapter declared volatile
+ * — never the whole declaration, never a key nobody sent.
+ */
+describe('declared volatile fields on the observe channel', () => {
+  /**
+   * Builds an observe persistence record as the finalize path issues it.
+   *
+   * Args:
+   *   payload: payload overrides merged over the observe default.
+   *
+   * Returns:
+   *   Record<string, unknown>: a provenanced witness record.
+   */
+  function observeRecord(payload: Record<string, unknown>): Record<string, unknown> {
+    return record('persistence.observed', {
+      resourceId: OBLIGATION.resourceId,
+      entityId: 'doc-1',
+      found: true,
+      fields: { name: 'Quarterly report', label: 'QUARTERLY REPORT' },
+      before: { found: true, fields: { name: 'Annual', label: 'ANNUAL' } },
+      observedFields: { name: 'Quarterly report', label: 'Quarterly report' },
+      exchange: { method: 'PATCH', path: '/api/documents/doc-1', status: 200, seq: 4 },
+      sessionId: 'session-1',
+      channel: 'observe',
+      ...payload,
+    });
+  }
+
+  it('accepts the transformed request key and reports exactly the skip', () => {
+    const observed = observeRecord({ volatileFields: ['label', 'never_sent'] });
+    const outcome = evaluateObligation(OBLIGATION, {
+      claims: [CLAIM],
+      records: [observed],
+      waivers: [],
+      classification: CLASSIFICATION,
+      now: NOW,
+    });
+    expect(outcome.verdict).toBe('satisfied');
+    expect(volatileEchoSkips(null, observed)).toEqual([
+      { field: 'label', entered: 'Quarterly report', persisted: 'QUARTERLY REPORT' },
+    ]);
+  });
+
+  it('still blocks the same record when the transformed key was never declared', () => {
+    const observed = observeRecord({});
+    const outcome = evaluateObligation(OBLIGATION, {
+      claims: [CLAIM],
+      records: [observed],
+      waivers: [],
+      classification: CLASSIFICATION,
+      now: NOW,
+    });
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('EVIDENCE_VALUE_MISMATCH');
+    expect(volatileEchoSkips(null, observed)).toEqual([]);
+  });
+});
