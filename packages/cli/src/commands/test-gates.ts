@@ -2250,6 +2250,18 @@ async function writeWitnessLedgerDocument(
   }
 }
 
+/**
+ * The directory the native playwright child runs from: the directory
+ * holding the config enumeration selected (the repo root for a
+ * root-level config, the project directory for a nested one). It is the
+ * base every relative path the suite itself writes or reads resolves
+ * from, so the gate's own checks must use it rather than the repo root.
+ */
+function nativePlaywrightConfigDir(cwd: string): string {
+  const config = findPlaywrightConfig(cwd);
+  return config === null ? cwd : dirname(resolve(cwd, config));
+}
+
 async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): Promise<number> {
   const { out, format, witnessUrl, runTimeoutMs } = options;
   const runtimeReuseDigest = options.runtimeReuseDigest;
@@ -2460,17 +2472,21 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     discoveryError = error instanceof TestDiscoveryError ? error.message : (error as Error).message;
   }
   // A declared state is honored as DATA, and only when it names a file
-  // inside the candidate. Refused here, loudly and before anything is
-  // spawned, because dropping it instead would run the project logged
-  // out and report a green gate over a suite that never really
-  // exercised the authenticated UI. With an operator's whole-run
+  // inside the candidate. A relative declaration is resolved from the
+  // native config directory — the cwd the suite's own setup test wrote
+  // the file from — while the candidate root stays the containment
+  // boundary. Refused here, loudly and before anything is spawned,
+  // because dropping it instead would run the project logged out and
+  // report a green gate over a suite that never really exercised the
+  // authenticated UI. With an operator's whole-run
   // GATEFORGE_SESSION_STATE set, no declaration is used at all, so none
   // is read or checked either — precedence means the losing value never
   // reaches the filesystem.
   if (io.env['GATEFORGE_SESSION_STATE'] === undefined) {
+    const nativeConfigDir = nativePlaywrightConfigDir(io.cwd);
     for (const [project, declared] of Object.entries(projectStorageStates)) {
       try {
-        resolveProjectStorageState(declared, io.cwd, project);
+        resolveProjectStorageState(declared, io.cwd, project, nativeConfigDir);
       } catch (error) {
         throw new UsageError(`test-gates: ${(error as Error).message}`);
       }

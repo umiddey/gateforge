@@ -23,12 +23,20 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startWitness } from '../src/witness/server.js';
-import { startSupervisorSpoolDrain } from '../src/supervisor/drain.js';
+import { startSupervisorSpoolDrain, type SpoolDrainHandle } from '../src/supervisor/drain.js';
 import { spoolPathFor } from '../src/supervisor/spool.js';
 import { SupervisorClient } from '../src/supervisor/client.js';
-import { listNativePlaywrightTests, type NativeListResult } from '../src/discovery/reconcile.js';
+import {
+  listNativePlaywrightTests,
+  type NativeInstance,
+  type NativeListResult,
+} from '../src/discovery/reconcile.js';
 import { executeSupervisedPlaywright } from '../src/discovery/supervised-run.js';
-import { TRUSTED_CONFIG_FILE, type ProjectScope } from '../src/discovery/trusted-config.js';
+import {
+  resolveProjectStorageState,
+  TRUSTED_CONFIG_FILE,
+  type ProjectScope,
+} from '../src/discovery/trusted-config.js';
 
 const DIRECTORIES: string[] = [];
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -38,6 +46,8 @@ const VERIFIER_KEY = 'project-state-verifier-key';
 const LOOPBACK = [127, 0, 0, 1].join('.');
 /** The state file the native auth pattern writes inside the candidate. */
 const STATE_FILE = 'playwright/.auth/user.json';
+/** A subdirectory project: its config, specs and artifacts live here. */
+const PROJECT_DIR = 'frontend';
 /** Sessions the app already knows, so a STALE state file is a real login. */
 const SEEDED_SESSIONS: Record<string, string> = {
   'stale-token': 'Stale Session',
@@ -165,13 +175,28 @@ function storageStateDocument(token: string): string {
  * signs in and saves the state file, plus the dependent project that
  * declares the state it reads.
  *
+ * Every path the suite itself writes or declares stays RELATIVE, which
+ * is the contract under test: where the config lives decides where those
+ * paths land. `options.dir` places the config and the specs in a
+ * subdirectory project — the self-contained layout enumeration supports
+ * too — and leaves the repo root to a config that lives at the root.
+ *
  * @param cwd: the consumer repo root.
  * @param declared: the value the dependent project's `use.storageState` holds.
  * @param expects: the identity the dependent spec asserts it renders.
+ * @param options: `dir` (project directory; default the repo root) and
+ *   `secondSpecTitle` (a second spec test, for named-selection cases).
  */
-function writeAuthProject(cwd: string, declared: string, expects: string): void {
+function writeAuthProject(
+  cwd: string,
+  declared: string,
+  expects: string,
+  options: { dir?: string; secondSpecTitle?: string } = {},
+): void {
+  const projectDir = join(cwd, options.dir ?? '');
+  mkdirSync(projectDir, { recursive: true });
   writeFileSync(
-    join(cwd, 'playwright.config.mjs'),
+    join(projectDir, 'playwright.config.mjs'),
     [
       `export default {`,
       `  testDir: './tests',`,
@@ -183,9 +208,9 @@ function writeAuthProject(cwd: string, declared: string, expects: string): void 
       '',
     ].join('\n'),
   );
-  mkdirSync(join(cwd, 'tests'), { recursive: true });
+  mkdirSync(join(projectDir, 'tests'), { recursive: true });
   writeFileSync(
-    join(cwd, 'tests', 'auth.setup.ts'),
+    join(projectDir, 'tests', 'auth.setup.ts'),
     [
       `import { mkdirSync } from 'node:fs';`,
       `import { expect, test as setup } from 'playwright/test';`,
@@ -206,7 +231,7 @@ function writeAuthProject(cwd: string, declared: string, expects: string): void 
     ].join('\n'),
   );
   writeFileSync(
-    join(cwd, 'tests', 'protected.spec.ts'),
+    join(projectDir, 'tests', 'protected.spec.ts'),
     [
       `import { expect, test } from 'playwright/test';`,
       ``,
@@ -216,6 +241,16 @@ function writeAuthProject(cwd: string, declared: string, expects: string): void 
       `  expect((await page.locator('#protected').textContent())?.trim()).toBe('Protected area');`,
       `  expect((await page.locator('#who').textContent())?.trim()).toBe(${JSON.stringify(expects)});`,
       `});`,
+      ...(options.secondSpecTitle === undefined
+        ? []
+        : [
+            '',
+            `test(${JSON.stringify(options.secondSpecTitle)}, async ({ page }) => {`,
+            `  const response = await page.goto('/protected');`,
+            `  expect(response?.status()).toBe(200);`,
+            `  expect((await page.locator('#protected').textContent())?.trim()).toBe('Protected area');`,
+            `});`,
+          ]),
       '',
     ].join('\n'),
   );
@@ -229,10 +264,19 @@ function writeAuthProject(cwd: string, declared: string, expects: string): void 
  * @param expects: the identity the spec asserts it renders.
  * @param project: the project name (a candidate string, so one case
  *   deliberately uses a name that is a JavaScript prototype key).
+ * @param options: `dir` (project directory; default the repo root).
  */
-function writeSingleProject(cwd: string, declared: string, expects: string, project = 'chromium'): void {
+function writeSingleProject(
+  cwd: string,
+  declared: string,
+  expects: string,
+  project = 'chromium',
+  options: { dir?: string } = {},
+): void {
+  const projectDir = join(cwd, options.dir ?? '');
+  mkdirSync(projectDir, { recursive: true });
   writeFileSync(
-    join(cwd, 'playwright.config.mjs'),
+    join(projectDir, 'playwright.config.mjs'),
     [
       `export default {`,
       `  testDir: './tests',`,
@@ -243,9 +287,9 @@ function writeSingleProject(cwd: string, declared: string, expects: string, proj
       '',
     ].join('\n'),
   );
-  mkdirSync(join(cwd, 'tests'), { recursive: true });
+  mkdirSync(join(projectDir, 'tests'), { recursive: true });
   writeFileSync(
-    join(cwd, 'tests', 'protected.spec.ts'),
+    join(projectDir, 'tests', 'protected.spec.ts'),
     [
       `import { expect, test } from 'playwright/test';`,
       ``,
@@ -275,6 +319,54 @@ function scopesFor(enumeration: NativeListResult): ProjectScope[] {
         : { storageState: enumeration.projectStorageStates[name] as string }),
     }))
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+}
+
+/**
+ * Registers exactly the enumerated instances this run will execute (a
+ * named run registers the NAMED tests) and starts the spool drain that
+ * backs the run. The supervisor client comes back too: the witness's
+ * execution trace is where expected-set ADMISSION is observable — a
+ * run whose identities the registration never bound opens no sessions,
+ * which no outcome row and no empty conflict list would show.
+ */
+async function registerAndDrain(input: {
+  stateDir: string;
+  runId: string;
+  witnessUrl: string;
+  instances: readonly NativeInstance[];
+}): Promise<{ drain: SpoolDrainHandle; supervisor: SupervisorClient }> {
+  const supervisor = new SupervisorClient(input.witnessUrl, RUN_TOKEN, VERIFIER_KEY);
+  await supervisor.registerExpectedSet({
+    tests: input.instances.map((instance) => ({
+      testId: instance.frameworkId,
+      project: instance.project.length > 0 ? instance.project : null,
+      file: instance.file,
+      titlePath: instance.titlePath,
+    })),
+  });
+  const drain = startSupervisorSpoolDrain({
+    stateDir: input.stateDir,
+    runId: input.runId,
+    witnessUrl: input.witnessUrl,
+    runToken: RUN_TOKEN,
+    verifierKey: VERIFIER_KEY,
+  });
+  return { drain, supervisor };
+}
+
+/**
+ * One line per registered identity the witness admitted, with the
+ * sessions it minted for it: `<project>|<repo-relative file>|<title
+ * path>|<sessions>`.
+ */
+async function admittedIdentities(supervisor: SupervisorClient): Promise<string[]> {
+  const trace = await supervisor.executionTrace();
+  return (trace?.tests ?? [])
+    .map(
+      (test) =>
+        `${test.project ?? ''}|${test.file}|${test.titlePath.join('>')}|${String(test.sessions.length)}`,
+    )
+    .sort();
 }
 
 describe('a native per-project storage state reaches the project that declared it', () => {
@@ -540,4 +632,248 @@ describe('a native per-project storage state reaches the project that declared i
       await app.stop();
     }
   }, 240_000);
+});
+
+/**
+ * A project whose config lives ONE directory down is enumerated from
+ * that directory, so the supervised child must run there too: the
+ * paths the suite itself writes and declares are relative, and they
+ * must land exactly where they land when the owner runs the suite from
+ * the project directory. The candidate root stays the identity root —
+ * repo-relative files, repo-relative keys, pinned root testDir.
+ */
+describe('a nested native project runs from its own config directory', () => {
+  it('writes the setup artifact inside the project and reads it back authenticated', async () => {
+    const cwd = tempDir('nested');
+    const stateDir = tempDir('nested-state');
+    writeAuthProject(cwd, STATE_FILE, 'Ada', { dir: PROJECT_DIR });
+    // The candidate root already holds a REAL session for a stale token.
+    // An artifact written at the root instead of inside the project
+    // would overwrite exactly this file — the observable defect.
+    mkdirSync(join(cwd, 'playwright', '.auth'), { recursive: true });
+    writeFileSync(join(cwd, STATE_FILE), storageStateDocument('stale-token'), 'utf8');
+
+    const app = await startProtectedApp();
+    expect((await app.hit('/protected')).status).toBe(401);
+
+    const enumeration = await listNativePlaywrightTests({ cwd });
+    // The nested layout moves WHERE the suite runs, never the identities
+    // the catalog, the expected set and the receipt speak: both files
+    // stay repo-relative.
+    expect([...enumeration.instances.map((instance) => instance.file)].sort()).toEqual([
+      `${PROJECT_DIR}/tests/auth.setup.ts`,
+      `${PROJECT_DIR}/tests/protected.spec.ts`,
+    ]);
+
+    const projectScopes = scopesFor(enumeration);
+    const runId = 'nested-project-state-run';
+    const witness = await startWitness({ runId, token: RUN_TOKEN, verifierKey: VERIFIER_KEY, host: LOOPBACK });
+    const { drain, supervisor } = await registerAndDrain({
+      stateDir,
+      runId,
+      witnessUrl: witness.url,
+      instances: enumeration.instances,
+    });
+    try {
+      const envelope = await executeSupervisedPlaywright(
+        { logicalKeys: [] },
+        { stateDir, runId, vars: {} },
+        {
+          cwd,
+          timeoutMs: 180_000,
+          appBaseUrl: app.url,
+          testFiles: enumeration.instances.map((instance) => instance.file),
+          projects: projectScopes.map((scope) => scope.name),
+          projectScopes,
+        },
+      );
+      const { conflicts } = await drain.stop();
+      expect(conflicts).toEqual([]);
+      expect(envelope.outcomes.map((outcome) => [outcome.project, outcome.status])).toEqual([
+        ['setup', 'passed'],
+        ['chromium', 'passed'],
+      ]);
+      // Every executed test was ADMITTED by the registration: the
+      // witness minted a session for each repo-relative identity. A run
+      // whose identities were reported relative to the wrong root opens
+      // NO session — and a refused open is not a conflict, so the trace
+      // is the only place that shows it.
+      expect(await admittedIdentities(supervisor)).toEqual([
+        `chromium|${PROJECT_DIR}/tests/protected.spec.ts|renders the protected page|1`,
+        `setup|${PROJECT_DIR}/tests/auth.setup.ts|signs in and saves the storage state|1`,
+      ]);
+      // The setup project's relative write landed INSIDE the project,
+      // and the dependent project authenticated with that very file.
+      const written = JSON.parse(readFileSync(join(cwd, PROJECT_DIR, STATE_FILE), 'utf8')) as {
+        cookies: { name: string; value: string }[];
+      };
+      const session = written.cookies.find((cookie) => cookie.name === 'session');
+      const authenticated = await app.hit('/protected', `session=${session?.value ?? ''}`);
+      expect(authenticated.status).toBe(200);
+      expect(authenticated.body).toContain('Ada');
+      // Nothing was written at the repo root: the directory the suite
+      // does not run in kept the exact state it started with.
+      const rootState = JSON.parse(readFileSync(join(cwd, STATE_FILE), 'utf8')) as {
+        cookies: { name: string; value: string }[];
+      };
+      expect(rootState.cookies.find((cookie) => cookie.name === 'session')?.value).toBe('stale-token');
+    } finally {
+      await witness.stop();
+      await app.stop();
+    }
+  }, 240_000);
+
+  it('runs exactly the named file:line after the child moved to the config directory', async () => {
+    const cwd = tempDir('nested-named');
+    const stateDir = tempDir('nested-named-state');
+    const secondTitle = 'renders the protected page on a second visit';
+    writeAuthProject(cwd, STATE_FILE, 'Ada', { dir: PROJECT_DIR, secondSpecTitle: secondTitle });
+
+    const app = await startProtectedApp();
+    const enumeration = await listNativePlaywrightTests({ cwd });
+    const setup = enumeration.instances.find((instance) => instance.project === 'setup');
+    const named = enumeration.instances.find((instance) => instance.title === 'renders the protected page');
+    if (setup === undefined || named === undefined) throw new Error('enumeration shape changed');
+    // The run names BOTH the setup test (the dependent project needs the
+    // artifact it writes) and one line of the spec; the spec's second
+    // test was never named.
+    const testLocations = [
+      `${setup.location.file}:${String(setup.location.line)}`,
+      `${named.location.file}:${String(named.location.line)}`,
+    ];
+
+    const projectScopes = scopesFor(enumeration);
+    const runId = 'nested-named-run';
+    const witness = await startWitness({ runId, token: RUN_TOKEN, verifierKey: VERIFIER_KEY, host: LOOPBACK });
+    const { drain, supervisor } = await registerAndDrain({
+      stateDir,
+      runId,
+      witnessUrl: witness.url,
+      instances: [setup, named],
+    });
+    try {
+      const envelope = await executeSupervisedPlaywright(
+        { logicalKeys: [] },
+        { stateDir, runId, vars: {} },
+        {
+          cwd,
+          timeoutMs: 180_000,
+          appBaseUrl: app.url,
+          testFiles: enumeration.instances.map((instance) => instance.file),
+          testLocations,
+          projects: projectScopes.map((scope) => scope.name),
+          projectScopes,
+        },
+      );
+      const { conflicts } = await drain.stop();
+      expect(conflicts).toEqual([]);
+      // Exactly the named tests ran, in the named files, in dependency
+      // order — and the named spec test really rendered the protected
+      // page as the identity this run's setup signed in as.
+      expect(
+        envelope.outcomes.map((outcome) => [outcome.project, outcome.logicalKey, outcome.status]),
+      ).toEqual([
+        ['setup', `${setup.location.file}#signs in and saves the storage state`, 'passed'],
+        ['chromium', `${named.location.file}#renders the protected page`, 'passed'],
+      ]);
+      // Both named tests were admitted under their repo-relative
+      // identities and hold a session each — the named selection is not
+      // only executed, it is bound.
+      expect(await admittedIdentities(supervisor)).toEqual([
+        `chromium|${PROJECT_DIR}/tests/protected.spec.ts|renders the protected page|1`,
+        `setup|${PROJECT_DIR}/tests/auth.setup.ts|signs in and saves the storage state|1`,
+      ]);
+    } finally {
+      await witness.stop();
+      await app.stop();
+    }
+  }, 240_000);
+
+  it('keeps a relative operator whole-run state anchored at the candidate root', async () => {
+    const cwd = tempDir('nested-operator');
+    const stateDir = tempDir('nested-operator-state');
+    // The project declares a state that could NOT be honored; the
+    // operator's own relative path is anchored at the CANDIDATE ROOT,
+    // not at the directory the native child runs from.
+    writeSingleProject(cwd, '../../outside/user.json', 'Operator Session', 'chromium', { dir: PROJECT_DIR });
+    writeFileSync(join(cwd, 'operator-state.json'), storageStateDocument('operator-token'), 'utf8');
+
+    const app = await startProtectedApp();
+    const enumeration = await listNativePlaywrightTests({ cwd });
+    const projectScopes = scopesFor(enumeration);
+    const runId = 'nested-operator-run';
+    const witness = await startWitness({ runId, token: RUN_TOKEN, verifierKey: VERIFIER_KEY, host: LOOPBACK });
+    const { drain, supervisor } = await registerAndDrain({
+      stateDir,
+      runId,
+      witnessUrl: witness.url,
+      instances: enumeration.instances,
+    });
+    try {
+      const envelope = await executeSupervisedPlaywright(
+        { logicalKeys: [] },
+        { stateDir, runId, vars: {} },
+        {
+          cwd,
+          timeoutMs: 180_000,
+          appBaseUrl: app.url,
+          // The operator's whole-run state, exactly as
+          // GATEFORGE_SESSION_STATE has always been honored: a relative
+          // path still means the candidate root.
+          storageState: 'operator-state.json',
+          testFiles: enumeration.instances.map((instance) => instance.file),
+          projects: projectScopes.map((scope) => scope.name),
+          projectScopes,
+        },
+      );
+      const { conflicts } = await drain.stop();
+      expect(conflicts).toEqual([]);
+      // The browser rendered the OPERATOR's identity — the spec asserts
+      // it, so a pass here is the state file really having been read.
+      expect(envelope.outcomes.map((outcome) => [outcome.project, outcome.status])).toEqual([
+        ['chromium', 'passed'],
+      ]);
+      // Admitted under its repo-relative identity, session minted: the
+      // operator's whole-run state authenticated a test the expected
+      // set actually bound.
+      expect(await admittedIdentities(supervisor)).toEqual([
+        `chromium|${PROJECT_DIR}/tests/protected.spec.ts|renders the protected page|1`,
+      ]);
+    } finally {
+      await witness.stop();
+      await app.stop();
+    }
+  }, 240_000);
+});
+
+describe('a declared browser state resolves from the native config directory', () => {
+  it('resolves a nested declaration against that directory, bounded by the candidate root', () => {
+    const cwd = tempDir('resolve');
+    const configDir = join(cwd, PROJECT_DIR);
+    mkdirSync(configDir, { recursive: true });
+    expect(resolveProjectStorageState(STATE_FILE, cwd, 'chromium', configDir)).toBe(join(configDir, STATE_FILE));
+    // A `../shared` state that lands back INSIDE the candidate stays
+    // valid: the boundary is the candidate, not the config directory.
+    expect(resolveProjectStorageState('../shared/user.json', cwd, 'chromium', configDir)).toBe(
+      join(cwd, 'shared', 'user.json'),
+    );
+  });
+
+  it('still refuses an empty, URL, lexical and physical escape declared by a nested config', () => {
+    const outside = tempDir('resolve-outside');
+    const cwd = tempDir('resolve-refuse');
+    const configDir = join(cwd, PROJECT_DIR);
+    mkdirSync(configDir, { recursive: true });
+    // Lexically inside the candidate, physically outside it.
+    symlinkSync(outside, join(configDir, 'linked'), 'dir');
+    const cases = [
+      { declared: '', because: 'is empty' },
+      { declared: 'https://example.test/user.json', because: 'is a URL' },
+      { declared: '../../outside/user.json', because: 'resolves outside the candidate root' },
+      { declared: 'linked/user.json', because: 'through a link' },
+    ];
+    for (const { declared, because } of cases) {
+      expect(() => resolveProjectStorageState(declared, cwd, 'chromium', configDir)).toThrow(because);
+    }
+  });
 });

@@ -12,6 +12,13 @@
  * workers, zero retries) and runs the runner with `--config <trusted>`.
  *
  * Honesty rules:
+ * - The child runs from the SELECTED NATIVE CONFIG DIRECTORY, the same
+ *   directory `listNativePlaywrightTests` enumerated the suite from, so
+ *   a nested project's own relative paths — its setup project's saved
+ *   browser state above all — resolve exactly as they do when the owner
+ *   runs the suite. The repo root stays the IDENTITY root: the trusted
+ *   config's testDir, the reporter's root, and the base every
+ *   repo-relative file/location is resolved against before the spawn.
  * - Only the engine reporter writes the lifecycle spool + outcomes
  *   document, and only to parent-side paths the runner child never
  *   learns (no state paths in the child env).
@@ -79,16 +86,29 @@ export interface SupervisedRunOptions {
   command?: readonly string[];
   /** Whole-run wall-clock bound (default {@link DEFAULT_RUN_TIMEOUT_MS}). */
   timeoutMs?: number;
-  /** Repo root override (default: process cwd; the trusted testDir). */
+  /**
+   * Repo root — the candidate root, the identity root, and the trusted
+   * testDir. It is NOT the child's cwd: the child runs from the
+   * directory of the selected native config (the same one
+   * `listNativePlaywrightTests` enumerates from), which is this root
+   * for a root-level config.
+   */
   cwd?: string;
   /** Trusted operator-provided app proxy URL used by relative navigation. */
   appBaseUrl?: string;
-  /** Trusted operator-provided browser session file (never passed to workers). */
+  /**
+   * Trusted operator-provided browser session file (never passed to
+   * workers). A relative value keeps its CANDIDATE-ROOT meaning and is
+   * resolved before the child runs, so the child's cwd never re-points
+   * it.
+   */
   storageState?: string;
   /**
    * Exact repo-relative posix test files to run (the supervisor's
    * selection as data). Undefined = the runner default (every spec
-   * under the root). The consumer config's scoping never applies.
+   * under the root). The consumer config's scoping never applies. These
+   * stay repo-relative because the trusted config pins the repo root as
+   * its testDir.
    */
   testFiles?: readonly string[];
   /**
@@ -96,7 +116,9 @@ export interface SupervisedRunOptions {
    * (the supervisor's per-TEST selection as positional arguments).
    * Undefined = file granularity. The values come from the plan fixed
    * before the run, never from the suite, and are passed as positional
-   * location filters — never as a suite-controlled flag.
+   * location filters — never as a suite-controlled flag. They are
+   * resolved against the repo root before the spawn, because the child
+   * no longer runs from there.
    */
   testLocations?: readonly string[];
   /**
@@ -150,8 +172,12 @@ export function playwrightVersion(): string {
  *   env: run-state dir + run identity + pre-sanitized vars the child
  *     inherits (witness wiring; NEVER verifier material, NEVER state
  *     paths — the child must not locate the spool or outcomes files).
- *   options: runner command override (tests), timeout, cwd, the exact
- *     test files/locations/projects to run, reporter entry override.
+ *   options: runner command override (tests), timeout, the repo root,
+ *     the exact test files/locations/projects to run, reporter entry
+ *     override. The runner CHILD runs from the directory of the selected
+ *     native config — the way the owner runs the suite, and the way
+ *     enumeration read it — so a project's own relative paths resolve
+ *     exactly as they do outside Gateforge.
  *
  * Returns:
  *   Promise<RunnerExecutionEnvelope>: the structured outcome envelope —
@@ -178,6 +204,7 @@ export async function executeSupervisedPlaywright(
   // executes, so it cannot fabricate spool/outcomes and exit early.
   const { configPath } = synthesizeTrustedConfig({
     cwd,
+    nativeConfigDir: consumerConfigDir,
     stateDir: env.stateDir,
     runId: env.runId,
     reporterEntry: options.reporterEntry ?? trustedReporterEntry(),
@@ -189,7 +216,12 @@ export async function executeSupervisedPlaywright(
   });
   const baseCommand = options.command ?? commandFromDirectory(consumerConfigDir);
   const isStub = options.command !== undefined;
-  const locations = [...new Set(options.testLocations ?? [])].sort();
+  // Positional location filters are resolved against the repo root
+  // BEFORE the spawn: the child runs from the config directory, so a
+  // repo-relative argument would be filtered from the wrong base.
+  const locations = [...new Set(options.testLocations ?? [])]
+    .sort()
+    .map((location) => absoluteLocation(cwd, location));
   const argv = isStub
     ? [...baseCommand, 'test', '--retries=0', ...locations]
     : [
@@ -205,7 +237,11 @@ export async function executeSupervisedPlaywright(
   const childEnv = buildRunnerChildEnv(env.vars, process.env);
   childEnv[ENV_PLAYWRIGHT_CONFIG_DIR] = consumerConfigDir;
   const child = spawn(argv[0] ?? '', argv.slice(1), {
-    cwd,
+    // The NATIVE CONFIG DIRECTORY, the same one enumeration ran from:
+    // the repo root stays the identity/testDir root, while the child's
+    // own relative paths (a setup project's saved storage state above
+    // all) resolve exactly as they do when the owner runs the suite.
+    cwd: consumerConfigDir,
     // ALLOWLIST ONLY (enforcement-review fix 1 + execution-authority
     // fix): no wholesale process.env merge — the verifier key and every
     // other unlisted variable never reach the untrusted runner — and NO
@@ -269,6 +305,24 @@ export async function executeSupervisedPlaywright(
     );
   }
   return parseOutcomesDocument(document, outcome.code);
+}
+
+/**
+ * Resolves one repo-relative `file:line[:column]` location against the
+ * repo root. The runner child runs from the native config directory, so
+ * a location left repo-relative would be filtered from the wrong base;
+ * an absolute argument targets the very same file either way. An
+ * already-absolute value (or one without a line) passes through the
+ * resolver unchanged.
+ */
+function absoluteLocation(root: string, location: string): string {
+  const parsed = /^(.*?):(\d+):?(\d+)?$/.exec(location);
+  const file = parsed === null ? location : (parsed[1] ?? location);
+  const absoluteFile = resolve(root, file);
+  const line = parsed?.[2];
+  if (line === undefined) return absoluteFile;
+  const column = parsed?.[3];
+  return column === undefined ? `${absoluteFile}:${line}` : `${absoluteFile}:${line}:${column}`;
 }
 
 /**

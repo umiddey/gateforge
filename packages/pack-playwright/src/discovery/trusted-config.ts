@@ -22,9 +22,13 @@
  *   test can read the artifact the setup test produced — and the state
  *   is what hands that project the session the setup test saved, while
  *   the setup project itself keeps running unauthenticated;
- * - storage states: a declared path is honored only when it is a path
- *   INSIDE the candidate root, and an operator-provided whole-run state
- *   still outranks every project declaration (see
+ * - storage states: a declared path is resolved from the NATIVE CONFIG
+ *   DIRECTORY the runner child runs from (so the dependent project reads
+ *   the very file its own setup project wrote from that same cwd) and is
+ *   honored only while it lands INSIDE the candidate root, which stays
+ *   the containment boundary for a nested project too; an
+ *   operator-provided whole-run state still outranks every project
+ *   declaration and keeps its own candidate-root meaning (see
  *   {@link resolveProjectStorageState});
  * - reporter: the engine's own reporter entry forced by absolute path
  *   with run-state paths as CONSTRUCTOR OPTIONS (never env — worker
@@ -87,12 +91,30 @@ export interface TrustedReporterOptions {
   outcomesPath: string;
   /** Absolute obligations document path (reporter ledger; empty when none). */
   obligationsPath: string;
+  /**
+   * Absolute CANDIDATE ROOT the reporter anchors every file identity
+   * to. Handed as trusted CONSTRUCTOR DATA (never worker env): the
+   * runner child runs from the native config directory, while every
+   * identity the supervisor registered is repo-relative — the reporter
+   * must therefore relativize against the root, not against the cwd it
+   * happens to run in.
+   */
+  candidateRoot: string;
 }
 
 /** Inputs for one trusted config synthesis. */
 export interface TrustedConfigInput {
-  /** Absolute repo root (the runner's testDir). */
+  /** Absolute repo root (the runner's testDir, and the identity root). */
   cwd: string;
+  /**
+   * Absolute native config directory — the directory the runner child
+   * runs from (the same one `listNativePlaywrightTests` enumerates
+   * from). Relative per-project {@link ProjectScope.storageState}
+   * declarations resolve from here, because that is the cwd the
+   * project's own setup test wrote the file from. Undefined = the repo
+   * root, which is exactly the config directory of a root-level config.
+   */
+  nativeConfigDir?: string;
   /** Absolute run-state dir (receives the synthesized config). */
   stateDir: string;
   /** The run identity. */
@@ -105,7 +127,10 @@ export interface TrustedConfigInput {
    * Operator-provided browser storage state, embedded only in trusted
    * config. This is the WHOLE-RUN state: when it is set it applies to
    * every project and outranks each project's declared
-   * {@link ProjectScope.storageState}, exactly as it always has.
+   * {@link ProjectScope.storageState}, exactly as it always has. A
+   * relative value keeps its CANDIDATE-ROOT meaning — it is resolved
+   * against {@link TrustedConfigInput.cwd} here, so moving the native
+   * child's cwd can never re-point an operator's path.
    */
   storageState?: string;
   /** Exact repo-relative posix test files to run (undefined = default). */
@@ -146,8 +171,13 @@ export interface ProjectScope {
    * hands it to THIS project only, which is what lets a `setup` project
    * sign in and save `playwright/.auth/user.json` for the dependent
    * project that reads it while the setup project itself stays logged
-   * out. Relative paths resolve against the RUNNER's cwd — the repo
-   * root — exactly like the setup test's own relative write.
+   * out. Relative paths resolve against the RUNNER's cwd — the native
+   * config directory the child runs from — exactly like the setup
+   * test's own relative write, which is the very cwd that write is
+   * resolved from. Containment stays the WHOLE candidate root, so a
+   * valid `../shared/state.json` that lands back inside the candidate
+   * is honored while anything reaching outside it is refused (see
+   * {@link resolveProjectStorageState}).
    *
    * An operator-provided whole-run state (GATEFORGE_SESSION_STATE)
    * outranks every project declaration, so this field is not emitted at
@@ -186,19 +216,26 @@ function isDirectoryEntry(path: string): boolean {
  * Resolves one project-declared `use.storageState` and refuses anything
  * a supervised run must not read.
  *
- * A relative path is resolved against the candidate root because that is
- * the runner's cwd: the worker reads the file relative to the process it
- * runs in, which is the very cwd the project's own setup test wrote it
- * from. The file itself need not exist yet — the setup project writes it
+ * A relative path is resolved against the NATIVE CONFIG DIRECTORY —
+ * the directory the runner child runs from, exactly the directory
+ * `listNativePlaywrightTests` enumerated the suite from: the worker
+ * reads the file relative to the process it runs in, which is that very
+ * cwd, which is also where the project's own setup test wrote it from.
+ * The file itself need not exist yet — the setup project writes it
  * during this run.
  *
- * Containment is PHYSICAL, not lexical: a symlink inside the candidate
- * that points outside it is refused too, so the check follows the real
- * filesystem from the nearest existing ancestor.
+ * Containment is the WHOLE CANDIDATE ROOT, not the config directory,
+ * and it is PHYSICAL rather than lexical: a symlink inside the
+ * candidate that points outside it is refused too, so the check follows
+ * the real filesystem from the nearest existing ancestor. A nested
+ * project's `../shared/state.json` therefore stays valid whenever it
+ * lands back inside the candidate.
  *
  * @param value: the `use.storageState` string the runner resolved.
- * @param root: the candidate root (the runner's cwd).
+ * @param root: the candidate root (the containment boundary).
  * @param project: the declaring project, named in the error.
+ * @param baseDir: the directory a relative declaration resolves from —
+ *   the native config directory the runner child runs from.
  *
  * @returns
  *   string: the absolute path the declared state resolves to.
@@ -209,19 +246,21 @@ function isDirectoryEntry(path: string): boolean {
  *   link. A requested state is never silently dropped — that would
  *   degrade into a logged-out run that looks green.
  */
-export function resolveProjectStorageState(value: string, root: string, project: string): string {
+export function resolveProjectStorageState(value: string, root: string, project: string, baseDir: string): string {
   const base = resolve(root);
+  const from = resolve(base, baseDir);
   const refuse = (why: string): never => {
     throw new ProjectStorageStateError(
       `project '${project}' declares use.storageState '${value}', which ${why}. A supervised run reads a ` +
-        `browser state only from inside the candidate (root '${base}'): point the project at a path under it — ` +
-        `the standard pattern writes 'playwright/.auth/user.json' from its own setup project — or set ` +
+        `browser state only from inside the candidate (root '${base}'), resolving relative paths from the ` +
+        `project's config directory '${from}': point the project at a path under the candidate — the ` +
+        `standard pattern writes 'playwright/.auth/user.json' from its own setup project — or set ` +
         `GATEFORGE_SESSION_STATE to a whole-run state instead.`,
     );
   };
   if (value.length === 0) return refuse('is empty');
   if (URL_LIKE.test(value)) return refuse('is a URL, not a file path');
-  const resolvedPath = resolve(base, value);
+  const resolvedPath = resolve(from, value);
   if (resolvedPath !== base && !resolvedPath.startsWith(base + sep)) {
     return refuse(`resolves outside the candidate root ('${resolvedPath}')`);
   }
@@ -281,7 +320,8 @@ export function trustedReporterEntry(fromModule: string = import.meta.url): stri
  * Synthesizes the trusted Playwright config into the run-state dir.
  *
  * Args:
- *   input: repo root, run state, reporter entry, file/project selection.
+ *   input: repo root, native config directory, run state, reporter
+ *     entry, file/project selection, and the operator's whole-run state.
  *
  * Returns:
  *   { configPath, reporterOptions }: absolute config path for
@@ -296,20 +336,30 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
     runId: input.runId,
     outcomesPath: join(input.stateDir, 'runner-outcomes.json'),
     obligationsPath: join(input.stateDir, 'obligations.json'),
+    candidateRoot: input.cwd,
   };
   const testFiles = [...new Set(input.testFiles ?? [])].sort();
   const projects = [...new Set(input.projects ?? [])].sort();
+  // An operator's whole-run state is resolved HERE, against the candidate
+  // root, and emitted absolute: a relative operator path keeps the
+  // candidate-root meaning it always had, whatever cwd the native child
+  // runs from. (An absolute value passes through unchanged — the
+  // operator's own path, never re-anchored.)
+  const operatorState = input.storageState === undefined ? undefined : resolve(input.cwd, input.storageState);
   // Every project-declared storage state is resolved and checked BEFORE
   // anything is written: a state a supervised run may not read refuses
   // the run outright, because silently dropping it would leave the
-  // project logged out and still call the run green. Under an operator's
-  // whole-run state the declarations are not used at all, so they are
-  // neither read nor checked — precedence means the losing value never
-  // reaches the filesystem.
-  if (input.storageState === undefined) {
+  // project logged out and still call the run green. Relative
+  // declarations resolve from the NATIVE CONFIG DIRECTORY (the child's
+  // cwd, where the setup test wrote the file), while containment stays
+  // the whole candidate root. Under an operator's whole-run state the
+  // declarations are not used at all, so they are neither read nor
+  // checked — precedence means the losing value never reaches the
+  // filesystem.
+  if (operatorState === undefined) {
     for (const scope of input.projectScopes ?? []) {
       if (scope.storageState !== undefined) {
-        resolveProjectStorageState(scope.storageState, input.cwd, scope.name);
+        resolveProjectStorageState(scope.storageState, input.cwd, scope.name, input.nativeConfigDir ?? input.cwd);
       }
     }
   }
@@ -333,7 +383,7 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
       name: scope.name,
       files: [...new Set(scope.files)].sort(),
       dependencies: scope.dependencies ?? [],
-      ...(input.storageState === undefined && scope.storageState !== undefined
+      ...(operatorState === undefined && scope.storageState !== undefined
         ? { storageState: scope.storageState }
         : {}),
     }))
@@ -409,7 +459,7 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
       headless: true,
       trace: 'off',
       ...(input.appBaseUrl !== undefined ? { baseURL: input.appBaseUrl } : {}),
-      ...(input.storageState !== undefined ? { storageState: input.storageState } : {}),
+      ...(operatorState !== undefined ? { storageState: operatorState } : {}),
     })},`,
     `  outputDir: ${JSON.stringify(join(input.stateDir, 'playwright-artifacts'))},`,
     '};',

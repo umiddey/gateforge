@@ -101,9 +101,15 @@ Four rules decide what a run does with a declared state:
   name the project, the value and the fix. None of them is ever dropped,
   because a dropped state is a logged-out run that still reports green.
 - **A relative path is relative to the runner's working directory** —
-  the repository root — which is the same directory the setup test wrote
-  it from. The file need not exist before the run; the setup project
-  creates it.
+  the directory holding the playwright config the run uses. That is the
+  repository root for a root-level config and the project's own
+  directory for a config one level down, which is exactly the directory
+  your setup test wrote the file from: the artifact the dependent project
+  reads is the artifact the setup project saved, wherever the config
+  lives. The file need not exist before the run; the setup project creates
+  it. Containment still covers the WHOLE repository, so a
+  `../shared/user.json` that lands back inside it is accepted while
+  anything reaching outside it stops the run.
 - **The setup project keeps no state**, so a stale file from an earlier
   run can never make it start signed in and skip the sign-in it exists to
   perform.
@@ -112,6 +118,16 @@ Four rules decide what a run does with a declared state:
   exactly as before; the declarations it outranks are then not read, not
   checked and not embedded anywhere in the run. Leave it unset to let the
   projects use their own.
+
+Everything else about a run keeps the repository root as its anchor, even
+while the suite runs from the project directory: the files and test
+identities a run reports stay repository-relative, so the keys your
+catalog, your expected set and your receipt speak do not change with the
+directory the config lives in, and a relative `GATEFORGE_SESSION_STATE`
+path still means the repository root rather than the project directory.
+There is nothing to configure: a supervised run simply resolves the
+suite's own relative paths the way you resolve them when you run the
+suite yourself.
 
 ### Per-session login identity (why a test may hand the witness its own tenant)
 

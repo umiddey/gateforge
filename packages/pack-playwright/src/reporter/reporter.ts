@@ -53,7 +53,7 @@
  * witness rejects every submission fail-closed.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { canonicalOf } from '../json.js';
 import type { Classification, HttpRouteCandidate } from '@gate-forge/core';
 import {
@@ -255,11 +255,28 @@ export interface GateforgeReporterOptions {
   outcomesPath?: string;
   /** Obligations document path override (precedence over GATEFORGE_OBLIGATIONS env). */
   obligationsPath?: string;
+  /**
+   * Absolute CANDIDATE ROOT every reported file identity is relative
+   * to. A supervised run hands it as trusted CONSTRUCTOR DATA because
+   * the runner child does not run from there: it runs from the
+   * selected native config directory, exactly as enumeration did and as
+   * the project's own relative paths require. The identities the
+   * supervisor registered — and every claim injection keyed by them —
+   * are repo-relative, so anchoring them at the child's cwd would
+   * rename `frontend/tests/x.spec.ts` to `tests/x.spec.ts`, miss every
+   * claim injection and fail every session binding closed.
+   *
+   * Absent (the standalone reporter a project runs itself, wired only
+   * through the environment) means the process cwd, which IS the honest
+   * root for that case.
+   */
+  candidateRoot?: string;
 }
 
 /**
- * The gateforge reporter. No options today; the constructor signature is
- * the Playwright reporter contract (`(options: object)`).
+ * The gateforge reporter. Its constructor signature is the Playwright
+ * reporter contract (`(options: object)`); every path and the identity
+ * root arrive as options.
  */
 export class GateforgeReporter {
   private readonly rows: ClaimRow[] = [];
@@ -275,6 +292,12 @@ export class GateforgeReporter {
   private readonly runnerErrors: string[] = [];
   /** The lifecycle spool file (null when the run has no state dir). */
   private readonly spoolFile: string | null;
+  /**
+   * The candidate root file identities are relative to, when the
+   * trusted supervisor supplied one; null means the process cwd (the
+   * standalone reporter's own honest root).
+   */
+  private readonly candidateRoot: string | null;
   /** Resolved run-state paths (options win, env is the legacy fallback). */
   private readonly resolved: { stateDir: string | null; runId: string | null; outcomesPath: string | null; obligationsPath: string | null };
 
@@ -289,6 +312,10 @@ export class GateforgeReporter {
       outcomesPath: outcomesPath !== undefined && outcomesPath !== '' ? outcomesPath : null,
       obligationsPath: obligationsPath !== undefined && obligationsPath !== '' ? obligationsPath : null,
     };
+    this.candidateRoot =
+      options.candidateRoot !== undefined && options.candidateRoot.length > 0
+        ? resolve(options.candidateRoot)
+        : null;
     const wired =
       (process.env[ENV_WITNESS_URL] ?? '') !== '' ||
       (this.resolved.stateDir ?? '') !== '';
@@ -655,12 +682,17 @@ export class GateforgeReporter {
     return parent.location === undefined || parent.location === null;
   }
 
-  /** Repo-relative posix file of a test (null when unknown). */
+  /**
+   * Repo-relative posix file of a test (null when unknown), relative to
+   * the CANDIDATE ROOT the supervisor handed the reporter — never to
+   * the runner child's cwd, which for a nested project is its config
+   * directory and would report every identity one directory short.
+   */
   private repoRelativeOf(test: ReporterTest): string | null {
     if (test.location?.file === undefined || test.location.file === null) return null;
     const raw = test.location.file;
     if (raw.length === 0) return null;
-    return relative(process.cwd(), raw).split(sep).join('/');
+    return relative(this.candidateRoot ?? process.cwd(), raw).split(sep).join('/');
   }
 
   /** Native annotation claims of one test (`{type: 'gateforge'}`). */

@@ -397,10 +397,14 @@ strict check. One missed precondition cost the whole run.
 `gateforge run` owns the generic lifecycle; your app owns the recipe:
 
 ```sh
-gateforge run                      # preflight, recipe, supervised suite, strict check, teardown
-gateforge run -- --changed         # the same, with your own test-gates flags
-gateforge enforcement doctor       # every precondition as one PASS/FAIL line with its fix command
+gateforge run -- --changed --scope full     # preflight, recipe, full supervised suite, strict check, teardown
+gateforge run -- --changed --scope changed  # prove only the changed slice
+gateforge enforcement doctor              # every precondition as one PASS/FAIL line with its fix command
 ```
+
+Keep `-- --changed`: `run` forwards only the arguments after `--`, and
+`test-gates` needs `--changed` to supervise the tests and seal a receipt.
+`--scope full` proves the whole suite; `--scope changed` proves a changed slice.
 
 The order is fixed: a **strict preflight** (the first failing precondition
 ends the run before a minute is spent), then the optional recipe
