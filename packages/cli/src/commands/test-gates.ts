@@ -226,6 +226,7 @@ import { obligationFingerprint } from '../evaluate.js';
 import { computeEvaluationScope } from '../scope.js';
 import { candidateTreeCoversCommit, computeCandidateTreeId, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
+import { loadRuntimeConfigAt } from '../runtime.js';
 import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
 import { engineIdentity, reportEngineLine } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
@@ -2201,18 +2202,14 @@ function runnerAdapterFor(
 type RunnerAdapterHolder = PytestRunnerAdapter | VitestRunnerAdapter | CypressRunnerAdapter;
 
 /**
- * Writes the WITNESS-ISSUED ledger into the run's `records.json` for the
- * non-Playwright runners.
+ * Writes the WITNESS-ISSUED ledger into the run's `records.json` after
+ * the supervisor drain has finalized every session.
  *
- * The Playwright pack's engine reporter performs this copy itself
- * (GF-23: the evaluator only ever reads the witness ledger, never a
- * suite-authored file). The pytest/vitest/cypress adapters have no such
- * in-suite reporter, so without this copy the evaluator sees an empty
- * ledger and grades EVERY obligation `missing` even when the witness
- * stamped a record. The trusted CLI performs the identical fetch while
- * the witness is still alive; a transport failure writes nothing (the
- * run stays fail-closed through the verdicts) and names itself on
- * stderr.
+ * The Playwright reporter may copy the ledger for its advisory output
+ * before the final drain sweep issues Observe or server-persistence
+ * records. Every runner therefore uses this final trusted fetch while
+ * the witness is alive. A transport failure writes nothing and names
+ * itself on stderr; unissued evidence can never receive credit.
  *
  * Args:
  *   io: the CLI IO (stderr carries the diagnostic).
@@ -3413,6 +3410,21 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     return 1;
   }
 
+  // The existing owner-pinned runtime declaration names test inputs too.
+  // Values come only from the operator, never from candidate configuration.
+  const declaredRunnerEnvNames = loadRuntimeConfigAt(io.cwd, config.runtime)?.envAllowlist;
+  if (declaredRunnerEnvNames !== undefined) {
+    for (const name of declaredRunnerEnvNames) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
+          /^(?:GATEFORGE_|NODE_OPTIONS$|NODE_PATH$|LD_|DYLD_|PYTHONPATH$|PYTHONHOME$|BASH_ENV$|ENV$)/i.test(name)) {
+        throw new UsageError(
+          `test-gates: runtime envAllowlist cannot grant '${name}' to test code; ` +
+          'engine wiring and process-loader controls stay outside the runner',
+        );
+      }
+    }
+  }
+
   // 4. Prepare the observer: spawn the loopback witness (unless the
   // caller wired one), adopt identities, bind the trusted context, and
   // materialize run state + claim injections BEFORE any test starts.
@@ -3514,13 +3526,11 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
               GATEFORGE_QUEUE_OBSERVER: config.queueObserver.kind,
               GATEFORGE_QUEUE_OBSERVER_CONFIG: JSON.stringify(config.queueObserver),
             }),
-        // Session-proxy tag channel: the pytest, vitest and cypress
-        // adapters publish a per-test session proxy origin, so the
-        // witness must front the app with an observation proxy or every
-        // proxied request is unattributable. The Playwright path is
-        // untouched (its sessions are engine-browser scoped), so an
-        // existing repository's witness wiring stays byte-identical.
-        ...(runnerName === 'pytest' || runnerName === 'vitest' || runnerName === 'cypress'
+        // Suite-driven Observe claims need session-attributed traffic too.
+        // Engine-driven Playwright repositories without these declarations
+        // keep their existing proxy-free wiring.
+        ...(runnerName === 'pytest' || runnerName === 'vitest' || runnerName === 'cypress' ||
+        (runnerName === 'playwright' && observeObligations.length > 0)
           ? appBase !== ''
             ? { [ENV_PROXY_TARGET]: appBase }
             : {}
@@ -3816,6 +3826,12 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     const value = io.env[name];
     if (typeof value === 'string' && value !== '') suiteEnv[name] = value;
   }
+  if (declaredRunnerEnvNames !== undefined) {
+    for (const name of declaredRunnerEnvNames) {
+      const value = io.env[name];
+      if (value !== undefined && value !== '') suiteEnv[name] = value;
+    }
+  }
 
   if (adapter !== null) {
     // Registration must be identical under planning's scrubbed env and
@@ -4032,7 +4048,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     } catch {
       sessionTrace = null; // fail closed: a missing authority never grades success
     }
-    if (runnerName !== 'playwright' && effectiveWitnessUrl !== undefined) {
+    if (effectiveWitnessUrl !== undefined) {
       await writeWitnessLedgerDocument(io, stateDir, effectiveWitnessUrl, runToken);
     }
     if (chaosRun !== null && effectiveWitnessUrl !== undefined && witnessVerifierKey !== undefined) {

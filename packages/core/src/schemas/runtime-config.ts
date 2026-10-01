@@ -225,7 +225,7 @@ export const RuntimeConfigSchema = z
     env_files: z.array(RecipeEnvFileSchema).optional(),
     /** Candidate-owned services to start, probe, and clean up. */
     services: z.array(RuntimeServiceSchema).optional(),
-    /** Operator environment variable names allowed through to commands/services. */
+    /** Operator environment names allowed through to commands, services and supervised tests. */
     envAllowlist: z.array(z.string().min(1)).optional(),
     /** Whole-run execution budget handed to the supervised gate. */
     executionTimeoutSeconds: z.number().int().min(1).max(3600).optional(),

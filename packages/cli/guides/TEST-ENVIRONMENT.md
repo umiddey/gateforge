@@ -18,6 +18,25 @@
 
 **Example:** `reset disposable database -> seed from this checkout -> run tests`.
 
+## Declare test-service environment variables
+
+The supervised Playwright runner does not inherit the whole operator environment. Declare the names your native test helpers need in the existing runtime document:
+
+```yaml
+# .gateforge.yml
+runtime: .gateforge/runtime.yml
+```
+
+```yaml
+# .gateforge/runtime.yml
+schemaVersion: 1
+envAllowlist: [API_BASE_URL, TEST_MAIL_URL]
+```
+
+Export those values before `gateforge run` or `test-gates`. Only listed names reach the runner and its wired enumeration; values are never read from inline configuration. This document is part of the owner-approved policy digest, so adding a name requires the normal policy approval. Keep test registration independent of the values.
+
+Engine `GATEFORGE_*` names and process-loader controls (`NODE_OPTIONS`, `NODE_PATH`, `LD_*`, `DYLD_*`, `PYTHONPATH`, `PYTHONHOME`, `BASH_ENV`, `ENV`) are refused even if listed. No list means no additional variables are forwarded.
+
 ## Create login state against the app
 
 **Rule:** Mint the Playwright login state by connecting directly to the app, not through the witness proxy. Reuse one session file instead of repeatedly logging in. Set `GATEFORGE_SESSION_STATE` to that file for the supervised run.

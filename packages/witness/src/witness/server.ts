@@ -141,6 +141,7 @@
  */
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
@@ -181,7 +182,7 @@ import {
   envFingerprintMismatch,
   probeEnvFingerprint,
 } from './env-attestation.js';
-import { hostResolverRules, pinnedLoopbackIps, pinnedGet } from './loopback-pins.js';
+import { hostResolverRules, isLoopbackAddress, pinnedLoopbackIps, pinnedGet } from './loopback-pins.js';
 import { loadClassifications, toClassificationView } from './classifications.js';
 import {
   EngineBrowserError,
@@ -412,6 +413,10 @@ interface WitnessState {
     mountPath: string | null;
   } & WitnessOptions;
   adapters: Map<string, EvidenceAdapter>;
+  /** Loopback host matching the browser-facing app's cookie origin. */
+  proxyHost: string;
+  /** Numeric loopback address resolved once before any proxy listens. */
+  proxyBindHost: string;
   classifications: Record<string, Classification>;
   ledger: Map<string, IssuedRecord>;
   /**
@@ -853,7 +858,7 @@ async function startObservedProxy(
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once('error', rejectListen);
-    server.listen(0, state.options.host, () => resolveListen());
+    server.listen(0, state.proxyBindHost, () => resolveListen());
   });
   server.removeAllListeners('error');
   return server;
@@ -865,7 +870,7 @@ function proxyUrlOf(state: WitnessState, server: Server): string {
   if (address === null || typeof address === 'string') {
     throw new WitnessStartupError('observation proxy failed to bind an OS-assigned port');
   }
-  return `http://${formatHost(state.options.host)}:${address.port}`;
+  return `http://${formatHost(state.proxyHost)}:${address.port}`;
 }
 
 /**
@@ -1047,6 +1052,21 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
       );
     }
   }
+  // Keep the browser-facing logical hostname and the control host separate.
+  // Resolve the proxy bind address once, and never bind a non-loopback result.
+  const proxyHostname = options.proxyTarget ? new URL(options.proxyTarget).hostname : null;
+  const proxyHost = proxyHostname === null
+    ? options.host ?? LOOPBACK_HOSTNAME
+    : proxyHostname.replace(/^\[|\]$/g, '');
+  let proxyBindHost = proxyHost;
+  if (proxyHostname !== null) {
+    await assertLoopback(options.proxyTarget as string, 'observation proxy target');
+    const resolved = await lookup(proxyHost);
+    if (!isLoopbackAddress(resolved.address)) {
+      throw new AttestationError(`observation proxy hostname '${proxyHost}' resolved to a non-loopback bind address`);
+    }
+    proxyBindHost = resolved.address;
+  }
 
   const state: WitnessState = {
     options: {
@@ -1062,6 +1082,8 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
       host: options.host ?? LOOPBACK_HOSTNAME,
     },
     adapters,
+    proxyHost,
+    proxyBindHost,
     classifications,
     ledger: new Map(),
     preObservations: new Map(),
@@ -1140,7 +1162,6 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   // by URL rewriting.
   let proxyUrl: string | null = null;
   if (typeof state.options.proxyTarget === 'string' && state.options.proxyTarget.length > 0) {
-    await assertLoopback(state.options.proxyTarget, 'observation proxy target');
     state.proxyServer = await startObservedProxy(state, null, SHARED_PROXY_CHAOS_SESSION);
     proxyUrl = proxyUrlOf(state, state.proxyServer);
   }

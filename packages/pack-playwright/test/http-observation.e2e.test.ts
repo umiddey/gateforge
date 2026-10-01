@@ -53,7 +53,7 @@ const TARGET_PAGE = `<!doctype html>
 `;
 
 /** Minimal loopback target app: `/` renders the form, POST /api/contracts → 201 JSON. */
-async function startTargetApp(): Promise<{ url: string; stop: () => Promise<void> }> {
+async function startTargetApp(host = '127.0.0.1'): Promise<{ url: string; stop: () => Promise<void> }> {
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     if (req.method === 'GET' && (req.url ?? '/') === '/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -68,11 +68,11 @@ async function startTargetApp(): Promise<{ url: string; stop: () => Promise<void
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'not found' }));
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  await new Promise<void>((resolve) => server.listen(0, host, () => resolve()));
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('no target app port');
   return {
-    url: `http://127.0.0.1:${address.port}`,
+    url: `http://${host}:${address.port}`,
     stop: async () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
@@ -110,11 +110,10 @@ function observe(
 }
 
 describe('browser-driven observation proxy (real chromium, playwright-evidence)', () => {
-  it('the BROWSER POSTs through the proxy; the witness witnesses the request (red probe first)', async () => {
-    const target = await startTargetApp();
+  it.each(['127.0.0.1', 'localhost', '127.0.0.2'])('the BROWSER POSTs through the %s proxy; the witness witnesses the request (red probe first)', async (host) => {
+    const target = await startTargetApp(host);
     const witness = await startWitness({ runId: RUN_ID, token: TOKEN, verifierKey: VERIFIER_KEY, proxyTarget: target.url });
     try {
-      expect(witness.proxyUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       // Phase 1: the journey runs under a supervisor-opened session and
       // a witness-recorded action interval; browser traffic goes through
       // the session's observation channel.

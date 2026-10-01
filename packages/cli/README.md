@@ -232,7 +232,7 @@ services:                       # candidate-owned app/database/worker processes
     fingerprint: prod-v1        # GF-13 marker (reviewed adapters must declare the same)
     target: true                # this proxy URL becomes the run's attested target
     ready: { log: 'listening on', timeoutSeconds: 60 }   # or http: <url>
-envAllowlist: [DATABASE_URL]    # operator env names allowed through to children
+envAllowlist: [DATABASE_URL]    # operator env names for services and supervised tests
 executionTimeoutSeconds: 1800   # whole-run budget handed to the supervised gate
 ```
 
