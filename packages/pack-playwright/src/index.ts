@@ -151,6 +151,8 @@ export {
   listNativePlaywrightTests,
   findPlaywrightConfig,
   findPlaywrightConfigs,
+  PLAYWRIGHT_CONFIG_NAMES,
+  CONFIG_SEARCH_PRUNED_DIRS,
   untrustedEnv,
   reconciliationKey,
   splitPytestNodeId,

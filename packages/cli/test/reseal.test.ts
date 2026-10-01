@@ -145,6 +145,38 @@ describe('test-only re-seal change classification', () => {
     });
   });
 
+  it.each<{ kind: string; applicationFiles: Record<string, string> }>([
+    {
+      kind: 'entry point',
+      applicationFiles: {
+        'src/app.ts': "import { amount } from './helper.js';\nexport const total = amount();\n",
+      },
+    },
+    {
+      kind: 'import cycle',
+      applicationFiles: {
+        'src/app.ts': "import './other.js';\nimport { amount } from './helper.js';\nexport const total = amount();\n",
+        'src/other.ts': "import './app.js';\nexport const other = 1;\n",
+      },
+    },
+  ])('refuses an application $kind beside colocated tests', async ({ applicationFiles }) => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'src/helper.ts': 'export const amount = () => 1;\n',
+        'src/accounts.spec.ts': SPEC,
+        'src/orders.spec.ts': SPEC,
+        ...applicationFiles,
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'src/helper.ts': 'export const amount = () => 2;\n' }, 'change shared application code');
+      const classification = classify(repo, parent, treeOf(repo), ['src/accounts.spec.ts', 'src/orders.spec.ts']);
+      expect(classification.eligible).toBe(false);
+      expect(classification.helperFiles).toEqual([]);
+      expect(classification.affectedTestFiles).toEqual([]);
+    });
+  });
+
   it('refuses a changed file no test imports', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles({ ...BASE_FILES, 'e2e/orphan.ts': 'export const orphan = 1;\n' });
@@ -349,10 +381,108 @@ describe('test-only re-seal change classification', () => {
     });
   });
 
+  it('refuses a helper change when dependency ownership cannot be resolved', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/auth.setup.ts': SPEC,
+        'playwright.config.ts': [
+          "const setupProject = 'setup';",
+          'export default {',
+          "  projects: [{ name: 'setup', testMatch: '**/auth.setup.ts' },",
+          "    { name: 'chromium', testMatch: '**/*.spec.ts', dependencies: [setupProject] }],",
+          '};',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/helper.ts': 'export const amount = () => 2;\n' }, 'fix helper');
+      const classification = classify(repo, parent, treeOf(repo), [...TEST_FILES, 'e2e/auth.setup.ts']);
+      expect(classification.eligible).toBe(false);
+      expect(classification.affectedTestFiles).toEqual([]);
+    });
+  });
+
+  it('re-runs the setup project when a dependent test changes', async () => {
+    await withTempRepo({}, async (repo) => {
+      // The standard Playwright auth pattern: a `setup` project owns
+      // `**\/*.setup.ts` and `chromium` depends on it. A supervised run
+      // re-runs the setup project's tests BEFORE the dependent ones
+      // (the dependency edge the enumeration captured), so the
+      // classifier's affected set must name the setup file too — it is
+      // the set the re-seal receipt is later recomputed against, and a
+      // fresh outcome outside it is refused as EVIDENCE_STALE.
+      const catalog = ['e2e/accounts.spec.ts', 'e2e/orders.spec.ts', 'e2e/auth.setup.ts'];
+      repo.writeFiles({
+        ...BASE_FILES,
+        'e2e/auth.setup.ts': "import { test } from '@playwright/test';\ntest('auth state', async () => {});\n",
+        'playwright.config.ts': [
+          "import { defineConfig } from '@playwright/test';",
+          'export default defineConfig({',
+          '  projects: [',
+          "    { name: 'setup', testMatch: '**/*.setup.ts' },",
+          "    { name: 'chromium', dependencies: ['setup'] },",
+          '  ],',
+          '});',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// a fix\n` }, 'dependent fix');
+      const classification = classify(repo, parent, treeOf(repo), catalog);
+      expect(classification.eligible).toBe(true);
+      expect(classification.affectedTestFiles).toEqual(['e2e/accounts.spec.ts', 'e2e/auth.setup.ts']);
+      // The untouched sibling spec is NOT affected: it stays carried.
+      expect(classification.affectedTestFiles).not.toContain('e2e/orders.spec.ts');
+    });
+  });
+
+  it('reads nested dependency projects and resolves their testDir from the config directory', async () => {
+    await withTempRepo({}, async (repo) => {
+      const catalog = [
+        'frontend/e2e/accounts.spec.ts',
+        'frontend/e2e/orders.spec.ts',
+        'frontend/e2e/prepare-auth.ts',
+      ];
+      const spec = "import { test } from '@playwright/test';\ntest('account', async () => {});\n";
+      repo.writeFiles({
+        'frontend/e2e/accounts.spec.ts': spec,
+        'frontend/e2e/orders.spec.ts': spec,
+        'frontend/e2e/prepare-auth.ts': "import { test } from '@playwright/test';\ntest('auth state', async () => {});\n",
+        'vitest.config.ts': 'export default {};\n',
+        'frontend/playwright.config.ts': [
+          "import { defineConfig } from '@playwright/test';",
+          'export default defineConfig({',
+          '  projects: [',
+          "    { name: 'setup', testDir: './e2e', testMatch: 'prepare-auth.ts' },",
+          "    { name: 'chromium', testDir: './e2e', testMatch: '*.spec.ts', dependencies: ['setup'] },",
+          '  ],',
+          '});',
+          '',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'frontend/e2e/accounts.spec.ts': `${spec}\n// a fix\n` }, 'dependent fix');
+      const current = treeOf(repo);
+      repo.writeFiles({ 'frontend/playwright.config.ts': 'export default {};\n' });
+      const classification = classify(repo, parent, current, catalog);
+      expect(classification.eligible).toBe(true);
+      expect(classification.affectedTestFiles).toEqual([
+        'frontend/e2e/accounts.spec.ts',
+        'frontend/e2e/prepare-auth.ts',
+      ]);
+      expect(classification.changedPaths).toEqual(['frontend/e2e/accounts.spec.ts']);
+    });
+  });
+
   it('reads a literal dynamic import as an ordinary import edge', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles({
         ...BASE_FILES,
+        'e2e/accounts.spec.ts': `import './lazy.js';\n${SPEC}`,
         // The consumer shape: a tracked file loads its sibling through
         // a LITERAL dynamic import, in each quoting form. The specifier
         // is fixed at parse time, so the edge is an ordinary one and

@@ -1,12 +1,13 @@
 /**
  * Ambient typings for picomatch (CJS, ships no types).
- * The CLI uses picomatch only to test repo-relative paths against the
- * include/exclude globs from `.gateforge.yml` — a tiny surface.
+ * The CLI matches repository paths and literal runner testMatch globs.
  */
 declare module 'picomatch' {
   interface PicomatchOptions {
     /** Match dotfiles (anything under a leading-dot directory). */
     dot?: boolean;
+    /** Match a slash-free runner pattern against the file basename. */
+    matchBase?: boolean;
   }
 
   /** A compiled glob matcher: true when `path` matches the pattern. */

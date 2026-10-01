@@ -9,6 +9,7 @@ export * from './git-ignore.js';
 export * from './inference.js';
 export * from './reconcile.js';
 export { localPlaywrightCliCandidates } from '../runner-resolution.js';
+export { CONFIG_SEARCH_PRUNED_DIRS, PLAYWRIGHT_CONFIG_NAMES } from './config-locations.js';
 export * from './pytest-adapter.js';
 export * from './discover.js';
 export * from './adapters.js';

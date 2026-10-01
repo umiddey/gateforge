@@ -32,12 +32,12 @@ function treeOf(root: string): string {
   return computeCandidateTreeId(gitDir as string, root, process.env, '.gateforge') as string;
 }
 
-function entry(file: string, title: string): TestCatalogEntry {
+function entry(file: string, title: string, project = 'chromium'): TestCatalogEntry {
   const titlePath = ['Suite', title];
   return {
-    logicalKey: `playwright:chromium:${file}:${titlePath.join('>')}`,
+    logicalKey: `playwright:${project}:${file}:${titlePath.join('>')}`,
     runner: 'playwright',
-    project: 'chromium',
+    project,
     file,
     titlePath,
     title,
@@ -72,6 +72,29 @@ function obligation(id: string): Obligation {
 
 const ACCOUNTS_KEY = 'playwright:chromium:e2e/accounts.spec.ts:Suite>reads an account';
 const ORDERS_KEY = 'playwright:chromium:e2e/orders.spec.ts:Suite>reads an account';
+
+const SETUP_KEY = 'playwright:setup:e2e/auth.setup.ts:Suite>auth state';
+
+/**
+ * The parent's execution, with the dependency project's stage planned and
+ * passed too, so the fixture's parent really did prove the setup test.
+ * That is what keeps the re-seal's own pre-fix failure an AFFECTED-SET
+ * defect rather than a parent that never witnessed the stage.
+ */
+function parentExecutionWithSetup(outcomes: Array<{ logicalKey: string; status: string }>): ExecutionResult {
+  const base = parentExecution([...outcomes, { logicalKey: SETUP_KEY, status: 'passed' }]);
+  return {
+    ...base,
+    planned: [
+      ...base.planned,
+      { logicalKey: SETUP_KEY, project: 'setup', file: 'e2e/auth.setup.ts', titlePath: ['Suite', 'auth state'], frameworkId: null },
+    ],
+    outcomes: [
+      ...base.outcomes,
+      { logicalKey: SETUP_KEY, attempt: 1, expectedFailure: false, status: 'passed', file: 'e2e/auth.setup.ts', titlePath: ['Suite', 'auth state'], project: 'setup' },
+    ],
+  } as unknown as ExecutionResult;
+}
 
 function parentReceipt(overrides: Partial<GateReceipt> = {}): GateReceipt {
   return GateReceiptSchema.parse({
@@ -258,6 +281,47 @@ describe('test-only re-seal decision', () => {
       });
       expect(decision.plan).toBeNull();
       expect(decision.reason).toBe('setup test changed: e2e/auth.setup.ts → changed-scope run');
+    });
+  });
+
+  it('re-runs the dependency project when a dependent test changes', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles(BASE_FILES);
+      // The standard auth pattern: a `setup` project owning the
+      // setup file, with the browser project depending on it.
+      repo.writeFiles({
+        'e2e/auth.setup.ts': 'export const auth = 1;\n',
+        'playwright.config.ts': [
+          "import { defineConfig } from '@playwright/test';",
+          'export default defineConfig({',
+          '  projects: [',
+          "    { name: 'setup', testMatch: '**/*.setup.ts' },",
+          "    { name: 'chromium', testMatch: '**/*.spec.ts', dependencies: ['setup'] },",
+          '  ],',
+          '});',
+        ].join('\n'),
+      });
+      repo.commitFiles({}, 'base');
+      const parentTree = treeOf(repo.root);
+      repo.commitFiles({ 'e2e/accounts.spec.ts': `${SPEC}\n// the race fix\n` }, 'dependent spec change');
+      const setupEntry = entry('e2e/auth.setup.ts', 'auth state', 'setup');
+      const decision = decideTestOnlyReseal({
+        io: { cwd: repo.root, env: process.env, stdout: '', stderr: '' } as never,
+        gitDir: resolveGitDir(repo.root, process.env) as string,
+        parent: receiptParent(parentTree, parentExecutionWithSetup(PASSED)),
+        currentTreeId: treeOf(repo.root),
+        catalog: catalog([entry('e2e/accounts.spec.ts', 'reads an account'), entry('e2e/orders.spec.ts', 'reads an account'), setupEntry]),
+        obligations: [obligation('tenant.accounts:persistence:read'), obligation('tenant.orders:persistence:read')],
+        enabled: true,
+      });
+      expect(decision.reason).toBeNull();
+      // The dependent re-runs because it changed, and the setup stage
+      // re-runs because the dependent needs it: both inside the
+      // affected set, so the run's plan and the chain recomputation
+      // agree and the run is not self-contradicting.
+      expect(decision.plan?.affectedFiles).toEqual(['e2e/accounts.spec.ts', 'e2e/auth.setup.ts']);
+      // The untouched dependent is still carried, not re-run.
+      expect(decision.plan?.carriedTests).toBe(1);
     });
   });
 

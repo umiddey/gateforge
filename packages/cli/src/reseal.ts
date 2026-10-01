@@ -34,6 +34,8 @@ import { readFileSync } from 'node:fs';
 import { join, posix, relative, resolve } from 'node:path';
 import picomatch from 'picomatch';
 import ts from 'typescript';
+import { parse as parseYaml } from 'yaml';
+import { CONFIG_SEARCH_PRUNED_DIRS, PLAYWRIGHT_CONFIG_NAMES } from '@gate-forge/pack-playwright';
 import { sanitizedAuthorityEnv } from './candidate-tree.js';
 import { UsageError } from './errors.js';
 
@@ -662,6 +664,8 @@ function resolutionCandidates(
 interface SetupStage {
   /** Catalog test files a dependency/setup project owns. */
   files: string[];
+  /** Files owned by declared dependency projects, not merely setup-named files. */
+  dependencyFiles: string[];
   /**
    * True when a runner config declares a dependency project whose test
    * files cannot be resolved from the config's own bytes. Every changed
@@ -670,19 +674,13 @@ interface SetupStage {
   unresolved: boolean;
 }
 
-/** Runner config file names, checked at the repository root. */
-const RUNNER_CONFIG_NAMES = [
-  'playwright.config.ts',
-  'playwright.config.mts',
-  'playwright.config.cts',
-  'playwright.config.js',
-  'playwright.config.mjs',
-  'playwright.config.cjs',
-  'vitest.config.ts',
-  'vitest.config.js',
-  'cypress.config.ts',
-  'cypress.config.js',
-] as const;
+/** Each configured runner reads its own config, not another runner's root file. */
+const RUNNER_CONFIG_NAMES: Readonly<Record<string, readonly string[]>> = {
+  playwright: PLAYWRIGHT_CONFIG_NAMES,
+  vitest: ['vitest.config.ts', 'vitest.config.js'],
+  cypress: ['cypress.config.ts', 'cypress.config.js'],
+  pytest: [],
+};
 
 /**
  * True for a test file the setup naming conventions claim: the
@@ -745,11 +743,53 @@ function stringLiterals(items: readonly string[]): string[] | null {
   return values;
 }
 
-/** Reads the runner config's own bytes from the sealed tree. */
-function runnerConfigText(gitDir: string, env: NodeJS.ProcessEnv, treeId: string): string | null {
-  for (const name of RUNNER_CONFIG_NAMES) {
+/** Reads selected config bytes only from the sealed tree, never the working copy. */
+function runnerConfigText(
+  gitDir: string,
+  env: NodeJS.ProcessEnv,
+  treeId: string,
+): { text: string; directory: string } | null {
+  const root = run(gitDir, env, ['ls-tree', '-z', treeId]);
+  if (root === null) return null;
+  const rootPaths = new Set<string>();
+  const nested: string[] = [];
+  for (const entry of root.split('\0')) {
+    const tab = entry.indexOf('\t');
+    if (tab < 0) continue;
+    const name = entry.slice(tab + 1);
+    rootPaths.add(name);
+    if (entry.startsWith('040000 tree ') && CONFIG_SEARCH_PRUNED_DIRS[name] !== true) nested.push(name);
+  }
+  let runner = 'playwright';
+  if (rootPaths.has('.gateforge.yml')) {
+    const config = run(gitDir, env, ['cat-file', 'blob', `${treeId}:.gateforge.yml`]);
+    if (config === null) return null;
+    try {
+      const document = parseYaml(config) as { runner?: unknown } | null;
+      if (typeof document?.runner === 'string') runner = document.runner;
+    } catch {
+      return null;
+    }
+  }
+  if (!Object.hasOwn(RUNNER_CONFIG_NAMES, runner)) return null;
+  for (const name of RUNNER_CONFIG_NAMES[runner] ?? []) {
+    if (!rootPaths.has(name)) continue;
     const text = run(gitDir, env, ['cat-file', 'blob', `${treeId}:${name}`]);
-    if (text !== null) return text;
+    return text === null ? null : { text, directory: '.' };
+  }
+  if (runner !== 'playwright' || nested.length === 0) return null;
+  nested.sort();
+  // One bounded listing of immediate children, not one Git process per candidate.
+  const children = run(gitDir, env, ['ls-tree', '--name-only', '-z', treeId, ...nested.map((name) => `${name}/`)]);
+  if (children === null) return null;
+  const paths = new Set(children.split('\0'));
+  for (const directory of nested) {
+    for (const name of PLAYWRIGHT_CONFIG_NAMES) {
+      const path = `${directory}/${name}`;
+      if (!paths.has(path)) continue;
+      const text = run(gitDir, env, ['cat-file', 'blob', `${treeId}:${path}`]);
+      return text === null ? null : { text, directory };
+    }
   }
   return null;
 }
@@ -778,14 +818,20 @@ function setupStage(
   testFiles: readonly string[],
 ): SetupStage {
   const files = new Set(testFiles.filter((file) => isSetupByConvention(file)));
-  const config = runnerConfigText(gitDir, env, treeId);
+  // Tracked apart from `files`: only these are re-executed by a run
+  // because a `dependencies` edge orders them (see dependencyFiles).
+  const dependencyFiles = new Set<string>();
+  const source = runnerConfigText(gitDir, env, treeId);
+  const config = source?.text ?? null;
   // No `dependencies` token anywhere means no dependency stage the
   // config declares; a token we cannot resolve fails closed below.
-  if (config === null || !/\bdependencies\b/.test(config)) return { files: [...files], unresolved: false };
+  if (config === null || !/\bdependencies\b/.test(config)) {
+    return { files: [...files], dependencyFiles: [], unresolved: false };
+  }
   const projectsAt = config.indexOf('projects');
-  if (projectsAt < 0) return { files: [...files], unresolved: true };
+  if (projectsAt < 0) return { files: [...files], dependencyFiles: [], unresolved: true };
   const arrayAt = config.indexOf('[', projectsAt);
-  if (arrayAt < 0) return { files: [...files], unresolved: true };
+  if (arrayAt < 0) return { files: [...files], dependencyFiles: [], unresolved: true };
   let depth = 0;
   let end = -1;
   for (let index = arrayAt; index < config.length; index += 1) {
@@ -799,51 +845,65 @@ function setupStage(
       }
     }
   }
-  if (end < 0) return { files: [...files], unresolved: true };
+  if (end < 0) return { files: [...files], dependencyFiles: [], unresolved: true };
+  const outerConfig = config.slice(0, projectsAt) + config.slice(end + 1);
+  const inheritedTestDir = /\btestDir\s*:\s*['"`]([^'"`]+)['"`]/.exec(outerConfig)?.[1];
+  if (/\btestDir\s*:/.test(outerConfig) && inheritedTestDir === undefined) {
+    return { files: [...files], dependencyFiles: [], unresolved: true };
+  }
   const projectLiterals = splitTopLevel(config.slice(arrayAt + 1, end)).filter(
     (literal) => literal.startsWith('{'),
   );
-  if (projectLiterals.length === 0) return { files: [...files], unresolved: true };
+  if (projectLiterals.length === 0) return { files: [...files], dependencyFiles: [], unresolved: true };
   const byName = new Map<string, string>();
   let anyDependency = false;
   for (const literal of projectLiterals) {
     const name = /\bname\s*:\s*['"`]([^'"`]+)['"`]/.exec(literal)?.[1];
-    if (name === undefined) return { files: [...files], unresolved: true };
+    if (name === undefined) return { files: [...files], dependencyFiles: [], unresolved: true };
     byName.set(name, literal);
     if (/\bdependencies\s*:/.test(literal)) anyDependency = true;
   }
-  if (!anyDependency) return { files: [...files], unresolved: false };
+  if (!anyDependency) return { files: [...files], dependencyFiles: [], unresolved: false };
   for (const literal of projectLiterals) {
     const declared = /\bdependencies\s*:\s*\[([^\]]*)\]/.exec(literal);
     if (declared === null || declared[1] === undefined) {
-      if (/\bdependencies\s*:/.test(literal)) return { files: [...files], unresolved: true };
+      if (/\bdependencies\s*:/.test(literal)) {
+        return { files: [...files], dependencyFiles: [], unresolved: true };
+      }
       continue;
     }
     const names = stringLiterals(splitTopLevel(declared[1]));
-    if (names === null) return { files: [...files], unresolved: true };
+    if (names === null) return { files: [...files], dependencyFiles: [], unresolved: true };
     for (const name of names) {
       const project = byName.get(name);
-      if (project === undefined) return { files: [...files], unresolved: true };
+      if (project === undefined) return { files: [...files], dependencyFiles: [], unresolved: true };
       const testDir = /\btestDir\s*:\s*['"`]([^'"`]+)['"`]/.exec(project)?.[1];
       if (project.includes('testDir') && testDir === undefined) {
-        return { files: [...files], unresolved: true };
+        return { files: [...files], dependencyFiles: [], unresolved: true };
       }
       const match = /\btestMatch\s*:\s*(['"`][^'"`]+['"`]|\[[^\]]*\])/.exec(project);
-      if (match === null || match[1] === undefined) return { files: [...files], unresolved: true };
+      if (match === null || match[1] === undefined) {
+        return { files: [...files], dependencyFiles: [], unresolved: true };
+      }
       const literal = match[1];
       const patterns =
         literal.startsWith('[') ? stringLiterals(splitTopLevel(literal.slice(1, -1))) : stringLiterals([literal]);
-      if (patterns === null) return { files: [...files], unresolved: true };
-      const prefix = testDir === undefined ? '' : `${posix.normalize(testDir)}/`;
+      if (patterns === null) return { files: [...files], dependencyFiles: [], unresolved: true };
+      const testRoot = posix.normalize(posix.join(source?.directory ?? '.', testDir ?? inheritedTestDir ?? '.'));
+      const prefix = testRoot === '.' ? '' : `${testRoot}/`;
       for (const pattern of patterns) {
-        const matches = picomatch(prefix + pattern, { dot: true });
+        const matches = picomatch(pattern, { dot: true, matchBase: !pattern.includes('/') });
         for (const file of testFiles) {
-          if (matches(file)) files.add(file);
+          if (!file.startsWith(prefix)) continue;
+          if (matches(file.slice(prefix.length))) {
+            files.add(file);
+            dependencyFiles.add(file);
+          }
         }
       }
     }
   }
-  return { files: [...files].sort(), unresolved: false };
+  return { files: [...files].sort(), dependencyFiles: [...dependencyFiles].sort(), unresolved: false };
 }
 
 /** Every directory the catalog's test files live in or under. */
@@ -948,6 +1008,13 @@ export function classifyResealChange(input: {
       return refuse(`app file deleted: ${entry.path}`);
     }
   }
+  const candidates = changes.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);
+  // A changed path outside every test root is app code whatever the
+  // import graph says, so it refuses first and by its own name: the
+  // reason a user needs is "you changed app code", not a doubt about
+  // some unrelated file's imports.
+  const appFile = candidates.find((path) => !underTestRoot(path, roots));
+  if (appFile !== undefined) return refuse(`app file changed: ${appFile}`);
   // A setup/dependency test file changes every dependent test without an
   // import edge, so it can never be carried. A config whose dependency
   // project the bytes do not pin down makes every changed test file a
@@ -960,19 +1027,13 @@ export function classifyResealChange(input: {
         `setup test changed: ${first} (the runner config declares a dependency project whose tests cannot be resolved)`,
       );
     }
+    return refuse(`setup dependency tests cannot be resolved from the runner config for ${candidates[0]}`);
   } else {
     const setup = testFiles.find((file) => stage.files.includes(file));
     if (setup !== undefined) {
       return refuse(`setup test changed: ${setup}`);
     }
   }
-  const candidates = changes.filter((entry) => !testFileSet.has(entry.path)).map((entry) => entry.path);
-  // A changed path outside every test root is app code whatever the
-  // import graph says, so it refuses first and by its own name: the
-  // reason a user needs is "you changed app code", not a doubt about
-  // some unrelated file's imports.
-  const appFile = candidates.find((path) => !underTestRoot(path, roots));
-  if (appFile !== undefined) return refuse(`app file changed: ${appFile}`);
   // The import graph is consulted for EVERY change set, not only for a
   // helper claim: a spec file can export a shared fixture or a
   // `test.extend`, so a changed test file affects its importers too.
@@ -1021,6 +1082,7 @@ export function classifyResealChange(input: {
    * longer in the tree, but the importer's specifier still names it).
    */
   const importersOf = new Map<string, string[]>();
+  const importsOf = new Map<string, string[][]>();
   for (const file of sources) {
     const resolved = resolveImports(file);
     if (resolved === null) {
@@ -1031,6 +1093,7 @@ export function classifyResealChange(input: {
         `unresolvable import: ${file.path} → ${unresolvable?.specifier ?? '?'}`,
       );
     }
+    importsOf.set(file.path, resolved);
     for (const candidates of resolved) {
       for (const target of candidates) {
         const importers = importersOf.get(target);
@@ -1039,8 +1102,36 @@ export function classifyResealChange(input: {
       }
     }
   }
+  // Directory membership alone does not make an application importer
+  // test code. Each importer must also lead to a cataloged test.
+  const testCode = new Set(testFileSet);
+  const pendingTestCode = [...testFileSet];
+  for (let index = 0; index < pendingTestCode.length; index += 1) {
+    for (const candidates of importsOf.get(pendingTestCode[index] as string) ?? []) {
+      for (const target of candidates) {
+        if (!importsOf.has(target) || testCode.has(target)) continue;
+        testCode.add(target);
+        pendingTestCode.push(target);
+      }
+    }
+  }
   const helperFiles: string[] = [];
   const affected = new Set(testFiles);
+  // A DEPENDENCY project's tests run BEFORE the dependents in every
+  // supervised run (the `dependencies` edge the enumeration captured),
+  // so a dependent change re-executes the whole stage. The affected set
+  // must say so: the chain recomputation (reseal-chain) re-derives this
+  // same set from the same two trees and refuses a fresh outcome
+  // outside it, so omitting the stage makes the run re-execute a test
+  // its own receipt then rejects as EVIDENCE_STALE. Only files a
+  // declared `dependencies` project owns are added — a
+  // convention-named setup file is never re-executed, so naming it
+  // would demand an outcome that never arrives. An UNRESOLVED stage
+  // adds nothing: the refusal above already failed this change set
+  // closed, and a stage we cannot read must not be guessed at.
+  if (!stage.unresolved) {
+    for (const file of stage.dependencyFiles) affected.add(file);
+  }
   for (const path of [...testFiles, ...candidates]) {
     const isTestFile = testFileSet.has(path);
     // Importers re-run transitively: a shared fixture declared in a
@@ -1055,7 +1146,7 @@ export function classifyResealChange(input: {
         if (seen.has(file)) continue;
         seen.add(file);
         if (testFileSet.has(file)) affected.add(file);
-        else if (!underTestRoot(file, roots)) {
+        else if (!underTestRoot(file, roots) || !testCode.has(file)) {
           return refuse(
             `app file changed: ${file} imports the changed ${isTestFile ? 'test file' : 'test helper'} ${path}`,
           );

@@ -43,30 +43,9 @@ import { fileURLToPath } from 'node:url';
 import { buildRunnerChildEnv } from './runner-env.js';
 import { CLAIM_ANNOTATION_TYPE, ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
 import { localPlaywrightCliCandidates } from '../runner-resolution.js';
+import { CONFIG_SEARCH_PRUNED_DIRS, PLAYWRIGHT_CONFIG_NAMES } from './config-locations.js';
 import type { Location } from '@gate-forge/core';
 import { PROJECT_GRAPH_PATH_ENV, type ProjectGraphDocument } from '../reporter/project-graph-reporter.js';
-
-/** Config file names checked at the repo root and one level deep
- * (first match wins within each directory). */
-const PLAYWRIGHT_CONFIG_NAMES = [
-  'playwright.config.ts',
-  'playwright.config.mts',
-  'playwright.config.cts',
-  'playwright.config.js',
-  'playwright.config.mjs',
-  'playwright.config.cjs',
-] as const;
-
-/** Directory names never searched for a nested playwright config
- * (dependency trees, build output, VCS state, runner artifacts). */
-const CONFIG_SEARCH_PRUNED_DIRS: ReadonlySet<string> = new Set([
-  'node_modules',
-  'dist',
-  '.git',
-  'test-results',
-  'coverage',
-  'build',
-]);
 
 /** Default wall-clock bound for one `--list` invocation. */
 export const DEFAULT_LIST_TIMEOUT_MS = 60_000;
@@ -234,7 +213,7 @@ export function findPlaywrightConfigs(cwd: string): string[] {
     return found; // unreadable root: the root-level search already came up empty
   }
   const subdirs = names
-    .filter((name) => !CONFIG_SEARCH_PRUNED_DIRS.has(name))
+    .filter((name) => CONFIG_SEARCH_PRUNED_DIRS[name] !== true)
     .filter((name) => {
       try {
         return statSync(join(cwd, name)).isDirectory();
