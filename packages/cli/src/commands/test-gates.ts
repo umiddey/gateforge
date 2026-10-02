@@ -1947,6 +1947,25 @@ export function decideTestOnlyReseal(input: {
  */
 export async function runSupervisedTestGates(io: Io, options: SupervisedOptions): Promise<number> {
   const config = loadConfigAt(io.cwd);
+
+  // The existing owner-pinned runtime declaration names test inputs too.
+  // Values come only from the operator, never from candidate configuration.
+  // Checked HERE, before a harness command, the pipeline, or the
+  // candidate's own runner configuration runs: a reserved control this
+  // run refuses must never reach candidate code first.
+  const declaredRunnerEnvNames = loadRuntimeConfigAt(io.cwd, config.runtime)?.envAllowlist;
+  if (declaredRunnerEnvNames !== undefined) {
+    for (const name of declaredRunnerEnvNames) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
+          /^(?:GATEFORGE_|NODE_OPTIONS$|NODE_PATH$|LD_|DYLD_|PYTHONPATH$|PYTHONHOME$|BASH_ENV$|ENV$)/i.test(name)) {
+        throw new UsageError(
+          `test-gates: runtime envAllowlist cannot grant '${name}' to test code; ` +
+          'engine wiring and process-loader controls stay outside the runner',
+        );
+      }
+    }
+  }
+
   // A merge-request pipeline with no base commit resolves the `auto`
   // provider to the local staged diff: zero changed files, and a gate
   // that fails an hour later on debt nobody changed. Refuse in seconds,
@@ -1989,7 +2008,7 @@ export async function runSupervisedTestGates(io: Io, options: SupervisedOptions)
   let runCode = 1;
   let teardownFailure: HarnessFailure | null = null;
   try {
-    runCode = await runSupervisedTestGatesInner(io, options);
+    runCode = await runSupervisedTestGatesInner(io, options, declaredRunnerEnvNames);
     if (config.diagnostics?.hostLoad === true) {
       const loadPath = join(diagnosticsDir, 'host-load.json');
       const timingPath = join(diagnosticsDir, 'test-timing.jsonl');
@@ -2313,7 +2332,11 @@ function nativePlaywrightConfigDir(cwd: string): string {
   return config === null ? cwd : dirname(resolve(cwd, config));
 }
 
-async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): Promise<number> {
+async function runSupervisedTestGatesInner(
+  io: Io,
+  options: SupervisedOptions,
+  declaredRunnerEnvNames: readonly string[] | undefined,
+): Promise<number> {
   const { out, format, witnessUrl, runTimeoutMs } = options;
   const runtimeReuseDigest = options.runtimeReuseDigest;
   const runtimeReuseMounts = options.runtimeReuseMounts ?? [];
@@ -3522,21 +3545,6 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       'test-gates: --scope changed produced no runnable slice — nothing was executed and no receipt was sealed',
     );
     return 1;
-  }
-
-  // The existing owner-pinned runtime declaration names test inputs too.
-  // Values come only from the operator, never from candidate configuration.
-  const declaredRunnerEnvNames = loadRuntimeConfigAt(io.cwd, config.runtime)?.envAllowlist;
-  if (declaredRunnerEnvNames !== undefined) {
-    for (const name of declaredRunnerEnvNames) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
-          /^(?:GATEFORGE_|NODE_OPTIONS$|NODE_PATH$|LD_|DYLD_|PYTHONPATH$|PYTHONHOME$|BASH_ENV$|ENV$)/i.test(name)) {
-        throw new UsageError(
-          `test-gates: runtime envAllowlist cannot grant '${name}' to test code; ` +
-          'engine wiring and process-loader controls stay outside the runner',
-        );
-      }
-    }
   }
 
   // 4. Prepare the observer: spawn the loopback witness (unless the

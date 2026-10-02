@@ -35,7 +35,7 @@ envAllowlist: [API_BASE_URL, TEST_MAIL_URL]
 
 Export those values before `gateforge run` or `test-gates`. Only listed names reach the runner and its wired enumeration; values are never read from inline configuration. This document is part of the owner-approved policy digest, so adding a name requires the normal policy approval. Keep test registration independent of the values.
 
-Engine `GATEFORGE_*` names and process-loader controls (`NODE_OPTIONS`, `NODE_PATH`, `LD_*`, `DYLD_*`, `PYTHONPATH`, `PYTHONHOME`, `BASH_ENV`, `ENV`) are refused even if listed. No list means no additional variables are forwarded.
+Engine `GATEFORGE_*` names and process-loader controls (`NODE_OPTIONS`, `NODE_PATH`, `LD_*`, `DYLD_*`, `PYTHONPATH`, `PYTHONHOME`, `BASH_ENV`, `ENV`) are refused even if listed. No list means no additional variables are forwarded. Supervised test-gates refuses these names with usage error 2 before its harness setup, plugin pipeline, or native test enumeration.
 
 ## Create login state against the app
 

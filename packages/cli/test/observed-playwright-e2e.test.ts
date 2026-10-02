@@ -1,10 +1,43 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { withTempRepo } from '@gate-forge/core';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { loadConfigAt } from '../src/commands/common.js';
 import { cleanupWitnessedFixture, installStrictFixture, operatorEnvironment, ROOT, FINGERPRINT, ADAPTER, GATEFORGE_YML } from './witnessed-run-fixture.js';
+
+/**
+ * The candidate's own Playwright config plus ONE added statement: the
+ * module records that it was genuinely loaded, which is exactly what a
+ * reserved control request must be refused BEFORE. The marker lives
+ * OUTSIDE the candidate repository, so observing it can never dirty or
+ * drift the graded input tree.
+ *
+ * Args:
+ *   markerPath: absolute path the loaded config records itself at.
+ *
+ * Returns:
+ *   string: the config module source.
+ */
+function configLoadMarkerSource(markerPath: string): string {
+  return `import { writeFileSync } from 'node:fs';
+import { defineConfig } from 'playwright/test';
+writeFileSync(${JSON.stringify(markerPath)}, 'candidate config loaded');
+export default defineConfig({
+  testDir: 'specs',
+  fullyParallel: false,
+  workers: 1,
+  retries: 0,
+  forbidOnly: true,
+  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
+  use: { headless: true, trace: 'off' },
+  timeout: 60_000,
+});
+`;
+}
 
 const TITLE = 'creates an account through a native browser form';
 const CLAIM = 'tenant.accounts:persistence:create';
@@ -138,25 +171,45 @@ describe('Playwright Observe declarations through the actual CLI', () => {
     }
   }, 180_000);
 
+  // The refused repo is the SAME repository the positive case observes,
+  // with its mapping, so the named selector resolves. The candidate's own
+  // config records its load outside the repository: the refusal is then
+  // observed as a real side effect that never happened — not as a
+  // sentence, a mock, or a timeout.
   it.each(['GATEFORGE_WITNESS_VERIFIER_KEY_FILE', 'NODE_OPTIONS'])(
-    'refuses an owner envAllowlist request for reserved control %s before running tests',
+    'refuses an owner envAllowlist request for reserved control %s before candidate configuration runs',
     async name => {
-      await withTempRepo({}, async repo => {
-        installStrictFixture(repo, { 'specs/native.spec.js': SPEC });
-        repo.writeFiles({
-          '.gateforge.yml': `${GATEFORGE_YML}runtime: .gateforge/runtime.yml\n`,
-          '.gateforge/runtime.yml': `schemaVersion: 1\nenvAllowlist: ['${name}']\n`,
+      const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-reserved-env-'));
+      const markerPath = join(markerDir, 'native-config-loaded.marker');
+      try {
+        await withTempRepo({}, async repo => {
+          installStrictFixture(repo, { 'specs/native.spec.js': SPEC });
+          repo.writeFiles({
+            'playwright.config.mjs': configLoadMarkerSource(markerPath),
+            '.gateforge.yml': `${GATEFORGE_YML}runtime: .gateforge/runtime.yml\n`,
+            '.gateforge/runtime.yml': `schemaVersion: 1\nenvAllowlist: ['${name}']\n`,
+            '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: persistence\n    when: {}\n    require: [persistence:create]\n',
+            '.gateforge/adapters/tenant.accounts.mjs': ADAPTER.replace('  deletion:', "  observe: { create: { method: 'POST', path: '/api/accounts' } },\n  volatileFields: ['status'],\n  deletion:"),
+            '.gateforge/test-map.yml': `schemaVersion: 1\ntests:\n  - key: playwright:chromium:specs/native.spec.js:${TITLE}\n    selector:\n      runner: playwright\n      project: chromium\n      file: specs/native.spec.js\n      titlePath: ['${TITLE}']\n    kind: observed-e2e\n    claims: ['${CLAIM}']\n    reason: Native UI writes an account; independent engine reads verify its persisted fields.\n`,
+          });
+          repo.git(['add', '-A']);
+          repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'reserved runner environment fixture']);
+          const { env } = operatorEnvironment();
+          const run = await runCliProcess(repo.root, {
+            ...env,
+            GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
+          });
+          const observed = `${run.stdout}\n${run.stderr}`;
+          expect(run.code, observed).toBe(2);
+          // The candidate's own configuration module never executed.
+          expect(
+            existsSync(markerPath),
+            'candidate Playwright configuration was loaded before the reserved control was refused',
+          ).toBe(false);
         });
-        repo.git(['add', '-A']);
-        repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'reserved runner environment fixture']);
-        const { env } = operatorEnvironment();
-        const run = await runCliProcess(repo.root, {
-          ...env,
-          GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
-        });
-        expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(2);
-        expect(run.stderr).toContain(`runtime envAllowlist cannot grant '${name}' to test code`);
-      });
+      } finally {
+        rmSync(markerDir, { recursive: true, force: true });
+      }
     }, 180_000,
   );
 });
