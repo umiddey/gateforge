@@ -131,6 +131,7 @@ const invokedDirectly = process.argv[1] !== undefined && import.meta.url.endsWit
 if (invokedDirectly) {
   const server = createValidationApp();
   server.listen(PORT, LOOPBACK_HOST, () => {
-    console.log(`gateforge validation example listening on http://${LOOPBACK_HOST}:${PORT}`);
+    const address = server.address();
+    console.log(`gateforge validation example listening on http://${LOOPBACK_HOST}:${address.port}`);
   });
 }
