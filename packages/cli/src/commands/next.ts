@@ -65,6 +65,7 @@ import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { resolveProvider } from '../providers.js';
 import { computeEvaluationScope, detectStagedWorkingTreeMismatches } from '../scope.js';
 import { httpRoutesView, resolveStateDir } from '../state.js';
+import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import { loadConfigAt, rejectUnknownFlags, VERIFIER_KEY_ENV } from './common.js';
 import { loadCacheExclusions } from '../cache-exclusions.js';
 import { singletonPerTenantGuidanceLines } from '../singleton-guidance.js';
@@ -941,7 +942,12 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     let testFiles: string[] = [];
     if (runnerConfig !== null) {
       try {
-        const discovered = await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true });
+        const discovered = await discoverTestCatalog({
+          cwd: io.cwd,
+          config,
+          collectPytest: true,
+          excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
+        });
         discoveryResult = discovered;
         testFiles = discovered.catalog.entries
           .filter((entry) => entry.runner === config.runner)
@@ -1011,6 +1017,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   const mapped = await resolveRepositoryMappings({
     cwd: io.cwd,
     config,
+    stateDir,
     obligations: pipeline.policy.obligations,
     ...(discoveryResult !== undefined
       ? {

@@ -64,6 +64,7 @@ import type { InferenceResult } from './inference.js';
 import {
   scanTestFiles,
   UNRESOLVED_TITLE_PLACEHOLDER,
+  type RepoRelativeFileFilter,
   type StaticRegistrationWarning,
   type StaticScanResult,
   type StaticUnresolved,
@@ -96,6 +97,14 @@ export interface DiscoverOptions {
   ) => Promise<PytestCollectionResult>;
   /** Native playwright `--list` timeout (default 60s). */
   playwrightTimeoutMs?: number;
+  /**
+   * Optional veto over statically seeded candidates, forwarded to
+   * {@link scanTestFiles} unchanged. It filters the seed only: the
+   * native `--list` enumeration below stays authoritative, so a caller
+   * can hide the ENGINE's own generated run-state files from catalog
+   * construction without touching a single enumerated case.
+   */
+  excludeFile?: RepoRelativeFileFilter;
 }
 
 /** The discovery result: validated catalog, canonical JSON, and live native claims. */
@@ -173,6 +182,7 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
     cwd,
     include: config.project.paths.include,
     exclude: config.project.paths.exclude,
+    excludeFile: options.excludeFile,
   });
   const scanMs = performance.now() - scanStartedAtMs;
 

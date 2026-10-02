@@ -47,6 +47,8 @@ import {
   type StaticScanResult,
 } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
+import { engineGeneratedStateFileFilter } from './state-artifacts.js';
+import { resolveStateDir } from './state.js';
 
 /** The tracked sidecar path, repo-root-relative (plan §5.1 row 2). */
 export const TEST_MAP_RELATIVE = '.gateforge/test-map.yml';
@@ -322,6 +324,14 @@ export interface MappingResolutionOptions {
   cwd: string;
   /** Validated `.gateforge.yml` (drives discovery). */
   config: GateforgeConfig;
+  /**
+   * The run's resolved run-state directory (absolute). The fresh
+   * discovery below uses it to keep the engine's OWN generated state
+   * files out of the static candidate seed; absent means the default
+   * state directory, resolved from `cwd` exactly like every CLI entry
+   * point.
+   */
+  stateDir?: string;
   /** The run's obligations (the registry the resolver validates against). */
   obligations: readonly Obligation[];
   /** Pre-discovered catalog; when absent the module discovers fresh. */
@@ -413,6 +423,10 @@ export async function resolveRepositoryMappings(
         config: options.config,
         collectPytest: true,
         pytestCollection: options.pytestCollection,
+        excludeFile: engineGeneratedStateFileFilter(
+          options.cwd,
+          options.stateDir ?? resolveStateDir(options.cwd),
+        ),
       });
       catalog = discovered.catalog;
       discoveredClaims = discovered.nativeClaims;

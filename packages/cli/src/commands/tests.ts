@@ -84,6 +84,7 @@ import {
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { resolveProvider } from '../providers.js';
 import { httpRoutesView, resolveStateDir } from '../state.js';
+import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
 import { loadCacheExclusions } from '../cache-exclusions.js';
@@ -184,7 +185,12 @@ async function runDiscovery(
 ): Promise<DiscoverResult> {
   let discovered: DiscoverResult;
   try {
-    discovered = await discoverTestCatalog({ cwd, config, collectPytest });
+    discovered = await discoverTestCatalog({
+      cwd,
+      config,
+      collectPytest,
+      excludeFile: engineGeneratedStateFileFilter(cwd, stateDir),
+    });
   } catch (error) {
     // A failed native enumeration is a config/environment problem
     // (exit 2), never an empty catalog.
@@ -778,10 +784,12 @@ async function syncSubcommand(
 ): Promise<number> {
   rejectUnknownFlags(options, ['json'], TESTS_USAGE);
   const config = loadConfigAt(io.cwd);
+  const stateDir = resolveStateDir(io.cwd);
   const scan = scanTestFiles({
     cwd: io.cwd,
     include: config.project.paths.include,
     exclude: config.project.paths.exclude,
+    excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
   });
   const generated = annotationTestMapEntries(scan);
   const previous = loadOptionalTestMap(io.cwd);

@@ -50,6 +50,16 @@ export interface ScanBudget {
   maxImportDepth?: number;
 }
 
+/**
+ * A caller-supplied veto over one repo-relative posix file. Returning
+ * true means the file is NOT a static-discovery candidate. It is
+ * consulted at the candidate-seed boundary only, so it never removes
+ * a file the runner legitimately enumerates, and never shortens
+ * import traversal (a traversed import target is read for bindings
+ * whatever the seed says about it).
+ */
+export type RepoRelativeFileFilter = (repoRelativePath: string) => boolean;
+
 /** Options for one static test scan. */
 export interface StaticScanOptions {
   /** Absolute repo root. */
@@ -58,6 +68,18 @@ export interface StaticScanOptions {
   include: readonly string[];
   /** Repo-root-relative exclude globs (any match wins). */
   exclude: readonly string[];
+  /**
+   * Optional veto over seeded candidates (repo-relative posix paths).
+   *
+   * The seed is the ONLY place this applies: a file the caller hides
+   * here contributes no static rows, while import traversal from a
+   * kept file and the native runner's own enumeration are untouched.
+   * Gateforge's CLI passes the engine's own generated run-state
+   * artifacts (see `cli/src/state-artifacts.ts`) so the controller
+   * spec a first run persists into the state directory cannot be
+   * harvested back as a test the repository never declared.
+   */
+  excludeFile?: RepoRelativeFileFilter;
   /** Traversal budgets (defaults documented on {@link ScanBudget}). */
   budget?: ScanBudget;
 }
@@ -374,7 +396,12 @@ function registrationWarningsForCall(
  * unavailable — every candidate is kept exactly as before
  * (see {@link gitIgnoredPaths}).
  */
-function collectCandidateFiles(cwd: string, include: readonly string[], exclude: readonly string[]): string[] {
+function collectCandidateFiles(
+  cwd: string,
+  include: readonly string[],
+  exclude: readonly string[],
+  excludeFile?: RepoRelativeFileFilter,
+): string[] {
   const found: string[] = [];
   const walk = (dir: string, rel: string): void => {
     let names: string[];
@@ -398,7 +425,8 @@ function collectCandidateFiles(cwd: string, include: readonly string[], exclude:
       } else if (
         PARSEABLE_EXTENSIONS.some((ext) => name.endsWith(ext)) &&
         pathInScope(relPath, include) &&
-        !pathInScope(relPath, exclude)
+        !pathInScope(relPath, exclude) &&
+        excludeFile?.(relPath) !== true
       ) {
         found.push(relPath);
       }
@@ -1154,7 +1182,7 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     maxTraversedFiles: options.budget?.maxTraversedFiles ?? DEFAULT_MAX_TRAVERSED_FILES,
     maxImportDepth: options.budget?.maxImportDepth ?? DEFAULT_MAX_IMPORT_DEPTH,
   };
-  const seededFiles = collectCandidateFiles(options.cwd, options.include, options.exclude);
+  const seededFiles = collectCandidateFiles(options.cwd, options.include, options.exclude, options.excludeFile);
   for (const file of seededFiles) state.seeded.add(file);
 
   for (const file of seededFiles) {

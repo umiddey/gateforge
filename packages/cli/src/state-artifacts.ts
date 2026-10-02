@@ -49,6 +49,7 @@
  * The Playwright pack's generated names are imported from the pack
  * itself, so a rename there cannot leave this list stale.
  */
+import { relative, resolve, sep } from 'node:path';
 import {
   FREEZE_CONTROL_DIR,
   FREEZE_CONTROL_SPEC_FILE,
@@ -161,4 +162,60 @@ export function isEngineGeneratedStatePath(stateRelativePath: string): boolean {
   if (ENGINE_GENERATED_STATE_FILES.includes(stateRelativePath)) return true;
   if (ENGINE_GENERATED_STATE_FILES.includes(segments[segments.length - 1] as string)) return true;
   return ENGINE_GENERATED_STATE_SUBTREES.includes(segments[0] as string);
+}
+
+/**
+ * Builds the static-discovery seed veto for the run's OWN generated
+ * state: a repo-relative file is hidden from catalog seeding when,
+ * and only when, it sits INSIDE the state directory this run actually
+ * resolved AND its state-relative path is an engine-generated
+ * artifact in the closed-world registry above.
+ *
+ * Why the seed needs it: the state directory holds real
+ * source-shaped files (`trusted.playwright.config.mjs`, the freeze
+ * controller spec), and `gateforge init` declares `.mjs`/`.js`/`.ts`
+ * scan globs — so after the first run those OUTPUT files were
+ * harvested back as tests the repository never declared, and the
+ * second run planned a case the runner cannot enumerate.
+ *
+ * What it deliberately does NOT do:
+ * - it is a SEED veto only. The native `--list` enumeration, import
+ *   traversal, and every enumerated consumer case are untouched;
+ * - it never matches by basename alone, by title, or by a blanket
+ *   `.gateforge` rule: a controller lookalike with the same file name
+ *   anywhere else stays a candidate;
+ * - containment is segment-exact, so a sibling directory that merely
+ *   shares a prefix (`.gateforge/test-gates-extra/…`) is never
+ *   excluded;
+ * - a state directory that is the repository root itself, or outside
+ *   it, excludes nothing at all (no prefix, no guess);
+ * - it says nothing about the input digest. A hand-written source
+ *   file parked in the state directory is still refused by
+ *   `assertOutputDisjoint` with byte-identical wording, and a TRACKED
+ *   file there still refuses first; a veto here can never make a
+ *   tracked file invisible to that refusal, because the veto is
+ *   applied to the discovery walk, not to the declared-input check.
+ *
+ * Args:
+ *   cwd: absolute repository root the discovery walk starts from.
+ *   stateDir: absolute run-state directory the run resolved (the
+ *     `--out` override when the command accepts one, else the
+ *     default).
+ *
+ * Returns:
+ *   (repoRelativePath: string) => boolean: true excludes the file
+ *   from static candidate seeding.
+ */
+export function engineGeneratedStateFileFilter(
+  cwd: string,
+  stateDir: string,
+): (repoRelativePath: string) => boolean {
+  // Same containment convention as the digest's state prefix
+  // (`input-snapshot.ts` `buildFileEntries`): the posix form of the
+  // RESOLVED state directory relative to the RESOLVED repo root, which
+  // is exactly the coordinate space the discovery walk reports.
+  const prefix = relative(resolve(cwd), resolve(stateDir)).split(sep).join('/');
+  if (prefix === '' || prefix === '..' || prefix.startsWith('../')) return () => false;
+  const under = `${prefix}/`;
+  return (file) => file.startsWith(under) && isEngineGeneratedStatePath(file.slice(under.length));
 }

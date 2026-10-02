@@ -227,6 +227,7 @@ export {
 } from './discovery/index.js';
 export type {
   StaticScanOptions,
+  RepoRelativeFileFilter,
   StaticScanResult,
   StaticTestEntry,
   StaticTestFacts,

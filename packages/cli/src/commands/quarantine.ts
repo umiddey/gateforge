@@ -31,6 +31,7 @@ import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { resolveStateDir } from '../state.js';
+import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import { resolveRepoPath, runPipeline } from '../pipeline.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 
@@ -133,12 +134,13 @@ export async function quarantineCommand(io: Io, argv: readonly string[]): Promis
   }
 
   const config = loadConfigAt(io.cwd);
+  const stateDir = resolveStateDir(io.cwd);
   const pipeline = await runPipeline({
     cwd: io.cwd,
     env: io.env,
     config,
     provider: 'all-files',
-    stateDir: resolveStateDir(io.cwd),
+    stateDir,
   });
   // `pipeline.now` is the injected run instant — the ONLY time source for
   // expiry judgment (invariant 7); the wall clock never joins.
@@ -148,7 +150,11 @@ export async function quarantineCommand(io: Io, argv: readonly string[]): Promis
   // for a typo would silently never apply, which is worse than an error.
   let catalogKeys: string[];
   try {
-    const discovered = await discoverTestCatalog({ cwd: io.cwd, config });
+    const discovered = await discoverTestCatalog({
+      cwd: io.cwd,
+      config,
+      excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
+    });
     catalogKeys = discovered.catalog.entries.map((entry) => entry.logicalKey);
   } catch (error) {
     // Fail closed with the OWN action: a quarantine may only name a test

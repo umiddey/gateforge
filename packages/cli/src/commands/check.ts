@@ -227,6 +227,7 @@ import {
   type StagedCandidate,
 } from '../staged-candidate.js';
 import { httpRoutesView, readCandidateTreeEntries, readStateDocument, resolveStateDir } from '../state.js';
+import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import {
   assertReceiptApprovedPolicy,
   evaluateApprovedPolicy,
@@ -1231,7 +1232,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     let testFiles: string[] = [];
     if (runnerConfig !== null) {
       try {
-        const scopeDiscovery = await discoverTestCatalog({ cwd: io.cwd, config });
+        const scopeDiscovery = await discoverTestCatalog({
+          cwd: io.cwd,
+          config,
+          excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
+        });
         scopeDiscoveryTimings = scopeDiscovery.timings;
         testFiles = scopeDiscovery.catalog.entries
           .filter((entry) => entry.runner === config.runner)
@@ -1326,6 +1331,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     cwd: io.cwd,
     include: config.project.paths.include,
     exclude: config.project.paths.exclude,
+    excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
   });
   const tsScanMs = performance.now() - annotationScanStartedAtMs;
   for (const warning of annotationScan.registrationWarnings) {
@@ -1401,6 +1407,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
       config,
+      stateDir,
       obligations: pipeline.policy.obligations,
       claimBindings,
       behaviorCatalog: pipeline.behaviorCatalog,

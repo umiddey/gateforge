@@ -315,9 +315,17 @@ export function consumerOf(statePath: string): string {
   return state.consumer;
 }
 
-/** Repo-relative path of the generated controller spec, when armed. */
-export function controlSpecPath(): string {
-  return `${DEFAULT_STATE_DIR}/${FREEZE_CONTROL_DIR}/${FREEZE_CONTROL_SPEC_FILE}`;
+/**
+ * Repo-relative path of the generated controller spec, when armed.
+ *
+ * @param stateDir: repo-relative run-state directory the run actually
+ *   resolved (`--out`); the configured one when absent.
+ *
+ * @returns
+ *   string: the repo-relative path of the controller spec.
+ */
+export function controlSpecPath(stateDir: string = DEFAULT_STATE_DIR): string {
+  return `${stateDir}/${FREEZE_CONTROL_DIR}/${FREEZE_CONTROL_SPEC_FILE}`;
 }
 
 /** Repo-relative path of the controller's request document. */
@@ -680,6 +688,21 @@ export interface NativeFixtureOptions {
    * to make the candidate look unchanged.
    */
   installedDependencies?: boolean;
+  /**
+   * This repository declares every parseable JavaScript source file
+   * (`.js`, `.jsx`, `.mjs`, `.cjs`, at any depth) as a scan input —
+   * exactly what `init` writes for a JavaScript project — instead of
+   * only its `src` and `specs` directories, and its run-state directory
+   * is ordinary untracked workspace bytes rather than a gitignored one.
+   *
+   * That is the shape of a real consumer project: the template's own
+   * `.gitignore` never hid `.gateforge/test-gates/`. It is exactly the
+   * shape in which the engine's OWN generated `.mjs` controller sits
+   * inside the configured scan scope of every LATER command. The first
+   * real native E2E opts in, so its second run and the strict checks
+   * around it exercise that repeat-use of one workspace.
+   */
+  initLikeScanInputs?: boolean;
 }
 
 /**
@@ -1270,10 +1293,20 @@ ${reserved}  ],
  *   void.
  */
 export function installNativeFreezeFixture(repo: TempRepo, options: NativeFixtureOptions = {}): void {
+  // A repository at `init`'s defaults declares every parseable source
+  // file as a scan input, so the engine's OWN generated `.mjs`
+  // controller inside the state directory falls inside the scan scope of
+  // the NEXT command over the same workspace. That is the consumer shape
+  // this variant reproduces; every other variant keeps the narrow
+  // `src/**` + `specs/**` scope it always had.
+  const scanInclude =
+    options.initLikeScanInputs === true
+      ? "['**/*.js', '**/*.jsx', '**/*.mjs', '**/*.cjs']"
+      : "['src/**', 'specs/**']";
   const gateforgeConfig = `schemaVersion: 1
 project:
   languages: [javascript]
-  paths: { include: ['src/**', 'specs/**'], exclude: [] }
+  paths: { include: ${scanInclude}, exclude: [] }
 plugins:
   - id: gateforge.fixture
     version: 1.0.0
@@ -1407,8 +1440,17 @@ enforcement:
       : { 'package.json': `${JSON.stringify({ type: 'module' }, null, 2)}\n` }),
     // `.auth/` is gitignored: the preparation stages write their genuine
     // session state there, so it exists as ignored workspace bytes and
-    // never in a commit.
-    '.gitignore': ['node_modules', '.auth/', `${DEFAULT_STATE_DIR}`, ''].join('\n'),
+    // never in a commit. The run-state directory is gitignored for the
+    // same reason in every variant that always had it — except the
+    // init-like one, where a real consumer's `.gitignore` does NOT hide
+    // it, so the persisted controller really is untracked-but-visible
+    // workspace bytes of the shape a second command enumerates.
+    '.gitignore': [
+      'node_modules',
+      '.auth/',
+      ...(options.initLikeScanInputs === true ? [] : [DEFAULT_STATE_DIR]),
+      '',
+    ].join('\n'),
   });
   if (options.installedDependencies === true) {
     installConsumerDependencies(repo.root);
@@ -1586,12 +1628,14 @@ export interface SealedReceipt {
  * Reads the sealed execution result the run left behind.
  *
  * @param repo: the repository the run sealed into.
+ * @param stateDir: the run-state directory the run actually resolved
+ *   (`--out`); the configured one when absent.
  *
  * @returns
  *   SealedExecution: the parsed result, or null when the run sealed none.
  */
-export function sealedExecution(repo: TempRepo): SealedExecution | null {
-  const path = join(resolveStateDir(repo.root), 'execution-result.json');
+export function sealedExecution(repo: TempRepo, stateDir?: string): SealedExecution | null {
+  const path = join(resolveStateDir(repo.root, stateDir), 'execution-result.json');
   if (!existsSync(path)) return null;
   return JSON.parse(readFileSync(path, 'utf8')) as SealedExecution;
 }
@@ -1600,12 +1644,14 @@ export function sealedExecution(repo: TempRepo): SealedExecution | null {
  * Reads the sealed gate receipt, or null when the run left none.
  *
  * @param repo: the repository the run sealed into.
+ * @param stateDir: the run-state directory the run actually resolved
+ *   (`--out`); the configured one when absent.
  *
  * @returns
  *   SealedReceipt | null: the sealed bindings.
  */
-export function sealedReceipt(repo: TempRepo): SealedReceipt | null {
-  const path = join(resolveStateDir(repo.root), 'receipt.json');
+export function sealedReceipt(repo: TempRepo, stateDir?: string): SealedReceipt | null {
+  const path = join(resolveStateDir(repo.root, stateDir), 'receipt.json');
   if (!existsSync(path)) return null;
   return JSON.parse(readFileSync(path, 'utf8')) as SealedReceipt;
 }
@@ -1707,11 +1753,13 @@ export function newestSpoolLines(repo: TempRepo): SpoolLine[] {
  * tree (which contains the generated state) from the pre-run one.
  *
  * @param repo: the workspace to walk.
+ * @param stateDir: the run-state directory the run actually resolved
+ *   (`--out`); the configured one when absent.
  *
  * @returns
  *   string | null: the candidate tree id, or null without a Git directory.
  */
-export function candidateTreeIdOf(repo: TempRepo): string | null {
+export function candidateTreeIdOf(repo: TempRepo, stateDir?: string): string | null {
   const gitDir = resolveGitDir(repo.root, process.env);
   if (gitDir === null) return null;
   const config = loadConfig(repo.path('.gateforge.yml'));
@@ -1719,7 +1767,7 @@ export function candidateTreeIdOf(repo: TempRepo): string | null {
     gitDir,
     repo.root,
     process.env,
-    resolveStateDir(repo.root),
+    resolveStateDir(repo.root, stateDir),
     'record',
     [],
     loadDocsExclusions(repo.root, config),

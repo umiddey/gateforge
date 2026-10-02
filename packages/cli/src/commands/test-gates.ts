@@ -281,6 +281,7 @@ import {
   writeTwinInventory,
   writeTwinShapes,
 } from '../state.js';
+import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import {
   loadConfigAt,
   parseRunFormat,
@@ -2538,7 +2539,15 @@ async function runSupervisedTestGatesInner(
     // failure is honest data: the suite's runner summary turns
     // `unavailable`, `inventoryComplete` goes false, and the gate blocks
     // TEST_INVENTORY_INCOMPLETE — never a silently narrower inventory.
-    const discovered = await discoverTestCatalog({ cwd: io.cwd, config, collectPytest: true });
+    const discovered = await discoverTestCatalog({
+      cwd: io.cwd,
+      config,
+      collectPytest: true,
+      // The state directory this run ACTUALLY resolved (`--out` aware):
+      // the supervised run's own generated config and freeze controller
+      // must not be harvested back as declared tests on a repeat run.
+      excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
+    });
     catalog = discovered.catalog;
     nativeClaims = discovered.nativeClaims;
     nativeErrors = discovered.nativeErrors;
@@ -2669,6 +2678,7 @@ async function runSupervisedTestGatesInner(
       cwd: io.cwd,
       config,
       obligations: pipeline.policy.obligations,
+      stateDir,
       catalog,
       nativeClaims,
       behaviorCatalog: pipeline.behaviorCatalog,
@@ -4048,6 +4058,7 @@ async function runSupervisedTestGatesInner(
   const adapter = runnerName === 'playwright'
     ? new PlaywrightAdapter({
         config,
+        discover: { excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir) },
         run: {
           testFiles: plannedRows.map((row) => row.planned.file),
           // A named run executes exactly the named tests, not their

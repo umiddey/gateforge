@@ -72,7 +72,10 @@ interface GateReport {
  * @param repo: the fixture repository.
  * @param app: the attested base URL, the protected route and the per-run
  *   session secret.
+ * @param extra: ordinary environment the run forwards to the suite.
  * @param options: the fixture variant whose baseline the run inherits.
+ * @param out: repo-relative run-state directory to pass as `--out`; the
+ *   configured one when absent.
  *
  * @returns
  *   Promise<{ code, stdout, stderr, env }>: the CLI result and the
@@ -83,6 +86,7 @@ async function runSupervised(
   app: { url: string; protectedUrl: string; sessionSecret: string },
   extra: Record<string, string> = {},
   options: NativeFixtureOptions = {},
+  out?: string,
 ): Promise<{ code: number; stdout: string; stderr: string; env: Record<string, string> }> {
   const env = nativeRunEnv(
     repo,
@@ -92,7 +96,9 @@ async function runSupervised(
     },
     options,
   );
-  const result = await runNativeCli(repo, ['test-gates', '--changed', '--scope', 'full', '--format', 'json'], env);
+  const argv = ['test-gates', '--changed', '--scope', 'full', '--format', 'json'];
+  if (out !== undefined) argv.push('--out', out);
+  const result = await runNativeCli(repo, argv, env);
   return { ...result, env };
 }
 
@@ -152,7 +158,13 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
       const app = await startNativeApp();
       try {
         await withTempRepo({ prefix: 'gateforge-native-freeze-' }, async (repo) => {
-          installNativeFreezeFixture(repo);
+          // A consumer at `init`'s defaults: every parseable source file is
+          // a declared scan input, and the run-state directory is ordinary
+          // untracked workspace bytes rather than a gitignored one. That is
+          // what makes the SECOND run in this very test the same situation a
+          // real repository reaches — the engine's own generated controller
+          // is inside the configured scan scope of every later command.
+          installNativeFreezeFixture(repo, { initLikeScanInputs: true });
           writeCandidateChange(repo);
           const preRunTree = candidateTreeIdOf(repo);
 
@@ -226,6 +238,12 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
             expect(index, 'a body test began before the accepted release').toBeGreaterThan(marker);
           }
 
+          // The engine's own controller was written into the state
+          // directory of this workspace, and it is still there: nothing in
+          // this run — or in the check that follows it — may make the gate
+          // pass by deleting the engine's own output.
+          expect(existsSync(repo.path(controlSpecPath())), 'the generated controller persists').toBe(true);
+
           // The strict check over the very same prepared candidate.
           const check = await runNativeCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], first.env);
           expect(check.code, `check stdout:\n${check.stdout}\nstderr:\n${check.stderr}`).toBe(0);
@@ -236,12 +254,78 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           const second = await runSupervised(repo, app);
           expect(second.code, `second run stdout:\n${second.stdout}\nstderr:\n${second.stderr}`).toBe(0);
           expect(sealedReceipt(repo)?.candidateTreeId).toBe(preparedTree);
+          // The second run planned and executed EXACTLY the same consumer
+          // cases: the persisted `.mjs` controller the first run left behind
+          // is not a planned row, an outcome row or an unresolved gap, so
+          // the identities stay the catalog's own.
+          const resealed = sealedExecution(repo);
+          expect(resealed?.complete).toBe(true);
+          expect(resealed?.planned.map((row) => row.logicalKey).sort()).toEqual([...CONSUMER_CASES].sort());
+          expect(resealed?.outcomes.map((outcome) => outcome.logicalKey).sort()).toEqual([...CONSUMER_CASES].sort());
+          expect(resealed?.outcomes.every((outcome) => outcome.status === 'passed' && outcome.attempt === 1)).toBe(true);
+          expect(resealed?.planned.filter((row) => row.project === CONTROL_PROJECT)).toEqual([]);
+          expect(resealed?.outcomes.filter((outcome) => outcome.project === CONTROL_PROJECT)).toEqual([]);
+          expect(resealed?.sessionTrace?.filter((traced) => traced.file.includes(controlSpecPath()))).toEqual([]);
+          expect(freezeOrdering(spoolLines(repo)).controller, 'the controller is not a native lifecycle').toEqual([]);
+          expect(existsSync(repo.path(controlSpecPath())), 'the second run did not delete the controller').toBe(true);
           const recheck = await runNativeCli(
             repo,
             ['check', '--changed', '--require-e2e', '--format', 'json'],
             second.env,
           );
           expect(recheck.code, `recheck stdout:\n${recheck.stdout}\nstderr:\n${recheck.stderr}`).toBe(0);
+        });
+      } finally {
+        await app.stop();
+      }
+    },
+    1_500_000,
+  );
+
+  it(
+    'keeps ONE prepared candidate across two supervised runs whose state directory is a custom one',
+    async () => {
+      const app = await startNativeApp();
+      // A repository-relative state directory that is NOT the configured
+      // one, so the ownership boundary the engine applies is the directory
+      // this run really resolved — never an assumption about the default.
+      const custom = '.gateforge/alt-state';
+      try {
+        await withTempRepo({ prefix: 'gateforge-native-custom-state-' }, async (repo) => {
+          installNativeFreezeFixture(repo, { initLikeScanInputs: true });
+          writeCandidateChange(repo);
+
+          const first = await runSupervised(repo, app, {}, {}, custom);
+          expect(first.code, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`).toBe(0);
+          expect((JSON.parse(first.stdout) as GateReport).summary.blocking).toBe(0);
+          // The run graded a candidate and sealed its receipt where
+          // `--out` said, and never touched the configured state directory.
+          const preparedTree = candidateTreeIdOf(repo, custom);
+          expect(preparedTree).not.toBeNull();
+          expect(sealedReceipt(repo, custom)?.candidateTreeId).toBe(preparedTree);
+          expect(existsSync(repo.path(controlSpecPath(custom))), 'the generated controller is in the custom state').toBe(true);
+          expect(existsSync(repo.path('.gateforge/test-gates')), 'the default state directory was never created').toBe(false);
+
+          // The second run over the SAME workspace: the controller the
+          // first run persisted is inside the declared scan scope, and the
+          // identities stay the catalog's own eleven consumer cases.
+          const second = await runSupervised(repo, app, {}, {}, custom);
+          expect(second.code, `second run stdout:\n${second.stdout}\nstderr:\n${second.stderr}`).toBe(0);
+          expect((JSON.parse(second.stdout) as GateReport).summary.blocking).toBe(0);
+          const resealed = sealedExecution(repo, custom);
+          expect(resealed?.complete).toBe(true);
+          expect(resealed?.planned.map((row) => row.logicalKey).sort()).toEqual([...CONSUMER_CASES].sort());
+          expect(resealed?.outcomes.map((outcome) => outcome.logicalKey).sort()).toEqual([...CONSUMER_CASES].sort());
+          expect(resealed?.outcomes.every((outcome) => outcome.status === 'passed' && outcome.attempt === 1)).toBe(true);
+          expect(resealed?.planned.filter((row) => row.project === CONTROL_PROJECT)).toEqual([]);
+          expect(resealed?.outcomes.filter((outcome) => outcome.project === CONTROL_PROJECT)).toEqual([]);
+          expect(resealed?.sessionTrace?.filter((traced) => traced.file.includes(controlSpecPath(custom)))).toEqual([]);
+          // Same candidate both times, and the engine's own output is
+          // still on disk: nothing here passes by deleting it.
+          expect(sealedReceipt(repo, custom)?.candidateTreeId).toBe(preparedTree);
+          expect(candidateTreeIdOf(repo, custom)).toBe(preparedTree);
+          expect(existsSync(repo.path(controlSpecPath(custom))), 'the second run did not delete the controller').toBe(true);
+          expect(existsSync(repo.path('.gateforge/test-gates')), 'the default state directory was never created').toBe(false);
         });
       } finally {
         await app.stop();
