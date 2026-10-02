@@ -195,8 +195,26 @@ function generatedStateRefusal(
   return null;
 }
 
-/** Extensions whose import statements the graph resolves. */
-const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py']);
+/**
+ * Extensions whose import statements the graph resolves.
+ *
+ * A fixed string-keyed lookup, so it is a Record and membership is
+ * `Object.hasOwn` — never the `in` operator, which would answer `true`
+ * for an inherited prototype key. The keys are extensions, so nothing in
+ * the graph can name a prototype member; the own-property test is what
+ * keeps that guarantee independent of the key spelling.
+ */
+const SOURCE_EXTENSIONS: Readonly<Record<string, true>> = {
+  '.ts': true,
+  '.tsx': true,
+  '.mts': true,
+  '.cts': true,
+  '.js': true,
+  '.jsx': true,
+  '.mjs': true,
+  '.cjs': true,
+  '.py': true,
+};
 
 /** Suffixes a relative specifier may carry, longest first. */
 const RESOLVABLE_SUFFIXES = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py'] as const;
@@ -662,7 +680,7 @@ function trackedSources(gitDir: string, env: NodeJS.ProcessEnv, treeId: string):
     const sha = meta[2] ?? '';
     const path = record.slice(tab + 1);
     if ((meta[1] ?? '') !== 'blob' || sha.length === 0) continue;
-    if (!SOURCE_EXTENSIONS.has(extname(path))) continue;
+    if (!Object.hasOwn(SOURCE_EXTENSIONS, extname(path))) continue;
     entries.push({ path, sha });
   }
   if (entries.length === 0) return [];
@@ -1030,8 +1048,13 @@ interface SealedConfigDeclaration {
  * computed and therefore names nothing this resolver can read.
  */
 function configPropertyName(member: ts.ObjectLiteralElementLike): string | null {
-  if (ts.isIdentifier(member.name)) return member.name.text;
-  if (ts.isStringLiteral(member.name) || ts.isNoSubstitutionTemplateLiteral(member.name)) return member.name.text;
+  const name = member.name;
+  // A member the syntax tree does not give a name for is a member this
+  // resolver cannot key on, exactly like a computed key: it reports
+  // nothing rather than guessing.
+  if (name === undefined) return null;
+  if (ts.isIdentifier(name)) return name.text;
+  if (ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
   return null;
 }
 
@@ -1395,9 +1418,13 @@ export function classifyResealChange(input: {
    * Repo-relative paths this run's input snapshot binds, or absent when
    * the caller holds no inventory. A declared browser state that IS an
    * input is authority, not output, so it can never be carried as a
-   * generated-state change. An independent recomputation that holds no
-   * inventory still refuses such a path as app code, so the two sides
-   * never disagree about the ones that matter.
+   * generated-state change. Nothing else in the two sealed trees records
+   * that membership, so it is not inferable from them: a recomputation
+   * holding no inventory — the independent chain check reads no input
+   * snapshot — decides such a path on trackedness, removal and file mode
+   * alone, never on an assumed membership. The two sides can therefore
+   * reach different verdicts for an input-bound state path, and each one
+   * is the verdict its own evidence supports.
    */
   inputFiles?: ReadonlySet<string>;
 }): ResealChangeClassification {
@@ -1463,6 +1490,7 @@ export function classifyResealChange(input: {
     }
     trackedness = { parent, current };
   }
+  const testFileSet = new Set(input.testFiles);
   // The owner may declare runtime state the run itself rewrites (a
   // witnessed login stage's storage state, a runner's own cache): the
   // bytes are gitignored workspace state, so EVERY sealed candidate
@@ -1470,10 +1498,25 @@ export function classifyResealChange(input: {
   // succeed without a declaration. It is an OWNER ASSERTION, so it is
   // deliberately narrow: a matching changed path is disregarded only
   // when it is absent from BOTH sealed commits, i.e. when it exists
-  // solely as untracked/ignored workspace bytes. A tracked path never
-  // matches, whatever the glob reads. Without a declaration, or without
-  // the two commit trees to check trackedness against, nothing is
-  // disregarded (fail closed).
+  // solely as untracked/ignored workspace bytes, AND when the sealed
+  // runner config does not itself speak for that path. A tracked path
+  // never matches, whatever the glob reads. Without a declaration, or
+  // without the two commit trees to check trackedness against, nothing
+  // is disregarded (fail closed).
+  //
+  // PRECEDENCE: the sealed runner config outranks the owner assertion,
+  // because a glob is a claim about bytes while a `use.storageState`
+  // nomination is a claim about who READS them. A nominated target is
+  // the input of the tests that consume it, so it must reach the
+  // generated-state rules below — untracked, outside the input
+  // inventory, an ordinary file, not a removal, every reader
+  // re-executing — instead of being swallowed as ignorable runtime
+  // bytes, which is exactly how a changed state would be carried as a
+  // proven cache write. And when those declarations cannot be COMPUTED
+  // no nomination can be named at all, so no raw non-test path may be
+  // disregarded then either: the refusal below is the only place that
+  // reports that doubt, and a glob must not hide it. Every other case
+  // is unchanged, which is what an ordinary runtime cache relies on.
   let disregarded: string[] = [];
   if (declared.length > 0 && trackedness !== null) {
     const { parent, current } = trackedness;
@@ -1481,6 +1524,8 @@ export function classifyResealChange(input: {
     disregarded = changed
       .filter(
         (entry) =>
+          !stateGraph.consumers.has(entry.path) &&
+          (stateGraph.problem === null || testFileSet.has(entry.path)) &&
           !parent.has(entry.path) &&
           !current.has(entry.path) &&
           matchers.some((matcher) => matcher(entry.path)),
@@ -1493,7 +1538,6 @@ export function classifyResealChange(input: {
   if (changes.length === 0) {
     return refuse('the sealed trees are identical, so there is nothing to classify', disregarded);
   }
-  const testFileSet = new Set(input.testFiles);
   const roots = testRoots(input.testFiles);
   // A sealed config whose declarations the bytes COMPUTE cannot say who
   // reads a declared state file. That is a refusal the moment the change

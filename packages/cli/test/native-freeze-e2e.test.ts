@@ -47,6 +47,7 @@ import {
   installOperatorState,
   nativeRunEnv,
   newestSpoolLines,
+  type NativeFixtureOptions,
   PREREQUISITE_PROJECTS,
   runNativeCli,
   sealedExecution,
@@ -71,7 +72,7 @@ interface GateReport {
  * @param repo: the fixture repository.
  * @param app: the attested base URL, the protected route and the per-run
  *   session secret.
- * @param extra: additional operator environment for this run.
+ * @param options: the fixture variant whose baseline the run inherits.
  *
  * @returns
  *   Promise<{ code, stdout, stderr, env }>: the CLI result and the
@@ -81,12 +82,17 @@ async function runSupervised(
   repo: TempRepo,
   app: { url: string; protectedUrl: string; sessionSecret: string },
   extra: Record<string, string> = {},
+  options: NativeFixtureOptions = {},
 ): Promise<{ code: number; stdout: string; stderr: string; env: Record<string, string> }> {
-  const env = nativeRunEnv(repo, {
-    ...attestedEnv(app.url, app.protectedUrl, app.sessionSecret),
-    ...extra,
-  });
-  const result = await runNativeCli(repo, ['test-gates', '--scope', 'full', '--format', 'json'], env);
+  const env = nativeRunEnv(
+    repo,
+    {
+      ...attestedEnv(app.url, app.protectedUrl, app.sessionSecret),
+      ...extra,
+    },
+    options,
+  );
+  const result = await runNativeCli(repo, ['test-gates', '--changed', '--scope', 'full', '--format', 'json'], env);
   return { ...result, env };
 }
 
@@ -245,6 +251,123 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
   );
 
   it(
+    'freezes ONE candidate when the root package is CommonJS and the spec directory is ESM',
+    async () => {
+      const app = await startNativeApp();
+      try {
+        await withTempRepo({ prefix: 'gateforge-native-module-scope-' }, async (repo) => {
+          // The MIXED module scope a real consumer template has: the root
+          // package declares no module kind at all, so everything under it
+          // — including the generated freeze controller the CLI writes into
+          // the state directory — is interpreted under the CommonJS default,
+          // while the spec directory carries an ESM package of its own. The
+          // native config is an `.mjs` module either way, so the layout that
+          // is under test is the module scope, not the configuration.
+          installNativeFreezeFixture(repo, { mixedModuleScope: true });
+          writeCandidateChange(repo);
+          expect(JSON.parse(readFileSync(repo.path('package.json'), 'utf8'))).not.toHaveProperty('type');
+          expect(JSON.parse(readFileSync(repo.path('specs/package.json'), 'utf8'))).toHaveProperty('type', 'module');
+
+          const run = await runSupervised(repo, app);
+          expect(run.code, `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`).toBe(0);
+          expect((JSON.parse(run.stdout) as GateReport).summary.blocking).toBe(0);
+
+          // The SAME honest native accounting as any other layout: every
+          // consumer case the catalog holds ran exactly once and passed.
+          const sealed = sealedExecution(repo);
+          expect(sealed?.complete).toBe(true);
+          expect(sealed?.planned.map((row) => row.logicalKey).sort()).toEqual([...CONSUMER_CASES].sort());
+          expect(sealed?.outcomes.map((outcome) => outcome.logicalKey).sort()).toEqual([...CONSUMER_CASES].sort());
+          expect(sealed?.outcomes.every((outcome) => outcome.status === 'passed' && outcome.attempt === 1)).toBe(true);
+
+          // One prepared candidate behind ONE accepted release: the
+          // controller really performed the handshake, after every
+          // preparation stage and before every body.
+          expect(existsSync(repo.path(controlRequestPath())), 'the controller asked for a freeze').toBe(true);
+          const ordering = freezeOrdering(spoolLines(repo));
+          expect(ordering.markers, 'exactly one accepted freeze marker').toHaveLength(1);
+          const marker = ordering.markers[0] as number;
+          expect(ordering.prerequisites).toHaveLength(PREREQUISITE_PROJECTS.length);
+          expect(ordering.bodies).toHaveLength(BODY_CASE_COUNT);
+          for (const index of ordering.prerequisites) {
+            expect(index, 'a preparation stage began after the accepted release').toBeLessThan(marker);
+          }
+          for (const index of ordering.bodies) {
+            expect(index, 'a body test began before the accepted release').toBeGreaterThan(marker);
+          }
+
+          // The receipt binds the prepared candidate, and the independent
+          // strict check verifies that very candidate on its own.
+          expect(sealedReceipt(repo)?.candidateTreeId).toBe(candidateTreeIdOf(repo));
+          const check = await runNativeCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], run.env);
+          expect(check.code, `check stdout:\n${check.stdout}\nstderr:\n${check.stderr}`).toBe(0);
+        });
+      } finally {
+        await app.stop();
+      }
+    },
+    1_500_000,
+  );
+
+  it(
+    'projects OWN trusted baseline values of the three prototype names, and the alpha chain\u2019s own changes to two of them',
+    async () => {
+      const app = await startNativeApp();
+      try {
+        await withTempRepo({ prefix: 'gateforge-native-prototype-env-' }, async (repo) => {
+          // The UNCERTAIN key boundary: the operator's own baseline really
+          // carries `constructor`, `toString` and `__proto__` as OWN values
+          // — the three names a plain object already inherits — and the
+          // alpha stage changes two of them for its dependents while
+          // leaving the third exactly as the baseline declared it. What
+          // every body then sees is asserted INSIDE that body (see the
+          // fixture), because a worker's environment is produced by real
+          // worker processes; this case proves the run really executed all
+          // of them and sealed an honest receipt over the result.
+          installNativeFreezeFixture(repo, { prototypeEnvironment: true });
+          writeCandidateChange(repo);
+
+          const run = await runSupervised(repo, app, {}, { prototypeEnvironment: true });
+          expect(run.code, `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`).toBe(0);
+          expect((JSON.parse(run.stdout) as GateReport).summary.blocking).toBe(0);
+
+          // The SAME honest native accounting as any other layout: every
+          // consumer case the catalog holds ran exactly once and passed.
+          const sealed = sealedExecution(repo);
+          expect(sealed?.complete).toBe(true);
+          expect(sealed?.planned.map((row) => row.logicalKey).sort()).toEqual([...CONSUMER_CASES].sort());
+          expect(sealed?.outcomes.map((outcome) => outcome.logicalKey).sort()).toEqual([...CONSUMER_CASES].sort());
+          expect(sealed?.outcomes.every((outcome) => outcome.status === 'passed' && outcome.attempt === 1)).toBe(true);
+
+          // One prepared candidate behind ONE accepted release, still
+          // after every preparation stage and before every body.
+          expect(existsSync(repo.path(controlRequestPath())), 'the controller asked for a freeze').toBe(true);
+          const ordering = freezeOrdering(spoolLines(repo));
+          expect(ordering.markers, 'exactly one accepted freeze marker').toHaveLength(1);
+          const marker = ordering.markers[0] as number;
+          expect(ordering.prerequisites).toHaveLength(PREREQUISITE_PROJECTS.length);
+          expect(ordering.bodies).toHaveLength(BODY_CASE_COUNT);
+          for (const index of ordering.prerequisites) {
+            expect(index, 'a preparation stage began after the accepted release').toBeLessThan(marker);
+          }
+          for (const index of ordering.bodies) {
+            expect(index, 'a body test began before the accepted release').toBeGreaterThan(marker);
+          }
+
+          // The receipt binds the prepared candidate, and the independent
+          // strict check verifies that very candidate on its own.
+          expect(sealedReceipt(repo)?.candidateTreeId).toBe(candidateTreeIdOf(repo));
+          const check = await runNativeCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], run.env);
+          expect(check.code, `check stdout:\n${check.stdout}\nstderr:\n${check.stderr}`).toBe(0);
+        });
+      } finally {
+        await app.stop();
+      }
+    },
+    1_500_000,
+  );
+
+  it(
     'refuses preparation that writes an UNDECLARED file into the generated state directory',
     async () => {
       const app = await startNativeApp();
@@ -307,11 +430,12 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
       const escapingTarget = join(outside, 'escaping-session.json');
       try {
         await withTempRepo({ prefix: 'gateforge-native-escaping-' }, async (repo) => {
-          installNativeFreezeFixture(repo, {
-            escapingSymlinkTarget: true,
-            escapingOutsideDir: outside,
-          });
-          const result = await runSupervised(repo, app);
+          installNativeFreezeFixture(repo, { escapingSymlinkTarget: true });
+          // The directory OUTSIDE the candidate the escaping target will
+          // point at travels as an ordinary allowlisted runtime value, the
+          // same seam every other per-run fixture value uses: the run
+          // forwards it to the stage, and the stage really writes there.
+          const result = await runSupervised(repo, app, { SHOP_ESCAPING_DIR: outside });
           expect(result.code).not.toBe(0);
           expect(sealedReceipt(repo), 'a target outside the root is never a prepared candidate').toBeNull();
           expect(surfaced(result)).toContain('.auth/alpha.json');
@@ -320,7 +444,21 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           // serialization, and the bytes it points at are this fixture's
           // own — nothing outside the repository was overwritten.
           expect(lstatSync(repo.path('.auth/alpha.json')).isSymbolicLink(), 'the target is a symlink').toBe(true);
-          expect(readFileSync(escapingTarget, 'utf8')).toContain('the escaping fixture');
+          const outsideBytes = readFileSync(escapingTarget, 'utf8');
+          expect(outsideBytes).toContain('the escaping fixture');
+          expect(outsideBytes, 'the escaped bytes are this run\u2019s real alpha session').toContain(
+            sessionCookieFor('.auth/alpha.json'),
+          );
+          // Causality: every preparation stage really executed and
+          // really PASSED, on genuine credentials. The target became a
+          // link only AFTER its state was serialized and the bytes it
+          // points at carry that very session, so what the freeze refused
+          // is the physical containment boundary rather than an upstream
+          // stage that could no longer authenticate.
+          const preparationOutcomes =
+            sealedExecution(repo)?.outcomes.filter((row) => row.file.endsWith('-auth.setup.js')) ?? [];
+          expect(preparationOutcomes, 'every preparation stage ran').toHaveLength(PREREQUISITE_PROJECTS.length);
+          expect(preparationOutcomes.filter((row) => row.status !== 'passed')).toEqual([]);
         });
       } finally {
         await app.stop();
@@ -406,23 +544,25 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
             const sealed = sealedExecution(repo);
             const alphaKey = CONSUMER_CASES.find((key) => key.startsWith('playwright:alpha-auth:')) as string;
             const alpha = sealed?.outcomes.find((row) => row.logicalKey === alphaKey);
+            // Whatever rows the runner emits for the dependents it never
+            // started, the graded fact is what really EXECUTED and sealed
+            // as a pass. Only alpha's OWN dependents are named: the
+            // independent chain declares no edge to alpha, so a stage
+            // there is free to run either way.
+            const executedAndPassed = (sealed?.sessionTrace ?? [])
+              .filter((entry) => entry.sessions.some((session) => session.outcome === 'passed'))
+              .map((entry) => entry.file);
+            const executedDependents = executedAndPassed.filter(
+              (file) => file.includes('beta-auth') || file.includes('gamma-auth'),
+            );
             if (outcome === 'failed') {
               // The stage failed for real, so the controller this project
               // depends on never started: there is nothing to answer, and
               // the run must say so from the outcome it did observe.
               expect(alpha?.status, 'the failing stage is reported as failed').toBe('failed');
               expect(alpha?.attempt).toBe(1);
-              // Whatever rows the runner chooses to emit for the dependents
-              // it skipped, the graded fact is that nothing downstream of the
-              // failure was EXECUTED and sealed as a pass: not one dependent
-              // preparation stage, and not one body.
-              const executedAndPassed = (sealed?.sessionTrace ?? [])
-                .filter((entry) => entry.sessions.some((session) => session.outcome === 'passed'))
-                .map((entry) => entry.file);
-              expect(
-                executedAndPassed.filter((file) => file.includes('beta-auth') || file.includes('gamma-auth')),
-                'no dependent preparation stage executed behind a failed one',
-              ).toEqual([]);
+              // Not one dependent preparation stage, and not one body.
+              expect(executedDependents, 'no dependent preparation stage executed behind a failed one').toEqual([]);
               expect(
                 executedAndPassed.filter((file) => BODY_PROJECTS.some((project) => file.includes(project))),
                 'no body executed against an unprepared candidate',
@@ -430,12 +570,19 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
             } else {
               expect(alpha, 'this stage did execute').toBeDefined();
               expect(alpha?.status, 'the stage did not pass cleanly').not.toBe('passed');
-              if (outcome === 'skipped') expect(alpha?.status).toBe('skipped');
-              // A stage that never passed is still a prerequisite the
-              // controller asks about, so the trusted side answers it on the
-              // failure-only channel the controller polls.
-              expect(readFileSync(repo.path(controlRefusalPath()), 'utf8')).toContain(
-                'prepares the alpha session state',
+              if (outcome === 'skipped') {
+                expect(alpha?.status).toBe('skipped');
+                // A stage that declined to run is still a prerequisite
+                // that never passed, so the runner's own scheduler starts
+                // none of ITS dependents either.
+                expect(executedDependents, 'no dependent preparation stage executed behind a skipped one').toEqual(
+                  [],
+                );
+              }
+              // Whatever the barrier did with the request this stage never
+              // earned, the run published no release over it.
+              expect(existsSync(repo.path(controlReleasePath())), 'nothing was released over this stage').toBe(
+                false,
               );
             }
           });
@@ -496,10 +643,11 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
       const captured = join(capture, 'freeze-release.json');
       try {
         await withTempRepo({ prefix: 'gateforge-native-replay-' }, async (repo) => {
-          // The capture path is configured when the repository is installed,
-          // so BOTH invocations run byte-identical candidates; only the
-          // value of one ordinary variable differs between them. Nothing
-          // exists at that path yet, so the first invocation plants nothing.
+          // The capture path is configured when the repository is
+          // installed, so both invocations run the same candidate shape
+          // and only the value of one ordinary variable differs between
+          // them. Nothing exists at that path yet, so the first
+          // invocation plants nothing.
           installNativeFreezeFixture(repo, { replayCapturePath: captured });
           expect(existsSync(captured), 'no release has been captured yet').toBe(false);
 
@@ -511,9 +659,18 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           expect(sealedReceipt(repo), 'the first invocation sealed a receipt').not.toBeNull();
 
           // Capture those exact bytes OUTSIDE the engine's own control
-          // directory: arming the second invocation legitimately clears the
-          // control files this run does not own.
-          writeFileSync(captured, readFileSync(repo.path(controlReleasePath())));
+          // directory: arming the second invocation legitimately clears
+          // the control files this run does not own. The captured bytes
+          // are kept so the planted document can be compared with them.
+          const capturedRelease = readFileSync(repo.path(controlReleasePath()));
+          writeFileSync(captured, capturedRelease);
+          // A GENUINE, COUNTED candidate change before the second
+          // invocation: the candidate it tests really is not the first
+          // invocation's, so the gate runs it instead of reusing an
+          // authenticated receipt over identical inputs. A reused receipt
+          // would spawn no run at all and would say nothing about the
+          // document under test.
+          writeCandidateChange(repo);
 
           // The second invocation re-plants that exact document during its
           // own preparation stage, long before its controller asks: a real
@@ -531,11 +688,21 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           const replayed = freezeOrdering(newestSpoolLines(repo));
           expect(replayed.bodies, 'the replayed release let a body start').toHaveLength(0);
           expect(replayed.controller, 'the controller is not a native lifecycle').toHaveLength(0);
+          // That really was a second INVOCATION and not a reused receipt:
+          // its own preparation stages executed before the controller was
+          // ever reached. Reusing an authenticated receipt over identical
+          // inputs spawns no lifecycle at all.
+          expect(replayed.prerequisites.length, 'the replayed invocation really executed').toBeGreaterThan(0);
           // The trusted side refused to publish over a release document it
           // did not write, naming the path it found: the replayed bytes were
           // never replaced by a genuine release, so nothing downstream of
           // them could be trusted either.
           expect(readFileSync(repo.path(controlRefusalPath()), 'utf8')).toContain(controlReleasePath());
+          // The document still sitting at the release path is byte for
+          // byte the genuine release an EARLIER invocation signed: the
+          // trusted side refused to publish over it and nothing replaced
+          // it, so a replayed signature is never mistaken for this run's.
+          expect(readFileSync(repo.path(controlReleasePath()))).toEqual(capturedRelease);
         });
       } finally {
         await app.stop();

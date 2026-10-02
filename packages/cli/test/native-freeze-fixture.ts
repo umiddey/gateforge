@@ -36,7 +36,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import { existsSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, type TempRepo } from '@gate-forge/core';
@@ -78,11 +78,73 @@ export { FINGERPRINT };
 /** The name the operator's own whole-run session cookie carries. */
 export const OPERATOR_COOKIE = 'operator-session';
 
-/** The ordinary baseline variable a preparation stage revokes. */
-const DELETED_BASELINE_KEY = 'SHOP_LEGACY';
+/**
+ * The ordinary baseline variable a preparation stage revokes. Both
+ * meaningful fixture names are ordinary, non-reserved and carry no
+ * shared prefix: the controller's projection is proved over names that
+ * are not a namespace of the engine's own, not over a family that
+ * happens to look alike.
+ */
+const DELETED_BASELINE_KEY = 'LEGACY_ACCOUNT_SCOPE';
 
 /** The ordinary variable NO baseline has and preparation introduces. */
-const INTRODUCED_KEY = 'SHOP_TICKET';
+const INTRODUCED_KEY = 'SESSION_TICKET';
+
+/**
+ * The ordinary variable a revision-driven preparation stage mints its
+ * session for. It is an operator value like every other baseline name in
+ * this fixture, and it is forwarded to the runner child only through the
+ * repository's own runtime allowlist — never by a Gateforge-private channel.
+ */
+export const SESSION_REVISION_ENV = 'SHOP_STATE_REVISION';
+
+/**
+ * The three names a plain object's prototype already carries. No prefix
+ * restriction is available for them and none is invented here: the
+ * variable the operator really owns may be named `constructor`, `toString`
+ * or `__proto__`, and an environment projection has to carry all three.
+ */
+const PROTOTYPE_BASELINE_NAMES: readonly string[] = ['constructor', 'toString', '__proto__'];
+
+/**
+ * The OWN trusted baseline values of those three names, built with
+ * `Object.fromEntries` on purpose. An object literal would hand
+ * `__proto__` to the prototype setter instead of defining it, and an
+ * ordinary lookup would find an inherited member where the owner set a
+ * real value — so the baseline this fixture declares must be constructed
+ * the only way that makes all three OWN.
+ */
+const PROTOTYPE_BASELINE_VALUES: Readonly<Record<string, string>> = Object.fromEntries([
+  ['constructor', 'trusted-constructor'],
+  ['toString', 'trusted-tostring'],
+  ['__proto__', 'trusted-proto'],
+]);
+
+/**
+ * What the alpha preparation stage sets for its OWN dependents: two of the
+ * three names change, and `__proto__` is deliberately left alone. Nothing
+ * here guesses what deleting an own `__proto__` should mean downstream —
+ * the stage simply does not touch that name.
+ */
+const PROTOTYPE_ALPHA_VALUES: Readonly<Record<string, string>> = Object.fromEntries([
+  ['constructor', 'alpha-constructor'],
+  ['toString', 'alpha-tostring'],
+]);
+
+/**
+ * The prototype-name values a body inherits: the trusted baseline, with
+ * the stage's own values layered over the names it changed. Both operands
+ * are spread, and a spread defines own properties instead of assigning
+ * them, so `__proto__` survives as a real entry here too.
+ *
+ * @param overrides: the values a preparation stage set for its dependents.
+ *
+ * @returns
+ *   Record<string, string>: the OWN values, one per prototype name.
+ */
+function prototypeBaselineValues(overrides: Readonly<Record<string, string>> = {}): Record<string, string> {
+  return { ...PROTOTYPE_BASELINE_VALUES, ...overrides };
+}
 
 /**
  * One planned consumer project of the fixture suite: its name, the file
@@ -190,30 +252,32 @@ export const BODY_CASE_COUNT: number = BODY_PROJECTS_TABLE.reduce(
 /** The body spec files, one per body project, in project order. */
 export const BODY_SPEC_FILES: readonly string[] = BODY_PROJECTS_TABLE.map((project) => project.file);
 
-/** One generated session state file and the session cookie it carries. */
-interface GeneratedState {
-  /** Repo-relative posix path the project declares as its `storageState`. */
-  path: string;
+/** One generated session state file: what it carries and who reads it. */
+interface GeneratedStateMetadata {
   /** The cookie name the preparation stage signs into that file. */
   cookie: string;
-  /** The project that declares it (its consumer). */
+  /** The project that declares it as its `storageState`. */
   consumer: string;
 }
 
 /**
- * The generated state the four preparation stages really produce, and the
- * consumer each one belongs to. Every path is git-ignored workspace bytes
- * that no commit ever carries.
+ * The generated state the four preparation stages really produce, keyed by
+ * the repo-relative path a project declares as its `storageState`, with the
+ * session cookie that state carries and the consumer each one belongs to.
+ * Every key is git-ignored workspace bytes that no commit ever carries.
  */
-const GENERATED_STATE_TABLE: readonly GeneratedState[] = [
-  { path: '.auth/alpha.json', cookie: 'alpha-session', consumer: 'zeta-body' },
-  { path: '.auth/beta.json', cookie: 'beta-session', consumer: 'delta-body' },
-  { path: '.auth/gamma.json', cookie: 'gamma-session', consumer: 'eta-body' },
-  { path: '.auth/omega.json', cookie: 'omega-session', consumer: 'epsilon-body' },
-];
+const GENERATED_STATE_BY_PATH: Readonly<Record<string, GeneratedStateMetadata>> = {
+  '.auth/alpha.json': { cookie: 'alpha-session', consumer: 'zeta-body' },
+  '.auth/beta.json': { cookie: 'beta-session', consumer: 'delta-body' },
+  '.auth/gamma.json': { cookie: 'gamma-session', consumer: 'eta-body' },
+  '.auth/omega.json': { cookie: 'omega-session', consumer: 'epsilon-body' },
+};
 
-/** The generated state files the preparation stages really produce. */
-export const GENERATED_STATE: readonly string[] = GENERATED_STATE_TABLE.map((state) => state.path);
+/**
+ * The generated state files the preparation stages really produce, in the
+ * order this table declares them.
+ */
+export const GENERATED_STATE: readonly string[] = Object.keys(GENERATED_STATE_BY_PATH);
 
 /**
  * The session cookie name one generated state file carries.
@@ -224,7 +288,13 @@ export const GENERATED_STATE: readonly string[] = GENERATED_STATE_TABLE.map((sta
  *   string: the cookie name the file really contains.
  */
 export function sessionCookieFor(statePath: string): string {
-  const state = GENERATED_STATE_TABLE.find((entry) => entry.path === statePath);
+  // The own-property guard is not decoration: a plain lookup on an object
+  // literal also finds INHERITED members — `toString`, `constructor`,
+  // `__proto__` — so an unguarded read would hand back one of those instead
+  // of the unknown-path error these helpers have always thrown.
+  const state: GeneratedStateMetadata | undefined = Object.hasOwn(GENERATED_STATE_BY_PATH, statePath)
+    ? GENERATED_STATE_BY_PATH[statePath]
+    : undefined;
   if (state === undefined) throw new Error(`no generated state is declared at '${statePath}'`);
   return state.cookie;
 }
@@ -238,7 +308,9 @@ export function sessionCookieFor(statePath: string): string {
  *   string: the project that declares it as its `use.storageState`.
  */
 export function consumerOf(statePath: string): string {
-  const state = GENERATED_STATE_TABLE.find((entry) => entry.path === statePath);
+  const state: GeneratedStateMetadata | undefined = Object.hasOwn(GENERATED_STATE_BY_PATH, statePath)
+    ? GENERATED_STATE_BY_PATH[statePath]
+    : undefined;
   if (state === undefined) throw new Error(`no generated state is declared at '${statePath}'`);
   return state.consumer;
 }
@@ -316,7 +388,12 @@ export async function runNativeCli(
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const physicalBin = process.env['GATEFORGE_PHYSICAL_CLI_BIN'];
   if (physicalBin === undefined) return runWorkspaceCli(repo, argv, env);
-  const childEnv: NodeJS.ProcessEnv = { ...process.env };
+  // A NULL-PROTOTYPE child map. The operator's baseline may really own a
+  // key named `__proto__`; on an ordinary object that assignment would
+  // reach Object.prototype's setter and the value would never reach the
+  // CLI at all. Every value, every removal and every physical-CLI flag
+  // below is unchanged — only the container's prototype is.
+  const childEnv: NodeJS.ProcessEnv = Object.assign(Object.create(null) as NodeJS.ProcessEnv, process.env);
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) delete childEnv[key];
     else childEnv[key] = value;
@@ -484,11 +561,17 @@ export async function startNativeApp(): Promise<{
  * @param repo: the repository whose policy revision is pinned.
  * @param extra: additional operator values (the attested app wiring and the
  *   per-run session secret).
+ * @param options: the fixture variant; the prototype-name variant adds its
+ *   three OWN baseline values here.
  *
  * @returns
  *   Record<string, string>: the environment shared by the run and the check.
  */
-export function nativeRunEnv(repo: TempRepo, extra: Record<string, string> = {}): Record<string, string> {
+export function nativeRunEnv(
+  repo: TempRepo,
+  extra: Record<string, string> = {},
+  options: NativeFixtureOptions = {},
+): Record<string, string> {
   const config = loadConfig(repo.path('.gateforge.yml'));
   return {
     GATEFORGE_WITNESS_VERIFIER_KEY: NATIVE_VERIFIER_KEY,
@@ -496,6 +579,7 @@ export function nativeRunEnv(repo: TempRepo, extra: Record<string, string> = {})
     SHOP_REGION: 'eu-west',
     SHOP_TIER: 'gold',
     [DELETED_BASELINE_KEY]: 'deprecated',
+    ...(options.prototypeEnvironment === true ? prototypeBaselineValues() : {}),
     ...extra,
   };
 }
@@ -525,8 +609,6 @@ export interface NativeFixtureOptions {
   inputMovingPreparation?: boolean;
   /** A preparation stage that turns its own target into an escaping symlink. */
   escapingSymlinkTarget?: boolean;
-  /** Absolute directory OUTSIDE the repo the escaping target points into. */
-  escapingOutsideDir?: string;
   /** A preparation stage that appends a BODY begin before the release exists. */
   queueEarlyBodyBegin?: boolean;
   /** The control document a preparation stage plants before the controller runs. */
@@ -534,9 +616,9 @@ export interface NativeFixtureOptions {
   /**
    * Absolute path OUTSIDE the repository where a GENUINE signed release is
    * captured and later re-planted byte for byte. It is configured when the
-   * repository is installed, so BOTH invocations run the same candidate
-   * bytes and only the environment differs; during the first invocation the
-   * file simply does not exist yet, so nothing is planted.
+   * repository is installed, so both invocations run the same candidate
+   * shape and only ordinary values differ between them; during the first
+   * invocation the file simply does not exist yet, so nothing is planted.
    */
   replayCapturePath?: string;
   /** A preparation stage that plants a forged control REQUEST. */
@@ -547,10 +629,57 @@ export interface NativeFixtureOptions {
   reservedProjectName?: boolean;
   /** The generated state embeds the current commit, so it changes per commit. */
   stateTracksCommit?: boolean;
+  /**
+   * The generated state mints its session for an OPERATOR revision
+   * (`SESSION_REVISION_ENV`) instead of the current commit, so two runs
+   * over different commits produce byte-identical state. This is the
+   * "preparation restores the parent's own bytes" condition, reached with a
+   * genuine session rather than with written bytes.
+   */
+  stateRevision?: boolean;
+  /**
+   * A CommonJS-default root package with an ESM spec directory of its own:
+   * the root `package.json` declares no module kind, and `specs/` carries
+   * `{"type": "module"}`. The native config stays an `.mjs` module, so the
+   * engine's generated controller — which lives under the root state
+   * directory, and therefore under the root package — has to be interpreted
+   * under the root's module rules while every body is not.
+   */
+  mixedModuleScope?: boolean;
+  /**
+   * The trusted baseline carries OWN values for `constructor`, `toString`
+   * and `__proto__` — the three names a plain object's prototype already
+   * carries — and the alpha preparation stage changes the first two for
+   * its dependents while leaving `__proto__` alone. This is the uncertain
+   * key boundary: an environment projection that only understands
+   * ordinary names silently loses real operator values, so every body
+   * grades what it really inherited from inside its own worker.
+   */
+  prototypeEnvironment?: boolean;
   /** The owner opts this repository into the test-only re-seal path. */
   resealEnabled?: boolean;
   /** An operator whole-run session state outranks every declaration. */
   operatorState?: boolean;
+  /**
+   * The COMMITTED runtime document declares the owner-approved dependency
+   * reuse for `node_modules`. A materialized candidate checkout contains
+   * TRACKED index bytes only, so an isolated checkout built from this
+   * repository would otherwise carry no dependencies at all; the
+   * declared reuse is the ONLY sanctioned bridge that hands it the
+   * owner's own link. The base commit already carries the declaration
+   * and the policy pin is computed after the document exists, so both
+   * ownership gates hold by the ordinary install.
+   */
+  declaredDependencyReuse?: boolean;
+  /**
+   * The workspace carries a REAL installed dependency closure — ordinary
+   * files, no link — instead of the dependency link every other variant
+   * uses. A raw candidate ingestion with no reuse-mount support refuses
+   * EVERY link, fail closed, so the bytes such a run seals over have to
+   * be real files from the start: nothing is ever removed after the seal
+   * to make the candidate look unchanged.
+   */
+  installedDependencies?: boolean;
 }
 
 /**
@@ -562,12 +691,27 @@ export interface NativeFixtureOptions {
  * The two fixture-carried names are ALWAYS allowlisted, in every variant:
  * a fixture whose allowlist changed between two invocations would change
  * the candidate the second invocation tests, and only the VALUE of an
- * ordinary variable may differ between them.
+ * ordinary variable may differ between them. The session revision is the
+ * same kind of fixture-carried name, allowlisted for EXACTLY the variant
+ * that reads it, so every other variant's runtime document stays the byte
+ * it always was.
+ *
+ * The three prototype names are allowlisted for EXACTLY the variant that
+ * declares them, for the same reason: every other variant's runtime
+ * document stays the byte it always was.
+ *
+ * The document's OTHER half is the owner-approved dependency reuse, and
+ * it is declared for EXACTLY the variant whose isolated checkout needs
+ * one: a checkout is materialized from tracked index bytes, so without
+ * the declaration it would carry no dependencies at all. Every other
+ * variant keeps the runtime document byte for byte.
+ *
+ * @param options: the fixture variant.
  *
  * @returns
  *   string: the runtime document source.
  */
-function runtimeYml(): string {
+function runtimeYml(options: NativeFixtureOptions): string {
   const allow = [
     'SHOP_REGION',
     'SHOP_TIER',
@@ -576,10 +720,14 @@ function runtimeYml(): string {
     'SHOP_SESSION_SECRET',
     'SHOP_CAPTURED_RELEASE',
     'SHOP_ESCAPING_DIR',
+    ...(options.stateRevision === true ? [SESSION_REVISION_ENV] : []),
+    ...(options.prototypeEnvironment === true ? [...PROTOTYPE_BASELINE_NAMES] : []),
   ];
   return `schemaVersion: 1
 envAllowlist: [${allow.join(', ')}]
-`;
+${options.declaredDependencyReuse === true ? `prepare:
+  reuse: [node_modules]
+` : ''}`;
 }
 
 /**
@@ -632,12 +780,27 @@ function plantReleaseStatement(shape: 'unsigned' | 'forged' | 'replay'): string 
   return `
   // The identities THIS run armed, read out of the generated controller
   // spec the CLI pinned before it spawned the runner, and the sha256 of
-  // that spec's own current bytes.
+  // that spec's own current bytes. The armed document is emitted as one
+  // escaped JSON literal inside a JSON.parse call — the only shape that
+  // can carry an own '__proto__' key or a value holding a quote — so the
+  // slice is read between the call's open paren and its closing ');'
+  // and parsed twice: once to the literal, once to the document.
   const specText = readFileSync(${controlDir} + '/${FREEZE_CONTROL_SPEC_FILE}', 'utf8');
-  const armedAt = specText.indexOf('const ARMED = ');
-  const armedEnd = specText.indexOf('\\n};', armedAt);
+  const armedAt = specText.indexOf('const ARMED = JSON.parse(');
+  const armedEnd = specText.indexOf('\\n', armedAt);
   expect(armedAt >= 0 && armedEnd > armedAt, 'this run armed a freeze controller').toBe(true);
-  const armed = JSON.parse(specText.slice(armedAt + 'const ARMED = '.length, armedEnd + 2));
+  const armedLiteral = specText.slice(armedAt + 'const ARMED = JSON.parse('.length, armedEnd).trim();
+  expect(armedLiteral.endsWith(');'), 'the armed document is one escaped JSON literal').toBe(true);
+  const armed = JSON.parse(JSON.parse(armedLiteral.slice(0, -2)));
+  // The identities are REAL: a planted document built from an undefined
+  // field would carry no identity at all, and the refusal it is meant to
+  // provoke would then prove nothing.
+  expect(
+    ['project', 'runId', 'invocationId', 'nonce', 'specPath'].every(
+      (field) => typeof armed[field] === 'string' && armed[field].length > 0,
+    ),
+    'this run armed a freeze controller with real identities',
+  ).toBe(true);
   const payload = {
     schemaVersion: 1,
     project: armed.project,
@@ -673,6 +836,8 @@ function plantReleaseStatement(shape: 'unsigned' | 'forged' | 'replay'): string 
  * @param input.fail: fail before producing anything.
  * @param input.retry: fail the first attempt so the runner retries it.
  * @param input.trackCommit: embed the current commit in the saved session.
+ * @param input.revision: mint the session for an operator revision instead
+ *   of the commit or the fixed literal.
  * @param input.escapingSymlink: make this stage's own target escape the
  *   root AFTER the storage state was serialized.
  *
@@ -696,6 +861,7 @@ function preparationSpec(input: {
   plantedRelease?: 'unsigned' | 'forged' | 'replay';
   plantedRequest?: boolean;
   trackCommit?: boolean;
+  revision?: boolean;
 }): string {
   const requires = (input.requires ?? [])
     .map(
@@ -735,10 +901,16 @@ function preparationSpec(input: {
   // This stage's OWN target becomes a symlink to bytes outside the
   // candidate root. The swap happens AFTER the storageState
   // serialization, so the target really is still a symlink when the
-  // freeze inspects the workspace, and the bytes it points at belong to
-  // this fixture alone.
+  // freeze inspects the workspace.
+  //
+  // The bytes it points at are this fixture's own, and they are the REAL
+  // session this stage just serialized: every dependent stage can still
+  // authenticate against them, so the run really reaches the freeze with
+  // a live credential and what the freeze refuses is the containment
+  // boundary rather than a broken upstream stage.
   const outside = join(String(process.env.SHOP_ESCAPING_DIR), 'escaping-session.json');
-  writeFileSync(outside, '{"cookies":[],"origins":[],"ownedBy":"the escaping fixture"}\\n');
+  const serialized = JSON.parse(readFileSync('${input.statePath}', 'utf8'));
+  writeFileSync(outside, JSON.stringify({ ...serialized, ownedBy: 'the escaping fixture' }, null, 2) + '\\n');
   rmSync('${input.statePath}', { force: true });
   symlinkSync(outside, '${input.statePath}');`
       : '';
@@ -805,7 +977,14 @@ function preparationSpec(input: {
   const commit = input.trackCommit === true
     ? `  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();\n`
     : '';
-  const sessionPart = input.trackCommit === true ? 'commit' : "'value'";
+  // A revision-driven stage mints its session for an OPERATOR value, so
+  // the very same revision yields byte-identical state on every run: the
+  // preparation a second run performs restores what the parent sealed.
+  const revision = input.revision === true
+    ? `  const revision = String(process.env[${JSON.stringify(SESSION_REVISION_ENV)}]);
+  expect(revision, 'the operator named the revision this session is minted for').toMatch(/^[0-9a-z]{1,64}$/);\n`
+    : '';
+  const sessionPart = input.revision === true ? 'revision' : input.trackCommit === true ? 'commit' : "'value'";
   return `import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -813,7 +992,7 @@ import { join } from 'node:path';
 import { test, expect } from '@gate-forge/pack-playwright';
 ${input.retry === true ? '\ntest.describe.configure({ retries: 1 });\n' : ''}
 test('${input.title}', async ({ browser }, testInfo) => {
-${skip}${requires}${commit}
+${skip}${requires}${commit}${revision}
 ${fail}${retry}${unsafe}${inputMoving}${queueEarlyBodyBegin}${plant}
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -835,7 +1014,7 @@ ${fail}${retry}${unsafe}${inputMoving}${queueEarlyBodyBegin}${plant}
   mkdirSync('.auth', { recursive: true });
   await context.storageState({ path: '${input.statePath}' });
   expect(readFileSync('${input.statePath}', 'utf8')).toContain('${input.cookie}');
-${input.trackCommit === true ? "  expect(readFileSync('${input.statePath}', 'utf8')).toContain(commit);\n" : ''}
+${input.trackCommit === true ? `  expect(readFileSync(${JSON.stringify(input.statePath)}, 'utf8')).toContain(commit);\n` : ''}${input.revision === true ? `  expect(readFileSync(${JSON.stringify(input.statePath)}, 'utf8')).toContain(revision);\n` : ''}
   await context.close();
 ${escapingSymlink}
 ${produces}
@@ -850,9 +1029,15 @@ function alphaSpec(options: NativeFixtureOptions): string {
     title: (PREPARATION_PROJECTS[0] as ConsumerProject).titles[0] as string,
     statePath: '.auth/alpha.json',
     cookie: 'alpha-session',
-    // An ordinary baseline variable CHANGED, and one that did not exist at
-    // baseline at all CREATED.
-    produces: { SHOP_REGION: 'alpha-region', [INTRODUCED_KEY]: 'alpha-created' },
+    // An ordinary baseline variable CHANGED, one that did not exist at
+    // baseline at all CREATED, and — in the prototype-name variant only —
+    // two of the three prototype names CHANGED for this stage's dependents
+    // while the third is left exactly as the trusted baseline declared it.
+    produces: {
+      SHOP_REGION: 'alpha-region',
+      [INTRODUCED_KEY]: 'alpha-created',
+      ...(options.prototypeEnvironment === true ? { ...PROTOTYPE_ALPHA_VALUES } : {}),
+    },
     fail: options.failingPrerequisite === true,
     skip: options.skippedPrerequisite === true,
     retry: options.retriedPrerequisite === true,
@@ -864,6 +1049,7 @@ function alphaSpec(options: NativeFixtureOptions): string {
     ...(options.replayCapturePath !== undefined ? { plantedRelease: 'replay' as const } : {}),
     plantedRequest: options.forgedRequest === true,
     trackCommit: options.stateTracksCommit === true,
+    revision: options.stateRevision === true,
   });
 }
 
@@ -900,6 +1086,14 @@ function omegaSpec(options: NativeFixtureOptions): string {
     cookie: 'omega-session',
     produces: { SHOP_REGION: 'omega-region', [INTRODUCED_KEY]: 'omega-created' },
     fail: options.failingPrerequisite === true,
+    revision: options.stateRevision === true,
+    // The independent chain's state tracks the commit exactly like the
+    // deepest chain's does, so "every commit changes the generated state"
+    // is one property of the fixture rather than one of the chains that
+    // happen to be read first. Revision mode keeps precedence: a stage
+    // that mints for an operator revision embeds the revision, never the
+    // commit, whichever of the two the variant selected.
+    trackCommit: options.stateTracksCommit === true,
   });
 }
 
@@ -1003,8 +1197,13 @@ ${absentEnv}
 
   // The protected route is the authority: it answers 401 to a caller with
   // no credential at all, and 200 only to the credential this run signed.
-  const anonymous = await browser.newContext();
-  const denied = await anonymous.newPage().goto(String(process.env.SHOP_PROTECTED_URL) + '/session');
+  // The state's own storage state is NOT inherited here: Playwright's
+  // browser fixture fills the ABSENT options of a new context from the
+  // project's combined context options, so a bare newContext() arrives at
+  // the route already holding the very session this body proves. An
+  // explicit EMPTY state is what makes this caller genuinely anonymous.
+  const anonymous = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+  const denied = await (await anonymous.newPage()).goto(String(process.env.SHOP_PROTECTED_URL) + '/session');
   expect(denied?.status(), 'the route refuses an unauthenticated caller').toBe(401);
   await anonymous.close();
   const granted = await page.goto(String(process.env.SHOP_PROTECTED_URL) + '/session');
@@ -1096,6 +1295,14 @@ enforcement:
   // ever reaches a body: the operator's session is what every body starts
   // from, and the generated files are only read, never served.
   const ownCookie = options.operatorState === true ? OPERATOR_COOKIE : null;
+  // The prototype-name variant: what every body must REALLY inherit for
+  // the three uncertain names. The independent body sees the trusted
+  // baseline untouched, the two bodies on alpha's chain see the two names
+  // alpha changed plus the baseline's own `__proto__`, and the omega chain
+  // changes none of them, so its body sees the baseline for all three.
+  const prototypeBaseline = options.prototypeEnvironment === true ? prototypeBaselineValues() : {};
+  const prototypeAlphaChain =
+    options.prototypeEnvironment === true ? prototypeBaselineValues(PROTOTYPE_ALPHA_VALUES) : {};
   repo.writeFiles({
     '.gateforge.yml': gateforgeConfig,
     '.gateforge/fixture-detector.mjs': DETECTOR,
@@ -1103,7 +1310,7 @@ enforcement:
     '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,
     '.gateforge/adapters/tenant.accounts.mjs': ADAPTER,
     '.gateforge/baselines/obligations.json': `${JSON.stringify({ schemaVersion: 1, fingerprints: [] }, null, 2)}\n`,
-    '.gateforge/runtime.yml': runtimeYml(),
+    '.gateforge/runtime.yml': runtimeYml(options),
     'src/accounts.js': '// fixture source: the accounts resource lives here.\n',
     'src/orders.js': '// fixture source: the orders resource lives here.\n',
     'specs/accounts-surface.js': readFileSync(join(ROOT, 'example/e2e/accounts-surface.js'), 'utf8'),
@@ -1116,13 +1323,20 @@ enforcement:
       ownCookie: ownCookie ?? 'beta-session',
       fileCookie: 'beta-session',
       statePath: '.auth/beta.json',
-      // Its OWN chains' values win over the baseline the controller
-      // projected back: that is only true while the controller is the
-      // FIRST dependency, ahead of the body's original edges.
-      expectEnv: { SHOP_REGION: 'beta-region', SHOP_TIER: 'gamma-tier' },
-      // The baseline key its own chain revoked, and the key that chain
-      // created two hops up: neither may survive the projection.
-      absentEnv: [DELETED_BASELINE_KEY, INTRODUCED_KEY],
+      // Its OWN chain's values, in the order that chain produced them:
+      // beta's region, gamma's tier, and the ticket alpha created two hops
+      // up. Ordinary native propagation along a dependency chain is
+      // CUMULATIVE, so a value an earlier stage produced is still present
+      // when this body starts.
+      expectEnv: {
+        ...prototypeAlphaChain,
+        SHOP_REGION: 'beta-region',
+        SHOP_TIER: 'gamma-tier',
+        [INTRODUCED_KEY]: 'alpha-created',
+      },
+      // The one ordinary baseline key that chain revoked, and only that
+      // one: a deletion travels the chain exactly as a creation does.
+      absentEnv: [DELETED_BASELINE_KEY],
       claims: DELTA_CLAIMS,
     }),
     'specs/epsilon-body.spec.js': bodySpec({
@@ -1134,6 +1348,7 @@ enforcement:
       // never touched and another chain DID revoke: both come back
       // untouched here, because they were projected back to the baseline.
       expectEnv: {
+        ...prototypeBaseline,
         SHOP_REGION: 'omega-region',
         [INTRODUCED_KEY]: 'omega-created',
         SHOP_TIER: 'gold',
@@ -1149,7 +1364,12 @@ enforcement:
       // An independent project has no edge of its own, so EVERY ordinary
       // baseline value is back exactly as it was and nothing a preparation
       // stage produced survives.
-      expectEnv: { SHOP_REGION: 'eu-west', SHOP_TIER: 'gold', [DELETED_BASELINE_KEY]: 'deprecated' },
+      expectEnv: {
+        ...prototypeBaseline,
+        SHOP_REGION: 'eu-west',
+        SHOP_TIER: 'gold',
+        [DELETED_BASELINE_KEY]: 'deprecated',
+      },
       absentEnv: [INTRODUCED_KEY],
       rewriteState: options.bodyRewritesGeneratedState === true,
     }),
@@ -1158,27 +1378,82 @@ enforcement:
       ownCookie: ownCookie ?? 'gamma-session',
       fileCookie: 'gamma-session',
       statePath: '.auth/gamma.json',
-      // Only the project this body depends on produces environment for it:
-      // gamma changed the tier, and every other value is the baseline the
-      // controller projected back — including the key beta revoked one hop
-      // earlier, which never travelled a second hop.
-      expectEnv: { SHOP_TIER: 'gamma-tier', SHOP_REGION: 'eu-west', [DELETED_BASELINE_KEY]: 'deprecated' },
-      absentEnv: [INTRODUCED_KEY],
+      // The tail of the deepest chain inherits that WHOLE chain's
+      // environment, not only its immediate prerequisite's: gamma set the
+      // tier, beta's region reached this body two hops down, and alpha's
+      // ticket three hops down.
+      expectEnv: {
+        ...prototypeAlphaChain,
+        SHOP_TIER: 'gamma-tier',
+        SHOP_REGION: 'beta-region',
+        [INTRODUCED_KEY]: 'alpha-created',
+      },
+      // The baseline key that same chain revoked one hop above still does
+      // not come back: a deletion travels the chain as a creation does.
+      absentEnv: [DELETED_BASELINE_KEY],
     }),
     'playwright.config.mjs': playwrightConfig(options),
-    'package.json': `${JSON.stringify({ type: 'module' }, null, 2)}\n`,
+    // The MIXED module scope: with `mixedModuleScope`, the root package
+    // declares no module kind at all — so CommonJS is the default for every
+    // file under it, including the generated freeze controller the CLI
+    // writes into the state directory — while the spec directory carries an
+    // ESM package of its own. The native config is an `.mjs` module either
+    // way, so the configuration itself is never what changes.
+    ...(options.mixedModuleScope === true
+      ? {
+          'package.json': `${JSON.stringify({ name: 'native-preparation-fixture', private: true }, null, 2)}\n`,
+          'specs/package.json': `${JSON.stringify({ type: 'module' }, null, 2)}\n`,
+        }
+      : { 'package.json': `${JSON.stringify({ type: 'module' }, null, 2)}\n` }),
     // `.auth/` is gitignored: the preparation stages write their genuine
     // session state there, so it exists as ignored workspace bytes and
     // never in a commit.
     '.gitignore': ['node_modules', '.auth/', `${DEFAULT_STATE_DIR}`, ''].join('\n'),
   });
-  symlinkSync(
-    process.env['GATEFORGE_PHYSICAL_NODE_MODULES'] ?? join(ROOT, 'node_modules'),
-    join(repo.root, 'node_modules'),
-    'dir',
-  );
+  if (options.installedDependencies === true) {
+    installConsumerDependencies(repo.root);
+  } else {
+    symlinkSync(
+      process.env['GATEFORGE_PHYSICAL_NODE_MODULES'] ?? join(ROOT, 'node_modules'),
+      join(repo.root, 'node_modules'),
+      'dir',
+    );
+  }
   repo.git(['add', '-A']);
   repo.commit('native preparation fixture');
+}
+
+/**
+ * The dependency closure a consumer install actually provides, written
+ * into the workspace as ordinary files.
+ *
+ * Two real entry points have to resolve from the workspace itself: the
+ * preparation and body specs import `@gate-forge/pack-playwright`, and
+ * the in-process detector imports `@gate-forge/http-contract`. Their
+ * declared dependencies are installed with them — the runner the engine
+ * selects and spawns, the two engine packages the pack loads, and the
+ * libraries those declare — so every module those two entry points
+ * really load is present, at the versions this repository is built
+ * against. It is the closure an install produces (the shape
+ * `example-first-run.test.ts` installs), never a launcher stub, and the
+ * copy dereferences, so the workspace carries no link anywhere.
+ *
+ * @param repoRoot: absolute root of the fixture repository.
+ *
+ * @returns
+ *   void.
+ */
+function installConsumerDependencies(repoRoot: string): void {
+  const modules = join(repoRoot, 'node_modules');
+  const installed = process.env['GATEFORGE_PHYSICAL_NODE_MODULES'] ?? join(ROOT, 'node_modules');
+  const engine = join(modules, '@gate-forge');
+  mkdirSync(engine, { recursive: true });
+  for (const name of ['pack-playwright', 'core', 'witness', 'http-contract']) {
+    cpSync(join(ROOT, 'packages', name), join(engine, name), { recursive: true, dereference: true });
+  }
+  for (const name of ['playwright', 'playwright-core', 'typescript', 'yaml', 'zod']) {
+    cpSync(join(installed, name), join(modules, name), { recursive: true, dereference: true });
+  }
 }
 
 /**
@@ -1228,6 +1503,55 @@ export function installOperatorState(
   return path;
 }
 
+/**
+ * Rewrites ONE generated state file to a different session revision, the
+ * way an untracked workspace edit would: the cookie is the one that state
+ * really declares and its value is a MAC this run's protected route
+ * accepts, over this run's own secret. A body that reads the rewritten
+ * state therefore still proves the session semantics instead of failing
+ * over bytes nothing signed, so what a run reports is a decision about the
+ * re-seal rather than an accident.
+ *
+ * @param repo: the repository whose generated state is rewritten.
+ * @param statePath: the repo-relative generated state path.
+ * @param origin: the attested base URL the session belongs to.
+ * @param secret: the per-run MAC secret.
+ * @param sessionPart: the revision half of the session credential.
+ *
+ * @returns
+ *   string: the state bytes now on disk.
+ */
+export function writeGeneratedSessionState(
+  repo: TempRepo,
+  statePath: string,
+  origin: string,
+  secret: string,
+  sessionPart: string,
+): string {
+  const cookie = sessionCookieFor(statePath);
+  const bytes = `${JSON.stringify(
+    {
+      cookies: [
+        {
+          name: cookie,
+          value: signedSessionValue(cookie, sessionPart, secret),
+          domain: new URL(origin).hostname,
+          path: '/',
+          expires: -1,
+          httpOnly: false,
+          secure: false,
+          sameSite: 'Lax',
+        },
+      ],
+      origins: [],
+    },
+    null,
+    2,
+  )}\n`;
+  repo.writeFiles({ [statePath]: bytes });
+  return bytes;
+}
+
 /** The sealed execution result of the run that just finished. */
 export interface SealedExecution {
   planned: Array<{ logicalKey: string; project: string | null; file: string; titlePath: string[] }>;
@@ -1248,6 +1572,8 @@ export interface SealedReceipt {
   runId: string;
   inputDigest: string;
   candidateTreeId: string;
+  /** Parent commit the receipt was sealed against (null when unborn). */
+  parentSha?: string | null;
   changedPaths?: string[];
   resealDisregarded?: string[];
   carriedTests?: number;
@@ -1285,20 +1611,29 @@ export function sealedReceipt(repo: TempRepo): SealedReceipt | null {
 }
 
 /**
- * How many re-seal chain hops the run state currently retains.
+ * How many re-seal chain artifacts the run state currently RETAINS.
+ *
+ * One hop is not one file: a retained hop is a full set of documents
+ * (`hop-<n>-records.json`, `-claims.json`, `-attestations.json`,
+ * `-receipt.json`, `-execution-result.json`, `-catalog.json`), so this
+ * counts every retained artifact of every hop and the number is a property
+ * of the chain's SHAPE, never a hop count.
+ *
+ * Zero means no artifact is retained — whether the chain directory is gone
+ * or simply holds nothing — which is what a suite reads after a refused or
+ * never-issued re-seal to show that nothing was kept. A chain directory
+ * that exists and cannot be read is an error, not an absence: it is never
+ * silently converted to zero.
  *
  * @param repo: the repository the chain lives in.
  *
  * @returns
- *   number: the retained hop count (0 when the chain was cleared).
+ *   number: the retained artifact count (0 when the chain retains none).
  */
-export function resealChainHops(repo: TempRepo): number {
+export function retainedResealArtifactCount(repo: TempRepo): number {
   const directory = join(resolveStateDir(repo.root), 'reseal-chain');
-  try {
-    return readdirSync(directory).length;
-  } catch {
-    return 0;
-  }
+  if (!existsSync(directory)) return 0;
+  return readdirSync(directory).length;
 }
 
 /**
@@ -1407,4 +1742,26 @@ export function writeCandidateChange(repo: TempRepo): void {
   repo.writeFiles({
     'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited comment.\n',
   });
+}
+
+/**
+ * The same commit-only candidate change, COMMITTED.
+ *
+ * A re-seal parent is authenticated against the COMMIT its receipt names:
+ * the sealed candidate must cover that commit's tree, so an uncommitted
+ * source edit leaves a parent that proves bytes no commit carries and the
+ * verification refuses it. A suite that grades a re-seal therefore records
+ * the audited comment in the source before the full parent run, and stages
+ * ONLY that one file — the generated session state and the run state are
+ * git-ignored workspace bytes and can never reach a commit here.
+ *
+ * @param repo: the fixture repository.
+ *
+ * @returns
+ *   string: the sha of the commit that carries the change.
+ */
+export function commitCandidateChange(repo: TempRepo): string {
+  writeCandidateChange(repo);
+  repo.git(['add', '--', 'src/accounts.js']);
+  return repo.commit('record the audited comment in the application source');
 }

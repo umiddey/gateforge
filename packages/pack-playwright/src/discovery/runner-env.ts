@@ -149,6 +149,18 @@ export const RUNNER_SYSTEM_ALLOWLIST: readonly string[] = [
  * `vars` win over the ambient environment; only allowlisted names are
  * copied at all.
  *
+ * The child's own record has NO prototype. Every name here is an
+ * arbitrary operator- or supervisor-chosen name, and `constructor`,
+ * `toString` and `__proto__` are both legal environment names and
+ * properties every plain object inherits: on a plain object an
+ * assignment to `__proto__` stores no own key at all (the inherited
+ * accessor swallows it), and a membership test by lookup
+ * (`child[name] === undefined`) reports an inherited property as
+ * already present. This map is the trusted baseline the freeze
+ * controller projects every body worker back to, so a name dropped here
+ * is a name no body worker can ever be projected back to — it keeps
+ * whatever the preparation wrote instead.
+ *
  * Args:
  *   vars: supervisor-supplied run variables (must be child-safe; a
  *     secret name here is a wiring bug and throws).
@@ -182,7 +194,7 @@ export function buildRunnerChildEnv(
       );
     }
   }
-  const child: Record<string, string> = {};
+  const child = Object.create(null) as Record<string, string>;
   for (const name of [...RUNNER_SYSTEM_ALLOWLIST, ...RUNNER_GATEFORGE_ALLOWLIST]) {
     const value = vars[name] ?? ambient[name];
     if (value !== undefined && value !== '') child[name] = value;
@@ -191,7 +203,8 @@ export function buildRunnerChildEnv(
   // pass through — they arrive from trusted supervision, and the secret
   // and parent-side checks above already ran over ALL of vars.
   for (const [name, value] of Object.entries(vars)) {
-    if (child[name] === undefined && value !== '') child[name] = value;
+    if (Object.hasOwn(child, name)) continue;
+    if (value !== '') child[name] = value;
   }
   return child;
 }

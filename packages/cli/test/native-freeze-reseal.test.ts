@@ -22,16 +22,19 @@ import {
   attestedEnv,
   BODY_SPEC_FILES,
   candidateTreeIdOf,
+  commitCandidateChange,
   CONSUMER_CASES,
   consumerOf,
   installNativeFreezeFixture,
   nativeRunEnv,
-  resealChainHops,
+  newestSpoolLines,
+  retainedResealArtifactCount,
   runNativeCli,
   sealedExecution,
   sealedReceipt,
+  SESSION_REVISION_ENV,
   startNativeApp,
-  writeCandidateChange,
+  writeGeneratedSessionState,
 } from './native-freeze-fixture.js';
 
 /**
@@ -103,12 +106,16 @@ describe('the test-only re-seal over a prepared candidate', () => {
       try {
         await withTempRepo({ prefix: 'gateforge-native-reseal-' }, async (repo) => {
           installNativeFreezeFixture(repo, { resealEnabled: true });
-          writeCandidateChange(repo);
+          commitCandidateChange(repo);
           const env = nativeRunEnv(repo, attestedEnv(app.url, app.protectedUrl, app.sessionSecret));
 
           // The parent: a full supervised native run that freezes the
           // generated session state and seals a receipt over THAT tree.
-          const parent = await runNativeCli(repo, ['test-gates', '--scope', 'full', '--format', 'json'], env);
+          const parent = await runNativeCli(
+            repo,
+            ['test-gates', '--changed', '--scope', 'full', '--format', 'json'],
+            env,
+          );
           expect(parent.code, `stdout:\n${parent.stdout}\nstderr:\n${parent.stderr}`).toBe(0);
           const parentSha = repo.headSha() as string;
           const parentReceipt = sealedReceipt(repo);
@@ -133,7 +140,6 @@ describe('the test-only re-seal over a prepared candidate', () => {
           expect(receipt?.resealedFrom, 'the chain names the parent it carried from').toBeTruthy();
           expect(receipt?.carriedTests).toBeGreaterThan(0);
           expect((receipt?.carriedTests ?? 0) + (receipt?.rerunTests ?? 0)).toBe(CONSUMER_CASES.length);
-          expect(resealChainHops(repo)).toBeGreaterThan(0);
           // …and it bound the candidate this run really tested: a NEW tree,
           // because the committed change is part of it, carrying exactly the
           // parent's generated session bytes (which is what makes the carry
@@ -164,20 +170,25 @@ describe('the test-only re-seal over a prepared candidate', () => {
           // Every commit changes the generated session bytes, so this
           // fixture's re-seal always faces a CHANGED runtime target.
           installNativeFreezeFixture(repo, { resealEnabled: true, stateTracksCommit: true });
-          writeCandidateChange(repo);
+          commitCandidateChange(repo);
           const env = nativeRunEnv(repo, attestedEnv(app.url, app.protectedUrl, app.sessionSecret));
-          const parent = await runNativeCli(repo, ['test-gates', '--scope', 'full', '--format', 'json'], env);
+          const parent = await runNativeCli(
+            repo,
+            ['test-gates', '--changed', '--scope', 'full', '--format', 'json'],
+            env,
+          );
           expect(parent.code, `parent stdout:\n${parent.stdout}\nstderr:\n${parent.stderr}`).toBe(0);
           const parentSha = repo.headSha() as string;
           const parentReceipt = sealedReceipt(repo);
           expect(parentReceipt?.candidateTreeId).toBe(candidateTreeIdOf(repo));
           expect(readFileSync(repo.path('.auth/alpha.json'), 'utf8')).toContain(parentSha);
 
-          // A committed change to ONE mapped spec. The preparation chain it
-          // depends on runs again in the next run and regenerates that
-          // session with THIS commit's bytes, while the independent chain's
-          // session still holds the previous ones and its consumer is not
-          // executed at all.
+          // A committed change to ONE mapped spec. Every preparation stage
+          // this changed-scope run reaches mints its session for THIS
+          // commit, in both chains, so what no longer holds is not the
+          // parent's generated state — it is the outcome for the readers
+          // of that state. Which readers really executed is read below
+          // from the run's own lifecycle records, not assumed here.
           touchSpec(repo, 'specs/delta-body.spec.js');
 
           const refused = await runNativeCli(
@@ -189,14 +200,36 @@ describe('the test-only re-seal over a prepared candidate', () => {
           // the receipt and the chain, and says what to run instead.
           expect(refused.code, `stdout:\n${refused.stdout}\nstderr:\n${refused.stderr}`).toBe(1);
           expect(sealedReceipt(repo), 'no receipt survives a refused re-seal').toBeNull();
-          expect(resealChainHops(repo), 'no chain hop survives a refused re-seal').toBe(0);
+          expect(retainedResealArtifactCount(repo), 'no chain artifact survives a refused re-seal').toBe(0);
 
-          // The state really was regenerated for the chain that ran again…
-          expect(readFileSync(repo.path('.auth/alpha.json'), 'utf8')).toContain(repo.headSha() as string);
-          // …and really not for the chain this run never reached, which is
-          // exactly why its consumer's evidence may not be carried.
-          expect(readFileSync(repo.path('.auth/omega.json'), 'utf8')).toContain(parentSha);
-          expect(readFileSync(repo.path('.auth/omega.json'), 'utf8')).not.toContain(repo.headSha() as string);
+          // The generated state really was regenerated for THIS commit:
+          // both chains' bytes now carry the child's own commit, which is
+          // exactly why the parent's evidence may not be carried over
+          // them.
+          const childSha = repo.headSha() as string;
+          expect(readFileSync(repo.path('.auth/alpha.json'), 'utf8')).toContain(childSha);
+          expect(readFileSync(repo.path('.auth/omega.json'), 'utf8')).toContain(childSha);
+
+          // And the reason the re-seal is refused is a READER, not the
+          // state. Which readers this run really executed is read out of
+          // its OWN lifecycle records — one entry per `testBegin` line,
+          // attributed to the project the runner really named, never to a
+          // list this fixture promised.
+          const freshProjects = [
+            ...new Set(
+              newestSpoolLines(repo)
+                .filter((line) => line.kind === 'testBegin' && typeof line.project === 'string')
+                .map((line) => line.project as string),
+            ),
+          ];
+          // The reader of the spec this commit touched really ran again…
+          expect(freshProjects, 'the changed spec really executed fresh').toContain(consumerOf('.auth/beta.json'));
+          // …and the reader the refusal names really did not, which is the
+          // whole reason no parent evidence may be carried for it.
+          const missingReader = consumerOf('.auth/alpha.json');
+          expect(freshProjects, `${missingReader} executed fresh, so no evidence would be missing`).not.toContain(
+            missingReader,
+          );
 
           const message = surfaced(refused);
           // The refusal is actionable: it names a consumer of the changed
@@ -204,7 +237,6 @@ describe('the test-only re-seal over a prepared candidate', () => {
           // command that would prove every consumer.
           expect(message).toContain('gateforge test-gates --changed --scope full');
           expect(message).toContain(`specs/${consumerOf('.auth/alpha.json')}.spec.js`);
-          expect(message).toContain(`specs/${consumerOf('.auth/gamma.json')}.spec.js`);
         });
       } finally {
         await app.stop();
@@ -220,9 +252,13 @@ describe('the test-only re-seal over a prepared candidate', () => {
       try {
         await withTempRepo({ prefix: 'gateforge-native-reseal-fresh-' }, async (repo) => {
           installNativeFreezeFixture(repo, { resealEnabled: true, stateTracksCommit: true });
-          writeCandidateChange(repo);
+          commitCandidateChange(repo);
           const env = nativeRunEnv(repo, attestedEnv(app.url, app.protectedUrl, app.sessionSecret));
-          const parent = await runNativeCli(repo, ['test-gates', '--scope', 'full', '--format', 'json'], env);
+          const parent = await runNativeCli(
+            repo,
+            ['test-gates', '--changed', '--scope', 'full', '--format', 'json'],
+            env,
+          );
           expect(parent.code, `parent stdout:\n${parent.stdout}\nstderr:\n${parent.stderr}`).toBe(0);
           const parentSha = repo.headSha() as string;
           const parentReceipt = sealedReceipt(repo);
@@ -234,15 +270,19 @@ describe('the test-only re-seal over a prepared candidate', () => {
           for (const file of BODY_SPEC_FILES) touchSpec(repo, file);
           const base = mergeEnv(repo, app, parentSha);
 
-          const fresh = await runNativeCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], base);
+          const fresh = await runNativeCli(
+            repo,
+            ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'],
+            base,
+          );
           expect(fresh.code, `stdout:\n${fresh.stdout}\nstderr:\n${fresh.stderr}`).toBe(0);
 
           const receipt = sealedReceipt(repo);
           // This is a CHAIN, not an ordinary receipt: it names the parent
-          // it carried from and retains the hop that links them.
+          // it carried from, and the independent strict check below
+          // recomputes that very chain.
           expect(receipt?.resealedFromKind).toBe('receipt');
           expect(receipt?.resealedFrom).toBeTruthy();
-          expect(resealChainHops(repo), 'the chain hop was retained').toBeGreaterThan(0);
 
           // Every case executed fresh against the prepared candidate, so no
           // parent evidence had to be carried.
@@ -270,6 +310,79 @@ describe('the test-only re-seal over a prepared candidate', () => {
           // check verifies the re-prepared candidate on its own.
           const checked = await runNativeCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], base);
           expect(checked.code, `check stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`).toBe(0);
+        });
+      } finally {
+        await app.stop();
+      }
+    },
+    1_800_000,
+  );
+
+  it(
+    'refuses a re-seal whose planned fresh consumers leave the affected set preparation restored',
+    async () => {
+      const app = await startNativeApp();
+      try {
+        await withTempRepo({ prefix: 'gateforge-native-reseal-restored-' }, async (repo) => {
+          // The generated state is minted for an OPERATOR revision, so the
+          // preparation a later run performs restores exactly the bytes the
+          // parent sealed. The state differs between the two runs only when
+          // something genuinely rewrites it.
+          installNativeFreezeFixture(repo, { resealEnabled: true, stateRevision: true });
+          commitCandidateChange(repo);
+          const revision = 'parentrevision';
+          const parent = await runNativeCli(
+            repo,
+            ['test-gates', '--changed', '--scope', 'full', '--format', 'json'],
+            {
+              ...nativeRunEnv(repo, attestedEnv(app.url, app.protectedUrl, app.sessionSecret)),
+              [SESSION_REVISION_ENV]: revision,
+            },
+          );
+          expect(parent.code, `parent stdout:\n${parent.stdout}\nstderr:\n${parent.stderr}`).toBe(0);
+          const parentSha = repo.headSha() as string;
+          expect(sealedReceipt(repo)?.candidateTreeId).toBe(candidateTreeIdOf(repo));
+          expect(sealedExecution(repo)?.outcomes).toHaveLength(CONSUMER_CASES.length);
+
+          // ONE mapped spec changes, and the two untracked sessions really
+          // change too: both are rewritten to another revision of the same
+          // signed session, so the plan this re-seal is decided from is WIDE
+          // and every reader of either state is inside it.
+          touchSpec(repo, 'specs/delta-body.spec.js');
+          const parentStates = new Map<string, Buffer>();
+          for (const statePath of ['.auth/alpha.json', '.auth/omega.json']) {
+            const before = readFileSync(repo.path(statePath));
+            expect(before.toString('utf8'), `${statePath} is minted for the parent revision`).toContain(revision);
+            parentStates.set(statePath, before);
+            writeGeneratedSessionState(repo, statePath, app.url, app.sessionSecret, 'foreignrevision');
+            expect(readFileSync(repo.path(statePath), 'utf8'), `${statePath} really changed`).not.toEqual(
+              before.toString('utf8'),
+            );
+          }
+
+          const reversion = await runNativeCli(
+            repo,
+            ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'],
+            { ...mergeEnv(repo, app, parentSha), [SESSION_REVISION_ENV]: revision },
+          );
+          // The producer may not seal a hop its own independent consumer
+          // rejects: the run refuses, clears the receipt and the chain, and
+          // names the command that would prove every consumer fresh.
+          expect(reversion.code, `stdout:\n${reversion.stdout}\nstderr:\n${reversion.stderr}`).toBe(1);
+          expect(sealedReceipt(repo), 'no receipt survives the refusal').toBeNull();
+          expect(retainedResealArtifactCount(repo), 'no chain artifact survives the refusal').toBe(0);
+
+          // The preparation really ran and really restored the parent's own
+          // bytes, so the sealed difference it would have to sign shrank back
+          // to the single spec — while the run had already executed the
+          // readers the wide plan named.
+          for (const [statePath, before] of parentStates) {
+            expect(readFileSync(repo.path(statePath)), `${statePath} is the parent's own bytes again`).toEqual(before);
+          }
+          const message = surfaced(reversion);
+          expect(message).toContain('gateforge test-gates --changed --scope full');
+          expect(message).toContain(`specs/${consumerOf('.auth/alpha.json')}.spec.js`);
+          expect(message).toContain(`specs/${consumerOf('.auth/omega.json')}.spec.js`);
         });
       } finally {
         await app.stop();

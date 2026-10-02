@@ -165,19 +165,36 @@ export interface SupervisedRunOptions {
 }
 
 /**
- * The `<playwright>/test.js` module the generated freeze controller
- * imports its `test`/`expect` from — resolved from the CLI THIS run
- * actually spawns, so a repository whose own playwright differs from the
+ * The CommonJS test module the generated freeze controller imports its
+ * `test`/`expect` from — the `@playwright/test` package root or
+ * `playwright/test`, whichever package the CLI THIS run actually spawns
+ * belongs to, so a repository whose own playwright differs from the
  * pack's pinned fallback still gets one consistent runner.
+ *
+ * Resolution follows the engine's own consumer-runner binding: at each
+ * directory `@playwright/test` is preferred over `playwright`, and the
+ * two publish their test module at DIFFERENT paths — `@playwright/test`
+ * has no `test.js` beside its `cli.js` at all and exposes its runner at
+ * the package root, while `playwright` publishes `test.js` next to its
+ * `cli.js`. Joining a `test.js` onto the selected CLI's directory would
+ * therefore name a file the preferred install does not contain, so each
+ * package is resolved by its own module name instead. `resolve` computes
+ * a path and never evaluates the module, so no runner code runs in the
+ * CLI.
  *
  * @param baseCommand: the runner argv (see {@link commandFromDirectory}).
  *
  * @returns
- *   string: absolute path to the playwright package's `test.js`.
+ *   string: absolute path to the selected package's test module.
  */
 export function playwrightTestModulePath(baseCommand: readonly string[]): string {
   const cli = baseCommand[1] ?? '';
-  if (cli.endsWith('cli.js')) return join(dirname(cli), 'test.js');
+  if (cli.endsWith('cli.js')) {
+    const requireFrom = createRequire(cli);
+    return requireFrom.resolve(
+      cli.endsWith(join('@playwright', 'test', 'cli.js')) ? '@playwright/test' : 'playwright/test',
+    );
+  }
   const require = createRequire(import.meta.url);
   return require.resolve('playwright/test');
 }

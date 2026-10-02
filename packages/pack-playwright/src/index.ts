@@ -162,6 +162,7 @@ export {
 } from './discovery/prepare-barrier.js';
 export type {
   ArmedFreezeControl,
+  BaselineEnvProjection,
   FreezeArmInput,
   FreezeControl,
   FreezeReleaseDocument,

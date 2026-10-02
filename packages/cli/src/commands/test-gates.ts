@@ -143,6 +143,7 @@ import {
   supervisedRunnerChildEnv,
   writeFreezeRefusal,
   resolveProjectStorageState,
+  CypressRunnerAdapter,
   PlaywrightAdapter,
   PytestRunnerAdapter,
   readRunnerOutcomes,
@@ -1801,7 +1802,9 @@ export function decideTestOnlyReseal(input: {
    * Repo-relative paths this run's input snapshot binds. A declared
    * browser state inside it is authority, not output, so it is never
    * carried as a generated-state change. Absent when the caller holds no
-   * inventory, which only ever makes the classifier stricter elsewhere.
+   * inventory: input membership is not inferable from the sealed trees;
+   * without an inventory this classifier applies only the other
+   * generated-state eligibility rules.
    */
   inputFiles?: ReadonlySet<string>;
   /**
@@ -2959,9 +2962,15 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // guessed half-set, never a silent whole-suite widening.
   let runnerEnumeration: RunnerEnumeration | null = null;
   if (runnerName !== 'playwright' && catalog !== null && discoveryError === null) {
-    runnerEnumeration = await runnerAdapterFor(runnerName).enumerate(io.cwd);
-    if (runnerEnumeration.status === 'discovered') {
-      const enumeratedRows = runnerEnumeration.tests.map(plannedRowOfIdentity);
+    // Bound to a `const` first: the plan below narrows on the ENUMERATION,
+    // and a `let` that later feeds a closure reads as its own initializer
+    // again. Nothing about the enumeration is assumed — an adapter that
+    // cannot list its tests returns `status: 'unavailable'`, and that
+    // plans nothing rather than planning a guessed half-set.
+    const enumeration = await runnerAdapterFor(runnerName).enumerate(io.cwd);
+    runnerEnumeration = enumeration;
+    if (enumeration.status === 'discovered') {
+      const enumeratedRows = enumeration.tests.map(plannedRowOfIdentity);
       fullPlannedCount = enumeratedRows.length;
       plannedRows =
         options.scope === 'changed'
@@ -3881,10 +3890,16 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // constructor (runnerAdapterFor below), and their registration comes
   // from the contract enumeration (4.6), so there is no Playwright
   // --list to re-diff.
-  const suiteEnv: Record<string, string> = {
-    GATEFORGE_RUN_TOKEN: envRecord.GATEFORGE_RUN_TOKEN,
-    GATEFORGE_CLI_VERSION: VERSION,
-  };
+  // A record with NO prototype, not an object literal: the declared
+  // runtime allowlist below carries arbitrary operator-chosen NAMES, and
+  // `__proto__` is both a legal one and a property every plain object
+  // inherits — assigning it to a literal stores no own key at all (the
+  // inherited accessor swallows it), so the name would silently vanish
+  // from the child's own baseline and the freeze controller could never
+  // project a body worker back to it.
+  const suiteEnv = Object.create(null) as Record<string, string>;
+  suiteEnv['GATEFORGE_RUN_TOKEN'] = envRecord.GATEFORGE_RUN_TOKEN;
+  suiteEnv['GATEFORGE_CLI_VERSION'] = VERSION;
   if (envRecord.GATEFORGE_WITNESS_URL !== null) {
     suiteEnv['GATEFORGE_WITNESS_URL'] = envRecord.GATEFORGE_WITNESS_URL;
   }
@@ -3898,6 +3913,13 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   }
   if (declaredRunnerEnvNames !== undefined) {
     for (const name of declaredRunnerEnvNames) {
+      // OWN membership on the ambient environment, for the same reason the
+      // record above has no prototype: a declared name is an arbitrary
+      // name, and `__proto__`, `constructor` and `toString` are properties
+      // every plain object inherits, so a plain lookup would put `Object`
+      // or `Object.prototype` itself into the baseline for a variable the
+      // operator never set.
+      if (!Object.hasOwn(io.env, name)) continue;
       const value = io.env[name];
       if (value !== undefined && value !== '') suiteEnv[name] = value;
     }
@@ -3984,8 +4006,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           invocationId,
           nonce: freezeNonce,
           stateDir,
-          // The SAME runner this run spawns, so the generated controller
-          // imports one consistent `playwright/test`.
+          // The SAME install this run spawns, so the generated controller
+          // imports one consistent runner module (`@playwright/test`'s
+          // package root, or `playwright/test`).
           testModulePath: playwrightTestModulePath(defaultPlaywrightCommand(io.cwd)),
           releasePublicKey: freezeKeys.publicKeyBase64,
           // The runner child's OWN environment, captured before any project
@@ -3994,7 +4017,16 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
           baseEnv: supervisedRunnerChildEnv(suiteEnv, io.cwd),
           timeoutMs: Math.min(Math.max(runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS, 120_000), 900_000),
         });
+  // The identity the freeze accepted, written by the handler below and
+  // read once when this run seals. It is read through a NAMED accessor
+  // on purpose: the handler runs from the drain's own callback, so the
+  // assignment is not this function's straight line, and a compiler that
+  // sees only the initializer would narrow the variable to `null` and
+  // quietly seal the pre-run tree for a run that really froze a prepared
+  // one. The accessor carries the union type explicitly, so the read is
+  // the truth and not an inference about it.
   let preparedIdentity: PreparedCandidateIdentity | null = null;
+  const acceptedPreparedIdentity = (): PreparedCandidateIdentity | null => preparedIdentity;
 
   // Per-project file selection (setup-dependency fix): the plan already
   // knows which files belong to which project, and project identity is
@@ -4969,7 +5001,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
   // with it, it is the ONE prepared candidate the freeze accepted after
   // the prerequisite stage — never a rebound baseline, and never a second
   // snapshot. Both the final drift check and the receipt bind this value.
-  const testedTreeId = preparedIdentity?.preparedTreeId ?? frozenTreeId;
+  const testedTreeId = acceptedPreparedIdentity()?.preparedTreeId ?? frozenTreeId;
 
   // The FINAL control-spec pin. The request-time check proved the pinned
   // bytes were intact before the release was signed; the bodies then ran
@@ -5005,22 +5037,31 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     }
   }
 
-  // The test-only re-seal must be recomputed against the tree this run
-  // actually TESTED. Before the global preparation freeze that tree is
-  // the pre-run baseline the plan was decided from; with the freeze it is
-  // the PREPARED candidate, and a native preparation stage that rewrote a
-  // parent state target after the plan was made would otherwise leave a
-  // receipt whose signed `changedPaths` describe bytes nobody graded.
+  // The test-only re-seal must hold against the tree this run actually
+  // TESTED, and the fresh outcomes it issues must be EXACTLY the tests
+  // that classification names — in BOTH directions. Before the global
+  // preparation freeze the tested tree is the pre-run baseline the plan
+  // was decided from; with the freeze it is the PREPARED candidate, and a
+  // native preparation stage that restores a parent state target shrinks
+  // the affected set after the plan was made. An affected file with no
+  // fresh outcome leaves a claim nobody proved; a fresh outcome the
+  // affected set does not name is proof the sealed classification does
+  // not cover, and the independent chain check refuses exactly that as
+  // EVIDENCE_STALE.
   //
   // So the classification is recomputed here from the SAME two sealed
-  // trees a consumer recomputes from, and the seal binds THAT result. A
-  // recomputation that no longer holds — or whose affected set demands a
-  // test this run did not freshly execute — is a targeted refusal naming
-  // the files, never a silent carry of proof that no longer applies.
+  // trees a consumer recomputes from ONLY when the tested tree moved, the
+  // seal binds THAT result, and an unchanged tested tree reuses the
+  // plan's own classification rather than recomputing nothing new. Either
+  // way the two-sided membership check runs on EVERY re-seal issuance, and
+  // a mismatch is a targeted refusal naming every offending file and the
+  // explicit full-fresh command — never a silent carry of proof that no
+  // longer applies, and never a hop this run's own consumer will reject.
   let preparedReseal: ResealPlan | null = reSealPlan;
   let preparedResealRefusal: string | null = null;
+  let preparedClassification: ResealChangeClassification | null = null;
   if (reSealPlan !== null && testedTreeId !== null && testedTreeId !== frozenTreeId && freezeGitDir !== null) {
-    const recomputed = classifyResealChange({
+    preparedClassification = classifyResealChange({
       gitDir: freezeGitDir,
       env: io.env,
       cwd: io.cwd,
@@ -5043,6 +5084,9 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
         : {}),
       ...(preFiles !== null ? { inputFiles: new Set(preFiles.map((entry) => entry.path)) } : {}),
     });
+  }
+  if (reSealPlan !== null && testedTreeId !== null) {
+    const recomputed = preparedClassification ?? reSealPlan.classification;
     if (!recomputed.eligible) {
       // A change set that no longer classifies against the PREPARED tree
       // is refused the same actionable way an uncovered carry is: the
@@ -5058,15 +5102,54 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
     } else {
       const freshFiles = new Set(plannedRows.map((row) => row.planned.file));
       const uncovered = recomputed.affectedTestFiles.filter((file) => !freshFiles.has(file)).sort();
-      if (uncovered.length > 0) {
-        preparedResealRefusal =
-          `native preparation changed the tested bytes in a way that affects test file(s) this re-seal ` +
-          `carried instead of re-running (${uncovered.join(', ')}) — re-run the full relevant suite ` +
-          '(`gateforge test-gates --changed --scope full`) so every affected test executes against the ' +
-          'prepared candidate';
+      // BOTH directions, because the independent chain check requires
+      // both. The second is what a preparation restore produces: the
+      // state returns to its parent revision, the readers that change
+      // dragged into the affected set drop back out of it, and the plan
+      // made before that restore still executes them. Sealing anyway
+      // issues a hop the very next `check` refuses, so it is refused
+      // here, where every extra path and the fix can still be named.
+      const affectedSet = new Set(recomputed.affectedTestFiles);
+      const outside = [...freshFiles].filter((file) => !affectedSet.has(file)).sort();
+      if (uncovered.length > 0 || outside.length > 0) {
+        const freshen =
+          're-run the full relevant suite (`gateforge test-gates --changed --scope full`) so the re-sealed ' +
+          'receipt carries outcomes only for the tests its own classification names';
+        if (uncovered.length > 0 && outside.length > 0) {
+          preparedResealRefusal =
+            'the executed set and the sealed affected set disagree in BOTH directions: this re-seal carried ' +
+            `instead of re-running (${uncovered.join(', ')}) and re-ran test file(s) the affected set does ` +
+            `not name (${outside.join(', ')}) — ${freshen}`;
+        } else if (uncovered.length > 0) {
+          // The prepared-drift wording is true only when the tested tree
+          // actually moved. An unchanged tree has no preparation drift
+          // to blame, so the reason names the membership mismatch itself
+          // rather than inventing a cause for it.
+          if (preparedClassification !== null) {
+            preparedResealRefusal =
+              `native preparation changed the tested bytes in a way that affects test file(s) this re-seal ` +
+              `carried instead of re-running (${uncovered.join(', ')}) — re-run the full relevant suite ` +
+              '(`gateforge test-gates --changed --scope full`) so every affected test executes against the ' +
+              'prepared candidate';
+          } else {
+            preparedResealRefusal =
+              `this re-seal carried test file(s) its own classification requires it to re-run ` +
+              `(${uncovered.join(', ')}) — ${freshen}`;
+          }
+        } else {
+          preparedResealRefusal =
+            `this re-seal executed test file(s) the sealed affected set does not name (${outside.join(', ')}) — ` +
+            freshen;
+        }
         preparedReseal = null;
       } else {
-        preparedReseal = { ...reSealPlan, classification: recomputed };
+        // Reuse the plan itself when the tested tree did not move: its
+        // classification is already the one that applies, so rebuilding
+        // an identical object would be a copy with no new information.
+        preparedReseal =
+          preparedClassification === null
+            ? reSealPlan
+            : { ...reSealPlan, classification: preparedClassification };
       }
     }
   }
@@ -5453,7 +5536,7 @@ async function runSupervisedTestGatesInner(io: Io, options: SupervisedOptions): 
       ? {}
       : {
           ...(preparedReseal.parentKind === 'receipt'
-            ? { carriedFrom: reSealPlan.parentSha, parentReceiptDigest: reSealPlan.parentDigest }
+            ? { carriedFrom: preparedReseal.parentSha, parentReceiptDigest: preparedReseal.parentDigest }
             : {}),
           resealedFrom: preparedReseal.parentDigest,
           resealedFromKind: preparedReseal.parentKind,

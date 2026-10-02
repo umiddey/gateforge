@@ -5,9 +5,9 @@
  * graph, and any doubt is refused with one plain reason line.
  */
 import { describe, expect, it } from 'vitest';
-import { withTempRepo } from '@gate-forge/core';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
-import { carryDiffIsWithinScope, classifyResealChange } from '../src/reseal.js';
+import { carryDiffIsWithinScope, classifyResealChange, type ResealChangeClassification } from '../src/reseal.js';
 
 const TEST_FILES = ['e2e/accounts.spec.ts', 'e2e/orders.spec.ts'];
 
@@ -995,6 +995,233 @@ describe('declared runtime files the run itself rewrites', () => {
       const plain = classify(repo, parent, current, SCENARIO_FILES);
       expect(plain).toEqual(classifyDeclared(repo, parent, current, parentSha, currentSha, []));
       expect(plain.disregardedPaths).toBeUndefined();
+    });
+  });
+});
+
+describe('an owner runtime glob never outranks the sealed runner config\'s own state declaration', () => {
+  // A consumer whose saved session lives BESIDE its specs in a git-ignored
+  // directory, in a three-project runner: one login stage, a body that
+  // depends on it and a second body ordered after that one. The owner also
+  // declares runtime globs that match those very bytes — an ordinary
+  // project does exactly that, and the declaration that says who READS a
+  // state file is the one the sealed config's own bytes carry, never the
+  // owner's.
+  const CATALOG = [
+    'e2e/auth.setup.ts',
+    'e2e/desktop/accounts.spec.ts',
+    'e2e/desktop/orders.spec.ts',
+    'e2e/mobile/accounts.spec.ts',
+  ];
+  const STATE_PATH = 'e2e/.auth/session.json';
+  const CACHE_PATH = '.cache/report.json';
+
+  const REPO_FILES: Record<string, string> = {
+    'src/accounts.ts': 'export const accounts = 1;\n',
+    'e2e/auth.setup.ts': "import { test } from '@playwright/test';\ntest('logs in', async () => {});\n",
+    'e2e/desktop/accounts.spec.ts': SPEC,
+    'e2e/desktop/orders.spec.ts': SPEC,
+    'e2e/mobile/accounts.spec.ts': SPEC,
+    '.gitignore': ['.gateforge/', 'e2e/.auth/', '.cache/', ''].join('\n'),
+  };
+
+  /**
+   * The sealed runner config, with the `use.storageState` value supplied by
+   * the caller so a case can state it as a fixed path or compute it.
+   *
+   * @param storage: the source of the login project's storage state value.
+   * @param prelude: statements the value's identifier is declared in.
+   *
+   * @returns
+   *   string: the config source.
+   */
+  function runnerConfig(storage: string, prelude: readonly string[] = []): string {
+    return [
+      "import { defineConfig } from '@playwright/test';",
+      '',
+      ...prelude,
+      ...(prelude.length > 0 ? [''] : []),
+      'export default defineConfig({',
+      '  projects: [',
+      `    { name: 'auth', testMatch: '**/auth.setup.ts', use: { storageState: ${storage} } },`,
+      "    { name: 'desktop', testMatch: '**/desktop/*.spec.ts', dependencies: ['auth'] },",
+      "    { name: 'mobile', testMatch: '**/mobile/*.spec.ts', dependencies: ['desktop'] },",
+      '  ],',
+      '});',
+      '',
+    ].join('\n');
+  }
+
+  /**
+   * Seals the pair of candidate trees this block classifies: a git-ignored
+   * session that CHANGED between them, optionally beside a second
+   * git-ignored path that changed too.
+   *
+   * @param repo: the fixture repository.
+   * @param config: the sealed runner config source.
+   * @param first: the session bytes the parent sealed.
+   * @param second: the session bytes this run holds.
+   * @param unrelated: an unrelated git-ignored path and its two revisions.
+   *
+   * @returns
+   *   { parentTreeId, currentTreeId, parentSha, currentSha }: the two sealed
+   *   trees and the two commits they belong to.
+   */
+  function sealedPair(
+    repo: TempRepo,
+    config: string,
+    first: string,
+    second: string,
+    unrelated?: { path: string; parent: string; current: string },
+  ): { parentTreeId: string; currentTreeId: string; parentSha: string; currentSha: string } {
+    repo.writeFiles({ ...REPO_FILES, 'playwright.config.ts': config });
+    repo.commitFiles({}, 'base');
+    repo.writeFiles({
+      [STATE_PATH]: first,
+      ...(unrelated === undefined ? {} : { [unrelated.path]: unrelated.parent }),
+    });
+    const parentTreeId = treeOf(repo);
+    const parentSha = repo.headSha() as string;
+    repo.writeFiles({
+      [STATE_PATH]: second,
+      ...(unrelated === undefined ? {} : { [unrelated.path]: unrelated.current }),
+    });
+    const currentTreeId = treeOf(repo);
+    const currentSha = repo.headSha() as string;
+    return { parentTreeId, currentTreeId, parentSha, currentSha };
+  }
+
+  /**
+   * Classifies the sealed pair with the owner declaration: the globs, the
+   * two COMMIT trees (which say what is tracked source) and optionally the
+   * paths this run's input snapshot binds.
+   *
+   * @param repo: the fixture repository.
+   * @param sealed: the two sealed trees and their commits.
+   * @param globs: the owner runtime globs.
+   * @param inputFiles: the paths the input snapshot binds, when it has any.
+   *
+   * @returns
+   *   ResealChangeClassification: the classification of the change set.
+   */
+  function classifyDeclared(
+    repo: TempRepo,
+    sealed: { parentTreeId: string; currentTreeId: string; parentSha: string; currentSha: string },
+    globs: readonly string[],
+    inputFiles?: ReadonlySet<string>,
+  ): ResealChangeClassification {
+    return classifyResealChange({
+      gitDir: resolveGitDir(repo.root, process.env) as string,
+      env: process.env,
+      cwd: repo.root,
+      parentTreeId: sealed.parentTreeId,
+      currentTreeId: sealed.currentTreeId,
+      testFiles: CATALOG,
+      runtimeFileGlobs: globs,
+      parentCommitTreeId: `${sealed.parentSha}^{tree}`,
+      currentCommitTreeId: `${sealed.currentSha}^{tree}`,
+      ...(inputFiles !== undefined ? { inputFiles } : {}),
+    });
+  }
+
+  it('re-runs every reader of a declared session an owner glob also matches', async () => {
+    await withTempRepo({}, async (repo) => {
+      const sealed = sealedPair(
+        repo,
+        runnerConfig(`'${STATE_PATH}'`),
+        '{"revision":"parent"}\n',
+        '{"revision":"login"}\n',
+      );
+
+      const classified = classifyDeclared(repo, sealed, ['e2e/.auth/*.json']);
+      expect(classified.eligible).toBe(true);
+      expect(classified.reason).toBeNull();
+      // The matching glob buys nothing: the real tree difference stands, the
+      // declaration disregards no part of it, and the session is still not
+      // mistaken for a test file or a proven test helper.
+      expect(classified.changedPaths).toEqual([STATE_PATH]);
+      expect(classified.disregardedPaths).toEqual([]);
+      expect(classified.testFiles).toEqual([]);
+      expect(classified.helperFiles).toEqual([]);
+      // Every project that reads that session re-executes: the login stage
+      // itself and both bodies, the second one through the project ordered
+      // after the first.
+      expect(classified.affectedTestFiles).toEqual(CATALOG);
+    });
+  });
+
+  it('refuses a declared session this run\'s input snapshot binds, however the glob reads', async () => {
+    await withTempRepo({}, async (repo) => {
+      const sealed = sealedPair(
+        repo,
+        runnerConfig(`'${STATE_PATH}'`),
+        '{"revision":"parent"}\n',
+        '{"revision":"login"}\n',
+      );
+
+      const classified = classifyDeclared(
+        repo,
+        sealed,
+        ['e2e/.auth/*.json', STATE_PATH],
+        new Set([STATE_PATH]),
+      );
+      // Input-bound bytes are authority, never generated output, so the
+      // change is refused rather than carried — and the glob that names the
+      // exact path buys it no disregard at all.
+      expect(classified.eligible).toBe(false);
+      expect(classified.changedPaths).toEqual([STATE_PATH]);
+      expect(classified.disregardedPaths).toEqual([]);
+      expect(classified.affectedTestFiles).toEqual([]);
+    });
+  });
+
+  it('refuses a changed path the sealed config cannot resolve, instead of hiding it behind a glob', async () => {
+    await withTempRepo({}, async (repo) => {
+      // The config does compute its own storage state, so no project can be
+      // named as the reader of these bytes — which is a doubt about every
+      // changed path that is not obviously test code.
+      const sealed = sealedPair(
+        repo,
+        runnerConfig('stateFile', [`const stateFile = 'e2e/.auth/' + 'session.json';`]),
+        '{"revision":"parent"}\n',
+        '{"revision":"login"}\n',
+      );
+
+      const classified = classifyDeclared(repo, sealed, ['e2e/.auth/*.json']);
+      expect(classified.eligible).toBe(false);
+      // The doubt is stated over the real difference: a glob that matches the
+      // path cannot turn an unreadable declaration into a silent pass.
+      expect(classified.changedPaths).toEqual([STATE_PATH]);
+      expect(classified.disregardedPaths).toEqual([]);
+      expect(classified.affectedTestFiles).toEqual([]);
+    });
+  });
+
+  it('still disregards an unrelated runtime cache beside a declared session', async () => {
+    await withTempRepo({}, async (repo) => {
+      const sealed = sealedPair(
+        repo,
+        runnerConfig(`'${STATE_PATH}'`),
+        '{"revision":"parent"}\n',
+        '{"revision":"login"}\n',
+        { path: CACHE_PATH, parent: '{"runs":1}\n', current: '{"runs":2}\n' },
+      );
+
+      const classified = classifyDeclared(repo, sealed, [CACHE_PATH, 'e2e/.auth/*.json']);
+      expect(classified.eligible).toBe(true);
+      expect(classified.reason).toBeNull();
+      // Both paths really differ between the two sealed trees, and only the
+      // cache — a runtime artifact no project reads — is disregarded.
+      expect(classified.changedPaths).toEqual([CACHE_PATH, STATE_PATH]);
+      expect(classified.disregardedPaths).toEqual([CACHE_PATH]);
+      expect(classified.affectedTestFiles).toEqual(CATALOG);
+
+      // The cache glob alone reaches exactly as far: the declared session is
+      // honoured either way, because its readers come from the sealed config.
+      const cacheOnly = classifyDeclared(repo, sealed, [CACHE_PATH]);
+      expect(cacheOnly.eligible).toBe(true);
+      expect(cacheOnly.disregardedPaths).toEqual([CACHE_PATH]);
+      expect(cacheOnly.affectedTestFiles).toEqual(CATALOG);
     });
   });
 });

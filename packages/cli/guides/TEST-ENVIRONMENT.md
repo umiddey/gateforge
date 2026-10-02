@@ -129,6 +129,73 @@ There is nothing to configure: a supervised run simply resolves the
 suite's own relative paths the way you resolve them when you run the
 suite yourself.
 
+### One prepared candidate for the whole native run
+
+**Rule:** In a Playwright run whose planned projects are named, and with no
+operator-set whole-run session state, the run freezes ONE prepared candidate
+between the preparation stages and the bodies. Every preparation stage runs
+first — genuinely, with its own outcome, retained as a witnessed
+prerequisite — and every body test then executes against the prepared bytes
+and is gated on the freeze releasing. Unnamed or empty projects take no part,
+a non-Playwright runner never enters this path, and an operator-set
+whole-run session state bypasses it exactly as before.
+
+**Why:** A setup project saves its session into the working tree, so the
+bytes a body reads only exist once that stage has run. Before this, the
+candidate was frozen before native setup. A run then correctly refused to
+seal when genuine setup changed the counted session-state bytes, even if
+every test passed. Declared native dependencies already put each setup
+ahead of its own dependent body; what was missing was a place where
+genuine generated output could be admitted at all, and a guarantee that
+no INDEPENDENT body starts before ALL preparation. One freeze supplies
+both.
+
+What the freeze admits, and nothing else:
+
+- **Only a declared session file may be written.** The difference between
+  the pre-run baseline and the prepared candidate may hold additions and
+  modifications to an untracked, non-input, non-excluded, physically
+  contained regular file that a project declares as its `storageState` —
+  and no removal, no symlink, and no other change to any candidate file. A
+  tracked file, or one the run's input snapshot binds, is read state and
+  never a write target: a `use.storageState` declaration says where a
+  project READS a session, never that preparation owns it. The engine's own
+  run artifacts — the spool, the synthesized config, the generated
+  controller — are written to the excluded run-state directory and are not
+  candidate files at all.
+- **Source, trusted policy and the input digest stay frozen** for the run.
+  A change to any of them after the freeze is not preparation output and
+  is never carried as such.
+- **Only a signature opens the barrier.** The private key lives in the
+  CLI process's memory and is never written to disk; the controller
+  receives the public key and verifies the release against the run, the
+  invocation, the nonce, the prepared tree and the exact bytes of its own
+  spec. A refusal document is failure-only: it can end the controller's
+  wait sooner, never let a body through.
+- **Your projects' environment behaves as it does without the freeze.** A
+  runner unions each dependency's produced environment into its
+  dependents, so a project still sees its own dependency chain's
+  assignments over the baseline; the controller restores the trusted
+  baseline inside its own worker before any body starts, so a
+  prerequisite's variable reaches the projects that depend on it and
+  nothing further.
+
+**Not a sandbox.** The freeze is a signed, checked boundary inside your
+run, not an isolation boundary around your machine. Ordinary local files
+are not OS-immutable: another process running as the same user can modify
+or restore those bytes, and tampering with the CLI's own memory is beyond
+what a signature can prove. What the freeze does establish is that each
+body executed against the prepared candidate the receipt names, and that
+only the declared candidate-file changes above could have produced it.
+
+**Nothing to configure.** The same freeze runs whether your root
+`package.json` is CommonJS, declares `"type": "module"`, or your specs
+live in a nested directory with their own manifest: the generated
+controller is plain ESM JavaScript whose module kind comes from its own
+`.mjs` name rather than from your package manifest. A run that plans no
+named project, a non-Playwright runner, and a run with an operator-set
+whole-run session state each behave exactly as they did before.
+
 ### Per-session login identity (why a test may hand the witness its own tenant)
 
 **Rule:** A test that creates a new tenant — or any row that only exists
