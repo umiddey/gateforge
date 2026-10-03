@@ -33,6 +33,19 @@ const DOCUMENTATION_EXTENSIONS = new Set([
 ]);
 const DOCUMENTATION_BASENAMES = new Set(['.gitkeep', 'readme', 'license', 'notice', 'changelog', 'copying']);
 
+// Data and document formats an owner-declared documentation folder may carry
+// beside DOCUMENTATION_EXTENSIONS. They are accepted ONLY as folder content:
+// `.html` stays in EXECUTABLE_EXTENSIONS everywhere else, and every name-based
+// gate in isProtectedFile (manifests, execution configs, `*.config.*`,
+// lockfiles, declared gate inputs) still refuses them by name.
+const DOCS_FOLDER_DATA_EXTENSIONS: Record<string, true> = {
+  '.json': true,
+  '.yaml': true,
+  '.yml': true,
+  '.csv': true,
+  '.html': true,
+};
+
 const EXECUTION_CONFIG_NAMES = new Set([
   '.babelrc', '.eslintrc', '.prettierrc', 'playwright.config.js', 'playwright.config.cjs',
   'playwright.config.mjs', 'playwright.config.ts', 'playwright.config.cts', 'playwright.config.mts',
@@ -198,6 +211,7 @@ function isProtectedFile(
   const segments = normalized.split('/');
   const extension = basename.includes('.') ? basename.slice(basename.lastIndexOf('.')).toLowerCase() : '';
   const lower = basename.toLowerCase();
+  const declaredFolderContent = DOCS_FOLDER_DATA_EXTENSIONS[extension] === true;
   return (
     (mode & 0o111) !== 0 ||
     segments.some((segment) => ['.git', '.gateforge', '.github', '.agents', '.codex'].includes(segment)) ||
@@ -205,7 +219,7 @@ function isProtectedFile(
     MANIFEST_NAMES.includes(basename) ||
     GIT_SCOPE_CONTROL_BASENAMES.includes(basename) ||
     PACK_CONFIGS.includes(normalized) ||
-    EXECUTABLE_EXTENSIONS.has(extension) ||
+    (EXECUTABLE_EXTENSIONS.has(extension) && !declaredFolderContent) ||
     EXECUTION_CONFIG_NAMES.has(lower) ||
     lower.includes('.config.') && !DOCUMENTATION_EXTENSIONS.has(extension) ||
     lower.startsWith('requirements') && lower.endsWith('.txt') ||
@@ -218,11 +232,15 @@ function isProtectedFile(
   );
 }
 
-/** Checks whether a file has a supported documentation or static-raster type. */
+/** Checks whether a file has a supported documentation, data, or static-raster type. */
 function isAllowlistedDocumentationFile(basename: string): boolean {
   const lower = basename.toLowerCase();
   const extension = lower.includes('.') ? lower.slice(lower.lastIndexOf('.')) : '';
-  return DOCUMENTATION_BASENAMES.has(lower) || DOCUMENTATION_EXTENSIONS.has(extension);
+  return (
+    DOCUMENTATION_BASENAMES.has(lower) ||
+    DOCUMENTATION_EXTENSIONS.has(extension) ||
+    DOCS_FOLDER_DATA_EXTENSIONS[extension] === true
+  );
 }
 
 /** Writes the owner declaration in a stable format. */
