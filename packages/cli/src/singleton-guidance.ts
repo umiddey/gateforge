@@ -1,11 +1,14 @@
 /**
  * Per-tenant singleton guidance (plan 2026-09-25 Phase 4b item 3).
  *
- * A table whose UNIQUE constraint includes the tenant scope column
- * admits one row per tenant (E9/E10): a create of such a resource is
- * provable ONLY on a brand-new tenant, while the witness's adapter reads
- * use one process-global login. The sqlalchemy pack emits that as an
- * additive `singletonPerTenant` fact; this module turns it into the ONE
+ * A table whose UNIQUE constraint is written over the tenancy scope
+ * ALONE admits at most one row per tenant (E9/E10): a create of such a
+ * resource is provable ONLY on a brand-new tenant, while the witness's
+ * adapter reads use one process-global login. A constraint that merely
+ * CONTAINS a scope column (`unique (period_id, tenant_id, contract_id)`)
+ * does not admit one row per tenant, so no such sentence is ever printed.
+ * The sqlalchemy pack emits that as an additive `singletonPerTenant`
+ * fact; this module turns it into the ONE
  * plain advisory line the owner reads, plus the same guidance as ready-made
  * lines for `gateforge next` (which calls
  * {@link singletonPerTenantGuidanceLines} rather than re-deriving the rule).
@@ -20,8 +23,14 @@ import { CAUSE_NEXT_ACTIONS, type BlockingEntry, type GraphResource } from '@gat
 export interface SingletonPerTenantFact {
   /** Declared constraint/index name, or null when it is unnamed. */
   constraint: string | null;
-  /** The recognized tenant-scope column inside {@link columns}. */
+  /** The first recognized tenant-scope column inside {@link columns}. */
   tenantColumn: string;
+  /**
+   * Every recognized tenancy-scope column of the constraint, written
+   * order. Absent on a fact minted by an older pack; then the single
+   * {@link tenantColumn} is the whole scope.
+   */
+  scopeColumns?: readonly string[];
   /** Every column of the unique constraint/index, written order. */
   columns: readonly string[];
 }
@@ -46,12 +55,14 @@ function guidanceSentence(resourceId: string, fact: SingletonPerTenantFact): str
     fact.constraint === null
       ? `unique(${fact.columns.join(', ')})`
       : `${String(fact.constraint)} unique(${fact.columns.join(', ')})`;
+  const scope = (fact.scopeColumns ?? [fact.tenantColumn]).join(' and ');
   return (
-    `'${resourceId}' is a singleton per tenant: ${constraint} includes the tenant scope column ` +
-    `'${fact.tenantColumn}', so exactly one row per tenant exists. Its create can only be proven on a ` +
-    'fresh tenant: create the tenant in the test, then register that tenant login with the witness ' +
-    'for THIS session only (POST /sessions/identity — see the test-environment guide) so the adapter ' +
-    'reads see the new tenant instead of the process-global seat.'
+    `'${resourceId}' is a singleton per tenant: ${constraint} is declared over exactly the ` +
+    `tenancy scope ('${scope}') and nothing else, so at most one row exists per tenant. Its ` +
+    'create can only be proven on a fresh tenant: create the tenant in the test, then register ' +
+    "that tenant's login with the witness for THIS session only (POST /sessions/identity — see " +
+    'the test-environment guide) so the adapter reads see the new tenant instead of the ' +
+    'process-global seat.'
   );
 }
 
@@ -62,7 +73,12 @@ function guidanceSentence(resourceId: string, fact: SingletonPerTenantFact): str
 function singletonFactOf(resource: GraphResource): SingletonPerTenantFact | null {
   const raw = resource.attributes['singletonPerTenant'];
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
-  const fact = raw as { constraint?: unknown; tenantColumn?: unknown; columns?: unknown };
+  const fact = raw as {
+    constraint?: unknown;
+    tenantColumn?: unknown;
+    scopeColumns?: unknown;
+    columns?: unknown;
+  };
   if (typeof fact.tenantColumn !== 'string' || fact.tenantColumn.length === 0) return null;
   if (!Array.isArray(fact.columns) || fact.columns.length === 0) return null;
   const columns: string[] = [];
@@ -70,10 +86,26 @@ function singletonFactOf(resource: GraphResource): SingletonPerTenantFact | null
     if (typeof column !== 'string' || column.length === 0) return null;
     columns.push(column);
   }
+  const scopeColumns: string[] = [];
+  if (Array.isArray(fact.scopeColumns)) {
+    for (const column of fact.scopeColumns) {
+      if (typeof column !== 'string' || column.length === 0) return null;
+      scopeColumns.push(column);
+    }
+    // A fact whose scope list contradicts its own columns is malformed,
+    // not a partial fact to guess at.
+    if (
+      scopeColumns.length === 0 ||
+      scopeColumns.some((column) => !columns.includes(column))
+    ) {
+      return null;
+    }
+  }
   return {
     constraint:
       typeof fact.constraint === 'string' && fact.constraint.length > 0 ? fact.constraint : null,
     tenantColumn: fact.tenantColumn,
+    ...(scopeColumns.length > 0 ? { scopeColumns } : {}),
     columns,
   };
 }

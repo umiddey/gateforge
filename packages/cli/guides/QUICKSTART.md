@@ -233,6 +233,16 @@ gateforge classify plane 'app/main.py' tenant \
   --reason 'Owner review confirms the tenant plane for DELETE /items/{}.' --confirm
 ```
 
+`classify plane` takes one file, one FOLDER, or one glob — a folder answer
+is written as `match: 'app/routes/**'`, so a repository with hundreds of
+routers needs one reviewed rule per router directory rather than one per
+file:
+
+```sh
+gateforge classify plane 'app/routes' tenant \
+  --reason 'Every router in this folder serves tenant-scoped records.' --confirm
+```
+
 Then run `gateforge next` again: the same block must not reappear. A route
 that is genuinely internal is the other answer, and it stays owner-only (an
 `internalRules` entry in `.gateforge/classification-policy.yml`).

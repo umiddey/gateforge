@@ -13,7 +13,8 @@
  * `classify` and `check` share the identical pipeline, so their
  * effective decisions agree byte-for-byte (phase-5 checklist).
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { canonicalJson, globMatch, type JsonValue } from '@gate-forge/core';
 import {
   PLANES_CONFIG_PATH,
@@ -30,10 +31,10 @@ import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { UsageError } from '../errors.js';
 
 export const CLASSIFY_USAGE =
-  'usage: gateforge classify [--json] [--write-snapshot <path>] | gateforge classify plane <source> <tenant|master|global> ' +
+  'usage: gateforge classify [--json] [--write-snapshot <path>] | gateforge classify plane <file|folder|glob> <tenant|master|global> ' +
   '--reason <text> [--confirm]';
 export const CLASSIFY_PLANE_USAGE =
-  'usage: gateforge classify plane <source> <tenant|master|global> --reason <text> [--confirm]';
+  'usage: gateforge classify plane <file|folder|glob> <tenant|master|global> --reason <text> [--confirm]';
 
 /** Renders the text form of one classification pass. */
 function describeResult(io: Io, pipeline: Awaited<ReturnType<typeof runPipeline>>): void {
@@ -170,6 +171,57 @@ function planeConfigDiff(path: string, before: string, after: string): string {
 }
 
 /**
+ * Resolves the `<file|folder|glob>` argument into the `match` pattern the
+ * reviewed document carries, plus the wording the messages use.
+ *
+ * A FOLDER becomes `'<folder>/**'` — the same rule shape the plane
+ * proposals write, so classifying 200 routes in `backend/api/v1` is one
+ * reviewed answer instead of 200 hand-edited lines. A GLOB is used
+ * verbatim after validation. Anything else is one file path, exactly as
+ * before. Every form stays repo-relative: an absolute, drive-qualified,
+ * backslashed or `..`-escaping source is refused, so a rule can never
+ * point outside the repository the gate reads.
+ *
+ * Args:
+ *   source: The raw `<file|folder|glob>` argument.
+ *   cwd: Absolute repository root (used to recognize an existing folder).
+ *
+ * Returns:
+ *   { match: string; label: string }: the rule's `match` pattern and the
+ *     human wording ("backend/api/v1/**" reads better in a refusal than a
+ *     bare folder name).
+ *
+ * Raises:
+ *   UsageError: The source is not one repo-relative file path, folder, or
+ *     glob.
+ */
+function resolvePlaneMatch(source: string, cwd: string): { match: string; label: string } {
+  const segments = source.split('/');
+  const malformed =
+    source.length === 0 ||
+    source !== source.trim() ||
+    source.includes('\\') ||
+    source.startsWith('/') ||
+    /^[A-Za-z]:/.test(source) ||
+    segments.includes('..') ||
+    segments.includes('');
+  if (malformed) {
+    throw new UsageError(
+      `classify plane source must be one repo-relative file path, folder, or glob (${CLASSIFY_PLANE_USAGE})`,
+    );
+  }
+  // A glob is the owner's own pattern: validated as repo-relative here and
+  // matched verbatim by the runtime.
+  if (/[*?[\]{}]/.test(source)) return { match: source, label: source };
+  // An existing directory classifies its whole subtree; the rule the
+  // proposal writes uses exactly this shape.
+  if (existsSync(join(cwd, source)) && statSync(join(cwd, source)).isDirectory()) {
+    return { match: `${source}/**`, label: `${source}/**` };
+  }
+  return { match: source, label: source };
+}
+
+/**
  * Previews or explicitly appends a non-suppressive plane declaration.
  *
  * Args:
@@ -192,17 +244,7 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
   const source = positionals[1] as string;
   const planeValue = positionals[2] as string;
   const reason = stringFlag(options, 'reason');
-  if (
-    source.length === 0 ||
-    source !== source.trim() ||
-    source.includes('\\') ||
-    source.startsWith('/') ||
-    /^[A-Za-z]:/.test(source) ||
-    source.split('/').includes('..') ||
-    /[*?[\]{}]/.test(source)
-  ) {
-    throw new UsageError(`classify plane source must be one repo-relative file path (${CLASSIFY_PLANE_USAGE})`);
-  }
+  const { match, label } = resolvePlaneMatch(source, io.cwd);
   if (!['tenant', 'master', 'global'].includes(planeValue)) {
     throw new UsageError(`classify plane requires tenant, master, or global (${CLASSIFY_PLANE_USAGE})`);
   }
@@ -218,11 +260,15 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
   }
   const before = readFileSync(path, 'utf8');
   const current = parsePlanesConfigText(before, path);
+  // Overlap is tested in BOTH directions: a broader existing rule already
+  // covers the new pattern, and a broader new pattern would swallow a
+  // narrower existing rule. Either way an answer is already on record, and
+  // a disagreeing one must be edited, never shadowed by a second rule.
   const overlapping = current.rules.filter(
     (rule) =>
       rule.match !== undefined &&
-      globMatch(source, rule.match) &&
-      !(rule.exclude ?? []).some((excluded) => globMatch(source, excluded)),
+      !(rule.exclude ?? []).some((excluded) => globMatch(match, excluded)) &&
+      (globMatch(match, rule.match) || globMatch(rule.match, match)),
   );
   const conflicting = overlapping.filter((rule) => rule.plane !== planeValue);
   if (conflicting.length > 0) {
@@ -232,22 +278,22 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
     // command is the only way the product ever suggests that answer, so
     // there was no other way back from it.
     throw new UsageError(
-      `classify plane will not add a conflicting rule for '${source}'; edit the existing owner-reviewed rule in '${PLANES_CONFIG_PATH}':\n` +
+      `classify plane will not add a conflicting rule for '${label}'; edit the existing owner-reviewed rule in '${PLANES_CONFIG_PATH}':\n` +
         conflicting
           .map(
             (rule) =>
               `  rule with match '${rule.match}' has plane '${rule.plane}'; change its \`plane\` key to '${planeValue}'` +
-              ` (and its \`reason\` to your own words) to classify '${source}'`,
+              ` (and its \`reason\` to your own words) to classify '${label}'`,
           )
           .join('\n'),
     );
   }
   if (overlapping.length > 0) {
-    writeLine(io.stdout, `${source} already has the reviewed ${planeValue} plane in ${PLANES_CONFIG_PATH}; no change`);
+    writeLine(io.stdout, `${label} already has the reviewed ${planeValue} plane in ${PLANES_CONFIG_PATH}; no change`);
     return 0;
   }
 
-  const rule = { match: source, plane: planeValue as SqlalchemyPlane, reason: reason.trim() };
+  const rule = { match, plane: planeValue as SqlalchemyPlane, reason: reason.trim() };
   const after = `${JSON.stringify({ rules: [...current.rules, rule] }, null, 2)}\n`;
   writeLine(io.stdout, planeConfigDiff(PLANES_CONFIG_PATH, before, after));
   writeLine(io.stdout, `${PLANES_CONFIG_PATH} is an owner-reviewed classification input.`);

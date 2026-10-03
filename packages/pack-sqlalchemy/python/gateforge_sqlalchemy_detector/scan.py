@@ -147,6 +147,34 @@ SOFT_DELETE_CANDIDATE_FIELDS = (
     "is_deleted",
 )
 
+# Directory segments that mark test fixture surface (exact segment match,
+# case-insensitive). Files under such a directory are parsed and reported
+# in ``scannedPaths`` — the coverage evidence stays honest — but they never
+# reach the resource graph: a fixture table is not business surface, and a
+# fixture that re-declares a real table's name used to collide with it and
+# leave the REAL resource plane-unresolved. This mirrors
+# ``packages/pack-sqlalchemy/src/test-paths.ts`` exactly (the TypeScript
+# side applies the same rule to plane proposals and route folders); both
+# must stay in step, which ``test/test-directory-models.test.ts`` pins.
+TEST_PATH_SEGMENTS = ("tests", "test")
+
+
+def _is_test_path(relpath: str) -> bool:
+    """Whether a repo-relative path is test fixture surface.
+
+    Only DIRECTORY segments decide, so ``models/test_accounts.py`` is not
+    test surface while ``tests/models.py`` is, and ``contest/`` is not
+    ``test``.
+
+    Args:
+        relpath: Repo-root-relative posix path.
+
+    Returns:
+        bool: True when any directory segment is ``test``/``tests``.
+    """
+    segments = relpath.replace("\\", "/").split("/")[:-1]
+    return any(segment.lower() in TEST_PATH_SEGMENTS for segment in segments)
+
 
 def expr_label(node: ast.expr) -> str:
     """Classify a non-literal expression deterministically for UNRESOLVED reasons.
@@ -1814,7 +1842,13 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
         if finding is not None:
             findings.append(finding)
             continue
+        # Coverage evidence records EVERY successfully parsed file, test
+        # fixtures included — a hole in the scan must stay visible. The
+        # index is what feeds the resource graph, and a fixture table is
+        # not business surface (see ``_is_test_path``).
         scanned.append(relpath)
+        if _is_test_path(relpath):
+            continue
         indexes[relpath] = index
     resources: list[dict] = []
     unresolved: list[dict] = []

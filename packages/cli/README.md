@@ -778,21 +778,33 @@ run closed at startup (exit 2).
 
 When `next` cannot resolve a route's plane, it asks which data boundary owns
 the route and prints one command for each supported choice. Run only the
-choice the owner has reviewed. `classify plane` accepts one repo-relative
-router source path, one plane, and a non-empty reason:
+choice the owner has reviewed. `classify plane` takes one repo-relative
+file path, FOLDER, or glob, one plane, and a non-empty reason:
 
 ```sh
+# one router file (as before)
 gateforge classify plane 'src/routes.js' tenant \
   --reason 'Owner review confirms tenant-owned records for this route.'
+
+# a whole router folder — written as the rule 'src/routes/**'
+gateforge classify plane 'backend/api/v1' tenant \
+  --reason 'Every router in this folder serves tenant-owned records.'
+
+# your own glob, matched verbatim
+gateforge classify plane 'backend/api/v1/*_admin.py' master \
+  --reason 'These admin routers serve operator-managed records.'
 ```
 
 The default is a dry run: it prints the exact config diff and does not write.
 Add `--confirm` to append the rule to an **existing**
 `.gateforge/planes.json`. The command never creates another trust file,
-replaces a rule, or writes an internality declaration; conflicting rules
-must be resolved by editing the owner-reviewed config. This file is a
-classification input, so changing it changes the trusted-policy digest; an
-approved policy pin must be re-approved before strict gates run.
+replaces a rule, or writes an internality declaration; a source outside the
+repository (absolute, drive-qualified, backslashed, or `..`-escaping) is
+refused, and a new rule that would overlap an existing one with a different
+plane is refused too — conflicting rules must be resolved by editing the
+owner-reviewed config. This file is a classification input, so changing it
+changes the trusted-policy digest; an approved policy pin must be
+re-approved before strict gates run.
 
 The alternative in `next` is owner-only: use the existing
 `.gateforge/classification-policy.yml` `internalRules` declaration only when
@@ -916,10 +928,33 @@ otherwise, and a reason on every rule naming the directory it was
 inferred from. The keyword mapping IS a heuristic — that is why the file
 is a review artifact: it is written only after explicit consent (flag,
 or the TTY prompt), only when absent, and must be reviewed before the
-next run reads it. Tables under test directories are excluded from the
-proposal (fixtures are not business surface); they stay plane-less and
-gate-visible. Non-interactive runs without `--planes` propose nothing
-and print the tip.
+next run reads it.
+Tables under test directories are excluded from the proposal (fixtures are
+not business surface) and never enter the resource graph at all, so a
+fixture that re-declares a real table's name cannot collide with it. The
+same rule (a `test/` or `tests/` directory segment) is generic — it names
+no repository. Non-interactive runs without `--planes` propose nothing and
+print the tip.
+
+### Route folders get their own question
+
+Model folders alone leave every discovered endpoint `PLANE_UNRESOLVED`, so
+`--planes` also asks ONE question per ROUTE folder — the directory of the
+file that declares the handlers, e.g. `backend/api/v1` — and writes one
+`match: 'backend/api/v1/**'` rule per answer. A route's plane is never
+inferred from the model it links to (an `accounts` route can serve master
+data): the question may SHOW that model's plane as a hint, and only when
+every model behind the folder's routes has the same resolved plane —
+otherwise no hint is shown and the owner answers from the routes.
+
+Nothing is applied without an answer. In a non-interactive run init prints
+each folder, its unresolved route count, the hint (labelled as a hint) and
+the exact command to run later:
+
+```sh
+gateforge classify plane 'backend/api/v1' tenant \
+  --reason 'These routers serve tenant-owned records.'
+```
 
 ## test-gates protocol (G6 surface)
 

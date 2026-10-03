@@ -2,13 +2,16 @@
  * Owner-declared tenant scope columns (plan 2026-09-25 Phase 4b item 3a).
  *
  * The fixed `TENANT_SCOPE_COLUMNS` list recognizes the usual spellings
- * (`tenant_id`, `tenant`, ...), but the real incident's ledger table is
- * scoped by `contractor_id`: unique (contractor_id, ledger_id, kind)
- * admits one row per contractor, so a create is provable only on a fresh
- * contractor. The owner must therefore be able to DECLARE which columns
- * carry the tenant scope, and the declaration must REPLACE the default
- * list (never extend it silently). ABSENT stays byte-identical: same tag,
- * same bytes, same nothing.
+ * (`tenant_id`, `tenant`, ...), but the incident's contractor tables are
+ * scoped by `contractor_id`. The owner must therefore be able to DECLARE
+ * which columns carry the tenant scope, and the declaration must REPLACE
+ * the default list (never extend it silently). ABSENT stays
+ * byte-identical: same tag, same bytes, same nothing.
+ *
+ * The declared columns are also what the EXACT rule reads: a constraint
+ * is a per-tenant singleton only when every column it names is in the
+ * declared scope, so `unique (contractor_id, ledger_id, kind)` is not one
+ * while `unique (contractor_id)` is.
  *
  * The key lives in `.gateforge.yml`, so it is inside the trusted policy
  * digest — an agent cannot widen the tenant scope of a review artifact
@@ -35,12 +38,19 @@ const ORIGINAL_CWD = process.cwd();
 /** The reviewed plane decision for both singleton fixtures. */
 const TENANT_PLANE_RULES: readonly PlaneConfigRule[] = [
   {
-    tables: ['contractor_ledger_entries', 'contractor_ledgers'],
+    tables: ['contractor_ledger_entries', 'contractor_ledgers', 'contractor_profiles'],
     plane: 'tenant',
     reason: 'each table carries a contractor_id scope column',
   },
   {
-    tables: ['ledger_entries', 'meters', 'coupons', 'tenant_settings'],
+    tables: [
+      'ledger_entries',
+      'tenant_profiles',
+      'tenant_quotas',
+      'meters',
+      'coupons',
+      'tenant_settings',
+    ],
     plane: 'tenant',
     reason: 'each table carries a tenant_id scope column',
   },
@@ -153,11 +163,16 @@ describe('owner-declared tenant scope columns (plan Phase 4b item 3a)', () => {
 
   it('tags a contractor-scoped table once the owner declares the scope column', async () => {
     const outcome = await discoverIn(project(['contractor_id']), [CONTRACTOR_FIXTURE]);
-    expect(tagOf(outcome, 'contractor_ledger_entries')).toEqual({
-      constraint: 'uq_contractor_ledger_kind',
+    expect(tagOf(outcome, 'contractor_profiles')).toEqual({
+      constraint: 'uq_contractor_profile',
       tenantColumn: 'contractor_id',
-      columns: ['contractor_id', 'ledger_id', 'kind'],
+      scopeColumns: ['contractor_id'],
+      columns: ['contractor_id'],
     });
+    // The composite `unique (contractor_id, ledger_id, kind)` admits many
+    // rows per contractor, so declaring the scope column does not make it
+    // a singleton — the old rule tagged it and told the owner otherwise.
+    expect(tagOf(outcome, 'contractor_ledger_entries')).toBeUndefined();
   });
 
   it('never tags a constraint that excludes the declared scope column', async () => {
@@ -172,14 +187,15 @@ describe('owner-declared tenant scope columns (plan Phase 4b item 3a)', () => {
 
   it('REPLACES the default list: a declared list never also matches tenant_id', async () => {
     const declared = project(['contractor_id']);
-    expect(tagOf(await discoverIn(declared, [TENANT_FIXTURE]), 'ledger_entries')).toBeUndefined();
+    expect(tagOf(await discoverIn(declared, [TENANT_FIXTURE]), 'tenant_profiles')).toBeUndefined();
     // The very same table IS tagged once the declaration is gone — that
     // is the whole difference, and it is the owner's call to make.
     rmSync(declared.configPath);
-    expect(tagOf(await discoverIn(declared, [TENANT_FIXTURE]), 'ledger_entries')).toEqual({
-      constraint: 'uq_ledger_tenant_ledger_kind',
+    expect(tagOf(await discoverIn(declared, [TENANT_FIXTURE]), 'tenant_profiles')).toEqual({
+      constraint: 'uq_tenant_profile_tenant',
       tenantColumn: 'tenant_id',
-      columns: ['tenant_id', 'ledger', 'kind'],
+      scopeColumns: ['tenant_id'],
+      columns: ['tenant_id'],
     });
   });
 

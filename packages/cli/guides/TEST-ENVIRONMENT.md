@@ -238,11 +238,14 @@ authority:
 Without a registration the engine reads as the process-global seat
 credentials in the environment, byte-identically to today's behavior.
 
-**Example:** A per-tenant singleton table (`unique (contractor_id,
-ledger_id, kind)` — see the `RESOURCE_SINGLETON_PER_TENANT` advisory)
-cannot be proven by a read that uses the fixed seat: that seat's tenant
-already has its row. The test creates the tenant first, registers that
-tenant's login, then performs the read:
+**Example:** A per-tenant singleton table (a table whose unique constraint
+covers the tenancy scope alone, `unique (contractor_id)` — see the
+`RESOURCE_SINGLETON_PER_TENANT` advisory) cannot be proven by a read that
+uses the fixed seat: that seat's tenant already has its row. (A constraint
+that merely CONTAINS a scope column, such as `unique (contractor_id,
+ledger_id, kind)`, admits many rows per contractor and is not a singleton.)
+The test creates the tenant first, registers that tenant's login, then
+performs the read:
 
 ```js
 test('creates the first ledger entry for a fresh contractor', async ({ evidence }) => {
