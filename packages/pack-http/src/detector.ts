@@ -193,6 +193,16 @@ function lineColumnFor(text: string, index: number): { line: number; col: number
  * framework attribution follows the module the file imports (pack-auth
  * convention — without import disambiguation the first scanner wins and
  * wrong attribution leaks across frameworks).
+ *
+ * `app`/`server`/`router` are server names by convention. `api` is NOT:
+ * it is the axios/playwright/fetch-client spelling (`api.get('/x')` in an
+ * e2e spec, `api.post('/x', body)` in an api-client module), and reading
+ * it as a registration minted a SERVER ROUTE out of a test-suite or
+ * frontend call site — an endpoint located in a spec file and attributed
+ * to a path no server registers. `api.<verb>` therefore counts as a
+ * registration only where the file shows server-framework evidence (it
+ * imports express, fastify, or hono): a server's own `api` router does.
+ * Everything else about the shape is unchanged.
  */
 function scanServerRoutes(
   text: string,
@@ -206,12 +216,17 @@ function scanServerRoutes(
   } else if (/\bfrom\s+['"]fastify['"]/.test(text) || /\brequire\(\s*['"]fastify['"]/.test(text)) {
     origin = 'fastify';
   }
+  const serverFramework =
+    origin !== 'express' ||
+    /\bfrom\s+['"]express['"]/.test(text) ||
+    /\brequire\(\s*['"]express['"]/.test(text);
   const registration =
     /\b(app|server|router|api)\.(get|post|put|patch|delete|all)\(\s*(['"`])([^'"`]+)\3(?:\s*,\s*([A-Za-z_$][\w$]*)\s*[),])?/g;
   let match: RegExpExecArray | null;
   while ((match = registration.exec(text)) !== null) {
     const receiver = match[1] ?? '';
     if (clientSymbols.includes(receiver)) continue;
+    if (receiver === 'api' && !serverFramework) continue;
     const method = (match[2] ?? '').toUpperCase();
     const path = match[4] ?? '';
     if (path.length === 0) continue;

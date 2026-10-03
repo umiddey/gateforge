@@ -10,6 +10,12 @@ classification signals** (dogfood remediation phase 4):
   Fastify and Hono registrations (import-disambiguated, the pack-auth
   convention), and NestJS `@Controller('accounts')` + `@Get/@Post/@Put/
   @Patch/@Delete/@All('…')` decorators.
+  `app`/`server`/`router` are server names by convention; an `api.<verb>()`
+  call counts as a registration **only** where the file imports a server
+  framework (express/fastify/hono), because that is also how an axios
+  instance, a Playwright request context, or an api-client module spells
+  its calls — reading those as routes minted server routes out of test
+  and client call sites.
 - **Frontend API-client calls** (bounded static dataflow, plan phase 3):
   direct literal `fetch`/Axios, `fetch(url, { method })`, Axios config
   objects and instances, configured client symbols (`apiClient.get`),
@@ -22,6 +28,17 @@ classification signals** (dogfood remediation phase 4):
   disappear and never default to GET. A modeled Axios instance creation
   with a proven literal `baseURL` joins that base into the emitted call
   path (see *Instance baseURL joining* below).
+- **The verb of `fetch(url, options)`** comes from a bounded
+  request-options model, never from "the options were not inline": an
+  inline object (`method` read with last-writer-wins, so a spread and
+  the override after it both participate), a module-scope constant
+  naming one, or a call to a scanned function whose body is a single
+  `return <expression>` with its first parameter bound to that argument
+  (so a forwarder resolves through it). Options that provably carry no
+  `method` keep the platform default — GET really is what the call
+  sends. Options the model cannot read yield a typed
+  `HTTP_METHOD_DYNAMIC` entry and **no call fact**: before, such a call
+  was recorded as a GET and joined a route the server never serves.
 
 ## Client-scan configuration
 

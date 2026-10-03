@@ -42,8 +42,25 @@ describe('fastapi detector (subprocess, real python)', () => {
       'simple/routers.py',
       'simple/standalone.py',
     ]);
-    expect(outcome.findings).toEqual([]);
-    expect(outcome.unresolved).toEqual([]);
+    // `simple/main.py` declares its routes on the app itself and includes
+    // NO router, so `simple/routers.py`'s `items` and
+    // `simple/standalone.py`'s `admin` are mounted by nothing in this
+    // scan — and the pack says so, once per router, instead of leaving
+    // their standalone paths to read as served routes.
+    const unmounted = (outcome.unresolved as ReadonlyArray<Record<string, unknown>>).map(
+      (entry) => {
+        const location = entry['location'];
+        const file =
+          typeof location === 'object' && location !== null && 'file' in location
+            ? String(location.file)
+            : '';
+        return [String(entry['code']), file];
+      },
+    );
+    expect(unmounted).toEqual([
+      ['FASTAPI_ROUTER_UNMOUNTED', 'simple/routers.py'],
+      ['FASTAPI_ROUTER_UNMOUNTED', 'simple/standalone.py'],
+    ]);
     expect(effectivePaths(outcome).sort()).toEqual([
       'DELETE /items/{}',
       'GET /admin/stats',
@@ -104,26 +121,53 @@ describe('fastapi detector (subprocess, real python)', () => {
     expect(get?.attributes['requestSchemaSymbols']).toEqual([]);
   });
 
-  it('blocks computed prefixes and computed paths with typed entries', async () => {
-    const outcome = await runDiscover(['simple/computed.py']);
+  it('folds a constant prefix, and blocks genuinely computed prefixes and paths', async () => {
+    // A prefix written as a module-level string CONSTANT is provable, so
+    // the router's routes carry their real path. The wrapper fills the
+    // canonical path; the raw python surface leaves it empty by design,
+    // so the path is asserted through the wrapper and the typed entries
+    // through the raw surface.
+    const folded = await runDetector(['simple/computed.py']);
+    expect(effectivePaths(folded)).toEqual(['GET /computed/x']);
+    const raw = await runDiscover(['simple/computed.py']);
+    expect(
+      (raw.unresolved as ReadonlyArray<Record<string, unknown>>).map((entry) => entry['code']),
+    ).toEqual(['HTTP_PATH_DYNAMIC']);
+
+    // An f-string / attribute prefix is computed: nothing is invented.
+    const outcome = await runDiscover(['simple/computed_expression_prefix.py']);
     expect(facts(outcome.resources)).toEqual([]);
     const codes = outcome.unresolved.map((entry) => entry['code']);
-    expect(codes).toContain('FASTAPI_PREFIX_UNRESOLVED');
-    expect(codes).toContain('HTTP_PATH_DYNAMIC');
+    expect(codes).toEqual([
+      'FASTAPI_PREFIX_UNRESOLVED',
+      'FASTAPI_PREFIX_UNRESOLVED',
+    ]);
     for (const entry of outcome.unresolved) {
-      expect(entry['location']).toHaveProperty('file', 'simple/computed.py');
+      expect(entry['location']).toHaveProperty('file', 'simple/computed_expression_prefix.py');
+      expect(String(entry['detail'])).toContain('declares a computed prefix');
     }
   });
 
   it('closes the computed-prefix finding when the same mount declares a literal', async () => {
     // The guidance `gateforge next` prints for FASTAPI_PREFIX_UNRESOLVED
-    // names exactly one fix: write the prefix as a literal at the mount
-    // site. This is that fix, run through the REAL python detector — the
-    // same app shape as `simple/computed.py`, one edit apart.
-    const computed = await runDiscover(['simple/computed.py']);
-    expect(computed.unresolved.map((entry) => entry['code'])).toContain('FASTAPI_PREFIX_UNRESOLVED');
+    // names the fix: make the prefix statically computable. This is that
+    // fix, run through the REAL python detector — the same mount written
+    // three ways, one edit apart.
+    const computed = await runDiscover(['simple/computed_expression_prefix.py']);
+    expect(computed.unresolved.map((entry) => entry['code'])).toContain(
+      'FASTAPI_PREFIX_UNRESOLVED',
+    );
+    const constant = await runDetector(['simple/computed.py']);
+    expect(
+      (constant.unresolved as ReadonlyArray<Record<string, unknown>>).map(
+        (entry) => entry['code'],
+      ),
+    ).not.toContain('FASTAPI_PREFIX_UNRESOLVED');
+    expect(effectivePaths(constant)).toEqual(['GET /computed/x']);
     const literal = await runDetector(['simple/literal_prefix.py']);
-    expect(literal.unresolved.map((entry) => (entry as Record<string, unknown>)['code'])).not.toContain('FASTAPI_PREFIX_UNRESOLVED');
+    expect(
+      (literal.unresolved as ReadonlyArray<Record<string, unknown>>).map((entry) => entry['code']),
+    ).not.toContain('FASTAPI_PREFIX_UNRESOLVED');
     expect(effectivePaths(literal)).toEqual(['GET /computed/x']);
   });
 

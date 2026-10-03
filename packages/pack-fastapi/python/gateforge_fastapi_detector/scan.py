@@ -19,9 +19,26 @@ Detector vocabulary (frozen with the pack):
 - One fact per (effective mounted path, concrete method): an
   ``api_route(methods=[...])`` yields one fact per listed method, and a
   router mounted twice yields one fact per mount (plan phase 2.3).
-- Standalone routers (never the target of a resolvable ``include_router``)
-  emit their routes at their own prefix with ``mountProvenance``
-  ``standalone`` — matching the legacy wiring scanner's default mount.
+  ``Router creation that the AST pass cannot model`` (``build_router()``,
+  a subscript, an attribute, any expression that is not a plain
+  ``APIRouter(...)`` call) is a typed ``FASTAPI_PREFIX_UNRESOLVED``
+  outcome naming the variable and its file — NEVER a silently
+  prefix-less router: a route whose effective path cannot be proven is
+  never reported as served.
+- Literal prefixes: a prefix expression that is a module-level string
+  constant (``PREFIX = "/api/v1"``) is folded to its literal, for both
+  ``APIRouter(prefix=...)`` and ``include_router(prefix=...)``, so the
+  mount prefix reaches the effective path. Anything else computed stays
+  typed-unresolved.
+- Annotated router definitions (``router: APIRouter = APIRouter(...)``)
+  are router definitions exactly like ``router = APIRouter(...)``,
+  prefix included.
+- Unmounted routers: when the whole mount graph is provable (no
+  ``FASTAPI_PREFIX_UNRESOLVED`` anywhere in the scan), a router that no
+  include edge targets is dead code in the scanned set: its routes keep
+  their standalone emission, and one ``FASTAPI_ROUTER_UNMOUNTED`` entry
+  names the router, its file, and every declared route so the reader can
+  see that no scanned app serves those paths.
 - Registry functions (the ``def register_all_routers(app): ...
   app.include_router(r, prefix=...)`` pattern): a function whose body
   calls ``include_router`` on one of ITS OWN parameters collects those
@@ -65,10 +82,14 @@ Detector vocabulary (frozen with the pack):
   imports are unaffected. Without import roots every behavior is exactly
   as before (closed-world: back-compat).
 - ``unresolved`` entries: ``FASTAPI_PREFIX_UNRESOLVED`` for computed
-  router/include prefixes, unresolvable or ambiguous include
-  targets/imports/aliases, unresolvable registry-function call-site
-  arguments, include cycles, and registry chains beyond the helper-depth
-  bound; ``HTTP_PATH_DYNAMIC`` for non-literal route paths;
+  router/include prefixes, router creations the AST pass cannot model,
+  unresolvable or ambiguous include targets/imports/aliases,
+  unresolvable registry-function call-site arguments, include cycles,
+  and registry chains beyond the helper-depth bound;
+  ``FASTAPI_ROUTER_UNMOUNTED`` for a router no include edge targets —
+  reported only when the scanned set shows an application and no
+  unresolvable include, since "unmounted" is otherwise unprovable;
+  ``HTTP_PATH_DYNAMIC`` for non-literal route paths;
   ``HTTP_METHOD_DYNAMIC`` for decorator verbs outside the supported set.
   All are source-located and blocking — nothing disappears silently.
 - No app import, no route execution, no environment or network access
@@ -89,6 +110,10 @@ FRAMEWORK = "fastapi"
 
 # Typed outcome codes (mirrored in @gate-forge/http-contract codes.ts).
 FASTAPI_PREFIX_UNRESOLVED = "FASTAPI_PREFIX_UNRESOLVED"
+# A router no include edge targets, reported only when the mount graph
+# itself is provable: the paths the standalone fallback emits are served
+# by no scanned app, and the reader must be told which file declares them.
+FASTAPI_ROUTER_UNMOUNTED = "FASTAPI_ROUTER_UNMOUNTED"
 
 _DECORATOR_METHODS = {
     "get": "GET",
@@ -150,6 +175,13 @@ class RouterDef:
     # Set when the variable is an import alias bound to a router defined in
     # another scanned module: ``(raw_module, level, imported_name)``.
     alias_of: tuple[str | None, int, str] | None = None
+    # True when the router OBJECT comes from an expression this AST pass
+    # cannot model (``build_router()``, a subscript, an attribute, any
+    # expression that is not a plain ``APIRouter(...)`` call). Its own
+    # prefix and therefore every route's effective path are unprovable:
+    # the walk reports a typed outcome instead of emitting a fabricated
+    # prefix-less path.
+    creation_computed: bool = False
 
 
 @dataclass
@@ -280,6 +312,41 @@ def _static_string(node: ast.AST | None) -> str | None:
     return None
 
 
+def _literal_prefix(node: ast.AST | None, constants: dict[str, str]) -> str | None:
+    """A mount prefix that provably is one literal string, else None.
+
+    Beyond a literal (``prefix="/api/v1"``) this folds a module-level
+    string CONSTANT (``PREFIX = "/api/v1"; APIRouter(prefix=PREFIX)``):
+    that value is fixed by the source, so the effective path is provable
+    and the route must not disappear behind a computed-prefix outcome.
+    Anything else (an f-string, an attribute, a call, a concatenation)
+    stays computed and is reported as typed-unresolved.
+    """
+    literal = _static_string(node)
+    if literal is not None:
+        return literal
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    return None
+
+
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Module-level string constants, for literal prefix folding."""
+    constants: dict[str, str] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            literal = _static_string(statement.value)
+            if literal is not None:
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = literal
+        elif isinstance(statement, ast.AnnAssign):
+            literal = _static_string(statement.value)
+            if literal is not None and isinstance(statement.target, ast.Name):
+                constants[statement.target.id] = literal
+    return constants
+
+
 def _dotted_name(node: ast.AST | None) -> str | None:
     """A dotted name for Name/Attribute chains, or None."""
     if isinstance(node, ast.Name):
@@ -402,13 +469,14 @@ class _ModuleVisitor(ast.NodeVisitor):
     its ``include_router`` calls still count for the outer parameter.
     """
 
-    def __init__(self, relpath: str) -> None:
+    def __init__(self, relpath: str, constants: dict[str, str] | None = None) -> None:
         self.index = FileIndex(relpath=relpath)
         # Current top-level function (registry-function context), or None
         # at module level.
         self._function: FunctionIncludes | None = None
-
-    # -- imports ------------------------------------------------------------
+        # Module-level string constants, for literal prefix folding
+        # (`PREFIX = "/api/v1"`; `APIRouter(prefix=PREFIX)`).
+        self._constants: dict[str, str] = constants or {}
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -425,24 +493,42 @@ class _ModuleVisitor(ast.NodeVisitor):
     # -- router / app instances ---------------------------------------------
 
     def visit_Assign(self, node: ast.Assign) -> None:
-        if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
-            kind = node.value.func.id
-            if kind in {"FastAPI", "APIRouter"}:
-                for target in node.targets:
-                    if not isinstance(target, ast.Name):
-                        continue
-                    if kind == "FastAPI":
-                        self.index.apps.add(target.id)
-                    else:
-                        prefix_node = _keyword(node.value, "prefix")
-                        prefix: str | None = (
-                            "" if prefix_node is None else _static_string(prefix_node)
-                        )
-                        self.index.routers[target.id] = RouterDef(
-                            var=target.id, prefix=prefix,
-                            prefix_node=prefix_node if prefix_node is not None else node.value,
-                        )
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self._record_instance(target.id, node.value)
         self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        # `router: APIRouter = APIRouter(prefix="/api/v1")` defines a
+        # router exactly like the unannotated form; before this, the
+        # annotated shape produced a silently prefix-less route.
+        if node.value is not None and isinstance(node.target, ast.Name):
+            self._record_instance(node.target.id, node.value)
+        self.generic_visit(node)
+
+    def _record_instance(self, name: str, value: ast.AST) -> None:
+        """Indexes one ``FastAPI()`` / ``APIRouter()`` binding."""
+        if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)):
+            return
+        kind = value.func.id
+        if kind == "FastAPI":
+            self.index.apps.add(name)
+            # Routes declared straight on the app (`@app.get("/health")`)
+            # belong to it with no router prefix of their own.
+            self.index.routers.setdefault(
+                name, RouterDef(var=name, prefix="", prefix_node=value),
+            )
+            return
+        if kind != "APIRouter":
+            return
+        prefix_node = _keyword(value, "prefix")
+        prefix: str | None = (
+            "" if prefix_node is None else _literal_prefix(prefix_node, self._constants)
+        )
+        self.index.routers[name] = RouterDef(
+            var=name, prefix=prefix,
+            prefix_node=prefix_node if prefix_node is not None else value,
+        )
 
     # -- response models -----------------------------------------------------
 
@@ -561,7 +647,19 @@ class _ModuleVisitor(ast.NodeVisitor):
             alias_of = None
             if ref is not None and ref.name is not None:
                 alias_of = (ref.module, ref.level, ref.name)
-            router = RouterDef(var=owner.id, prefix="", prefix_node=owner, alias_of=alias_of)
+            # No router definition and no import binding for this name: the
+            # router object comes from an expression this pass cannot model
+            # (`build_router()`, a subscript, a re-assignment). Its own
+            # prefix is therefore UNKNOWN — a synthetic `prefix=""` here
+            # would publish every one of its routes at a path no app serves,
+            # with no typed outcome at all.
+            router = RouterDef(
+                var=owner.id,
+                prefix="" if alias_of is not None else None,
+                prefix_node=owner,
+                alias_of=alias_of,
+                creation_computed=alias_of is None,
+            )
             self.index.routers[owner.id] = router
         router.routes.append(entry)
         out_of_set = [m for m in methods if m not in _DECORATOR_METHODS.values()]
@@ -600,7 +698,10 @@ class _ModuleVisitor(ast.NodeVisitor):
             target_var=target_var,
             target_alias=target_alias,
             target_attrs=target_attrs,
-            prefix="" if prefix_node is None else _static_string(prefix_node),
+            prefix=(
+                "" if prefix_node is None
+                else _literal_prefix(prefix_node, self._constants)
+            ),
             node=node,
             file=self.index.relpath,
         )
@@ -657,7 +758,7 @@ def _scan_file(relpath: str, root: Path) -> tuple[FileIndex | None, dict | None]
             "detail": f"{type(exc).__name__}: {msg}",
             "locations": [{"file": relpath, "line": max(line, 1), "col": 0}],
         }
-    visitor = _ModuleVisitor(relpath)
+    visitor = _ModuleVisitor(relpath, _module_string_constants(tree))
     visitor.visit(tree)
     return visitor.index, None
 
@@ -893,6 +994,7 @@ class _Resolver:
         self._materialize_function_includes()
         self._merge_aliases()
         included = self._collect_included()
+        unmounted: list[tuple[str, str, RouterDef]] = []
         for relpath in sorted(self.indexes):
             index = self.indexes[relpath]
             for var in sorted(index.apps):
@@ -906,6 +1008,56 @@ class _Resolver:
                 if (relpath, name) in included:
                     continue
                 self._walk(relpath, name, "", (), "standalone", included)
+                if router.routes:
+                    unmounted.append((relpath, name, router))
+        self._report_unmounted_routers(
+            unmounted, apps_present=any(index.apps for index in self.indexes.values()),
+        )
+
+    def _report_unmounted_routers(
+        self,
+        unmounted: list[tuple[str, str, RouterDef]],
+        apps_present: bool,
+    ) -> None:
+        """Names routers no include edge mounts, when that is provable.
+
+        A router that no scanned include edge targets is served by no
+        scanned app: the standalone fallback still reports its routes (a
+        route's path is a claim, and its declared prefix is all this pass
+        knows), but the reader must see that nothing mounts them — the
+        routes appear at the router's OWN prefix, without whatever mount
+        prefix the sibling modules carry.
+
+        Reported ONLY when the scanned set actually shows the application
+        and its mount graph is otherwise fully proven. With no app
+        instance the mounting code may simply be outside the scan, and
+        with an unresolvable include this scan cannot say which routers
+        that include would have reached — in both cases "unmounted" would
+        be a claim about files nobody could see, or would bury the real
+        blocker (already reported) under unrelated entries.
+        """
+        if not apps_present:
+            return
+        if any(entry["code"] == FASTAPI_PREFIX_UNRESOLVED for entry in self.unresolved):
+            return
+        for relpath, name, router in unmounted:
+            routes = sorted(
+                f"{method} {router.prefix or ''}{route.path}"
+                for route in router.routes
+                if route.path is not None
+                for method in route.methods
+            )
+            self.unresolved.append({
+                "code": FASTAPI_ROUTER_UNMOUNTED,
+                "detail": (
+                    f"router '{name}' in {relpath} is never included by any app in the "
+                    f"scanned set; its {len(routes)} route(s) "
+                    f"({', '.join(routes)}) are reported at the router's own prefix, "
+                    "which no scanned app serves — mount the router, or delete it if it "
+                    "is dead code"
+                ),
+                "location": loc(relpath, router.prefix_node),
+            })
 
     def _materialize_function_includes(self) -> None:
         """Rewires registry-function includes onto real instances.
@@ -1381,10 +1533,17 @@ class _Resolver:
                 return
             if router.prefix is None:
                 self.unresolved.append({
-                    "code": "FASTAPI_PREFIX_UNRESOLVED",
+                    "code": FASTAPI_PREFIX_UNRESOLVED,
                     "detail": (
-                        f"router '{var}' in {relpath} declares a computed prefix; "
-                        "the effective path cannot be proven statically"
+                        (
+                            f"router '{var}' in {relpath} is created by an expression that "
+                            "cannot be modeled statically (its own prefix and routes are "
+                            "unknown), so its effective paths are not reported"
+                        )
+                        if router.creation_computed else (
+                            f"router '{var}' in {relpath} declares a computed prefix; "
+                            "the effective path cannot be proven statically"
+                        )
                     ),
                     "location": loc(relpath, router.prefix_node),
                 })

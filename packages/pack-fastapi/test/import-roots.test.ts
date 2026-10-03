@@ -58,7 +58,18 @@ describe('fastapi import-root resolution (.gateforge/fastapi.json)', () => {
       IMPORT_ROOTS_FIXTURES,
       BACKEND_IMPORT_ROOTS,
     );
-    expect(outcome.unresolved).toEqual([]);
+    // One typed entry: the admin router no scanned app mounts. Its
+    // standalone path is reported, and this entry says plainly that
+    // nothing serves it.
+    expect(outcome.unresolved).toEqual([
+      {
+        code: 'FASTAPI_ROUTER_UNMOUNTED',
+        detail: expect.stringContaining(
+          "router 'router' in import-roots/admin/api/v1/activities.py is never included by any app",
+        ),
+        location: { file: 'import-roots/admin/api/v1/activities.py', line: 10, col: 26 },
+      },
+    ]);
     expect(effectivePaths(outcome).sort()).toEqual([
       // admin's same-shaped router is NOT the include target; it stays standalone.
       'GET /activities/{}',
