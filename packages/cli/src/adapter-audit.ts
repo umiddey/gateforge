@@ -227,6 +227,80 @@ export function routesForResource(
 }
 
 /**
+ * One GET route the runtime route inventory omits because its
+ * endpoint's plane is unanswered.
+ *
+ * An endpoint with no resolved plane has no plane-qualified graph id,
+ * so `httpRoutesView` skips it: the route IS compiled and it DOES
+ * exist — nothing downstream can see it, which is not the same thing.
+ * The scaffolder needs it to name the real blocker instead of
+ * reporting the resource as unserved (GF-12).
+ */
+export interface UnresolvedRoute {
+  /** Concrete uppercase method as compiled (e.g. `GET`). */
+  readonly method: string;
+  /** Compiled canonical path shape (e.g. `/accounts/{}`). */
+  readonly canonicalPath: string;
+  /** Linked business resource name, when the compiler linked one. */
+  readonly linkedResourceName?: string;
+}
+
+/**
+ * The plane-unanswered GET routes that could serve one business
+ * resource: the same evidence rule the resolved inventory uses — the
+ * engine LINKED the route, or the path NAMES the resource as a whole
+ * segment. A route the compiler linked to a DIFFERENT resource is
+ * never returned here: that is someone else's route.
+ *
+ * Args:
+ *   resource: the business resource.
+ *   routes: the plane-unanswered route inventory.
+ *
+ * Returns:
+ *   UnresolvedRoute[]: every GET route that could serve the resource,
+ *   in the order the inventory carries them.
+ */
+export function unresolvedRoutesForResource(
+  resource: GraphResource,
+  routes: readonly UnresolvedRoute[],
+): UnresolvedRoute[] {
+  const gets = routes.filter((route) => route.method === 'GET');
+  const name = nameSegment(resource.name);
+  return gets.filter(
+    (route) =>
+      route.linkedResourceName === resource.name ||
+      route.canonicalPath.split('/').some((segment) => nameSegment(segment) === name),
+  );
+}
+
+/**
+ * The literal path segments a route carries BETWEEN the segment that
+ * names the resource and its positional tail.
+ *
+ * `/shipments/carrier/{id}` names `shipments` and then adds a literal
+ * `carrier`, so it reads a carrier THROUGH a shipment: whatever it
+ * answers, it is not one shipment entity. A route whose last literal
+ * segment IS the resource (`/shipments/{id}`) has no such tail, and a
+ * route that never names the resource cannot be judged this way at
+ * all — there the engine's linkage is the evidence.
+ *
+ * Args:
+ *   prefix: the literal prefix `splitRoutePath` left behind.
+ *   resourceName: the business resource name.
+ *
+ * Returns:
+ *   string[]: the literal segments after the resource segment, or an
+ *   empty array when the route's own level IS the resource.
+ */
+export function literalTailAfterResource(prefix: string, resourceName: string): string[] {
+  const segments = prefix.split('/').filter((segment) => segment.length > 0);
+  const name = nameSegment(resourceName);
+  const at = segments.findIndex((segment) => nameSegment(segment) === name);
+  if (at < 0 || at === segments.length - 1) return [];
+  return segments.slice(at + 1);
+}
+
+/**
  * Normalizes one name or path segment for whole-segment name matching.
  *
  * Args:

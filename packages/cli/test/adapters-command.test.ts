@@ -110,6 +110,15 @@ const PLUGIN_WITHOUT_ROUTES = PLUGIN_WITH_ROUTES.replace(
 );
 
 /**
+ * A detector whose resource is served by a COMPLETE collection and no
+ * by-id route — the list-only shape the kit resolves the member from.
+ */
+const PLUGIN_WITH_COLLECTION_ONLY = PLUGIN_WITH_ROUTES.replace(
+  /.*(?:endpoint|signal)\('GET \/api\/accounts\/:id'.*\n/g,
+  '',
+);
+
+/**
  * Installs a fixture project with one adapter-less business resource.
  *
  * Args:
@@ -334,6 +343,30 @@ describe('gateforge adapters scaffold', () => {
       expect(run.stdout).toContain('no GET route serves one accounts entity');
       expect(run.stdout).toContain('a create cannot be witnessed without a complete collection read');
       expect(existsSync(repo.path('.gateforge/adapters/tenant.accounts.mjs'))).toBe(false);
+    });
+  });
+
+  it('writes a list-only adapter when the app serves a collection and no by-id route', async () => {
+    await withTempRepo({}, async (repo) => {
+      install(repo, PLUGIN_WITH_COLLECTION_ONLY);
+      const run = await runCli(repo, ['adapters', 'scaffold'], {
+        GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+      });
+      expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(run.stdout).toContain('wrote .gateforge/adapters/tenant.accounts.mjs');
+      const source = readFileSync(repo.path('.gateforge/adapters/tenant.accounts.mjs'), 'utf8');
+      // No readPath is invented, and the header says what that costs.
+      expect(source).toContain('LIST-ONLY');
+      expect(source).toContain('listPath: "/api/accounts"');
+      expect(source).not.toContain('readPath:');
+      // The generated module is a real adapter: the kit builds it and
+      // `adapters check` grades it exactly like a hand-written one.
+      installWitnessKit(repo);
+      const check = await runCli(repo, ['adapters', 'check']);
+      expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
+      expect(check.stdout).toContain('[ok] .gateforge/adapters/tenant.accounts.mjs');
+      expect(check.stdout).toContain('declares list');
+      expect(check.stdout).not.toContain('[invalid]');
     });
   });
 
