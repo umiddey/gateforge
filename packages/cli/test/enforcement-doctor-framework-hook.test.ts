@@ -108,4 +108,28 @@ describe('enforcement doctor understands a framework-managed commit hook (8)', (
       expect(hook.detail).toContain('non-gateforge');
     });
   });
+
+  it('reports the commit gate NOT active (fail) when the config declares gateforge-check but no hook exists yet', async () => {
+    // R1-7: `.pre-commit-config.yaml` declares our hook, but the
+    // framework has not installed its generated hook file yet —
+    // until `pre-commit install` runs, the commit gate is NOT
+    // active, so the row must fail (never an ok all-clear).
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ '.pre-commit-config.yaml': PRE_COMMIT_CONFIG });
+      const { code, stdout, stderr } = await runCli(repo, ['enforcement', 'doctor', '--json']);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+      const report = JSON.parse(stdout) as DoctorJson;
+      const hook = report.checks.find((entry) => entry.id === 'hook');
+      expect(hook, "the doctor always reports a 'hook' check").toBeTruthy();
+      const found = hook as { status: string; detail: string };
+      expect(found.status).toBe('fail');
+      expect(found.detail).toContain('NOT active');
+      expect(found.detail).toContain('pre-commit install');
+      // The text surface carries the same action.
+      const text = await runCli(repo, ['enforcement', 'doctor']);
+      expect(text.code).toBe(0);
+      expect(text.stdout).toContain('pre-commit install');
+    });
+  });
 });

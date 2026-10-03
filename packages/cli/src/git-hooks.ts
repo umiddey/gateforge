@@ -178,6 +178,22 @@ export function installCommitHook(
         `then re-run \`gateforge init --blocking\` to verify activation.`,
     };
   }
+  // Pre-commit FRAMEWORK without an installed hook: the framework
+  // owns .git/hooks/pre-commit (it regenerates that file from
+  // .pre-commit-config.yaml on every `pre-commit install`), so
+  // gateforge must NEVER write a raw hook file here — it wires
+  // itself through the framework config instead.
+  const frameworkConfig = join(cwd, '.pre-commit-config.yaml');
+  if (existsSync(frameworkConfig)) {
+    return {
+      status: 'framework',
+      hookPath,
+      hooksDir,
+      detail:
+        'pre-commit framework config found — gateforge wires itself through .pre-commit-config.yaml; ' +
+        'run `pre-commit install` to activate the gate',
+    };
+  }
   const script = gateforgeHookScript(gateArgs);
   try {
     mkdirSync(hooksDir, { recursive: true });

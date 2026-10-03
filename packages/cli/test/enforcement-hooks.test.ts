@@ -188,6 +188,25 @@ describe('installCommitHook (install AND verify an ACTIVE hook)', () => {
       rmSync(scratch, { recursive: true, force: true });
     }
   });
+
+  it('returns framework WITHOUT writing a hook file when a pre-commit config exists but no hook is installed', () =>
+    withTempRepo({}, (repo) => {
+      // R1-7: the pre-commit framework owns .git/hooks/pre-commit
+      // (regenerated from .pre-commit-config.yaml on every
+      // `pre-commit install`), so gateforge must NOT write a raw
+      // hook file — it wires itself through the framework config.
+      repo.writeFiles({
+        '.pre-commit-config.yaml':
+          'repos:\n  - repo: local\n    hooks:\n      - id: gateforge-check\n        name: gateforge\n        entry: gateforge check --staged --require-e2e\n        language: system\n        pass_filenames: false\n',
+      });
+      const outcome = installCommitHook(repo.root, gitEnv());
+      expect(outcome.status).toBe('framework');
+      expect(existsSync(repo.path('.git/hooks/pre-commit'))).toBe(false);
+      if (outcome.status === 'framework') {
+        expect(outcome.detail).toContain('pre-commit framework config found');
+        expect(outcome.detail).toContain('pre-commit install');
+      }
+    }));
 });
 
 describe('init --blocking (CLI wiring of the active hook)', () => {

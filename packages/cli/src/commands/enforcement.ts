@@ -959,14 +959,26 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
   // "did not touch" contradicted what `init` had just said about the
   // very same file.
   const frameworkGate = frameworkHookGateWired(io.cwd, hook.hookPath);
+  // R1-7: the framework config declares our hook, but no
+  // framework-GENERATED hook exists in the hooks directory
+  // yet — the commit gate is NOT active until the framework
+  // installs its hook (`pre-commit install`), so the row
+  // fails instead of all-clearing.
+  const frameworkConfigPending =
+    !frameworkGate &&
+    !hook.verifyOk &&
+    declaresGateforgeCheck(join(io.cwd, '.pre-commit-config.yaml'));
   checks.push({
     id: 'hook',
-    status: frameworkGate || hook.verifyOk ? 'ok' : hook.marker ? 'fail' : 'warn',
+    status: frameworkGate || hook.verifyOk ? 'ok' : frameworkConfigPending ? 'fail' : hook.marker ? 'fail' : 'warn',
     detail: frameworkGate
       ? `the commit gate runs through the pre-commit framework: ${hook.hookPath} is framework-generated ` +
         'and .pre-commit-config.yaml declares gateforge-check, which runs on every commit — gateforge does not ' +
         'edit the generated hook file (a direct edit is wiped by the next framework install)'
-      : hook.detail,
+      : frameworkConfigPending
+        ? `the commit gate is NOT active: .pre-commit-config.yaml declares gateforge-check but no framework-generated ` +
+          `hook exists in '${hook.hooksDir ?? 'the hooks directory'}' — run \`pre-commit install\` to activate the gate`
+        : hook.detail,
   });
   const hookMutation = precommitMutationCheck(io.cwd, io.env);
   checks.push({ id: 'hook-mutation', ...hookMutation });
