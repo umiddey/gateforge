@@ -36,13 +36,15 @@ export {
   type HttpOrigin,
 } from './detector.js';
 
-/** The default CLI in-process plugin module: `{ discover(paths) }`. */
-// The default export is created LAZILY per discover call: the detector
-// resolves paths against `process.cwd()` at call time. An eagerly created
-// instance would pin the first repo root it saw and go blind in any
-// long-lived host that loads the module once and scans multiple repos.
-export default {
-  discover(paths: readonly string[]) {
-    return createHttpDetector().discover(paths);
-  },
-};
+/**
+ * The default CLI in-process plugin module: `{ discover(paths) }`.
+ *
+ * Like every other pack, the instance is created at module import — safe
+ * because `createHttpDetector` resolves the repo root AND its
+ * `.gateforge/http-clients.json` document at DISCOVER time, not at factory
+ * time. `gateforge check --staged` imports this module at startup and only
+ * moves the process cwd to the staged candidate checkout afterwards, so a
+ * factory-time capture would grade the user's worktree instead of the
+ * staged bytes.
+ */
+export default createHttpDetector();

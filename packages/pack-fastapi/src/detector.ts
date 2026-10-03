@@ -22,10 +22,11 @@
  * handler corroboration over the facts this pack emits).
  *
  * Determinism: the python scan is pure over (paths, file bytes). The
- * optional `.gateforge/fastapi.json` config (import roots for absolute
- * imports, the central-router-registry pattern) is read once at factory
- * time and passed to the scanner as an explicit `--import-roots` argv
- * flag — never environment state, never per-request mutation.
+ * The optional `.gateforge/fastapi.json` config (import roots for absolute
+ * imports, the central-router-registry pattern) is read from the root that
+ * is in force at DISCOVER time and passed to the scanner as an explicit
+ * `--import-roots` argv flag — never environment state, never per-request
+ * mutation.
  */
 import { readFileSync } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
@@ -148,7 +149,12 @@ export interface FastapiDetectorOptions {
   command?: readonly string[];
   /** Subprocess environment (default: {@link pythonEnvironment}). */
   env?: NodeJS.ProcessEnv;
-  /** Working directory the repo-relative paths resolve against. */
+  /**
+   * Working directory the repo-relative paths resolve against (default:
+   * `process.cwd()` AT DISCOVER TIME, not at factory time — the default
+   * export is created at module import and `check --staged` moves the
+   * process cwd to the candidate checkout before discovery).
+   */
   cwd?: string;
   /** Handshake-pinned plugin id (default: the pack id). */
   pluginId?: string;
@@ -160,9 +166,9 @@ export interface FastapiDetectorOptions {
    */
   importRoots?: readonly string[];
   /**
-   * Repo-relative path of a config document (JSON) read from `cwd` when
-   * `importRoots` is not given (default: `.gateforge/fastapi.json`;
-   * absence is normal, malformed throws).
+   * Repo-relative path of a config document (JSON) read from the root in
+   * force at discover time when `importRoots` is not given (default:
+   * `.gateforge/fastapi.json`; absence is normal, malformed throws).
    */
   importRootsConfigPath?: string;
 }
@@ -187,27 +193,37 @@ export interface FastapiDetector {
 export function createFastapiDetector(options: FastapiDetectorOptions = {}): FastapiDetector {
   const command = options.command ?? DEFAULT_COMMAND;
   const env = options.env ?? pythonEnvironment();
-  const cwd = options.cwd ?? process.cwd();
   const pluginId = options.pluginId ?? PACK_PLUGIN_ID;
   const pluginVersion = options.pluginVersion ?? PACK_VERSION;
-  // Explicit roots win; otherwise the config document (absence normal,
-  // malformed throws). With no roots at all the spawned command is
-  // byte-identical to the pre-config surface.
-  const importRoots =
-    options.importRoots ??
-    readFastapiScanConfigOrNull(resolve(cwd, options.importRootsConfigPath ?? FASTAPI_SCAN_CONFIG_PATH))
-      .importRoots ??
-    [];
-  const argv =
-    importRoots.length > 0 ? [...command, '--import-roots', JSON.stringify(importRoots)] : [...command];
+  // The repo root is resolved at DISCOVER time unless the caller pinned one
+  // explicitly: the default export of this pack is created at module import
+  // (the CLI imports it at startup), and `gateforge check --staged` moves the
+  // process cwd to the staged candidate checkout before discovery runs. A
+  // root captured at factory time would pin the loader's cwd and read the
+  // user's worktree bytes instead of the gated ones. The same holds for the
+  // config document: `.gateforge/fastapi.json` is read from the root in
+  // force at this discover call. Explicit options always win.
+  const resolveRoot = (): string => options.cwd ?? process.cwd();
+  const resolveArgv = (cwd: string): string[] => {
+    // Explicit roots win; otherwise the config document (absence normal,
+    // malformed throws). With no roots at all the spawned command is
+    // byte-identical to the pre-config surface.
+    const importRoots =
+      options.importRoots ??
+      readFastapiScanConfigOrNull(resolve(cwd, options.importRootsConfigPath ?? FASTAPI_SCAN_CONFIG_PATH))
+        .importRoots ??
+      [];
+    return importRoots.length > 0 ? [...command, '--import-roots', JSON.stringify(importRoots)] : [...command];
+  };
 
   return {
     async discover(paths) {
       if (paths.length === 0) {
         return { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       }
+      const cwd = resolveRoot();
       const session = new PluginSession({
-        command: argv,
+        command: resolveArgv(cwd),
         pluginId,
         pluginVersion,
         cwd,

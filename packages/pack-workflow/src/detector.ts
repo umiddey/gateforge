@@ -34,7 +34,11 @@ export interface WorkflowContractAttributes {
 
 /** Options for {@link createWorkflowDetector}. */
 export interface WorkflowDetectorOptions {
-  /** Repo root used to compute repo-root-relative `source` paths. */
+  /**
+   * Repo root used to compute repo-root-relative `source` paths (default:
+   * `process.cwd()` AT DISCOVER TIME — the default export is created at
+   * module import, so a factory-time capture would pin the loader's cwd).
+   */
   cwd?: string;
   /** Detector version override; primarily tests. */
   detectorVersion?: string;
@@ -90,7 +94,6 @@ interface PendingMachine {
 export function createWorkflowDetector(
   options: WorkflowDetectorOptions = {},
 ): WorkflowDetector {
-  const cwd = options.cwd ?? process.cwd();
   const detectorId = options.detectorId ?? PACK_PLUGIN_ID;
   const detectorVersion = options.detectorVersion ?? PACK_VERSION;
 
@@ -98,6 +101,12 @@ export function createWorkflowDetector(
     async discover(paths) {
       const out: DiscoveryOutcome = { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       if (paths.length === 0) return out;
+      // Resolved per call, not at factory time: `gateforge check --staged`
+      // moves the process cwd to the staged candidate checkout before
+      // discovery runs, and this pack's default export is created at module
+      // import (the CLI imports it at startup). An explicit `cwd` still
+      // wins.
+      const cwd = options.cwd ?? process.cwd();
       const machines: PendingMachine[] = [];
       const findings: ProtocolFinding[] = [];
       const scanned: string[] = [];

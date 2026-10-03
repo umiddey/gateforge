@@ -87,14 +87,19 @@ export interface HttpDetector {
 
 /** Options for {@link createHttpDetector}. */
 export interface HttpDetectorOptions {
-  /** Repo root for repo-relative `source` paths (default: `process.cwd()`). */
+  /**
+   * Repo root for repo-relative `source` paths (default: `process.cwd()` AT
+   * DISCOVER TIME — the default export is created at module import, so a
+   * factory-time capture would pin the loader's cwd and grade the user's
+   * worktree instead of the gated candidate checkout).
+   */
   root?: string;
   /** Client-scan configuration (declarates resolvable APIs, ADR 0004 D6). */
   clientScan?: ClientScanConfig;
   /**
    * Repo-relative path of a client-scan config document (JSON) read from
-   * `root` when `clientScan` is not given (default:
-   * `.gateforge/http-clients.json`; absence is normal).
+   * the root in force at discover time when `clientScan` is not given
+   * (default: `.gateforge/http-clients.json`; absence is normal).
    */
   clientScanConfigPath?: string;
 }
@@ -260,17 +265,22 @@ function scanNestControllers(text: string, file: string): HttpArtifact[] {
  *   HttpDetector: the pinned `{ discover(paths) }` module.
  */
 export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetector {
-  const root = options.root ?? process.cwd();
-  const clientScan =
-    options.clientScan ??
-    readClientScanConfigOrNull(
-      resolve(root, options.clientScanConfigPath ?? '.gateforge/http-clients.json'),
-    );
   return {
     discover(paths) {
       if (paths.length === 0) {
         return { resources: [], unresolved: [], findings: [], classificationSignals: [], scannedPaths: [] };
       }
+      // The repo root AND its config document are resolved per discover
+      // call unless the caller pinned them: `gateforge check --staged` moves
+      // the process cwd to the staged candidate checkout before discovery
+      // runs, so the gated repository is the one in force here, not whatever
+      // root was current when this instance was created.
+      const root = options.root ?? process.cwd();
+      const clientScan =
+        options.clientScan ??
+        readClientScanConfigOrNull(
+          resolve(root, options.clientScanConfigPath ?? '.gateforge/http-clients.json'),
+        );
       const files = resolveInputs(paths, root);
       const artifacts: HttpArtifact[] = [];
       const findings: Array<{ code: string; detail: string; locations: Location[] }> = [];
