@@ -130,14 +130,29 @@ routes the compiler found.
   graph proves nothing but the table carries a typical soft-delete
   column, the value is a guess and **needs you** says which column
   raised the question.
+- It writes only from routes the engine **linked** to the resource. A
+  path that merely *names* it is listed under **needs you** with the
+  candidates, for you to confirm; a route linked to a different
+  resource is never used.
 - A per-parent route (`/contracts/{contractId}/invoices`) is never
-  taken as the collection, and never as a by-id read of the resource:
-  when only those exist, it asks you for `listPath` instead.
+  taken as the collection, and never as a by-id read of the resource.
+- A route with a **literal segment between the resource and the id**
+  (`/shipments/carrier/{id}` looks a carrier up through a shipment) is
+  never taken as a by-id read either — whatever it answers, it is not
+  one entity of that resource.
+- When the app serves a complete collection and **no by-id route at
+  all**, it writes a **list-only** adapter: the kit reads the member
+  out of the collection. The file's header says so, because every read
+  then walks the whole collection — slower than a by-id read. Add
+  `readPath` as soon as the app serves one.
 - Anything it will not guess is printed under **needs you**, with the
   reason: no read route, a composite key, no collection route (a create
-  cannot be witnessed without one), a path no schema or handler evidence
-  links to the resource, no projectable columns, or an unknown target
-  fingerprint.
+  cannot be witnessed without one), a route only a name match points
+  at, no projectable columns, an unknown target fingerprint, or a route
+  that **exists but whose endpoint plane is unanswered**. That last
+  case is named with its blocker — `GET /api/v2/accounts/{} exists but
+  its plane is unanswered — answer the plane first` — and never
+  reported as a missing route.
 
 A generated adapter is a **starting point, not proof**. The gate grades
 it exactly like a hand-written one.

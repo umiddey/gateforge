@@ -19,14 +19,26 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
-import { canonicalJson, humanMessage, type JsonValue } from '@gate-forge/core';
+import {
+  canonicalJson,
+  humanMessage,
+  HTTP_ENDPOINT_RESOURCE_KIND,
+  type JsonValue,
+  type ResourceGraph,
+} from '@gate-forge/core';
 import { parseArgs, stringFlag } from '../args.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { runPipeline, type PipelineResult } from '../pipeline.js';
 import { httpRoutesView, resolveStateDir } from '../state.js';
-import { auditAdapters, listAdapterFiles, probeAdapter, type AdapterProbeReport } from '../adapter-audit.js';
+import {
+  auditAdapters,
+  listAdapterFiles,
+  probeAdapter,
+  type AdapterProbeReport,
+  type UnresolvedRoute,
+} from '../adapter-audit.js';
 import { planAdapters, type AdapterTarget, type ScaffoldPlan } from '../adapter-scaffold.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 
@@ -73,6 +85,39 @@ function resourcesNeedingAdapters(pipeline: PipelineResult): readonly AdapterTar
 }
 
 /**
+ * The GET routes the runtime route inventory omits because the
+ * endpoint's plane is unanswered: such an endpoint has no
+ * plane-qualified graph id, so `httpRoutesView` skips it. The route is
+ * compiled and it exists — the scaffolder must name it with that
+ * blocker instead of reporting the resource as unserved (GF-12).
+ *
+ * Args:
+ *   graph: built resource graph.
+ *
+ * Returns:
+ *   UnresolvedRoute[]: the plane-unanswered GET routes, path-sorted.
+ */
+function unresolvedPlaneRoutes(graph: ResourceGraph): UnresolvedRoute[] {
+  const routes: UnresolvedRoute[] = [];
+  for (const resource of graph.resources) {
+    if (resource.id !== null || resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) continue;
+    const method = resource.attributes['method'];
+    const canonicalPath = resource.attributes['canonicalPath'];
+    if (typeof method !== 'string' || method !== 'GET') continue;
+    if (typeof canonicalPath !== 'string' || canonicalPath === '') continue;
+    const linkedResourceName = resource.attributes['linkedResourceName'];
+    routes.push({
+      method,
+      canonicalPath,
+      ...(typeof linkedResourceName === 'string' ? { linkedResourceName } : {}),
+    });
+  }
+  return routes.sort((a, b) =>
+    a.canonicalPath < b.canonicalPath ? -1 : a.canonicalPath > b.canonicalPath ? 1 : 0,
+  );
+}
+
+/**
  * Runs `gateforge adapters scaffold`.
  *
  * Args:
@@ -99,6 +144,7 @@ async function scaffold(io: Io, dryRun: boolean): Promise<number> {
     routes: httpRoutesView(pipeline.graph),
     existing,
     environmentFingerprint: io.env[TARGET_FINGERPRINT_ENV] ?? null,
+    unresolvedRoutes: unresolvedPlaneRoutes(pipeline.graph),
   });
   const created: ScaffoldPlan[] = [];
   const skipped: ScaffoldPlan[] = [];

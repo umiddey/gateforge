@@ -1,11 +1,15 @@
 /**
  * `gateforge adapters scaffold` planning accuracy, at the planner level.
  *
- * The four measured failure modes of the generator, one test each:
- * a per-parent sub-collection sold as the complete collection, path
+ * The measured failure modes of the generator, one test each: a
+ * per-parent sub-collection sold as the complete collection, path
  * naming that ignores hyphens, a soft-delete table scaffolded as a
- * hard delete, and a field list too narrow to observe read-only
- * columns the obligations grade.
+ * hard delete, a field list too narrow to observe read-only columns
+ * the obligations grade, a route that only NAMES the resource turned
+ * into a written readPath, a literal segment before the id taken as a
+ * by-id read, a list-only resource refused although the kit resolves
+ * the member out of the collection, and a route that exists behind an
+ * unanswered plane reported as absent.
  *
  * The fixture reproduces the SHAPES those failures were measured on
  * (nested + flat collections, a hyphenated path, an `is_active`
@@ -16,6 +20,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GraphResource, HttpRouteCandidate } from '@gate-forge/core';
 import { planAdapters, type AdapterTarget, type ScaffoldPlan } from '../src/adapter-scaffold.js';
+import type { UnresolvedRoute } from '../src/adapter-audit.js';
 
 const FINGERPRINT = 'fixture-loopback-v1';
 
@@ -33,6 +38,8 @@ interface FixtureResource {
   routes: HttpRouteCandidate[];
   handWritten: HandWritten | null;
   deleteSemantics: AdapterTarget['deleteSemantics'];
+  /** Compiled routes the runtime inventory omits (plane unanswered). */
+  unresolvedRoutes?: UnresolvedRoute[];
 }
 
 /**
@@ -112,6 +119,7 @@ function planFor(fixture: FixtureResource): ScaffoldPlan {
     routes: fixture.routes,
     existing: [],
     environmentFingerprint: FINGERPRINT,
+    unresolvedRoutes: fixture.unresolvedRoutes ?? [],
   });
   const plan = plans[0];
   if (plan === undefined) throw new Error(`no plan for ${fixture.resource.name}`);
@@ -129,10 +137,10 @@ describe('the scaffolder never sells a per-parent sub-collection as the collecti
     const plan = planFor({
       resource: table('invoices', { updateableFields: ['total'] }),
       routes: [
-        get('/api/v1/contracts/:contractId/invoices'),
-        get('/api/v1/invoices'),
-        get('/api/v1/invoices/:id'),
-        get('/api/v1/contracts/:contractId/invoices/:invoiceId'),
+        get('/api/v1/contracts/:contractId/invoices', 'invoices'),
+        get('/api/v1/invoices', 'invoices'),
+        get('/api/v1/invoices/:id', 'invoices'),
+        get('/api/v1/contracts/:contractId/invoices/:invoiceId', 'invoices'),
       ],
       handWritten: {
         readPath: '/api/v1/invoices/{id}',
@@ -151,8 +159,8 @@ describe('the scaffolder never sells a per-parent sub-collection as the collecti
     const plan = planFor({
       resource: table('tasks', { updateableFields: ['title'] }),
       routes: [
-        get('/api/v1/customer-accounts/:customerAccountId/tasks'),
-        get('/api/v1/customer-accounts/:customerAccountId/tasks/:id'),
+        get('/api/v1/customer-accounts/:customerAccountId/tasks', 'tasks'),
+        get('/api/v1/customer-accounts/:customerAccountId/tasks/:id', 'tasks'),
       ],
       handWritten: null,
       deleteSemantics: null,
@@ -172,7 +180,10 @@ describe('the scaffolder matches route names across hyphens and underscores', ()
   it('finds the hyphenated path of an underscored table', () => {
     const plan = planFor({
       resource: table('work_reports', { updateableFields: ['summary'] }),
-      routes: [get('/api/v1/work-reports'), get('/api/v1/work-reports/:id')],
+      routes: [
+        get('/api/v1/work-reports', 'work_reports'),
+        get('/api/v1/work-reports/:id', 'work_reports'),
+      ],
       handWritten: {
         readPath: '/api/v1/work-reports/{id}',
         listPath: '/api/v1/work-reports',
@@ -184,8 +195,9 @@ describe('the scaffolder matches route names across hyphens and underscores', ()
     expect(plan.status).toBe('create');
     expect(declared(plan, 'readPath')).toBe('"/api/v1/work-reports/{id}"');
     expect(declared(plan, 'listPath')).toBe('"/api/v1/work-reports"');
-    // A name match stays a guess, and says so.
-    expect(plan.guesses.join('\n')).toContain('name-matched only');
+    // Only engine-linked routes reach a file, and the file says which
+    // ones they were.
+    expect(plan.guesses.join('\n')).toContain("routes linked to 'work_reports'");
   });
 
   it('never matches a name as a path segment substring', () => {
@@ -207,7 +219,7 @@ describe('the scaffolder reads the delete semantics the graph can see', () => {
         columnNames: ['id', 'email', 'role', 'is_active'],
         softDeleteCandidateFields: ['is_active'],
       }),
-      routes: [get('/api/v1/accounts'), get('/api/v1/accounts/:id')],
+      routes: [get('/api/v1/accounts', 'accounts'), get('/api/v1/accounts/:id', 'accounts')],
       handWritten: {
         readPath: '/api/v1/accounts/{id}',
         listPath: '/api/v1/accounts',
@@ -224,7 +236,7 @@ describe('the scaffolder reads the delete semantics the graph can see', () => {
   it('never silently hard-deletes a table that merely LOOKS soft-deleted', () => {
     const plan = planFor({
       resource: table('accounts', { columnNames: ['id', 'email', 'is_active'] }),
-      routes: [get('/api/v1/accounts'), get('/api/v1/accounts/:id')],
+      routes: [get('/api/v1/accounts', 'accounts'), get('/api/v1/accounts/:id', 'accounts')],
       handWritten: null,
       deleteSemantics: null,
     });
@@ -243,7 +255,7 @@ describe('the scaffolder reads the delete semantics the graph can see', () => {
         columnNames: ['id', 'email', 'is_active'],
         softDeleteCandidateFields: ['is_active'],
       }),
-      routes: [get('/api/v1/accounts'), get('/api/v1/accounts/:id')],
+      routes: [get('/api/v1/accounts', 'accounts'), get('/api/v1/accounts/:id', 'accounts')],
       handWritten: null,
       deleteSemantics: 'hard',
     });
@@ -272,7 +284,7 @@ describe('the scaffolder projects every declared column, minus the secrets', () 
         updateableFields: ['email', 'first_name'],
         foreignKeyReferences: [{ column: 'owner_id', references: 'users.id' }],
       }),
-      routes: [get('/api/v1/accounts'), get('/api/v1/accounts/:id')],
+      routes: [get('/api/v1/accounts', 'accounts'), get('/api/v1/accounts/:id', 'accounts')],
       handWritten: {
         readPath: '/api/v1/accounts/{id}',
         listPath: '/api/v1/accounts',
@@ -299,7 +311,7 @@ describe('the scaffolder projects every declared column, minus the secrets', () 
   it('asks for the fields when the graph declares no column at all', () => {
     const plan = planFor({
       resource: table('orders', {}),
-      routes: [get('/api/v1/orders'), get('/api/v1/orders/:id')],
+      routes: [get('/api/v1/orders', 'orders'), get('/api/v1/orders/:id', 'orders')],
       handWritten: null,
       deleteSemantics: null,
     });
@@ -315,7 +327,7 @@ describe('the scaffolder projects every declared column, minus the secrets', () 
         { columnNames: ['id', 'email', 'status'], primaryKeyColumns: ['id'] },
         [],
       ),
-      routes: [get('/api/v1/accounts'), get('/api/v1/accounts/:id')],
+      routes: [get('/api/v1/accounts', 'accounts'), get('/api/v1/accounts/:id', 'accounts')],
       handWritten: {
         readPath: '/api/v1/accounts/{id}',
         listPath: '/api/v1/accounts',
@@ -334,7 +346,7 @@ describe('the scaffolder projects every declared column, minus the secrets', () 
   it('omits the exclusion clause when nothing was excluded', () => {
     const plan = planFor({
       resource: table('orders', { columnNames: ['label', 'total'] }, []),
-      routes: [get('/api/v1/orders'), get('/api/v1/orders/:id')],
+      routes: [get('/api/v1/orders', 'orders'), get('/api/v1/orders/:id', 'orders')],
       handWritten: {
         readPath: '/api/v1/orders/{id}',
         listPath: '/api/v1/orders',
@@ -350,6 +362,158 @@ describe('the scaffolder projects every declared column, minus the secrets', () 
   });
 });
 
+describe('the scaffolder writes only what engine evidence supports', () => {
+  it('never writes an adapter from a route that merely names the resource', () => {
+    const plan = planFor({
+      resource: table('webhooks', { updateableFields: ['event'] }),
+      routes: [get('/api/v1/webhooks'), get('/api/v1/webhooks/attempts/:id')],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('needs-you');
+    expect(plan.source).toBeNull();
+    const text = plan.needsYou.join('\n');
+    // Nothing is linked to `webhooks`, so the candidates are listed for
+    // a human to confirm and no path is invented from the name.
+    expect(text).toContain('nothing is written from a name match');
+    expect(text).toContain('GET /api/v1/webhooks');
+    expect(text).toContain('GET /api/v1/webhooks/attempts/:id');
+  });
+
+  it('never takes a route with a literal segment before the id as a by-id read', () => {
+    const plan = planFor({
+      resource: table('shipments', { updateableFields: ['weight'] }),
+      routes: [
+        get('/api/v1/shipments', 'shipments'),
+        get('/api/v1/shipments/carrier/:id', 'shipments'),
+      ],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('needs-you');
+    expect(plan.source).toBeNull();
+    const text = plan.needsYou.join('\n');
+    expect(text).toContain('GET /api/v1/shipments/carrier/:id');
+    expect(text).toContain('literal segment');
+    expect(text).toContain('readPath');
+  });
+
+  it('never takes a route the compiler linked to a different resource', () => {
+    const plan = planFor({
+      resource: table('attachments', { updateableFields: ['filename'] }),
+      routes: [
+        get('/api/v1/attachments', 'attachments'),
+        // Linked to `media_attachments`, so it is someone else's route
+        // even though its path names `attachments`.
+        get('/api/v1/media/attachments/:id', 'media_attachments'),
+      ],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('needs-you');
+    expect(plan.source).toBeNull();
+    expect(plan.needsYou.join('\n')).toContain('GET /api/v1/media/attachments/:id');
+  });
+});
+
+describe('the scaffolder writes a list-only adapter when no by-id route exists', () => {
+  it('generates a collection-only adapter and says in the header that it is slower', () => {
+    const plan = planFor({
+      resource: table('categories', {
+        columnNames: ['id', 'name', 'published_at'],
+        updateableFields: ['name'],
+      }),
+      routes: [get('/api/v1/categories', 'categories')],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('create');
+    expect(declared(plan, 'listPath')).toBe('"/api/v1/categories"');
+    // The kit resolves the member out of the complete collection, so no
+    // readPath is declared — and the header carries the cost.
+    expect(declared(plan, 'readPath')).toBe('');
+    expect(plan.source ?? '').toContain('LIST-ONLY');
+    expect(plan.source ?? '').toContain('slower');
+    const guesses = plan.guesses.join('\n');
+    expect(guesses).toContain('readPath omitted');
+    expect(guesses).toContain('collectionKey guessed');
+    expect(guesses).toContain('paging guessed');
+  });
+
+  it('still asks the human when a by-id-shaped route was rejected', () => {
+    const plan = planFor({
+      resource: table('sensors', { updateableFields: ['label'] }),
+      routes: [
+        get('/api/v1/sensors', 'sensors'),
+        get('/api/v1/sites/:siteId/sensors/:id', 'sensors'),
+      ],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    // A per-parent read is not "no by-id route": the app DOES serve one,
+    // so the slower list-only shape must not be written silently.
+    expect(plan.status).toBe('needs-you');
+    expect(plan.source).toBeNull();
+    expect(plan.needsYou.join('\n')).toContain('per-parent route');
+  });
+
+  it('takes the by-id route when the resource segment is the route’s own level', () => {
+    const plan = planFor({
+      resource: table('sensors', { updateableFields: ['label'] }),
+      routes: [
+        get('/api/v1/sensors', 'sensors'),
+        get('/api/v1/sites/sensors/:id', 'sensors'),
+      ],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('create');
+    expect(declared(plan, 'readPath')).toBe('"/api/v1/sites/sensors/{id}"');
+  });
+});
+
+describe('the scaffolder names a route that exists behind an unanswered plane', () => {
+  it('names the route and the blocker instead of reporting no route at all', () => {
+    const plan = planFor({
+      resource: table('accounts', { updateableFields: ['email'] }),
+      routes: [],
+      unresolvedRoutes: [
+        { method: 'GET', canonicalPath: '/api/v2/accounts', linkedResourceName: 'accounts' },
+        { method: 'GET', canonicalPath: '/api/v2/accounts/{}', linkedResourceName: 'accounts' },
+      ],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('needs-you');
+    expect(plan.source).toBeNull();
+    const text = plan.needsYou.join('\n');
+    expect(text).toContain(
+      'GET /api/v2/accounts, GET /api/v2/accounts/{} exist but their plane is unanswered',
+    );
+    expect(text).toContain('answer the plane first');
+    // The false negative this replaces: both routes are compiled.
+    expect(text).not.toContain('no GET route serves one accounts entity');
+    expect(text).not.toContain('no GET collection route serves accounts');
+  });
+
+  it('waits for the plane instead of writing a slower list-only adapter', () => {
+    const plan = planFor({
+      resource: table('accounts', { updateableFields: ['email'] }),
+      routes: [get('/api/v2/accounts', 'accounts')],
+      unresolvedRoutes: [
+        { method: 'GET', canonicalPath: '/api/v2/accounts/{}', linkedResourceName: 'accounts' },
+      ],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('needs-you');
+    expect(plan.source).toBeNull();
+    expect(plan.needsYou.join('\n')).toContain(
+      'GET /api/v2/accounts/{} exists but its plane is unanswered',
+    );
+  });
+});
+
 /** The fixture app: the shapes the generator was measured failing on. */
 const FIXTURE: FixtureResource[] = [
   // Flat collection next to per-parent sub-collections.
@@ -361,9 +525,9 @@ const FIXTURE: FixtureResource[] = [
       softDeleteCandidateFields: ['is_active'],
     }),
     routes: [
-      get('/api/v1/contracts/:contractId/invoices'),
-      get('/api/v1/invoices'),
-      get('/api/v1/invoices/:id'),
+      get('/api/v1/contracts/:contractId/invoices', 'invoices'),
+      get('/api/v1/invoices', 'invoices'),
+      get('/api/v1/invoices/:id', 'invoices'),
     ],
     handWritten: {
       readPath: '/api/v1/invoices/{id}',
@@ -380,7 +544,10 @@ const FIXTURE: FixtureResource[] = [
       updateableFields: ['summary'],
       softDeleteCandidateFields: ['is_active'],
     }),
-    routes: [get('/api/v1/work-reports'), get('/api/v1/work-reports/:id')],
+    routes: [
+      get('/api/v1/work-reports', 'work_reports'),
+      get('/api/v1/work-reports/:id', 'work_reports'),
+    ],
     handWritten: {
       readPath: '/api/v1/work-reports/{id}',
       listPath: '/api/v1/work-reports',
@@ -416,7 +583,7 @@ const FIXTURE: FixtureResource[] = [
       updateableFields: ['email'],
       softDeleteCandidateFields: ['is_active'],
     }),
-    routes: [get('/api/v1/accounts'), get('/api/v1/accounts/:id')],
+    routes: [get('/api/v1/accounts', 'accounts'), get('/api/v1/accounts/:id', 'accounts')],
     handWritten: {
       readPath: '/api/v1/accounts/{id}',
       listPath: '/api/v1/accounts',
@@ -432,7 +599,7 @@ const FIXTURE: FixtureResource[] = [
       updateableFields: ['total'],
       foreignKeyReferences: [{ column: 'customer_id', references: 'customers.id' }],
     }),
-    routes: [get('/api/v1/orders'), get('/api/v1/orders/:id')],
+    routes: [get('/api/v1/orders', 'orders'), get('/api/v1/orders/:id', 'orders')],
     handWritten: {
       readPath: '/api/v1/orders/{id}',
       listPath: '/api/v1/orders',
@@ -447,7 +614,10 @@ const FIXTURE: FixtureResource[] = [
       columnNames: ['entry_id', 'line_no', 'amount'],
       updateableFields: ['amount'],
     }, ['entry_id', 'line_no']),
-    routes: [get('/api/v1/ledger-entries'), get('/api/v1/ledger-entries/:entryId/:lineNo')],
+    routes: [
+      get('/api/v1/ledger-entries', 'ledger_entries'),
+      get('/api/v1/ledger-entries/:entryId/:lineNo', 'ledger_entries'),
+    ],
     handWritten: null,
     deleteSemantics: 'hard',
   },
