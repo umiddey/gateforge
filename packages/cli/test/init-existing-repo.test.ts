@@ -18,7 +18,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
-import { runCli } from './helpers.js';
+import { configYml, runCli } from './helpers.js';
 
 /** Repo-relative paths a preset must never offer to delete. */
 const PRE_EXISTING: readonly string[] = [
@@ -103,6 +103,107 @@ describe('init on an existing repository claims only what it did', () => {
       expect(stdout).not.toContain('nothing blocks your commits');
       expect(stdout).toContain('your existing commit hook and/or CI job (left untouched) still decide');
       expect(readFileSync(join(repo.root, '.git', 'hooks', 'pre-commit'), 'utf8')).toBe('#!/bin/sh\nexit 0\n');
+    });
+  });
+});
+describe('init with an existing config never rewrites it (R1-2)', () => {
+  it('exits 2 when --strict-e2e asks for a value the config does not have', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ '.gateforge.yml': configYml() });
+      const before = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      const { code, stderr } = await runCli(repo, ['init', '--no-scan', '--strict-e2e']);
+      expect(code).toBe(2);
+      expect(stderr).toContain('.gateforge.yml exists and has enforcement.strictE2E: false');
+      expect(stderr).toContain('you asked for true');
+      expect(stderr).toContain('init never rewrites an existing config');
+      expect(stderr).toContain('set enforcement.strictE2E: true in .gateforge.yml yourself');
+      // Byte for byte: the conflict is decided before anything is written.
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toBe(before);
+    });
+  });
+
+  it('exits 0 when --strict-e2e matches the existing config', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ '.gateforge.yml': `${configYml()}enforcement:\n  strictE2E: true\n` });
+      const { code, stdout, stderr } = await runCli(repo, ['init', '--no-scan', '--strict-e2e']);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+    });
+  });
+
+  it('exits 2 when a preset names a mode the config does not have', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ '.gateforge.yml': `mode: changed\n${configYml()}` });
+      const before = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      const { code, stderr } = await runCli(repo, ['init', '--no-scan', '--preset', 'strict']);
+      expect(code).toBe(2);
+      expect(stderr).toContain('.gateforge.yml exists and has mode: changed');
+      expect(stderr).toContain('you asked for strict');
+      expect(stderr).toContain('set mode: strict in .gateforge.yml yourself');
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toBe(before);
+    });
+  });
+
+  it('exits 0 when the preset matches the existing config', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ '.gateforge.yml': `mode: changed\n${configYml()}` });
+      const { code, stdout, stderr } = await runCli(repo, ['init', '--no-scan', '--preset', 'normal']);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+    });
+  });
+
+  it('exits 2 when --unmatched-routes differs from the config', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ '.gateforge.yml': `${configYml()}endpoints:\n  unmatchedRoutes: warn\n` });
+      const before = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      const { code, stderr } = await runCli(repo, [
+        'init',
+        '--no-scan',
+        '--unmatched-routes',
+        'block',
+      ]);
+      expect(code).toBe(2);
+      expect(stderr).toContain('.gateforge.yml exists and has endpoints.unmatchedRoutes: warn');
+      expect(stderr).toContain('you asked for block');
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toBe(before);
+    });
+  });
+
+  it('exits 0 when --unmatched-routes matches the config', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ '.gateforge.yml': `${configYml()}endpoints:\n  unmatchedRoutes: block\n` });
+      const { code, stdout, stderr } = await runCli(repo, [
+        'init',
+        '--no-scan',
+        '--unmatched-routes',
+        'block',
+      ]);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+    });
+  });
+
+  it('prints one line per differing key', async () => {
+    await withTempRepo({}, async (repo) => {
+      // No `mode:` key (the absent-key default is `strict`) and
+      // `unmatchedRoutes: warn`, against the normal preset's
+      // `changed` mode and a `--unmatched-routes block` request.
+      repo.writeFiles({ '.gateforge.yml': `${configYml()}endpoints:\n  unmatchedRoutes: warn\n` });
+      const { code, stderr } = await runCli(repo, [
+        'init',
+        '--no-scan',
+        '--preset',
+        'normal',
+        '--unmatched-routes',
+        'block',
+      ]);
+      expect(code).toBe(2);
+      const lines = stderr
+        .split('\n')
+        .filter((line) => line.includes('.gateforge.yml exists and has'));
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain('mode: strict');
+      expect(lines[0]).toContain('you asked for changed');
+      expect(lines[1]).toContain('endpoints.unmatchedRoutes: warn');
+      expect(lines[1]).toContain('you asked for block');
     });
   });
 });

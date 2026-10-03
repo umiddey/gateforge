@@ -180,9 +180,17 @@ describe('init --preset', () => {
       expect(first.code).toBe(0);
       const before = readFileSync(repo.path('.gateforge.yml'), 'utf8');
       const second = await runCli(repo, ['init', '--no-scan', '--preset', 'strict']);
-      expect(second.code).toBe(0);
+      // R1-2: the strict preset asks for `mode: strict` and
+      // `enforcement.strictE2E: true`; the existing config has
+      // `mode: changed` and no strict E2E. init never rewrites
+      // an existing config, so the differing request exits 2
+      // before anything is written — the owner sets the keys.
+      expect(second.code).toBe(2);
+      expect(second.stderr).toContain('.gateforge.yml exists and has mode: changed');
+      expect(second.stderr).toContain('you asked for strict');
+      expect(second.stderr).toContain('.gateforge.yml exists and has enforcement.strictE2E: false');
+      expect(second.stderr).toContain('you asked for true');
       expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toBe(before);
-      expect(second.stdout).toContain('existing .gateforge.yml left untouched');
       expect(loadConfig(repo.path('.gateforge.yml')).mode).toBe('changed');
     });
   });

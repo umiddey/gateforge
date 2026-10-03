@@ -25,10 +25,11 @@ import {
   PolicyFileSchema,
   loadConfig,
   parseConfig,
+  resolveStrictnessMode,
   serializeBaseline,
   strictCapabilityGaps,
 } from '@gate-forge/core';
-import type { StrictnessMode } from '@gate-forge/core';
+import type { GateforgeConfig, StrictnessMode } from '@gate-forge/core';
 import {
   DEFAULT_PLANES_CONFIG,
   PLANES_CONFIG_PATH,
@@ -770,6 +771,77 @@ function presetFlagConflict(
     if (wired && options[`no-${flag}`] === true) return `no-${flag}`;
   }
   return null;
+}
+/**
+ * The config settings a run REQUESTS that an existing
+ * `.gateforge.yml` already owns with a different value
+ * (R1-2): a chosen preset's strictness `mode` and
+ * `enforcement.strictE2E`, plus the `--strict-e2e` and
+ * `--unmatched-routes` flags. init never rewrites an
+ * existing config, so a differing request is a usage error
+ * the owner resolves by setting the key in the file — one
+ * line per differing key, BEFORE anything is written.
+ *
+ * Absent keys compare as their effective values (`mode`
+ * defaults to `strict`, `strictE2E` to false, absent
+ * `unmatchedRoutes` grades advisories — `warn`), so a
+ * request that matches what the file already does is not a
+ * conflict. Only an explicit `--preset` names a request:
+ * the non-interactive auto-chosen light goal and a
+ * terminal answer to the goal question are default
+ * behavior paths, not requests — a headless re-run of
+ * `init` on an initialized repository must keep working.
+ */
+function requestedConfigConflicts(
+  cwd: string,
+  options: Readonly<Record<string, unknown>>,
+  goal: { settings: InitPresetSettings; autoChosen?: boolean } | null,
+): Array<{ key: string; current: string; requested: string }> {
+  const conflicts: Array<{ key: string; current: string; requested: string }> = [];
+  if (!existsSync(join(cwd, '.gateforge.yml'))) return conflicts;
+  // An unparseable document is today's path (the draft load
+  // below rethrows or falls back); there is no value to
+  // compare a request against, so nothing is a conflict.
+  let existing: GateforgeConfig;
+  try {
+    existing = loadConfig(join(cwd, '.gateforge.yml'));
+  } catch {
+    return conflicts;
+  }
+  const requests: Array<{ key: string; current: string; requested: string }> = [];
+  if (goal !== null && options['preset'] !== undefined) {
+    requests.push(
+      {
+        key: 'mode',
+        current: resolveStrictnessMode(existing),
+        requested: goal.settings.strictnessMode,
+      },
+      {
+        key: 'enforcement.strictE2E',
+        current: existing.enforcement?.strictE2E === true ? 'true' : 'false',
+        requested: goal.settings.strictE2E ? 'true' : 'false',
+      },
+    );
+  }
+  if (options['strict-e2e'] === true) {
+    requests.push({
+      key: 'enforcement.strictE2E',
+      current: existing.enforcement?.strictE2E === true ? 'true' : 'false',
+      requested: 'true',
+    });
+  }
+  const unmatchedRoutes = stringFlag(options, 'unmatched-routes');
+  if (unmatchedRoutes !== undefined) {
+    requests.push({
+      key: 'endpoints.unmatchedRoutes',
+      current: existing.endpoints?.unmatchedRoutes ?? 'warn',
+      requested: unmatchedRoutes.trim().toLowerCase(),
+    });
+  }
+  for (const request of requests) {
+    if (request.current !== request.requested) conflicts.push(request);
+  }
+  return conflicts;
 }
 /**
  * Resolves the goal `init` should set up. Three paths, in order:
@@ -1598,6 +1670,27 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     options['strict-e2e'] === true;
   const goal = await resolveGoal(io, options, enforcementFlagGiven, existsSync(join(io.cwd, '.gateforge.yml')));
   const strictE2E = goal !== null ? goal.settings.strictE2E : options['strict-e2e'] === true;
+
+  // An existing config is never rewritten (R1-2): a run that
+  // REQUESTS a setting the file already owns with a different
+  // value — a chosen preset's `mode`/`enforcement.strictE2E`,
+  // or the `--strict-e2e` / `--unmatched-routes` flags — exits
+  // 2 BEFORE anything is written, one line per differing key,
+  // naming the key, both values, and the edit that fixes it.
+  // Same value (or no such request) behaves exactly as today.
+  const configConflicts = requestedConfigConflicts(io.cwd, options, goal);
+  if (configConflicts.length > 0) {
+    throw new UsageError(
+      configConflicts
+        .map(
+          (conflict) =>
+            `.gateforge.yml exists and has ${conflict.key}: ${conflict.current}; ` +
+              `you asked for ${conflict.requested}. init never rewrites an existing config — ` +
+              `set ${conflict.key}: ${conflict.requested} in .gateforge.yml yourself.`,
+        )
+        .join('\n'),
+    );
+  }
 
   // Strict-setup preflight (plan Phase 0 item 4): BEFORE anything is
   // written — a strict setup demanding an unavailable proof channel
