@@ -103,6 +103,24 @@ describe('per-tenant singleton advisory', () => {
     expect(entry?.detail).toContain('unique(tenant_id, ledger)');
   });
 
+  it('names a composite tenancy scope in full', () => {
+    const [entry] = singletonPerTenantAdvisories(
+      [
+        resource('tenant.tenant_settings', 'tenant_settings', {
+          singletonPerTenant: {
+            constraint: 'uq_org_tenant_setting',
+            tenantColumn: 'org_id',
+            scopeColumns: ['org_id', 'tenant_id'],
+            columns: ['org_id', 'tenant_id'],
+          },
+        }),
+      ],
+      new Set(['tenant.tenant_settings']),
+    );
+    expect(entry?.detail).toContain('uq_org_tenant_setting unique(org_id, tenant_id)');
+    expect(entry?.detail).toContain("'org_id and tenant_id'");
+  });
+
   it('ignores a malformed tag rather than crashing the gate', () => {
     const malformed = [
       { singletonPerTenant: 'yes' },

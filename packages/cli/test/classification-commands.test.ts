@@ -54,6 +54,121 @@ describe('automatic classification commands', () => {
     });
   });
 
+  it('classifies a whole FOLDER with one rule, and refuses anything outside the repo', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        'backend/api/v1/accounts.py': '# router fixture\n',
+        'backend/api/v1/orders.py': '# router fixture\n',
+        '.gateforge/planes.json': JSON.stringify({ rules: [] }),
+      });
+      const args = [
+        'classify',
+        'plane',
+        'backend/api/v1',
+        'tenant',
+        '--reason',
+        'Every router in this folder is tenant-scoped.',
+      ];
+
+      // The preview shows the folder rule and writes nothing.
+      const preview = await runCli(repo, args);
+      expect(preview.code).toBe(0);
+      expect(preview.stdout).toContain('"match": "backend/api/v1/**"');
+      expect(preview.stdout).toContain('rerun this command with --confirm');
+      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
+        rules: [],
+      });
+
+      const confirmed = await runCli(repo, [...args, '--confirm']);
+      expect(confirmed.code).toBe(0);
+      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
+        rules: [
+          {
+            match: 'backend/api/v1/**',
+            plane: 'tenant',
+            reason: 'Every router in this folder is tenant-scoped.',
+          },
+        ],
+      });
+
+      // A source that escapes the repository is refused: a rule must never
+      // point at bytes the gate does not read.
+      for (const outside of ['../secrets', '/etc/gateforge', 'backend/../../etc', 'backend\\api']) {
+        const refused = await runCli(repo, [
+          'classify',
+          'plane',
+          outside,
+          'tenant',
+          '--reason',
+          'outside the repo',
+          '--confirm',
+        ]);
+        expect([outside, refused.code]).toEqual([outside, 2]);
+        expect(refused.stderr).toContain('repo-relative');
+      }
+      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
+        rules: [
+          {
+            match: 'backend/api/v1/**',
+            plane: 'tenant',
+            reason: 'Every router in this folder is tenant-scoped.',
+          },
+        ],
+      });
+    });
+  });
+
+  it('accepts a glob and refuses to shadow an existing rule that disagrees', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        'src/api/accounts.js': '// route fixture\n',
+        '.gateforge/planes.json': JSON.stringify({ rules: [] }),
+      });
+
+      const globbed = await runCli(repo, [
+        'classify',
+        'plane',
+        'src/api/**',
+        'master',
+        '--reason',
+        'The whole api folder is operator-managed.',
+        '--confirm',
+      ]);
+      expect(globbed.code).toBe(0);
+      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
+        rules: [
+          { match: 'src/api/**', plane: 'master', reason: 'The whole api folder is operator-managed.' },
+        ],
+      });
+
+      // A narrower, disagreeing rule already covers files inside the new
+      // glob's surface: the owner edits that rule instead of stacking a
+      // second one over it.
+      repo.writeFiles({
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [
+            { match: 'src/api/**', plane: 'master', reason: 'folder rule' },
+            { match: 'src/api/public.js', plane: 'global', reason: 'public ingress' },
+          ],
+        }),
+      });
+      const shadowed = await runCli(repo, [
+        'classify',
+        'plane',
+        'src/api',
+        'tenant',
+        '--reason',
+        'tenant folder',
+        '--confirm',
+      ]);
+      expect(shadowed.code).toBe(2);
+      expect(shadowed.stderr).toContain('will not add a conflicting rule');
+      expect(shadowed.stderr).toContain("match 'src/api/**'");
+    });
+  });
+
   it('does not create a new plane trust file', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

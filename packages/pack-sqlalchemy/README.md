@@ -30,6 +30,26 @@ with `ast.parse` and reports:
 | Class with bases but no literal tablename anywhere | class symbol + `no_tablename_source` unresolved entry (the graph resolves through its repo-wide symbol table when a base carries a literal — same-file AND cross-file) |
 | Plain classes (mixins, no bases, no table facts) | nothing |
 | Malformed Python file | `PARSE_ERROR` finding with a line number; the file contributes no resources (GF-19) |
+| Class declared in a file under a test directory (`test/`, `tests/`) | nothing — fixtures are not business surface (below) |
+
+### Test directories are not business surface
+
+A path is test fixture surface when any of its **directory** segments is
+exactly `test` or `tests` (case-insensitive; `src/test-paths.ts`, mirrored
+in the python detector). Files there are still parsed and still reported in
+`scannedPaths` — the coverage evidence stays honest — but they contribute no
+resource, no unresolved entry, no signal and no duplicate finding to the
+graph.
+
+The why is a real adoption blocker: a pytest module that re-declares a
+table on its own `Base` to build rows without touching the application's
+metadata (`__tablename__ = "accounts"` next to the real
+backend/models/account.py) used to enter the graph as a second business
+resource. The real table then collided with its own fixture, stayed
+plane-unresolved and blocked the gate with no honest answer. Excluding test
+directories is not a special case for any one repository — it is the same
+rule `gateforge init` already applied when it refused to infer a business
+plane for a fixture table, now applied to the graph as well.
 
 ### Detector vocabulary
 
@@ -251,12 +271,12 @@ document path can be moved with `planesConfigPath`.
 
 ## Per-tenant singletons
 
-A table whose UNIQUE constraint — or whose UNIQUE **index** — includes the
-tenant scope column admits at most ONE row per tenant. A `create` of such a
-resource is therefore provable only on a brand-new tenant, while the
-witness's adapter reads use one process-global login: the create reads as
-"the fixed tenant already has that row". The pack reports that as an
-ADDITIVE fact and never as a verdict:
+A table whose UNIQUE constraint — or whose UNIQUE **index** — is written
+over the tenancy scope and NOTHING ELSE admits at most ONE row per tenant.
+A `create` of such a resource is therefore provable only on a brand-new
+tenant, while the witness's adapter reads use one process-global login: the
+create reads as "the fixed tenant already has that row". The pack reports
+that as an ADDITIVE fact and never as a verdict:
 
 - `attributes.uniqueConstraints` — every declared
   `UniqueConstraint("a", "b")`, `Index("ix", "a", "b", unique=True)`, and
@@ -265,21 +285,30 @@ ADDITIVE fact and never as a verdict:
   attribute is **absent** when the table declares no unique constraint, and
   a computed column expression or a non-literal `unique` flag is never
   guessed.
-- `attributes.singletonPerTenant` — `{constraint, tenantColumn, columns}`,
-  minted only when BOTH facts are provable: the table's plane evidence is
-  `tenant` AND one declared unique constraint includes a recognized
-  tenant-scope column (`TENANT_SCOPE_COLUMNS`: `tenant_id`, `tenant`,
-  `tenantId`, `tenant_uuid`, `tenant_key`). The first qualifying constraint
-  in written order is the one reported; every one of them says the same.
+- `attributes.singletonPerTenant` — `{constraint, tenantColumn,
+  scopeColumns, columns}`, minted only when BOTH facts are provable: the
+  table's plane evidence is `tenant` AND one declared unique constraint
+  names tenancy-scope columns ONLY (`TENANT_SCOPE_COLUMNS`: `tenant_id`,
+  `tenant`, `tenantId`, `tenant_uuid`, `tenant_key`). `scopeColumns` lists
+  the recognized scope columns of that constraint in written order and
+  `tenantColumn` is the first of them. The first qualifying constraint in
+  written order is the one reported; every one of them says the same.
+
+  "Scope and nothing else" is the rule. A constraint that merely CONTAINS
+  a scope column says something different: `unique (period_id, tenant_id,
+  contract_id, recipient_user_id)` admits one row per RECIPIENT per period,
+  so many rows per tenant exist and the table is **not** a singleton. Such a
+  constraint is left untagged — the `uniqueConstraints` facts stay visible
+  so an owner can see exactly why.
 
 Both are attributes, not signals: nothing blocks on them. The gate turns
 the tag into one non-blocking `RESOURCE_SINGLETON_PER_TENANT` advisory per
 resource that owes a `persistence:create`, naming the constraint, the
-tenant column and how to prove it (create the tenant in the test, then
+scope columns and how to prove it (create the tenant in the test, then
 register that tenant's login with the witness for that session only — see
 `packages/cli/guides/TEST-ENVIRONMENT.md`). A table on another plane, an
-unreviewed table, or a unique constraint that excludes the tenant scope
-column is left byte-identical to before.
+unreviewed table, and a unique constraint naming any non-scope column are
+left byte-identical to before.
 
 ### Declaring the tenant scope columns
 

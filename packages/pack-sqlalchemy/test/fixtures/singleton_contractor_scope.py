@@ -1,8 +1,9 @@
 """A tenant-plane table whose scope column is NOT named like a tenant.
 
-The real incident's ledger table is scoped by ``contractor_id``: unique
-(contractor_id, ledger_id, kind) admits one row per contractor, so a
-create is provable only on a fresh contractor. The fixed
+The incident's ledger table is scoped by ``contractor_id``: unique
+(contractor_id, ledger_id, kind) admits one row per ledger and kind, so it
+is NOT a per-tenant singleton — the tag is minted only for
+``contractor_profiles``, whose constraint covers the scope alone. The fixed
 ``TENANT_SCOPE_COLUMNS`` list cannot recognize ``contractor_id``, so the
 owner has to be able to DECLARE the scope column name; the default list
 must stay exactly as it is for every other repository.
@@ -17,7 +18,7 @@ Base = declarative_base()
 
 
 class ContractorLedgerEntry(Base):
-    """Unique (contractor_id, ledger_id, kind): one row per contractor."""
+    """Unique (contractor_id, ledger_id, kind): many rows per contractor."""
 
     __tablename__ = "contractor_ledger_entries"
     __table_args__ = (
@@ -39,3 +40,14 @@ class ContractorLedger(Base):
     id = Column(Integer, primary_key=True)
     contractor_id = Column(String(32), ForeignKey("contractors.id"), nullable=False)
     code = Column(String(32), nullable=False)
+
+
+class ContractorProfile(Base):
+    """Unique (contractor_id): exactly one row per contractor."""
+
+    __tablename__ = "contractor_profiles"
+    __table_args__ = (UniqueConstraint("contractor_id", name="uq_contractor_profile"),)
+
+    id = Column(Integer, primary_key=True)
+    contractor_id = Column(String(32), ForeignKey("contractors.id"), nullable=False)
+    display_name = Column(String(64))

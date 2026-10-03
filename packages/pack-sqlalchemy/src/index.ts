@@ -63,6 +63,10 @@ export {
   CONFIG_PATH as TENANCY_CONFIG_PATH,
 } from './tenancy.js';
 export {
+  isTestSourcePath,
+  TEST_PATH_SEGMENTS,
+} from './test-paths.js';
+export {
   EntityAdapterSchema,
   validateEntityAdapter,
   type EntityAdapter,

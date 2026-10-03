@@ -1,14 +1,16 @@
 /**
- * Per-tenant singletons (plan 2026-09-25 Phase 4b item 3a, E9/E10).
- *
- * A table whose UNIQUE constraint (or unique index) includes the tenant
- * scope column admits at most ONE row per tenant: a create can therefore
- * only be proven on a brand-new tenant, while the witness reads through
- * one process-global login. The detector emits that as an ADDITIVE fact
- * (`uniqueConstraints` attributes, plus the `singletonPerTenant` tag
+ * A table whose UNIQUE constraint (or unique index) is written over the
+ * tenancy scope ALONE admits at most one row per tenant: a create can
+ * therefore only be proven on a brand-new tenant, while the witness reads
+ * through one process-global login. The detector emits that as an ADDITIVE
+ * fact (`uniqueConstraints` attributes, plus the `singletonPerTenant` tag
  * minted in the TypeScript wrapper where plane evidence lives) so the
  * owner sees the obligation. Nothing here blocks, and a table without
  * either fact is byte-identical to before.
+ *
+ * A constraint that merely CONTAINS a scope column is NOT a singleton —
+ * `unique (tenant_id, ledger, kind)` admits many rows per tenant — and
+ * these cases assert that too.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { cpSync, mkdtempSync, rmSync } from 'node:fs';
@@ -30,7 +32,14 @@ type TableResource = DiscoveryOutcome['resources'][number];
 /** Every table of the fixture, tenant plane applied (the reviewed state). */
 const TENANT_PLANE_RULES: readonly PlaneConfigRule[] = [
   {
-    tables: ['ledger_entries', 'meters', 'coupons', 'tenant_settings'],
+    tables: [
+      'ledger_entries',
+      'tenant_profiles',
+      'tenant_quotas',
+      'meters',
+      'coupons',
+      'tenant_settings',
+    ],
     plane: 'tenant',
     reason: 'each table carries a tenant_id scope column',
   },
@@ -77,21 +86,34 @@ describe('per-tenant singleton facts (plan Phase 4b item 3a)', () => {
     expect(tables.get('tenant_settings')?.attributes['uniqueConstraints']).toBeUndefined();
   });
 
-  it('tags a tenant table whose unique constraint includes the tenant scope column', async () => {
+  it('tags a tenant table whose unique constraint covers the scope ALONE', async () => {
     const tables = tablesByName(applyPlanesConfig(await discoverFixture(), {
       rules: [...TENANT_PLANE_RULES],
     }));
-    expect(tables.get('ledger_entries')?.attributes['singletonPerTenant']).toEqual({
-      constraint: 'uq_ledger_tenant_ledger_kind',
+    expect(tables.get('tenant_profiles')?.attributes['singletonPerTenant']).toEqual({
+      constraint: 'uq_tenant_profile_tenant',
       tenantColumn: 'tenant_id',
-      columns: ['tenant_id', 'ledger', 'kind'],
+      scopeColumns: ['tenant_id'],
+      columns: ['tenant_id'],
     });
     // A unique INDEX says exactly the same thing about uniqueness.
-    expect(tables.get('meters')?.attributes['singletonPerTenant']).toEqual({
-      constraint: 'ux_meters_tenant_serial',
+    expect(tables.get('tenant_quotas')?.attributes['singletonPerTenant']).toEqual({
+      constraint: 'ux_tenant_quota_tenant',
       tenantColumn: 'tenant_id',
-      columns: ['tenant_id', 'serial'],
+      scopeColumns: ['tenant_id'],
+      columns: ['tenant_id'],
     });
+  });
+
+  it('never tags a constraint that merely CONTAINS the scope column', async () => {
+    const tables = tablesByName(applyPlanesConfig(await discoverFixture(), {
+      rules: [...TENANT_PLANE_RULES],
+    }));
+    // `unique (tenant_id, ledger, kind)` admits one row per ledger and
+    // kind, so many rows per tenant exist: the old rule tagged these and
+    // told the owner a row is unique per tenant.
+    expect(tables.get('ledger_entries')?.attributes['singletonPerTenant']).toBeUndefined();
+    expect(tables.get('meters')?.attributes['singletonPerTenant']).toBeUndefined();
   });
 
   it('never tags a table whose unique constraint excludes the tenant scope column', async () => {
@@ -104,15 +126,15 @@ describe('per-tenant singleton facts (plan Phase 4b item 3a)', () => {
 
   it('never tags without plane evidence: a table of unknown plane stays untagged', async () => {
     const tables = tablesByName(await discoverFixture());
-    expect(tables.get('ledger_entries')?.attributes['plane']).toBeUndefined();
-    expect(tables.get('ledger_entries')?.attributes['singletonPerTenant']).toBeUndefined();
+    expect(tables.get('tenant_profiles')?.attributes['plane']).toBeUndefined();
+    expect(tables.get('tenant_profiles')?.attributes['singletonPerTenant']).toBeUndefined();
   });
 
   it('adds only the plane and the tag, leaving every other attribute untouched', async () => {
-    const before = tablesByName(await discoverFixture()).get('ledger_entries');
+    const before = tablesByName(await discoverFixture()).get('tenant_profiles');
     const after = tablesByName(applyPlanesConfig(await discoverFixture(), {
       rules: [...TENANT_PLANE_RULES],
-    })).get('ledger_entries');
+    })).get('tenant_profiles');
     const tag = after?.attributes['singletonPerTenant'];
     expect(after?.attributes).toEqual({
       ...before?.attributes,

@@ -11,10 +11,12 @@
  * told to review it before the next run.
  *
  * Semantics (deterministic, conservative):
- * - tables under conventional test directories (`tests/`, `test/`) are
- *   EXCLUDED from inference: they are fixtures, not business tables,
- *   and a rule endorsing them would misclassify them as business
- *   surface (they stay plane-less and gate-visible instead);
+ * - tables under test directories are EXCLUDED from inference by the SAME
+ *   rule the sqlalchemy detector applies to the resource graph
+ *   (`isTestSourcePath` from the pack, mirrored by its python detector):
+ *   they are fixtures, not business tables, and a rule endorsing them
+ *   would misclassify them as business surface. The graph never sees them
+ *   either, so this filter is defence in depth;
  * - source directories are grouped into MODEL TREES under the longest
  *   common directory prefix, one non-overlapping `match` glob per tree;
  * - a tree whose path names a control-plane segment (`admin`, `master`,
@@ -22,13 +24,15 @@
  *   proposes `tenant`. A keyword heuristic IS a guess — but a
  *   reviewable one, written into the file with its evidence, never a
  *   runtime inference.
+ *
+ * ROUTE folders are a separate, owner-answered step (problem 13, D1 —
+ * ask, never infer): see `route-plane-proposals.ts`, which proposes one
+ * question per route folder and shows a linked model's plane as a HINT
+ * only.
  */
 
 import { dirname } from 'node:path';
-import type { PlanesConfig, PlaneConfigRule, SqlalchemyPlane } from '@gate-forge/pack-sqlalchemy';
-
-/** Directory segments that mark test fixtures (exact segment match). */
-const TEST_SEGMENTS = new Set(['tests', 'test']);
+import { isTestSourcePath, type PlanesConfig, type PlaneConfigRule, type SqlalchemyPlane } from '@gate-forge/pack-sqlalchemy';
 
 /** Path keywords that mark a control-plane (master) model tree. */
 const MASTER_KEYWORDS = ['admin', 'master', 'control', 'root', 'operator'] as const;
@@ -48,15 +52,6 @@ function directoryOf(source: string): string {
   const normalized = source.replaceAll('\\', '/');
   const index = normalized.lastIndexOf('/');
   return index === -1 ? '' : normalized.slice(0, index);
-}
-
-/** Whether any path segment marks the path as test fixture surface. */
-function isTestPath(source: string): boolean {
-  return source
-    .replaceAll('\\', '/')
-    .split('/')
-    .slice(0, -1)
-    .some((segment) => TEST_SEGMENTS.has(segment));
 }
 
 /**
@@ -86,7 +81,7 @@ export function inferPlanesConfig(tableSources: readonly string[]): PlaneInferen
   if (unique.length === 0) {
     return { config: null, note: 'no sqlalchemy tables discovered — nothing to propose', skippedTestTables: 0 };
   }
-  const business = unique.filter((source) => !isTestPath(source));
+  const business = unique.filter((source) => !isTestSourcePath(source));
   const skippedTestTables = unique.length - business.length;
   if (business.length === 0) {
     return {
