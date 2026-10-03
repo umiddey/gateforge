@@ -6,7 +6,7 @@
  * Two modes:
  *
  * **Legacy `--suite` mode** — the orchestration surface G6's Playwright
- * pack consumes (see packages/cli/README.md "test-gates protocol"). The
+ * pack consumes (see packages/cli/guides/REFERENCE.md "test-gates protocol"). The
  * CLI implements the orchestration; the Playwright side — the loopback
  * witness service and the claims/records reporter — is a documented
  * contract G6 fills:

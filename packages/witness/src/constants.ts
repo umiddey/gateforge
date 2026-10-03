@@ -4,7 +4,7 @@
  * These names are the wire contract between the fixture (test process),
  * the reporter (runner process), and the witness service (engine
  * process). They are also the documented env surface of `gateforge
- * test-gates` (packages/cli/README.md "test-gates protocol") — the CLI
+ * test-gates` (packages/cli/guides/REFERENCE.md "test-gates protocol") — the CLI
  * already exports GATEFORGE_RUN_ID / GATEFORGE_RUN_TOKEN /
  * GATEFORGE_STATE_DIR / GATEFORGE_OBLIGATIONS / GATEFORGE_WITNESS_URL;
  * the pack augments the target/attestation/adapter surface below.
