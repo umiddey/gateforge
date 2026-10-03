@@ -567,7 +567,10 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
       continue; // a declared mapping exists — inference adds nothing
     }
     const map = bindings ?? bindingsFor(obligationId);
-    for (const candidate of inferredCandidates(obligationId, input.catalog)) {
+    // No route hints here: this surface is the DECLARED evidence, and an
+    // inferred binding is a suggestion, never graded. The ranked,
+    // route-aware candidate list is produced by `mappingSuggestions`.
+    for (const candidate of inferredCandidates(obligationId, input.catalog, [])) {
       if (map.has(candidate.row.logicalKey)) continue;
       map.set(candidate.row.logicalKey, {
         logicalKey: candidate.row.logicalKey,
@@ -632,37 +635,195 @@ interface InferredCandidate {
   row: TestCatalogEntry;
   /** Single-cause human signals explaining the match (no confidence numbers). */
   why: string[];
+  /** Deterministic evidence score (higher is stronger; see CANDIDATE_SCORE). */
+  score: number;
 }
 
 /**
- * Deterministic token inference (plan Phase 3 item 2): obligation
- * resource-id tokens (`tenant.accounts` → `tenant`, `accounts`) matched
- * against catalog rows' files, title paths, and category labels. Signals
- * feed SUGGESTIONS only — an inference never writes a mapping (§5.3).
+ * Evidence weights for candidate ranking (plan 2026-09-13 §5.3: a
+ * suggestion is a SIGNAL, never hidden probability). Every weight is
+ * documented and additive, so the printed reason always explains the
+ * order: an explicit tag beats a route path segment, a route segment
+ * beats a bare resource token, and a mocked folder subtracts.
  */
-function inferredCandidates(obligationId: string, catalog: TestCatalog): InferredCandidate[] {
+const CANDIDATE_SCORE: Readonly<Record<string, number>> = Object.freeze({
+  explicitTag: 100,
+  titleResourceToken: 30,
+  titleOperationToken: 25,
+  titleRouteSegment: 20,
+  fileResourceToken: 15,
+  fileRouteSegment: 10,
+  categoryToken: 10,
+  realFolder: 10,
+  mockedSuppression: -30,
+});
+
+/**
+ * Title words that stand for an obligation's operation segment
+ * (`…:persistence:delete` → `delete`, `remove`, …). Generic English,
+ * never a consumer name.
+ */
+const OPERATION_TITLE_WORDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  create: Object.freeze(['create', 'add', 'new', 'post', 'insert']),
+  read: Object.freeze(['read', 'get', 'list', 'show', 'fetch', 'display', 'loads']),
+  update: Object.freeze(['update', 'edit', 'modify', 'change', 'patch', 'put', 'saves']),
+  delete: Object.freeze(['delete', 'remove', 'destroy', 'archive', 'clears']),
+});
+
+/** Path segments that carry no resource meaning in a route hint. */
+const ROUTE_FILLER_SEGMENTS: Readonly<Record<string, true>> = Object.freeze({
+  api: true,
+  rest: true,
+  http: true,
+  https: true,
+  index: true,
+  gateway: true,
+  service: true,
+});
+
+/**
+ * The route segments of one obligation's hints worth matching against a
+ * test's title/file: no path parameters, no version or filler segments.
+ */
+function routeSegmentsOf(hints: readonly string[]): string[] {
+  const segments: string[] = [];
+  for (const hint of hints) {
+    const path = hint.replace(/^[A-Za-z]+\s+/, '');
+    for (const raw of path.split('/')) {
+      const segment = raw.trim().toLowerCase();
+      if (segment.length < 3) continue;
+      if (segment.startsWith('{') || segment.endsWith('}')) continue;
+      if (/^v\d+$/.test(segment)) continue;
+      if (ROUTE_FILLER_SEGMENTS[segment] === true) continue;
+      segments.push(segment);
+    }
+  }
+  return [...new Set(segments)];
+}
+
+/** The operation segment of an obligation id (`…:persistence:delete`). */
+function operationOf(obligationId: string): string {
+  const parts = obligationId.split(':');
+  return (parts[parts.length - 1] ?? '').toLowerCase();
+}
+
+/** Words of a title path, split on non-letters. */
+function titleWords(titlePath: readonly string[]): string[] {
+  return titlePath
+    .join(' ')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 2);
+}
+
+/** The resource token an explicit `@crud(<resource>)`/`@gateforge(<…>)` tag names. */
+function explicitTagTokens(titlePath: readonly string[]): string[] {
+  const tokens: string[] = [];
+  for (const segment of titlePath) {
+    for (const match of segment.matchAll(/@(?:crud|gateforge|resource|op)\(([^)]*)\)/g)) {
+      for (const token of (match[1] ?? '').split(/[^A-Za-z0-9]+/)) {
+        if (token.length > 2) tokens.push(token.toLowerCase());
+      }
+    }
+  }
+  return tokens;
+}
+
+/**
+ * Scores ONE catalog row against one obligation by the evidence the row
+ * carries, and explains every contributing signal in plain words.
+ *
+ * Args:
+ *   obligationId: the obligation the row is a candidate for.
+ *   row: the catalog row under consideration.
+ *   routes: the obligation's route hints (e.g. `GET /api/v2/accounts`).
+ *
+ * Returns:
+ *   {score, why}: the additive evidence score and its human reasons.
+ */
+function candidateEvidence(
+  obligationId: string,
+  row: TestCatalogEntry,
+  routes: readonly string[],
+): { score: number; why: string[] } {
   const resourceId = obligationId.slice(0, Math.max(0, obligationId.indexOf(':')));
   const tokens = resourceId
     .split(/[.\-_]/)
     .map((token) => token.toLowerCase())
     .filter((token) => token.length > 2);
-  if (tokens.length === 0) return [];
+  const why: string[] = [];
+  let score = 0;
+  const file = row.file.toLowerCase();
+  const title = row.titlePath.join('>').toLowerCase();
+  const words = titleWords(row.titlePath);
+  const tagTokens = explicitTagTokens(row.titlePath);
+  const operationWords = OPERATION_TITLE_WORDS[operationOf(obligationId)] ?? [];
+  const routeSegments = routeSegmentsOf(routes);
+
+  for (const token of tokens) {
+    if (tagTokens.includes(token)) {
+      score += CANDIDATE_SCORE['explicitTag'] ?? 0;
+      why.push(`explicit tag names this obligation's resource '${token}'`);
+      continue;
+    }
+    if (title.includes(token)) {
+      score += CANDIDATE_SCORE['titleResourceToken'] ?? 0;
+      why.push(`resource token '${token}' matches the test title path`);
+    } else if (file.includes(token)) {
+      score += CANDIDATE_SCORE['fileResourceToken'] ?? 0;
+      why.push(`resource token '${token}' matches the test file '${row.file}'`);
+    } else if (row.categorySignals.some((signal) => signal.label.toLowerCase().includes(token))) {
+      score += CANDIDATE_SCORE['categoryToken'] ?? 0;
+      why.push(`resource token '${token}' matches a category label`);
+    }
+  }
+  const operation = operationOf(obligationId);
+  if (operation.length > 2 && operationWords.some((word) => words.includes(word))) {
+    score += CANDIDATE_SCORE['titleOperationToken'] ?? 0;
+    why.push(`title names the obligation's operation '${operation}'`);
+  }
+  for (const segment of routeSegments) {
+    if (title.includes(segment)) {
+      score += CANDIDATE_SCORE['titleRouteSegment'] ?? 0;
+      why.push(`title mentions the obligation's route segment '${segment}'`);
+    } else if (file.includes(segment)) {
+      score += CANDIDATE_SCORE['fileRouteSegment'] ?? 0;
+      why.push(`test file mentions the obligation's route segment '${segment}'`);
+    }
+  }
+  if (row.file.split('/').some((segment) => segment.toLowerCase() === 'real')) {
+    score += CANDIDATE_SCORE['realFolder'] ?? 0;
+    why.push("lives in a 'real' folder (unmocked)");
+  }
+  if (row.suppressionSignals.some((signal) => signal.kind === 'mock')) {
+    score += CANDIDATE_SCORE['mockedSuppression'] ?? 0;
+    why.push('mocks the system under test (weaker evidence)');
+  }
+  return { score, why };
+}
+
+/**
+ * Deterministic token inference (plan Phase 3 item 2): obligation
+ * resource-id tokens (`tenant.accounts` → `tenant`, `accounts`) matched
+ * against catalog rows' files, title paths, and category labels, plus the
+ * obligation's operation and route hints. Candidates are ordered by
+ * evidence score (strongest first), then by logical key for stability.
+ * Signals feed SUGGESTIONS only — an inference never writes a mapping (§5.3).
+ */
+function inferredCandidates(
+  obligationId: string,
+  catalog: TestCatalog,
+  routes: readonly string[],
+): InferredCandidate[] {
   const candidates: InferredCandidate[] = [];
   for (const row of catalog.entries) {
-    const why: string[] = [];
-    const title = row.titlePath.join('>').toLowerCase();
-    for (const token of tokens) {
-      if (row.file.toLowerCase().includes(token)) {
-        why.push(`resource token '${token}' matches the test file '${row.file}'`);
-      } else if (title.includes(token)) {
-        why.push(`resource token '${token}' matches the test title path`);
-      } else if (row.categorySignals.some((signal) => signal.label.toLowerCase().includes(token))) {
-        why.push(`resource token '${token}' matches a category label`);
-      }
-    }
-    if (why.length > 0) candidates.push({ row, why });
+    const evidence = candidateEvidence(obligationId, row, routes);
+    if (evidence.why.length === 0) continue;
+    candidates.push({ row, why: evidence.why, score: evidence.score });
   }
-  return candidates.sort((a, b) => compareStrings(a.row.logicalKey, b.row.logicalKey));
+  return candidates.sort(
+    (a, b) => b.score - a.score || compareStrings(a.row.logicalKey, b.row.logicalKey),
+  );
 }
 
 /** Cause a mapping suggestion can carry (plan §5.4 mapping rows). */
@@ -680,6 +841,10 @@ export interface SuggestionCandidate {
   file: string;
   /** Matched signals — the WHY, never an opaque confidence number. */
   why: string[];
+  /** Evidence score (additive weights; higher is a stronger match). */
+  score: number;
+  /** 1-based position in this suggestion's ranked list. */
+  rank: number;
 }
 
 /** One per-obligation reuse suggestion (plan Phase 3 item 6). */
@@ -706,6 +871,12 @@ export interface MappingSuggestionsInput {
   obligationIds: readonly string[];
   /** The resolved-mappings surface from {@link resolveTestMappings}. */
   resolution: ResolvedMappings;
+  /**
+   * Route hints per obligation (`GET /api/v2/accounts`, …) used ONLY to
+   * rank candidates by route evidence. Absent (or an empty list) simply
+   * means no route evidence is available — never a different order rule.
+   */
+  routeHints?: ReadonlyMap<string, readonly string[]>;
 }
 
 /**
@@ -740,6 +911,50 @@ const SUGGESTION_RANK: Readonly<Record<MappingSuggestionCause, number>> = Object
 });
 
 /**
+ * The ONE instruction for a mapping suggestion: when the strongest
+ * candidate is an existing suite-driven browser test, the next step is to
+ * MARK that test `observed-e2e` and run it with the witness — writing a
+ * new overlay test while a fitting test already exists is the advice the
+ * owner got wrong in 0.8.0. The overlay instruction is what remains when
+ * no existing test fits the obligation (`newTestNeeded`).
+ *
+ * Args:
+ *   obligationId: the obligation the suggestion is about.
+ *   candidate: the top-ranked candidate, when one exists.
+ *
+ * Returns:
+ *   string: the suggestion's next action.
+ */
+function reuseNextAction(obligationId: string, candidate: SuggestionCandidate | undefined): string {
+  if (candidate === undefined) return CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING'] ?? '';
+  return (
+    `mark the existing test as observed-e2e and run it with the witness — ` +
+    `\`gateforge tests mark --test ${candidate.logicalKey} --kind observed-e2e ` +
+    `--obligation ${obligationId} --reason "existing suite-driven browser test"\`, ` +
+    `then \`gateforge test-gates --changed\` to collect its witnessed evidence`
+  );
+}
+
+/**
+ * Scores, orders, and numbers one obligation's candidate rows: evidence
+ * score first (strongest match ranks #1), logical key second for
+ * determinism. Every candidate carries its score and rank so the JSON
+ * surface keeps the full ranked list.
+ */
+function rankCandidates(
+  candidates: readonly {
+    logicalKey: string;
+    file: string;
+    why: string[];
+    score: number;
+  }[],
+): SuggestionCandidate[] {
+  return [...candidates]
+    .sort((a, b) => b.score - a.score || compareStrings(a.logicalKey, b.logicalKey))
+    .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
+}
+
+/**
  * Produces per-obligation reuse suggestions ordered by reuse (plan
  * Phase 3 item 6). Obligations with a clean DECLARED mapping produce no
  * suggestion (their remaining gap is executed proof, not mapping).
@@ -772,14 +987,19 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
     }
     const stale = problems.find((problem) => problem.cause === 'TEST_MAPPING_STALE');
     if (stale !== undefined) {
-      const candidates = inferredCandidates(obligationId, input.catalog).map((candidate) => {
-        const hint = observeHintForRow(candidate.row);
-        return {
-          logicalKey: candidate.row.logicalKey,
-          file: candidate.row.file,
-          why: [...candidate.why, ...(hint !== null ? [hint] : [])],
-        };
-      });
+      const candidates = rankCandidates(
+        inferredCandidates(obligationId, input.catalog, input.routeHints?.get(obligationId) ?? []).map(
+          (candidate) => {
+            const hint = observeHintForRow(candidate.row);
+            return {
+              logicalKey: candidate.row.logicalKey,
+              file: candidate.row.file,
+              why: [...candidate.why, ...(hint !== null ? [hint] : [])],
+              score: candidate.score,
+            };
+          },
+        ),
+      );
       suggestions.push({
         obligationId,
         cause: 'TEST_MAPPING_STALE',
@@ -796,13 +1016,22 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
       suggestions.push({
         obligationId,
         cause: 'TEST_KIND_UNKNOWN',
-        candidates: declared
-          .map((binding) => ({
-            logicalKey: binding.logicalKey,
-            file: binding.instances[0]?.file ?? '',
-            why: ['mapped by declaration, but its kind is unknown'],
-          }))
-          .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey)),
+        candidates: rankCandidates(
+          declared.map((binding) => {
+            const row = rowsByKey.get(binding.logicalKey);
+            const evidence = row === undefined ? { score: 0, why: [] as string[] } : candidateEvidence(
+              obligationId,
+              row,
+              input.routeHints?.get(obligationId) ?? [],
+            );
+            return {
+              logicalKey: binding.logicalKey,
+              file: binding.instances[0]?.file ?? '',
+              why: ['mapped by declaration, but its kind is unknown', ...evidence.why],
+              score: evidence.score,
+            };
+          }),
+        ),
         missingEvidence: 'a declared kind for the connected test (code analysis could not classify it)',
         nextAction: CAUSE_NEXT_ACTIONS['TEST_KIND_UNKNOWN'],
         newTestNeeded: false,
@@ -810,20 +1039,26 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
       continue;
     }
     if (declared.length > 0) continue; // declared + clean: the gap is execution, not mapping
-    const candidates = bindings
-      .map((binding) => {
-        const hint = observeHintForRow(rowsByKey.get(binding.logicalKey));
+    const candidates = rankCandidates(
+      bindings.map((binding) => {
+        const row = rowsByKey.get(binding.logicalKey);
+        const hint = observeHintForRow(row);
         const base =
           binding.origin === 'inferred' || binding.origin === 'prior-run'
             ? (binding.reason ?? binding.origin)
             : `bound by native annotation (${binding.logicalKey})`;
+        const evidence =
+          row === undefined
+            ? { score: 0, why: [] as string[] }
+            : candidateEvidence(obligationId, row, input.routeHints?.get(obligationId) ?? []);
         return {
           logicalKey: binding.logicalKey,
           file: binding.instances[0]?.file ?? '',
-          why: hint !== null ? [base, hint] : [base],
+          why: [base, ...evidence.why, ...(hint !== null ? [hint] : [])],
+          score: evidence.score,
         };
-      })
-      .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey));
+      }),
+    );
     suggestions.push({
       obligationId,
       cause: 'TEST_MAPPING_MISSING',
@@ -832,7 +1067,7 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
         candidates.length > 0
           ? 'a DECLARED mapping and witnessed evidence for this change (a mapping declares intent; it supplies no test result)'
           : 'a declared mapping to any existing test — no candidate survived resolution',
-      nextAction: CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING'],
+      nextAction: reuseNextAction(obligationId, candidates[0]),
       newTestNeeded: candidates.length === 0,
     });
   }

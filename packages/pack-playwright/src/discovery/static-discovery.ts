@@ -80,6 +80,17 @@ export interface StaticScanOptions {
    * harvested back as a test the repository never declared.
    */
   excludeFile?: RepoRelativeFileFilter;
+  /**
+   * Per-file runner-globals predicate (repo-relative posix paths).
+   *
+   * TRUE when the file's own runner injects `test`/`it`/`describe` as
+   * GLOBALS (vitest `globals: true`): in such a file a bare
+   * `it('…')`/`test('…')` IS a test registration the runner owns, not
+   * an alias the scan could not resolve. Without this predicate every
+   * unbound call stays `unresolved-test-alias`, which is what a file
+   * without runner globals must keep.
+   */
+  testGlobals?: RepoRelativeFileFilter;
   /** Traversal budgets (defaults documented on {@link ScanBudget}). */
   budget?: ScanBudget;
 }
@@ -512,6 +523,8 @@ interface ScanState {
   resolving: Set<string>;
   maxTraversedFiles: number;
   maxImportDepth: number;
+  /** Whether the file's runner provides test globals (see StaticScanOptions). */
+  testGlobals: (file: string) => boolean;
 }
 
 /**
@@ -1181,6 +1194,7 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     resolving: new Set(),
     maxTraversedFiles: options.budget?.maxTraversedFiles ?? DEFAULT_MAX_TRAVERSED_FILES,
     maxImportDepth: options.budget?.maxImportDepth ?? DEFAULT_MAX_IMPORT_DEPTH,
+    testGlobals: options.testGlobals ?? ((): boolean => false),
   };
   const seededFiles = collectCandidateFiles(options.cwd, options.include, options.exclude, options.excludeFile);
   for (const file of seededFiles) state.seeded.add(file);
@@ -1234,6 +1248,9 @@ function scanFileForTests(
   gateforgeImport: Location | null,
 ): void {
   const { file, source } = model;
+  // Once per file, not once per call site: the runner-globals predicate
+  // matches globs, and a file has hundreds of call expressions.
+  const runnerGlobals = state.testGlobals(file);
 
   const visit = (
     node: ts.Node,
@@ -1252,7 +1269,14 @@ function scanFileForTests(
     const location = locationOf(file, source, node);
     const resolution = resolveTestAlias(state, cwd, file, chain.base, 0);
     const names = chain.names;
-    const isDescribe = names.includes('describe');
+    // A runner that injects the test GLOBALS for this file (vitest
+    // `globals: true`) owns a bare `describe(...)` exactly as it owns a
+    // bare `it(...)`: the runner itself would execute this suite. Without
+    // it, an import-less describe reads as an unresolvable alias and the
+    // whole file collapses into gaps.
+    const isDescribe =
+      names.includes('describe') ||
+      (resolution === 'unknown' && names.length === 0 && chain.base === 'describe' && runnerGlobals);
     const isExtend = names.includes('extend');
     const lifecycle = names.some((name) => NON_TEST_SEGMENTS.has(name));
     const suppression = names.filter((name) => SUPPRESSION_SEGMENTS.has(name));
@@ -1262,8 +1286,18 @@ function scanFileForTests(
     // `pw.test(...)` / `base.test(...)` where pw/base is the required or
     // namespaced test module object: the test function itself (not a
     // wrapper) — grades exactly like a direct `test(...)` registration.
-    const effectiveResolution =
-      resolution === 'testmodule' && !isExtend && !lifecycle && !isDescribe && (names[0] === 'test' || names[0] === 'it')
+    // A runner that provides GLOBALS for this file (vitest `globals: true`)
+    // makes a bare `it('…')`/`test('…')` a registration the runner itself
+    // owns: the runner proves those files by executing them, so the scan
+    // must not file them as an unresolvable alias.
+    const globalsRegistration =
+      resolution === 'unknown' &&
+      names.length === 0 &&
+      (chain.base === 'test' || chain.base === 'it') &&
+      runnerGlobals;
+    const effectiveResolution = globalsRegistration
+      ? 'test'
+      : resolution === 'testmodule' && !isExtend && !lifecycle && !isDescribe && (names[0] === 'test' || names[0] === 'it')
         ? 'test'
         : resolution;
 

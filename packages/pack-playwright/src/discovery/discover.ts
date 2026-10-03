@@ -69,6 +69,13 @@ import {
   type StaticScanResult,
   type StaticUnresolved,
 } from './static-discovery.js';
+import {
+  playwrightFileScopes,
+  runnerForFile,
+  scopeSelectsFile,
+  vitestFileScopes,
+  type RunnerFileScope,
+} from './runner-file-scope.js';
 
 /** Options for one discovery run. */
 export interface DiscoverOptions {
@@ -177,12 +184,19 @@ export interface DiscoveryTimings {
 export async function discoverTestCatalog(options: DiscoverOptions): Promise<DiscoverResult> {
   const { cwd, config } = options;
   const discoveryStartedAtMs = performance.now();
+  // The repository's own runner file scopes, read BEFORE the static scan:
+  // a file a runner would never collect must not become one of the
+  // configured runner's tests, and a file whose runner injects the test
+  // GLOBALS (`globals: true`) registers tests without importing them.
+  const vitestScopes = vitestFileScopes(cwd);
   const scanStartedAtMs = performance.now();
   const scan = scanTestFiles({
     cwd,
     include: config.project.paths.include,
     exclude: config.project.paths.exclude,
     excludeFile: options.excludeFile,
+    testGlobals: (file) =>
+      vitestScopes.some((scope) => scope.globals && scopeSelectsFile(scope, cwd, file)),
   });
   const scanMs = performance.now() - scanStartedAtMs;
 
@@ -193,9 +207,19 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
   });
   const nativeListMs = performance.now() - nativeStartedAtMs;
 
-  const builder = new CatalogBuilder(cwd, scan, native);
-  const runnerSummaries: RunnerSummary[] = [builder.playwrightSummary()];
+  // The CONFIGURED runner's own selection, and every other runner's, so a
+  // static-only file can be attributed to the runner that actually collects
+  // it. Both sides fail open: an unreadable selection narrows nothing.
+  const playwrightScopes = playwrightFileScopes(native.testFileScope ?? []);
+  const scopes: RunnerScopes =
+    config.runner === 'playwright'
+      ? { configured: playwrightScopes, other: vitestScopes }
+      : config.runner === 'vitest'
+        ? { configured: vitestScopes, other: playwrightScopes }
+        : { configured: [], other: [...vitestScopes, ...playwrightScopes] };
+  const builder = new CatalogBuilder(cwd, scan, native, config.runner, scopes);
   const entries: TestCatalogEntry[] = builder.buildEntries();
+  const runnerSummaries: RunnerSummary[] = [builder.playwrightSummary()];
 
     // Registered pytest suites: diagnostic-only identities (§3.5).
     const suites = config.diagnostics?.suites ?? [];
@@ -292,30 +316,118 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
     };
 }
 
+/**
+ * The runners' own test-file selections, as this discovery read them.
+ * Both sides fail open: an unknown selection collects everything, so an
+ * unreadable scope reproduces the pre-existing catalog rather than a
+ * narrower guess.
+ */
+interface RunnerScopes {
+  /** The CONFIGURED runner's own scopes (empty ⇒ selection unknown). */
+  configured: readonly RunnerFileScope[];
+  /** The other runners' own scopes (empty ⇒ no other runner claims). */
+  other: readonly RunnerFileScope[];
+}
+
 /** Assembles catalog rows from the scan + native enumeration. */
 class CatalogBuilder {
   /** Static entries keyed by file#titlePath for matching. */
   private readonly staticByKey = new Map<string, StaticScanResult['entries'][number]>();
+  /** Files attributed to another runner's own selection, by runner name. */
+  private readonly attributed = new Map<string, Set<string>>();
+  /** Files no runner's own selection claims (kept as blocking rows). */
+  private readonly unclaimed = new Set<string>();
+  /** Memoized file → owning runner (`''` ⇒ claimed by no runner). */
+  private readonly owners = new Map<string, string>();
+  /**
+   * The runner a static-only row carries when no other runner's own
+   * selection claims its file: the CONFIGURED runner, whose enumeration
+   * did not produce it. `pytest` is the exception — it selects no files by
+   * glob at all (its rows come from collection), so such rows keep the
+   * playwright label they have always carried.
+   */
+  private readonly staticRowRunner: string;
 
   constructor(
     private readonly cwd: string,
     private readonly scan: StaticScanResult,
     private readonly native: NativeListResult,
+    private readonly runner: string,
+    private readonly scopes: RunnerScopes,
   ) {
+    this.staticRowRunner = runner === 'pytest' ? 'playwright' : runner;
     for (const entry of scan.entries) {
       this.staticByKey.set(reconciliationKey(entry.file, entry.titlePath), entry);
     }
   }
 
+  /**
+   * Which runner's own selection collects this statically found file.
+   *
+   * Args:
+   *   file: repo-relative posix path.
+   *
+   * Returns:
+   *   string: the owning runner, or `''` when no runner claims the file
+   *   (the caller keeps it a blocking row instead of inventing a runner).
+   */
+  private ownerOf(file: string): string {
+    const known = this.owners.get(file);
+    if (known !== undefined) return known;
+    const owner =
+      runnerForFile(this.runner, this.scopes.configured, this.scopes.other, this.cwd, file) ?? '';
+    this.owners.set(file, owner);
+    return owner;
+  }
+
+  /** Records one file's attribution for the runner summary line. */
+  private recordAttribution(owner: string, file: string): void {
+    if (owner === '') {
+      this.unclaimed.add(file);
+      return;
+    }
+    if (owner === this.runner) return;
+    const files = this.attributed.get(owner) ?? new Set<string>();
+    files.add(file);
+    this.attributed.set(owner, files);
+  }
+
+  /** The attribution clause appended to the playwright summary detail. */
+  private attributionDetail(): string {
+    const parts: string[] = [];
+    for (const [owner, files] of [...this.attributed].sort()) {
+      parts.push(`${String(files.size)} file(s) attributed to ${owner} by its own test-file selection`);
+    }
+    if (this.unclaimed.size > 0) {
+      parts.push(
+        `${String(this.unclaimed.size)} file(s) outside the configured selection are claimed by no runner`,
+      );
+    }
+    for (const scope of [...this.scopes.configured, ...this.scopes.other]) {
+      if (scope.note !== undefined) parts.push(scope.note);
+    }
+    return parts.length > 0 ? `; ${parts.join('; ')}` : '';
+  }
+
   /** The playwright runner summary line for this run. */
   playwrightSummary(): RunnerSummary {
     if (this.native.status === 'unavailable') {
-      return { runner: 'playwright', name: 'playwright', status: 'unavailable', detail: this.native.detail };
+      return {
+        runner: 'playwright',
+        name: 'playwright',
+        status: 'unavailable',
+        detail: `${this.native.detail}${this.attributionDetail()}`,
+      };
     }
     // Native reporter errors (e.g. a spec that fails to load) are DATA:
     // surfaced on the summary and reflected in inventoryComplete.
     const errors = this.native.errors.length > 0 ? `; native errors: ${this.native.errors.join(' | ').slice(0, 500)}` : '';
-    return { runner: 'playwright', name: 'playwright', status: 'discovered', detail: `${this.native.detail}${errors}` };
+    return {
+      runner: 'playwright',
+      name: 'playwright',
+      status: 'discovered',
+      detail: `${this.native.detail}${errors}${this.attributionDetail()}`,
+    };
   }
 
   /** Builds every playwright row: matched, list-only, static-only, gaps. */
@@ -505,7 +617,19 @@ class CatalogBuilder {
     };
   }
 
-  /** One static-only row: static scan found it, native list did not. */
+  /**
+   * One static-only row: the static scan found the case and the CONFIGURED
+   * runner did not enumerate it.
+   *
+   * The runner whose OWN selection collects the file decides the row's
+   * runner: a vitest suite inside a playwright-configured repository is a
+   * vitest row, not a phantom playwright test that will never execute. That
+   * runner was never enumerated either (Gateforge runs the configured
+   * runner), so the row records `reconciliation: 'unavailable'` plus the
+   * attribution evidence instead of a reconciliation verdict it cannot
+   * support. A file NO runner's selection claims keeps the configured
+   * runner and stays the blocking gap it is — ownership is never invented.
+   */
   private staticOnlyRow(staticEntry: StaticScanResult['entries'][number]): TestCatalogEntry {
     const inference = inferTestKind({
       file: staticEntry.file,
@@ -515,9 +639,13 @@ class CatalogBuilder {
     });
     const digest = fileDigest(this.cwd, staticEntry.file);
     const suppression = suppressionOf(staticEntry, [], staticEntry.location);
+    const owner = this.ownerOf(staticEntry.file);
+    this.recordAttribution(owner, staticEntry.file);
+    const foreign = owner !== '' && owner !== this.runner;
+    const runner = foreign ? owner : this.staticRowRunner;
     return {
-      logicalKey: deriveLogicalKey({ runner: 'playwright', project: null, file: staticEntry.file, titlePath: staticEntry.titlePath }),
-      runner: 'playwright',
+      logicalKey: deriveLogicalKey({ runner, project: null, file: staticEntry.file, titlePath: staticEntry.titlePath }),
+      runner,
       project: null,
       file: staticEntry.file,
       titlePath: [...staticEntry.titlePath],
@@ -525,51 +653,106 @@ class CatalogBuilder {
       sourceLocation: staticEntry.location,
       parameterIdentity: staticEntry.parameterIdentity,
       sourceDigest: digest ?? EMPTY_SHA256,
-      discoveryStatus: 'unresolved',
-      reconciliation: this.native.status === 'unavailable' ? 'unavailable' : 'static-only',
+      discoveryStatus: foreign ? 'discovered' : 'unresolved',
+      reconciliation:
+        foreign || this.native.status === 'unavailable' ? 'unavailable' : 'static-only',
       resolutionOrigin: 'static',
       inferredKind: inference.inferredKind,
       kindSignals: inference.kindSignals,
-      weakSignals: inference.weakSignals,
+      weakSignals: [
+        ...inference.weakSignals,
+        ...(foreign
+          ? [
+              {
+                ruleId: 'runner-file-scope',
+                evidence:
+                  `this file is outside the configured runner (${this.runner})'s own test-file selection; ` +
+                  `the ${owner} configuration claims it, so it is ${owner}'s test (no ${owner} enumeration ran in this run)`,
+                location: staticEntry.location,
+              },
+            ]
+          : []),
+        // A file no runner's selection claims stays the configured
+        // runner's blocking gap; the typed code stays the one every
+        // consumer already matches, and THIS weak signal carries the
+        // sharper fact.
+        ...(owner === ''
+          ? [
+              {
+                ruleId: 'no-runner-claims-file',
+                evidence: `no configured runner's own test-file selection claims this file — the ${this.runner} runner will never collect it`,
+                location: staticEntry.location,
+              },
+            ]
+          : []),
+      ],
       rulesFired: inference.rulesFired,
       categorySignals: inference.categorySignals,
       suppressionSignals: [...suppression.mocks, ...suppression.flags],
-      unresolvedReason: {
-        code:
-          this.native.status === 'unavailable'
-            ? 'reconciliation-unavailable'
-            : 'reconciliation-static-only',
-        detail:
-          this.native.status === 'unavailable'
-            ? 'no native playwright enumeration ran (no playwright config) — the case is statically visible only'
-            : 'the static scan found this case but the runner did not enumerate it (check configured globs, dynamic titles, or filters)',
-      },
+      ...(foreign
+        ? {}
+        : {
+            unresolvedReason: {
+              code:
+                this.native.status === 'unavailable'
+                  ? 'reconciliation-unavailable'
+                  : 'reconciliation-static-only',
+              detail:
+                this.native.status === 'unavailable'
+                  ? 'no native playwright enumeration ran (no playwright config) — the case is statically visible only'
+                  : owner === ''
+                    ? `the static scan found this case but no configured runner's own test-file selection claims its file — the ${this.runner} runner will never collect it (check the configured globs, dynamic titles, or filters)`
+                    : 'the static scan found this case but the runner did not enumerate it (check configured globs, dynamic titles, or filters)',
+            },
+          }),
     };
   }
 
-  /** One unresolved-gap row (unresolvable wrapper, budget, dynamic title). */
+  /**
+   * One unresolved-gap row (unresolvable wrapper, budget, dynamic title).
+   *
+   * The gap keeps its own code and stays unresolved — an unprovable call
+   * is unprovable wherever it lives — but it is filed under the runner
+   * whose own selection collects the file, so a foreign-runner gap never
+   * masquerades as a gap in the configured runner's inventory.
+   */
   private unresolvedRow(gap: StaticUnresolved): TestCatalogEntry {
+    const owner = this.ownerOf(gap.file);
+    this.recordAttribution(owner, gap.file);
+    const foreign = owner !== '' && owner !== this.runner;
+    const runner = foreign ? owner : this.staticRowRunner;
+    const titlePath = gap.titlePath.length > 0 ? gap.titlePath : [UNRESOLVED_TITLE_PLACEHOLDER];
     return {
       logicalKey: deriveLogicalKey({
-        runner: 'playwright',
+        runner,
         project: null,
         file: gap.file,
-        titlePath: gap.titlePath.length > 0 ? gap.titlePath : [UNRESOLVED_TITLE_PLACEHOLDER],
+        titlePath,
       }),
-      runner: 'playwright',
+      runner,
       project: null,
       file: gap.file,
-      titlePath: gap.titlePath.length > 0 ? gap.titlePath : [UNRESOLVED_TITLE_PLACEHOLDER],
+      titlePath: [...titlePath],
       title: gap.titlePath[gap.titlePath.length - 1] ?? UNRESOLVED_TITLE_PLACEHOLDER,
       sourceLocation: gap.location,
       parameterIdentity: null,
       sourceDigest: fileDigest(this.cwd, gap.file) ?? EMPTY_SHA256,
       discoveryStatus: 'unresolved',
-      reconciliation: this.native.status === 'unavailable' ? 'unavailable' : 'static-only',
+      reconciliation: foreign || this.native.status === 'unavailable' ? 'unavailable' : 'static-only',
       resolutionOrigin: 'static',
       inferredKind: 'unknown',
       kindSignals: [],
-      weakSignals: [],
+      weakSignals: foreign
+        ? [
+            {
+              ruleId: 'runner-file-scope',
+              evidence:
+                `this file is outside the configured runner (${this.runner})'s own test-file selection; ` +
+                `the ${owner} configuration claims it, so it is ${owner}'s test`,
+              location: gap.location,
+            },
+          ]
+        : [],
       rulesFired: [],
       categorySignals: [],
       suppressionSignals: [],
@@ -673,11 +856,19 @@ class CatalogBuilder {
     const diagnosticUnavailable = runnerSummaries.some(
       (summary) => summary.runner !== 'playwright' && summary.status === 'unavailable',
     );
+    // The CONFIGURED runner's unresolved rows are this run's own gap (its
+    // enumeration never produced those cases), and so are playwright's:
+    // the union is never weaker than the playwright-only rule, and it is
+    // what makes a vitest-configured repository judge its OWN inventory.
     const complete =
       parseErrors.length === 0 &&
       !this.scan.budgetExceeded &&
       this.native.errors.length === 0 &&
-      !sorted.some((row) => row.runner === 'playwright' && row.discoveryStatus === 'unresolved') &&
+      !sorted.some(
+        (row) =>
+          (row.runner === 'playwright' || row.runner === this.runner) &&
+          row.discoveryStatus === 'unresolved',
+      ) &&
       !diagnosticUnavailable;
 
     // Validate through the strict schema: duplicate logical keys and

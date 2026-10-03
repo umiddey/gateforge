@@ -17,17 +17,19 @@
  * itself schedules from — so the graph is the runner's own truth, not
  * the candidate's claim about it.
  *
- * It records the project graph and, alongside it, the RESOLVED
- * `use.storageState` of each project — but only when that value is a
- * plain string path. That is DATA the runner already resolved from the
- * consumer config (a file location), not consumer code, and it is what
- * the standard auth pattern needs: a `setup` project signs in and saves
- * `playwright/.auth/user.json`, and the dependent project is the one
- * that must be handed that file. Every other project option is
- * consumer configuration a supervised run deliberately does not honor,
- * so none of it crosses this boundary — including a `storageState`
- * given as an inline `{cookies, origins}` document, which is a value
- * this boundary does not carry.
+ * It records the project graph, alongside it the RESOLVED
+ * `use.storageState` of each project (only when that value is a plain
+ * string path), and each project's own resolved TEST-FILE selection
+ * (`testDir`/`testMatch`/`testIgnore`) — the runner's answer to "which
+ * files would you collect at all?". A test file outside every
+ * project's selection is not that runner's test, however test-shaped
+ * it looks, and the catalog must say so from the runner's own words
+ * rather than from a guess about the consumer's glob syntax.
+ *
+ * Every other project option is consumer configuration a supervised run
+ * deliberately does not honor, so none of it crosses this boundary —
+ * including a `storageState` given as an inline `{cookies, origins}`
+ * document, which is a value this boundary does not carry.
  *
  * The output path arrives in the environment, exactly like the json
  * reporter's own `PLAYWRIGHT_JSON_OUTPUT_FILE`: the reporter list a CLI
@@ -41,12 +43,19 @@ import { writeFileSync } from 'node:fs';
 /** Environment variable naming the graph document to write. */
 export const PROJECT_GRAPH_PATH_ENV = 'PLAYWRIGHT_GATEFORGE_PROJECT_GRAPH_FILE';
 
+/** A runner test-file selection value: a glob string or a RegExp. */
+type SelectionValue = string | RegExp;
+
 /** Minimal shape of the runner project objects this reporter reads. */
 interface RunnerProject {
   name?: string;
   dependencies?: readonly string[];
   /** The RESOLVED per-project `use`; only its `storageState` is read. */
   use?: { storageState?: unknown };
+  /** The RESOLVED per-project test root (absolute). */
+  testDir?: string;
+  testMatch?: SelectionValue | readonly SelectionValue[];
+  testIgnore?: SelectionValue | readonly SelectionValue[];
 }
 
 /** Minimal shape of the runner's resolved full config. */
@@ -74,13 +83,57 @@ export interface ProjectGraphDocument {
    * that would read as "every project has an empty state".
    */
   projectStorageStates?: Record<string, string>;
+  /**
+   * Per project, the runner's OWN resolved test-file selection: the
+   * absolute `testDir` plus its `testMatch`/`testIgnore` globs
+   * (serialized with `String()`, exactly as the runner's own json
+   * reporter serializes them). A project is ABSENT when one of its
+   * selection values is not a plain glob/RegExp — absent means "this
+   * project narrows nothing", never "this project collects nothing".
+   */
+  testFileScope?: ProjectTestFileScope[];
+}
+
+/** One project's runner-resolved test-file selection. */
+export interface ProjectTestFileScope {
+  /** The runner project name. */
+  name: string;
+  /** Absolute test root; the selection globs are relative to it. */
+  testDir: string;
+  /** Globs a file must match (relative to {@link testDir}). */
+  testMatch: string[];
+  /** Globs that exclude a file (relative to {@link testDir}). */
+  testIgnore: string[];
+}
+
+/**
+ * Normalizes one resolved `testMatch`/`testIgnore` value to its globs.
+ *
+ * @param value: the runner's resolved value (string, RegExp, or array).
+ *
+ * @returns
+ *   string[]: the globs in source order; empty when the runner resolved
+ *   nothing. `null` when any element is not a plain string/RegExp — the
+ *   caller then treats that project's whole selection as unknown.
+ */
+function selectionGlobs(value: RunnerProject['testMatch']): string[] | null {
+  if (value === undefined || value === null) return [];
+  const values = Array.isArray(value) ? value : [value];
+  const globs: string[] = [];
+  for (const element of values) {
+    if (typeof element === 'string') globs.push(element);
+    else if (element instanceof RegExp) globs.push(element.toString());
+    else return null;
+  }
+  return globs;
 }
 
 /**
  * The Playwright reporter that records the resolved project dependency
- * graph and the storage states its projects declare. Written for the
- * v2 reporter protocol (`version()` returning `'v2'`), whose
- * `onConfigure` receives the resolved full config.
+ * graph, the storage states its projects declare, and each project's
+ * resolved test-file selection. Written for the v2 reporter protocol
+ * (`version()` returning `'v2'`), whose `onConfigure` receives the
+ * resolved full config.
  */
 export class ProjectGraphReporter {
   /** Opts into the v2 reporter protocol (config arrives in onConfigure). */
@@ -89,8 +142,8 @@ export class ProjectGraphReporter {
   }
 
   /**
-   * Records the graph, and the declared storage states, the RUNNER
-   * resolved.
+   * Records the graph, the declared storage states, and the test-file
+   * selection the RUNNER resolved.
    *
    * @param config: the resolved full config, exactly as the runner has it.
    */
@@ -101,6 +154,7 @@ export class ProjectGraphReporter {
     // a legal one, so a map keyed by it must not inherit anything.
     const projectDependencies = Object.create(null) as Record<string, string[]>;
     const projectStorageStates = Object.create(null) as Record<string, string>;
+    const testFileScope: ProjectTestFileScope[] = [];
     for (const project of config.projects ?? []) {
       if (typeof project.name !== 'string' || project.name.length === 0) continue;
       projectDependencies[project.name] = [
@@ -120,11 +174,22 @@ export class ProjectGraphReporter {
       if (typeof storageState === 'string') {
         projectStorageStates[project.name] = storageState;
       }
+      // The runner's own file selection. Only plain globs and RegExps
+      // cross; a function-valued selector is consumer CODE, and a
+      // project with a non-data value is left out so it narrows nothing
+      // instead of narrowing wrongly.
+      const testDir = project.testDir;
+      const testMatch = selectionGlobs(project.testMatch);
+      const testIgnore = selectionGlobs(project.testIgnore);
+      if (typeof testDir === 'string' && testDir.length > 0 && testMatch !== null && testIgnore !== null) {
+        testFileScope.push({ name: project.name, testDir, testMatch, testIgnore });
+      }
     }
     const document: ProjectGraphDocument = {
       schemaVersion: 2,
       projectDependencies,
       ...(Object.keys(projectStorageStates).length > 0 ? { projectStorageStates } : {}),
+      ...(testFileScope.length > 0 ? { testFileScope } : {}),
     };
     writeFileSync(graphPath, `${JSON.stringify(document)}\n`, 'utf8');
   }
