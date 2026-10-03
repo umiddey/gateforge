@@ -193,7 +193,7 @@ describe('init in a terminal (fake TTY)', () => {
     await withTempRepo({}, async (repo) => {
       useFakeTerminal();
       // the goal question comes first, then the follow-ups in prompt order
-      scriptedAnswers.push('3', '', '', '', 'n');
+      scriptedAnswers.push('3', '', '', '', '', 'n');
       const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
       expect(code, stdout).toBe(0);
       expect(stdout).toContain('What should Gateforge do for you?');
@@ -210,7 +210,7 @@ describe('init in a terminal (fake TTY)', () => {
   it('answering 1 asks nothing about blocking and wires no hook', async () => {
     await withTempRepo({}, async (repo) => {
       useFakeTerminal();
-      scriptedAnswers.push('1', '', '', '', 'n');
+      scriptedAnswers.push('1', '', '', '', '', 'n');
       const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
       expect(loadConfig(repo.path('.gateforge.yml')).mode).toBe('warn');
       expect(existsSync(repo.path('.git/hooks/pre-commit'))).toBe(false);

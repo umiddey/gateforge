@@ -156,6 +156,27 @@ clock:
     // ABSENT stays absent: today's behavior, byte-identical.
     expect(parseConfig({ ...validConfig }).tenancy).toBeUndefined();
   });
+
+  it('accepts only block|warn for how unmatched by-id routes are graded', () => {
+    expect(parseConfig({ ...validConfig, endpoints: { unmatchedRoutes: 'block' } }).endpoints).toEqual({
+      unmatchedRoutes: 'block',
+    });
+    expect(parseConfig({ ...validConfig, endpoints: { unmatchedRoutes: 'warn' } }).endpoints).toEqual({
+      unmatchedRoutes: 'warn',
+    });
+    // An empty section declares nothing and stays absent; a value that is
+    // neither answer is refused rather than read as one of them.
+    expect(parseConfig({ ...validConfig, endpoints: {} }).endpoints).toEqual({});
+    expect(() => parseConfig({ ...validConfig, endpoints: { unmatchedRoutes: 'loud' } })).toThrow(
+      GateforgeConfigError,
+    );
+    expect(() => parseConfig({ ...validConfig, endpoints: { unmatchedRoute: 'block' } })).toThrow(
+      GateforgeConfigError,
+    );
+    // ABSENT stays absent: an upgraded repository keeps today's parsing,
+    // and the engine reads that absence as the non-blocking default.
+    expect(parseConfig({ ...validConfig }).endpoints).toBeUndefined();
+  });
   it('accepts optional harness commands and bounded history retention', () => {
     const config = parseConfig({
       ...validConfig,

@@ -100,6 +100,15 @@ On a repo that already has Gateforge files, `init` reports only what THAT run di
 
 `--docs-exclude <folder,...>` and `--docs-exclude-file <path>` are the same owner assertion in two spellings (the file holds one folder per line; blank lines and `#` comments are ignored); they combine into one deduplicated list, and the interactive prompt says the flag exists so a long list does not have to be typed into one prompt.
 
+`--unmatched-routes block|warn` answers, ahead of the terminal question, the
+one thing a NEW repository must say about routes whose name matches no
+discovered table: gate commits on them, or only report them. In a terminal
+`init` asks once ("Routes whose name matches no table: block commits, or
+warn only? [block/warn]"); headless it writes `warn` and prints the exact
+key that turns blocking on. A repository that already has a
+`.gateforge.yml` is never asked and never rewritten here — it keeps saying
+nothing, which the `check`/`next` banner keeps pointing at.
+
 The cache is disabled by `--no-cache`, `GATEFORGE_NO_CACHE=1`, or recognized CI-provider markers (`GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI`, `JENKINS_URL`, `TF_BUILD`). A bare `CI=true` does not disable it.
 
 Global flags: `--help`, `--version`. Exit codes per architecture contract 4:
@@ -1068,6 +1077,22 @@ evidence: name the response model or the handler after the resource, or
 declare the missing mapping. If none is right, the route genuinely serves
 something the resource graph does not model. A route that links, a route
 with nothing near it, and any collection route are unaffected.
+
+Whether the entry BLOCKS is the owner's call, in `.gateforge.yml`:
+
+```yaml
+endpoints:
+  unmatchedRoutes: warn   # the default; `block` gates commits on them
+```
+
+Absent the key means `warn`: the entries are reported under this same code
+in the advisory channel, `check --changed` does not block on them, and
+`check` and `next` print a banner at the top with the count, the first
+three examples and the key above — a repository that upgraded must not
+start failing commits over a finding it never chose. `warn` says the same
+thing with the "you have not chosen" sentence gone; `block` makes the entry
+a blocking entry like any other. `gateforge init` asks once in a terminal
+and takes `--unmatched-routes block|warn`.
 
 ## Proposing planes at init (`gateforge init --planes`)
 

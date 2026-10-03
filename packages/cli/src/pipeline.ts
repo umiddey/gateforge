@@ -60,6 +60,11 @@ import { gitIgnoredPaths } from './git-ignored.js';
 import { runPlugins } from './plugins.js';
 import type { CacheControl, CacheCounts } from './run-cache.js';
 import { compileEndpointContribution, type EndpointInventory } from './endpoint-compiler.js';
+import {
+  partitionUnmatchedRouteEntries,
+  unmatchedRoutesMode,
+  type UnmatchedRoutesMode,
+} from './unmatched-routes.js';
 import { readJsonArray } from './state.js';
 import { providerFor } from './providers.js';
 
@@ -97,6 +102,20 @@ export interface PipelineResult {
   contributions: DetectorOutput[];
   /** Compiled endpoint inventory (ADR 0004 D6): facts, endpoints, blocks. */
   endpointInventory: EndpointInventory;
+  /**
+   * The effective `endpoints.unmatchedRoutes` grading mode (0.9.0,
+   * owner decision D7): `block` only when the owner said so; ABSENT is
+   * `unchosen` and behaves like `warn`. Navigation surfaces read it to
+   * explain whether an unmatched by-id route blocks.
+   */
+  unmatchedRoutesMode: UnmatchedRoutesMode;
+  /**
+   * Unmatched by-id routes (`ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED`)
+   * the owner graded as ADVISORY: reported in the report's advisory
+   * channel under the same code, never blocking. Empty under `block`,
+   * where they stay in `policy.blocking` instead.
+   */
+  unmatchedRouteAdvisories: readonly BlockingEntry[];
   /** The built resource graph with effective classifications bound. */
   graph: ResourceGraph;
   /** Policy evaluation: obligations, blocking entries, claim assessments. */
@@ -592,6 +611,18 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     engineAlembicRecords = compiled.records;
     alembicNotices = compiled.notices;
   }
+  // Unmatched by-id routes (0.9.0, owner decision D7): the owner decides
+  // whether `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED` blocks. ABSENT (an
+  // upgraded repository) and `warn` keep the entries out of the blocking
+  // channel entirely — so `check --changed`, the strict exit code and the
+  // next-action ranking all see an unchanged gate — and hand them to the
+  // report as advisories instead. `block` leaves `policy.blocking`
+  // exactly as it is.
+  const unmatchedRouteMode = unmatchedRoutesMode(config);
+  const partition = partitionUnmatchedRouteEntries(policy.blocking, unmatchedRouteMode);
+  if (partition.blocking.length !== policy.blocking.length) {
+    policy = { ...policy, blocking: partition.blocking };
+  }
   const manifest = RunManifestSchema.parse({
     schemaVersion: 1,
     runId,
@@ -608,6 +639,8 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     graph,
     policy,
     observationScope: policiesParsed.data.options?.['http.endpoint.requireObservation'] ?? 'consumed',
+    unmatchedRoutesMode: unmatchedRouteMode,
+    unmatchedRouteAdvisories: partition.advisories,
     manifest,
     now,
     changedFiles,

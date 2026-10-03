@@ -180,6 +180,7 @@ import { obligationFingerprint, evaluateRun, scopeBlocking } from '../evaluate.j
 import { auditAdapters } from '../adapter-audit.js';
 import { singletonPerTenantAdvisories } from '../singleton-guidance.js';
 import { responseFieldAdvisories } from '../response-field-guidance.js';
+import { unmatchedRouteBannerLines } from '../unmatched-routes.js';
 import { annotationMapSyncAdvisories, findRunnerConfigPath, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
@@ -1878,6 +1879,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       // a joined endpoint pairs a proven response model with a read, so
       // a repository without both packs renders byte-identically.
       ...responseFieldAdvisories(pipeline.endpointInventory.endpoints),
+      // Unmatched by-id routes the owner graded as advisory (0.9.0,
+      // owner decision D7). Same code, advisory channel, never blocking:
+      // the entries are already out of `pipeline.policy.blocking`, so
+      // the exit code and `check --changed` are untouched.
+      ...pipeline.unmatchedRouteAdvisories,
     ],
     waiverCounts: evaluated.waiverCounts,
     baseline: baselineReport,
@@ -1915,6 +1921,17 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           }),
     },
   });
+  // Unmatched by-id routes the owner graded as advisory (0.9.0, owner
+  // decision D7): loud at the TOP of the text report, not buried in the
+  // advisory tail, because a demoted finding must be impossible to miss.
+  // The JSON document keeps them in `advisories` under the same code.
+  if (format === 'text') {
+    const banner = unmatchedRouteBannerLines(
+      pipeline.unmatchedRouteAdvisories,
+      pipeline.unmatchedRoutesMode,
+    );
+    if (banner.length > 0) report = `${banner.join('\n')}\n${report}`;
+  }
   if (newDebt !== null) {
     if (format === 'json') {
       const document = JSON.parse(report) as Record<string, JsonValue>;

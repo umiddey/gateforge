@@ -70,6 +70,7 @@ import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import { loadConfigAt, rejectUnknownFlags, VERIFIER_KEY_ENV } from './common.js';
 import { loadCacheExclusions } from '../cache-exclusions.js';
 import { singletonPerTenantGuidanceLines } from '../singleton-guidance.js';
+import { unmatchedRouteBannerLines } from '../unmatched-routes.js';
 import {
   buildEndpointDeclaration,
   loadBehaviorRecipes,
@@ -1155,6 +1156,19 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   });
 
   const candidates = rankBlockers(evaluated.blocking, evaluated.verdicts, focusedRouteKeys(pipeline.graph));
+  // Unmatched by-id routes the owner graded as advisory (0.9.0, owner
+  // decision D7): printed near the top whether or not anything blocks,
+  // because `next` is where an owner looks to learn what a run is
+  // reporting. They never block here (they are out of the blocking
+  // channel), so a clean run still prints `next: none — clean` below.
+  if (!asJson) {
+    for (const line of unmatchedRouteBannerLines(
+      pipeline.unmatchedRouteAdvisories,
+      pipeline.unmatchedRoutesMode,
+    )) {
+      writeLine(io.stdout, line);
+    }
+  }
   if (candidates.length === 0) {
     if (asJson) {
       writeLine(

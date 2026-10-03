@@ -630,6 +630,37 @@ export const GateforgeConfigSchema = z
       })
       .strict()
       .optional(),
+    /**
+     * Endpoint-compilation findings the owner grades rather than the
+     * engine deciding alone (0.9.0, owner decision D7).
+     *
+     * `endpoints.unmatchedRoutes` decides whether
+     * `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED` blocks a commit. ABSENT =
+     * the entries are reported as advisories and NEVER block, with a
+     * banner in `check` and `next` naming the count, the first examples
+     * and this exact key: an existing repository that upgrades must not
+     * start blocking commits over a finding it never chose. `warn` is
+     * the same non-blocking behavior once the owner has SAID so (no
+     * "you have not chosen" sentence). `block` restores the strict
+     * behavior, where the entry is a blocking entry like every other.
+     *
+     * Security-sensitive: the key lives in `.gateforge.yml`, so it is
+     * inside the trusted policy digest — an agent cannot silence a
+     * gate-visible finding without the owner repinning the revision. An
+     * unknown value fails the load through the plain config-error path
+     * (exit 2).
+     */
+    endpoints: z
+      .object({
+        /**
+         * `block` = the unmatched-route entry is blocking (today's
+         * 0.9.0 behavior). `warn` or ABSENT = advisory + banner, never
+         * blocking.
+         */
+        unmatchedRoutes: z.enum(['block', 'warn']).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -642,6 +673,14 @@ export type GateforgeConfig = z.infer<typeof GateforgeConfigSchema>;
  * default list — today's behavior, byte-identical.
  */
 export type TenancyConfig = NonNullable<GateforgeConfig['tenancy']>;
+
+/**
+ * Inferred `.gateforge.yml` `endpoints` section (0.9.0, owner decision
+ * D7): how the owner grades `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED`.
+ * ABSENT means the advisory + banner behavior — an existing repository
+ * never starts blocking commits over a setting it never chose.
+ */
+export type EndpointsConfig = NonNullable<GateforgeConfig['endpoints']>;
 
 /**
  * One actionable config diagnostic: where, what, and expected-vs-got.

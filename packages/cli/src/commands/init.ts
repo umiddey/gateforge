@@ -106,7 +106,7 @@ export const INIT_USAGE =
   '[--witnessed staged|full] [--ci] [--no-ci] ' +
   '[--docs-exclude <folder,...> [--docs-exclude-file <path>] [--confirm-doc-exclusions]] [--cache-exclude <file,...> ' +
   '[--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--no-planes] ' +
-  '[--behavior] [--no-behavior] [--behavior-packs <pack,...>]';
+  '[--behavior] [--no-behavior] [--behavior-packs <pack,...>] [--unmatched-routes block|warn]';
 
 /** Template for the complete-behavior owner document (plan §4.1). */
 export const BEHAVIOR_TEMPLATE = `\
@@ -458,6 +458,8 @@ function configTemplate(
     strictnessMode?: StrictnessMode;
     /** `runner` writes the owner-owned `runner:` key; undefined writes NO key (playwright is the default). */
     runner?: string;
+    /** `unmatchedRoutes` writes the owner-owned `endpoints.unmatchedRoutes` key; undefined writes NO key. */
+    unmatchedRoutes?: 'block' | 'warn';
   } = {},
 ): string {
   const enforcementBlock =
@@ -496,6 +498,19 @@ runner: ${options.runner}
     options.historyRetentionDays === undefined
       ? ''
       : `history:\n  retentionDays: ${String(options.historyRetentionDays)}\n`;
+  // The owner-owned unmatched-route grading. Only written when the owner
+  // answered (the terminal question, the flag, or the non-interactive
+  // `warn`); an existing config that said nothing keeps saying nothing,
+  // and the `check`/`next` banner keeps asking.
+  const endpointsBlock =
+    options.unmatchedRoutes === undefined
+      ? ''
+      : `# Routes whose name matches no discovered resource (ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED).
+# 'warn' reports them as advisories with a banner; 'block' makes them
+# blocking entries like any other finding. Absent means 'warn'.
+endpoints:
+  unmatchedRoutes: ${options.unmatchedRoutes}
+`;
   return `\
 # gateforge project configuration (schemaVersion 1)
 schemaVersion: 1
@@ -540,7 +555,7 @@ witness:
   maxDurationSeconds: 5
 clock:
   mode: system
-${runnerBlock}${historyBlock}${strictnessBlock}${enforcementBlock}\
+${endpointsBlock}${runnerBlock}${historyBlock}${strictnessBlock}${enforcementBlock}\
 `;
 }
 
@@ -824,6 +839,66 @@ async function resolveHistoryRetention(io: Io): Promise<number | 'off' | undefin
     const days = Number(answer);
     if (Number.isInteger(days) && days >= 1 && days <= 90) return days;
     throw new UsageError("init: history retention must be an integer from 1 to 90, or 'off'");
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * Resolves how a NEW repository grades unmatched by-id routes (0.9.0,
+ * owner decision D7).
+ *
+ * Flags win, then the terminal question, then `warn`. A non-interactive
+ * run (an agent, a CI job, a test) writes `warn` and prints the exact
+ * setting to choose `block` — it never blocks a repository the owner
+ * never asked to gate on. A repository that ALREADY has a
+ * `.gateforge.yml` is left untouched: an existing config that has said
+ * nothing keeps saying nothing, and the banner keeps asking.
+ *
+ * Args:
+ *   io: process context (prompt + informational output).
+ *   options: parsed init flags.
+ *   configExisted: whether `.gateforge.yml` was already present.
+ *
+ * Returns:
+ *   Promise<{ mode: 'block' | 'warn' | undefined; note: string | undefined }>:
+ *   the answer to write (`undefined` writes no key) and the non-interactive
+ *   line to print.
+ */
+async function resolveUnmatchedRoutes(
+  io: Io,
+  options: Record<string, unknown>,
+  configExisted: boolean,
+): Promise<{ mode: 'block' | 'warn' | undefined; note: string | undefined }> {
+  const flagValue = stringFlag(options, 'unmatched-routes');
+  if (flagValue !== undefined) {
+    const mode = flagValue.trim().toLowerCase();
+    if (mode !== 'block' && mode !== 'warn') {
+      throw new UsageError("init: --unmatched-routes must be 'block' or 'warn'");
+    }
+    return { mode, note: undefined };
+  }
+  if (configExisted) return { mode: undefined, note: undefined };
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return {
+      mode: 'warn',
+      note:
+        "note: routes whose name matches no table will be REPORTED, not blocking. " +
+        "set 'endpoints:\n  unmatchedRoutes: block' in .gateforge.yml (or re-run with --unmatched-routes block) to block on them",
+    };
+  }
+  // The question is printed by the command (like the goal question), so it
+  // is in the run's own output and survives a non-interactive transcript;
+  // the readline prompt only takes the answer.
+  writeLine(io.stdout, 'Routes whose name matches no table: block commits, or warn only? [block/warn] (default warn)');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(' ')).trim().toLowerCase();
+    if (answer === '') return { mode: 'warn', note: undefined };
+    if (answer !== 'block' && answer !== 'warn') {
+      throw new UsageError("init: unmatched-route grading must be 'block' or 'warn'");
+    }
+    return { mode: answer, note: undefined };
   } finally {
     rl.close();
   }
@@ -1375,6 +1450,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       'planes',
       'no-planes',
       'behavior',
+      'unmatched-routes',
       'no-behavior',
       'behavior-packs',
       'docs-exclude',
@@ -1530,6 +1606,12 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   // preset summary must tell the truth about what changed.
   const existedConfigAtStart = existsSync(join(io.cwd, '.gateforge.yml'));
   const historyRetentionDays = existsSync(join(cwd, '.gateforge.yml')) ? undefined : await resolveHistoryRetention(io);
+  // How a NEW repository grades unmatched by-id routes (0.9.0, owner
+  // decision D7). Asked once, in a terminal; `warn` and the exact key to
+  // choose `block` on a non-interactive run; an existing config is left
+  // alone and keeps the `check`/`next` banner asking.
+  const unmatchedRoutes = await resolveUnmatchedRoutes(io, options, existedConfigAtStart);
+  if (unmatchedRoutes.note !== undefined) writeLine(io.stdout, unmatchedRoutes.note);
   const languages = scan.languages;
   const pluginIds = recommended;
   const configOptions = {
@@ -1545,6 +1627,8 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     strictnessMode: goal?.settings.strictnessMode,
     // The scanned runner, when it is unambiguous and not Playwright.
     runner: detectedRunner,
+    // The owner's answer for unmatched by-id routes; undefined writes no key.
+    unmatchedRoutes: unmatchedRoutes.mode,
   };
   const generatedDraftConfig = (): ReturnType<typeof loadConfig> =>
     parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });
