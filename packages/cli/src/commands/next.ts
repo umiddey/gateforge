@@ -65,6 +65,7 @@ import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { resolveProvider } from '../providers.js';
 import { computeEvaluationScope, detectStagedWorkingTreeMismatches } from '../scope.js';
 import { httpRoutesView, resolveStateDir } from '../state.js';
+import { gateforgeOwnedInputs } from '../gateforge-owned.js';
 import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import { loadConfigAt, rejectUnknownFlags, VERIFIER_KEY_ENV } from './common.js';
 import { loadCacheExclusions } from '../cache-exclusions.js';
@@ -116,6 +117,64 @@ interface NextCandidate {
   kind: string;
   /** Rank per the plan §2 table (lower wins). */
   rank: number;
+  /**
+   * Tie-break inside one rank: 0 when the item is a real business route
+   * (linked to a model, or consumed by the frontend), 1 otherwise.
+   */
+  focus: number;
+}
+
+/**
+ * Endpoint identities that carry real application weight.
+ *
+ * A route the engine LINKED to a business model, or that the frontend
+ * statically CONSUMES, is business surface: answering it moves the
+ * product forward. A route with neither (a demo endpoint, an internal
+ * probe, a leftover script) is still reported — it is never hidden —
+ * but it must not be the FIRST thing an agent or an owner is told to
+ * do, which is where alphabetical id order used to put it: the top item
+ * of a thousand was a fifteen-line demo app's `/api/test`.
+ *
+ * Both the plane-qualified resource id and the bare resource name are
+ * registered, because a plane-unresolved endpoint has no id at all and
+ * is reported under its name.
+ *
+ * Args:
+ *   graph: the built resource graph.
+ *
+ * Returns:
+ *   ReadonlySet<string>: the focused route identities.
+ */
+function focusedRouteKeys(graph: ResourceGraph): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const resource of graph.resources) {
+    if (resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) continue;
+    const linked = resource.attributes['linkedResourceName'];
+    const isLinked = typeof linked === 'string' && linked.length > 0;
+    if (!isLinked && resource.attributes['frontendConsumed'] !== true) continue;
+    if (resource.id !== null) keys.add(resource.id);
+    keys.add(resource.name);
+  }
+  return keys;
+}
+
+/**
+ * Whether one ranked item belongs to a focused route — either the route
+ * itself or an obligation carried by it (`<resourceId>:<contract>`).
+ *
+ * Args:
+ *   focused: the focused route identities.
+ *   id: the candidate id (resource name/id, or an obligation id).
+ *
+ * Returns:
+ *   number: 0 when focused, 1 otherwise.
+ */
+function routeFocus(focused: ReadonlySet<string>, id: string): number {
+  if (focused.has(id)) return 0;
+  for (const key of focused) {
+    if (id.startsWith(`${key}:`)) return 0;
+  }
+  return 1;
 }
 
 /**
@@ -184,9 +243,28 @@ function rankCause(cause: CauseCode | null | undefined, kind: string): number {
 
 /**
  * Normalizes blocking entries + blocking verdicts into ranked
- * candidates (stable sort by id inside a rank).
+ * candidates.
+ *
+ * Order: cause rank first (unchanged — a capability gap still outranks
+ * everything), then business weight, then id. The focus tie-break only
+ * ever reorders items of the SAME rank, so it cannot demote anything
+ * the plan says must come first; it only stops alphabetical id order
+ * from putting an unlinked demo route at the top of a thousand-item
+ * list.
+ *
+ * Args:
+ *   blocking: the run's blocking entries.
+ *   verdicts: the run's obligation verdicts.
+ *   focused: endpoint identities with real business weight.
+ *
+ * Returns:
+ *   NextCandidate[]: ranked candidates.
  */
-function rankBlockers(blocking: readonly BlockingEntry[], verdicts: readonly ObligationVerdict[]): NextCandidate[] {
+function rankBlockers(
+  blocking: readonly BlockingEntry[],
+  verdicts: readonly ObligationVerdict[],
+  focused: ReadonlySet<string>,
+): NextCandidate[] {
   const candidates: NextCandidate[] = [];
   for (const entry of blocking) {
     const cause = entry.cause ?? null;
@@ -203,6 +281,7 @@ function rankBlockers(blocking: readonly BlockingEntry[], verdicts: readonly Obl
             : 'gateforge discover --json'),
       kind: entry.kind,
       rank: rankCause(cause, entry.kind),
+      focus: routeFocus(focused, entry.resourceId ?? entry.name ?? 'repo'),
     });
   }
   for (const verdict of verdicts) {
@@ -217,9 +296,20 @@ function rankBlockers(blocking: readonly BlockingEntry[], verdicts: readonly Obl
         (cause !== null ? CAUSE_NEXT_ACTIONS[cause] : CAUSE_NEXT_ACTIONS['EVIDENCE_NOT_COLLECTED']),
       kind: 'verdict',
       rank: rankCause(cause, 'verdict'),
+      focus: routeFocus(focused, verdict.obligation.id),
     });
   }
-  candidates.sort((a, b) => (a.rank !== b.rank ? a.rank - b.rank : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  candidates.sort((a, b) =>
+    a.rank !== b.rank
+      ? a.rank - b.rank
+      : a.focus !== b.focus
+        ? a.focus - b.focus
+        : a.id < b.id
+          ? -1
+          : a.id > b.id
+            ? 1
+            : 0,
+  );
   return candidates;
 }
 
@@ -233,7 +323,7 @@ const CLASSIFIER_BLOCK_ANSWERS: Readonly<Record<string, string>> = {
   DELETE_SEMANTICS_UNRESOLVED:
     "declare what the endpoint does in '.gateforge/endpoints.json' — 'crud-archive' or 'crud-delete' on a DELETE endpoint (an ENDPOINT_SEMANTICS_UNRESOLVED block prints the exact entry)",
   PLANE_UNRESOLVED:
-    "gateforge classify plane <file> <tenant|master|global> --reason '<why>' --confirm — or change the existing rule for that file in '.gateforge/planes.json'",
+    "gateforge classify plane <file|folder|glob> <tenant|master|global> --reason '<why>' --confirm — or change the existing rule for that source in '.gateforge/planes.json'",
 };
 
 /**
@@ -972,6 +1062,11 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       mappingSidecar: sidecar !== null,
       knownSourceFiles,
       strictE2E: config.enforcement?.strictE2E === true,
+      // Gateforge's OWN scaffold/policy files are policy inputs (D2),
+      // not product changes: without this `next --changed` would keep
+      // listing `.gateforge/*.yml`, `GATEFORGE.md` and the CI/pre-commit
+      // wiring as CHANGE_UNMAPPED — the exact thing D2 removes.
+      policyInputs: [...gateforgeOwnedInputs(io.cwd, pipeline.changedFiles, config).keys()],
     });
     changedFiles = scopeDecision.mode === 'all' ? null : scopeDecision.changedFiles;
     const sidecarCoveredFiles = new Set((sidecar?.tests ?? []).map((entry) => entry.selector.file));
@@ -1059,7 +1154,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     },
   });
 
-  const candidates = rankBlockers(evaluated.blocking, evaluated.verdicts);
+  const candidates = rankBlockers(evaluated.blocking, evaluated.verdicts, focusedRouteKeys(pipeline.graph));
   if (candidates.length === 0) {
     if (asJson) {
       writeLine(

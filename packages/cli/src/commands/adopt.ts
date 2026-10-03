@@ -61,6 +61,41 @@ import { loadConfigAt } from './common.js';
 
 export const ADOPT_USAGE = 'usage: gateforge adopt';
 
+/**
+ * What `gateforge adopt --help` prints. The command used to print only
+ * its usage line, so its whole contract — what it forgives, for how
+ * long, and the one case where an adopted obligation still blocks —
+ * existed only in the source file.
+ */
+export const ADOPT_HELP = `${ADOPT_USAGE}
+
+Adopts an EXISTING repository: run it once, after \`gateforge init\`, on a
+project that already has code and therefore already has findings.
+
+  what it records — the currently-blocking findings: unsatisfied
+  obligation fingerprints (pin #2) plus every blocking entry, and, as a
+  second layer, the classification-blocked resource identities. They go
+  into .gateforge/baselines/obligations.json, sanctioned by a dated,
+  count-annotated receipt (.gateforge/baselines/adoption.json). Without
+  that receipt a baseline forgives nothing.
+
+  shrink-only — the recorded set never grows on its own. It is the one
+  sanctioned bulk-add this engine performs, and only once per repository:
+  a second \`adopt\` is a no-op success. Resolve debt and shrink it with
+  \`gateforge baseline update\`; new (never-adopted) work is never
+  baselined and keeps blocking (\`check\` exits 1).
+
+  strictE2E — with \`enforcement.strictE2E: true\` a baselined E2E
+  obligation is NOT proof. It blocks with ENFORCEMENT_UNTRUSTED again
+  as soon as a change touches it; adoption forgives today's state, not
+  the next edit.
+
+  wiring — after recording, it applies the blocking wiring (pre-commit
+  hook block + CI template) through the same idempotent path as
+  \`gateforge init --blocking\`.
+
+Exit codes: 0 adopted (or an idempotent no-op), 2 config/usage.`;
+
 /** Groups the adopted red set by source for the adoption report. */
 function groupReds(reds: ReadonlyMap<string, string>): string[] {
   const counts = new Map<string, number>();
@@ -83,7 +118,7 @@ function groupReds(reds: ReadonlyMap<string, string>): string[] {
  */
 export async function adoptCommand(io: Io, argv: readonly string[]): Promise<number> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    writeLine(io.stdout, ADOPT_USAGE);
+    writeLine(io.stdout, ADOPT_HELP);
     return 0;
   }
   if (argv.length > 0) {

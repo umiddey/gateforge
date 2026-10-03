@@ -35,6 +35,8 @@ const BOOLEAN_FLAGS: Record<string, true> = {
   'no-ci': true,
   planes: true,
   'no-planes': true,
+  behavior: true,
+  'no-behavior': true,
   'accept-recommended': true,
   'no-scan': true,
   failed: true,

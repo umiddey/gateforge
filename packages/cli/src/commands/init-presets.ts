@@ -195,6 +195,13 @@ export interface PresetRunOutcome {
   configExisted: boolean;
   /** Repo-relative posix paths this run CREATED (the undo list). */
   created: readonly string[];
+  /**
+   * Repo-relative posix paths this run CHANGED IN PLACE — an appended
+   * CI include, an appended pre-commit entry, an added ignore rule.
+   * These are the owner's own files: the undo for them is a restore,
+   * never a delete.
+   */
+  modified: readonly string[];
   /** True when the repo already had a commit hook before this run. */
   repoHasCommitHook: boolean;
   /** True when the repo already had a CI file before this run. */
@@ -264,14 +271,23 @@ export function renderPresetSummary(name: InitPresetName, outcome: PresetRunOutc
   }
   lines.push(hookLine(preset, outcome));
   if (preset.ci) {
+    // One truth per run: a file this run WROTE, one it appended to, and
+    // one it left alone are three different facts, and printing
+    // "updated …" followed by "kept … this run created none" read as a
+    // contradiction about the same file.
     lines.push(
       outcome.created.includes('.gitlab-ci.yml')
         ? 'wrote the .gitlab-ci.yml include + job'
-        : 'kept the .gitlab-ci.yml already in place (this run created none)',
+        : outcome.modified.includes('.gitlab-ci.yml')
+          ? 'added the gateforge include to your existing .gitlab-ci.yml (undo: git restore -- .gitlab-ci.yml)'
+          : 'kept the .gitlab-ci.yml already in place (this run created none)',
     );
   }
   if (outcome.created.length > 0) {
     lines.push(`undo: rm -rf ${outcome.created.join(' ')}`);
+  }
+  if (outcome.modified.length > 0) {
+    lines.push(`undo: git restore -- ${outcome.modified.join(' ')}`);
   }
   return lines;
 }

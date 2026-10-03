@@ -89,12 +89,47 @@ It writes:
 - `GATEFORGE.md`
 - `tests/e2e/gateforge/README.md` for the default overlay proof path
 
-It also creates `.gateforge/adapters/` and `.gateforge/waivers/`. It preserves existing files. A chosen documentation exclusion adds `.gateforge/docs-exclusions.yml`.
+It also creates `.gateforge/adapters/` and `.gateforge/waivers/`, and adds
+`.gateforge/test-gates/` (Gateforge's own run state: catalog, caches,
+receipts, history) to `.gitignore` so `git add -A` never stages it. It
+preserves existing files. A chosen documentation exclusion adds
+`.gateforge/docs-exclusions.yml`.
 
 **You should see:** a scan summary, recommended packages, the goal summary
-with its `undo:` line, and a `skeleton ready` message.
+with its `undo:` lines, and a `skeleton ready` message.
 
 **If not:** read the first error. Fix invalid or missing project configuration, install a recommended pack, then run `gateforge init` again. Existing files are not replaced by a normal rerun.
+
+### Already have code? Adopt what is there
+
+If the repository already has an application, the next commit is not
+green: `gateforge check` reports everything discovery finds as existing
+debt, and debt blocks. Do not reach for `--no-verify` — there is a
+command for exactly this situation, and `init` names it in its own output
+whenever the repository already had code:
+
+```sh
+gateforge adopt
+```
+
+It records today's blocking findings as forgiven debt, in
+`.gateforge/baselines/obligations.json` plus a dated receipt in
+`.gateforge/baselines/adoption.json`, and then wires the blocking gate.
+
+- The recorded set is **shrink-only**. It never forgives new work: new
+  unproven changes keep blocking. Resolve debt and shrink the set with
+  `gateforge baseline update`.
+- Run it **once**. A second `adopt` is a no-op success; there is exactly
+  one sanctioned bulk-add per repository.
+- Under `--preset strict` / `strictE2E`, an adopted E2E obligation is not
+  proof. It blocks with `ENFORCEMENT_UNTRUSTED` again as soon as a change
+  touches it — adoption forgives today's state, not the next edit.
+- `gateforge adopt --help` prints this contract, and
+  `gateforge baseline diff <before> <after>` compares two adopted sets by
+  obligation ID.
+
+Adopting forgives; it does not prove. The work of proving obligations
+starts in step 4 and is unchanged.
 
 ## 4. Find existing tests and suggestions
 
