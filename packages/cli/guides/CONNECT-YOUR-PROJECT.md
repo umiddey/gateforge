@@ -140,6 +140,10 @@ routes the compiler found.
   (`/shipments/carrier/{id}` looks a carrier up through a shipment) is
   never taken as a by-id read either — whatever it answers, it is not
   one entity of that resource.
+- When a route comes from a router **no app mounts** (the module is
+  never included anywhere), the file still uses it — but marks the
+  derived path as a guess and asks you to confirm it: the route exists
+  in the source tree, and nothing serves it.
 - When the app serves a complete collection and **no by-id route at
   all**, it writes a **list-only** adapter: the kit reads the member
   out of the collection. The file's header says so, because every read

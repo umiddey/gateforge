@@ -36,6 +36,8 @@ interface HandWritten {
 interface FixtureResource {
   resource: GraphResource;
   routes: HttpRouteCandidate[];
+  /** Route paths no app mounts (the endpoint is standalone). */
+  standalonePaths?: string[];
   handWritten: HandWritten | null;
   deleteSemantics: AdapterTarget['deleteSemantics'];
   /** Compiled routes the runtime inventory omits (plane unanswered). */
@@ -120,6 +122,7 @@ function planFor(fixture: FixtureResource): ScaffoldPlan {
     existing: [],
     environmentFingerprint: FINGERPRINT,
     unresolvedRoutes: fixture.unresolvedRoutes ?? [],
+    standalonePaths: fixture.standalonePaths ?? [],
   });
   const plan = plans[0];
   if (plan === undefined) throw new Error(`no plan for ${fixture.resource.name}`);
@@ -511,6 +514,45 @@ describe('the scaffolder names a route that exists behind an unanswered plane', 
     expect(plan.needsYou.join('\n')).toContain(
       'GET /api/v2/accounts/{} exists but its plane is unanswered',
     );
+  });
+});
+
+describe('the scaffolder marks a path no app mounts', () => {
+  it('declares the guess in the file and asks the human to confirm it', () => {
+    const plan = planFor({
+      resource: table('webhook_deliveries', { updateableFields: ['status'] }),
+      routes: [
+        get('/api/v1/webhook-deliveries', 'webhook_deliveries'),
+        get('/webhook-deliveries/:id', 'webhook_deliveries'),
+      ],
+      // The router file is never included anywhere: the route exists in
+      // the source tree and no app serves it.
+      standalonePaths: ['/webhook-deliveries/:id'],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('create');
+    const guesses = plan.guesses.join('\n');
+    expect(guesses).toContain('GET /webhook-deliveries/:id');
+    expect(guesses).toContain('no app mounts');
+    expect(plan.needsYou.join('\n')).toContain('router no app mounts');
+    // Only the unmounted route is questioned.
+    expect(plan.needsYou.join('\n')).not.toContain('/api/v1/webhook-deliveries');
+  });
+
+  it('says nothing when every route is mounted', () => {
+    const plan = planFor({
+      resource: table('webhook_deliveries', { updateableFields: ['status'] }),
+      routes: [
+        get('/api/v1/webhook-deliveries', 'webhook_deliveries'),
+        get('/api/v1/webhook-deliveries/:id', 'webhook_deliveries'),
+      ],
+      handWritten: null,
+      deleteSemantics: null,
+    });
+    expect(plan.status).toBe('create');
+    expect(plan.guesses.join('\n')).not.toContain('no app mounts');
+    expect(plan.needsYou.join('\n')).not.toContain('no app mounts');
   });
 });
 

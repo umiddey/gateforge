@@ -118,6 +118,39 @@ function unresolvedPlaneRoutes(graph: ResourceGraph): UnresolvedRoute[] {
 }
 
 /**
+ * The route paths NO app mounts: every endpoint that declares the path
+ * does so from a standalone router (no include/mount chain), so the
+ * route exists in the source tree but nothing serves it. A generated
+ * path built from one of these is a guess the reviewer must confirm,
+ * and the file says so.
+ *
+ * A path with no mount provenance at all is NOT in this list: an
+ * endpoint that never declared one is unknown, not unmounted.
+ *
+ * Args:
+ *   graph: built resource graph.
+ *
+ * Returns:
+ *   string[]: the unmounted route paths, sorted.
+ */
+function standaloneOnlyRoutes(graph: ResourceGraph): string[] {
+  const mounted = new Set<string>();
+  const standalone = new Set<string>();
+  for (const resource of graph.resources) {
+    if (resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) continue;
+    const canonicalPath = resource.attributes['canonicalPath'];
+    if (typeof canonicalPath !== 'string' || canonicalPath === '') continue;
+    const provenances = resource.attributes['mountProvenances'];
+    const declared = Array.isArray(provenances)
+      ? provenances.filter((value): value is string => typeof value === 'string')
+      : [];
+    if (declared.includes('include-chain')) mounted.add(canonicalPath);
+    else if (declared.includes('standalone')) standalone.add(canonicalPath);
+  }
+  return [...standalone].filter((path) => !mounted.has(path)).sort();
+}
+
+/**
  * Runs `gateforge adapters scaffold`.
  *
  * Args:
@@ -145,6 +178,7 @@ async function scaffold(io: Io, dryRun: boolean): Promise<number> {
     existing,
     environmentFingerprint: io.env[TARGET_FINGERPRINT_ENV] ?? null,
     unresolvedRoutes: unresolvedPlaneRoutes(pipeline.graph),
+    standalonePaths: standaloneOnlyRoutes(pipeline.graph),
   });
   const created: ScaffoldPlan[] = [];
   const skipped: ScaffoldPlan[] = [];

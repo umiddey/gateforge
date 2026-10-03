@@ -80,6 +80,12 @@ export interface ScaffoldInput {
    * reporting the resource as unserved.
    */
   unresolvedRoutes: readonly UnresolvedRoute[];
+  /**
+   * Route paths no app mounts (the endpoint is declared by a standalone
+   * router): a path derived from one of these is marked as an explicit
+   * guess, never silently trusted.
+   */
+  standalonePaths: readonly string[];
 }
 
 /**
@@ -333,6 +339,9 @@ function planeBlocker(entries: readonly { route: { canonicalPath: string } }[]):
  */
 export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
   const existing = new Set(input.existing);
+  // Route paths no app mounts: a path derived from one of these is a
+  // guess the reviewer must confirm, never a silent value.
+  const unmounted = new Set(input.standalonePaths);
   const plans: ScaffoldPlan[] = [];
   for (const target of input.targets) {
     const { resource } = target;
@@ -555,6 +564,20 @@ export function planAdapters(input: ScaffoldInput): ScaffoldPlan[] {
     const deletion = target.deleteSemantics ?? (softDelete.declared.length > 0 ? 'archive' : 'hard');
     if (byId !== undefined) {
       guesses.push(`readPath '${byId.split.prefix}/{id}' guessed from GET ${byId.route.canonicalPath}`);
+    }
+    for (const [role, source] of [
+      ...(byId === undefined ? [] : [['readPath', byId.route.canonicalPath] as const]),
+      ['listPath', collection.route.canonicalPath] as const,
+    ]) {
+      if (!unmounted.has(source)) continue;
+      guesses.push(
+        `${role} taken from GET ${source}, which no app mounts (the router is never included): the ` +
+          'route exists in the source tree but nothing serves it — confirm it before trusting this path',
+      );
+      needsYou.push(
+        `GET ${source} is declared by a router no app mounts: the generated ${role} points at a ` +
+          'route nothing serves — confirm the path, or declare the mounted one yourself',
+      );
     }
     if (readPath === null) {
       guesses.push(
