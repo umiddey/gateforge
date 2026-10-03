@@ -1585,3 +1585,90 @@ describe('endpoint capability config channel (.gateforge/endpoints.json)', () =>
     });
   });
 });
+
+describe('unmatched by-id candidates are named, never linked', () => {
+  /** Business-resource-only contribution, as model packs emit it. */
+  function businessContribution(
+    names: readonly string[],
+  ): Record<string, unknown> {
+    return {
+      detectorId: 'test.models',
+      detectorVersion: '1',
+      resources: names.map((name, index) => ({
+        schemaVersion: 1 as const,
+        id: `sqlalchemy.table:${name}`,
+        kind: 'sqlalchemy.table',
+        source: `backend/models/${name}.py`,
+        location: { file: `backend/models/${name}.py`, line: index + 4, col: 0 },
+        detectorVersion: '0.1.0',
+        attributes: { resourceName: name },
+      })),
+      unresolved: [],
+      findings: [],
+      classificationSignals: [],
+    };
+  }
+
+  function candidateBlocks(compiled: ReturnType<typeof compileEndpointContribution>) {
+    return compiled.contribution.unresolved.filter(
+      (entry) => entry.code === 'ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED',
+    );
+  }
+
+  it('names a by-id route whose derived name matches nothing, with up to three near matches', () => {
+    // `GET /api/v1/reports/logs/{}` derives `logs`; the table behind it
+    // is `report_logs`. Before: the compiler emitted NOTHING for this
+    // route, so downstream read it as "no such route".
+    const route = routeFact('GET', '/api/v1/reports/logs/{}');
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessContribution(['report_logs', 'access_logs', 'import_logs', 'mail_logs']) as never,
+    ]);
+    const blocks = candidateBlocks(compiled);
+    expect(blocks).toHaveLength(1);
+    // Sorted, capped at three: the fourth is never shown.
+    expect(String(blocks[0]?.detail)).toContain('access_logs, import_logs, mail_logs');
+    expect(String(blocks[0]?.detail)).not.toContain('report_logs');
+    expect(String(blocks[0]?.detail)).toContain('GET /api/v1/reports/logs/{}');
+    expect(String(blocks[0]?.detail)).toContain("derives resource name 'logs'");
+    // CANDIDATES, never links: no linkedResourceName, no adapter binding.
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBeNull();
+    expect(
+      compiled.contribution.classificationSignals.some(
+        (signal) => (signal as { dimension: string }).dimension === 'adapter-binding',
+      ),
+    ).toBe(false);
+  });
+
+  it('reports the same route with an empty near-match list when nothing is close', () => {
+    const compiled = compileEndpointContribution([
+      contribution([routeFact('GET', '/api/v1/widgets/{}')]),
+      businessContribution(['tenants', 'invoices']) as never,
+    ]);
+    const blocks = candidateBlocks(compiled);
+    expect(blocks).toHaveLength(1);
+    expect(String(blocks[0]?.detail)).not.toContain('closest discovered names');
+    expect(String(blocks[0]?.detail)).toContain("derives resource name 'widgets'");
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBeNull();
+  });
+
+  it('says nothing when the by-id route links to its resource', () => {
+    const route = routeFact('GET', '/api/v1/report_logs/{}', {
+      handlerSymbol: 'backend.routes:get_report_log',
+    });
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessContribution(['report_logs']) as never,
+    ]);
+    expect(candidateBlocks(compiled)).toEqual([]);
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBe('report_logs');
+  });
+
+  it('stays silent for a collection route: no read is at stake there', () => {
+    const compiled = compileEndpointContribution([
+      contribution([routeFact('GET', '/api/v1/reports/logs')]),
+      businessContribution(['report_logs']) as never,
+    ]);
+    expect(candidateBlocks(compiled)).toEqual([]);
+  });
+});

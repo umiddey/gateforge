@@ -54,10 +54,12 @@
 import { join as joinPath } from 'node:path';
 import {
   ENDPOINT_CAPABILITY_CONTRADICTION,
+  ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED,
   ENDPOINT_RESOURCE_LINK_UNRESOLVED,
   ENDPOINT_SEMANTICS_UNRESOLVED,
   HTTP_CONTRACT_KIND,
   HTTP_ENDPOINT_KIND,
+  HTTP_PARAM_SLOT,
   HttpContractFactSchema,
   canonicalEndpointIdentity,
   derivePathResourceName,
@@ -197,6 +199,28 @@ export function symbolCorroborates(symbol: string, candidate: string): boolean {
   }
   const singularCandidate = candidate.endsWith('s') ? candidate.slice(0, -1) : candidate;
   return forms.includes(candidate) || forms.includes(singularCandidate);
+}
+/**
+ * Discovered resource names that could plausibly BE the candidate,
+ * reported to the owner as candidates. Deterministic and total: a name
+ * qualifies when its LAST `_`-segment equals the candidate or one of its
+ * singular/plural variants (`report_logs` for `logs`). Output is
+ * sorted, so the report never depends on scan order.
+ *
+ * This never links: the compiler links only on an EXACT name match plus a
+ * schema/handler corroboration fact (see the linkage block below). Its
+ * only job is to stop the unmatched case from being silent.
+ */
+function nearMatchResourceNames(names: readonly string[], candidate: string): string[] {
+  const singular = candidate.endsWith('s') ? candidate.slice(0, -1) : candidate;
+  const wanted = new Set([candidate, singular]);
+  return names
+    .filter((name) => {
+      const segments = name.split('_');
+      const last = segments[segments.length - 1] ?? name;
+      return wanted.has(last);
+    })
+    .sort(compareText);
 }
 
 /**
@@ -649,6 +673,13 @@ export function compileEndpointContribution(
     // Name coincidence alone never links.
     const candidate = derivePathResourceName(canonicalPath);
     let linkedResourceName: string | null = null;
+    // A by-id route is the shape an adapter read is built from, so an
+    // unmatched candidate there is the miss that mattered: the route was
+    // real, the resource it serves exists under another name, and the
+    // pass said nothing. `byIdEndpoint` keeps this to that shape — every
+    // unmatched COLLECTION route would add an entry per route without
+    // ever naming a read.
+    const byIdEndpoint = canonicalPath.endsWith(HTTP_PARAM_SLOT);
     if (candidate !== null) {
       const singularCandidate = candidate.endsWith('s') ? candidate.slice(0, -1) : candidate;
       const matches = [...businessNames.values()].filter(
@@ -690,6 +721,25 @@ export function compileEndpointContribution(
               `endpoint '${identity}' derives resource name '${candidate}' which matches ` +
               `${matches.length} discovered business resources; linkage needs exactly one ` +
               '(disambiguate the route or the resource names)',
+            location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+          });
+        }
+      } else if (matches.length === 0 && byIdEndpoint) {
+        const near = nearMatchResourceNames([...businessNames.keys()], candidate).slice(0, 3);
+        const key = `candidate:${identity}`;
+        if (!seenEndpointUnresolved.has(key)) {
+          seenEndpointUnresolved.add(key);
+          unresolved.push({
+            code: ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED,
+            detail:
+              `endpoint '${identity}' derives resource name '${candidate}', which names no ` +
+              'discovered business resource' +
+              (near.length > 0
+                ? `; closest discovered names: ${near.join(', ')} (candidates, never links)`
+                : '') +
+              '; link it with evidence that names the resource (a response_model or request ' +
+              'schema named after it, or a handler named after it), or leave it unlinked — a ' +
+              'name that merely looks close never links an endpoint',
             location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
           });
         }

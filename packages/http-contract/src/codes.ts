@@ -40,6 +40,19 @@ export const ENDPOINT_SEMANTICS_UNRESOLVED = 'ENDPOINT_SEMANTICS_UNRESOLVED';
 export const ENDPOINT_RESOURCE_LINK_UNRESOLVED = 'ENDPOINT_RESOURCE_LINK_UNRESOLVED';
 
 /**
+ * An endpoint whose path-derived resource name names NO discovered
+ * business resource. Silence here is what made a real by-id route
+ * (`GET /api/v1/reports/logs/{}`, served by a `report_logs` table) look
+ * like it did not exist. The entry carries the near matches among the
+ * discovered names — last `_`-segment or suffix equal to the candidate,
+ * singular/plural variants included — as CANDIDATES for the owner: it
+ * never links one. Same posture as its sibling
+ * {@link ENDPOINT_RESOURCE_LINK_UNRESOLVED}: a linkage this pass cannot
+ * prove is a typed blocking entry, not silence.
+ */
+export const ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED = 'ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED';
+
+/**
  * Two `.gateforge/endpoints.json` capability rules match one endpoint
  * identity and assert DIFFERENT capabilities — the declarative channel
  * fails closed (no capability is applied) until the rules agree, exactly
@@ -63,6 +76,7 @@ export const HTTP_BLOCK_CODES = [
   FRONTEND_ROUTE_AMBIGUOUS,
   ENDPOINT_SEMANTICS_UNRESOLVED,
   ENDPOINT_RESOURCE_LINK_UNRESOLVED,
+  ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED,
   ENDPOINT_CAPABILITY_CONTRADICTION,
   HTTP_OBSERVATION_UNTRUSTED,
 ] as const;

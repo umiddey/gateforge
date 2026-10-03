@@ -4,7 +4,7 @@ The gateforge command-line interface: initialize a project, discover
 resources and classification signals, inspect automatic decisions, reuse a
 repository's existing tests, evaluate obligations, run the supervised E2E
 gate, enforce the exact staged candidate, and maintain baselines.
-**0.9.0 vs. published 0.8.0:** `check --staged` reads the staged bytes, the scan skips untracked gitignored files (receipt identity unchanged), Gateforge's own setup files are policy inputs so the setup commit passes with the policy digest pinned, test-directory models stay out of the graph, per-tenant singletons are tagged only on an exact configured scope, `init` asks one plane question per route folder, `classify plane` takes a folder, `--docs-exclude-file`, `init --behavior`, `explain <path>`, ranked and capped `tests suggest`, `FASTAPI_ROUTER_UNMOUNTED` / `HTTP_METHOD_DYNAMIC` / folded FastAPI prefixes, and no `.pyc` in a published tarball. Upgrading: [UPGRADE-0.8-to-0.9](guides/UPGRADE-0.8-to-0.9.md).
+**0.9.0 vs. published 0.8.0:** `check --staged` reads the staged bytes, the scan skips untracked gitignored files (receipt identity unchanged), Gateforge's own setup files are policy inputs so the setup commit passes with the policy digest pinned, test-directory models stay out of the graph, per-tenant singletons are tagged only on an exact configured scope, `init` asks one plane question per route folder, `classify plane` takes a folder, `--docs-exclude-file`, `init --behavior`, `explain <path>`, ranked and capped `tests suggest`, `FASTAPI_ROUTER_UNMOUNTED` / `HTTP_METHOD_DYNAMIC` / `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED` / folded FastAPI prefixes, and no `.pyc` in a published tarball. Upgrading: [UPGRADE-0.8-to-0.9](guides/UPGRADE-0.8-to-0.9.md).
 
 **0.8.0 vs. published 0.7.1:** one-command local proof (`gateforge run`), witnessed single tests (`--test`), test-only re-seal, owner-chosen strictness and quarantine, a strict run preflight in the doctor, CI progress stream and witnessed CI templates, adapter kit and scaffold, an engine-owned queue observer for `task` cases, timing chaos and twin path coverage. Upgrading: [UPGRADE-0.7-to-0.8](guides/UPGRADE-0.7-to-0.8.md).
 
@@ -403,6 +403,11 @@ obligation: tenant.accounts:persistence:create  cause: TEST_MAPPING_MISSING
     why: lives in a 'real' folder (unmocked)
     ... and 286 more candidate(s) — run `gateforge tests suggest --json` for the full ranked list
 ```
+
+In `--json`, each candidate's `overlaps` lists the obligations that
+DECLARE that test (a `test-map.yml` entry or a `@gateforge` annotation) —
+not every obligation the test merely came up as a candidate for. The
+candidate list itself is unchanged and still carries every candidate.
 
 `already declared for: …` is printed only when a DECLARATION exists (a
 `test-map.yml` entry or an `@gateforge` annotation). An inferred or
@@ -1045,6 +1050,24 @@ capability is the archive-vs-hard answer (`crud-archive` /
 `crud-delete`) and nothing else resolves that block; on any other verb it
 is the closed vocabulary above. A rule left with a placeholder capability
 fails the run closed at startup (exit 2) with the allowed values named.
+
+### Answering `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED`
+
+This code says one thing: the route reads a single entity, and the name
+its path carries is not a name Gateforge found among your resources.
+`GET /api/v1/reports/logs/{}` served by a table called `report_logs` used
+to produce nothing at all, which read like a route that does not
+exist. The entry names the route, the name it derived, and up to three
+discovered resources whose last `_`-segment could be the same thing.
+
+Those names are CANDIDATES, never links. Gateforge links an endpoint to a
+resource only on an exact name plus a corroborating fact (a response or
+request schema named after it, or a handler named after it), and it does
+not do that here. If one of the candidates is right, give the route the
+evidence: name the response model or the handler after the resource, or
+declare the missing mapping. If none is right, the route genuinely serves
+something the resource graph does not model. A route that links, a route
+with nothing near it, and any collection route are unaffected.
 
 ## Proposing planes at init (`gateforge init --planes`)
 
