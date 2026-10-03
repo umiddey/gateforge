@@ -19,7 +19,18 @@
 # tag workflow (.github/workflows/publish.yml) or from the `.tgz` files a
 # `npm pack --dry-run --json --workspaces` just verified; a manual
 # `npm publish` from a used working tree is not a release path.
+#
+# Usage: `bash scripts/release-publish.sh` publishes; `bash
+# scripts/release-publish.sh check` runs the same tarball preflight and stops
+# there. Root package.json's `publish:all` and `pack:check` both route through
+# this script, so neither can publish a tarball the preflight refused.
 set -euo pipefail
+
+mode="${1:-publish}"
+if (( $# > 1 )) || [[ "$mode" != "publish" && "$mode" != "check" ]]; then
+  echo "usage: bash scripts/release-publish.sh [publish|check]" >&2
+  exit 2
+fi
 
 # Packed file lists of every workspace package, one "<package>: <path>" line
 # per Python bytecode entry. Exit 3: bytecode found. Exit 1: the list could not
@@ -73,6 +84,10 @@ elif (( bytecode_status != 0 )); then
   exit 1
 fi
 echo "::notice::tarball preflight: no Python bytecode in any workspace package"
+if [[ "$mode" == "check" ]]; then
+  echo "::notice::check mode: the packed file lists are clean; nothing was published"
+  exit 0
+fi
 published=0; skipped=0; failed=0
 for dir in packages/*/; do
   name=$(node -p "require('./${dir}package.json').name")
