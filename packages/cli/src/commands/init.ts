@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { parse as parseYaml, parseDocument, isSeq as isYamlSeq, isMap as isYamlMap } from 'yaml';
 import {
   ClassificationPolicySchema,
@@ -35,7 +35,13 @@ import {
   createSqlalchemyDetector,
   parsePlanesConfigText,
   PACK_VERSION as PACK_SQLALCHEMY_VERSION,
+  type PlaneConfigRule,
+  type SqlalchemyPlane,
 } from '@gate-forge/pack-sqlalchemy';
+import {
+  collectRoutePlaneFacts,
+  proposeRouteFolderPlanes,
+} from '../route-plane-proposals.js';
 import { PACK_VERSION as PACK_FASTAPI_VERSION } from '@gate-forge/pack-fastapi';
 import { PACK_VERSION as PACK_HTTP_VERSION } from '@gate-forge/pack-http';
 import { PACK_VERSION as PACK_TASK_VERSION } from '@gate-forge/pack-task';
@@ -44,7 +50,7 @@ import { parseArgs, stringFlag } from '../args.js';
 import type { Io } from '../io.js';
 import { recordInitPath, writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
-import { languageDefaultPlugins, recommendPlugins, renderScanBlock, scanRepo } from '../repo-scan.js';
+import { languageDefaultPlugins, recommendPlugins, renderScanBlock, scanRepo, type RepoScan } from '../repo-scan.js';
 import { rejectUnknownFlags } from './common.js';
 import { expandIncludePaths, type ExpandError } from '../glob.js';
 import { inferPlanesConfig } from '../planes-inference.js';
@@ -53,6 +59,7 @@ import {
   appendPreCommitHook,
   ensureHookScript,
   engineRootFromInvocation,
+  detectCiProvider,
   writeGitlabCiTemplate as writeSharedGitlabCiTemplate,
   writeServerProtectionInstructions,
 } from './blocking.js';
@@ -71,6 +78,7 @@ import {
   renderCacheExclusions,
   validateRequestedCacheFiles,
 } from '../cache-exclusions.js';
+import { DEFAULT_STATE_DIR } from '../state.js';
 import {
   CHOOSE_ANOTHER_GOAL_ADVICE,
   INIT_PRESETS,
@@ -95,7 +103,7 @@ export const INIT_USAGE =
   '[--preset light|normal|strict] [--explain-presets] [--no-scan] [--proof overlay|observe] ' +
   '[--blocking] [--no-blocking] [--pre-commit] [--no-pre-commit] [--mode changed|staged] ' +
   '[--witnessed staged|full] [--ci] [--no-ci] ' +
-  '[--docs-exclude <folder,...> [--confirm-doc-exclusions]] [--cache-exclude <file,...> ' +
+  '[--docs-exclude <folder,...> [--docs-exclude-file <path>] [--confirm-doc-exclusions]] [--cache-exclude <file,...> ' +
   '[--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--no-planes] ' +
   '[--behavior] [--no-behavior] [--behavior-packs <pack,...>]';
 
@@ -507,6 +515,15 @@ ${sourceIncludePatterns(languages).map((pattern) => `      - '${pattern}'`).join
       - '**/.mypy_cache/**'
       - '**/dist/**'
       - '**/build/**'
+      # Hidden dot-folders (agent tooling like .claude/ or .cursor/,
+      # editor/tool caches, leftover merge or working folders) hold
+      # tooling and debris, never application code. The rule is generic
+      # -- it keys on the dot prefix at any depth -- so any hidden folder
+      # is skipped, whatever it is called. .gateforge is the ONE
+      # exception and is deliberately NOT matched here: Gateforge's own
+      # configuration stays in scope.
+      - '**/.(!(gateforge))/**'
+      - '.!(gateforge)/**'
 # Detector plugins. Bundled detectors are preconfigured for the selected
 # languages and are loaded from their trusted package entry points.
 plugins:
@@ -654,6 +671,24 @@ const OBSERVE_CHECKLIST = `observe proof checklist (existing suite through the w
   4. Run \`gateforge test-gates --changed\`, then \`gateforge check --require-e2e\`.
 Honest scope: proves persistence (the server stored what the proxied
 request sent), not "the engine typed the form".`;
+
+/**
+ * The adoption block init prints on the FIRST init of a repository that
+ * already has code. Such a repository is not green on day one: the very
+ * next commit sees everything discovery found as existing debt. Without
+ * this block the owner meets that as a wall of findings with no name
+ * for the sanctioned way through it — `gateforge adopt` — which is why
+ * the command had to be discovered from a source file instead of from
+ * `init`.
+ *
+ * Everything here is exactly what `adopt` does: the recorded set, its
+ * shrink-only standing, and the one case where an adopted E2E
+ * obligation still blocks.
+ */
+const ADOPT_ADVICE = `this repository already had code, so \`gateforge check\` reports what discovery finds today, and today\'s findings block the first commit:
+  gateforge adopt — records today\'s blocking findings as forgiven debt, in a baseline plus a dated, count-annotated receipt, then wires the blocking gate.
+  it is shrink-only from here: it never forgives new work. Resolve debt and run \`gateforge baseline update\` to shrink the recorded set; new unproven work keeps blocking.
+  with strictE2E enabled, an adopted E2E obligation still blocks with ENFORCEMENT_UNTRUSTED as soon as a change touches it — baselined is not proof.`;
 
 /**
  * Asks (TTY only) whether init should write the recommended setup.
@@ -892,6 +927,39 @@ async function resolvePlanes(io: Io, options: Readonly<Record<string, unknown>>)
   }
 }
 
+/**
+ * Reads an owner-supplied folder list file: ONE folder per line, blank
+ * lines and `#` comments ignored. The comma list stays supported; this
+ * is the same declaration in a form that survives a long repository
+ * (typing or pasting dozens of folder names into one prompt wraps
+ * unreadably, and `paste -sd,` is not discoverable).
+ *
+ * Args:
+ *   cwd: absolute repository root the relative path resolves against.
+ *   filePath: the value given to `--docs-exclude-file`.
+ *
+ * Returns:
+ *   string[]: the folders named by the file, in file order.
+ *
+ * Throws:
+ *   UsageError: the file is missing or unreadable (never guessed at).
+ */
+function readFolderListFile(cwd: string, filePath: string): string[] {
+  const absolute = isAbsolute(filePath) ? filePath : join(cwd, filePath);
+  let text: string;
+  try {
+    text = readFileSync(absolute, 'utf8');
+  } catch (error) {
+    throw new UsageError(
+      `init: cannot read --docs-exclude-file '${filePath}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return text
+    .split('\n')
+    .map((line) => line.split('#')[0]?.trim() ?? '')
+    .filter((line) => line.length > 0);
+}
+
 /** Resolves the init owner's explicit documentation-folder declaration. */
 async function resolveDocsExclusionsForInit(
   io: Io,
@@ -900,18 +968,22 @@ async function resolveDocsExclusionsForInit(
 ): Promise<{ folders: string[]; changed: boolean }> {
   const current = loadDocsExclusions(io.cwd, config);
   const requestedValue = stringFlag(options, 'docs-exclude');
+  const fileValue = stringFlag(options, 'docs-exclude-file');
   const confirmUpdate = options['confirm-doc-exclusions'] === true;
   if (typeof options['confirm-doc-exclusions'] !== 'boolean' && options['confirm-doc-exclusions'] !== undefined) {
     throw new UsageError("init: '--confirm-doc-exclusions' must be a boolean flag");
   }
-  if (requestedValue !== undefined) {
-    const requested = requestedValue.trim() === ''
-      ? []
-      : validateRequestedDocsFolders(
-          io.cwd,
-          requestedValue.split(',').map((folder) => folder.trim()).filter((folder) => folder.length > 0),
-          config,
-        );
+  if (requestedValue !== undefined || fileValue !== undefined) {
+    // Both flags are the SAME declaration in two spellings, so they
+    // combine into one ordered, deduplicated list instead of one
+    // silently winning over the other.
+    const declared = [
+      ...(requestedValue === undefined || requestedValue.trim() === ''
+        ? []
+        : requestedValue.split(',').map((folder) => folder.trim()).filter((folder) => folder.length > 0)),
+      ...(fileValue === undefined ? [] : readFolderListFile(io.cwd, fileValue)),
+    ];
+    const requested = [...new Set(declared)];
     if (current.length > 0 && JSON.stringify(requested) !== JSON.stringify(current) && !confirmUpdate) {
       throw new UsageError(
         `init: changing ${DOCS_EXCLUSIONS_PATH} needs explicit owner review; repeat with --confirm-doc-exclusions`,
@@ -920,10 +992,10 @@ async function resolveDocsExclusionsForInit(
     if (current.length === 0 && requested.length === 0 && confirmUpdate) {
       throw new UsageError('init: --confirm-doc-exclusions requires a non-empty --docs-exclude update');
     }
-    return { folders: requested, changed: JSON.stringify(requested) !== JSON.stringify(current) };
+    return { folders: validateRequestedDocsFolders(io.cwd, requested, config), changed: JSON.stringify(requested) !== JSON.stringify(current) };
   }
   if (confirmUpdate) {
-    throw new UsageError('init: --confirm-doc-exclusions requires --docs-exclude');
+    throw new UsageError('init: --confirm-doc-exclusions requires --docs-exclude or --docs-exclude-file');
   }
   if (current.length > 0) return { folders: current, changed: false };
   if (process.stdin.isTTY === true && process.stdout.isTTY === true) {
@@ -931,7 +1003,8 @@ async function resolveDocsExclusionsForInit(
     try {
       const answer = await rl.question(
         'Owner assertion: enter documentation-only folders to exclude from evidence identity, or leave blank for none. ' +
-          'Gateforge cannot prove that app/tests do not read these files. Folders (comma-separated): ',
+          'Gateforge cannot prove that app/tests do not read these files. Folders (comma-separated; for a long list ' +
+          'write them one per line to a file and pass --docs-exclude-file <path>): ',
       );
       const raw = answer.trim();
       const folders = raw.length === 0
@@ -946,7 +1019,10 @@ async function resolveDocsExclusionsForInit(
       rl.close();
     }
   }
-  writeLine(io.stdout, 'tip: non-interactive init keeps full evidence identity; use --docs-exclude <folder,...> to opt in');
+  writeLine(
+    io.stdout,
+    'tip: non-interactive init keeps full evidence identity; use --docs-exclude <folder,...> (or --docs-exclude-file <path>, one folder per line) to opt in',
+  );
   return { folders: [], changed: false };
 }
 /**
@@ -1003,14 +1079,107 @@ function resolveCacheExclusionsForInit(
 
 
 /**
- * Runs discovery over the repo's own include/exclude config, infers a
- * planes proposal from the discovered table directories, self-checks
- * the draft against the runtime's strict parser, and writes
- * `.gateforge/planes.json` — only when absent (never overwrites a
- * reviewed document). Inference failure is surfaced as a visible
- * warning, never silently skipped, but does not abort the scaffold.
+ * Asks the owner ONE plane question per ROUTE folder that still has
+ * unresolved endpoints (owner decision D1: ask, never infer).
+ *
+ * The linked model's plane is shown as a HINT and is never applied: an
+ * `accounts` route can serve master data, so the owner answers for the
+ * ROUTES. `proposeRouteFolderPlaneRules` already withholds the hint when
+ * the linked models disagree or are themselves unresolved, so a hint
+ * here always means "these routes serve a model whose plane IS this".
+ *
+ * A non-interactive run proposes nothing and writes nothing: it prints
+ * the folders and the exact `gateforge classify plane` command for each,
+ * which is the same owner-reviewed path used for a folder rule later.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   io: process context.
+ *
+ * Returns:
+ *   Promise<PlaneConfigRule[]>: the rules the owner answered for.
  */
-async function proposePlanesConfig(cwd: string, io: Io): Promise<void> {
+async function askRouteFolderPlanes(cwd: string, io: Io): Promise<PlaneConfigRule[]> {
+  let proposals;
+  try {
+    proposals = proposeRouteFolderPlanes(await collectRoutePlaneFacts(cwd));
+  } catch (cause) {
+    writeLine(
+      io.stdout,
+      `warning: route plane discovery failed (${cause instanceof Error ? cause.message : String(cause)}); ` +
+        'answer the route folders with `gateforge classify plane <folder> <plane> --reason "<why>" --confirm` — init continues',
+    );
+    return [];
+  }
+  if (proposals.length === 0) return [];
+  const planes = new Set<SqlalchemyPlane>(['tenant', 'master', 'global']);
+  const answers: PlaneConfigRule[] = [];
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+    writeLine(
+      io.stdout,
+      `route folders with no answered plane (${proposals.length}) — one owner answer each, ` +
+        'never inferred from the linked model:',
+    );
+    for (const proposal of proposals) {
+      writeLine(
+        io.stdout,
+        `  ${proposal.folder} (${proposal.routeCount} route(s)` +
+          `${proposal.hintPlane === null ? '' : `, linked model(s) ${proposal.linkedModels.join(', ')} answer to ${proposal.hintPlane} — a hint only`})`,
+      );
+      writeLine(
+        io.stdout,
+        `    gateforge classify plane ${proposal.folder} tenant --reason 'routes in this folder serve tenant data' --confirm`,
+      );
+    }
+    return answers;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    writeLine(
+      io.stdout,
+      'route folders whose plane is still unanswered — one answer per folder, asked because ' +
+        'a route linked to a model can still serve different data:',
+    );
+    for (const proposal of proposals) {
+      const hint =
+        proposal.hintPlane === null
+          ? ''
+          : ` — hint only: the linked model(s) ${proposal.linkedModels.join(', ')} answer to ${proposal.hintPlane}; ` +
+            'a route can serve other data, so this is your answer to make';
+      const answer = (
+        await rl.question(`plane for '${proposal.folder}' (${proposal.routeCount} route(s)) — tenant/master/global, blank to skip${hint}: `)
+      )
+        .trim()
+        .toLowerCase();
+      if (!planes.has(answer as SqlalchemyPlane)) {
+        if (answer !== '') writeLine(io.stdout, `  skipped '${proposal.folder}': '${answer}' is not a plane`);
+        continue;
+      }
+      answers.push({
+        match: `${proposal.folder}/**`,
+        plane: answer as SqlalchemyPlane,
+        reason: `answered for the route folder '${proposal.folder}' during gateforge init; review before relying on this`,
+      });
+    }
+  } finally {
+    rl.close();
+  }
+  return answers;
+}
+/**
+ * Runs discovery over the repo's own include/exclude config, infers a
+ * planes proposal from the discovered table directories, adds the owner's
+ * answered ROUTE-folder rules, self-checks the draft against the runtime's
+ * strict parser, and writes `.gateforge/planes.json` — only when absent
+ * (never overwrites a reviewed document). Inference failure is surfaced as a
+ * visible warning, never silently skipped, but does not abort the scaffold.
+ */
+
+async function proposePlanesConfig(
+  cwd: string,
+  io: Io,
+  routeRules: readonly PlaneConfigRule[] = [],
+): Promise<void> {
   const planesPath = join(cwd, PLANES_CONFIG_PATH);
   if (existsSync(planesPath)) {
     writeLine(io.stdout, `exists, leaving untouched: ${planesPath}`);
@@ -1057,7 +1226,11 @@ async function proposePlanesConfig(cwd: string, io: Io): Promise<void> {
   // assumes while the file is absent. Writing it anyway is what makes
   // `gateforge init --planes` the runnable prerequisite the
   // `gateforge next` guidance prints for an unresolved route.
-  const serialized = `${JSON.stringify(inference.config ?? { rules: [] }, null, 2)}\n`;
+  // The owner's ROUTE-folder answers join the inferred model rules in the
+  // one file init writes: both are reviewed proposals, and splitting them
+  // across two writes would make the second overwrite the first.
+  const combined = [...(inference.config?.rules ?? []), ...routeRules];
+  const serialized = `${JSON.stringify(combined.length === 0 ? { rules: [] } : { rules: combined }, null, 2)}\n`;
   // Self-check the draft against the runtime's strict reader contract
   // BEFORE writing (a broken proposal must fail here, not at the next run).
   parsePlanesConfigText(serialized, planesPath);
@@ -1072,10 +1245,86 @@ async function proposePlanesConfig(cwd: string, io: Io): Promise<void> {
   }
   writeLine(
     io.stdout,
-    `created: ${planesPath} (${inference.config.rules.length} rule(s) inferred from model directories — review the reasons before the next gateforge run)`,
+    `created: ${planesPath} (${combined.length} rule(s) — ${inference.config?.rules.length ?? 0} inferred from model directories, ` +
+      `${routeRules.length} answered for route folders — review the reasons before the next gateforge run)`,
   );
 }
 
+/**
+ * The engine-owned state directories that must never be committed.
+ *
+ * `.gateforge/test-gates/` holds everything a supervised run caches and
+ * seals: the test catalog, plugin caches, receipts, records, spool and
+ * history. The engine writes it on every `check`/`test-gates`/`next`,
+ * so after `init` the very next `git add -A` staged it — and then the
+ * gate, quite correctly, reported the engine's own cache as unmapped
+ * product changes. Nothing else under `.gateforge/` is engine state:
+ * policies, adapters, waivers, baselines, hooks and the CI template are
+ * owner-reviewed files that MUST be committed.
+ */
+const ENGINE_STATE_IGNORE_ENTRIES: readonly string[] = [`${DEFAULT_STATE_DIR}/`];
+
+/**
+ * Whether a `.gitignore` already covers one engine-state entry.
+ *
+ * Comparison is line-wise and tolerant of the forms a human writes
+ * (leading `/`, a trailing `/`, surrounding spaces, a comment) so a
+ * repeated `init` never appends the same rule twice.
+ *
+ * Args:
+ *   text: the current `.gitignore` contents (empty when absent).
+ *   entry: the repo-relative directory to ignore.
+ *
+ * Returns:
+ *   boolean: true when the file already ignores that path.
+ */
+function ignoresEngineState(text: string, entry: string): boolean {
+  const wanted = entry.replace(/\/+$/, '');
+  return text.split('\n').some((line) => {
+    const trimmed = line.trim().replace(/^\/+|\/+$/g, '');
+    return trimmed === wanted || trimmed === `${wanted}/**`;
+  });
+}
+
+/**
+ * Adds the engine-owned state directories to the repository's
+ * `.gitignore`, creating the file when absent and appending when
+ * present. The owner's own lines are preserved byte for byte and a
+ * second run reports "already ignored" instead of appending again.
+ *
+ * Args:
+ *   io: process context.
+ *   cwd: absolute repository root.
+ *
+ * Returns:
+ *   void.
+ */
+function ignoreEngineState(io: Io, cwd: string): void {
+  const path = join(cwd, '.gitignore');
+  const existed = existsSync(path);
+  const existing = existed ? readFileSync(path, 'utf8') : '';
+  const missing = ENGINE_STATE_IGNORE_ENTRIES.filter((entry) => !ignoresEngineState(existing, entry));
+  if (missing.length === 0) {
+    if (existed) {
+      recordInitPath(io, cwd, path, 'preserved');
+      writeLine(io.stdout, `exists, leaving untouched: ${path} (gateforge engine state already ignored)`);
+    }
+    return;
+  }
+  const block = [
+    '# Gateforge engine state — never committed (regenerated by every run).',
+    ...missing,
+    '',
+  ].join('\n');
+  const prefix = existing.length === 0 || existing.endsWith('\n') ? existing : `${existing}\n`;
+  writeFileSync(path, `${prefix}${block}`, 'utf8');
+  recordInitPath(io, cwd, path, existed ? 'modified' : 'created');
+  writeLine(
+    io.stdout,
+    `${existed ? 'updated' : 'created'}: ${path} (gateforge engine state ignored: ${missing.join(', ')} — ` +
+      'without this, `git add -A` stages the run cache and the gate blocks on its own files)',
+  );
+}
 /**
  * Runs `gateforge init` in the io cwd.
  *
@@ -1090,7 +1339,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   // The ledger every writer below fills: the closing summary names only
   // what THIS run created or kept, so it can never offer to delete the
   // owner's pre-existing config, baselines, waivers, hooks or CI file.
-  io.initPaths ??= { created: [], preserved: [] };
+  io.initPaths ??= { created: [], modified: [], preserved: [] };
   const { options } = parseArgs(argv);
   if (options['help'] === true) {
     writeLine(io.stdout, INIT_USAGE);
@@ -1121,6 +1370,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       'no-behavior',
       'behavior-packs',
       'docs-exclude',
+      'docs-exclude-file',
       'confirm-doc-exclusions',
       'cache-exclude',
       'confirm-cache-exclusions',
@@ -1223,16 +1473,19 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   }
 
   // Scan + recommend + choose (Phase 1 item 1): heuristics inform the
-  // install; nothing extra is silently enabled. --no-scan skips the
-  // filesystem walk and falls back to the language-derived set.
+  // install; nothing extra is silently enabled. `--no-scan` skips the
+  // filesystem walk and falls back to the language-derived set (and
+  // claims nothing about how much code is there); `--languages` skips
+  // only the language DERIVATION — the signals and the number of files
+  // the walk really saw are still true.
   const noScan = options['no-scan'] === true;
-  const scan =
-    noScan || explicitLanguages !== null
-      ? {
-          languages: explicitLanguages ?? ['python'],
-          signals: noScan ? [] : scanRepo(io.cwd).signals,
-        }
-      : scanRepo(io.cwd);
+  const walked = noScan ? null : scanRepo(io.cwd);
+  const scan: RepoScan =
+    walked === null
+      ? { languages: explicitLanguages ?? ['python'], signals: [], reasons: undefined, files: 0 }
+      : explicitLanguages === null
+        ? walked
+        : { ...walked, languages: explicitLanguages };
   // Which runner the scan saw. The `runner:` key is owner-owned, so it
   // is written ONLY when exactly one non-Playwright runner was detected:
   // Playwright stays the frozen default, and an ambiguous repository
@@ -1259,6 +1512,12 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   }
 
   const cwd = io.cwd;
+  // Which CI provider this repository ALREADY used, captured BEFORE any
+  // CI file is written by this run: a repository that shows no provider
+  // at all gets both sets of instructions, and after wiring
+  // `.gitlab-ci.yml` always exists — the question would then be answered
+  // by us rather than read from the repository.
+  const ciProviderBeforeWiring = detectCiProvider(cwd);
   // Whether `.gateforge.yml` was already there BEFORE this run: the
   // preset summary must tell the truth about what changed.
   const existedConfigAtStart = existsSync(join(io.cwd, '.gateforge.yml'));
@@ -1367,10 +1626,27 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         ]
       : []),
   ];
+  /**
+   * Queues one scaffold file, keyed by path. Two steps of the same run
+   * can want the SAME file with different content (the config and the
+   * config-with-behaviorPolicy); pushing both made the second entry
+   * report "exists, leaving untouched" about a file the same run had
+   * just created, and silently dropped the richer content. The later
+   * entry wins, in the later entry's position, so exactly one line per
+   * file is ever printed and the fullest content is what lands.
+   */
+  const pushTarget = (target: { path: string; write: () => void; label: string }): void => {
+    const existing = targets.findIndex((candidate) => candidate.path === target.path);
+    if (existing === -1) {
+      targets.push(target);
+      return;
+    }
+    targets[existing] = target;
+  };
   if (docsExclusionChoice.changed) {
     const exclusionPath = join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/'));
     const exclusionText = renderDocsExclusions(docsExclusionChoice.folders);
-    targets.push({
+    pushTarget({
       path: exclusionPath,
       label: 'owner-declared documentation exclusions',
       write: () => {
@@ -1388,7 +1664,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   if (cacheExclusionChoice.changed) {
     const exclusionPath = join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/'));
     const exclusionText = renderCacheExclusions(cacheExclusionChoice.files);
-    targets.push({
+    pushTarget({
       path: exclusionPath,
       label: 'owner-declared Python bytecode exclusions',
       write: () => {
@@ -1473,14 +1749,14 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         }
       }
     } else {
-      targets.push({
+      pushTarget({
         path: behaviorPath,
         label: 'complete-behavior document (SCAFFOLD — not approval)',
         write: () => writeFileSync(behaviorPath, template, 'utf8'),
       });
     }
     if (!existsSync(join(cwd, '.gateforge.yml'))) {
-      targets.push({
+      pushTarget({
         path: join(cwd, '.gateforge.yml'),
         label: 'config (with behaviorPolicy)',
         write: () => {
@@ -1523,7 +1799,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       const added = loadConfig(configPath).plugins
         .map((plugin) => plugin.id)
         .filter((id) => explicitPlugins.includes(id));
-      recordInitPath(io, cwd, configPath, 'preserved');
+      recordInitPath(io, cwd, configPath, 'modified');
       writeLine(
         io.stdout,
         `updated: ${configPath} (added detector(s): ${added.join(', ')} — every other key left as it was)`,
@@ -1538,6 +1814,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         (target.label === 'owner-declared Python bytecode exclusions' && cacheExclusionChoice.changed)
       ) {
         target.write();
+        recordInitPath(io, cwd, target.path, 'modified');
         writeLine(io.stdout, `updated: ${target.path}`);
         continue;
       }
@@ -1549,6 +1826,10 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     recordInitPath(io, cwd, target.path, 'created');
     writeLine(io.stdout, `created: ${target.path}`);
   }
+  // Engine-owned state is never a product change: without this the
+  // first `git add -A` stages the run cache the gate just wrote, and the
+  // gate then blocks on its own files.
+  ignoreEngineState(io, cwd);
   // Observe proof checklist (observe proof only): the work no scaffold
   // can do — proxy wiring, adapter bindings, and kind declarations.
   if (proofMode === 'observe') {
@@ -1598,7 +1879,11 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   const planesRequested = options['planes'] === true;
   if (planesRequested || languages.includes('python')) {
     if (await resolvePlanes(io, options)) {
-      await proposePlanesConfig(cwd, io);
+      // The route folders are asked in the SAME flow, right before the
+      // model folders are written, so both sets of answers land in one
+      // reviewed `.gateforge/planes.json`.
+      const routeRules = await askRouteFolderPlanes(cwd, io);
+      await proposePlanesConfig(cwd, io, routeRules);
     }
   }
   // Behavior-profile setup (plan 2026-09-19 §4.11): `--behavior` scaffolds
@@ -1746,7 +2031,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       }
       writeLine(io.stdout, `${pushHook.status}: ${pushHook.detail}`);
     }
-    writeServerProtectionInstructions(io);
+    writeServerProtectionInstructions(io, ciProviderBeforeWiring);
   }
   // A preset can ask for the CI job without a local hook (`normal`):
   // the server check is then the only place the gate runs, which is a
@@ -1761,11 +2046,19 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       configExisted: existedConfigAtStart,
       autoChosen: goal.autoChosen === true,
       created: [...(ledger?.created ?? [])],
+      modified: [...(ledger?.modified ?? [])],
       repoHasCommitHook: existsSync(join(cwd, '.git/hooks/pre-commit')),
       repoHasCi: existsSync(join(cwd, '.gitlab-ci.yml')) || existsSync(join(cwd, '.github/workflows/gateforge.yml')),
     })) {
       writeLine(io.stdout, line);
     }
+  }
+  // A repository that already had code before this run gets the
+  // adoption path named HERE, where the owner is deciding what the
+  // gate will do to them. `init` on a fresh project has no debt and
+  // must not talk about adopting one.
+  if (!existedConfigAtStart && scan.files > 0) {
+    writeLine(io.stdout, ADOPT_ADVICE);
   }
   writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');
   const alembicOptIn = renderAlembicOptIn(cwd);

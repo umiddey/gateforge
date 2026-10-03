@@ -474,18 +474,23 @@ export function ensureHookScript(
     recordInitPath(io, io.cwd, hookScript, 'created');
     writeLine(io.stdout, `created: ${hookScript}`);
   } else {
-    recordInitPath(io, io.cwd, hookScript, 'preserved');
     const current = readFileSync(hookScript, 'utf8');
     if (isGeneratedHookScript(current)) {
       const updated = replaceGeneratedHookBlock(current, hookScriptTemplate(gateArgs));
       if (updated !== current) {
         writeFileSync(hookScript, updated, 'utf8');
         chmodSync(hookScript, 0o755);
+        // The generated block was rewritten in place: the undo is a
+        // restore, not a delete (the file may hold the owner's own
+        // additions around our markers).
+        recordInitPath(io, io.cwd, hookScript, 'modified');
         writeLine(io.stdout, `updated: ${hookScript} (${gateArgs.join(' ')})`);
       } else {
+        recordInitPath(io, io.cwd, hookScript, 'preserved');
         writeLine(io.stdout, `verified: ${hookScript} (${gateArgs.join(' ')})`);
       }
     } else {
+      recordInitPath(io, io.cwd, hookScript, 'preserved');
       writeLine(io.stdout, `exists, leaving untouched: ${hookScript} (foreign file)`);
     }
   }
@@ -525,6 +530,10 @@ export function appendPreCommitHook(io: Io): void {
       return;
     }
     writeFileSync(path, `${current.endsWith('\n') ? current : current + '\n'}${PRE_COMMIT_BLOCK}`);
+    // The file belongs to the OWNER and this run appended one block to
+    // it, so the ledger records it as MODIFIED: `rm -rf` would throw
+    // their hooks away, `git restore` puts the file back exactly.
+    recordInitPath(io, io.cwd, path, 'modified');
     // One line, one action: the file belongs to the OWNER, so the line
     // says so and carries the exact way back. The command is printed
     // only where it really works — `git restore` needs a tracked file,
@@ -563,12 +572,15 @@ export function writeGitlabCiTemplate(io: Io, mode: GitlabGateMode = 'check'): v
     writeLine(io.stdout, `created: ${gitlabCi} (includes the gateforge jobs)`);
     return;
   }
-  recordInitPath(io, io.cwd, gitlabCi, 'preserved');
   const current = readFileSync(gitlabCi, 'utf8');
   if (current.includes('gitlab-gateforge.yml')) {
+    recordInitPath(io, io.cwd, gitlabCi, 'preserved');
     writeLine(io.stdout, `exists, leaving untouched: ${gitlabCi} (gateforge include present)`);
     return;
   }
+  // The owner's CI file stays theirs: this run only ADDED the include,
+  // so the ledger records it as modified and the undo is a restore.
+  recordInitPath(io, io.cwd, gitlabCi, 'modified');
   const local = "  - local: '.gateforge/ci/gitlab-gateforge.yml'";
   if (/^include:/m.test(current)) {
     writeFileSync(gitlabCi, current.replace(/^include:[^\n]*/m, (match) => `${match}\n${local}`));
@@ -598,24 +610,74 @@ export function writeCiTemplate(io: Io, provider: 'github' | 'gitlab', mode: Git
   }
 }
 /**
+ * Detects which CI provider this repository already uses, from the
+ * files it already has. `null` when neither is present, so the caller
+ * can say so instead of guessing.
+ *
+ * The rule is the one `enforce` already uses for `--ci` (GitLab when a
+ * `.gitlab-ci.yml` exists, GitHub when only `.github` does), so the
+ * instructions and the generated wiring always agree.
+ *
+ * Args:
+ *   cwd: repository root.
+ *
+ * Returns:
+ *   'github' | 'gitlab' | null: the detected provider, or null.
+ */
+export function detectCiProvider(cwd: string): 'github' | 'gitlab' | null {
+  if (existsSync(join(cwd, '.gitlab-ci.yml'))) return 'gitlab';
+  if (existsSync(join(cwd, '.github'))) return 'github';
+  return null;
+}
+
+/**
  * Prints owner-run steps for making the generated CI job mandatory.
+ *
+ * Only the DETECTED provider's commands are printed: a GitLab-only
+ * repository was told GitHub branch-protection commands it can never
+ * run, and the reader had to work out which half applied. When the
+ * repository shows no provider at all, both are printed and the block
+ * says why.
  *
  * Args:
  *   io: process context.
+ *   provider: the provider the wiring used, when the caller already
+ *   resolved one; otherwise the repository is probed.
  *
  * Returns:
  *   void.
  */
-export function writeServerProtectionInstructions(io: Io): void {
+export function writeServerProtectionInstructions(
+  io: Io,
+  provider: 'github' | 'gitlab' | null = detectCiProvider(io.cwd),
+): void {
+  const github = [
+    'GitHub: gh api --method PUT "repos/OWNER/REPO/branches/BRANCH/protection" --input - <<\'JSON\'',
+    '{"required_status_checks":{"strict":true,"contexts":["gateforge"]},"enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null}',
+    'JSON',
+  ];
+  const gitlab = [
+    'GitLab: glab api --method PUT "projects/PROJECT_ID" -f only_allow_merge_if_pipeline_succeeds=true',
+    'GitLab: glab api --method POST "projects/PROJECT_ID/protected_branches" -f name=BRANCH -f push_access_level=0 -f merge_access_level=30 -f allow_force_push=false',
+  ];
+  const lines =
+    provider === 'github'
+      ? [...github]
+      : provider === 'gitlab'
+        ? [...gitlab]
+        : [
+            'note: no .gitlab-ci.yml and no .github/ — both providers are shown because neither was detected',
+            ...github,
+            ...gitlab,
+          ];
   writeLine(
     io.stdout,
     [
       'Server setup (review and run explicitly; Gateforge does not change branch settings):',
-      'GitHub: gh api --method PUT "repos/OWNER/REPO/branches/BRANCH/protection" --input - <<\'JSON\'',
-      '{"required_status_checks":{"strict":true,"contexts":["gateforge"]},"enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null}',
-      'JSON',
-      'GitLab: glab api --method PUT "projects/PROJECT_ID" -f only_allow_merge_if_pipeline_succeeds=true',
-      'GitLab: glab api --method POST "projects/PROJECT_ID/protected_branches" -f name=BRANCH -f push_access_level=0 -f merge_access_level=30 -f allow_force_push=false',
+      provider === null
+        ? 'no CI provider was detected (no .gitlab-ci.yml and no .github/) — both providers are shown:'
+        : `detected CI provider: ${provider}`,
+      ...lines,
     ].join('\n'),
   );
 }

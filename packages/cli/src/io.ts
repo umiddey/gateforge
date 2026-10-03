@@ -28,10 +28,22 @@ export class CaptureStream extends Writable {
  * delete the OWNER's pre-existing config, baselines, waivers, hooks and
  * CI file, and a fixed "wrote no hooks" line would claim an absence the
  * repo does not have. The ledger records what this run actually did.
+ *
+ * `modified` is its own bucket because an append to an existing file
+ * needs a different undo than a deletion: `rm -rf` would throw away the
+ * owner's own lines, while `git restore` puts the file back exactly as
+ * it was. Folding "modified" into "created" would offer to delete a
+ * file the run only added a line to.
  */
 export interface InitPathLedger {
   /** Repo-relative posix paths this run CREATED. */
   created: string[];
+  /**
+   * Repo-relative posix paths this run CHANGED IN PLACE (an appended
+   * CI include, an appended pre-commit entry, an added ignore rule) —
+   * the file existed before and still holds the owner's content.
+   */
+  modified: string[];
   /** Repo-relative posix paths that already existed and were left alone. */
   preserved: string[];
 }
@@ -61,14 +73,15 @@ export function processIo(): Io {
 
 /**
  * Records a repo file in the init ledger: `created` when this run
- * brought it into existence, `preserved` when it was already there and
- * left alone. A no-op for commands with no ledger.
+ * brought it into existence, `modified` when it changed a file that
+ * already existed, `preserved` when it was already there and left
+ * alone. A no-op for commands with no ledger.
  *
  * Args:
  *   io: the command context.
  *   cwd: absolute repo root the path resolves against.
- *   path: absolute path of the file the run just wrote or kept.
- *   state: which of the two happened.
+ *   path: absolute path of the file the run just wrote, changed or kept.
+ *   state: which of the three happened.
  *
  * Returns:
  *   void.
@@ -77,7 +90,7 @@ export function recordInitPath(
   io: Io,
   cwd: string,
   path: string,
-  state: 'created' | 'preserved',
+  state: 'created' | 'modified' | 'preserved',
 ): void {
   const ledger = io.initPaths;
   if (ledger === undefined) return;

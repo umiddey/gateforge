@@ -12,7 +12,9 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 
-/** Directories never descended into (dependency, build, VCS output). */
+/**
+ * Directories never descended into (dependency, build, VCS output).
+ */
 const IGNORED_DIRS = new Set([
   'node_modules',
   '.venv',
@@ -24,6 +26,85 @@ const IGNORED_DIRS = new Set([
   '.pytest_cache',
   '.mypy_cache',
 ]);
+
+/**
+ * Hidden (dot-prefixed) directories are NOT application code, so the
+ * default scan skips them. Agent tooling (`.claude/`, `.cursor/`),
+ * editor/tool caches, and leftover working folders a previous run or a
+ * merge left behind (`.g6_head_check/`, `.merge-review-main-variants/`)
+ * all live
+ * there and would otherwise be read as product code: the recommendation
+ * evidence then named a path the owner never writes. The rule is
+ * generic — it keys on the dot prefix, never on a name list — so a
+ * repository that hides something else under a dot folder gets the same
+ * treatment.
+ *
+ * `.gateforge` is the ONE exception: it is the directory Gateforge
+ * itself owns, and a re-run must still read its own configuration state
+ * rather than silently seeing less than the first run saw.
+ */
+const SCANNED_HIDDEN_DIRS = new Set(['.gateforge']);
+
+/**
+ * Directory names that hold leftovers, archives, generated output or
+ * fixtures rather than application code. The scan still READS them (a
+ * signal found only there is still a signal), but recommendation
+ * evidence prefers an application file: `reasons` quotes the file a
+ * pack was recommended from, and that file should be one the owner
+ * actually edits. Generic by convention, never by repository.
+ */
+const NON_APPLICATION_DIRS = new Set([
+  'archive',
+  'archives',
+  'archived',
+  'backup',
+  'backups',
+  'tmp',
+  'temp',
+  'vendor',
+  'vendored',
+  'generated',
+  '__generated__',
+  'fixtures',
+  'testdata',
+  'samples',
+]);
+
+/**
+ * Whether any directory segment of a repo-relative path names a
+ * leftover, archive, generated or fixture directory.
+ *
+ * Args:
+ *   file: repo-relative posix file path.
+ *
+ * Returns:
+ *   boolean: true when the path is not application code.
+ */
+function isNonApplicationPath(file: string): boolean {
+  return file
+    .split('/')
+    .slice(0, -1)
+    .some((segment) => NON_APPLICATION_DIRS.has(segment.toLowerCase()));
+}
+
+/**
+ * Orders files so evidence prefers application code: application files
+ * first (stable, alphabetical), non-application paths after. Detection
+ * itself is unchanged — a signal found only in a leftover folder is
+ * still reported, just quoted from the best available file.
+ *
+ * Args:
+ *   files: the collected repo-relative paths.
+ *
+ * Returns:
+ *   string[]: the same paths in evidence-preference order.
+ */
+function evidenceOrder(files: readonly string[]): string[] {
+  return [...files].sort((a, b) => {
+    const rank = (isNonApplicationPath(a) ? 1 : 0) - (isNonApplicationPath(b) ? 1 : 0);
+    return rank !== 0 ? rank : a < b ? -1 : a > b ? 1 : 0;
+  });
+}
 
 /** Files larger than this are never content-scanned (binary guard). */
 const MAX_SCAN_BYTES = 1024 * 1024;
@@ -47,6 +128,13 @@ export interface RepoScan {
    * was read from. Absent for a signal with no file evidence.
    */
   reasons?: Record<string, string>;
+  /**
+   * How many files the walk actually read (after the default excludes).
+   * `init` uses it to tell a fresh repository from one that already has
+   * code: the first `init` on an existing repository has to name the
+   * adoption path, and it cannot know that without having looked.
+   */
+  files: number;
 }
 
 /** The signal that justifies each recommended pack, in print order. */
@@ -220,8 +308,13 @@ const JS_OR_TS = /\.(js|jsx|mjs|cjs|ts|tsx)$/;
  *   skipped, an empty repo reports `python` with no signals).
  */
 export function scanRepo(cwd: string): RepoScan {
-  const files: string[] = [];
-  collectFiles(cwd, cwd, files);
+  const collected: string[] = [];
+  collectFiles(cwd, cwd, collected);
+  // Detection reads every collected file; the ORDER decides only which
+  // file a signal is QUOTED from. Application code comes first, so the
+  // printed evidence names a file the owner edits rather than one that
+  // happens to be first in a leftover or archived folder.
+  const files = evidenceOrder(collected);
   let hasPy = false;
   let hasJs = false;
   let hasTs = false;
@@ -316,7 +409,7 @@ export function scanRepo(cwd: string): RepoScan {
   if (hasCypress) signals.push('cypress');
   if (hasPytestIni || hasPytestToml || hasPytestFile) signals.push('pytest');
   if (reasons['http-clients']) signals.push('http-clients');
-  return { languages, signals, reasons };
+  return { languages, signals, reasons, files: collected.length };
 }
 
 /**
@@ -424,6 +517,11 @@ function collectFiles(root: string, dir: string, out: string[]): void {
   }
   for (const entry of entries) {
     if (IGNORED_DIRS.has(entry)) continue;
+    // Hidden folders hold agent tooling, editor/tool caches and
+    // leftover working directories, not product code (see
+    // SCANNED_HIDDEN_DIRS). `.gateforge` is the one exception: it is
+    // Gateforge's own state and must stay readable on a re-run.
+    if (entry.startsWith('.') && !SCANNED_HIDDEN_DIRS.has(entry)) continue;
     const absolute = join(dir, entry);
     let stat: ReturnType<typeof statSync>;
     try {

@@ -54,7 +54,7 @@ import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { findRunnerConfigPath, TEST_MAP_RELATIVE } from '../mapping.js';
-import { inspectCommitHook } from '../git-hooks.js';
+import { inspectCommitHook, isFrameworkManagedHookBody } from '../git-hooks.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { resolveStateDir } from '../state.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
@@ -709,6 +709,66 @@ function readdirSafe(dir: string): string[] {
     return [];
   }
 }
+/**
+ * Whether a `.pre-commit-config.yaml` declares Gateforge's hook.
+ *
+ * Args:
+ *   path: absolute path to `.pre-commit-config.yaml`.
+ *
+ * Returns:
+ *   boolean: true when a hook with id `gateforge-check` is declared.
+ */
+function declaresGateforgeCheck(path: string): boolean {
+  if (!existsSync(path)) return false;
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(readFileSync(path, 'utf8'));
+  } catch {
+    return false;
+  }
+  // Parsed YAML is external input: every step narrows with `typeof` /
+  // `in` so a malformed config answers "not wired" instead of trusting a
+  // fabricated shape.
+  if (typeof parsed !== 'object' || parsed === null || !('repos' in parsed)) return false;
+  const repos = parsed.repos;
+  if (!Array.isArray(repos)) return false;
+  return repos.some((repo) => {
+    if (typeof repo !== 'object' || repo === null || !('hooks' in repo)) return false;
+    const hooks = repo.hooks;
+    if (!Array.isArray(hooks)) return false;
+    return hooks.some(
+      (hook) =>
+        typeof hook === 'object' && hook !== null && 'id' in hook && hook.id === 'gateforge-check',
+    );
+  });
+}
+
+/**
+ * Whether this repository's commit gate runs through a pre-commit
+ * FRAMEWORK.
+ *
+ * A framework regenerates `.git/hooks/pre-commit` from
+ * `.pre-commit-config.yaml` on every `pre-commit install`, so the file
+ * in `.git/hooks` carries the framework's signature and never a
+ * Gateforge marker. Reading only for our marker therefore reported
+ * "a non-gateforge pre-commit hook exists … gateforge did not touch it"
+ * about a repository where `init` had just wired the gate through the
+ * framework config — the two commands contradicted each other on the
+ * same file. Both halves must hold: the hook file is framework
+ * generated AND the framework config actually declares our hook.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   hookPath: the resolved `.git/hooks/pre-commit` path, if any.
+ *
+ * Returns:
+ *   boolean: true when the gate is wired through the framework.
+ */
+function frameworkHookGateWired(cwd: string, hookPath: string | null): boolean {
+  if (hookPath === null || !existsSync(hookPath)) return false;
+  if (!isFrameworkManagedHookBody(readFileSync(hookPath, 'utf8'))) return false;
+  return declaresGateforgeCheck(join(cwd, '.pre-commit-config.yaml'));
+}
 
 /**
  * Detects generated CI wiring without treating a template as server-side
@@ -893,10 +953,20 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
 
   // 1. Hook presence + ACTIVATION (never reported as managed protection).
   const hook = inspectCommitHook(io.cwd, io.env);
+  // A framework-managed hook is WIRED, not foreign: the gate lives in
+  // `.pre-commit-config.yaml` and runs on every commit exactly like any
+  // other framework hook. Reporting it as a non-gateforge hook Gateforge
+  // "did not touch" contradicted what `init` had just said about the
+  // very same file.
+  const frameworkGate = frameworkHookGateWired(io.cwd, hook.hookPath);
   checks.push({
     id: 'hook',
-    status: hook.verifyOk ? 'ok' : hook.marker ? 'fail' : 'warn',
-    detail: hook.detail,
+    status: frameworkGate || hook.verifyOk ? 'ok' : hook.marker ? 'fail' : 'warn',
+    detail: frameworkGate
+      ? `the commit gate runs through the pre-commit framework: ${hook.hookPath} is framework-generated ` +
+        'and .pre-commit-config.yaml declares gateforge-check, which runs on every commit — gateforge does not ' +
+        'edit the generated hook file (a direct edit is wiped by the next framework install)'
+      : hook.detail,
   });
   const hookMutation = precommitMutationCheck(io.cwd, io.env);
   checks.push({ id: 'hook-mutation', ...hookMutation });
@@ -1143,8 +1213,11 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
         '`--no-verify`, an alternate core.hooksPath, direct plumbing, or an unrelated clone bypass it (ADR 0005 D1)',
     });
   }
+  // A framework-wired gate is an ACTIVE local hook, exactly like a
+  // Gateforge-owned one: the check runs on every commit either way.
+  const hookActive = hook.verifyOk || frameworkGate;
   const level: DoctorReport['level'] =
-    ciWired && protection.verified ? 3 : ciWired ? 2 : hook.verifyOk ? 1 : 0;
+    ciWired && protection.verified ? 3 : ciWired ? 2 : hookActive ? 1 : 0;
 
   return {
     mode,
