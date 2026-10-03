@@ -68,6 +68,10 @@ No configuration change is required and no new option is on by default. This rel
 - No Python bytecode in a published tarball. 0.8.0 reached npm carrying `__pycache__/*.pyc` in four packages because a manual `npm publish` ran from a tree whose detectors had executed. Every manifest that ships a `python` directory now ends its `files` list with `!**/__pycache__`, `!**/*.pyc` and `!**/*.pyo`, and `scripts/release-publish.sh` refuses the WHOLE release — before publishing anything — when `npm pack --dry-run --json --workspaces` still names one, printing the package and the path. Publish from the tag workflow (`v0.9.0`) or from the verified `.tgz` files (`npm run pack:check` prints the lists).
 - The test suite no longer reads the developer's verifier keyring: keys are isolated per run, so a local suite result does not depend on the machine it ran on.
 
+### Fixed
+
+- A `persistence:read` whose observe binding declares `collection` no longer stops proving once the list outgrows 16 KB. The witness parsed the first 16,384 bytes of the response it proxied, so a bigger list named no complete row and the claim stayed `EVIDENCE_NOT_COLLECTED` with no receipt sealed — a failure that grew every run as the app's own data grew (in the session that motivated this release, a users list at 18,526 bytes over 107 rows took acceptance from 70/70 to 69/70, and the same list had been under the cap one release earlier). Such a read is now parsed from its OWN bounded copy — up to 1 MiB and up to 10,000 rows — so a real app's normal data size can no longer make a passing test unprovable. Nothing else moved: the 16 KB response tap is byte-identical, so the body digest and the create-attribution log read exactly what they always did; only the declared `idKey` is read, exactly as before; and the record payload is unchanged, so every record and receipt already sealed re-verifies. A body or a page past the new bounds is refused, never partially read, with a note naming the bound and the measured size.
+
 ## 0.8.0
 
 ### Upgrading from 0.7.x

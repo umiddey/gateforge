@@ -806,6 +806,71 @@ describe('observe finalize (collection read)', () => {
       await fixture.target.stop();
     }
   });
+  it('resolves a read from a list response past the 16 KB response-snapshot cap', async () => {
+    // A real app's list grows with its own data: past 16 KB the body used
+    // to name no complete row, so the claim stayed EVIDENCE_NOT_COLLECTED
+    // with no way out. A DECLARED collection read is parsed from its own
+    // wider bounded copy, so a big list still proves — and the entity it
+    // proves is a row the session-open snapshot really held, never one of
+    // the filler rows that only made the body big.
+    const fixture = await startFixturedWitness({ read: WRAPPED_COLLECTION_READ });
+    try {
+      await declare(fixture.witness.url, [READ_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [READ_CLAIM]);
+      const got = await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts?shape=large');
+      expect(got.status).toBe(200);
+      // Past the 16 KB tap, so this body genuinely could not be read from it.
+      expect(Buffer.byteLength(got.text)).toBeGreaterThan(16384);
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['notes']).toEqual([]);
+      expect(done.body['finalized']).toMatchObject([{ operation: 'read', entityId: 'acc-1' }]);
+      const records = await ledgerRecords(fixture.witness.url);
+      const payload = (records.find((entry) => entry['kind'] === 'persistence.observed')?.['payload']) as Record<
+        string,
+        unknown
+      >;
+      expect(payload['entityId']).toBe('acc-1');
+      expect(payload['fields']).toMatchObject({ first_name: 'Ada', last_name: 'Lovelace' });
+      // The record payload is unchanged: nothing from the body rides in it.
+      expect(payload['exchange']).toMatchObject({ method: 'GET', path: '/api/accounts', status: 200 });
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('keeps create attribution on the 16 KB tap for a body the collection read reads whole', async () => {
+    // The wider buffer is the collection parse's alone. A create response
+    // past 16 KB is still unreadable to attribution, so a second entity
+    // appearing in the same window stays ambiguous instead of being
+    // attributed from bytes the attribution log never saw.
+    const fixture = await startFixturedWitness();
+    try {
+      await declare(fixture.witness.url, [CREATE_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [CREATE_CLAIM]);
+      // Two new entities in the window, one of them written outside the
+      // proxy — attribution cannot separate them without a readable body.
+      await fetch(`${fixture.target.url}/api/accounts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ first_name: 'Outside', last_name: 'Proxy' }),
+      });
+      await proxyExchange(
+        session.proxyUrl as string,
+        'POST',
+        '/api/accounts?shape=large',
+        JSON.stringify({ first_name: 'Big', last_name: 'Body' }),
+      );
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['finalized']).toEqual([]);
+      expect(String((done.body['notes'] as string[])[0])).toContain('16384');
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
 
   it('notes a collection read whose body named no usable row', async () => {
     const refusals: ReadonlyArray<{ shape: string; expected: string }> = [
@@ -814,8 +879,12 @@ describe('observe finalize (collection read)', () => {
       { shape: 'malformed', expected: "row 0 carries no usable 'id' id" },
       { shape: 'duplicate', expected: "names 'acc-1' more than once" },
       { shape: 'notjson', expected: 'not parseable JSON' },
-      { shape: 'large', expected: 'exceeded the 16384-byte witness snapshot cap' },
       { shape: 'foreign', expected: 'named no entity that existed when this session opened' },
+      // Past the collection-read BODY bound and past its ROW bound: still
+      // refused, still with no record — a bigger bound never means a
+      // partial page read as a whole one.
+      { shape: 'huge', expected: 'witness collection-read bound' },
+      { shape: 'manyrows', expected: 'row witness collection-read bound' },
     ];
     for (const refusal of refusals) {
       const fixture = await startFixturedWitness({ read: WRAPPED_COLLECTION_READ });

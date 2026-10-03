@@ -282,6 +282,32 @@ const OBSERVED_BODY_SNAPSHOT_BYTES = 16384;
  */
 const OBSERVED_REQUEST_BODY_BYTES = 65536;
 /**
+ * Second, collection-only response buffer: a DECLARED collection read is
+ * parsed from a bounded copy taken here, not from the 16 KB tap above.
+ *
+ * Why a second buffer: the 16 KB tap exists to hash one exchange cheaply
+ * and to feed the create-attribution index, and it must not grow — that
+ * index is append-only and keeps every short scalar it read for the whole
+ * run. A real app's list response, meanwhile, grows with its own data, and
+ * the engine must be able to prove a read from a list the app
+ * legitimately serves past 16 KB.
+ *
+ * Only a route whose observe read binding declares `collection` is
+ * buffered this wide (the route is resolved before any byte is copied),
+ * so the wider buffer exists for declared collection reads and nothing
+ * else. The response still streams to the browser unbuffered, and the
+ * 16 KB tap, its digest and the attribution log are byte-identical to
+ * before.
+ */
+const COLLECTION_BODY_MAX_BYTES = 1024 * 1024;
+/**
+ * Upper bound on rows one declared collection read may name. The body
+ * bound alone does not bound the ID ARRAY a parsed page builds (a body of
+ * tiny rows is cheap per row and expensive in ids), so the parse refuses
+ * a page larger than this instead of materializing it.
+ */
+const COLLECTION_MAX_ROWS = 10_000;
+/**
  * Cap on one response scalar retained for entity attribution: entity
  * ids are short, so a longer scalar is dropped rather than retained
  * (the attribution set stays a handful of small strings per exchange).
@@ -762,21 +788,30 @@ function collectionReadRoutes(state: WitnessState, sessionId: string | null): Ma
 }
 
 /**
- * Reads the DECLARED row ids out of one bounded response-body snapshot
- * for a collection-read binding: a non-empty row array (at the
- * declared `rowsKey`, or at the root when none was declared) whose
- * every row is an object carrying a short, scalar, unique `idKey`.
+ * Reads the DECLARED row ids out of one bounded collection-read body: a
+ * non-empty row array (at the declared `rowsKey`, or at the root when
+ * none was declared) whose every row is an object carrying a short,
+ * scalar, unique `idKey`.
  *
  * Only that one field is read. Counts, totals, metadata and any other
  * arbitrary scalar in the body are never examined — a response that
  * names no usable row therefore names nothing, and the finalize path
  * turns that into a typed note rather than evidence.
  *
+ * The bytes handed in are the DECLARED-COLLECTION buffer (bounded at
+ * COLLECTION_BODY_MAX_BYTES), NOT the 16 KB response tap: that tap stays
+ * exactly as it was for hashing and create attribution, and this parse
+ * is its only reader. Every rule below — declared key only, short scalar
+ * ids, uniqueness, prototype-free dedupe, fail-closed on anything else —
+ * is unchanged; only the bound the truncation note names moved.
+ *
  * Args:
- *   snapshot: the bounded response bytes already hashed into the
- *     exchange's body digest (nothing larger is retained anywhere).
+ *   collectionSnapshot: the bounded collection-read body bytes.
  *   contentType: lowercased response media type, or null.
- *   truncated: whether the body exceeded the snapshot cap.
+ *   overBound: whether the response exceeded COLLECTION_BODY_MAX_BYTES
+ *     (a truncated body names no complete row, exactly as before).
+ *   totalBytes: the TOTAL response body size, so a refusal names what
+ *     the app actually served beside the bound it crossed.
  *   collection: the adapter's declared collection shape.
  *
  * Returns:
@@ -784,21 +819,23 @@ function collectionReadRoutes(state: WitnessState, sessionId: string | null): Ma
  *   the body named none.
  */
 function parseCollectionRows(
-  snapshot: Buffer,
+  collectionSnapshot: Buffer,
   contentType: string | null,
-  truncated: boolean,
+  overBound: boolean,
+  totalBytes: number,
   collection: ObserveCollection,
 ): ObservedCollectionRows {
   // Every exit carries the declared shape these ids were read under,
   // so a finalize can refuse a capture another declaration produced.
   const declared = { rowsKey: collection.rowsKey ?? null, idKey: collection.idKey };
-  if (truncated) {
+  if (overBound) {
     return {
       ...declared,
       ids: [],
       error:
-        `the collection response exceeded the ${String(OBSERVED_BODY_SNAPSHOT_BYTES)}-byte witness ` +
-        'snapshot cap — a truncated body names no complete rows',
+        `the collection response is ${String(totalBytes)} bytes, above the ` +
+        `${String(COLLECTION_BODY_MAX_BYTES)}-byte witness collection-read bound — a truncated body ` +
+        'names no complete rows',
     };
   }
   if (contentType !== 'application/json') {
@@ -810,7 +847,7 @@ function parseCollectionRows(
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(snapshot.toString('utf8'));
+    parsed = JSON.parse(collectionSnapshot.toString('utf8'));
   } catch {
     return { ...declared, ids: [], error: 'the collection response is not parseable JSON' };
   }
@@ -837,6 +874,19 @@ function parseCollectionRows(
   }
   if (rows.length === 0) {
     return { ...declared, ids: [], error: 'the collection response returned no rows' };
+  }
+  if (rows.length > COLLECTION_MAX_ROWS) {
+    // Refused before any id is read: a page this large is past the bound
+    // the engine will hold ids for, so naming none of it is honest where
+    // naming a prefix would be a partial list read as a whole one.
+    return {
+      ...declared,
+      ids: [],
+      error:
+        `the collection response returned ${String(rows.length)} rows, above the ` +
+        `${String(COLLECTION_MAX_ROWS)}-row witness collection-read bound — an unbounded page names ` +
+        'no complete row set',
+    };
   }
   const ids: Array<string | number> = [];
   // Prototype-free: an id is arbitrary candidate data, so `'constructor'`
@@ -985,13 +1035,34 @@ async function startObservedProxy(
         }
         const status = upstream.statusCode ?? 0;
         const observedPath = normalizeObservedPath(forwardUrl);
+        const method = (req.method ?? 'GET').toUpperCase();
+        // Collection reads (declared, never inferred): only a route this
+        // session actually claimed as a collection read is buffered wide
+        // enough to parse, and only the declared row id field is kept —
+        // every other route's body is hashed and dropped. A route two
+        // claims declare DIFFERENT shapes for is not parsed at all; the
+        // conflict travels so the finalize can name it. Resolved HERE,
+        // before any byte is copied, because the buffering decision
+        // depends on it and must not change mid-stream.
+        const collectionRoute = status >= 200 && status <= 299 ? collectionFor(method, observedPath) : null;
+        const collectionShape = collectionRoute === null ? null : collectionRoute.shape;
+        const collectionConflict =
+          collectionRoute !== null && collectionRoute.shape === null ? collectionRoute.declarations : null;
         // Bounded response-body snapshot: the tap is attached BEFORE
         // piping so both consumers receive the stream; forwarding to
         // the browser stays unbuffered (the snapshot never gates the
         // response). Total bytes are counted even beyond the snapshot
-        // limit; only the snapshot is hashed.
+        // limit; only the snapshot is hashed. This tap and everything it
+        // feeds (the digest, the create-attribution log) are unchanged.
         const snapshot: Buffer[] = [];
         let snapshotBytes = 0;
+        // Second buffer, declared collection reads ONLY: a real app's
+        // list response grows with its own data, and a read proven from a
+        // list the app legitimately serves past 16 KB must not become
+        // unprovable just because the app has rows. Parsed at end, then
+        // dropped — only the id array outlives this handler.
+        const collectionSnapshot: Buffer[] = [];
+        let collectionBytes = 0;
         let totalBytes = 0;
         upstream.on('data', (chunk: Buffer) => {
           totalBytes += chunk.length;
@@ -1001,10 +1072,15 @@ async function startObservedProxy(
             snapshot.push(Buffer.from(taken)); // copy: detach from the stream pool
             snapshotBytes += taken.length;
           }
+          if (collectionShape !== null && collectionBytes < COLLECTION_BODY_MAX_BYTES) {
+            const room = COLLECTION_BODY_MAX_BYTES - collectionBytes;
+            const taken = chunk.length > room ? chunk.subarray(0, room) : chunk;
+            collectionSnapshot.push(Buffer.from(taken));
+            collectionBytes += taken.length;
+          }
         });
         upstream.on('end', () => {
           const seq = (state.observedSeq += 1);
-          const method = (req.method ?? 'GET').toUpperCase();
           // Twin path coverage (E64): the request's SHAPE, computed at
           // record time from the method and the target the proxy
           // already saw. Only the shape is kept — a route template and
@@ -1017,16 +1093,6 @@ async function startObservedProxy(
           }
           const bodySnapshot = Buffer.concat(snapshot);
           const responseContentType = contentTypeOf(upstream.headers['content-type']);
-          // Collection reads (declared, never inferred): only a route
-          // this session actually claimed as a collection read has its
-          // response parsed here, and only the declared row id field is
-          // kept — every other route's body is hashed and dropped. A
-          // route two claims declare DIFFERENT shapes for is not parsed
-          // at all; the conflict travels so the finalize can name it.
-          const collectionRoute = status >= 200 && status <= 299 ? collectionFor(method, observedPath) : null;
-          const collectionShape = collectionRoute === null ? null : collectionRoute.shape;
-          const collectionConflict =
-            collectionRoute !== null && collectionRoute.shape === null ? collectionRoute.declarations : null;
           state.observed.push({
             method,
             path: observedPath,
@@ -1043,9 +1109,10 @@ async function startObservedProxy(
             ...(collectionShape !== null
               ? {
                   collectionRows: parseCollectionRows(
-                    bodySnapshot,
+                    Buffer.concat(collectionSnapshot),
                     responseContentType,
-                    totalBytes > OBSERVED_BODY_SNAPSHOT_BYTES,
+                    totalBytes > COLLECTION_BODY_MAX_BYTES,
+                    totalBytes,
                     collectionShape,
                   ),
                 }

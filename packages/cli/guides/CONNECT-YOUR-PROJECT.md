@@ -291,18 +291,29 @@ What the kit guarantees, so you do not have to re-derive it:
   credits only the entities it already held when the test session
   opened, read back through the adapter and graded as before. A count
   or total, a metadata-only body, a duplicate id, a row with no id, a
-  non-JSON or an oversized body, and a row created after the session
-  opened all REFUSE the obligation with a typed note instead of
-  satisfying it. It is opt-in: without `collection` a read binds
-  `{id}` from the path exactly as before, and a collection may only be
-  declared on a read + `GET` whose path carries no `{id}` — anything
-  else is refused when the adapter loads.
-  Two resources one test claims may share a route only by declaring the
-  SAME shape. When they disagree, neither is read: the note names both
-  declarations and no record is issued, because one resource's rows can
-  never be read under another resource's `rowsKey`/`idKey`. With an
-  identical shape the route is read once and that one response credits
-  exactly one claim.
+  non-JSON body, and a row created after the session opened all REFUSE
+  the obligation with a typed note instead of satisfying it. It is
+  opt-in: without `collection` a read binds `{id}` from the path
+  exactly as before, and a collection may only be declared on a read +
+  `GET` whose path carries no `{id}` — anything else is refused when
+  the adapter loads. Two resources one test claims may share a route
+  only by declaring the SAME shape. When they disagree, neither is read:
+  the note names both declarations and no record is issued, because one
+  resource's rows can never be read under another resource's
+  `rowsKey`/`idKey`. With an identical shape the route is read once and
+  that one response credits exactly one claim.
+
+  **Size: a real list still proves.** A collection read is parsed from
+  its OWN bounded copy of the response — up to 1 MiB and up to 10,000
+  rows. A list that outgrows the engine's 16 KB response-snapshot cap
+  (the tap that feeds the body digest and create attribution, itself
+  unchanged) still proves: a real app's data growing must not make a
+  passing test unprovable. A body or a page past those bounds is
+  refused exactly as a truncated one always was — no ids, a typed note
+  naming the bound and the measured size, no record. Both bounds live
+  on the WITNESS side, so nothing about your adapter changes; a route
+  that serves an unbounded collection should declare paging and a by-id
+  read rather than rely on a larger bound.
 
 Adapters are read-only by construction. If your app has state only the
 database can answer, the frozen contract has a `probeServer` channel —

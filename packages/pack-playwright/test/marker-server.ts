@@ -92,7 +92,7 @@ function handle(
     res.end(JSON.stringify(listShape(shape, rows)));
     return;
   }
-  if (req.method === 'POST' && url === '/api/accounts') {
+  if (req.method === 'POST' && listUrl.pathname === '/api/accounts') {
     void readBody().then((raw) => {
       let body: Record<string, unknown> = {};
       try {
@@ -107,7 +107,23 @@ function handle(
         status: 'active',
       };
       accounts.set(account.id, account);
-      res.end(JSON.stringify(account));
+      // `?shape=large` creates the row exactly as the plain route does and
+      // then answers with a body past the 16 KB response-snapshot cap: the
+      // create attribution log must still see only its own bounded slice.
+      const createShape = listUrl.searchParams.get('shape');
+      res.end(
+        createShape === 'large'
+          ? JSON.stringify({
+              ...account,
+              rows: Array.from({ length: 200 }, (_unused, index) => ({
+                id: `bulk-${String(index)}`,
+                first_name: 'Bulk'.repeat(20),
+                last_name: 'Filler'.repeat(20),
+                status: 'active',
+              })),
+            })
+          : JSON.stringify(account),
+      );
     });
     return;
   }
@@ -175,8 +191,14 @@ function handle(
  * that must never stand in for one: an envelope, a root array, a
  * metadata-only summary, an empty page, a page naming one row twice, a
  * reversed page, a page of ids the app never held, a row with no id
- * field, and a page larger than the witness response-snapshot cap.
- * `notjson` is served by the caller as raw non-JSON text.
+ * field, a page past the 16 KB response-snapshot cap that a DECLARED
+ * collection read must still resolve (`large`), a page past the wider
+ * collection-read body bound (`huge`), and a page past its row bound
+ * (`manyrows`). `notjson` is served by the caller as raw non-JSON text.
+ *
+ * The filler rows name entities the app never held: they make the body
+ * big, and the witness must still resolve the read to a row the
+ * session-open snapshot really held.
  *
  * @param shape - the requested response shape
  * @param rows - the accounts the app currently holds
@@ -201,13 +223,44 @@ function listShape(shape: string, rows: Account[]): unknown {
     case 'malformed':
       return { accounts: [{ first_name: 'Nameless', last_name: 'Row', status: 'active' }] };
     case 'large':
+      // Past the 16 KB response-snapshot cap, inside the collection-read
+      // bound: a real list a real app grows into, and it must still prove.
       return {
-        accounts: Array.from({ length: 200 }, (_unused, index) => ({
-          id: `bulk-${String(index)}`,
-          first_name: 'Bulk'.repeat(20),
-          last_name: 'Filler'.repeat(20),
-          status: 'active',
-        })),
+        accounts: [
+          ...rows,
+          ...Array.from({ length: 200 }, (_unused, index) => ({
+            id: `bulk-${String(index)}`,
+            first_name: 'Bulk'.repeat(20),
+            last_name: 'Filler'.repeat(20),
+            status: 'active' as const,
+          })),
+        ],
+      };
+    case 'huge':
+      // Past the collection-read body bound: refused, never partially read.
+      return {
+        accounts: [
+          ...rows,
+          ...Array.from({ length: 5000 }, (_unused, index) => ({
+            id: `bulk-${String(index)}`,
+            first_name: 'Bulk'.repeat(20),
+            last_name: 'Filler'.repeat(20),
+            status: 'active' as const,
+          })),
+        ],
+      };
+    case 'manyrows':
+      // Small per row, so the ROW bound is what a page like this crosses.
+      return {
+        accounts: [
+          ...rows,
+          ...Array.from({ length: 10_001 }, (_unused, index) => ({
+            id: `row-${String(index)}`,
+            first_name: 'R',
+            last_name: 'R',
+            status: 'active' as const,
+          })),
+        ],
       };
     default:
       return { accounts: rows };
