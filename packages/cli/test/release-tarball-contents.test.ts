@@ -92,13 +92,16 @@ function packedPaths(cwd: string): string[] {
 
 /**
  * Builds a scratch workspace whose `npm` is a recording stub, so the release
- * script can run without touching a registry.
+ * script can run without touching a registry. The scratch root also gets a
+ * root package.json whose `workspaces` array lists the packages in the given
+ * order — the order the release publisher must follow.
  *
  * Args:
  *   packages: package directory names to create, with their packed file lists.
  *
  * Returns:
  *   The workspace root, with `npm` on PATH and `W6_STUB_LOG` exported.
+ *   A `publish` whose arguments contain W6_STUB_FAIL_PUBLISH exits 1.
  */
 function stubbedWorkspace(packages: Array<{ dir: string; files: string[] }>): {
   root: string;
@@ -115,12 +118,25 @@ function stubbedWorkspace(packages: Array<{ dir: string; files: string[] }>): {
     files: entry.files.map((path) => ({ path })),
   }));
   writeFileSync(packJson, `${JSON.stringify(entries)}\n`);
+  writeFileSync(
+    join(root, 'package.json'),
+    `${JSON.stringify(
+      {
+        name: 'probe-root',
+        private: true,
+        workspaces: packages.map((entry) => `packages/${entry.dir}`),
+      },
+      null,
+      2,
+    )}\n`,
+  );
   const stub = [
     '#!/usr/bin/env bash',
     'printf "%s\\n" "$*" >> "$W6_STUB_LOG"',
     'case "$1" in',
     '  view) exit 1 ;;',
     '  pack) cat "$W6_STUB_PACK_JSON" ;;',
+    '  publish) if [ -n "$W6_STUB_FAIL_PUBLISH" ] && printf \'%s\' "$*" | grep -q "$W6_STUB_FAIL_PUBLISH"; then exit 1; fi; exit 0 ;;',
     '  *) exit 0 ;;',
     'esac',
     '',
@@ -144,6 +160,8 @@ function stubbedWorkspace(packages: Array<{ dir: string; files: string[] }>): {
  *   root: workspace root from `stubbedWorkspace`.
  *   logPath: file the npm stub records its invocations in.
  *   args: arguments for the release script; none means publish.
+ *   extraEnv: extra environment variables for the run (e.g.
+ *     W6_STUB_FAIL_PUBLISH); existing callers pass none.
  *
  * Returns:
  *   The exit status, the combined output, and the recorded npm invocations.
@@ -152,12 +170,14 @@ function runReleaseScript(
   root: string,
   logPath: string,
   args: string[] = [],
+  extraEnv: Record<string, string> = {},
 ): { status: number | null; output: string; invocations: string[] } {
   const run = spawnSync('bash', [RELEASE_SCRIPT, ...args], {
     cwd: root,
     encoding: 'utf8',
     env: {
       ...process.env,
+      ...extraEnv,
       PATH: `${join(root, 'stub-bin')}:${process.env.PATH ?? ''}`,
       W6_STUB_LOG: logPath,
       W6_STUB_PACK_JSON: join(root, 'pack.json'),
@@ -275,6 +295,46 @@ describe('release publisher bytecode preflight', () => {
       expect(result.status).not.toBe(0);
       expect(result.output).toContain('the packed file list could not be verified');
       expect(result.invocations.filter((line) => line.startsWith('publish'))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes in root workspaces order, not alphabetical order', () => {
+    const { root, logPath } = stubbedWorkspace([
+      { dir: 'zeta-core', files: ['package.json', 'dist/index.js'] },
+      { dir: 'alpha-cli', files: ['package.json', 'dist/index.js'] },
+    ]);
+    try {
+      const result = runReleaseScript(root, logPath);
+      expect(result.status).toBe(0);
+      expect(result.output).toContain('2 published, 0 skipped, 0 failed');
+      // Alphabetical order would publish alpha-cli first; the publisher
+      // must follow the root workspaces array instead.
+      expect(result.invocations.filter((line) => line.startsWith('publish'))).toEqual([
+        'publish -w packages/zeta-core/ --provenance',
+        'publish -w packages/alpha-cli/ --provenance',
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('stops at the first failed publish so a dependent is never published without its dependency', () => {
+    const { root, logPath } = stubbedWorkspace([
+      { dir: 'core-pkg', files: ['package.json', 'dist/index.js'] },
+      { dir: 'mid-pkg', files: ['package.json', 'dist/index.js'] },
+      { dir: 'cli-pkg', files: ['package.json', 'dist/index.js'] },
+    ]);
+    try {
+      const result = runReleaseScript(root, logPath, [], { W6_STUB_FAIL_PUBLISH: 'mid-pkg' });
+      expect(result.status).not.toBe(0);
+      expect(result.output).toContain('stopping: @probe/mid-pkg@9.9.9 failed');
+      expect(result.invocations.filter((line) => line.startsWith('publish'))).toEqual([
+        'publish -w packages/core-pkg/ --provenance',
+        'publish -w packages/mid-pkg/ --provenance',
+      ]);
+      expect(result.output).toContain('1 published, 0 skipped, 1 failed');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

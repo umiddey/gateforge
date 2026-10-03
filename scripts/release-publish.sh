@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Idempotent workspace publisher for the release workflow.
 #
-# For each workspace package: if its exact version is already on the
-# registry, skip (safe re-runs, partial rollouts); otherwise publish with
+# Packages publish in root package.json workspaces order — dependencies
+# first — and the first failure stops the release, so a dependent (e.g.
+# the CLI) is never published without its dependencies. For each
+# workspace package: if its exact version is already on the registry,
+# skip it (re-running skips what is already on the registry; safe
+# re-runs and partial rollouts); otherwise publish with provenance.
 # A partial publish is a broken release: a fresh install of the CLI can
 # resolve one workspace while its same-version dependencies are absent.
 # Fail the workflow so release automation cannot report a false green.
@@ -91,7 +95,11 @@ if [[ "$mode" == "check" ]]; then
   exit 0
 fi
 published=0; skipped=0; failed=0
-for dir in packages/*/; do
+# Root package.json lists the workspaces in dependency order; publish
+# them in exactly that order, never alphabetically.
+mapfile -t workspace_dirs < <(node -p "require('./package.json').workspaces.join('\\n')")
+for ws in "${workspace_dirs[@]}"; do
+  dir="${ws%/}/"
   name=$(node -p "require('./${dir}package.json').name")
   version=$(node -p "require('./${dir}package.json').version")
   if npm view "$name@$version" version >/dev/null 2>&1; then
@@ -104,7 +112,9 @@ for dir in packages/*/; do
     published=$((published + 1))
   else
     echo "::warning::$name@$version FAILED to publish — check its Trusted Publisher settings on npmjs.com"
+    echo "::error::stopping: $name@$version failed; packages after it in workspace order (which may depend on it) were not published"
     failed=$((failed + 1))
+    break
   fi
 done
 echo "publish summary: $published published, $skipped skipped, $failed failed"
