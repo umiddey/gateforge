@@ -343,4 +343,22 @@ describe('check --staged gates the exact staged candidate (CLI)', () => {
       expect(result.stdout).toContain('not approved by the committed base');
       expect(result.stdout).toContain('vendor/cache');
     }));
+
+  it('names the doctor command in the no-pin ENFORCEMENT_UNTRUSTED block', () =>
+    withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      // strictE2E binds the policy revision: with no pin
+      // provisioned the staged gate fails closed and must tell
+      // the owner where to read the value to pin.
+      const configPath = repo.path('.gateforge.yml');
+      repo.writeFiles({
+        '.gateforge.yml': `${readFileSync(configPath, 'utf8')}enforcement:\n  strictE2E: true\n`,
+      });
+      repo.stage();
+      const result = await runCli(repo, ['check', '--staged']);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('ENFORCEMENT_UNTRUSTED');
+      expect(result.stdout).toContain('no owner-approved policy digest is provisioned');
+      expect(result.stdout).toContain('gateforge enforcement doctor');
+    }));
 });

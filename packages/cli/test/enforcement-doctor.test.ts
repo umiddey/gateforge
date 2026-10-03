@@ -11,6 +11,8 @@ import { describe, expect, it } from 'vitest';
 import { withTempRepo } from '@gate-forge/core';
 import { installFixture, runCli } from './helpers.js';
 import { installCommitHook } from '../src/git-hooks.js';
+import { trustedPolicyDigestForConfig } from '../src/execution.js';
+import { loadConfigAt } from '../src/commands/common.js';
 
 /** Sanitized env for direct module calls. */
 function gitEnv(): NodeJS.ProcessEnv {
@@ -302,6 +304,50 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(hook.detail).toContain('installed and active');
       // Still honest: the hook alone is not managed protection.
       expect(checkById(report, 'managed-guarantee').detail).toContain('managed guarantees NOT active');
+    });
+  });
+
+  it('prints the FULL trusted policy digest plus the owner pin action when no pin is provisioned', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const digest = trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root));
+      expect(digest).toMatch(/^[0-9a-f]{64}$/);
+      const json = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        GATEFORGE_APPROVED_POLICY_DIGEST: undefined,
+      });
+      expect(json.code).toBe(0);
+      const policy = checkById(parseDoctor(json.stdout), 'trusted-binary-policy');
+      expect(policy.status).toBe('ok');
+      // The full 64-hex digest — never a prefix — in the JSON
+      // report, with the exact owner action for the absent pin.
+      expect(policy.detail).toContain(digest);
+      expect(policy.detail).toContain(
+        `owner: pin this revision with GATEFORGE_APPROVED_POLICY_DIGEST=${digest}`,
+      );
+      expect(policy.detail).toContain('GATEFORGE_TRUSTED_CONFIG outside the repo');
+      // The text surface carries the same full digest and action.
+      const text = await runCli(repo, ['enforcement', 'doctor'], {
+        GATEFORGE_APPROVED_POLICY_DIGEST: undefined,
+      });
+      expect(text.code).toBe(0);
+      expect(text.stdout).toContain(digest);
+      expect(text.stdout).toContain(
+        `owner: pin this revision with GATEFORGE_APPROVED_POLICY_DIGEST=${digest}`,
+      );
+    });
+  });
+
+  it('prints the full digest without a pin action once the provisioned pin matches', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const digest = trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root));
+      const json = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        GATEFORGE_APPROVED_POLICY_DIGEST: digest,
+      });
+      const policy = checkById(parseDoctor(json.stdout), 'trusted-binary-policy');
+      expect(policy.detail).toContain(digest);
+      expect(policy.detail).toContain('matches the candidate policy revision');
+      expect(policy.detail).not.toContain('owner: pin this revision');
     });
   });
 });

@@ -58,7 +58,12 @@ import { inspectCommitHook, isFrameworkManagedHookBody } from '../git-hooks.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { resolveStateDir } from '../state.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
-import { describeApprovedPolicyResolution, resolveApprovedPolicyDigest } from '../trusted-policy.js';
+import {
+  APPROVED_POLICY_DIGEST_ENV,
+  TRUSTED_CONFIG_ENV,
+  describeApprovedPolicyResolution,
+  resolveApprovedPolicyDigest,
+} from '../trusted-policy.js';
 import {
   engineIdentity,
   engineInstallProvenance,
@@ -1162,9 +1167,18 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
           ? ' — MISMATCHES the candidate policy revision (strict gates will block)'
           : ' — matches the candidate policy revision';
       }
+      // R1-13: the FULL 64-hex digest (never a prefix) — the owner
+      // copies it into the protected pin verbatim. An absent or
+      // mismatched pin gets the exact owner action line.
+      const pinMatches =
+        resolution.status === 'ok' && resolution.digest !== null && resolution.digest === digest;
+      const pinAction = pinMatches
+        ? ''
+        : `\nowner: pin this revision with ${APPROVED_POLICY_DIGEST_ENV}=${digest} ` +
+          `(protected env, CI variable, or ${TRUSTED_CONFIG_ENV} outside the repo)`;
       policyDetail =
-        `trusted policy digest present (${digest.slice(0, 12)}…); gateforge binary: ${binaryPath} (${binaryOrigin}); ` +
-        `${describeApprovedPolicyResolution(resolution)}${matchNote}`;
+        `trusted policy digest present (${digest}); gateforge binary: ${binaryPath} (${binaryOrigin}); ` +
+        `${describeApprovedPolicyResolution(resolution)}${matchNote}${pinAction}`;
       policyStatus = 'ok';
     } catch (error) {
       policyDetail = `trusted policy digest computation failed: ${(error as Error).message.split('\n')[0] ?? 'unknown'}`;

@@ -256,7 +256,8 @@ export function assertApprovedPolicy(candidateDigest: string, input: ApprovedPol
       cause: 'ENFORCEMENT_UNTRUSTED',
       detail:
         'no owner-approved policy digest is provisioned, so strict enforcement cannot verify who owns the ' +
-        "candidate's policy revision — a weakened candidate could otherwise approve its own weaker checks (fail closed)",
+        "candidate's policy revision — a weakened candidate could otherwise approve its own weaker checks (fail closed)" +
+        ' — read the value with `gateforge enforcement doctor`',
       nextAction: PROVISION_PIN_NEXT_ACTION,
     };
   }
