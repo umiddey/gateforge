@@ -65,7 +65,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking` and route-specific `guidance` when relevant). For an endpoint with no plane, ask which boundary owns its data and show the owner-reviewed choices; internality remains owner-only. Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. `classify plane` previews or explicitly appends an owner-reviewed endpoint plane rule to the existing `.gateforge/planes.json`; snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
-| `gateforge explain <resourceId> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. | 0/1/2 |
+| `gateforge explain <resourceId\|path> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. A repo-relative PATH is also a target: when no resource matches it, the command prints what the file is and what governs it (Gateforge policy input, declared gate input, owner-declared documentation folder, known source of a resource, or an unclassified change) with the steps that attribute it — this is the answer an unmapped `CHANGE_UNMAPPED` file needs. An unknown target stays unknown (exit 1). | 0/1/2 |
 | `gateforge tests discover [--json] [--pytest]` | Inventory existing tests into the derived run-state catalog: static analysis reconciled with native Playwright enumeration (`--list`). Unresolved wrappers, parse errors, and inventory gaps are DATA (never an empty catalog — failed native enumeration is exit 2). `--pytest` additionally collects the configured diagnostic suites' node ids (`--collect-only`). Playwright enumeration runs ONE config (a repo-root config wins; otherwise the alphabetically first config one directory deep), and when the repo holds more than one the runner line names every config, the one used, why, and the ones NOT inventoried. `inventoryComplete=false` means a reconciliation gap (an enumerated-vs-static mismatch, an unresolved case, or a not-inventoried extra config), not a partial success. | 0/2 |
 | `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`). When Playwright reports load errors and enumerates no tests, report one `TEST_INVENTORY_INCOMPLETE` with the error count and first error instead of stale-mapping fan-out; the action is to install the missing dependency and rerun Gateforge. An inspection surface, NOT a gate: exit 0 even with blocking problems. | 0/2 |
 | `gateforge tests mark --test <key> --kind <kind> [--category <c>]... --obligation <id>... --reason "<text>"` | Declare an existing test in `.gateforge/test-map.yml` (see the test-reuse workflow below). Validates against the CURRENT catalog and obligation registry, writes atomically and idempotently, prints the exact diff. Never edits test files, never adds waivers, refuses contradictions. | 0/2 |
@@ -474,6 +474,26 @@ check:
   sidecar cannot authorize weaker checks: gates evaluate under the trusted
   policy digest, so a weakened candidate fails closed until a separate
   trusted update is accepted.
+
+**Gateforge's own files are policy inputs.** The config, the policy,
+classification, behavior and runtime documents, the exclusion declarations,
+the mapping sidecar, the adapter/waiver/baseline/quarantine records, the
+generated gate wiring (hook script, CI job templates, `GATEFORGE.md`, the
+overlay-proof README, the engine reference) and your CI/pre-commit config
+*while they still carry Gateforge's managed block* are policy inputs, not
+product files: a change to one of them is never an unmapped `CHANGE_UNMAPPED`
+change, and a change set that contains only those files cannot change product
+behavior — so it does not drag your adopted E2E obligations into a strict
+re-grade, and the setup/adopt commit passes `check --changed` without
+`--no-verify`. Their integrity is governed exactly as before: they are inside
+the approved policy digest, so a change to them needs your pin to be
+re-approved, and a mismatching pin still blocks. Deleting the gate job from
+your CI config, or
+the entry from `.pre-commit-config.yaml`, is not a policy input — it goes back
+to blocking. Everything Gateforge does not own (your source, tests, runner
+config, manifests, ignore controls, documentation you did not exclude) keeps
+today's treatment, including the scope expansion that makes a policy change
+re-check the whole repository.
 
 **Receipts (the strict saved-state gate).** `check --require-e2e` accepts
 only an authenticated gate receipt sealed by a COMPLETE supervised run for

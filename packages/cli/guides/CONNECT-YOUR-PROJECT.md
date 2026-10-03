@@ -62,6 +62,20 @@ policy, the `GATEFORGE.md` agent loop, and the adapter/waiver skeleton,
 then wires the pre-commit hook and CI. Re-run it any time; it is
 idempotent and never overwrites a file you edited.
 
+**Your first commit.** Everything `init` and `adopt` write is a Gateforge
+policy input, not product code: the config and policy documents, the
+exclusion declarations, the mapping sidecar, the adapter/waiver/baseline
+records, the generated hook and CI templates, `GATEFORGE.md`, and your CI
+and pre-commit config *while they still carry Gateforge's block*. Committing
+them does not count as an untested behavior change, so the setup commit
+passes `check --changed` in strict mode without `--no-verify`, and it does
+not re-open the E2E debt you adopted. Those files are inside the approved
+policy digest, so approve the digest `init` prints through the protected
+`GATEFORGE_APPROVED_POLICY_DIGEST` setting before you rely on that in a
+strict repository — an unapproved policy revision blocks, exactly as any
+other change to your gate does. Removing the gate job from your CI config is
+not a policy input: it goes back to blocking.
+
 Exit code 2 means a configuration problem, not a code problem: the
 message names the file and the key.
 
