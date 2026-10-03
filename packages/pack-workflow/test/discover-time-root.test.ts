@@ -6,8 +6,12 @@
  * startup), and `gateforge check --staged` moves the process cwd to the
  * staged candidate checkout before discovery runs. A detector that captured
  * `process.cwd()` at factory time would resolve repo-relative scan paths
- * against the loader's cwd: the staged machines would not be read at all
- * (every path surfaces as `WORKFLOW_READ_FAILED`).
+ * against the loader's cwd — so the staged machines would never be read.
+ *
+ * Both temp projects declare the SAME module path with DIFFERENT machine
+ * names, and the machine name is part of the emitted resource id: a
+ * factory-time root reports the other project's machine. On the factory-
+ * time-capturing detector the first case FAILS.
  *
  * An explicit `cwd` still wins.
  */
@@ -19,7 +23,7 @@ import { createWorkflowDetector, WORKFLOW_CONTRACT_KIND } from '../src/index.js'
 
 const ORIGINAL_CWD = process.cwd();
 
-/** A temp project holding one XState machine named `machineName`. */
+/** A temp project whose `src/contract.ts` declares `machineName`. */
 function makeProject(name: string, machineName: string): string {
   const root = mkdtempSync(join(tmpdir(), `gateforge-workflow-root-${name}-`));
   mkdirSync(join(root, 'src'), { recursive: true });
@@ -44,25 +48,27 @@ function makeProject(name: string, machineName: string): string {
   return root;
 }
 
-const sourcesOf = (outcome: { resources: readonly unknown[] }): string[] =>
-  (outcome.resources as Array<{ kind: string; source: string }>)
+/** Ids of the workflow contracts the outcome carries, joined for matching. */
+const contractIds = (outcome: { resources: readonly unknown[] }): string =>
+  (outcome.resources as Array<{ kind: string; id: string }>)
     .filter((resource) => resource.kind === WORKFLOW_CONTRACT_KIND)
-    .map((resource) => resource.source)
-    .sort();
+    .map((resource) => resource.id)
+    .sort()
+    .join(' ');
 
 describe('createWorkflowDetector resolves the repo root at discover time', () => {
   it('reads the repository in force at the discover call, not at factory time', async () => {
     const factoryCwd = makeProject('factory', 'factoryMachine');
-    const discoverCwd = makeProject('discover', 'discoverMachine');
+    const discoverCwd = makeProject('discover', 'stagedMachine');
     try {
       process.chdir(factoryCwd);
       const detector = createWorkflowDetector();
       process.chdir(discoverCwd);
       const outcome = await detector.discover(['src/contract.ts']);
-      // A factory-time root would have resolved `src/contract.ts` under
-      // `factoryCwd` — the staged candidate's machine would never be read.
+      // A factory-time root would have reported `factoryMachine` instead.
+      expect(contractIds(outcome)).toContain('stagedmachine');
+      expect(contractIds(outcome)).not.toContain('factorymachine');
       expect(outcome.findings).toEqual([]);
-      expect(sourcesOf(outcome)).toEqual(['src/contract.ts']);
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(factoryCwd, { recursive: true, force: true });
@@ -77,8 +83,9 @@ describe('createWorkflowDetector resolves the repo root at discover time', () =>
       const detector = createWorkflowDetector({ cwd: pinned });
       process.chdir(discoverCwd);
       const outcome = await detector.discover(['src/contract.ts']);
+      expect(contractIds(outcome)).toContain('pinnedmachine');
+      expect(contractIds(outcome)).not.toContain('elswheremachine');
       expect(outcome.findings).toEqual([]);
-      expect(sourcesOf(outcome)).toEqual(['src/contract.ts']);
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(pinned, { recursive: true, force: true });
