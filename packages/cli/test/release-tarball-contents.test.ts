@@ -143,6 +143,7 @@ function stubbedWorkspace(packages: Array<{ dir: string; files: string[] }>): {
  * Args:
  *   root: workspace root from `stubbedWorkspace`.
  *   logPath: file the npm stub records its invocations in.
+ *   args: arguments for the release script; none means publish.
  *
  * Returns:
  *   The exit status, the combined output, and the recorded npm invocations.
@@ -150,8 +151,9 @@ function stubbedWorkspace(packages: Array<{ dir: string; files: string[] }>): {
 function runReleaseScript(
   root: string,
   logPath: string,
+  args: string[] = [],
 ): { status: number | null; output: string; invocations: string[] } {
-  const run = spawnSync('bash', [RELEASE_SCRIPT], {
+  const run = spawnSync('bash', [RELEASE_SCRIPT, ...args], {
     cwd: root,
     encoding: 'utf8',
     env: {
@@ -238,5 +240,66 @@ describe('release publisher bytecode preflight', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('release publisher check mode', () => {
+  it('verifies the packed tarballs and publishes nothing', () => {
+    const { root, logPath } = stubbedWorkspace([
+      { dir: 'clean-pkg', files: ['package.json', 'python/detector/scan.py'] },
+    ]);
+    try {
+      const result = runReleaseScript(root, logPath, ['check']);
+      expect(result.status).toBe(0);
+      expect(result.output).toContain('nothing was published');
+      expect(result.invocations).toEqual(['pack --dry-run --json --workspaces']);
+      expect(result.invocations.filter((line) => line.startsWith('publish'))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a dirty list exactly like the publish path', () => {
+    const { root, logPath } = stubbedWorkspace([
+      { dir: 'dirty-pkg', files: ['package.json', 'python/detector/__pycache__/scan.cpython-312.pyc'] },
+    ]);
+    try {
+      const result = runReleaseScript(root, logPath, ['check']);
+      expect(result.status).not.toBe(0);
+      expect(result.output).toContain('Python bytecode would ship');
+      expect(result.invocations.filter((line) => line.startsWith('publish'))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an unknown mode with its usage instead of publishing', () => {
+    const { root, logPath } = stubbedWorkspace([{ dir: 'clean-pkg', files: ['package.json'] }]);
+    try {
+      const result = runReleaseScript(root, logPath, ['publish-all']);
+      expect(result.status).toBe(2);
+      expect(result.output).toContain('usage: bash scripts/release-publish.sh [publish|check]');
+      expect(result.invocations).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('root release scripts', () => {
+  // The repository's own manifest: a named, one-line shape is enough to read
+  // two script strings out of it.
+  const rootManifest = JSON.parse(
+    readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'),
+  ) as { scripts?: Record<string, string> };
+  const rootScripts = rootManifest.scripts ?? {};
+
+  it('publish:all goes through the release publisher, so the bytecode refusal cannot be bypassed', () => {
+    expect(rootScripts['publish:all']).toContain('scripts/release-publish.sh');
+    expect(rootScripts['publish:all']).not.toMatch(/npm publish/);
+  });
+
+  it('pack:check runs the same bytecode check as the publish path', () => {
+    expect(rootScripts['pack:check']).toContain('scripts/release-publish.sh check');
   });
 });
