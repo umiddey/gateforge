@@ -262,6 +262,69 @@ describe('input snapshot (§11.2)', () => {
     });
   });
 
+  it('accepts data and document formats inside a declared documentation folder', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const config = fixtureConfig(repo);
+      repo.writeFiles({
+        'docs/readme.md': '# Guide\n',
+        'docs/schema.json': '{"type":"object"}\n',
+        'docs/values.yaml': 'key: value\n',
+        'docs/values.yml': 'key: value\n',
+        'docs/rows.csv': 'name,role\n',
+        'docs/page.html': '<!doctype html>\n<title>Guide</title>\n',
+        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+      });
+      const exclusions = loadDocsExclusions(repo.root, config);
+      expect(exclusions).toEqual(['docs']);
+
+      // Outside a declared folder `.html` keeps full evidence identity.
+      const stateDir = resolveStateDir(repo.root);
+      repo.stage();
+      repo.commit('documentation folder carrying data formats');
+      const before = computeInputSnapshot({ cwd: repo.root, config, stateDir, docsExclusions: exclusions }).inputDigest;
+      repo.writeFiles({ 'assets/page.html': '<!doctype html>\n<title>Product</title>\n' });
+      repo.stage(['assets/page.html']);
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir, docsExclusions: exclusions }).inputDigest).not.toBe(
+        before,
+      );
+    });
+  });
+
+  it('still refuses manifests, execution configs, lockfiles and source in a declared documentation folder', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const config = fixtureConfig(repo);
+      repo.writeFiles({
+        'docs/readme.md': '# Guide\n',
+        'docs/values.yaml': 'key: value\n',
+        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+      });
+      expect(loadDocsExclusions(repo.root, config)).toEqual(['docs']);
+
+      const refused = [
+        'package.json',
+        'tsconfig.json',
+        '.gitlab-ci.yml',
+        '.pre-commit-config.yaml',
+        'pnpm-workspace.yaml',
+        'composer.json',
+        'vite.config.json',
+        'pnpm-lock.yaml',
+        'yarn.lock',
+        'run.js',
+      ];
+      for (const name of refused) {
+        repo.writeFiles({ [`docs/${name}`]: '{}\n' });
+        expect(() => loadDocsExclusions(repo.root, config)).toThrow(
+          `cannot exclude executable or gate input 'docs/${name}'`,
+        );
+        unlinkSync(join(repo.root, 'docs', name));
+      }
+      expect(loadDocsExclusions(repo.root, config)).toEqual(['docs']);
+    });
+  });
+
   it('keeps Markdown referenced by test configuration in the evidence digest', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

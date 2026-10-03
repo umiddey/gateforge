@@ -515,10 +515,17 @@ file, a later edit can make old evidence look valid without running the tests
 again. Reports show the approved folders, pin identity, and this reduced
 guarantee. Gateforge rejects exclusions that contain configured scan inputs,
 source files, gate or trust metadata, manifests, lockfiles, or symlinks.
-Every file must also use a supported document or raster-image format. MDX,
-WASM, SVG, HTML, and unknown formats fail closed. This format allowlist does
-not prove that an allowed file cannot affect application or test behavior;
-the project assertion and its reduced guarantee still apply.
+Every file must also use a supported document, data, or raster-image format.
+Besides Markdown, reStructuredText, plain text, PDF, and static raster images,
+an excluded folder may hold `.json`, `.yaml`, `.yml`, `.csv`, and `.html`
+files. Refusal is by name first, so `package.json`, `tsconfig.json`,
+`.pre-commit-config.yaml`, `.gitlab-ci.yml`, `pnpm-workspace.yaml`,
+`composer.json`, any `*.config.*` file, and lockfiles stay refused inside an
+excluded folder. MDX, WASM, SVG, and unknown formats fail closed. HTML is
+accepted only as content of a declared folder; elsewhere it keeps full
+evidence identity. This format allowlist does not prove that an allowed file
+cannot affect application or test behavior; the project assertion and its
+reduced guarantee still apply.
 
 **Owner-declared Python bytecode exclusions (explicit trust mode).** By
 default, Python bytecode remains part of candidate and input identity. To
