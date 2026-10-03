@@ -13,10 +13,12 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { withTempRepo } from '@gate-forge/core';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
+import { configYml } from './helpers.js';
 import type { DetectorOutput } from '@gate-forge/core';
 import type { HttpContractFact, HttpMethod } from '@gate-forge/http-contract';
 import {
+  collectRoutePlaneFacts,
   proposeRouteFolderPlanes,
   routePlaneFactsOf,
   type RoutePlaneFact,
@@ -103,6 +105,55 @@ function model(
     findings: [],
     classificationSignals: [],
   };
+}
+
+/**
+ * A fixture plugin that emits ONE server-route contract fact per
+ * scanned path, so the assertion is about which paths the scan handed
+ * the detectors — nothing else.
+ */
+const ROUTE_FIXTURE_PLUGIN = `export default {
+  discover(paths) {
+    const resources = [];
+    const scannedPaths = [];
+    for (const rel of paths) {
+      scannedPaths.push(rel);
+      const location = { file: rel, line: 1, col: 0 };
+      resources.push({
+        schemaVersion: 1,
+        id: 'http.contract:' + rel,
+        kind: 'http.contract',
+        source: rel,
+        location,
+        detectorVersion: '1.0.0',
+        attributes: {
+          role: 'server-route',
+          method: 'GET',
+          normalizedPath: '/api/' + rel.replace(/\\.py$/, '').split('/').join('/'),
+          rawPath: '/api/' + rel.replace(/\\.py$/, '').split('/').join('/'),
+          framework: 'fastapi',
+          handlerSymbol: 'list_orders',
+        },
+      });
+    }
+    return { resources, unresolved: [], findings: [], classificationSignals: [], scannedPaths };
+  },
+};
+`;
+
+/** A repository whose routes live in `app/api` and in a generated tree. */
+async function installRouteRepo(repo: TempRepo, gitignore: string): Promise<void> {
+  repo.writeFiles({
+    '.gitignore': gitignore,
+    '.gateforge.yml': configYml({
+      include: "['**/*.py']",
+      plugins:
+        "  - id: route.fixture\n    version: '1.0.0'\n    transport: in-process\n    module: ./routes.mjs",
+    }),
+    'routes.mjs': ROUTE_FIXTURE_PLUGIN,
+    'app/api/orders.py': 'def list_orders():\n    return []\n',
+    'build/api/orders.py': 'def list_orders():\n    return []\n',
+  });
 }
 
 /** A fact as the collector would emit it. */
@@ -240,6 +291,33 @@ describe('route-folder plane proposals (problem 13)', () => {
           hintPlane: null,
           linkedModels: [],
         },
+      ]);
+    });
+  });
+});
+
+describe('route-plane proposals scan exactly what the pipeline scans (D5)', () => {
+  it('a route file in a gitignored untracked folder produces no proposal', async () => {
+    await withTempRepo({}, async (repo) => {
+      await installRouteRepo(repo, 'build/\n');
+      const facts = await collectRoutePlaneFacts(repo.root);
+      // Before the fix this list named build/api/orders.py and the
+      // proposal named a folder no owner could act on.
+      expect(facts.map((entry) => entry.source)).toEqual(['app/api/orders.py']);
+      expect(proposeRouteFolderPlanes(facts).map((proposal) => proposal.folder)).toEqual([
+        'app/api',
+      ]);
+
+      // Same repository, one rule removed: the file is scanned again.
+      await installRouteRepo(repo, '');
+      const scanned = await collectRoutePlaneFacts(repo.root);
+      expect(scanned.map((entry) => entry.source)).toEqual([
+        'app/api/orders.py',
+        'build/api/orders.py',
+      ]);
+      expect(proposeRouteFolderPlanes(scanned).map((proposal) => proposal.folder)).toEqual([
+        'app/api',
+        'build/api',
       ]);
     });
   });

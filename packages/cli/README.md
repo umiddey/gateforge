@@ -4,12 +4,15 @@ The gateforge command-line interface: initialize a project, discover
 resources and classification signals, inspect automatic decisions, reuse a
 repository's existing tests, evaluate obligations, run the supervised E2E
 gate, enforce the exact staged candidate, and maintain baselines.
+**0.9.0 vs. published 0.8.0:** `check --staged` reads the staged bytes, the scan skips untracked gitignored files (receipt identity unchanged), Gateforge's own setup files are policy inputs so the setup commit passes with the policy digest pinned, test-directory models stay out of the graph, per-tenant singletons are tagged only on an exact configured scope, `init` asks one plane question per route folder, `classify plane` takes a folder, `--docs-exclude-file`, `init --behavior`, `explain <path>`, ranked and capped `tests suggest`, `FASTAPI_ROUTER_UNMOUNTED` / `HTTP_METHOD_DYNAMIC` / folded FastAPI prefixes, and no `.pyc` in a published tarball. Upgrading: [UPGRADE-0.8-to-0.9](guides/UPGRADE-0.8-to-0.9.md).
+
 **0.8.0 vs. published 0.7.1:** one-command local proof (`gateforge run`), witnessed single tests (`--test`), test-only re-seal, owner-chosen strictness and quarantine, a strict run preflight in the doctor, CI progress stream and witnessed CI templates, adapter kit and scaffold, an engine-owned queue observer for `task` cases, timing chaos and twin path coverage. Upgrading: [UPGRADE-0.7-to-0.8](guides/UPGRADE-0.7-to-0.8.md).
 
 ## Start here
 
 - [Quickstart](guides/QUICKSTART.md)
 - [Test environment](guides/TEST-ENVIRONMENT.md)
+- [Upgrade from 0.8 to 0.9](guides/UPGRADE-0.8-to-0.9.md)
 - [Upgrade from 0.7 to 0.8](guides/UPGRADE-0.7-to-0.8.md)
 - [Upgrade from 0.6 to 0.7](guides/UPGRADE-0.6-to-0.7.md)
 - [Runners other than Playwright](guides/RUNNER-NEUTRAL-EVIDENCE.md)

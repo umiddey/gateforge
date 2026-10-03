@@ -28,8 +28,9 @@
 import { compareStrings, loadConfig, type DetectorOutput } from '@gate-forge/core';
 import { isTestSourcePath, type SqlalchemyPlane } from '@gate-forge/pack-sqlalchemy';
 import { compileEndpointContribution } from './endpoint-compiler.js';
-import { expandIncludePaths } from './glob.js';
+import { expandScanPaths } from './glob.js';
 import { runPlugins } from './plugins.js';
+import { gitIgnoredPaths } from './git-ignored.js';
 import { HTTP_ENDPOINT_RESOURCE_KIND } from '@gate-forge/core';
 
 /** The plane values a fact can carry (never inferred, only read). */
@@ -103,10 +104,23 @@ function agreedBusinessPlane(
  *   Error: propagates whatever discovery raises (unreadable config, a
  *     failing plugin, a malformed planes document). The caller surfaces
  *     it — a proposal pass must never look like "nothing to ask".
+ *
+ * The DETECTOR-INPUT scope is the SCAN scope (owner decision D5), not
+ * the identity walk: a gitignored, untracked tree (a built report
+ * bundle, a local cache) holds no route the owner would ever be asked
+ * about, and every other detector-input caller in `init` and in the
+ * pipeline enumerates the same list. Outside a git work tree the
+ * scope reports `known: false` and skips nothing, so behaviour there
+ * is unchanged.
  */
 export async function collectRoutePlaneFacts(cwd: string): Promise<RoutePlaneFact[]> {
   const config = loadConfig(`${cwd}/.gateforge.yml`);
-  const paths = expandIncludePaths(config.project.paths.include, config.project.paths.exclude, cwd);
+  const paths = expandScanPaths(
+    config.project.paths.include,
+    config.project.paths.exclude,
+    cwd,
+    gitIgnoredPaths(cwd),
+  );
   const { contributions } = await runPlugins(config.plugins, paths, cwd);
   return routePlaneFactsOf(contributions, cwd);
 }
