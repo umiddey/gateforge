@@ -37,6 +37,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { normalizeChangedFiles, type GateforgeConfig } from '@gate-forge/core';
+import { GATEFORGE_TEST_MAP_PATH } from './gateforge-owned.js';
 import {
   GIT_SCOPE_CONTROL_BASENAMES,
   MANIFEST_NAMES,
@@ -59,6 +60,20 @@ export interface ScopeDecision {
    * non-strict mode (the historical contract is unchanged there).
    */
   unmappedFiles: string[];
+  /**
+   * 0.9.0 D2: the Gateforge-owned policy inputs in the changed set (see
+   * `gateforge-owned.ts`). They are reported here for visibility and are
+   * never part of `unmappedFiles`.
+   */
+  policyInputs: string[];
+  /**
+   * 0.9.0 D2: true when the WHOLE changed set is Gateforge-owned policy
+   * input. Such a change cannot alter product behavior, so the caller keeps
+   * the adopted baseline's forgiveness instead of dragging adopted E2E
+   * obligations into a strict re-grade. False as soon as one product, test,
+   * runner-config, manifest or ignore-control file is in the set.
+   */
+  policyInputsOnly: boolean;
 }
 
 /**
@@ -155,6 +170,12 @@ export function computeEvaluationScope(input: {
   mappingSidecar?: boolean;
   knownSourceFiles?: readonly string[];
   strictE2E?: boolean;
+  /**
+   * 0.9.0 D2: the changed paths already classified as Gateforge-owned policy
+   * inputs by the caller (it owns the candidate checkout, this module stays
+   * pure). They are never unmapped and they never expand the scope.
+   */
+  policyInputs?: readonly string[];
 }): ScopeDecision {
   const changed = normalizeChangedFiles([...input.changedFiles]);
   const pluginModules: string[] = [];
@@ -187,6 +208,10 @@ export function computeEvaluationScope(input: {
   const strictE2E = input.strictE2E === true;
   const reasons = new Set<string>();
   const unmappedFiles = new Set<string>();
+  // 0.9.0 D2: the Gateforge-owned policy inputs of this change set, classified
+  // by the caller (it owns the candidate checkout; this module stays pure).
+  const policyInputs = new Set((input.policyInputs ?? []).map(normalizeRepoPath));
+  const policyInputFiles = new Set<string>();
   // Docs-only exemption candidates: `docs/**.md` files. The exemption
   // applies ONLY when the whole changed set is such files (checked after
   // the loop) — a mixed docs+code change is never docs-only.
@@ -194,6 +219,7 @@ export function computeEvaluationScope(input: {
   const isDocsOnly = (file: string): boolean =>
     file.startsWith('docs/') && file.endsWith('.md');
   for (const file of changed) {
+    if (policyInputs.has(file)) policyInputFiles.add(file);
     const reason = matchGateDefiningInput(file, gate);
     if (reason !== null) {
       reasons.add(reason);
@@ -220,6 +246,14 @@ export function computeEvaluationScope(input: {
       docsOnlyFiles.add(file);
       continue;
     }
+    // 0.9.0 D2: a Gateforge-owned policy input (config, policy documents,
+    // adapter/waiver/baseline records, generated gate wiring, the managed
+    // block of the owner's CI/pre-commit config) is governed by the
+    // owner-approved policy digest, never by a product obligation — so it is
+    // neither unmapped nor a scope-expansion reason. Placed after the
+    // test-file / test-infra / mapping-sidecar checks, which keep expanding
+    // for the files they own.
+    if (policyInputs.has(file)) continue;
     // Unclassified change: nothing can attribute it. Strict E2E mode
     // treats it conservatively (full scope + CHANGE_UNMAPPED); outside
     // strict mode the historical narrowed contract is unchanged.
@@ -238,14 +272,19 @@ export function computeEvaluationScope(input: {
     }
   }
   const expandedBecause = [...reasons].sort();
-  if (expandedBecause.length > 0) {
-    return { mode: 'all', changedFiles: changed, expandedBecause, unmappedFiles: [...unmappedFiles].sort() };
-  }
-  return { mode: 'changed', changedFiles: changed, expandedBecause: [], unmappedFiles: [...unmappedFiles].sort() };
+  const decision = {
+    expandedBecause,
+    unmappedFiles: [...unmappedFiles].sort(),
+    policyInputs: [...policyInputFiles].sort(),
+    policyInputsOnly: changed.length > 0 && policyInputFiles.size === changed.length,
+  };
+  return expandedBecause.length > 0
+    ? { mode: 'all', changedFiles: changed, ...decision }
+    : { mode: 'changed', changedFiles: changed, ...decision };
 }
 
 /** The tracked mapping sidecar path (scope-expansion trigger). */
-const TEST_MAP_SIDECAR = '.gateforge/test-map.yml';
+const TEST_MAP_SIDECAR = GATEFORGE_TEST_MAP_PATH;
 
 /**
  * Runs one git command for the mismatch check, returning stdout lines.

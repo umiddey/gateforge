@@ -175,6 +175,7 @@ import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
+import { gateforgeOwnedInputs } from '../gateforge-owned.js';
 import { obligationFingerprint, evaluateRun, scopeBlocking } from '../evaluate.js';
 import { auditAdapters } from '../adapter-audit.js';
 import { singletonPerTenantAdvisories } from '../singleton-guidance.js';
@@ -1218,7 +1219,14 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // entry (E15) unless a resolved mapping covers it. The provider
   // identity is preserved throughout — an expanded run never stamps
   // `all-files` as the diff provider.
-  let scopeDecision: ScopeDecision = { mode: 'all', changedFiles: [], expandedBecause: [], unmappedFiles: [] };
+  let scopeDecision: ScopeDecision = {
+    mode: 'all',
+    changedFiles: [],
+    expandedBecause: [],
+    unmappedFiles: [],
+    policyInputs: [],
+    policyInputsOnly: false,
+  };
   let mismatchBlocking: BlockingEntry[] = [];
   let scopeDiscoveryTimings: DiscoveryTimings | undefined;
   if (scopeAwareRun) {
@@ -1254,6 +1262,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         ),
       ),
     ];
+    // 0.9.0 D2: the Gateforge-owned policy inputs of this change set are
+    // classified here (check owns the candidate checkout; `scope.ts` stays
+    // pure) so they never become unmapped product changes and their change
+    // set can be recognized as product-behavior-neutral.
+    const ownedInputs = gateforgeOwnedInputs(io.cwd, pipeline.changedFiles, config);
     scopeDecision = computeEvaluationScope({
       config,
       changedFiles: pipeline.changedFiles,
@@ -1262,6 +1275,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       mappingSidecar: sidecar !== null,
       knownSourceFiles,
       strictE2E: config.enforcement?.strictE2E === true,
+      policyInputs: [...ownedInputs.keys()],
     });
     // CHANGE_UNMAPPED (plan §5.4, E15): strict mode blocks unclassified
     // changes unless a resolved mapping covers the file (journey
@@ -1280,7 +1294,15 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           'stay visible and blocking until mapped (strict E2E mode)',
         location: { file, line: 1, col: 0 },
         cause: 'CHANGE_UNMAPPED',
-        nextAction: CAUSE_NEXT_ACTIONS.CHANGE_UNMAPPED,
+        // 0.9.0 problem 26: the remediation names the step that actually
+        // attributes the file. `gateforge explain <file>` prints what the file
+        // is and what governs it (a discovered resource, a gate input, or an
+        // unclassified change) so the owner can map, declare or detect it.
+        nextAction:
+          `Attributing '${file}' starts with \`gateforge explain ${file}\`, which prints what the file is ` +
+          'and what governs it: map the detected resource, declare documentation folders with ' +
+          '`gateforge init --docs-exclude <folders>`, or add the detection that owns the file. ' +
+          'Never weaken the policy.',
       }));
     mismatchBlocking = [...mismatchBlocking, ...unmappedBlocking];
     // The local-staged provider lists index changes, but discovery reads
@@ -1299,6 +1321,8 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           changedFiles: scopeDecision.changedFiles,
           expandedBecause: scopeDecision.expandedBecause,
           unmappedFiles: scopeDecision.unmappedFiles,
+          policyInputs: scopeDecision.policyInputs,
+          policyInputsOnly: scopeDecision.policyInputsOnly,
         };
         mismatchBlocking = [
           ...mismatchBlocking,
@@ -1318,6 +1342,30 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       }
     }
   }
+
+  // 0.9.0 D2: the adopted baseline is a recorded, shrink-only statement of
+  // pre-existing debt, not an owner risk acceptance, so it survives the
+  // strict-E2E re-grade while a change set is provably product-behavior-
+  // neutral: Gateforge-owned policy inputs only (the scope for those files is
+  // unchanged — they keep expanding as gate-defining inputs exactly as
+  // today). The forgiveness is granted only when the owner has pinned the
+  // policy revision that governs those files: a mismatching pin still blocks
+  // on its own, and with no pin today's reporting stays (adopted debt is
+  // re-graded as blocking). An owner waiver is never forgiveness here.
+  const adoptedBaselineSurvivesStrictE2E =
+    diffScoped &&
+    scopeDecision.policyInputsOnly &&
+    evaluateApprovedPolicy(
+      docsApprovalResolution ??
+        resolveApprovedPolicyDigest({
+          flag: options.approvedPolicyDigest,
+          env: io.env,
+          candidateCwd: io.cwd,
+          candidateConfig: config,
+        }),
+      docsApprovalDigest ?? trustedPolicyDigestForConfig(io.cwd, config),
+      config.enforcement?.strictE2E === true || hasOwnerExclusions,
+    ).status === 'enforced';
 
   // Static annotations are compared with generated sidecar entries. The
   // advisory is deliberately separate from blockers for this warning-only
@@ -1456,6 +1504,8 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
     ...(carriedEvidence === null ? {} : { carriedEvidence }),
     baseline: adoptedBaseline,
+    // 0.9.0 D2: see `adoptedBaselineSurvivesStrictE2E` above.
+    adoptedBaselineSurvivesStrictE2E,
     evidenceContext: {
       expectedInputDigest: expectedDigest,
       snapshotUnavailable,

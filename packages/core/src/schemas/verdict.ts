@@ -124,7 +124,10 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   RUN_INCOMPLETE: 'Run or repair the selected suite',
   EVIDENCE_STALE: 'Rerun for the exact candidate',
   CHANGE_UNMAPPED:
-    'Map detection or add an overlay test for the changed resource. Do not weaken policy.',
+    'Attribute the change with `gateforge explain <file>` (it prints what the file is and what ' +
+    'governs it): map the detected resource, declare documentation folders with ' +
+    '`gateforge init --docs-exclude <folders>`, or add the detection that owns the file. ' +
+    'Do not weaken policy.',
   EVIDENCE_SCOPE_INCOMPLETE:
     'Map a test to the uncovered obligation (`gateforge tests mark`) or run full scope ' +
     '(`test-gates --changed` without `--scope changed`)',
