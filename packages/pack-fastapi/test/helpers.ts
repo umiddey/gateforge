@@ -26,6 +26,7 @@ export const ALL_FIXTURES = [
   'simple/routers.py',
   'simple/standalone.py',
   'simple/computed.py',
+  'simple/computed_expression_prefix.py',
   'simple/broken.py',
   'unsupported.py',
   'app/__init__.py',

@@ -398,6 +398,28 @@ function unwrapExpression(node: ts.Expression): ts.Expression {
   }
 }
 
+/**
+ * The node ITSELF with its own wrapping peeled: parentheses, `as T`,
+ * `!`. {@link unwrapExpression} walks the other way (from an inner node
+ * out to the wrapper around it), which is what a value-table lookup
+ * needs; the concise arrow body `=> ({ ... })` IS that wrapper, so the
+ * request-options model has to look through it.
+ */
+function unwrapOwnExpression(node: ts.Expression): ts.Expression {
+  let current = node;
+  for (;;) {
+    if (ts.isParenthesizedExpression(current)) {
+      current = current.expression;
+      continue;
+    }
+    if (ts.isAsExpression(current) || ts.isNonNullExpression(current)) {
+      current = current.expression;
+      continue;
+    }
+    return current;
+  }
+}
+
 /** One bound name and what it holds: the response envelope or the payload. */
 interface ReadHolder {
   name: string;
@@ -780,6 +802,39 @@ const VERB_METHODS: ReadonlyMap<string, HttpMethod> = new Map([
   ['options', 'OPTIONS'],
 ]);
 
+/**
+ * What a request-options expression provably says about the verb.
+ *
+ * `fetch(url, options)` sends a GET only when the options carry no
+ * `method`. Deciding that by "the second argument is not an inline
+ * object literal" silently invented a GET for every call whose options
+ * are built elsewhere — `fetch(PATH, withDeadline({ method: 'POST' }))`
+ * became `GET /path`, a route that does not exist, reported as a
+ * frontend call to a missing backend route. The three outcomes below are
+ * the only ones this bounded model may answer with:
+ *
+ * - `proven`   — one concrete verb is provable.
+ * - `absent`   — the options provably carry no `method` member, so the
+ *   platform default (GET) really is what the call sends.
+ * - `unproven` — anything else. The call site becomes a typed
+ *   `HTTP_METHOD_DYNAMIC` entry and emits NO call fact.
+ */
+type OptionsMethod =
+  | { kind: 'proven'; method: HttpMethod }
+  | { kind: 'absent' }
+  | { kind: 'unproven' };
+
+const ABSENT_OPTIONS: OptionsMethod = { kind: 'absent' };
+const UNPROVEN_OPTIONS: OptionsMethod = { kind: 'unproven' };
+
+/**
+ * Bound hops of the request-options model (an options object, a constant
+ * naming one, or a single-return function that forwards its argument), so
+ * a chain of wrappers is reported, never followed forever.
+ */
+const MAX_OPTIONS_HOPS = 4;
+
+
 /** A resolved constant value: rooted literal text with `${}` slots. */
 interface ConstValue {
   kind: 'literal' | 'unresolved';
@@ -795,6 +850,12 @@ interface FileModel {
   constants: Map<string, ts.Expression>;
   /** Module-scope function-likes whose bodies contain a client call. */
   clientFunctions: Set<string>;
+  /**
+   * Module-scope function-likes by name (declarations and
+   * constant-assigned arrows/expressions). The request-options model
+   * reads the ONE returned expression of these; it never runs them.
+   */
+  functions: Map<string, ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression>;
   /** Wrapper name → (param name, internal call expression, fn span). */
   wrappers: Map<string, {
     parameter: string;
@@ -829,6 +890,10 @@ function modelFile(source: ts.SourceFile, config: ClientScanConfig, file: string
     start: number;
     end: number;
   }>();
+  const functions = new Map<
+    string,
+    ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression
+  >();
   const isModuleScope = (node: ts.Node): boolean => {
     let current: ts.Node | undefined = node.parent;
     while (current !== undefined) {
@@ -856,24 +921,24 @@ function modelFile(source: ts.SourceFile, config: ClientScanConfig, file: string
         // One-declaration wrapper: `const apiGet = (path) => fetch(...)`.
         const init = declaration.initializer;
         if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
+          functions.set(declaration.name.text, init);
           modelWrapper(declaration.name.text, init, wrappers);
           if (containsClientCall(init, config, file)) clientFunctions.add(declaration.name.text);
         }
       }
     }
-    if (
-      (ts.isFunctionDeclaration(node) && node.name !== undefined && node.body !== undefined) ||
-      (ts.isVariableStatement(node))
-    ) {
-      // Named function declarations can be client wrappers too.
-      if (ts.isFunctionDeclaration(node) && node.name !== undefined && containsClientCall(node, config, file)) {
+    if (ts.isFunctionDeclaration(node) && node.name !== undefined) {
+      // Named function declarations can be client wrappers too, and the
+      // request-options model reads their single returned expression.
+      if (isModuleScope(node)) functions.set(node.name.text, node);
+      if (node.body !== undefined && containsClientCall(node, config, file)) {
         clientFunctions.add(node.name.text);
       }
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return { source, constants, clientFunctions, wrappers };
+  return { source, constants, clientFunctions, functions, wrappers };
 }
 
 /** True when the subtree contains a direct fetch/axios/client call. */
@@ -1147,9 +1212,23 @@ function extractCall(
   }
 }
 
-/** Anything that can evaluate an expression under the bounded model. */
+/**
+ * Anything that can evaluate an expression under the bounded model.
+ *
+ * `optionsMethod` answers the same question for a REQUEST-OPTIONS
+ * expression: an inline object, a constant naming one, or a
+ * single-return function that forwards its argument. It is part of the
+ * contract because the verb of `fetch(url, options)` may only come from
+ * a proven options model — never from "the options were not inline".
+ */
 interface Evaluator {
   evaluate(node: ts.Expression, file: string): ConstValue;
+  optionsMethod(
+    node: ts.Expression,
+    file: string,
+    bindings?: ReadonlyMap<string, [ts.Expression, string]>,
+    depth?: number,
+  ): OptionsMethod;
 }
 
 /**
@@ -1185,6 +1264,22 @@ class BoundTable implements Evaluator {
       return { kind: 'literal', text };
     }
     return this.inner.evaluate(node, file);
+  }
+
+  optionsMethod(
+    node: ts.Expression,
+    file: string,
+    bindings?: ReadonlyMap<string, [ts.Expression, string]>,
+    depth = 0,
+  ): OptionsMethod {
+    if (
+      ts.isIdentifier(node) &&
+      node.text === this.parameter &&
+      this.argument !== undefined
+    ) {
+      return this.inner.optionsMethod(this.argument, this.argumentFile, bindings, depth + 1);
+    }
+    return this.inner.optionsMethod(node, file, bindings, depth);
   }
 }
 
@@ -1244,6 +1339,28 @@ function extractClientCall(
         }
       }
     }
+  }
+  if (
+    framework === 'fetch' &&
+    optionsNode !== undefined &&
+    !ts.isObjectLiteralExpression(optionsNode)
+  ) {
+    // `fetch(url, options)` with options built elsewhere: the verb is
+    // whatever that object carries, and until the bounded options model
+    // proves it, assuming GET invents a route the server never serves.
+    const resolved = table.optionsMethod(optionsNode, file);
+    if (resolved.kind === 'unproven') {
+      unresolved.push({
+        code: HTTP_METHOD_DYNAMIC,
+        detail:
+          'fetch call passes request options that are not a provable object literal ' +
+          '(they are built by another function or a computed expression); the method ' +
+          'cannot be proven statically and is never assumed to be GET',
+        location,
+      });
+      return;
+    }
+    if (resolved.kind === 'proven') method = resolved.method;
   }
   if (method === null) return;
   resolveAndRecord(urlNode, framework, method, file, config, table, calls, unresolved, location, reads, baseURL);
@@ -1389,6 +1506,28 @@ function resolveAndRecord(
     location,
     ...(reads.length > 0 ? { responseReads: reads } : {}),
   });
+}
+
+/**
+ * The ONE expression a function-like returns, or undefined when it
+ * returns none or branches: two return paths can set the verb
+ * differently, and an unprovable options object must not be guessed.
+ */
+function returnedExpression(
+  fn: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression,
+): ts.Expression | undefined {
+  // A concise arrow body IS its returned expression: `(o) => ({ ...o })`.
+  if (ts.isArrowFunction(fn) && !ts.isBlock(fn.body)) return fn.body;
+  const body: ts.Block | undefined = ts.isArrowFunction(fn)
+    ? ts.isBlock(fn.body)
+      ? fn.body
+      : undefined
+    : fn.body;
+  if (body === undefined) return undefined;
+  const returns = body.statements.filter((statement): statement is ts.ReturnStatement =>
+    ts.isReturnStatement(statement),
+  );
+  return returns.length === 1 ? returns[0]?.expression : undefined;
 }
 
 function normalizeHttpMethodValue(raw: string): HttpMethod | null {
@@ -1709,6 +1848,126 @@ class ValueTable {
     const initializer = model?.constants.get(name);
     if (initializer === undefined) return UNRESOLVED_VALUE;
     return this.evaluate(initializer, targetFile);
+  }
+
+  /**
+   * The verb one request-options expression provably carries.
+   *
+   * Bounded and deterministic, three shapes only:
+   *  - an inline object literal: `method` is read with JavaScript's
+   *    last-writer-wins order, and a spread of another resolvable options
+   *    expression participates equally (`{...base, method:'POST'}`);
+   *  - a name: a module-scope constant in the scanned set (same file or
+   *    relative import), followed at most {@link MAX_OPTIONS_HOPS} hops;
+   *  - a call to a plain-named function whose declaration is in the
+   *    scanned set and whose body is a SINGLE `return <expression>`:
+   *    the first parameter binds to this call's first argument, so a
+   *    forwarder (`(options) => ({ ...options })`) resolves to whatever
+   *    its argument proves.
+   * Everything else — a computed member, an attribute, a member call, a
+   * function this scan cannot see — is `unproven`, and the caller turns
+   * that into a typed `HTTP_METHOD_DYNAMIC` entry instead of a GET.
+   */
+  optionsMethod(
+    node: ts.Expression,
+    file: string,
+    bindings: ReadonlyMap<string, [ts.Expression, string]> = new Map(),
+    depth = 0,
+  ): OptionsMethod {
+    if (depth > MAX_OPTIONS_HOPS) return UNPROVEN_OPTIONS;
+    const expression = unwrapOwnExpression(node);
+    if (ts.isObjectLiteralExpression(expression)) {
+      return this.optionsMethodOfObject(expression, file, bindings, depth);
+    }
+    if (ts.isIdentifier(expression)) {
+      const bound = bindings.get(expression.text);
+      if (bound !== undefined) return this.optionsMethod(bound[0], bound[1], bindings, depth + 1);
+      const constant = this.resolveConstantInitializer(expression.text, file, new Set());
+      if (constant === undefined) return UNPROVEN_OPTIONS;
+      return this.optionsMethod(constant[0], constant[1], bindings, depth + 1);
+    }
+    if (ts.isCallExpression(expression) && ts.isIdentifier(expression.expression)) {
+      return this.optionsMethodThroughCall(expression, file, bindings, depth);
+    }
+    return UNPROVEN_OPTIONS;
+  }
+
+  /** The verb one options object literal carries, spreads included. */
+  private optionsMethodOfObject(
+    object: ts.ObjectLiteralExpression,
+    file: string,
+    bindings: ReadonlyMap<string, [ts.Expression, string]>,
+    depth: number,
+  ): OptionsMethod {
+    let result: OptionsMethod = ABSENT_OPTIONS;
+    for (const property of object.properties) {
+      if (ts.isSpreadAssignment(property)) {
+        result = this.optionsMethod(property.expression, file, bindings, depth + 1);
+      } else if (
+        (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
+        ts.isIdentifier(property.name) &&
+        property.name.text === 'method'
+      ) {
+        const initializer = ts.isPropertyAssignment(property) ? property.initializer : property.name;
+        result = this.verbOfLiteral(initializer, file, bindings);
+      } else {
+        continue;
+      }
+      if (result.kind === 'unproven') return UNPROVEN_OPTIONS;
+    }
+    return result;
+  }
+
+  /** A `method:` member whose value provably is one concrete verb. */
+  private verbOfLiteral(
+    node: ts.Expression,
+    file: string,
+    bindings: ReadonlyMap<string, [ts.Expression, string]>,
+  ): OptionsMethod {
+    const bound = ts.isIdentifier(node) ? bindings.get(node.text) : undefined;
+    const resolved =
+      bound === undefined ? this.evaluate(node, file) : this.evaluate(bound[0], bound[1]);
+    if (resolved.kind !== 'literal') return UNPROVEN_OPTIONS;
+    const verb = normalizeHttpMethodValue(resolved.text);
+    return verb === null ? UNPROVEN_OPTIONS : { kind: 'proven', method: verb };
+  }
+
+  /** Options returned by a single-return function declared in the scan. */
+  private optionsMethodThroughCall(
+    call: ts.CallExpression,
+    file: string,
+    bindings: ReadonlyMap<string, [ts.Expression, string]>,
+    depth: number,
+  ): OptionsMethod {
+    const name = ts.isIdentifier(call.expression) ? call.expression.text : '';
+    if (name.length === 0) return UNPROVEN_OPTIONS;
+    const declared = this.functionOf(name, file);
+    if (declared === undefined) return UNPROVEN_OPTIONS;
+    const returned = returnedExpression(declared);
+    if (returned === undefined) return UNPROVEN_OPTIONS;
+    const next = new Map(bindings);
+    const parameter = declared.parameters[0];
+    const argument = call.arguments[0];
+    if (
+      parameter !== undefined &&
+      argument !== undefined &&
+      ts.isIdentifier(parameter.name)
+    ) {
+      next.set(parameter.name.text, [argument, file]);
+    }
+    return this.optionsMethod(returned, file, next, depth + 1);
+  }
+
+  /** A module-scope function declaration, same file or relative import. */
+  private functionOf(
+    name: string,
+    file: string,
+  ): ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | undefined {
+    const own = this.modelOf(file)?.functions.get(name);
+    if (own !== undefined) return own;
+    const imported = this.importedFrom(file, name);
+    if (imported === null) return undefined;
+    return this.modelOf(imported)?.functions.get(name);
   }
 
   private resolveSpecifier(fromFile: string, specifier: string): string | null {

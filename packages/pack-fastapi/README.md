@@ -123,6 +123,34 @@ bounded and deterministic:
   invented). A parameter name shadowing a same-file instance variable
   keeps the module-level reading only (no double emission).
 
+
+## Prefixes that are provable, and routers nothing mounts
+
+- **Annotated definitions are definitions.** `router: APIRouter =
+  APIRouter(prefix="/api/v1")` is indexed exactly like `router =
+  APIRouter(prefix="/api/v1")`, prefix included. (It used to be ignored,
+  and every route behind it was published at the router's own prefix with
+  no typed outcome.)
+- **Constant prefixes fold.** A prefix that is a module-level string
+  constant — `API = "/api/v1"` with `APIRouter(prefix=API)` **or**
+  `app.include_router(router, prefix=API)` — is provable from the source,
+  so the route keeps its real path. An f-string, an attribute, or a call
+  is genuinely computed: the router yields a typed
+  `FASTAPI_PREFIX_UNRESOLVED` entry and no route is emitted.
+- **A router object built by an unmodeled expression** (`router =
+  build_router()`, a subscript, an attribute) has an unknown prefix, so
+  its routes are reported as `FASTAPI_PREFIX_UNRESOLVED` naming the
+  variable — never as prefix-less paths that no app serves.
+- **`FASTAPI_ROUTER_UNMOUNTED`.** A router that no scanned
+  `include_router` targets is served by no scanned app. Its routes keep
+  their standalone emission (the declared prefix is all the scan knows),
+  and one typed entry names the router, its file and every declared
+  route, so "the `/api/v1` prefix was not applied" is never the answer
+  when the real one is "nothing mounts this router". Reported only when
+  the scanned set shows an application and has no unresolvable include;
+  with a partial scan, or an include the scan cannot follow, the pack
+  says nothing it cannot prove.
+
 ## Output model (ADR 0004 D1)
 
 One `http.contract` resource per (effective mounted path, concrete

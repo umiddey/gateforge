@@ -311,13 +311,15 @@ describe('serverScanRoots (server-route scoping)', () => {
     }
   });
 
-  it('client-symbol disambiguation is scope-aware: out of client scope, api.get(path, handler) is a router again', () => {
+  it('client-symbol disambiguation is scope-aware: out of client scope the name is a router again', () => {
     const dir = project({
       // Express-shaped registration via a name that is ALSO a configured
       // client symbol — inside the symbol's scope it is a client call,
-      // outside (backend/) it can only be a router registration.
+      // outside (backend/) it can only be a router registration. The
+      // server-side receiver is `router`: a bare `api.<verb>()` now needs
+      // server-framework evidence in its own file (next test).
       'frontend/src/client.ts': `api.get('/api/session', (req) => req);\n`,
-      'backend/routes.ts': `api.get('/api/admin', (req) => req);\n`,
+      'backend/routes.ts': `router.get('/api/admin', (req) => req);\n`,
     });
     try {
       const detector = createHttpDetector({
@@ -327,6 +329,27 @@ describe('serverScanRoots (server-route scoping)', () => {
       const outcome = detector.discover(['frontend', 'backend']);
       expect(frontendFacts(outcome)).toEqual(['GET /api/session']);
       expect(serverFacts(outcome)).toEqual(['GET /api/admin']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads an `api` receiver as a route only where the file imports a server framework', () => {
+    const dir = project({
+      // A server's own api router: the file proves what `api` is.
+      'backend/api.ts': [
+        `import express from 'express';`,
+        `export const api = express();`,
+        `api.get('/api/reports', (req, res) => res.json({}));`,
+      ].join('\n'),
+      // A test-suite / client-module `api`: the same spelling with no
+      // server anywhere in the file — a call, never a registration.
+      'e2e/orders.spec.ts': `const rows = await api.get('/api/reports');\n`,
+      'frontend/src/orders.js': `const rows = await api.get('/api/orders');\n`,
+    });
+    try {
+      const outcome = createHttpDetector({ root: dir }).discover(['backend', 'e2e', 'frontend']);
+      expect(serverFacts(outcome)).toEqual(['GET /api/reports']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
