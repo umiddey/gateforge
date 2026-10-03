@@ -5,17 +5,21 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  BASELINE_VERDICT_REASON,
   ObligationSchema,
   canonicalJson,
   fingerprint,
   renderRun,
   runExitCode,
   CAUSE_NEXT_ACTIONS,
+  repositoryDebtOf,
+  humanMessage,
   type BlockingEntry,
   type Obligation,
   type ObligationVerdict,
   type RunManifest,
   type Verdict,
+  type RunExecutionSummary,
 } from '../src/index.js';
 
 const LIFECYCLE = {
@@ -75,6 +79,16 @@ const BLOCKING: BlockingEntry[] = [
   },
 ];
 
+const ADVISORY: BlockingEntry = {
+  kind: 'finding',
+  resourceId: 'tenant.accounts',
+  name: 'accounts',
+  detail: 'test annotation claims changed',
+  location: { file: 'e2e/accounts.spec.ts', line: 2, col: 1 },
+  cause: 'TEST_MAP_OUT_OF_SYNC',
+  nextAction: 'gateforge tests sync',
+};
+
 describe('renderRun — json format', () => {
   it('emits GF-canonical JSON that round-trips through canonicalJson', () => {
     const verdicts = [entry(accounts, 'missing'), entry(orders, 'satisfied')];
@@ -114,12 +128,22 @@ describe('renderRun — json format', () => {
       blockingEntries: 1,
     });
     expect(report.waiverCounts).toEqual(WDIOR_COUNTS);
-    expect(report.blocking).toEqual(BLOCKING);
+    expect(report.blocking[0]).toMatchObject({
+      ...BLOCKING[0],
+      message: expect.stringContaining('[UNCLASSIFIED]'),
+    });
     const missing = report.verdicts.find((v: { obligationId: string }) =>
       v.obligationId === accounts.id,
     );
     expect(missing.fingerprint).toBe(fpFor(accounts));
     expect(missing.recordIds).toEqual([]);
+  });
+  it('shows the changed paths that brought a verdict into scope', () => {
+    const scoped = entry(accounts, 'missing', { inScopeBecause: ['src/accounts.ts'] });
+    const json = JSON.parse(renderRun([scoped], { format: 'json' }));
+    expect(json.verdicts[0]).toMatchObject({ inScopeBecause: ['src/accounts.ts'] });
+    const text = renderRun([scoped], { format: 'text' });
+    expect(text).toContain('in scope because: src/accounts.ts');
   });
 
   it('attaches bounded run provenance to blocking predicates', () => {
@@ -144,9 +168,138 @@ describe('renderRun — json format', () => {
       cause: 'EVIDENCE_VALUE_MISMATCH',
       reason: `invalid: evidence gap for ${accounts.id}`,
     });
-    expect(report.blocking).toEqual(BLOCKING);
+    expect(report.blocking[0]).toMatchObject({
+      ...BLOCKING[0],
+      message: expect.stringContaining('[UNCLASSIFIED]'),
+    });
   });
 
+  it('names baselined debt apart from new debt, in the text and in the JSON', () => {
+    // A run whose debt is part baselined and part new: the line and the
+    // JSON must report the SAME two numbers, and "new blocking" must be
+    // what the gate blocks on — never a subtraction that reaches zero
+    // while the gate still blocks.
+    const verdicts = [
+      entry(makeObligation('tenant.accounts'), 'satisfied'),
+      entry(makeObligation('tenant.orders'), 'missing'),
+      entry(makeObligation('tenant.widgets'), 'missing'),
+      entry(makeObligation('tenant.invoices'), 'waived', {
+        reason: `${BASELINE_VERDICT_REASON} adopted as forgiven (was missing); baseline is shrink-only`,
+      }),
+      entry(makeObligation('tenant.ledger'), 'waived', {
+        reason: `${BASELINE_VERDICT_REASON} adopted as forgiven (was missing); baseline is shrink-only`,
+      }),
+      entry(makeObligation('tenant.audit'), 'waived', { reason: 'GF-17: owner-stale waiver' }),
+    ];
+    const debt = repositoryDebtOf({
+      verdicts,
+      findings: [],
+      gradedVerdicts: verdicts,
+      gradedFindings: [],
+      unclaimed: 4,
+    });
+    expect(debt).toEqual({
+      obligations: 6,
+      blocking: 2,
+      blockingEntries: 0,
+      unclaimed: 4,
+      baselined: 2,
+      newlyBlocking: 2,
+      notGradedBlocking: 0,
+    });
+    const execution: RunExecutionSummary = {
+      scope: 'full',
+      mode: 'executed',
+      testsPerformedThisInvocation: 0,
+      selectedTests: { selected: 0, passed: 0, failed: 0, skipped: 0, expectedFailures: 0 },
+      selectedClaims: { selected: 0, satisfied: 0, blocking: 0, blockingEntries: 0, waived: 0 },
+      repositoryDebt: debt,
+    };
+    const text = renderRun(verdicts, { format: 'text', execution });
+    expect(text).toContain('repository debt: 2 known (baselined), 2 new blocking');
+    const json = JSON.parse(renderRun(verdicts, { format: 'json', execution }));
+    expect(json.execution.repositoryDebt).toEqual(debt);
+  });
+
+  it('counts every repository finding as debt the gate blocks on', () => {
+    const verdicts = [entry(makeObligation('tenant.accounts'), 'satisfied')];
+    const debt = repositoryDebtOf({
+      verdicts,
+      findings: BLOCKING,
+      gradedVerdicts: verdicts,
+      gradedFindings: BLOCKING,
+      unclaimed: 0,
+    });
+    expect(debt).toMatchObject({ obligations: 1, blocking: 1, blockingEntries: 1, newlyBlocking: 1 });
+  });
+
+  it('a slice run blocks on nothing it did not grade, and names that debt apart', () => {
+    // A changed-scope run whose own slice is clean exits 0. Calling the
+    // repository's untouched blocking debt "new blocking" would put a
+    // non-zero number next to a zero exit code.
+    const slice = [
+      entry(makeObligation('tenant.accounts'), 'satisfied'),
+      entry(makeObligation('tenant.orders'), 'waived', {
+        reason: `${BASELINE_VERDICT_REASON} adopted as forgiven (was missing); baseline is shrink-only`,
+      }),
+    ];
+    const repository = [...slice, entry(makeObligation('tenant.widgets'), 'missing')];
+    const debt = repositoryDebtOf({
+      verdicts: repository,
+      findings: [],
+      gradedVerdicts: slice,
+      gradedFindings: [],
+      unclaimed: 2,
+    });
+    expect(debt).toEqual({
+      obligations: 3,
+      blocking: 1,
+      blockingEntries: 0,
+      unclaimed: 2,
+      baselined: 1,
+      newlyBlocking: 0,
+      notGradedBlocking: 1,
+    });
+    const execution: RunExecutionSummary = {
+      scope: 'changed',
+      mode: 'executed',
+      testsPerformedThisInvocation: 1,
+      selectedTests: { selected: 1, passed: 1, failed: 0, skipped: 0, expectedFailures: 0 },
+      selectedClaims: { selected: 1, satisfied: 1, blocking: 0, blockingEntries: 0, waived: 0 },
+      repositoryDebt: debt,
+    };
+    const text = renderRun(slice, { format: 'text', execution });
+    expect(text).toContain('repository debt: 1 known (baselined), 0 new blocking');
+    expect(text).toContain('not graded by this changed-scope run: 1 blocking obligation(s)');
+  });
+
+  it('labels a selected result as partial and leaves the receipt explicitly unsealed', () => {
+    const execution: RunExecutionSummary = {
+      scope: 'changed',
+      mode: 'executed',
+      testsPerformedThisInvocation: 4,
+      selectedTests: { selected: 4, passed: 4, failed: 0, skipped: 0, expectedFailures: 0 },
+      selectedClaims: { selected: 26, satisfied: 26, blocking: 0, blockingEntries: 0, waived: 0 },
+      repositoryDebt: {
+        obligations: 30,
+        blocking: 4,
+        blockingEntries: 0,
+        unclaimed: 2,
+        baselined: 2,
+        newlyBlocking: 4,
+        notGradedBlocking: 0,
+      },
+    };
+    const verdicts = [entry(accounts, 'satisfied')];
+    const text = renderRun(verdicts, { format: 'text', execution, outcome: 'partial-selection' });
+    expect(text.endsWith(
+      'Tests: 4 passed.\nClaims: 26 satisfied.\nReceipt: not sealed — partial selection (expected)\n',
+    )).toBe(true);
+    const json = JSON.parse(
+      renderRun(verdicts, { format: 'json', execution, outcome: 'partial-selection' }),
+    );
+    expect(json.outcome).toBe('partial-selection');
+  });
   it('includes the run manifest when provided', () => {
     const run = {
       schemaVersion: 1,
@@ -159,6 +312,56 @@ describe('renderRun — json format', () => {
     } as const satisfies RunManifest;
     const report = JSON.parse(renderRun([entry(accounts, 'missing')], { format: 'json', run }));
     expect(report.run).toEqual(run);
+  });
+  it('includes engine identity in JSON and warns about an unpublished install in text', () => {
+    const engine = { version: '0.7.1', source: 'local path /workspace/gateforge', unpublished: true };
+    const json = JSON.parse(renderRun([entry(accounts, 'missing')], { format: 'json', engine }));
+    expect(json.engine).toEqual(engine);
+    const text = renderRun([entry(accounts, 'missing')], { format: 'text', engine });
+    expect(text).toContain('engine: 0.7.1 from local path /workspace/gateforge');
+    expect(text).toContain('unpublished engine: CI will not have this code');
+  });
+});
+
+describe('renderRun — non-blocking advisories', () => {
+  it('includes advisories in canonical JSON without adding to the blocking count', () => {
+    const report = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'json', advisories: [ADVISORY] }),
+    );
+    expect(report.advisories).toEqual([ADVISORY]);
+    expect(report.summary.blocking).toBe(0);
+  });
+
+  it('projects advisories as SARIF warning notifications', () => {
+    const report = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'sarif', advisories: [ADVISORY] }),
+    ) as {
+      runs: Array<{
+        invocations: Array<{
+          toolExecutionNotifications: Array<{ level: string; properties: Record<string, unknown> }>;
+        }>;
+      }>;
+    };
+    const notifications = report.runs[0]?.invocations[0]?.toolExecutionNotifications ?? [];
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        level: 'warning',
+        properties: expect.objectContaining({
+          cause: 'TEST_MAP_OUT_OF_SYNC',
+          nextAction: 'gateforge tests sync',
+        }),
+      }),
+    );
+  });
+
+  it('prints advisories separately from blocking entries in text output', () => {
+    const text = renderRun([entry(accounts, 'satisfied')], {
+      format: 'text',
+      advisories: [ADVISORY],
+    });
+    expect(text).toContain('advisories (non-blocking):');
+    expect(text).toContain('test annotation claims changed');
+    expect(text).not.toContain('blocking entries (unclassified/unresolved/findings/stale references):');
   });
 });
 
@@ -297,7 +500,7 @@ describe('renderRun — text trace (invariant 8)', () => {
     const verdicts = [entry(accounts, 'invalid', { recordIds: ['b'.repeat(64)] })];
     const text = renderRun(verdicts, { format: 'text', blocking: BLOCKING });
     expect(text).toContain('blocking entries (unclassified/unresolved/findings/stale references):');
-    expect(text).toContain('[unclassified] tenant.widgets — no classification entry');
+    expect(text).toContain('no classification entry. Run `gateforge explain tenant.widgets`. [UNCLASSIFIED]');
     expect(text).toContain(`records: ${'b'.repeat(64)}`);
     expect(text).toContain('exit code: 1');
   });
@@ -349,6 +552,30 @@ describe('runExitCode — contract 4 mapping', () => {
   });
 });
 
+describe('humanMessage', () => {
+  it('places the plain explanation first, a runnable command next, and the code last', () => {
+    expect(
+      humanMessage({
+        cause: 'TEST_MAPPING_MISSING',
+        detail: 'Resource widgets need a classification',
+        id: 'tenant.widgets',
+        nextAction: CAUSE_NEXT_ACTIONS.TEST_MAPPING_MISSING,
+      }),
+    ).toBe('Resource widgets need a classification. Run `gateforge tests suggest`. [TEST_MAPPING_MISSING]');
+  });
+
+  it('a detail that ends in a period still prints one sentence end, not `..`', () => {
+    expect(
+      humanMessage({
+        cause: 'EVIDENCE_STALE',
+        detail: 'require-e2e: the sealed run is not this run. changed inputs: src/app.ts.',
+        nextAction: 'gateforge test-gates --changed',
+      }),
+    ).toBe(
+      'require-e2e: the sealed run is not this run. changed inputs: src/app.ts. Run `gateforge test-gates --changed`. [EVIDENCE_STALE]',
+    );
+  });
+});
 describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR 0005)', () => {
   const caused = entry(accounts, 'missing', {
     reason: "no claim declares 'tenant.accounts:crud:update'",
@@ -366,6 +593,14 @@ describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR
     expect(mapped?.nextAction).toBe(caused.nextAction);
     expect(clean?.cause).toBeNull();
     expect(clean?.nextAction).toBeNull();
+  });
+  it('adds the same human message to JSON verdict records', () => {
+    const report = JSON.parse(renderRun([caused], { format: 'json' })) as {
+      verdicts: Array<{ obligationId: string; message?: string }>;
+    };
+    expect(report.verdicts[0]?.message).toBe(
+      "no claim declares 'tenant.accounts:crud:update'. Run `gateforge tests suggest`. [TEST_MAPPING_MISSING]",
+    );
   });
 
   it('sarif properties carry cause and nextAction', () => {
@@ -412,10 +647,178 @@ describe('renderRun — cause codes and next actions (plan 2026-09-13 §5.4, ADR
     expect(notification?.properties['cause']).toBe('CRUD_COVERAGE_MISSING');
     expect(notification?.properties['nextAction']).toContain('owner disposition');
     const text = renderRun([], { format: 'text', blocking: [coverageEntry] });
-    expect(text).toContain('(cause: CRUD_COVERAGE_MISSING → Connect/mark existing journeys');
-    // Entries without a mapping render exactly as before.
+    expect(text).toContain(
+      "coverage policy: table 'accounts' has no mapped browser-e2e 'delete' coverage and no owner disposition. " +
+        'Run `gateforge explain accounts`. [CRUD_COVERAGE_MISSING]',
+    );
     const plain = renderRun([], { format: 'text', blocking: BLOCKING });
-    expect(plain).toContain('[unclassified] tenant.widgets — no classification entry\n');
+    expect(plain).toContain('no classification entry. Run `gateforge explain tenant.widgets`. [UNCLASSIFIED]');
     expect(plain).not.toContain('(cause:');
+  });
+});
+
+describe('renderRun — lifecycle derivation visibility', () => {
+  it('surfaces one ordered derivation line per resource in json, sarif, and text', () => {
+    const lifecycleDerivation = [
+      {
+        resourceId: 'tenant.accounts',
+        resourceName: 'accounts',
+        operation: 'update',
+        disposition: 'disabled',
+        reason: 'no-updateable-fields',
+        detail: 'The model declares no updateable fields.',
+      },
+      {
+        resourceId: 'tenant.accounts',
+        resourceName: 'accounts',
+        operation: 'read',
+        disposition: 'not-observable',
+        reason: 'no-read-route',
+        detail: 'No linked GET or HEAD route was detected.',
+      },
+    ] as const;
+    const json = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'json', lifecycleDerivation }),
+    ) as { lifecycleDerivation: Array<{ operation: string; disposition: string }> };
+    expect(json.lifecycleDerivation.map((item) => item.operation)).toEqual(['read', 'update']);
+    expect(json.lifecycleDerivation[0]).toMatchObject({
+      operation: 'read',
+      disposition: 'not-observable',
+    });
+
+    const sarif = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'sarif', lifecycleDerivation }),
+    ) as { runs: Array<{ properties: Record<string, unknown> }> };
+    expect(sarif.runs[0]?.properties['lifecycleDerivation']).toEqual(json.lifecycleDerivation);
+
+    const text = renderRun([entry(accounts, 'satisfied')], { format: 'text', lifecycleDerivation });
+    const resourceLines = text
+      .split('\n')
+      .filter((line) => line.startsWith('  tenant.accounts:'));
+    expect(resourceLines).toHaveLength(1);
+    expect(resourceLines[0]).toContain('read: not-observable');
+    expect(resourceLines[0]).toContain('update: disabled');
+  });
+});
+
+describe('renderRun — Python cache exclusion visibility', () => {
+  it('includes exact paths and the owner pin status in every report format', () => {
+    const diagnosticContext = {
+      scope: 'full' as const,
+      candidateTreeId: 'a'.repeat(40),
+      inputDigest: 'b'.repeat(64),
+      evidenceState: 'attested',
+      authority: 'authoritative' as const,
+      cacheExclusions: {
+        files: ['src/__pycache__/accounts.cpython-313.pyc'],
+        approvalDigest: 'c'.repeat(64),
+        approvalStatus: 'matched' as const,
+        guarantee: 'owner assertion only',
+      },
+    };
+    const json = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'json', diagnosticContext }),
+    ) as { diagnosticContext: typeof diagnosticContext };
+    expect(json.diagnosticContext.cacheExclusions).toEqual(diagnosticContext.cacheExclusions);
+
+    const sarif = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'sarif', diagnosticContext }),
+    ) as { runs: Array<{ properties: { diagnosticContext: typeof diagnosticContext } }> };
+    expect(sarif.runs[0]?.properties.diagnosticContext.cacheExclusions).toEqual(
+      diagnosticContext.cacheExclusions,
+    );
+
+    const text = renderRun([entry(accounts, 'satisfied')], { format: 'text', diagnosticContext });
+    expect(text).toContain(
+      'Python cache exclusions: files=src/__pycache__/accounts.cpython-313.pyc approvalStatus=matched',
+    );
+    expect(text).toContain(diagnosticContext.cacheExclusions.approvalDigest);
+  });
+});
+describe('renderRun — adopted-baseline age', () => {
+  it('reports adoption age and never-witnessed obligations additively', () => {
+    const baseline = {
+      obligations: 2,
+      blockingEntries: 0,
+      adoptedAt: '2026-09-01T00:00:00.000Z',
+      ageDays: 16,
+      neverWitnessed: 1,
+    };
+    const json = JSON.parse(
+      renderRun([entry(accounts, 'satisfied')], { format: 'json', baseline }),
+    ) as { summary: Record<string, unknown> };
+    expect(json.summary).toMatchObject({
+      baselinedObligations: 2,
+      adoptedBaselineAt: baseline.adoptedAt,
+      adoptedBaselineAgeDays: 16,
+      neverWitnessedBaselinedObligations: 1,
+    });
+
+    const text = renderRun([entry(accounts, 'satisfied')], { format: 'text', baseline });
+    expect(text).toContain('age: 16 day(s); never witnessed: 1');
+  });
+});
+
+describe('renderRun — local failure reasons when the progress stream is off', () => {
+  const executionWith = (failed: number): RunExecutionSummary => ({
+    scope: 'full',
+    mode: 'executed',
+    testsPerformedThisInvocation: 5,
+    selectedTests: { selected: 5, passed: 5 - failed, failed, skipped: 0, expectedFailures: 0 },
+    selectedClaims: { selected: 0, satisfied: 0, blocking: 0, blockingEntries: 0, waived: 0 },
+    repositoryDebt: {
+      obligations: 0,
+      blocking: 0,
+      blockingEntries: 0,
+      baselined: 0,
+      newlyBlocking: 0,
+      unclaimed: 0,
+      notGradedBlocking: 0,
+    },
+  });
+  const failed = (title: string, message: string): { title: string; message: string } => ({ title, message });
+
+  it('names the first error line of up to three failures, then how to see the rest', () => {
+    const text = renderRun([entry(accounts, 'missing')], {
+      format: 'text',
+      execution: executionWith(4),
+      failedTests: [
+        failed('checkout > pays with a card', 'Error: browserType.launch: Target page, context or browser has been closed'),
+        failed('checkout > pays with a voucher', 'Error: expect(received).toBe(expected)\n  at line 12'),
+        failed('cart > empties', ''),
+        failed('cart > merges', 'Error: timeout of 5000ms exceeded'),
+      ],
+    });
+    expect(text).toContain(
+      'failed test: checkout > pays with a card — Error: browserType.launch: Target page, context or browser has been closed',
+    );
+    expect(text).toContain('failed test: checkout > pays with a voucher — Error: expect(received).toBe(expected)');
+    // A failure the runner reported no message for is still named.
+    expect(text).toContain('failed test: cart > empties');
+    // The fourth is NOT printed inline, and the line that replaces it is
+    // the exact command that prints every failure as it happens.
+    expect(text).not.toContain('cart > merges');
+    expect(text).toContain(
+      '… 1 more — run with `--progress stderr` to print every failure as it happens',
+    );
+  });
+
+  it('adds nothing to a run that failed no test, and never touches the json document', () => {
+    const green = renderRun([entry(accounts, 'satisfied')], { format: 'text', execution: executionWith(0) });
+    expect(green).not.toContain('failed test:');
+    expect(green).not.toContain('--progress stderr');
+    // The json document is the machine contract: the local hint is text
+    // only, so a consumer's parsed report keeps exactly its old shape.
+    const withHint = JSON.parse(
+      renderRun([entry(accounts, 'missing')], {
+        format: 'json',
+        execution: executionWith(1),
+        failedTests: [failed('checkout > pays', 'Error: nope')],
+      }),
+    ) as Record<string, unknown>;
+    const withoutHint = JSON.parse(
+      renderRun([entry(accounts, 'missing')], { format: 'json', execution: executionWith(1) }),
+    ) as Record<string, unknown>;
+    expect(Object.keys(withHint).sort()).toEqual(Object.keys(withoutHint).sort());
   });
 });

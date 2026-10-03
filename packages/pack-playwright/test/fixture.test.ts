@@ -161,11 +161,15 @@ describe('frozen surface, no escape hatch (invariant 6, GF-11)', () => {
       // Plan 2026-09-19 Phase 6 adds the fifth: `prove`, the
       // worker-facing required-case proof primitive (case id in,
       // engine-sealed reference out — never credentials or subjects).
+      // Plan Phase 4b item 3b adds the sixth: `registerSessionIdentity`,
+      // the session-scoped login registration (seat name + credential
+      // values in, nothing out but the seat name).
       expect(Object.keys(evidence).sort()).toEqual([
         'finalize',
         'http',
         'persistence',
         'prove',
+        'registerSessionIdentity',
         'ui',
         'visible',
       ]);
@@ -177,8 +181,31 @@ describe('frozen surface, no escape hatch (invariant 6, GF-11)', () => {
       // No boolean escape hatch exists (GF-11: registration path absent).
       const asRecord = evidence as unknown as Record<string, unknown>;
       expect(typeof asRecord['prove']).toBe('function');
+      expect(typeof asRecord['registerSessionIdentity']).toBe('function');
       expect(typeof (evidence.ui as unknown as Record<string, unknown>)['prove']).toBe('undefined');
       expect(Object.keys(evidence.ui).sort()).toEqual(['archive', 'create', 'read', 'update']);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('registers this session identity through the witness and refuses a malformed one', async () => {
+    const fixture = await startFixtureWitness();
+    // A credential built at runtime: no literal can be scanned for, and
+    // the assertion is about the seam, not about a fixed secret.
+    const secret = `rt-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+    try {
+      const evidence = await buildEvidence(fixture.witness.url);
+      await expect(
+        evidence.registerSessionIdentity({ seat: 'tenant-seat', values: { A: 7 } as never }),
+      ).rejects.toThrow(/must be a non-empty string/);
+      // The seat name is echoed; the credential itself is never returned.
+      await expect(
+        evidence.registerSessionIdentity({ seat: 'tenant-seat', values: { A: secret } }),
+      ).resolves.toEqual({ registered: true, seat: 'tenant-seat' });
+      const records = await new WitnessClient(fixture.witness.url, TOKEN).listRecords();
+      expect(JSON.stringify(records)).not.toContain(secret);
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();

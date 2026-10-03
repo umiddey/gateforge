@@ -42,11 +42,20 @@ import {
 } from '@gate-forge/core';
 import { PluginSession } from '@gate-forge/plugin-protocol';
 import { UsageError } from './errors.js';
+import {
+  digestPathListInputs,
+  lookupPluginCache,
+  storePluginResult,
+  type CacheControl,
+  type CacheCounts,
+} from './run-cache.js';
 
-/** One plugin run: detector contributions + pinned registrations. */
+/** One plugin run: detector contributions + pinned registrations + cache accounting. */
 export interface PluginRunResult {
   contributions: DetectorOutput[];
   registrations: PluginRegistration[];
+  /** Cache accounting for this run (0/0 when the cache is disabled). */
+  cache: CacheCounts;
 }
 
 /** Default export shape every in-process plugin must provide. */
@@ -69,16 +78,23 @@ export interface InProcessPluginModule {
 }
 
 /**
- * Runs every configured plugin over the same path list.
+ * Runs every configured plugin over the same path list, reusing cached
+ * discovery results when a cache control is provided and every key input
+ * (plugin config, module bytes, input bytes, interpreter identity) is
+ * unchanged. A cache miss runs the plugin exactly as before and stores
+ * the validated result; any doubt (unreadable input, unprobeable
+ * interpreter, corrupt entry) runs fresh — the cache only ever skips
+ * work whose inputs are byte-identical.
  *
  * Args:
  *   plugins: plugin entries from `.gateforge.yml` (config order).
  *   paths: expanded repo-relative include paths (possibly empty).
  *   cwd: repo root; subprocess cwd and in-process module base.
+ *   cache: cache control; omitted or disabled means a full scan.
  *
  * Returns:
- *   PluginRunResult: one validated contribution per plugin, plus the
- *   pinned registrations for the run manifest.
+ *   PluginRunResult: one validated contribution per plugin, the pinned
+ *   registrations for the run manifest, and the cache hit/miss counts.
  *
  * Throws:
  *   UsageError (exit 2): config/usage problems — spawn failures,
@@ -89,18 +105,37 @@ export async function runPlugins(
   plugins: readonly ConfigPlugin[],
   paths: readonly string[],
   cwd: string,
+  cache?: CacheControl,
 ): Promise<PluginRunResult> {
   const contributions: DetectorOutput[] = [];
   const registrations: PluginRegistration[] = [];
+  const cacheCounts: CacheCounts = { hits: 0, misses: 0 };
+  const cacheActive = cache !== undefined && !cache.disabled;
+  const inputsDigest = cacheActive ? digestPathListInputs(cwd, paths) : null;
   for (const plugin of plugins) {
-    if (plugin.transport === 'subprocess') {
-      contributions.push(await runSubprocessPlugin(plugin, paths, cwd));
+    const cached =
+      cacheActive && inputsDigest !== null
+        ? lookupPluginCache(cache.stateDir, plugin, inputsDigest, cwd, process.env)
+        : null;
+    if (cached !== null) {
+      contributions.push(cached);
+      cacheCounts.hits += 1;
     } else {
-      contributions.push(await runInProcessPlugin(plugin, paths, cwd));
+      const fresh =
+        plugin.transport === 'subprocess'
+          ? await runSubprocessPlugin(plugin, paths, cwd)
+          : await runInProcessPlugin(plugin, paths, cwd);
+      contributions.push(fresh);
+      if (cacheActive) {
+        cacheCounts.misses += 1;
+        if (inputsDigest !== null) {
+          storePluginResult(cache.stateDir, plugin, inputsDigest, cwd, process.env, fresh);
+        }
+      }
     }
     registrations.push({ id: plugin.id, version: plugin.version, transport: plugin.transport });
   }
-  return { contributions, registrations };
+  return { contributions, registrations, cache: cacheCounts };
 }
 
 /** Drives one GPP/3 subprocess plugin session over the path list. */
@@ -144,6 +179,39 @@ async function runSubprocessPlugin(
     // no-op; any earlier failure kills the process and reaps it.
     await session.dispose();
   }
+}
+
+/**
+ * The remedy for a plugin whose declared `version:` does not match the
+ * detector the module reports. Copying a sibling entry's version is the
+ * ordinary mistake, and the contract error alone names neither the field
+ * nor the fix, so the boundary says both: the field to edit, the value
+ * the detector declares, and the command that writes it.
+ *
+ * Args:
+ *   plugin: the pinned plugin config entry.
+ *   detector: the identity the signal claimed.
+ *
+ * Returns:
+ *   string: the fix sentence (empty when the id, not the version, is
+ *   what mismatched — a foreign id is never repaired by a version edit).
+ */
+function signalIdentityFix(
+  plugin: ConfigPlugin,
+  detector: { id: string; version: string },
+): string {
+  if (detector.id !== plugin.id) {
+    return (
+      `the signal claims a different detector id ('${detector.id}'), which no ` +
+      `plugins[].version edit can repair — a plugin may only signal under its own id`
+    );
+  }
+  return (
+    `the signal's version ('${detector.version}') is the version the pack's detector declares, ` +
+    `not the pack's npm version; fix: set version: '${detector.version}' on the ` +
+    `'${plugin.id}' entry in .gateforge.yml, or run \`gateforge init --plugins ${plugin.id}\` ` +
+    'to write the pin the installed pack declares'
+  );
 }
 
 /** Loads and drives one in-process plugin module. */
@@ -231,7 +299,8 @@ async function runInProcessPlugin(
         `in-process plugin '${plugin.id}'@'${plugin.version}' returned a classification signal ` +
           `claiming detector ${JSON.stringify(signal.detector.id)}@` +
           `${JSON.stringify(signal.detector.version)}; signal identity must equal the pinned ` +
-          `plugin identity (suppressive authority is engine-issued, never plugin-issued)`,
+          `plugin identity (suppressive authority is engine-issued, never plugin-issued); ` +
+          signalIdentityFix(plugin, signal.detector),
       );
     }
   }

@@ -197,6 +197,7 @@ ${clockBlock}
 /** Installs the standard automatic-classification fixture project. */
 export function installFixture(repo: TempRepo, options: Parameters<typeof configYml>[0] = {}): void {
   repo.writeFiles({
+    '.gitignore': '.gateforge/test-gates/\n',
     '.gateforge.yml': configYml(options),
     '.gateforge/policies.yml': POLICIES_YML,
     '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,

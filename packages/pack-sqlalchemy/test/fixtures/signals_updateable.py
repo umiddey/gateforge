@@ -7,9 +7,9 @@ classifier copies the attribute into the resource lifecycle
 requires it (fail closed when absent). It rides ATTRIBUTES — never
 semantics — and is never guessed:
 
-- a list/tuple of distinct non-empty string literals is copied verbatim;
-- a non-literal or empty declaration contributes NOTHING (no attribute),
-  never a partial guess.
+- a list/tuple of distinct non-empty string literals is copied, including
+  an explicit empty list/tuple;
+- a non-literal declaration contributes nothing, never a partial guess.
 """
 
 from sqlalchemy import Column, Integer, String

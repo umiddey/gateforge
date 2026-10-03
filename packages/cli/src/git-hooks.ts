@@ -27,6 +27,12 @@ export { HOOK_MARKER_BEGIN, HOOK_MARKER_END, HOOK_VERIFY_ARG, gateforgeHookScrip
 
 /** Name of the hook Git runs before a commit is created. */
 export const PRE_COMMIT_HOOK_NAME = 'pre-commit';
+/** Name of the hook Git runs before a ref update is pushed. */
+export const PRE_PUSH_HOOK_NAME = 'pre-push';
+/** Marker lines delimiting Gateforge's pre-push hook. */
+export const PRE_PUSH_MARKER_BEGIN = '# >>> gateforge pre-push v1 >>>';
+/** End marker for the generated pre-push hook. */
+export const PRE_PUSH_MARKER_END = '# <<< gateforge pre-push v1 <<<';
 
 /**
  * The standalone staged-gate runner written under `.gateforge/hooks/`:
@@ -183,6 +189,120 @@ export function installCommitHook(
   };
 }
 
+/**
+ * Installs the receipt-verification pre-push lane without replacing foreign hooks.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   env: process environment used to resolve Git's hooks directory.
+ *
+ * Returns:
+ *   HookInstallOutcome: installed, verified, conflict, or incomplete state.
+ */
+export function installPrePushHook(cwd: string, env: NodeJS.ProcessEnv): HookInstallOutcome {
+  const hooksDir = resolveHooksDir(cwd, env);
+  if (hooksDir === null) {
+    return {
+      status: 'incomplete',
+      hookPath: null,
+      hooksDir: null,
+      detail: 'no usable Git repository found — the pre-push hook could not be installed',
+      action: 'Run `gateforge init --blocking` inside a Git repository work tree.',
+    };
+  }
+  const hookPath = join(hooksDir, PRE_PUSH_HOOK_NAME);
+  const script = prePushHookScript();
+  if (existsSync(hookPath)) {
+    const current = readFileSync(hookPath, 'utf8');
+    if (!current.includes(PRE_PUSH_MARKER_BEGIN) || !current.includes(PRE_PUSH_MARKER_END)) {
+      return {
+        status: 'conflict',
+        hookPath,
+        hooksDir,
+        detail: `a foreign pre-push hook exists at '${hookPath}'; Gateforge did not overwrite it`,
+        action: `Add a pre-push stdin loop that runs \`gateforge check --candidate-commit "$local_sha" --require-e2e\` for each non-deletion local SHA, then re-run \`gateforge init --blocking\`.`,
+      };
+    }
+    const verify = probeHookExecution(hookPath);
+    if (!verify.ok) {
+      return {
+        status: 'incomplete',
+        hookPath,
+        hooksDir,
+        detail: `pre-push activation verification failed: ${verify.detail}`,
+        action: `Inspect '${hookPath}' and re-run \`gateforge init --blocking\`.`,
+      };
+    }
+    return { status: 'verified', hookPath, hooksDir, detail: `pre-push hook active at '${hookPath}'` };
+  }
+  try {
+    mkdirSync(hooksDir, { recursive: true });
+    writeFileSync(hookPath, script, 'utf8');
+    chmodSync(hookPath, 0o755);
+  } catch (error) {
+    return {
+      status: 'incomplete',
+      hookPath,
+      hooksDir,
+      detail: `the pre-push hook could not be written to '${hooksDir}': ${(error as Error).message}`,
+      action: `Ensure '${hooksDir}' is writable, then re-run \`gateforge init --blocking\`.`,
+    };
+  }
+  const verify = probeHookExecution(hookPath);
+  if (!verify.ok) {
+    return {
+      status: 'incomplete',
+      hookPath,
+      hooksDir,
+      detail: `pre-push hook written but activation verification failed: ${verify.detail}`,
+      action: `Inspect '${hookPath}' and re-run \`gateforge init --blocking\`.`,
+    };
+  }
+  return { status: 'installed', hookPath, hooksDir, detail: `pre-push hook installed and active at '${hookPath}'` };
+}
+
+
+/**
+ * Renders the pre-push hook that verifies every non-deletion local ref tip.
+ *
+ * Returns:
+ *   string: executable POSIX shell source.
+ */
+function prePushHookScript(): string {
+  return `#!/bin/sh
+${PRE_PUSH_MARKER_BEGIN}
+if [ "$1" = "${HOOK_VERIFY_ARG}" ]; then
+  echo "gateforge: pre-push receipt lane active"
+  exit 0
+fi
+GF_BIN=""
+if [ -f "node_modules/.bin/gateforge" ]; then
+  GF_BIN="node_modules/.bin/gateforge"
+elif command -v gateforge >/dev/null 2>&1; then
+  GF_BIN="gateforge"
+fi
+if [ -n "$GATEFORGE_CLI" ] && [ -x "$GATEFORGE_CLI" ]; then
+  GF_BIN="$GATEFORGE_CLI"
+fi
+if [ -z "$GF_BIN" ]; then
+  echo "gateforge: CLI engine not found; push blocked (fail closed)" >&2
+  exit 1
+fi
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha
+do
+  case "$local_sha" in
+    *[!0]*) ;;
+    *) continue ;;
+  esac
+  case "$GF_BIN" in
+    */*) node "$GF_BIN" check --candidate-commit "$local_sha" --require-e2e ;;
+    *) "$GF_BIN" check --candidate-commit "$local_sha" --require-e2e ;;
+  esac || exit $?
+done
+${PRE_PUSH_MARKER_END}
+`;
+}
 /**
  * Writes the standalone staged-gate script under `.gateforge/hooks/`
  * (idempotent, executable) — the chaining target the conflict report

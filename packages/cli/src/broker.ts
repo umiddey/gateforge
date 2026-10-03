@@ -56,7 +56,9 @@ import { resolveStateDir } from './state.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from './trusted-policy.js';
 import { rejectUnknownFlags, VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from './commands/common.js';
 import { resolveVerifierKeyring, verifyGateReceiptWithKeyring } from './verifier-keys.js';
+import { resealChainBlocking } from './reseal-chain.js';
 import { loadDocsExclusions } from './docs-exclusions.js';
+import { loadCacheExclusions } from './cache-exclusions.js';
 
 export const BROKER_USAGE =
   'usage: gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]\n' +
@@ -221,6 +223,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
   }
   const digests = recomputeWorkspaceDigests(workspace);
   const docsExclusions = loadDocsExclusions(workspace, digests.config);
+  const cacheExclusions = loadCacheExclusions(workspace, digests.config);
   const treeId = computeCandidateTreeId(
     authorityGitDir,
     workspace,
@@ -229,6 +232,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
     'reject',
     [],
     docsExclusions,
+    cacheExclusions,
   );
 
   // 1b. Approved-policy ownership gate (review 2026-09-13 P1 #5): the
@@ -246,7 +250,7 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
   const policyGate = evaluateApprovedPolicy(
     policyResolution,
     digests.trustedPolicyDigest,
-    digests.config.enforcement?.strictE2E === true || docsExclusions.length > 0,
+    digests.config.enforcement?.strictE2E === true || docsExclusions.length > 0 || cacheExclusions.length > 0,
   );
   if (policyGate.status === 'blocked') {
     throw new BrokerRejection(
@@ -340,6 +344,33 @@ export async function brokerCommitCommand(io: Io, argv: readonly string[]): Prom
     const binding = assertReceiptApprovedPolicy(receipt, policyGate.approved);
     if (!binding.ok) {
       throw new BrokerRejection(binding.cause, `broker: ${binding.detail} (${binding.nextAction})`);
+    }
+  }
+
+  // Re-seal recomputation (plan phase 3): the authority never accepts a
+  // `test-only` claim on its word. The retained chain is authenticated
+  // with the authority's own keyring, the two sealed trees are re-diffed
+  // in the authority's own object store, the change set is
+  // re-classified and the affected set recomputed — any difference is a
+  // typed reject, never a commit.
+  if (receipt.resealedFrom !== undefined) {
+    const chainBlocking = resealChainBlocking({
+      stateDir: resolveStateDir(workspace),
+      receipt,
+      verifierKeyring,
+      gitDir: authorityGitDir,
+      cwd: workspace,
+      env: io.env,
+      ...(digests.config.enforcement?.resealRuntimeFiles !== undefined
+        ? { runtimeFileGlobs: digests.config.enforcement.resealRuntimeFiles }
+        : {}),
+    });
+    if (chainBlocking.length > 0) {
+      const [first] = chainBlocking;
+      throw new BrokerRejection(
+        'EVIDENCE_STALE',
+        `broker: ${String(first?.detail ?? 'the re-seal does not recompute')} (rerun the gate for the exact candidate)`,
+      );
     }
   }
 

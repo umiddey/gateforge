@@ -3,10 +3,15 @@
  * passes, GF-23 claimed-records degradation at the CLI boundary,
  * config-error exit 2, `--changed` scoping, and GF-09 provider parity.
  */
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { attestationMac, ledgerMac, recordIdOf, withTempRepo } from '@gate-forge/core';
+import { attestationMac, ledgerMac, loadConfig, recordIdOf, withTempRepo } from '@gate-forge/core';
 import {
   classificationsYml,
+  configYml,
   currentInputDigest,
   fixtureFingerprint,
   installFixture,
@@ -14,10 +19,12 @@ import {
   OBLIGATION_ORDERS,
   PLUGIN_SOURCE,
   pythonPluginBlock,
+  referenceDetectorPath,
   runCli,
   writeV2Manifest,
   type CliResult,
 } from './helpers.js';
+import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 
 /** A valid, unexpired waiver for one fixture obligation. */
@@ -44,9 +51,11 @@ function parseReport(report: string): {
     recordIds: string[];
     policyId: string;
     fingerprint: string;
+    inScopeBecause?: string[];
   }>;
   blocking: Array<{ kind: string; detail?: string }>;
   run: { provider: string };
+  engine: { version: string; source: string; unpublished: boolean };
 } {
   return JSON.parse(report);
 }
@@ -73,6 +82,350 @@ describe('gateforge check', () => {
       ]);
       expect(report.verdicts.every((v) => v.verdict === 'missing')).toBe(true);
       expect(report.run.provider).toBe('all-files');
+    });
+  });
+  it('checks the requested commit tree instead of later worktree bytes', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.commitFiles({}, 'candidate base');
+      const candidateSha = repo.headSha();
+      expect(candidateSha).not.toBeNull();
+      const candidateTree = repo.git(['rev-parse', `${candidateSha}^{tree}`]).stdout.trim();
+      repo.writeFiles({ 'src/accounts.txt': 'changed after candidate\n' });
+      const result = await runCli(repo, ['check', '--candidate-commit', candidateSha ?? '', '--format', 'json']);
+      expect(result.code).toBe(1);
+      const report = JSON.parse(result.stdout) as { diagnosticContext: { candidateTreeId: string | null } };
+      expect(report.diagnosticContext.candidateTreeId).toBe(candidateTree);
+    });
+  });
+
+  it('verifies a matching externally pinned receipt before loading detector code', async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-fast-path-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const marker = join(markerDir, 'detector-ran');
+        const detectorRelativePath = '.gateforge/fast-path-detector.py';
+        const detectorSource = [
+          'from pathlib import Path',
+          'import runpy',
+          `Path(${JSON.stringify(marker)}).write_text('detector ran')`,
+          `runpy.run_path(${JSON.stringify(referenceDetectorPath())}, run_name='__main__')`,
+        ].join('\n');
+        const subprocessPlugin = pythonPluginBlock().replace(
+          JSON.stringify(referenceDetectorPath()),
+          JSON.stringify(detectorRelativePath),
+        );
+        repo.writeFiles({
+          '.gateforge.yml': `${configYml({
+            include: "['fixtures/**/*.gfx']",
+            plugins: subprocessPlugin,
+          })}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gitignore': '.gateforge/test-gates/\n',
+          'fixtures/resource.gfx': 'unresolved fixture resource\n',
+          [detectorRelativePath]: detectorSource,
+        });
+        repo.stage();
+        repo.commit('sealed candidate');
+        const candidateSha = repo.headSha();
+        expect(candidateSha).not.toBeNull();
+        const config = loadConfig(repo.path('.gateforge.yml'));
+        const approvedDigest = trustedPolicyDigestForConfig(repo.root, config);
+        const parentResult = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+        await mintCompleteRunReceipt(repo, {
+          verifierKey: 'fast-path-key',
+          parentSha: parentResult.status === 0 ? parentResult.stdout.trim() : null,
+          approvedPolicyDigest: approvedDigest,
+        });
+        rmSync(marker, { force: true });
+
+        const startedAt = performance.now();
+        const result = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha ?? '', '--require-e2e', '--format', 'json'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'fast-path-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+          },
+        );
+        const elapsedMs = performance.now() - startedAt;
+        expect(result.code, result.stdout).toBe(0);
+        expect((JSON.parse(result.stdout) as { fastPath?: boolean }).fastPath).toBe(true);
+        expect(elapsedMs).toBeLessThan(2_000);
+        expect(existsSync(marker)).toBe(false);
+
+        rmSync(marker, { force: true });
+        const wrongKey = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha ?? '', '--require-e2e', '--format', 'json'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'different-fast-path-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+          },
+        );
+        expect(wrongKey.code).not.toBe(0);
+        expect((JSON.parse(wrongKey.stdout) as { fastPath?: boolean }).fastPath).not.toBe(true);
+        expect(existsSync(marker)).toBe(true);
+        rmSync(marker, { force: true });
+        const wrongPolicyDigest = 'f'.repeat(64);
+        expect(wrongPolicyDigest).not.toBe(approvedDigest);
+        const wrongPin = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha ?? '', '--require-e2e', '--format', 'json'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'fast-path-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: wrongPolicyDigest,
+          },
+        );
+        expect(wrongPin.code).not.toBe(0);
+        expect(wrongPin.stdout).not.toContain('"fastPath":true');
+        expect(existsSync(marker)).toBe(false);
+      });
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('fails fast on an authenticated receipt for a different candidate tree', async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-stale-fast-path-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const marker = join(markerDir, 'detector-ran');
+        repo.writeFiles({
+          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gitignore': '.gateforge/test-gates/\n',
+          '.gateforge/waivers/accounts.json': waiverJson('tenant.accounts'),
+          '.gateforge/waivers/orders.json': waiverJson('tenant.orders'),
+          'plugin.mjs':
+            `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
+            `writeFileSync(${JSON.stringify(marker)}, 'detector ran');\n`,
+        });
+        repo.stage();
+        repo.commit('candidate tree');
+        const candidateSha = repo.headSha();
+        expect(candidateSha).not.toBeNull();
+        const parentResult = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+        repo.writeFiles({ 'src/accounts.txt': 'receipt was sealed against changed bytes\n' });
+        const config = loadConfig(repo.path('.gateforge.yml'));
+        const approvedDigest = trustedPolicyDigestForConfig(repo.root, config);
+        await mintCompleteRunReceipt(repo, {
+          verifierKey: 'stale-fast-path-key',
+          parentSha: parentResult.status === 0 ? parentResult.stdout.trim() : null,
+          approvedPolicyDigest: approvedDigest,
+        });
+        rmSync(marker, { force: true });
+        const startedAt = performance.now();
+
+        const result = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha ?? '', '--require-e2e'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'stale-fast-path-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+          },
+        );
+        expect(result.code, result.stdout).toBe(1);
+        expect(performance.now() - startedAt).toBeLessThan(2_000);
+        expect(result.stdout).toContain('EVIDENCE_STALE');
+        expect(result.stdout).toContain('src/accounts.txt');
+        expect(existsSync(marker), result.stdout).toBe(false);
+      });
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  });
+
+  it('verifies a matching receipt via the fast path when approved docs exclusions exist', async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-docs-fast-path-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const marker = join(markerDir, 'detector-ran');
+        repo.writeFiles({
+          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gitignore': '.gateforge/test-gates/\n',
+          '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - "docs"\n',
+          'docs/architecture.md': '# Architecture notes\n',
+          'plugin.mjs':
+            `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
+            `writeFileSync(${JSON.stringify(marker)}, 'detector ran');\n`,
+        });
+        repo.stage();
+        repo.commit('sealed candidate with docs exclusion');
+        const candidateSha = repo.headSha();
+        expect(candidateSha).not.toBeNull();
+        const parentResult = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+        const config = loadConfig(repo.path('.gateforge.yml'));
+        const approvedDigest = trustedPolicyDigestForConfig(repo.root, config);
+        await mintCompleteRunReceipt(repo, {
+          verifierKey: 'docs-fast-path-key',
+          parentSha: parentResult.status === 0 ? parentResult.stdout.trim() : null,
+          approvedPolicyDigest: approvedDigest,
+          docsExclusions: ['docs'],
+        });
+        rmSync(marker, { force: true });
+        const startedAt = performance.now();
+        const result = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha ?? '', '--require-e2e', '--format', 'json'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'docs-fast-path-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+            CI: undefined,
+          },
+        );
+        const elapsedMs = performance.now() - startedAt;
+        expect(result.code, result.stdout).toBe(0);
+        expect((JSON.parse(result.stdout) as { fastPath?: boolean }).fastPath).toBe(true);
+        expect(elapsedMs).toBeLessThan(2_000);
+        expect(existsSync(marker), result.stdout).toBe(false);
+      });
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('still accepts a docs-only edit after sealing when the exclusion is approved', async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-docs-edit-fast-path-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const marker = join(markerDir, 'detector-ran');
+        repo.writeFiles({
+          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gitignore': '.gateforge/test-gates/\n',
+          '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - "docs"\n',
+          'docs/architecture.md': '# Architecture notes\n',
+          'plugin.mjs':
+            `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
+            `writeFileSync(${JSON.stringify(marker)}, 'detector ran');\n`,
+        });
+        repo.stage();
+        repo.commit('sealed base');
+        const sealedSha = repo.headSha();
+        expect(sealedSha).not.toBeNull();
+        const sealedParent = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+        const config = loadConfig(repo.path('.gateforge.yml'));
+        const approvedDigest = trustedPolicyDigestForConfig(repo.root, config);
+        await mintCompleteRunReceipt(repo, {
+          verifierKey: 'docs-edit-key',
+          parentSha: sealedParent.status === 0 ? sealedParent.stdout.trim() : null,
+          approvedPolicyDigest: approvedDigest,
+          docsExclusions: ['docs'],
+        });
+        repo.writeFiles({ 'docs/new-note.md': '# A later docs-only edit\n' });
+        repo.stage();
+        const candidateSha = repo.commit('docs only change');
+        rmSync(marker, { force: true });
+        const startedAt = performance.now();
+        const result = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha, '--require-e2e', '--format', 'json'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'docs-edit-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+            CI: undefined,
+          },
+        );
+        expect(result.code, result.stdout).toBe(0);
+        expect((JSON.parse(result.stdout) as { fastPath?: boolean }).fastPath).toBe(true);
+        expect(performance.now() - startedAt).toBeLessThan(2_000);
+        expect(existsSync(marker), result.stdout).toBe(false);
+      });
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('fails fast naming the file for a code edit when a docs exclusion is approved', async () => {
+    const markerDir = mkdtempSync(join(tmpdir(), 'gateforge-code-edit-fast-path-'));
+    try {
+      await withTempRepo({}, async (repo) => {
+        installFixture(repo);
+        const marker = join(markerDir, 'detector-ran');
+        repo.writeFiles({
+          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gitignore': '.gateforge/test-gates/\n',
+          '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - "docs"\n',
+          'docs/architecture.md': '# Architecture notes\n',
+          'plugin.mjs':
+            `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
+            `writeFileSync(${JSON.stringify(marker)}, 'detector ran');\n`,
+        });
+        repo.stage();
+        repo.commit('sealed base');
+        const sealedSha = repo.headSha();
+        expect(sealedSha).not.toBeNull();
+        const sealedParent = repo.git(['rev-parse', 'HEAD^'], { allowFailure: true });
+        const config = loadConfig(repo.path('.gateforge.yml'));
+        const approvedDigest = trustedPolicyDigestForConfig(repo.root, config);
+        await mintCompleteRunReceipt(repo, {
+          verifierKey: 'code-edit-key',
+          parentSha: sealedParent.status === 0 ? sealedParent.stdout.trim() : null,
+          approvedPolicyDigest: approvedDigest,
+          docsExclusions: ['docs'],
+        });
+        repo.writeFiles({ 'src/accounts.txt': 'accounts changed after sealing\n' });
+        repo.stage();
+        const candidateSha = repo.commit('code change after sealing');
+        rmSync(marker, { force: true });
+        const startedAt = performance.now();
+        const result = await runCli(
+          repo,
+          ['check', '--candidate-commit', candidateSha, '--require-e2e'],
+          {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'code-edit-key',
+            GATEFORGE_APPROVED_POLICY_DIGEST: approvedDigest,
+            CI: undefined,
+          },
+        );
+        expect(result.code, result.stdout).toBe(1);
+        expect(result.stdout).toContain('EVIDENCE_STALE');
+        expect(result.stdout).toContain('src/accounts.txt');
+        expect(performance.now() - startedAt).toBeLessThan(2_000);
+        expect(existsSync(marker), result.stdout).toBe(false);
+      });
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('warns when a server route is reached only by statically matched mocks', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo, {
+        include: "['src/**/*.txt', 'src/**/*.js', 'tests/**/*.spec.js']",
+        plugins:
+          "  - id: fixture.plugin\n    version: '1.0.0'\n    transport: in-process\n    module: ./plugin.mjs\n" +
+          "  - id: gateforge.pack-http\n    version: '0.1.0'\n    transport: in-process\n    module: '@gate-forge/pack-http'",
+      });
+      repo.writeFiles({
+        'src/server.js':
+          "import express from 'express';\nconst app = express();\napp.get('/api/accounts', (_req, res) => res.json([]));\n",
+        'tests/mock.spec.js': [
+          "import { test } from '@playwright/test';",
+          "test('mocks the account route', async ({ page }) => {",
+          "  await page.route('**/api/accounts', (route) => route.fulfill({ status: 200 }));",
+          "  await page.goto('http://app.test');",
+          '});',
+          '',
+        ].join('\n'),
+        '.gateforge/planes.json': JSON.stringify({
+          rules: [{ match: 'src/server.js', plane: 'tenant', reason: 'The fixture route is tenant-scoped.' }],
+        }),
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [{ match: 'src/server.js', paths: ['/api/accounts'], method: 'GET', capability: 'crud-read', reason: 'The route reads account records.' }],
+        }),
+      });
+
+      const result = await runCli(repo, ['check']);
+      const advisoryStart = result.stdout.indexOf('advisories (non-blocking):');
+      const blockingStart = result.stdout.indexOf('blocking entries');
+      expect(advisoryStart).toBeGreaterThanOrEqual(0);
+      expect(result.stdout.slice(advisoryStart, blockingStart)).toContain(
+        'only mocked tests reach GET /api/accounts',
+      );
+      expect(result.stdout.slice(blockingStart)).not.toContain('only mocked tests reach GET /api/accounts');
     });
   });
 
@@ -403,6 +756,30 @@ describe('gateforge check', () => {
         ).toBe(true);
       }
 
+      // Genuine envelope over OLD inputs (a run sealed before the tree
+      // changed, or by an earlier engine): the MAC verifies, the digest
+      // does not → the finding names the re-seal, never the read-only
+      // `discover --json` dump.
+      {
+        const old = 'e'.repeat(64);
+        const sortedIds = [...recordIds].sort();
+        const mac = attestationMac(verifierKey, { runId, invocationId, inputDigest: old, recordIds: sortedIds });
+        writeManifest({
+          invocationId,
+          inputDigest: old,
+          recordIds: sortedIds,
+          attestation: { attestationVersion: 2, runId, invocationId, inputDigest: old, recordIds: sortedIds, mac },
+        });
+        const result = await runCli(repo, ['check', '--format', 'json'], withKey);
+        expect(result.code).toBe(1);
+        const report = JSON.parse(result.stdout) as { blocking: Array<{ detail?: string; message?: string }> };
+        const stale = report.blocking.find((entry) =>
+          (entry.detail ?? '').includes('does not match the current input snapshot'),
+        );
+        expect(stale, result.stdout).toBeDefined();
+        expect(stale?.message, result.stdout).toContain('Run `gateforge test-gates --changed`');
+      }
+
       // Transplanted record: an id issued under another run inserted
       // into the current bundle → demotes (run identity binds per
       // envelope) → invalid.
@@ -491,14 +868,43 @@ describe('gateforge check', () => {
       expect(code).toBe(1);
       const report = parseReport(stdout);
       expect(report.run.provider).toBe('local-staged');
+      expect(report.engine.version).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(report.engine.source).toMatch(/^(registry|local path )/);
+      expect(typeof report.engine.unpublished).toBe('boolean');
       // Only the changed resource's obligation is in scope.
       expect(report.verdicts.map((v) => v.obligationId)).toEqual([OBLIGATION_ORDERS]);
+      expect(report.verdicts[0]?.inScopeBecause).toEqual(['src/orders.txt']);
       expect(report.summary.blocking).toBe(1);
+      expect((JSON.parse(stdout) as { newDebt?: { count: number; obligationIds: string[] } }).newDebt).toEqual({
+        count: 1,
+        obligationIds: [OBLIGATION_ORDERS],
+      });
+      const text = await runCli(repo, ['check', '--changed']);
+      expect(text.stdout).toContain(`this change adds 1 unproven obligations: ${OBLIGATION_ORDERS}`);
 
       // The unrestricted check still sees both obligations.
       const full = await runCli(repo, ['check', '--format', 'json']);
       expect(full.code).toBe(1);
       expect(parseReport(full.stdout).verdicts).toHaveLength(2);
+    });
+  });
+
+  it('does not count adopted baseline obligations as newly introduced debt', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      expect((await runCli(repo, ['adopt'])).code).toBe(0);
+      repo.commitFiles({}, 'adopted base');
+      repo.writeFiles({ 'src/orders.txt': 'orders fixture.table\n# changed\n' });
+      repo.stage(['src/orders.txt']);
+
+      const result = await runCli(repo, ['check', '--changed', '--format', 'json']);
+      expect(result.code).toBe(0);
+      expect((JSON.parse(result.stdout) as { newDebt?: { count: number; obligationIds: string[] } }).newDebt).toEqual({
+        count: 0,
+        obligationIds: [],
+      });
+      const text = await runCli(repo, ['check', '--changed']);
+      expect(text.stdout).toContain('this change adds 0 unproven obligations: <none>');
     });
   });
 

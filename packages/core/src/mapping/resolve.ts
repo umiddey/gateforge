@@ -40,6 +40,7 @@ import { CAUSE_NEXT_ACTIONS } from '../schemas/verdict.js';
 /** Why a mapping problem exists (plan §5.4 rows TEST_MAPPING_* + TEST_KIND_UNKNOWN). */
 export type MappingProblemCause =
   | 'TEST_MAPPING_AMBIGUOUS'
+  | 'TEST_INVENTORY_INCOMPLETE'
   | 'TEST_MAPPING_STALE'
   | 'TEST_KIND_UNKNOWN'
   | 'BEHAVIOR_CASE_UNMAPPED';
@@ -138,8 +139,42 @@ export interface ResolveMappingsInput {
   obligationIds: readonly string[];
   /** Optional prior-run observations (suggestions only, never grading). */
   priorRunHints?: readonly PriorRunHint[];
+  /** Playwright files whose native test load failed; selectors there are unknown, not stale. */
+  nativeErrorFiles?: readonly string[];
+  /** True when native enumeration failed and produced no instances at all. */
+  nativeEnumerationFailed?: boolean;
   /** Compiled behavior catalog when the complete-behavior profile is on. */
   behaviorCatalog?: BehaviorCatalog | null;
+}
+
+/**
+ * Drops every binding whose test is owner-quarantined. A quarantined
+ * test proves nothing, so its
+ * coverage claim disappears from the mapping surface: an obligation it
+ * alone covered becomes uncovered and therefore stays `missing`. The
+ * problems list is preserved verbatim — a quarantine never hides a
+ * mapping problem.
+ *
+ * Args:
+ *   resolution: the resolved mappings of this run.
+ *   quarantinedKeys: logical test keys the owner quarantined.
+ *
+ * Returns:
+ *   ResolvedMappings: the same document without quarantined bindings,
+ *   with the same deterministic per-obligation ordering.
+ */
+export function withoutQuarantinedBindings(
+  resolution: ResolvedMappings,
+  quarantinedKeys: ReadonlySet<string>,
+): ResolvedMappings {
+  if (quarantinedKeys.size === 0) return resolution;
+  return {
+    obligations: resolution.obligations.map((obligation) => ({
+      obligationId: obligation.obligationId,
+      bindings: obligation.bindings.filter((binding) => !quarantinedKeys.has(binding.logicalKey)),
+    })),
+    problems: resolution.problems,
+  };
 }
 
 /** Sort rank of binding origins (declared first, hints last). */
@@ -156,6 +191,7 @@ const PROBLEM_RANK: Readonly<Record<MappingProblemCause, number>> = Object.freez
   TEST_MAPPING_STALE: 1,
   TEST_KIND_UNKNOWN: 2,
   BEHAVIOR_CASE_UNMAPPED: 3,
+  TEST_INVENTORY_INCOMPLETE: 4,
 });
 
 /** Test kinds that claim end-to-end proof (mocking disqualifies them, §3.2). */
@@ -259,35 +295,54 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
       continue;
     }
 
-    // Stale declaration (§5.2): the selector no longer matches the
-    // catalog. Name what vanished; suggest a migration on a rename.
+    // A failed native load means absence from this file's catalog is
+    // inconclusive. Keep independent registry errors visible.
     if (matched.length === 0) {
-      const renameTarget = input.catalog.entries.find(
-        (row) =>
-          row.file === entry.selector.file &&
-          row.titlePath.join('>') === (entry.selector.titlePath ?? []).join('>'),
-      );
-      const sameFile = input.catalog.entries.filter((row) => row.file === entry.selector.file);
-      const vanished = renameTarget !== undefined
-        ? `the test now appears as key '${renameTarget.logicalKey}' — migrate the declaration to ` +
-          'the new key (never silently transfer the old declaration or its proof)'
-        : sameFile.length > 0
-          ? `the file still exists but its title path changed (current: ${sameFile
-              .slice(0, 3)
-              .map((row) => `'${row.titlePath.join('>')}'`)
-              .join(', ')})`
-          : `the file '${entry.selector.file}' has no catalog rows anymore`;
-      for (const obligationId of claims) {
-        if (!registry.has(obligationId)) continue;
-        pushProblem({
-          cause: 'TEST_MAPPING_STALE',
-          obligationId,
-          detail:
-            `sidecar key '${entry.key}' no longer matches the catalog ` +
-            `(selector ${entry.selector.runner}/${entry.selector.project ?? '*'}:` +
-            `${entry.selector.file}:${(entry.selector.titlePath ?? []).join('>')}): ${vanished}`,
-          locations: renameTarget !== undefined ? [renameTarget.sourceLocation] : [],
-        });
+      const nativeLoadFailed =
+        entry.selector.runner === 'playwright' &&
+        (input.nativeEnumerationFailed === true ||
+          input.nativeErrorFiles?.includes(entry.selector.file) === true);
+      if (nativeLoadFailed) {
+        for (const obligationId of claims) {
+          if (!registry.has(obligationId)) {
+            pushProblem({
+              cause: 'TEST_MAPPING_STALE',
+              obligationId,
+              detail:
+                `sidecar entry '${entry.key}' claims '${obligationId}', which is not in the current ` +
+                'obligation registry (the obligation vanished or the id is misspelled); correct the mapping',
+              locations: [{ file: entry.selector.file, line: 1, col: 0 }],
+            });
+          }
+        }
+      } else {
+        const renameTarget = input.catalog.entries.find(
+          (row) =>
+            row.file === entry.selector.file &&
+            row.titlePath.join('>') === (entry.selector.titlePath ?? []).join('>'),
+        );
+        const sameFile = input.catalog.entries.filter((row) => row.file === entry.selector.file);
+        const vanished = renameTarget !== undefined
+          ? `the test now appears as key '${renameTarget.logicalKey}' — migrate the declaration to ` +
+            'the new key (never silently transfer the old declaration or its proof)'
+          : sameFile.length > 0
+            ? `the file still exists but its title path changed (current: ${sameFile
+                .slice(0, 3)
+                .map((row) => `'${row.titlePath.join('>')}'`)
+                .join(', ')})`
+            : `the file '${entry.selector.file}' has no catalog rows anymore`;
+        for (const obligationId of claims) {
+          if (!registry.has(obligationId)) continue;
+          pushProblem({
+            cause: 'TEST_MAPPING_STALE',
+            obligationId,
+            detail:
+              `sidecar key '${entry.key}' no longer matches the catalog ` +
+              `(selector ${entry.selector.runner}/${entry.selector.project ?? '*'}:` +
+              `${entry.selector.file}:${(entry.selector.titlePath ?? []).join('>')}): ${vanished}`,
+            locations: renameTarget !== undefined ? [renameTarget.sourceLocation] : [],
+          });
+        }
       }
       continue;
     }

@@ -14,7 +14,6 @@
  * `/__test/mint` helper (the secret is loopback-only and deterministic).
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -27,9 +26,6 @@ const SERVER_PATH = fileURLToPath(
 
 /** JWT secret mirrored from the example server (loopback, deterministic). */
 const JWT_SECRET = 'gateforge-auth-test-secret-v1';
-
-/** Host string the example server binds to (loopback via /etc/hosts). */
-const LOOPBACK_HOST = '0.0.0.0';
 
 /** Encode the JWT payload/header with the JOSE base64url alphabet (no padding). */
 function base64Url(input: Buffer | string): string {
@@ -45,37 +41,22 @@ function signJwt(claims: Record<string, unknown>): string {
   return `${headerB64}.${payloadB64}.${sig}`;
 }
 
-function pickFreePort(): Promise<number> {
+/** Boots the example server with the port reserved by the child itself. */
+function bootServer(): Promise<{ proc: ChildProcess; url: string }> {
   return new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.unref();
-    probe.on('error', reject);
-    probe.listen(0, 'localhost', () => {
-      const addr = probe.address();
-      if (addr === null || typeof addr === 'string') {
-        reject(new Error('failed to acquire free port'));
-        return;
-      }
-      const port = addr.port;
-      probe.close(() => resolve(port));
-    });
-  });
-}
-
-/** Boots the example server on the given port. */
-function bootServer(port: number): Promise<ChildProcess> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(process.execPath, [SERVER_PATH, '--port', String(port)], {
+    const proc = spawn(process.execPath, [SERVER_PATH, '--port', '0'], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stderr = '';
+    let stdout = '';
     proc.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString('utf8');
     });
     proc.stdout.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8');
-      if (text.includes('listening on http://')) {
-        resolve(proc);
+      stdout += chunk.toString('utf8');
+      const port = /listening on http:\/\/[^:\s]+:(\d+)/.exec(stdout)?.[1];
+      if (port !== undefined && Number(port) > 0) {
+        resolve({ proc, url: `http://localhost:${port}` });
       }
     });
     proc.on('error', (err) => reject(err));
@@ -93,14 +74,10 @@ interface E2EHarness {
 
 let harness: E2EHarness | undefined;
 beforeAll(async () => {
-  // OS-assigned free port — must not collide with the production 3001
-  // or any other pack's e2e.
-  const port = await pickFreePort();
-  const proc = await bootServer(port);
+  const { proc, url } = await bootServer();
   const exitPromise = new Promise<void>((resolve) => {
     proc.on('exit', () => resolve());
   });
-  const url = `http://localhost:${port}`;
   harness = {
     url,
     detector: createAuthDetector({ root: url }),

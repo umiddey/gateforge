@@ -28,8 +28,8 @@
  * state file that exists but is not valid JSON is a usage error (exit 2),
  * never a silent skip.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   canonicalJson,
@@ -43,6 +43,7 @@ import {
 } from '@gate-forge/core';
 import type { InputSnapshot } from './input-snapshot.js';
 import { UsageError } from './errors.js';
+import type { CandidateTreeEntry } from './candidate-tree.js';
 
 /** Default run-state directory, repo-root-relative. */
 export const DEFAULT_STATE_DIR = '.gateforge/test-gates';
@@ -76,10 +77,16 @@ export function httpRoutesView(graph: ResourceGraph): HttpRouteCandidate[] {
     if (resource.id === null || resource.kind !== 'http.endpoint') continue;
     const method = resource.attributes['method'];
     const canonicalPath = resource.attributes['canonicalPath'];
+    const linkedResourceName = resource.attributes['linkedResourceName'];
+    const capabilities = resource.attributes['capabilities'];
     routes.push({
       resourceId: resource.id,
       method: typeof method === 'string' ? method : '',
       canonicalPath: typeof canonicalPath === 'string' ? canonicalPath : '',
+      ...(typeof linkedResourceName === 'string' ? { linkedResourceName } : {}),
+      ...(Array.isArray(capabilities)
+        ? { capabilities: capabilities.filter((value): value is string => typeof value === 'string') }
+        : {}),
     });
   }
   routes.sort((a, b) => compareStrings(a.resourceId, b.resourceId));
@@ -140,6 +147,8 @@ export interface TestGatesEnv {
   GATEFORGE_OBLIGATIONS: string;
   /** Witness-service URL; null until G6 wires the loopback service. */
   GATEFORGE_WITNESS_URL: string | null;
+  /** Frontend build mode when exposed by standard build environment variables. */
+  frontendBuildMode?: string;
 }
 
 /** Reads an optional JSON array state file; absent → [], invalid → error. */
@@ -164,10 +173,30 @@ export function readJsonArray(stateDir: string, name: string): unknown[] {
   return document;
 }
 
-/** Writes one JSON document into the state dir (creating it). */
-function writeStateFile(stateDir: string, name: string, value: JsonValue): void {
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(join(stateDir, name), `${canonicalJson(value)}\n`, 'utf8');
+/**
+ * Writes one JSON document into the state dir (creating it), or into
+ * a subdirectory of it when `name` carries one.
+ *
+ * The state dir is shared with the witness and later `check` runs, and a
+ * run's processes can be killed at any point (a container exiting ends
+ * everything in it). The document goes to a temporary file first and
+ * replaces the old one by rename, so a kill leaves the previous document
+ * or the new one, never a truncated file.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   name: the document name, optionally inside a subdirectory.
+ *   value: the document to write.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeStateFile(stateDir: string, name: string, value: JsonValue): void {
+  const target = join(stateDir, name);
+  mkdirSync(dirname(target), { recursive: true });
+  const temporary = `${target}.tmp-${String(process.pid)}`;
+  writeFileSync(temporary, `${canonicalJson(value)}\n`, 'utf8');
+  renameSync(temporary, target);
 }
 
 /** Persists the validated run manifest. */
@@ -212,6 +241,49 @@ export function writeHttpRoutesView(stateDir: string, routes: readonly HttpRoute
 }
 
 /**
+ * Persists the route inventory the twin-shape recorder resolves
+ * request paths against (E64).
+ *
+ * It is the engine's own compiled `http.endpoint` list, written ONLY
+ * when the owner configured `enforcement.twinPaths`: a repository
+ * without that key never grows this file, and its runs stay
+ * byte-identical. The witness reads it so a recorded shape names a
+ * route TEMPLATE (`/accounts/{}`) instead of a concrete id.
+ */
+export function writeTwinInventory(path: string, templates: readonly string[]): void {
+  const document = {
+    schemaVersion: 1,
+    templates: [...new Set(templates)].sort(compareStrings),
+  };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${canonicalJson(document as unknown as JsonValue)}\n`, 'utf8');
+}
+
+/**
+ * Persists the twin shapes this run observed (E64): per test, the
+ * logical key, whether the session was observation-only, and the
+ * request SHAPES it exercised.
+ *
+ * Shapes and logical keys only — never a URL, a body or a
+ * non-allowlisted query value — so the document is safe to read, diff
+ * and paste into a bug. It is diagnostic: no gate reads it, and a
+ * shape in it can satisfy nothing.
+ */
+export function writeTwinShapes(
+  stateDir: string,
+  twins: readonly {
+    logicalKey: string;
+    observationOnly: boolean;
+    shapes: readonly { method: string; route: string; query?: Record<string, string> }[];
+  }[],
+): void {
+  writeStateFile(stateDir, 'twin-shapes.json', {
+    schemaVersion: 1,
+    twins: [...twins].sort((left, right) => compareStrings(left.logicalKey, right.logicalKey)),
+  } as unknown as JsonValue);
+}
+
+/**
  * Persists the run's effective-classification view (plan phase 5) as a
  * derived artifact for the verifier side (e.g. the witness service's
  * `GET /classifications` surface). NEVER authoritative engine input: the
@@ -230,13 +302,19 @@ export function writeEnv(
   manifest: RunManifest,
   witnessUrl: string | null,
   runToken?: string,
+  operatorEnv: NodeJS.ProcessEnv = process.env,
 ): TestGatesEnv {
+  const configuredBuildMode =
+    operatorEnv['VITE_MODE']?.trim() || operatorEnv['NODE_ENV']?.trim();
   const record: TestGatesEnv = {
     GATEFORGE_RUN_ID: manifest.runId,
     GATEFORGE_RUN_TOKEN: runToken ?? randomUUID(),
     GATEFORGE_STATE_DIR: stateDir,
     GATEFORGE_OBLIGATIONS: join(stateDir, 'obligations.json'),
     GATEFORGE_WITNESS_URL: witnessUrl,
+    ...(configuredBuildMode === undefined || configuredBuildMode.length === 0
+      ? {}
+      : { frontendBuildMode: configuredBuildMode }),
   };
   writeStateFile(stateDir, 'env.json', record as unknown as JsonValue);
   return record;
@@ -269,7 +347,16 @@ export function readStateDocument(stateDir: string, name: string): unknown | nul
   try {
     raw = readFileSync(path, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    if (code === 'EACCES' || code === 'EPERM') {
+      const info = lstatSync(path);
+      const currentUid = typeof process.getuid === 'function' ? process.getuid() : 'unknown';
+      throw new UsageError(
+        `state file exists at '${path}' but is not readable by uid ${String(currentUid)} ` +
+          `(owner uid ${String(info.uid)}) — rerun the suite as this user or fix ownership`,
+      );
+    }
     throw new UsageError(`cannot read '${path}': ${(error as Error).message}`);
   }
   try {
@@ -290,6 +377,67 @@ export function writeClaimInjections(
   } as unknown as JsonValue);
 }
 
+/** Advisory timing data for the most recently completed full test run. */
+export interface LastFullRunSummary {
+  /** Number of tests selected by that full run. */
+  testCount: number;
+  /** Wall-clock duration of the supervised test execution in milliseconds. */
+  durationMs: number;
+}
+
+/**
+ * Persists advisory cost data for a completed full test run.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   summary: selected test count and measured execution duration.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeLastFullRunSummary(stateDir: string, summary: LastFullRunSummary): void {
+  writeStateFile(stateDir, 'last-full-run.json', {
+    schemaVersion: 1,
+    testCount: summary.testCount,
+    durationMs: summary.durationMs,
+  });
+}
+
+/**
+ * Reads advisory full-run cost data without letting it affect gate trust.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   LastFullRunSummary | null: valid saved cost data, or null when missing
+ *   or unusable.
+ */
+export function readLastFullRunSummary(stateDir: string): LastFullRunSummary | null {
+  let document: unknown;
+  try {
+    document = readStateDocument(stateDir, 'last-full-run.json');
+  } catch {
+    return null;
+  }
+  if (document === null || typeof document !== 'object' || Array.isArray(document)) return null;
+  const record = document as Record<string, unknown>;
+  const testCount = record['testCount'];
+  const durationMs = record['durationMs'];
+  if (
+    record['schemaVersion'] !== 1 ||
+    typeof testCount !== 'number' ||
+    !Number.isSafeInteger(testCount) ||
+    testCount < 0 ||
+    typeof durationMs !== 'number' ||
+    !Number.isFinite(durationMs) ||
+    durationMs < 0
+  ) {
+    return null;
+  }
+  return { testCount, durationMs };
+}
+
 /** Persists the sealed supervision execution result. */
 export function writeExecutionResult(stateDir: string, result: unknown): void {
   writeStateFile(stateDir, 'execution-result.json', result as JsonValue);
@@ -298,6 +446,140 @@ export function writeExecutionResult(stateDir: string, result: unknown): void {
 /** Persists the authenticated gate receipt. */
 export function writeGateReceipt(stateDir: string, receipt: unknown): void {
   writeStateFile(stateDir, 'receipt.json', receipt as JsonValue);
+}
+
+/**
+ * Persists the run record of a whole-suite run that sealed no receipt.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   record: the authenticated run record.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeRunRecord(stateDir: string, record: unknown): void {
+  writeStateFile(stateDir, 'run-record.json', record as JsonValue);
+}
+
+/**
+ * Removes the retained run record. A gate receipt supersedes it (the
+ * receipt is the same evidence plus a verdict), so a sealed run never
+ * leaves a stale parent behind for the next one to re-seal from.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   void.
+ */
+export function clearRunRecord(stateDir: string): void {
+  rmSync(join(stateDir, 'run-record.json'), { force: true });
+}
+
+/**
+ * Persists the run-scope view the in-runner reporter reads.
+ *
+ * A reporter that graded a named test list or a changed slice observed
+ * no repository-wide debt, and must say so instead of printing a
+ * repository verdict the CLI never asked for. The view is derived run
+ * state, written before the suite starts, and read by nothing the gate
+ * trusts.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   scope: the scope this run actually grades.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeRunScopeView(stateDir: string, scope: 'full' | 'changed' | 'named'): void {
+  writeStateFile(stateDir, 'run-scope.json', { schemaVersion: 1, scope } as unknown as JsonValue);
+}
+
+/**
+ * Persists the Gateforge-owned failing-test diagnosis artifact.
+ *
+ * A failed witnessed test used to ship nothing but an ARIA snapshot:
+ * the runner's message and stack lived in the runner log, which the CI
+ * job keeps private precisely because it carries secrets. This file is
+ * the screened alternative — the first error line and a short
+ * `file:line` stack per failure, already passed through the credential
+ * guard, never a request or response body. It is written only when the
+ * progress stream is on, so a local run leaves the state directory
+ * exactly as it found it.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   runId: the run that produced the failures.
+ *   failures: the guarded failure records, in the order the run saw them.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeTestFailures(
+  stateDir: string,
+  runId: string,
+  failures: readonly {
+    logicalKey: string;
+    title: string;
+    message: string;
+    stackFrames: string[];
+  }[],
+): void {
+  writeStateFile(stateDir, 'failures.json', {
+    schemaVersion: 1,
+    runId,
+    failures: failures.map((failure) => ({
+      logicalKey: failure.logicalKey,
+      title: failure.title,
+      message: failure.message,
+      stackFrames: [...failure.stackFrames],
+    })),
+  } as unknown as JsonValue);
+}
+
+/**
+ * Persists the entries included in the sealed candidate tree.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   entries: sorted tree entries bound by the sealed receipt.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeCandidateTreeEntries(stateDir: string, entries: readonly CandidateTreeEntry[]): void {
+  writeStateFile(stateDir, 'candidate-tree.json', entries as unknown as JsonValue);
+}
+
+/**
+ * Reads the saved candidate-tree entries for mismatch diagnostics.
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *
+ * Returns:
+ *   CandidateTreeEntry[] | null: validated entries, or null when absent or malformed.
+ */
+export function readCandidateTreeEntries(stateDir: string): CandidateTreeEntry[] | null {
+  const document = readStateDocument(stateDir, 'candidate-tree.json');
+  if (!Array.isArray(document)) return null;
+  const entries: CandidateTreeEntry[] = [];
+  for (const value of document) {
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      typeof value.mode !== 'string' ||
+      typeof value.sha !== 'string' ||
+      !/^[0-9a-f]{40}$/.test(value.sha) ||
+      typeof value.path !== 'string'
+    ) {
+      return null;
+    }
+    entries.push({ mode: value.mode, sha: value.sha, path: value.path });
+  }
+  return entries;
 }
 
 /**

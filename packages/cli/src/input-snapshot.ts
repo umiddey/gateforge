@@ -22,9 +22,13 @@
  *
  * File identity is bytes + path + type: a deleted tracked file changes
  * the digest (explicit `deleted` entry). Symlink identity is preserved
- * (link target string plus target bytes); links escaping the repository,
- * unresolvable links, directory links, and submodules cannot be captured
- * and fail closed with {@link UnsupportedSnapshotError} — never a silent
+ * (link target string plus target bytes). A DANGLING symlink — one
+ * whose target does not exist, e.g. a checked-in link into a
+ * not-yet-created virtualenv — is recorded the way git records it: as
+ * a `dangling-symlink` entry bound to its link text alone, never
+ * followed and never read, so the run continues. Links escaping the
+ * repository, directory links, and submodules cannot be captured and
+ * fail closed with {@link UnsupportedSnapshotError} — never a silent
  * omission. Only the actual resolved run-state directory (`--out`) is
  * excluded from the evidence digest; `.git` internals, absolute paths,
  * timestamps, run tokens, and verifier keys never enter it. There is no
@@ -48,6 +52,7 @@ import {
 } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { expandIncludePaths } from './glob.js';
+import { isEngineGeneratedStatePath } from './state-artifacts.js';
 import {
   isRuntimeReusePath,
   RuntimeReuseBoundaryError,
@@ -137,10 +142,12 @@ export const MANIFEST_NAMES = [
 export const GIT_SCOPE_CONTROL_BASENAMES = ['.gitignore', '.gitattributes'];
 
 /**
- * The input tree cannot be captured completely (submodule, escaping or
- * unresolvable symlink, unreadable required input). Evaluation must fail
- * closed with an explicit unsupported-snapshot block — never a partial
- * digest claimed complete.
+ * The input tree cannot be captured completely (submodule, escaping
+ * symlink, unreadable required input). Evaluation must fail closed with
+ * an explicit unsupported-snapshot block — never a partial digest
+ * claimed complete. A symlink that is merely DANGLING, or whose target
+ * is a DIRECTORY, is not one of these: it is captured by its link text
+ * as a `dangling-symlink` / `directory-symlink` entry.
  */
 export class UnsupportedSnapshotError extends Error {
   constructor(message: string) {
@@ -165,10 +172,12 @@ export class SnapshotUnavailableError extends Error {
 export interface SnapshotFileEntry {
   /** Repo-root-relative posix path (or config-relative label for absence). */
   path: string;
-  /** `file` = regular bytes, `symlink` = link+target bytes, `absent` = missing optional config, `deleted` = tracked but gone. */
-  type: 'file' | 'symlink' | 'absent' | 'deleted';
+  /** `file` = regular bytes, `symlink` = link+target bytes, `dangling-symlink` = link text of a link whose target does not exist, `directory-symlink` = link text of a link to a directory, `absent` = missing optional config, `deleted` = tracked but gone. */
+  type: 'file' | 'symlink' | 'dangling-symlink' | 'directory-symlink' | 'absent' | 'deleted';
   /** Hex digest binding path + type + content (or absence marker). */
   contentDigest: string;
+  /** The raw link text of a symlink entry (never resolved). */
+  linkTarget?: string;
 }
 
 /** Canonical gate context hashed alongside the file inventory. */
@@ -227,6 +236,8 @@ export interface ComputeSnapshotInput {
   runtimeReuseMounts?: readonly RuntimeReuseMount[];
   /** Owner-declared documentation folders approved by the external policy pin. */
   docsExclusions?: readonly string[];
+  /** Exact owner-approved Python bytecode files approved by the external policy pin. */
+  cacheExclusions?: readonly string[];
 }
 
 /**
@@ -316,9 +327,11 @@ function hashEntry(kind: string, path: string, content: Buffer | string): string
  *   SnapshotFileEntry: the file, symlink, or deleted entry.
  *
  * Throws:
- *   UnsupportedSnapshotError: escaping/unresolvable/directory symlink,
- *   or a non-ENOENT filesystem failure (fail closed — required inputs
- *   must not silently vanish).
+ *   UnsupportedSnapshotError: an escaping symlink, a link to something
+ *   that is neither a file nor a directory (fifo, socket, device), or a
+ *   non-ENOENT filesystem failure (fail closed — required inputs must
+ *   not silently vanish). A dangling link and a link to a directory are
+ *   captured by their link text instead.
  */
 function entryForPath(cwd: string, path: string): SnapshotFileEntry {
   const absolute = join(cwd, ...path.split('/'));
@@ -357,13 +370,48 @@ function entryForPath(cwd: string, path: string): SnapshotFileEntry {
     let targetStat: ReturnType<typeof lstatSync>;
     try {
       targetStat = lstatSync(resolved);
-    } catch {
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        // A DANGLING link is a link, not a hole: git itself stores a
+        // symlink as a 120000 blob whose bytes are the link-target
+        // string, so the link text IS the identity. The target is never
+        // followed and never read, so a link into a not-yet-created
+        // virtualenv is captured exactly the way git records it and the
+        // run continues (one plain notice line names it). The entry
+        // still moves the digest: retargeting the link, or the target
+        // appearing after the project's own bootstrap, changes its
+        // identity and its entry type.
+        return {
+          path,
+          type: 'dangling-symlink',
+          linkTarget: target,
+          contentDigest: hashEntry('dangling-symlink', path, `link:${target}\0`),
+        };
+      }
       throw new UnsupportedSnapshotError(
-        `input snapshot rejects unresolvable symlink '${path}' -> '${target}'; ` +
+        `input snapshot cannot inspect symlink target of '${path}' (${code ?? 'UNKNOWN'}); ` +
           'explicit unsupported-snapshot block',
       );
     }
     if (!targetStat.isFile()) {
+      if (targetStat.isDirectory() || targetStat.isSymbolicLink()) {
+        // A link to a DIRECTORY (including one that only exists after the
+        // project's own bootstrap) is recorded the way a dangling link is:
+        // by its link text alone, exactly as git stores a 120000 blob.
+        // The target is never walked and never read — it can be a whole
+        // virtualenv — so the run continues with one plain notice line.
+        // The entry still moves the digest: retargeting the link, or the
+        // target becoming a regular file, changes its identity and its
+        // type. Anything else (fifo, socket, device) stays fail-closed:
+        // that is not a link into a path.
+        return {
+          path,
+          type: 'directory-symlink',
+          linkTarget: target,
+          contentDigest: hashEntry('directory-symlink', path, `link:${target}\0`),
+        };
+      }
       throw new UnsupportedSnapshotError(
         `input snapshot rejects non-file symlink '${path}' -> '${target}'; ` +
           'explicit unsupported-snapshot block',
@@ -381,7 +429,7 @@ function entryForPath(cwd: string, path: string): SnapshotFileEntry {
     // Identity = link location + link target string + target bytes: a
     // retargeted link and a changed target both move the digest.
     const combined = Buffer.concat([Buffer.from(`link:${target}\0`, 'utf8'), targetBytes]);
-    return { path, type: 'symlink', contentDigest: hashEntry('symlink', path, combined) };
+    return { path, type: 'symlink', linkTarget: target, contentDigest: hashEntry('symlink', path, combined) };
   }
   if (stat.isFile()) {
     let bytes: Buffer;
@@ -438,6 +486,54 @@ export function normalizeRepoModule(module: string): string | null {
 }
 
 /**
+ * Expands a configured Alembic versions directory into its migration files.
+ *
+ * The chain config names a DIRECTORY; the snapshot digests files, so the
+ * directory is walked and every file below it is declared instead.
+ * Python bytecode (`__pycache__/`, `*.pyc`, `*.pyo`) is skipped: Alembic
+ * writes it whenever it imports the migrations, so it would change the
+ * input identity without any source change. A missing or unreadable
+ * directory contributes nothing here — the compiler reports the broken
+ * chain itself.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *   directory: repo-relative versions directory.
+ *
+ * Returns:
+ *   string[]: repo-relative posix file paths, codepoint-sorted.
+ */
+export function migrationInputFiles(cwd: string, directory: string): string[] {
+  const prefix = directory.replace(/\\/g, '/').replace(/\/+$/, '');
+  const found: string[] = [];
+  const walk = (dir: string, segments: readonly string[]): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    entries.sort(compareStrings);
+    for (const entry of entries) {
+      const relativePath = [...segments, entry].join('/');
+      let stat;
+      try {
+        stat = lstatSync(join(dir, entry));
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory()) {
+        if (entry !== '__pycache__') walk(join(dir, entry), [...segments, entry]);
+      } else if (!/\.py[co]$/.test(entry)) {
+        found.push(relativePath);
+      }
+    }
+  };
+  walk(join(cwd, directory), []);
+  return found.map((path) => toPosix(`${prefix}/${path}`)).sort(compareStrings);
+}
+
+/**
  * Collects the DECLARED source/configuration inputs: configured scan
  * inputs (even gitignored) + explicit config/adapter/waiver/plugin/
  * manifest inputs. Only this set can trigger an unsafe `--out` overlap:
@@ -475,9 +571,22 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
     ...(config.behaviorPolicy === undefined ? [] : [toPosix(config.behaviorPolicy)]),
     ...(config.runtime === undefined ? [] : [toPosix(config.runtime)]),
     ...PACK_CONFIGS,
+    ...(config.alembic === undefined
+      ? []
+      : [
+          ...config.alembic.chains.flatMap((chain) => [
+            ...migrationInputFiles(cwd, chain.migrations),
+            chain.alembicIni ?? 'alembic.ini',
+            ...chain.models,
+          ]),
+          ...(config.alembic.seed === undefined ? [] : [config.alembic.seed.path]),
+        ]),
   ];
   if (existsSync(join(cwd, '.gateforge/docs-exclusions.yml'))) {
     explicitFiles.push('.gateforge/docs-exclusions.yml');
+  }
+  if (existsSync(join(cwd, '.gateforge/cache-exclusions.yml'))) {
+    explicitFiles.push('.gateforge/cache-exclusions.yml');
   }
   for (const candidate of explicitFiles) {
     if (candidate.length > 0) paths.add(candidate);
@@ -670,6 +779,11 @@ function buildFileEntries(
  * digest) is a hole, not an exclusion. Also rejects the state directory
  * aliasing the repo root itself (including through a symlink).
  *
+ * The ENGINE's own generated state is not a hole and is exempted through
+ * the closed-world set in `./state-artifacts.ts`: a tracked file under
+ * `--out` still refuses above, and any other path there still refuses
+ * here.
+ *
  * Args:
  *   cwd: absolute repo root.
  *   stateDir: absolute run-state directory.
@@ -743,9 +857,19 @@ export function assertOutputDisjoint(
     }
   }
   if (prefix === '' || prefix.startsWith('..')) return;
+  // A declared input that hides under --out is the hole this refuses.
+  // The engine's OWN generated state is not a hole: it is the output the
+  // exclusion exists for, and a supervised run writes real source-shaped
+  // files (the synthesized Playwright config) into the state directory —
+  // which made the very next command refuse to run in the repository the
+  // run had just graded. The generated set is closed-world
+  // (./state-artifacts.ts), so a tracked file (refused above), a
+  // hand-written file, and any path the engine never writes all still
+  // refuse with byte-identical wording.
   const hidden = declaredInputs
     .filter((item) => !item.startsWith('absent:'))
     .filter((item) => item === prefix || item.startsWith(`${prefix}/`))
+    .filter((item) => !isEngineGeneratedStatePath(item.slice(prefix.length + 1)))
     .sort(compareStrings);
   if (hidden.length > 0) {
     throw new UsageError(
@@ -845,8 +969,8 @@ export function digestSnapshot(files: readonly SnapshotFileEntry[], gateContext:
  * entries, canonical context, and digest.
  *
  * Args:
- *   input: cwd, config, stateDir, and (post-discovery) classifications,
- *   obligations, httpRoutes, and pinned plugins.
+ *   input: repository root, config, run state, optional post-discovery
+ *   classification context, and approved documentation/cache exclusions.
  *
  * Returns:
  *   InputSnapshot: full inventory, gate context, verifier format, and
@@ -865,6 +989,7 @@ export function computeInputSnapshot(input: ComputeSnapshotInput): InputSnapshot
     input.stateDir,
     input.runtimeReuseMounts,
     input.docsExclusions,
+    input.cacheExclusions,
   );
   const gateContext = buildGateContext(
     input.config,
@@ -894,9 +1019,17 @@ export function computeInputSnapshot(input: ComputeSnapshotInput): InputSnapshot
  *   cwd: absolute repo root.
  *   config: validated `.gateforge.yml`.
  *   stateDir: absolute run-state directory.
+ *   runtimeReuseMounts: externally prepared dependencies bound by digest.
+ *   docsExclusions: owner-approved documentation folders to omit.
+ *   cacheExclusions: exact owner-approved Python bytecode files to omit.
  *
  * Returns:
  *   SnapshotFileEntry[]: sorted file entries (overlap-checked).
+ *
+ * Throws:
+ *   UsageError: an exclusion overlaps run state or a configured input.
+ *   SnapshotUnavailableError: no usable Git inventory.
+ *   UnsupportedSnapshotError: a required file cannot be captured.
  */
 export function collectInputFiles(
   cwd: string,
@@ -904,6 +1037,7 @@ export function collectInputFiles(
   stateDir: string,
   runtimeReuseMounts: readonly RuntimeReuseMount[] = [],
   docsExclusions: readonly string[] = [],
+  cacheExclusions: readonly string[] = [],
 ): SnapshotFileEntry[] {
   const declared = collectDeclaredInputs(cwd, config);
   assertOutputDisjoint(cwd, stateDir, declared);
@@ -926,6 +1060,26 @@ export function collectInputFiles(
       throw new UsageError(`documentation exclusion '${folder}' overlaps a configured scan or gate input (fail closed)`);
     }
   }
+  for (const file of cacheExclusions) {
+    const segments = file.split('/');
+    const cacheIndex = segments.lastIndexOf('__pycache__');
+    if (
+      file.length === 0 || file.startsWith('/') || file.includes('\\') ||
+      segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..') ||
+      cacheIndex !== segments.length - 2 || !/\.(?:pyc|pyo)$/.test(segments.at(-1) ?? '')
+    ) {
+      throw new UsageError(`invalid approved Python bytecode exclusion '${file}' (fail closed)`);
+    }
+    if (
+      statePrefix !== '' &&
+      (statePrefix === file || statePrefix.startsWith(`${file}/`) || file.startsWith(`${statePrefix}/`))
+    ) {
+      throw new UsageError(`Python bytecode exclusion '${file}' overlaps the run-state directory (fail closed)`);
+    }
+    if (declared.some((path) => !path.startsWith('absent:') && path === file)) {
+      throw new UsageError(`Python bytecode exclusion '${file}' overlaps a configured scan or gate input (fail closed)`);
+    }
+  }
   try {
     validateRuntimeReuseMounts(cwd, runtimeReuseMounts);
   } catch (error) {
@@ -938,6 +1092,7 @@ export function collectInputFiles(
   const inventory = [...new Set([...declared, ...git.inventory])]
     .filter((path) => !isRuntimeReusePath(path.replace(/^absent:/, ''), runtimeReuseMounts))
     .filter((path) => path.startsWith('absent:') || !docsExclusions.some((folder) => path === folder || path.startsWith(`${folder}/`)))
+    .filter((path) => path.startsWith('absent:') || !cacheExclusions.includes(path))
     .sort(compareStrings);
   return buildFileEntries(cwd, inventory, git.tracked, stateDir);
 }
@@ -968,4 +1123,38 @@ export function diffInputFiles(before: readonly SnapshotFileEntry[], after: read
     if (!beforeByPath.has(path)) differences.push(`added during discovery: ${path}`);
   }
   return differences.sort(compareStrings);
+}
+
+/**
+ * One plain notice line per symlink captured by link text only.
+ *
+ * A dangling link or a link to a directory is captured, not fatal, so
+ * the run must still say what it saw: each line names the link and its
+ * target, and says whether an action is needed. A dangling link needs
+ * one (the project's own bootstrap, or drop the link); a directory link
+ * needs none — it works as it stands and nothing was read through it.
+ *
+ * Args:
+ *   files: the captured file entries.
+ * Returns:
+ *   string[]: one notice line per link captured by text, in path order
+ *   (empty when every link resolves to a regular file).
+ */
+export function symlinkNotices(files: readonly SnapshotFileEntry[]): string[] {
+  const notices: string[] = [];
+  for (const entry of files) {
+    const target = entry.linkTarget ?? '';
+    if (entry.type === 'dangling-symlink') {
+      notices.push(
+        `note: dangling symlink '${entry.path}' -> '${target}' is recorded by its link text ` +
+          "(the target does not exist; do: run the project's own bootstrap, or remove the link)",
+      );
+    } else if (entry.type === 'directory-symlink') {
+      notices.push(
+        `note: directory symlink '${entry.path}' -> '${target}' is recorded by its link text ` +
+          '(the target is a directory and was not read; no action needed)',
+      );
+    }
+  }
+  return notices;
 }

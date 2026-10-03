@@ -55,7 +55,7 @@ import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { evaluateRun, obligationFingerprint } from '../evaluate.js';
-import { headSha, resolveRepoPath, runPipeline } from '../pipeline.js';
+import { headSha, resolveRepoPath, runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { engineRootFromInvocation, ensureBlockingWiring } from './blocking.js';
 import { loadConfigAt } from './common.js';
 
@@ -137,6 +137,7 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
     blocking: pipeline.policy.blocking,
     stateDir,
     now: pipeline.now,
+    engineAlembicRecords: pipeline.engineAlembicRecords,
     changedFiles: null,
     baseline: null,
   });
@@ -184,6 +185,10 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
   // the classification-blocked resource ids (sorted, unique, possibly
   // empty — the field's presence is this receipt claiming the layer).
   writeBaseline(baselinePath, adoptBaseline([...reds.keys()]));
+  const orderedObligations = [...pipeline.policy.obligations].sort((a, b) =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  );
+  const obligationSources = sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog);
   writeAdoptionRecord(recordPath, {
     schemaVersion: 1,
     adoptedAt: pipeline.now,
@@ -191,6 +196,15 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
     adopted: reds.size,
     proven,
     classificationBlocked: adoptClassificationBlocked([...classificationBlocked]),
+    obligationFingerprintsById: Object.fromEntries(
+      orderedObligations.map((obligation) => [obligation.id, obligationFingerprint(obligation)]),
+    ),
+    obligationSourcesById: Object.fromEntries(
+      orderedObligations.map((obligation) => [
+        obligation.id,
+        obligationSources.get(obligation.resourceId) ?? [],
+      ]),
+    ),
   });
 
   // Step 3: enforcement wiring through the shared init --blocking path.

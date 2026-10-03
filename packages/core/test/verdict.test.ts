@@ -306,6 +306,110 @@ describe('evaluateObligation — satisfied requires complete witnessed evidence 
     expect(outcome.reason).toContain("'create'");
     expect(outcome.reason).toContain("'persistence:update' requires 'update'");
   });
+  it('grades two updates against their own anchor snapshots, independent of record order', () => {
+    const firstAction = witnessedAction({
+      payload: { operation: 'update', entityId: 'acc-1', anchorId: 'revision-2', fields: { name: 'Revision 2' } },
+    });
+    const secondAction = witnessedAction({
+      payload: { operation: 'update', entityId: 'acc-1', anchorId: 'revision-3', fields: { name: 'Revision 3' } },
+    });
+    const firstSnapshot = witnessedPersistence({
+      payload: {
+        entityId: 'acc-1',
+        found: true,
+        anchorId: 'revision-2',
+        fields: { name: 'Revision 2' },
+        before: { found: true, fields: { name: 'Initial' } },
+      },
+    });
+    const secondSnapshot = witnessedPersistence({
+      payload: {
+        entityId: 'acc-1',
+        found: true,
+        anchorId: 'revision-3',
+        fields: { name: 'Revision 3' },
+        before: { found: true, fields: { name: 'Revision 2' } },
+      },
+    });
+    const recordOrders = [
+      [firstAction, secondAction, firstSnapshot, secondSnapshot],
+      [secondAction, firstAction, firstSnapshot, secondSnapshot],
+    ];
+    for (let iteration = 0; iteration < 25; iteration += 1) {
+      for (const records of recordOrders) {
+        const outcome = evaluateObligation(obligation, {
+          claims: [makeClaim('test-1')],
+          records,
+          waivers: [],
+          classification,
+          now: NOW,
+        });
+        expect(outcome.verdict).toBe('satisfied');
+      }
+    }
+  });
+
+  it('rejects repeated same-entity updates when the adapter has no per-anchor snapshots', () => {
+    const records = [
+      witnessedAction({
+        payload: { operation: 'update', entityId: 'acc-1', fields: { name: 'Revision 2' } },
+      }),
+      witnessedAction({
+        payload: { operation: 'update', entityId: 'acc-1', fields: { name: 'Revision 3' } },
+      }),
+      witnessedPersistence({
+        payload: {
+          entityId: 'acc-1',
+          found: true,
+          fields: { name: 'Revision 2' },
+          before: { found: true, fields: { name: 'Initial' } },
+        },
+      }),
+      witnessedPersistence({
+        payload: {
+          entityId: 'acc-1',
+          found: true,
+          fields: { name: 'Revision 3' },
+          before: { found: true, fields: { name: 'Revision 2' } },
+        },
+      }),
+    ];
+
+    const outcome = evaluateObligation(obligation, {
+      claims: [makeClaim('test-1')],
+      records,
+      waivers: [],
+      classification,
+      now: NOW,
+    });
+
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('per-anchor snapshots');
+  });
+
+  it('keeps a genuinely wrong later update value blocking', () => {
+    const action = witnessedAction({
+      payload: { operation: 'update', entityId: 'acc-1', anchorId: 'revision-3', fields: { name: 'Revision 3' } },
+    });
+    const snapshot = witnessedPersistence({
+      payload: {
+        entityId: 'acc-1',
+        found: true,
+        anchorId: 'revision-3',
+        fields: { name: 'Wrong value' },
+        before: { found: true, fields: { name: 'Revision 2' } },
+      },
+    });
+    const outcome = evaluateObligation(obligation, {
+      claims: [makeClaim('test-1')],
+      records: [action, snapshot],
+      waivers: [],
+      classification,
+      now: NOW,
+    });
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('EVIDENCE_VALUE_MISMATCH');
+  });
 });
 
 describe('evaluateObligation — persistence postconditions, owner-owned (audit round 5)', () => {
@@ -317,7 +421,13 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
     archiveFields: undefined,
   } as const;
 
-  function claimOutcome(contract: string, lifecycle: unknown, records: unknown[], httpRoutes?: unknown) {
+  function claimOutcome(
+    contract: string,
+    lifecycle: unknown,
+    records: unknown[],
+    httpRoutes?: unknown,
+    resource?: unknown,
+  ) {
     const target = makeObligation({
       resourceId: 'tenant.accounts',
       contract,
@@ -354,6 +464,7 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
       waivers: [],
       classification,
       ...(httpRoutes !== undefined ? { httpRoutes: httpRoutes as never } : {}),
+      ...(resource !== undefined ? { resource: resource as never } : {}),
       now: NOW,
     });
   }
@@ -444,6 +555,19 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
       }),
     ]);
     expect(withBefore.verdict).toBe('satisfied');
+
+    const presentBefore = claimOutcome('persistence:create', LIFECYCLE, [
+      action,
+      witnessedPersistence({
+        payload: {
+          entityId: 'acc-9',
+          found: true,
+          fields: { name: 'New', status: 'active' },
+          before: { found: true },
+        },
+      }),
+    ]);
+    expect(presentBefore.verdict).toBe('invalid');
 
     const neverAppeared = claimOutcome('persistence:create', LIFECYCLE, [
       action,
@@ -563,10 +687,62 @@ describe('evaluateObligation — persistence postconditions, owner-owned (audit 
       }),
     ]);
     expect(outcome.verdict).toBe('invalid');
-    expect(outcome.reason).toContain('touches no classification-declared');
-    expect(outcome.reason).toContain('updated_at');
-    expect(outcome.reason).toContain('updateableFields');
+    expect(outcome.reason).toContain('the UI action changed only [updated_at]');
+    expect(outcome.reason).toContain('not a user-editable field');
+    expect(outcome.reason).toContain('the update test must change one of [first_name, last_name, name, status]');
   });
+  it('explains when the complete route inventory has no UI update route for the resource', () => {
+    const outcome = claimOutcome(
+      'persistence:update',
+      LIFECYCLE,
+      [
+        witnessedAction({ payload: { operation: 'update', entityId: 'acc-1' } }),
+        witnessedPersistence({
+          payload: {
+            entityId: 'acc-1',
+            found: true,
+            fields: { name: 'Old Name', updated_at: 'new' },
+            before: { found: true, fields: { name: 'Old Name', updated_at: 'old' } },
+          },
+        }),
+      ],
+      [],
+      { kind: 'sqlalchemy.table', attributes: { resourceName: 'accounts' } },
+    );
+    expect(outcome.reason).toContain('the UI action changed only [updated_at]');
+    expect(outcome.reason).toContain('no observed UI request writes these fields');
+    expect(outcome.reason).toContain('the feature may be unreachable from the UI');
+  });
+  it('does not call an update route absent when a linked route declares updates', () => {
+    const outcome = claimOutcome(
+      'persistence:update',
+      LIFECYCLE,
+      [
+        witnessedAction({ payload: { operation: 'update', entityId: 'acc-1' } }),
+        witnessedPersistence({
+          payload: {
+            entityId: 'acc-1',
+            found: true,
+            fields: { name: 'Old Name', updated_at: 'new' },
+            before: { found: true, fields: { name: 'Old Name', updated_at: 'old' } },
+          },
+        }),
+      ],
+      [
+        {
+          resourceId: 'http.endpoint:PUT /accounts/{}',
+          method: 'PUT',
+          canonicalPath: '/accounts/{}',
+          linkedResourceName: 'accounts',
+          capabilities: ['crud-update'],
+        },
+      ],
+      { kind: 'sqlalchemy.table', attributes: { resourceName: 'accounts' } },
+    );
+    expect(outcome.reason).not.toContain('no observed UI request writes these fields');
+  });
+
+
 
   it('update without classification-declared updateableFields fails closed', () => {
     const action = witnessedAction({ payload: { operation: 'update', entityId: 'acc-1' } });

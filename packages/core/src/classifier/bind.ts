@@ -43,6 +43,8 @@ export interface RunClassificationInput {
   policy: ClassificationPolicy;
   /** Reviewed adapter names available for binding. */
   adapters: readonly string[];
+  /** Enable host-derived lifecycle defaults for complete detector scans. */
+  deriveLifecycleDefaults?: boolean;
   scan?: {
     requestedPaths: string[];
     scannedPaths: string[];
@@ -141,6 +143,9 @@ function bindDecision(
       contradictions: bound.contradictions.map((entry) => ({ ...entry })),
       unresolvedDimensions: [...bound.unresolvedDimensions],
       decisionFingerprint: bound.decisionFingerprint,
+      ...(bound.lifecycleDerivation !== undefined
+        ? { lifecycleDerivation: bound.lifecycleDerivation.map((entry) => ({ ...entry })) }
+        : {}),
     },
   } as GraphResource;
 }
@@ -163,6 +168,7 @@ export function runClassification(input: RunClassificationInput): GraphClassific
     authority: input.authority ? [...input.authority] : [],
     policy: input.policy,
     adapters: input.adapters,
+    deriveLifecycleDefaults: input.deriveLifecycleDefaults,
     scan: {
       requestedPaths: input.scan?.requestedPaths ?? [],
       scannedPaths: input.scan?.scannedPaths ?? [],
@@ -230,6 +236,7 @@ export function classifierBlocking(
         name: decision.name,
         detail: `[${block.code}] ${block.detail}`,
         location: block.locations[0] ?? fallback,
+        nextAction: 'gateforge classify --json',
       });
     }
   }
@@ -240,6 +247,7 @@ export function classifierBlocking(
       name: null,
       detail: `[${stale.code}] ${stale.detail}`,
       location: stale.locations[0] ?? null,
+      nextAction: 'gateforge classify --json',
     });
   }
   for (const invalid of result.invalidSignals) {
@@ -249,6 +257,7 @@ export function classifierBlocking(
       name: null,
       detail: `[${invalid.code}] ${invalid.detail}`,
       location: invalid.locations[0] ?? null,
+      nextAction: 'gateforge classify --json',
     });
   }
   for (const unauthorized of result.unauthorizedSuppressive) {
@@ -258,6 +267,7 @@ export function classifierBlocking(
       name: null,
       detail: `[${unauthorized.code}] ${unauthorized.detail}`,
       location: unauthorized.locations[0] ?? null,
+      nextAction: 'gateforge classify --json',
     });
   }
   return entries;

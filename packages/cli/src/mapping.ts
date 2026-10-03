@@ -29,16 +29,72 @@ import {
   type Location,
   type Obligation,
   type ResolvedMappings,
+  type MappingProblem,
   type ResourceGraph,
   type TestCatalog,
   type TestMap,
+  type TestMapEntry,
 } from '@gate-forge/core';
 import type { MappedCoverage, CoverageOperation } from '@gate-forge/core';
-import { discoverTestCatalog, TestDiscoveryError } from '@gate-forge/pack-playwright';
+import {
+  discoverTestCatalog,
+  findPlaywrightConfig,
+  scanTestFiles,
+  TestDiscoveryError,
+  type DiscoverOptions,
+  type DiscoveryTimings,
+  type NativeInstance,
+  type StaticScanResult,
+} from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
+import { engineGeneratedStateFileFilter } from './state-artifacts.js';
+import { resolveStateDir } from './state.js';
 
 /** The tracked sidecar path, repo-root-relative (plan §5.1 row 2). */
 export const TEST_MAP_RELATIVE = '.gateforge/test-map.yml';
+
+/** Candidate config file names per non-Playwright runner (probe order). */
+const RUNNER_CONFIG_CANDIDATES: Record<string, readonly string[]> = {
+  vitest: [
+    'vitest.config.ts',
+    'vitest.config.mts',
+    'vitest.config.js',
+    'vitest.config.mjs',
+    'vite.config.ts',
+    'vite.config.mts',
+    'vite.config.js',
+  ],
+  cypress: [
+    'cypress.config.ts',
+    'cypress.config.mts',
+    'cypress.config.js',
+    'cypress.config.cjs',
+    'cypress.config.mjs',
+  ],
+};
+
+/**
+ * The configured runner's own configuration file — the scope-expansion
+ * signal `check --changed`, `next`, and the supervised run use instead
+ * of probing the Playwright config unconditionally (plan 2026-09-25,
+ * runner-agnostic evidence). `playwright` resolves through the exact
+ * existing probe; pytest keeps its configuration inside `.gateforge.yml`
+ * (the diagnostics suites), so it reports null and never widens.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *   runner: the configured runner name (`config.runner`).
+ *
+ * Returns:
+ *   string | null: the repo-relative config file name, or null.
+ */
+export function findRunnerConfigPath(cwd: string, runner: string): string | null {
+  if (runner === 'playwright') return findPlaywrightConfig(cwd);
+  for (const name of RUNNER_CONFIG_CANDIDATES[runner] ?? []) {
+    if (existsSync(join(cwd, name))) return name;
+  }
+  return null;
+}
 
 /**
  * Loads and validates the sidecar, or returns null when the repository
@@ -119,18 +175,173 @@ export function writeTestMapAtomic(cwd: string, testMap: TestMap): void {
   }
 }
 
+interface AnnotationMapGroup {
+  file: string;
+  titlePath: string[];
+  claims: Set<string>;
+  keys: Set<string>;
+  location: Location | null;
+}
+
+/**
+ * Builds deterministic sidecar entries from statically resolved test annotations.
+ *
+ * Args:
+ *   scan: static test scan for the configured source files.
+ *
+ * Returns:
+ *   TestMapEntry[]: one generated mapping per file/title path, with claims
+ *   deduplicated and sorted.
+ */
+export function annotationTestMapEntries(scan: StaticScanResult): TestMapEntry[] {
+  const groups = new Map<string, AnnotationMapGroup>();
+  for (const entry of scan.entries) {
+    if (entry.annotationClaims === undefined || entry.annotationClaims.length === 0) continue;
+    const identity = `${entry.file}\u0000${entry.titlePath.join('\u0000')}`;
+    const group = groups.get(identity) ?? {
+      file: entry.file,
+      titlePath: [...entry.titlePath],
+      claims: new Set<string>(),
+      keys: new Set<string>(),
+      location: entry.location,
+    };
+    for (const claim of entry.annotationClaims) group.claims.add(claim);
+    groups.set(identity, group);
+  }
+  return [...groups.values()]
+    .map((group): TestMapEntry => ({
+      key: `playwright:annotation:${group.file}:${group.titlePath.join('>')}`,
+      selector: { runner: 'playwright', file: group.file, titlePath: [...group.titlePath] },
+      source: 'annotation',
+      claims: [...group.claims].sort(compareStrings),
+      reason: 'Generated from Gateforge test annotations.',
+    }))
+    .sort((a, b) => compareStrings(a.key, b.key));
+}
+
+/**
+ * Compares current static annotations with generated sidecar entries.
+ *
+ * Args:
+ *   scan: current AST-only test scan.
+ *   sidecar: validated sidecar, or null when none exists.
+ *
+ * Returns:
+ *   BlockingEntry[]: non-blocking report advisories naming every
+ *   missing/extra generated claim and unresolved annotation.
+ */
+export function annotationMapSyncAdvisories(
+  scan: StaticScanResult,
+  sidecar: TestMap | null,
+): BlockingEntry[] {
+  const expectedEntries = annotationTestMapEntries(scan);
+  const expectedByIdentity = new Map<string, AnnotationMapGroup>();
+  const actualByIdentity = new Map<string, AnnotationMapGroup>();
+  const unresolvedByIdentity = new Map<string, StaticScanResult['entries'][number][]>();
+  for (const entry of expectedEntries) {
+    const titlePath = entry.selector.titlePath ?? [];
+    const identity = `${entry.selector.file}\u0000${titlePath.join('\u0000')}`;
+    const group = expectedByIdentity.get(identity) ?? {
+      file: entry.selector.file,
+      titlePath: [...titlePath],
+      claims: new Set<string>(),
+      keys: new Set<string>(),
+      location: scan.entries.find(
+        (row) => row.file === entry.selector.file && row.titlePath.join('\u0000') === titlePath.join('\u0000'),
+      )?.location ?? null,
+    };
+    for (const claim of entry.claims) group.claims.add(claim);
+    group.keys.add(entry.key);
+    expectedByIdentity.set(identity, group);
+  }
+  for (const entry of sidecar?.tests ?? []) {
+    if (entry.source !== 'annotation') continue;
+    const titlePath = entry.selector.titlePath ?? [];
+    const identity = `${entry.selector.file}\u0000${titlePath.join('\u0000')}`;
+    const group = actualByIdentity.get(identity) ?? {
+      file: entry.selector.file,
+      titlePath: [...titlePath],
+      claims: new Set<string>(),
+      keys: new Set<string>(),
+      location: null,
+    };
+    for (const claim of entry.claims) group.claims.add(claim);
+    group.keys.add(entry.key);
+    actualByIdentity.set(identity, group);
+  }
+  for (const entry of scan.entries) {
+    if (entry.annotationIssue === undefined) continue;
+    const identity = `${entry.file}\u0000${entry.titlePath.join('\u0000')}`;
+    const rows = unresolvedByIdentity.get(identity) ?? [];
+    rows.push(entry);
+    unresolvedByIdentity.set(identity, rows);
+  }
+  const identities = new Set([
+    ...expectedByIdentity.keys(),
+    ...actualByIdentity.keys(),
+    ...unresolvedByIdentity.keys(),
+  ]);
+  const advisories: BlockingEntry[] = [];
+  for (const identity of [...identities].sort(compareStrings)) {
+    const expected = expectedByIdentity.get(identity);
+    const actual = actualByIdentity.get(identity);
+    const unresolved = unresolvedByIdentity.get(identity) ?? [];
+    const expectedClaims = expected?.claims ?? new Set<string>();
+    const actualClaims = actual?.claims ?? new Set<string>();
+    const missing = [...expectedClaims].filter((claim) => !actualClaims.has(claim)).sort(compareStrings);
+    const extra = [...actualClaims].filter((claim) => !expectedClaims.has(claim)).sort(compareStrings);
+    const expectedKeys = expected?.keys ?? new Set<string>();
+    const actualKeys = actual?.keys ?? new Set<string>();
+    const keyMismatch =
+      expectedKeys.size !== actualKeys.size ||
+      [...expectedKeys].some((key) => !actualKeys.has(key));
+    if (missing.length === 0 && extra.length === 0 && !keyMismatch && unresolved.length === 0) continue;
+    const group = expected ?? actual;
+    const file = group?.file ?? unresolved[0]?.file ?? '<unknown>';
+    const titlePath = group?.titlePath ?? unresolved[0]?.titlePath ?? [];
+    const detailParts = [`test '${titlePath.join(' > ')}' in '${file}'`];
+    if (missing.length > 0) detailParts.push(`missing claim(s): ${missing.join(', ')}`);
+    if (extra.length > 0) detailParts.push(`extra claim(s): ${extra.join(', ')}`);
+    if (keyMismatch) detailParts.push('generated entry key differs from the current annotation identity');
+    for (const entry of unresolved) {
+      detailParts.push(`UNRESOLVED: ${entry.annotationIssue ?? 'annotation could not be resolved statically'}`);
+    }
+    advisories.push({
+      kind: 'finding',
+      resourceId: null,
+      name: 'TEST_MAP_OUT_OF_SYNC',
+      detail: `${detailParts.join('; ')}. Run \`gateforge tests sync\`.`,
+      location: group?.location ?? unresolved[0]?.location ?? null,
+      cause: 'TEST_MAP_OUT_OF_SYNC',
+      nextAction: CAUSE_NEXT_ACTIONS['TEST_MAP_OUT_OF_SYNC'],
+    });
+  }
+  return advisories;
+}
 /** Everything one mapping resolution over a real repository needs. */
 export interface MappingResolutionOptions {
   /** Absolute repo root. */
   cwd: string;
   /** Validated `.gateforge.yml` (drives discovery). */
   config: GateforgeConfig;
+  /**
+   * The run's resolved run-state directory (absolute). The fresh
+   * discovery below uses it to keep the engine's OWN generated state
+   * files out of the static candidate seed; absent means the default
+   * state directory, resolved from `cwd` exactly like every CLI entry
+   * point.
+   */
+  stateDir?: string;
   /** The run's obligations (the registry the resolver validates against). */
   obligations: readonly Obligation[];
   /** Pre-discovered catalog; when absent the module discovers fresh. */
   catalog?: TestCatalog;
   /** Current native annotations from the same discovery pass as catalog. */
   nativeClaims?: readonly Claim[];
+  /** Native Playwright reporter load errors from the same discovery pass. */
+  nativeErrors?: readonly string[];
+  /** Native Playwright instances from the same discovery pass. */
+  nativeInstances?: readonly NativeInstance[];
   /**
    * Authenticated claim declarations used instead of live annotations.
    * `check` supplies these only from a verified receipt; the sidecar is
@@ -141,6 +352,8 @@ export interface MappingResolutionOptions {
   priorRunHints?: readonly { logicalKey: string; obligationId: string }[];
   /** Compiled behavior catalog when complete-behavior is enabled. */
   behaviorCatalog?: BehaviorCatalog | null;
+  /** Optional collection wrapper used by the commit-check cache. */
+  pytestCollection?: DiscoverOptions['pytestCollection'];
 }
 
 /** One resolution over a real repository. */
@@ -155,6 +368,15 @@ export interface MappingResolutionResult {
   nativeClaims: Claim[];
   /** Sidecar and resolver claim declarations with current source locations. */
   claimInventory: Claim[];
+  /** Native Playwright reporter load errors from the discovery pass. */
+  nativeErrors: string[];
+  /** Inventory blocker details, or null when Playwright enumeration succeeded. */
+  nativeLoadProblem: MappingProblem | null;
+  /**
+   * Discovery step timings from the pass this module ran itself (absent
+   * when the caller supplied a pre-computed catalog).
+   */
+  discoveryTimings?: DiscoveryTimings;
 }
 
 /**
@@ -179,6 +401,10 @@ export async function resolveRepositoryMappings(
 ): Promise<MappingResolutionResult> {
   let catalog: TestCatalog;
   let discoveredClaims: Claim[];
+  let nativeErrors = [...(options.nativeErrors ?? [])];
+  let nativeInstances = [...(options.nativeInstances ?? [])];
+  let nativeInstancesKnown = options.nativeInstances !== undefined;
+  let discoveryTimings: DiscoveryTimings | undefined;
   if (options.catalog !== undefined) {
     catalog = options.catalog;
     discoveredClaims = [...(options.nativeClaims ?? [])];
@@ -192,9 +418,22 @@ export async function resolveRepositoryMappings(
       // that exists. Collection failure stays honest data (the pytest
       // runner summary turns `unavailable`); `tests discover` alone keeps
       // its explicit `--pytest` opt-in.
-      const discovered = await discoverTestCatalog({ cwd: options.cwd, config: options.config, collectPytest: true });
+      const discovered = await discoverTestCatalog({
+        cwd: options.cwd,
+        config: options.config,
+        collectPytest: true,
+        pytestCollection: options.pytestCollection,
+        excludeFile: engineGeneratedStateFileFilter(
+          options.cwd,
+          options.stateDir ?? resolveStateDir(options.cwd),
+        ),
+      });
       catalog = discovered.catalog;
       discoveredClaims = discovered.nativeClaims;
+      nativeErrors = [...discovered.nativeErrors];
+      nativeInstances = [...discovered.nativeInstances];
+      nativeInstancesKnown = true;
+      discoveryTimings = discovered.timings;
     } catch (error) {
       if (error instanceof TestDiscoveryError) throw new UsageError(error.message);
       throw error;
@@ -202,16 +441,51 @@ export async function resolveRepositoryMappings(
   }
   const nativeClaims = [...(options.claimBindings ?? discoveredClaims)];
   const sidecar = loadOptionalTestMap(options.cwd);
-  const resolution = resolveTestMappings({
+  const sidecarEntries = sidecar?.tests ?? [];
+  const normalizedNativeErrors = nativeErrors.map((error) => error.replaceAll('\\', '/'));
+  const nativeErrorFiles = [
+    ...new Set(
+      sidecarEntries
+        .filter(
+          (entry) =>
+            entry.selector.runner === 'playwright' &&
+            normalizedNativeErrors.some((error) =>
+              error.includes(`/${entry.selector.file.replaceAll('\\', '/')}`),
+            ),
+        )
+        .map((entry) => entry.selector.file),
+    ),
+  ];
+  const nativeEnumerationFailed =
+    nativeErrors.length > 0 &&
+    (nativeInstancesKnown
+      ? nativeInstances.length === 0
+      : !catalog.entries.some(
+          (entry) =>
+            entry.runner === 'playwright' &&
+            (entry.reconciliation === 'matched' || entry.reconciliation === 'list-only'),
+        ));
+  const resolved = resolveTestMappings({
     catalog,
     nativeClaims,
     sidecar: sidecar ?? { schemaVersion: 1, tests: [] },
     obligationIds: options.obligations.map((obligation) => obligation.id),
     ...(options.priorRunHints !== undefined ? { priorRunHints: options.priorRunHints } : {}),
     ...(options.behaviorCatalog !== undefined ? { behaviorCatalog: options.behaviorCatalog } : {}),
+    ...(nativeErrors.length > 0 ? { nativeErrorFiles, nativeEnumerationFailed } : {}),
   });
-  const claimInventory = currentClaimInventory(catalog, resolution, nativeClaims);
-  return { catalog, sidecar, resolution, nativeClaims, claimInventory };
+  const claimInventory = currentClaimInventory(catalog, resolved, nativeClaims);
+  const nativeLoadProblem = nativeInventoryProblem(nativeErrors);
+  return {
+    catalog,
+    sidecar,
+    resolution: resolved,
+    nativeClaims,
+    claimInventory,
+    nativeErrors,
+    nativeLoadProblem,
+    ...(discoveryTimings !== undefined ? { discoveryTimings } : {}),
+  };
 }
 /**
  * Combines claim declarations used by the resolver with sidecar
@@ -255,8 +529,15 @@ function currentClaimInventory(
   }
   const unique = new Map<string, Claim>();
   for (const claim of claims) {
+    // The declaring test is part of the identity: two tests in ONE file
+    // that declare the same obligation share a source location whenever
+    // the catalog carries no precise one, and collapsing them would
+    // attribute the declaration to whichever sorted first — grading the
+    // wrong test's evidence (and, in a named run, grading a selection
+    // whose own declaration had been dropped).
     const key = [
       claim.obligationId,
+      claim.testId,
       claim.testFile ?? '',
       claim.location?.line ?? '',
       claim.location?.col ?? '',
@@ -266,6 +547,48 @@ function currentClaimInventory(
   return [...unique.entries()]
     .sort(([left], [right]) => compareStrings(left, right))
     .map(([, claim]) => claim);
+}
+/**
+ * Builds the single typed problem for native Playwright reporter load errors.
+ *
+ * Args:
+ *   errors: verbatim errors returned by Playwright's JSON reporter.
+ *
+ * Returns:
+ *   MappingProblem | null: inventory failure details, or null when enumeration succeeded.
+ */
+export function nativeInventoryProblem(errors: readonly string[]): MappingProblem | null {
+  if (errors.length === 0) return null;
+  return {
+    cause: 'TEST_INVENTORY_INCOMPLETE',
+    obligationId: null,
+    detail: `Playwright enumeration reported ${errors.length} load error(s); first error: ${errors[0] ?? ''}`,
+    locations: [],
+  };
+}
+
+/**
+ * Projects native reporter load errors into one actionable gate blocker.
+ *
+ * Args:
+ *   problem: the typed inventory problem, or null when there are no native errors.
+ *
+ * Returns:
+ *   BlockingEntry[]: one blocker for an incomplete native inventory, otherwise empty.
+ */
+export function nativeInventoryBlocking(problem: MappingProblem | null): BlockingEntry[] {
+  if (problem === null) return [];
+  return [
+    {
+      kind: 'finding',
+      resourceId: null,
+      name: null,
+      detail: problem.detail,
+      location: null,
+      cause: 'TEST_INVENTORY_INCOMPLETE',
+      nextAction: 'Install the missing test dependency, then rerun Gateforge.',
+    },
+  ];
 }
 
 

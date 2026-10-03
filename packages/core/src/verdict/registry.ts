@@ -36,6 +36,10 @@ export interface HttpRouteCandidate {
   method: string;
   /** Compiled canonical path shape (e.g. `/accounts/{}`). */
   canonicalPath: string;
+  /** Linked business resource name from the host-derived endpoint graph. */
+  linkedResourceName?: string;
+  /** Detector-derived CRUD capabilities declared for this route. */
+  capabilities?: readonly string[];
 }
 
 /** Lenient record view (same shape the verdict engine reads). */
@@ -183,6 +187,28 @@ export function registerContractCapabilities(capability: ContractCapability): vo
     );
   }
   capabilities.set(capability.namespace, capability);
+}
+
+/**
+ * Replaces the NAMESPACE-level availability of an already registered
+ * capability record (the `task` namespace is
+ * available only while the engine owns a queue observer). The record
+ * itself stays first-wins — only the availability bit moves, and only
+ * for a namespace that is already registered, so no caller can invent
+ * contracts or rewrite another namespace's observer description.
+ *
+ * Args:
+   namespace: the namespace whose availability changes.
+   availability: the availability the namespace now reports.
+ *
+ * @throws Error when the namespace has no capability record.
+ */
+export function setContractAvailability(namespace: string, availability: ContractAvailability): void {
+  const current = capabilities.get(namespace);
+  if (current === undefined) {
+    throw new Error(`no capability record for contract namespace '${namespace}'; availability cannot be bound`);
+  }
+  capabilities.set(namespace, { ...current, availability });
 }
 
 /**

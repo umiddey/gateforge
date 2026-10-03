@@ -12,6 +12,134 @@ and a read-only JSON API (trusted-adapter surface).
   `clock` is a function whose return value is passed to `new Date()`
   (defaults to the system clock). Timestamps are ISO-8601 strings.
 
+## Gateforge first run
+
+Install the CLI and the packs first — this app needs the CLI, the HTTP
+detector pack (its config loads it) and the Playwright pack (the witnessed
+run in `behavior/` is driven through it). Keep every direct
+`@gate-forge/*` package on the SAME release; a mixed set exits 2 with
+`GATEFORGE_PACKAGE_INCOMPATIBLE`.
+
+```sh
+npm i -D \
+  @gate-forge/cli@0.8.0 \
+  @gate-forge/pack-playwright@0.8.0 \
+  @gate-forge/pack-http@0.8.0
+```
+
+**If your release is not on the registry yet** (a pre-publish set of
+tarballs), install every tarball of that release in ONE command — npm
+resolves the packages' own dependencies from the files themselves, so the
+CLI, the shared packages and every pack end up on one consistent version:
+
+```sh
+npm i -D ./gate-forge-*.tgz
+```
+
+Then put the project-local binary on your `PATH` (`export
+PATH="$PWD/node_modules/.bin:$PATH"`) or prefix the commands below with
+`npx `.
+
+Run these commands from `example/`. The checked-in `.gateforge/planes.json` and `.gateforge/endpoints.json` make the sample's route classification and endpoint behavior explicit; the verification script is excluded from product-source scanning.
+
+```sh
+gateforge init --no-ci --no-blocking
+gateforge check
+gateforge next
+```
+
+The scan recommends `gateforge.pack-http`. The check reports 10 endpoint routes and:
+
+```text
+gateforge run: 0 obligation(s) — 0 satisfied, 0 waived, 0 blocking
+exit code: 0
+```
+
+`exit code:` is the code the process exits with. When a non-blocking mode
+(`mode: warn` or `mode: changed`) softens a blocking result, the report says
+`would exit 1 in blocking mode` instead — the same fact, named as what it is.
+
+One non-blocking test-map advisory remains for the standalone UI journey; this in-memory app has no persistence adapter for that persistence claim. Navigation is:
+
+```text
+next: none — clean
+```
+
+## Where the witnessed run lives
+
+This root project is a STATIC `check` demo: `gateforge check` classifies the routes
+and reports. There is no receipt lane here, so asking for one can only say that
+none exists:
+
+```sh
+$ gateforge check --require-e2e
+require-e2e: no gate receipt exists for the current state — run `gateforge test-gates --changed` to execute the configured E2E suite ...
+exit code: 1
+```
+
+The witnessed project is the sub-directory `behavior/` — it carries its own
+`.gateforge.yml`, adapters, behavior policy, test map and Playwright config, and a
+run started at the root does not see it. It declares every route the app exposes
+in `.gateforge/behavior.yml` (mutating routes as `http:effect-verified` cases, read
+routes as `http:read-result-verified` cases), so an undeclared route would block
+with `ENDPOINT_BEHAVIOR_MISSING` instead of hiding.
+
+One command runs the whole witnessed proof on a fresh copy:
+
+```sh
+$ cd behavior
+$ npm install
+$ npm run gate
+```
+
+Once per machine, before the first run: the runner's browsers are a Playwright
+download, not an npm one, and an empty cache fails every test with
+`browserType.launch: Executable doesn't exist`. Install them once in this
+directory — `gateforge enforcement doctor` prints this exact command and this
+exact directory when they are missing:
+
+```sh
+$ npx playwright install chromium
+```
+
+On a Linux machine that has no browser system libraries — a container, a CI
+image, WSL — that install is not enough: the download lands, the tests still
+die, and the doctor says so by name:
+
+```sh
+$ npx playwright install --with-deps chromium   # needs root or sudo
+```
+
+`gateforge enforcement doctor` reports a build in exactly this state by name,
+with the loader's own line and the command that fixes it:
+
+```text
+[FAIL] runner: playwright installed; the browser build '<cache>/chromium-<revision>' is installed but
+cannot start on this machine: …/chrome: error while loading shared libraries: libnss3.so: cannot open
+shared object file; fix: run `npx playwright install-deps chromium` in '<this directory>' (installs the
+browser's system libraries; needs root or sudo)
+```
+
+(`gateforge run` stops at that same line before the suite starts, with exit 1.)
+
+`npm run gate` (`scripts/gate.mjs`) does what a supervised run needs around it:
+
+1. picks a free loopback port and starts the app on it (a supervised
+   `test-gates` run never loads the Playwright config, so its `webServer` never
+   starts the app);
+2. creates a verifier key ring in the OS temp directory, outside the repository
+   (mode 0600, never printed), and removes it at the end;
+3. sets `GATEFORGE_APP_BASE_URL`, `GATEFORGE_TARGET_BASE_URL`,
+   `GATEFORGE_TARGET_FINGERPRINT`, `GATEFORGE_FIXTURE_PROVIDER` and
+   `GATEFORGE_WITNESS_VERIFIER_KEY_FILE` for the three commands it runs:
+   `gateforge tests discover`, `gateforge test-gates --changed` and
+   `gateforge check --require-e2e`;
+4. stops the app and exits with the `check --require-e2e` status.
+
+A green run seals a receipt and ends with `check --require-e2e` exiting 0. To
+run the same steps by hand, start `node server.js --port <port>` first and set the
+five variables above yourself.
+
 ## Run
 
 ```sh

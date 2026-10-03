@@ -4,6 +4,7 @@
   "description": "",
   "main": "server.js",
   "scripts": {
+    "gate": "node scripts/gate.mjs",
     "verify-fixture": "node scripts/verify-fixture.mjs",
     "test": "npm run verify-fixture"
   },

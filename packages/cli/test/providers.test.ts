@@ -9,6 +9,7 @@ import {
   gitlabMrProvider,
   localStagedProvider,
   providerFor,
+  mergeRequestScopePreflight,
   resolveProvider,
 } from '../src/providers.js';
 
@@ -89,5 +90,64 @@ describe('resolveProvider (auto)', () => {
     const provider = providerFor('all-files', '/tmp', {});
     expect(provider.provider).toBe('all-files');
     expect(provider.changedFiles()).toEqual([]);
+  });
+});
+/**
+ * The CI merge-request scope preflight: in a merge-request pipeline the
+ * `auto` provider resolves to the LOCAL staged diff when the platform
+ * exposes no base commit, so a `--scope changed` run silently checks
+ * zero changed files and fails forty minutes later. The preflight turns
+ * that into an exit 2 in seconds, and only in that exact case.
+ */
+describe('the CI merge-request scope preflight', () => {
+  const autoConfig = { changed: { provider: 'auto' } } as unknown as Parameters<
+    typeof mergeRequestScopePreflight
+  >[0];
+
+  it('refuses a merge-request pipeline with no base commit', () => {
+    expect(
+      mergeRequestScopePreflight(autoConfig, { CI: 'true', CI_MERGE_REQUEST_IID: '94' }),
+    ).toMatch(/CI merge-request pipeline without a base commit/);
+    expect(
+      mergeRequestScopePreflight(autoConfig, {
+        CI: 'true',
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_BASE_REF: '',
+      }),
+    ).toMatch(/--scope full/);
+  });
+
+  it('says nothing outside that exact case', () => {
+    // A base commit is present: the provider resolves properly.
+    expect(
+      mergeRequestScopePreflight(autoConfig, {
+        CI: 'true',
+        CI_MERGE_REQUEST_IID: '94',
+        CI_MERGE_REQUEST_DIFF_BASE_SHA: 'a'.repeat(40),
+      }),
+    ).toBeNull();
+    // A GitHub pull request with its base ref.
+    expect(
+      mergeRequestScopePreflight(autoConfig, {
+        CI: 'true',
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_BASE_REF: 'main',
+      }),
+    ).toBeNull();
+    // A plain CI pipeline (not a merge request).
+    expect(mergeRequestScopePreflight(autoConfig, { CI: 'true' })).toBeNull();
+    // The same pipeline outside CI.
+    expect(
+      mergeRequestScopePreflight(autoConfig, { CI_MERGE_REQUEST_IID: '94' }),
+    ).toBeNull();
+    // An explicitly configured provider never falls back to auto.
+    expect(
+      mergeRequestScopePreflight(
+        { changed: { provider: 'local-staged' } } as unknown as Parameters<
+          typeof mergeRequestScopePreflight
+        >[0],
+        { CI: 'true', CI_MERGE_REQUEST_IID: '94' },
+      ),
+    ).toBeNull();
   });
 });

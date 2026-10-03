@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { parse as parseYaml } from 'yaml';
 import {
   ClaimSchema,
@@ -34,6 +35,7 @@ import {
   runClassification,
   sortLifecycleRules,
     type BehaviorCatalog,
+  type BlockingEntry,
   type ChangedProvider,
   type Claim,
   type ClassificationFile,
@@ -46,12 +48,16 @@ import {
   type PolicyEvaluationResult,
   type ResourceGraph,
   type RunManifest,
+  type LifecycleDerivationReportEntry,
 } from '@gate-forge/core';
+import { compileAlembic } from '@gate-forge/pack-alembic';
+import { staticAdapterFieldsFromSource } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.js';
 import { clockFromConfig } from './clock.js';
 import { expandIncludePaths, type ExpandError } from './glob.js';
 import { runPlugins } from './plugins.js';
+import type { CacheControl, CacheCounts } from './run-cache.js';
 import { compileEndpointContribution, type EndpointInventory } from './endpoint-compiler.js';
 import { readJsonArray } from './state.js';
 import { providerFor } from './providers.js';
@@ -77,6 +83,11 @@ export interface PipelineOptions {
    * pipeline executes in has no diff basis of its own.
    */
   changedFilesOverride?: readonly string[];
+  /**
+   * Plugin result cache control. Absent or
+   * disabled = full scan (the historical behavior).
+   */
+  pluginCache?: CacheControl;
 }
 
 /** The complete pipeline result. */
@@ -98,14 +109,50 @@ export interface PipelineResult {
   /** The raw classifier result (decisions with traces, stale/invalid signals). */
   classification: ClassificationResult;
   /**
+   * The effective `http.endpoint.requireObservation` option from the
+   * pinned policies document (plan Phase 4c, E60): which endpoint
+   * resources owe the observation contracts. Navigation surfaces read
+   * it to explain an obligation the option itself created.
+   */
+  observationScope: 'consumed' | 'all';
+  /**
    * The effective-classification view (plan phase 5): every resolved
    * resource's classification keyed by plane-qualified id. Derived
    * artifact — the engine recomputes it from signals on every run and
    * never reads it back as input.
    */
   classificationsView: ClassificationFile;
+  /** Lifecycle omissions and observability limits derived from complete detector facts. */
+  lifecycleDerivation: LifecycleDerivationReportEntry[];
   /** Compiled complete-behavior catalog, or null when the document is absent. */
   behaviorCatalog: BehaviorCatalog | null;
+  /**
+   * Coarse per-step wall-clock timings (`check --timing`): plugin/detector
+   * duration and the whole-pipeline
+   * duration in milliseconds. Observability only — never an input.
+   */
+  timings: PipelineTimings;
+  /** Plugin cache accounting for this run (0/0 when disabled). */
+  cache: CacheCounts;
+  /** Engine-issued Alembic records. Empty when the pack is not enabled. */
+  engineAlembicRecords: readonly {
+    obligationId: string;
+    kind: string;
+    trust?: string;
+    origin?: string;
+    payload?: unknown;
+    recordId?: string;
+  }[];
+  /** Owner-visible Alembic notes, including pinned irreversible revisions. */
+  alembicNotices: readonly string[];
+}
+
+/** Coarse pipeline step durations in milliseconds (`check --timing`). */
+export interface PipelineTimings {
+  /** Total `runPlugins` duration (all detectors, config order). */
+  pluginsMs: number;
+  /** Total `runPipeline` duration including the detector step. */
+  totalMs: number;
 }
 
 /** Source-file map resourceId → repo-relative source (for diff scoping). */
@@ -216,6 +263,83 @@ export function resolveRepoPath(cwd: string, repoRelative: string): string {
   return join(cwd, ...normalized.split('/'));
 }
 
+/**
+ * Finds known model update fields omitted from statically declared adapter
+ * projections without importing or evaluating adapter modules.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   adaptersDir: repo-relative adapter directory.
+ *   adapterNames: discovered adapter module basenames.
+ *   decisions: effective classifier decisions for this pipeline run.
+ *
+ * Returns:
+ *   BlockingEntry[]: one visible blocker for each affected resource.
+ */
+function adapterProjectionBlockers(
+  cwd: string,
+  adaptersDir: string,
+  adapterNames: readonly string[],
+  decisions: ClassificationResult['decisions'],
+): BlockingEntry[] {
+  const fieldsByAdapter = new Map<string, string[]>();
+  const absoluteDir = resolveRepoPath(cwd, adaptersDir);
+  for (const adapterName of adapterNames) {
+    let source: string;
+    try {
+      source = readFileSync(join(absoluteDir, `${adapterName}.mjs`), 'utf8');
+    } catch {
+      continue;
+    }
+    const fields = staticAdapterFieldsFromSource(source);
+    if (fields !== null) {
+      fields.sort(compareStrings);
+      fieldsByAdapter.set(adapterName, fields);
+    }
+  }
+  const blockers: BlockingEntry[] = [];
+  for (const decision of decisions) {
+    const classified = decision.classification;
+    const adapterName = classified?.evidenceAdapter;
+    const projectedFields = adapterName === undefined ? undefined : fieldsByAdapter.get(adapterName);
+    const updateableFields = classified?.lifecycle.updateableFields;
+    if (
+      adapterName === undefined ||
+      projectedFields === undefined ||
+      updateableFields === undefined
+    ) {
+      continue;
+    }
+    let missing: string[] | null = null;
+    for (const field of updateableFields) {
+      if (!projectedFields.includes(field)) {
+        if (missing === null) missing = [];
+        missing.push(field);
+      }
+    }
+    if (missing === null) continue;
+    missing.sort(compareStrings);
+    const missingFields = missing.length === 1 ? `field ${missing[0]}` : `fields [${missing.join(', ')}]`;
+    const verb = missing.length === 1 ? 'is' : 'are';
+    blockers.push({
+      kind: 'classification',
+      resourceId: decision.resourceId,
+      name: decision.name,
+      detail:
+        `${missingFields} ${verb} not exposed by adapter '${adapterName}' ` +
+        `(fields: ${projectedFields.length === 0 ? '<none>' : projectedFields.join(', ')})`,
+      location: decision.location,
+      cause: null,
+      nextAction:
+        "Add the missing fields to the adapter's 'fields' projection or remove them from the model's " +
+        'updateable fields.',
+    });
+  }
+  return blockers.sort(
+    (left, right) => compareStrings(left.resourceId ?? '', right.resourceId ?? ''),
+  );
+}
+
 /** First zod issue as one actionable `path: message` line. */
 function firstIssueText(
   error: { issues?: Array<{ path: PropertyKey[]; message: string }> },
@@ -254,7 +378,15 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     cwd,
     expandErrors,
   );
-  const { contributions, registrations } = await runPlugins(config.plugins, paths, cwd);
+  const pipelineStartedAtMs = performance.now();
+  const pluginsStartedAtMs = performance.now();
+  const { contributions, registrations, cache: pluginCacheCounts } = await runPlugins(
+    config.plugins,
+    paths,
+    cwd,
+    options.pluginCache,
+  );
+  const pluginsMs = performance.now() - pluginsStartedAtMs;
 
   const policyDocRaw = loadYaml(resolveRepoPath(cwd, config.classificationPolicy), 'classification-policy');
   const policyDocParsed = ClassificationPolicySchema.safeParse(policyDocRaw);
@@ -362,6 +494,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     authority,
     policy: policyDocParsed.data,
     adapters,
+    deriveLifecycleDefaults: true,
     scan: {
       // The proof request must describe the same repository scope that
       // detector discovery scans. Project exclusions remove files from the
@@ -382,7 +515,10 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     graph,
     policies: policiesParsed.data,
     claims,
-    extraBlocking: blocking,
+    extraBlocking: [
+      ...blocking,
+      ...adapterProjectionBlockers(cwd, config.adapters, adapters, classification.decisions),
+    ],
   });
   let behaviorCatalog: BehaviorCatalog | null = null;
   if (config.behaviorPolicy !== undefined) {
@@ -421,9 +557,37 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     options.changedFilesOverride !== undefined
       ? normalizeChangedFiles([...options.changedFilesOverride])
       : providerFor(provider, cwd, env).changedFiles();
+  const runId = options.runId ?? randomUUID();
+  let engineAlembicRecords: PipelineResult['engineAlembicRecords'] = [];
+  let alembicNotices: string[] = [];
+  if (config.alembic !== undefined) {
+    const compiled = await compileAlembic({
+      cwd,
+      alembic: config.alembic,
+      changedFiles,
+      now,
+      runId,
+    });
+    const obligationIds = new Set(policy.obligations.map((item) => item.id));
+    const mergedObligations = [...policy.obligations];
+    for (const item of compiled.obligations) {
+      if (obligationIds.has(item.id)) continue;
+      obligationIds.add(item.id);
+      mergedObligations.push(item);
+    }
+    policy = {
+      ...policy,
+      obligations: mergedObligations.sort((a, b) => compareStrings(a.id, b.id)),
+      blocking: [...policy.blocking, ...compiled.blocking].sort(
+        (a, b) => compareStrings(a.kind, b.kind) || compareStrings(a.resourceId ?? '', b.resourceId ?? ''),
+      ),
+    };
+    engineAlembicRecords = compiled.records;
+    alembicNotices = compiled.notices;
+  }
   const manifest = RunManifestSchema.parse({
     schemaVersion: 1,
-    runId: options.runId ?? randomUUID(),
+    runId,
     startedAt: now,
     gitSha: headSha(cwd),
     provider,
@@ -436,12 +600,18 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     endpointInventory,
     graph,
     policy,
+    observationScope: policiesParsed.data.options?.['http.endpoint.requireObservation'] ?? 'consumed',
     manifest,
     now,
     changedFiles,
     classification,
     classificationsView: effectiveClassifications(graph, classification),
+    lifecycleDerivation: lifecycleDerivationForReport(classification),
     behaviorCatalog,
+    timings: { pluginsMs, totalMs: performance.now() - pipelineStartedAtMs },
+    cache: pluginCacheCounts,
+    engineAlembicRecords,
+    alembicNotices,
   };
 }
 
@@ -484,6 +654,39 @@ export function effectiveClassifications(
     };
   }
   return { schemaVersion: 1, resources };
+}
+
+/**
+ * Projects classified lifecycle derivations into the stable report shape.
+ *
+ * Args:
+ *   classification: the classifier result with trace metadata.
+ *
+ * Returns:
+ *   LifecycleDerivationReportEntry[]: sorted resource-level report entries.
+ */
+export function lifecycleDerivationForReport(
+  classification: ClassificationResult,
+): LifecycleDerivationReportEntry[] {
+  const entries: LifecycleDerivationReportEntry[] = [];
+  for (const decision of classification.decisions) {
+    const derivations = decision.classification?.lifecycleDerivation ?? [];
+    if (derivations.length === 0) continue;
+    const resourceId =
+      decision.classification === null
+        ? decision.resourceId
+        : `${decision.classification.plane}.${decision.name}`;
+    for (const derivation of derivations) {
+      entries.push({ ...derivation, resourceId, resourceName: decision.name });
+    }
+  }
+  const operationOrder = { read: 0, update: 1, delete: 2 };
+  return entries.sort(
+    (left, right) =>
+      compareStrings(left.resourceId ?? left.resourceName, right.resourceId ?? right.resourceName) ||
+      compareStrings(left.resourceName, right.resourceName) ||
+      operationOrder[left.operation] - operationOrder[right.operation],
+  );
 }
 /**
  * Host-issued authority minting (red-team V1/V2 remediation, ADR 0003 D2):

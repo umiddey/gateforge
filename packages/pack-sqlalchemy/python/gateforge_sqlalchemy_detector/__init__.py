@@ -31,8 +31,17 @@ Detector vocabulary (frozen with the pack):
   ``argparse``, ``dataclasses``, ``marshmallow``, ``fastapi`` — can
   never qualify. A non-candidate class is emitted NOWHERE: no symbol,
   no table, no unresolved entry.
+- SQLModel tables: ``class X(SQLModel, table=True)`` (or a shared
+  ``SQLModel`` base, resolved through a cross-file SQLModel closure) is a
+  table whose name SQLModel derives at runtime by lowercasing the class
+  name. The AST can see that rule, so the name is a FACT
+  (``tablenameProvenance`` ``sqlmodel-class-name``), not a guess. A
+  ``Field(...)`` call counts as a column constructor only when the file
+  imports it from ``sqlmodel``; ``table=False`` (or a computed value) is
+  NOT a table, so a plain SQLModel class is invisible in every channel.
 - ``unresolved`` entries: typed reasons (``computed_tablename``,
-  ``table_name_derived_runtime``, ``no_tablename_source``) located at
+  ``table_name_derived_runtime`` — a ``table=True`` on a NON-SQLModel
+  base, whose name the AST cannot see, ``no_tablename_source``) located at
   the class statement; the graph retires them when it resolves the name
   and synthesizes ``inherited_tablename_unresolved`` when it cannot
   (GF-21: computed identity is typed, never absent).
@@ -43,7 +52,8 @@ Detector vocabulary (frozen with the pack):
   ``__gateforge_delete_semantics__``, ``__gateforge_archive_state__``,
   ``__gateforge_read_only__``; never an exposure claim (a table
   declaration proves nothing about external reachability).
-- additional table attributes: ``primaryKeyColumns``,
+- additional table attributes: ``columnNames`` (every literal column,
+  written order), ``primaryKeyColumns``,
   ``foreignKeyReferences`` (literal ``ForeignKey`` targets),
   ``softDeleteCandidateFields`` (bookkeeping-resembling column names —
   facts for reviewers, never semantics), ``readOnly``.

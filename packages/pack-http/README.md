@@ -109,6 +109,59 @@ wrapper's paths fully, or use a builder with `base`). The
 `urlBuilders[].base` channel is unchanged: it is configuration-declared,
 so the builder's base is part of the resolved value itself.
 
+### Response field reads (bounded, file-local)
+
+Every frontend-call fact carries `attributes.responseReads`: the fields
+the call site reads off that call's own response, each with the location
+of the read. It is the frontend half of the dropped-response-field proof
+(a merged frontend read `invoice.dueDate` after the FastAPI model had
+dropped it; every test mocked the response and the screen showed
+nothing), and it is collected by the same bounded pass that resolves the
+call target — no execution, no type checker, no cross-file inference.
+
+The model is deliberately small:
+
+- the call's own awaited result is followed through `await` and
+  parentheses; `<result>.data` is the payload (the axios/kit envelope) and
+  `<result>` alone is the envelope, so `res.status`/`res.headers` are not
+  fields;
+- a name bound from either of those (`const r = await call`,
+  `const { data: d } = await call`, `const d = (await call).data`) is
+  followed by name inside the enclosing function-like — nested
+  function-likes included, so a `useEffect` callback still counts;
+- `holder.<field>`, `holder.data.<field>`, `holder.data['<field>']` and
+  `holder['<field>']` are reads, as is every key of an object
+  destructuring of a holder or of `<holder>.data`;
+- a `let` holder (reassigned before the read), a computed key
+  (`d[key]`), and a JavaScript member (`data.map`, `data.length`,
+  `status`) are never reads;
+- a branch that opens on the call's OWN envelope (`ok`, `status`) is read
+  for its POLARITY, and only the failure arm is dropped: the body a
+  failure branch reads (`res.data?.detail`) is the server's ERROR
+  envelope, never the success model. `if (res.ok)`, `if (res.ok ===
+  true)`, `if (res.status >= 400)`, `> 399`, `!== 200`, `!== 201`, `< 400`,
+  `=== 200`, `<= 299` and their `!` negations all decide which arm runs,
+  so the success arm keeps its reads — `if (res.ok) setItems(res.data.
+  items)` is exactly the shape where a dropped field hides. A compound
+  condition (`!res.ok || res.status >= 500`), a comparison this pass
+  cannot read (`>= Math.min(400, limit)`) and a `statusText` test are
+  undecidable, so NEITHER arm is collected. A ternary is the same guard as
+  an `if` — `res.ok ? res.data.items : res.data?.detail` keeps the
+  success arm — and a ternary on anything else is not a guard at all: both
+  arms are ordinary success-path reads. A read after an early-return guard
+  (`if (!res.ok) { throw … }` … then the code) is collected as usual;
+- a read that is one operand of a `||` / `??` chain carries that chain's
+  index, so the check judges the chain as the ONE decision it is:
+  `res.data?.invoice_id || res.data?.invoice?.id` is silent when the
+  model declares `invoice_id`, because `invoice` is its defensive
+  fallback. A chain in which no operand is declared is reported whole.
+
+`gateforge check` compares these reads against the response model the
+joined backend route declares and emits one **non-blocking**
+`RESPONSE_FIELD_MISSING_FROM_MODEL` advisory per undeclared field. A call
+nobody consumes emits no attribute at all, so it stays byte-identical to
+before.
+
 ### Scan scoping (optional, strict, back-compatible)
 
 All scoping keys are OPTIONAL; a config without them scans exactly as

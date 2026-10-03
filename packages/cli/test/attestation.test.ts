@@ -93,6 +93,7 @@ volatileFields: []
 /** Installs the single-route transport fixture. */
 function installPingRepo(repo: TempRepo): void {
   repo.writeFiles({
+    '.gitignore': '.gateforge/test-gates/\n',
     '.gateforge.yml': configYml({ include: "['backend/**/*.py']" }),
     '.gateforge/policies.yml': PING_POLICIES_YML,
     '.gateforge/classification-policy.yml': PING_CLASSIFICATION_POLICY_YML,

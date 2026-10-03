@@ -213,7 +213,16 @@ describe('native enumeration of a subdirectory project (fake CLI contract)', () 
     // naming the config as seen from that cwd.
     expect(invocation.cwd).toBe(e2eDir);
     expect(invocation.argv[0]).toBe(join(e2eDir, 'node_modules', 'playwright', 'cli.js'));
-    expect(invocation.argv.slice(1)).toEqual(['test', '--list', '--reporter=json', '--config', 'playwright.config.ts']);
+    // The reporter LIST is the enumeration's own business (the json
+    // report plus the engine's project-graph reporter); what this test
+    // owns is the runner invocation around it.
+    expect(invocation.argv.slice(1).filter((arg) => !arg.startsWith('--reporter='))).toEqual([
+      'test',
+      '--list',
+      '--config',
+      'playwright.config.ts',
+    ]);
+    expect(invocation.argv.some((arg) => arg.startsWith('--reporter=json'))).toBe(true);
     // Instance paths are repo-relative (config directory prefixed), so
     // they reconcile against the static scan's rows.
     expect(result.instances[0]?.file).toBe('e2e/scenarios/x.spec.js');
@@ -302,7 +311,8 @@ describe('root-level repos unchanged (regression lock)', () => {
     // Repo-root cwd, root CLI, NO --config (auto-discovered config).
     expect(invocation.cwd).toBe(root);
     expect(invocation.argv[0]).toBe(join(root, 'node_modules', 'playwright', 'cli.js'));
-    expect(invocation.argv.slice(1)).toEqual(['test', '--list', '--reporter=json']);
+    expect(invocation.argv.slice(1).filter((arg) => !arg.startsWith('--reporter='))).toEqual(['test', '--list']);
+    expect(invocation.argv.some((arg) => arg.startsWith('--reporter=json'))).toBe(true);
     expect(result.instances[0]?.file).toBe('e2e/x.spec.js');
     expect(result.detail).toContain("over 'playwright.config.ts' enumerated");
     expect(result.detail).not.toContain('(cwd');
@@ -311,6 +321,76 @@ describe('root-level repos unchanged (regression lock)', () => {
     expect(catalog.entries.filter((entry) => entry.reconciliation === 'matched')).toHaveLength(1);
     expect(catalog.inventoryComplete).toBe(true);
     expect(catalog.entries[0]?.logicalKey).toBe('playwright:chromium:e2e/x.spec.js:Scenarios>subdir journey');
+  });
+});
+
+/**
+ * A repo may hold several playwright configs; enumeration runs exactly
+ * one of them. Narrowing to a subset silently grades less than the
+ * suite, so the choice is ALWAYS reported in the same plain line: every
+ * discovered config, which one was used, why that one, and which are
+ * not inventoried.
+ */
+describe('several playwright configs are never narrowed silently', () => {
+  it('names every config, the one used and the reason (a repo-root config wins)', async () => {
+    const root = makeTempDir();
+    const recordPath = join(root, 'invocation.json');
+    writeFakeCli(join(root, 'node_modules/playwright/cli.js'), recordPath, listDocument(root, join(root, 'e2e/x.spec.js')));
+    writeTree(root, {
+      'playwright.config.ts': 'export default {};\n',
+      'e2e/playwright.config.ts': 'export default {};\n',
+      'e2e/x.spec.js': SPEC,
+    });
+
+    const result = await listNativePlaywrightTests({ cwd: root });
+
+    expect(result.status).toBe('discovered');
+    // The one line the catalog prints must carry the whole choice.
+    expect(result.detail).toBe(
+      "native playwright --list over 'playwright.config.ts' enumerated 1 instance(s) as untrusted code " +
+        '(isolated temporary GATEFORGE_STATE_DIR) — note: 2 playwright configs are present, and only 1 is ' +
+        "inventoried: playwright.config.ts (inventoried: a repo-root config always wins, so a root project " +
+        "keeps its exact invocation), e2e/playwright.config.ts (not inventoried: its test cases are " +
+        'missing from this catalog)',
+    );
+  });
+
+  it('names every config when a subdirectory config wins (alphabetically first)', async () => {
+    const root = makeTempDir();
+    const recordPath = join(root, 'invocation.json');
+    const aDir = join(root, 'a-e2e');
+    writeFakeCli(join(aDir, 'node_modules/playwright/cli.js'), recordPath, listDocument(aDir, join(aDir, 'x.spec.js')));
+    writeTree(root, {
+      'a-e2e/playwright.config.js': 'export default {};\n',
+      'a-e2e/x.spec.js': SPEC,
+      'b-e2e/playwright.config.js': 'export default {};\n',
+      'b-e2e/y.spec.js': SPEC,
+    });
+
+    const result = await listNativePlaywrightTests({ cwd: root });
+
+    expect(result.status).toBe('discovered');
+    expect(result.detail).toContain('a-e2e/playwright.config.js (inventoried');
+    expect(result.detail).toContain('no repo-root config exists');
+    expect(result.detail).toContain('b-e2e/playwright.config.js (not inventoried');
+    expect(result.detail.match(/not inventoried/g)).toHaveLength(1);
+  });
+
+  it('reports no choice at all for a repo with exactly one config', async () => {
+    const root = makeTempDir();
+    const recordPath = join(root, 'invocation.json');
+    const e2eDir = join(root, 'e2e');
+    writeFakeCli(join(e2eDir, 'node_modules/playwright/cli.js'), recordPath, listDocument(e2eDir, join(e2eDir, 'scenarios/x.spec.js')));
+    writeTree(root, { 'e2e/playwright.config.ts': 'export default {};\n', 'e2e/scenarios/x.spec.js': SPEC });
+
+    const result = await listNativePlaywrightTests({ cwd: root });
+
+    // A single config is not a decision: the historical line is
+    // unchanged (no note, no noise).
+    expect(result.detail).toBe(
+      "native playwright --list over 'e2e/playwright.config.ts' (cwd 'e2e') enumerated 1 instance(s) as " +
+        'untrusted code (isolated temporary GATEFORGE_STATE_DIR)',
+    );
   });
 });
 

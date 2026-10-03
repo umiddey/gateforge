@@ -42,11 +42,20 @@ async function startFixturedWitness(options: {
   targetBaseUrl?: string;
   stateDir?: string | null;
   classifier?: boolean;
+  adapterIdentity?: 'natural-key';
   verifierKey?: string | null;
 }) {
   const project = makeTempProject('witness');
   writeFixtureProject(project);
   writeHonestAdapter(project, options.adapterFingerprint ?? 'example-v1');
+  if (options.adapterIdentity !== undefined) {
+    const adapterPath = join(project, '.gateforge/adapters/tenant.accounts.mjs');
+    const adapterSource = readFileSync(adapterPath, 'utf8').replace(
+      'export default {',
+      `export default { identity: '${options.adapterIdentity}',`,
+    );
+    writeFileSync(adapterPath, adapterSource);
+  }
   const target = await startMarkerServer(options.fingerprint);
   const stateDir = options.stateDir === undefined ? join(project, '.gateforge/test-gates') : options.stateDir;
   if (stateDir !== null) {
@@ -322,6 +331,71 @@ describe('persistence endpoint (pin #7)', () => {
       // Engine-side observation: the only witnessed origin (GF-23 round 3).
       expect(persistence?.trust).toBe('witnessed');
       expect(persistence?.origin).toBe('engine-observed');
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+  it('keeps unanchored entity snapshots distinct and bound to their observed key', async () => {
+    const fixture = await startFixturedWitness({ fingerprint: 'example-v1', adapterIdentity: 'natural-key' });
+    try {
+      const session = await openSupervisorSession(fixture.witness.url, TOKEN, TEST_ID, 0, VERIFIER_KEY);
+      const naturalKey = '2';
+      const pre = await fetch(`${fixture.witness.url}/witness/pre-observation`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resourceId: 'tenant.accounts',
+          entityId: naturalKey,
+          testId: TEST_ID,
+          claimId: 'tenant.accounts:persistence:create',
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+        }),
+      });
+      expect(pre.status).toBe(200);
+      const observation = (await pre.json()) as { observationId: string; observed: number };
+      expect(observation.observed).toBe(0);
+      const mismatched = await fetch(`${fixture.witness.url}/witness/persistence`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resourceId: 'tenant.accounts',
+          entityId: '3',
+          testId: TEST_ID,
+          claimId: 'tenant.accounts:persistence:create',
+          preObservationId: observation.observationId,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+        }),
+      });
+      expect(mismatched.status).toBe(409);
+      const created = await fetch(`${fixture.target.url}/api/accounts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ first_name: 'Grace', last_name: 'Hopper' }),
+      });
+      const createdEntity = (await created.json()) as { id: string };
+      expect(createdEntity.id).toBe(naturalKey);
+      const persisted = await fetch(`${fixture.witness.url}/witness/persistence`, {
+        method: 'POST',
+        headers: { [RUN_HEADER]: TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resourceId: 'tenant.accounts',
+          entityId: naturalKey,
+          testId: TEST_ID,
+          claimId: 'tenant.accounts:persistence:create',
+          preObservationId: observation.observationId,
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+        }),
+      });
+      expect(persisted.status, await persisted.text()).toBe(200);
+      const ledger = (await (
+        await fetch(`${fixture.witness.url}/records`, { headers: { [RUN_HEADER]: TOKEN } })
+      ).json()) as { records: Array<{ kind: string; payload: Record<string, unknown> }> };
+      const persistence = ledger.records.find((record) => record.kind === 'persistence.entity');
+      expect(persistence?.payload['before']).toEqual({ found: false });
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();

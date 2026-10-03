@@ -31,10 +31,12 @@ export {
   HttpContractSchemaVersionField,
   HttpLocationSchema,
   HttpMethodSchema,
+  ResponseReadSchema,
   type HttpContractFact,
   type HttpContractRole,
   type HttpLocation,
   type HttpMethod,
+  type ResponseRead,
 } from './schema.js';
 export {
   HTTP_CONTRACT_VERSION,

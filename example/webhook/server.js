@@ -43,7 +43,12 @@ const TIMESTAMP_SKEW_MS = REPLAY_WINDOW_MS;
 /** In-memory delivery log: event_id -> { attempt, firstSeenAt, sideEffects }. */
 const deliveryLog = new Map();
 
-/** Apply the side effect for a freshly-accepted event. */
+/**
+ * Apply the side effect for a freshly-accepted event.
+ *
+ * The state is explicit: a harness that owns its own delivery log must
+ * see the row land in ITS log, not in the process-global one.
+ */
 function applySideEffect(event, state = defaultWebhookState()) {
   const prior = state.deliveryLog.get(event.event_id);
   state.deliveryLog.set(event.event_id, {
@@ -162,10 +167,16 @@ async function handleWebhook(req, res, state = defaultWebhookState()) {
   }
 
   // 7. happy path
-  applySideEffect(event);
+  applySideEffect(event, state);
   send(res, 200, { ok: true, deduplicated: false, eventId: event.event_id });
 }
 
+
+/** GET /delivery-log — the complete delivery log, for a witness adapter. */
+function handleLogList(res, state = defaultWebhookState()) {
+  const deliveries = [...state.deliveryLog.values()].sort((a, b) => (a.eventId < b.eventId ? -1 : 1));
+  send(res, 200, { deliveries });
+}
 /** GET /delivery-log/:eventId — witness endpoint for the e2e. */
 function handleLogGet(req, res, state = defaultWebhookState()) {
   const url = (req.url ?? '').split('?')[0];
@@ -196,6 +207,10 @@ function start(port, state = defaultWebhookState()) {
       handleWebhook(req, res, state);
       return;
     }
+    if (req.method === 'GET' && url === '/delivery-log') {
+      handleLogList(res, state);
+      return;
+    }
     if (req.method === 'GET' && url.startsWith('/delivery-log/')) {
       handleLogGet(req, res, state);
       return;
@@ -211,6 +226,9 @@ function start(port, state = defaultWebhookState()) {
     });
   });
 }
+
+/** The real receiver, for harnesses that own their own state. */
+export { start as startWebhookServer };
 
 /** Parse CLI args. */
 function parseCli() {

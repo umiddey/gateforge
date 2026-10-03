@@ -430,6 +430,10 @@ function contractFactFromClientCall(
     location,
     idSuffix: `${sourceRel}:${clientCall.location.line}:${clientCall.location.col}`,
     callsites: [`${clientCall.location.file}:${clientCall.location.line}:${clientCall.location.col}`],
+    // The response fields this call site reads (plan 2026-09-25 Phase 4b
+    // item 5). Omitted entirely when the code reads none, so a call
+    // without a read emits exactly the bytes it emitted before.
+    ...(clientCall.responseReads === undefined ? {} : { responseReads: clientCall.responseReads }),
   });
 }
 
@@ -450,6 +454,11 @@ function buildFact(input: {
   location: HttpLocation;
   idSuffix: string;
   callsites?: string[];
+  responseReads?: ReadonlyArray<{
+    field: string;
+    location: { file: string; line: number; col: number };
+    chain?: number;
+  }>;
 }): FactOutcome {
   const method = normalizeHttpMethod(input.method);
   if (method === null) {
@@ -484,6 +493,13 @@ function buildFact(input: {
     framework: input.framework,
   };
   if (input.callsites !== undefined) attributes['callsites'] = input.callsites;
+  if (input.responseReads !== undefined) {
+    attributes['responseReads'] = input.responseReads.map((read) => ({
+      field: read.field,
+      location: { file: read.location.file, line: read.location.line, col: read.location.col },
+      ...(read.chain === undefined ? {} : { chain: read.chain }),
+    }));
+  }
   if (input.handler !== undefined && input.handler.length > 0) attributes['handlerSymbol'] = input.handler;
   return {
     ok: true,

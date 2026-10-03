@@ -25,10 +25,12 @@
  * project); unresolved/parse errors sort by location.
  */
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import {
   canonicalJson,
   ClaimSchema,
   type Claim,
+  type DiagnosticSuite,
   type JsonValue,
   deriveLogicalKey,
   TestCatalogSchema,
@@ -44,18 +46,26 @@ import {
 import { inferTestKind } from './inference.js';
 import {
   collectPytestSuite,
+  pytestCollectArgv,
   repoRelative,
 } from './pytest-adapter.js';
+import type { PytestCollectionResult } from './pytest-adapter.js';
+import { CypressRunnerAdapter } from './cypress-runner-adapter.js';
+import { VitestRunnerAdapter } from './vitest-runner-adapter.js';
+import type { RunnerTestIdentity } from '@gate-forge/witness/adapter';
 import {
   fileDigest,
   listNativePlaywrightTests,
   reconciliationKey,
+  type NativeInstance,
   type NativeListResult,
 } from './reconcile.js';
 import type { InferenceResult } from './inference.js';
 import {
   scanTestFiles,
   UNRESOLVED_TITLE_PLACEHOLDER,
+  type RepoRelativeFileFilter,
+  type StaticRegistrationWarning,
   type StaticScanResult,
   type StaticUnresolved,
 } from './static-discovery.js';
@@ -74,8 +84,27 @@ export interface DiscoverOptions {
    * fix, server-witnessed channel).
    */
   collectPytest?: boolean;
+  /**
+   * Optional wrapper around pytest collection. Gateforge's CLI uses this
+   * boundary to cache the exact collected result without coupling this
+   * discovery package to CLI run-state storage.
+   */
+  pytestCollection?: (
+    suite: DiagnosticSuite,
+    cwd: string,
+    argv: readonly string[],
+    collect: () => Promise<PytestCollectionResult>,
+  ) => Promise<PytestCollectionResult>;
   /** Native playwright `--list` timeout (default 60s). */
   playwrightTimeoutMs?: number;
+  /**
+   * Optional veto over statically seeded candidates, forwarded to
+   * {@link scanTestFiles} unchanged. It filters the seed only: the
+   * native `--list` enumeration below stays authoritative, so a caller
+   * can hide the ENGINE's own generated run-state files from catalog
+   * construction without touching a single enumerated case.
+   */
+  excludeFile?: RepoRelativeFileFilter;
 }
 
 /** The discovery result: validated catalog, canonical JSON, and live native claims. */
@@ -85,6 +114,42 @@ export interface DiscoverResult {
   json: string;
   /** Gateforge annotations on tests the current native list enumerated. */
   nativeClaims: Claim[];
+  /** Playwright JSON reporter errors from native enumeration, verbatim. */
+  nativeErrors: string[];
+  nativeInstances: NativeInstance[];
+  /**
+   * Playwright project name → the names it depends on, as the RUNNER
+   * resolved them (see `projectGraphReporterEntry`). Absent when the
+   * enumeration could not read the graph.
+   */
+  projectDependencies?: Record<string, string[]>;
+  /**
+   * Playwright project name → the `use.storageState` STRING the runner
+   * resolved for it. Absent when no project declares one, and absent
+   * together with {@link projectDependencies} whenever the graph itself
+   * was unreadable.
+   */
+  projectStorageStates?: Record<string, string>;
+  /** Static registration sites guarded by Gateforge environment state. */
+  registrationWarnings: StaticRegistrationWarning[];
+  /**
+   * Coarse per-step wall-clock timings (`check --timing`): static scan,
+   * native list, pytest collection, and
+   * the whole discovery in milliseconds. Observability only.
+   */
+  timings: DiscoveryTimings;
+}
+
+/** Coarse discovery step durations in milliseconds (`check --timing`). */
+export interface DiscoveryTimings {
+  /** Static test-file scan duration. */
+  scanMs: number;
+  /** Native Playwright `--list` enumeration duration. */
+  nativeListMs: number;
+  /** All configured pytest suites' collection duration. */
+  pytestCollectMs: number;
+  /** Total `discoverTestCatalog` duration including all steps above. */
+  totalMs: number;
 }
 
 /**
@@ -111,16 +176,22 @@ export interface DiscoverResult {
  */
 export async function discoverTestCatalog(options: DiscoverOptions): Promise<DiscoverResult> {
   const { cwd, config } = options;
+  const discoveryStartedAtMs = performance.now();
+  const scanStartedAtMs = performance.now();
   const scan = scanTestFiles({
     cwd,
     include: config.project.paths.include,
     exclude: config.project.paths.exclude,
+    excludeFile: options.excludeFile,
   });
+  const scanMs = performance.now() - scanStartedAtMs;
 
+  const nativeStartedAtMs = performance.now();
   const native = await listNativePlaywrightTests({
     cwd,
     timeoutMs: options.playwrightTimeoutMs,
   });
+  const nativeListMs = performance.now() - nativeStartedAtMs;
 
   const builder = new CatalogBuilder(cwd, scan, native);
   const runnerSummaries: RunnerSummary[] = [builder.playwrightSummary()];
@@ -128,9 +199,15 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
 
     // Registered pytest suites: diagnostic-only identities (§3.5).
     const suites = config.diagnostics?.suites ?? [];
+    const pytestCollectStartedAtMs = performance.now();
     for (const suite of suites) {
       if (options.collectPytest === true) {
-        const collection = await collectPytestSuite(suite, join(cwd, suite.cwd));
+        const suiteCwd = join(cwd, suite.cwd);
+        const collect = () => collectPytestSuite(suite, suiteCwd);
+        const collection =
+          options.pytestCollection === undefined
+            ? await collect()
+            : await options.pytestCollection(suite, suiteCwd, pytestCollectArgv(suite), collect);
         runnerSummaries.push({
           runner: 'pytest',
           name: suite.name,
@@ -155,6 +232,30 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
       }
     }
 
+    // The CONFIGURED runner (plan 2026-09-25, runner-agnostic evidence):
+    // when `runner:` names vitest or cypress, its adapter enumerates the
+    // expected set into catalog rows (discoveryStatus 'discovered' — the
+    // runner itself proved the case) so mappings, scope expansion, and
+    // the supervised plan resolve against it. `playwright` (the default)
+    // never runs this: the catalog above is byte-identical to before.
+    // pytest rows come from the diagnostics collection above.
+    if (config.runner === 'vitest' || config.runner === 'cypress') {
+      const adapter = config.runner === 'vitest' ? new VitestRunnerAdapter() : new CypressRunnerAdapter();
+      const enumeration = await adapter.enumerate(cwd);
+      runnerSummaries.push({
+        runner: config.runner,
+        name: config.runner,
+        status: enumeration.status === 'discovered' ? 'discovered' : 'unavailable',
+        detail: enumeration.detail,
+      });
+      if (enumeration.status === 'discovered') {
+        for (const test of enumeration.tests) {
+          const row = builder.adapterRunnerEntry(config.runner, test);
+          if (row !== null) entries.push(row);
+        }
+      }
+    }
+
     const catalog = builder.finalize(entries, runnerSummaries);
     const nativeClaims = native.instances.flatMap((instance) =>
       instance.claims.flatMap((obligationId) => {
@@ -168,7 +269,27 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
         return parsed.success ? [parsed.data] : [];
       }),
     );
-    return { catalog, json: canonicalJson(catalog as unknown as JsonValue), nativeClaims };
+    return {
+      catalog,
+      json: canonicalJson(catalog as unknown as JsonValue),
+      nativeClaims,
+      nativeInstances: native.instances,
+      nativeErrors: [...native.errors],
+
+      ...(native.projectDependencies !== undefined
+        ? { projectDependencies: native.projectDependencies }
+        : {}),
+      ...(native.projectStorageStates !== undefined
+        ? { projectStorageStates: native.projectStorageStates }
+        : {}),
+      registrationWarnings: scan.registrationWarnings,
+      timings: {
+        scanMs,
+        nativeListMs,
+        pytestCollectMs: performance.now() - pytestCollectStartedAtMs,
+        totalMs: performance.now() - discoveryStartedAtMs,
+      },
+    };
 }
 
 /** Assembles catalog rows from the scan + native enumeration. */
@@ -480,6 +601,46 @@ class CatalogBuilder {
       rulesFired: [],
       categorySignals: [],
       suppressionSignals: nodeId.includes('[xfail]') || nodeId.includes('[xpass]') ? [{ kind: 'fixme', detail: 'pytest xfail/xpass parameter', location: { file: repoFile, line: 1, col: 0 } }] : [],
+    };
+  }
+
+  /**
+   * One configured-runner row from the adapter enumeration (plan
+   * 2026-09-25, runner-agnostic evidence): the runner itself proved the
+   * case, so the row is DISCOVERED with the runner's own framework id —
+   * the same honest shape the pytest rows use (no Playwright
+   * reconciliation applies to it).
+   *
+   * Args:
+   *   runner: the configured runner name (`vitest` or `cypress`).
+   *   test: the enumerated test identity.
+   *
+   * Returns:
+   *   TestCatalogEntry | null: the catalog row, or null when the file is
+   *   unreadable (never a fabricated row).
+   */
+  adapterRunnerEntry(runner: 'vitest' | 'cypress', test: RunnerTestIdentity): TestCatalogEntry | null {
+    const digest = fileDigest(this.cwd, test.file);
+    if (digest === null) return null; // unreadable file: no fabricated row
+    const title = test.titlePath[test.titlePath.length - 1] ?? test.logicalKey;
+    return {
+      logicalKey: deriveLogicalKey({ runner, project: test.project, file: test.file, titlePath: [...test.titlePath] }),
+      runner,
+      project: test.project,
+      file: test.file,
+      titlePath: [...test.titlePath],
+      title,
+      sourceLocation: { file: test.file, line: 1, col: 0 },
+      parameterIdentity: test.frameworkId ?? test.logicalKey,
+      sourceDigest: digest,
+      discoveryStatus: 'discovered',
+      reconciliation: 'unavailable',
+      inferredKind: 'unknown',
+      kindSignals: [],
+      weakSignals: [],
+      rulesFired: [],
+      categorySignals: [],
+      suppressionSignals: [],
     };
   }
 

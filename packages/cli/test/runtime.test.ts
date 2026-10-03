@@ -12,6 +12,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RuntimeConfigSchema, withTempRepo, type RuntimeConfig } from '@gate-forge/core';
 import {
@@ -24,7 +25,7 @@ import {
 } from '../src/runtime.js';
 
 /** Absolute path of the compiled CLI bin (child-process runs). */
-const CLI_BIN = join(process.cwd(), 'packages/cli/bin/gateforge.js');
+const CLI_BIN = fileURLToPath(new URL('../bin/gateforge.js', import.meta.url));
 
 /** Minimal Io stand-in (the runtime layer only reads `env`). */
 const io = { env: process.env } as Parameters<typeof prepareRuntime>[3];
@@ -75,6 +76,33 @@ afterEach(() => {
 });
 
 describe('staged-runtime supervision', () => {
+  it('stops preparation when an opt-in preflight command fails', async () => {
+    const root = tempDir();
+    const runtime = RuntimeConfigSchema.parse({
+      schemaVersion: 1,
+      prepare: {
+        preflight: [{ name: 'lint', command: "printf 'preflight detail\\n'; exit 1", timeoutSeconds: 3 }],
+        command: "touch prepare-ran",
+      },
+    });
+    await expect(prepareRuntime(root, root, runtime, io, join(root, 'state'))).rejects.toMatchObject({
+      causeCode: 'RUNTIME_PREPARATION_FAILED',
+      message: expect.stringContaining('PREFLIGHT_FAILED lint'),
+    });
+    expect(existsSync(join(root, 'prepare-ran'))).toBe(false);
+  });
+
+  it('blocks runtime startup when a configured fixture health probe fails', async () => {
+    const root = tempDir();
+    const runtime = RuntimeConfigSchema.parse({
+      schemaVersion: 1,
+      health: [{ name: 'database', tcp: '127.0.0.1:1', timeoutSeconds: 1 }],
+    });
+    await expect(startRuntimeServices(root, runtime, io, join(root, 'state'))).rejects.toMatchObject({
+      causeCode: 'RUNTIME_READINESS_FAILED',
+      message: expect.stringContaining('FIXTURE_UNHEALTHY database'),
+    });
+  });
   it('a failing preparation command is typed and names its log', async () => {
     const root = tempDir();
     const runtime: RuntimeConfig = {
@@ -409,9 +437,18 @@ describe('staged-runtime supervision', () => {
         env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      let childOutput = '';
+      child.stdout.setEncoding('utf8').on('data', (chunk: string) => { childOutput += chunk; });
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => { childOutput += chunk; });
       const exited = new Promise<number | null>((resolveExit) => child.once('exit', resolveExit));
       // The readiness wait is running once the service process exists.
-      await waitFor(() => orphanCount(marker) === 1);
+      try {
+        await waitFor(() => orphanCount(marker) === 1);
+      } catch (error) {
+        if (child.exitCode === null) child.kill('SIGTERM');
+        await exited;
+        throw new Error(`${(error as Error).message}\n${childOutput}`);
+      }
       child.kill('SIGINT');
       const code = await exited;
       expect(code === null || code !== 0).toBe(true);

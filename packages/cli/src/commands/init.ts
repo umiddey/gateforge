@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { join } from 'node:path';
-import { parse as parseYaml } from 'yaml';
+import { parse as parseYaml, parseDocument, isSeq as isYamlSeq, isMap as isYamlMap } from 'yaml';
 import {
   ClassificationPolicySchema,
   PolicyFileSchema,
@@ -28,6 +28,7 @@ import {
   serializeBaseline,
   strictCapabilityGaps,
 } from '@gate-forge/core';
+import type { StrictnessMode } from '@gate-forge/core';
 import {
   DEFAULT_PLANES_CONFIG,
   PLANES_CONFIG_PATH,
@@ -38,20 +39,22 @@ import {
 import { PACK_VERSION as PACK_FASTAPI_VERSION } from '@gate-forge/pack-fastapi';
 import { PACK_VERSION as PACK_HTTP_VERSION } from '@gate-forge/pack-http';
 import { PACK_VERSION as PACK_TASK_VERSION } from '@gate-forge/pack-task';
+import { renderAlembicOptIn } from '@gate-forge/pack-alembic';
 import { parseArgs, stringFlag } from '../args.js';
 import type { Io } from '../io.js';
-import { writeLine } from '../io.js';
+import { recordInitPath, writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { languageDefaultPlugins, recommendPlugins, renderScanBlock, scanRepo } from '../repo-scan.js';
 import { rejectUnknownFlags } from './common.js';
 import { expandIncludePaths, type ExpandError } from '../glob.js';
 import { inferPlanesConfig } from '../planes-inference.js';
-import { hasGateforgeMarker, installCommitHook, writeStandaloneGateScript } from '../git-hooks.js';
+import { hasGateforgeMarker, installCommitHook, installPrePushHook, writeStandaloneGateScript } from '../git-hooks.js';
 import {
   appendPreCommitHook,
   ensureHookScript,
   engineRootFromInvocation,
   writeGitlabCiTemplate as writeSharedGitlabCiTemplate,
+  writeServerProtectionInstructions,
 } from './blocking.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import {
@@ -61,14 +64,44 @@ import {
   renderDocsExclusions,
   validateRequestedDocsFolders,
 } from '../docs-exclusions.js';
+import {
+  CACHE_EXCLUSIONS_GUARANTEE,
+  CACHE_EXCLUSIONS_PATH,
+  loadCacheExclusions,
+  renderCacheExclusions,
+  validateRequestedCacheFiles,
+} from '../cache-exclusions.js';
+import {
+  CHOOSE_ANOTHER_GOAL_ADVICE,
+  INIT_PRESETS,
+  isInitPresetName,
+  parseGoalAnswer,
+  renderGoalQuestion,
+  renderPresetTable,
+  renderPresetSummary,
+  type InitPresetName,
+  type InitPresetSettings,
+} from './init-presets.js';
+import {
+  BEHAVIOR_NAMESPACES,
+  behaviorPackEvidence,
+  behaviorSkeletonExamples,
+  detectBehaviorPacks,
+  parseBehaviorPacks,
+  type BehaviorNamespace,
+  type DetectedBehaviorPack,
+} from '../behavior-setup.js';
 export const INIT_USAGE =
-  '[--no-scan] [--proof overlay|observe] [--blocking] [--pre-commit] [--mode changed|staged] ' +
-  '[--witnessed staged|full] [--ci] [--no-ci] [--docs-exclude <folder,...> [--confirm-doc-exclusions]] ' +
-  '[--strict-e2e] [--planes] [--behavior]';
+  '[--preset light|normal|strict] [--explain-presets] [--no-scan] [--proof overlay|observe] ' +
+  '[--blocking] [--no-blocking] [--pre-commit] [--no-pre-commit] [--mode changed|staged] ' +
+  '[--witnessed staged|full] [--ci] [--no-ci] ' +
+  '[--docs-exclude <folder,...> [--confirm-doc-exclusions]] [--cache-exclude <file,...> ' +
+  '[--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--no-planes] ' +
+  '[--behavior] [--no-behavior] [--behavior-packs <pack,...>]';
 
 /** Template for the complete-behavior owner document (plan §4.1). */
 export const BEHAVIOR_TEMPLATE = `\
-# Complete-behavior owner document (plan §4.1).
+# Complete-behavior owner document.
 # Presence of this file enables the complete-behavior profile: every
 # discovered endpoint must have an approved declaration (cases or an
 # owner disposition). There is no warnOnly or silent fallback.
@@ -80,6 +113,7 @@ schemaVersion: 1
 endpoints: []
 resources: []
 `;
+
 
 /** The behavior-setup checklist: the work no scaffold can do. */
 export const BEHAVIOR_CHECKLIST = [
@@ -114,17 +148,21 @@ const BUNDLED_PLUGIN_VERSIONS: Readonly<Record<string, string>> = Object.freeze(
 
 /**
  * The bundled plugin ids init may write (the four trusted detector
- * packs). `gateforge.pack-task` carries no semantic verifier, so it is
- * opt-in only via `--plugins` — never recommended, never defaulted.
+ * packs). `gateforge.pack-task` is opt-in only via `--plugins` — never
+ * recommended, never defaulted — because the `task:*` contracts it
+ * discovers are gradable ONLY once the owner configures a
+ * `queueObserver` (the engine's own queue read); without one every one
+ * of them stays `VERIFIER_UNSUPPORTED`/fail-closed.
  */
 const KNOWN_BUNDLED_PLUGIN_IDS: ReadonlySet<string> = new Set(Object.keys(BUNDLED_PLUGIN_MODULES));
 
 /**
  * Selects the bundled detectors required by the generated coverage and
  * trusted-entry-point rules for the requested source languages.
- * `gateforge.pack-task` is NEVER included: it has no semantic verifier
- * (every contract grades VERIFIER_UNSUPPORTED), so it is opt-in only
- * via `--plugins`.
+ * `gateforge.pack-task` is NEVER included: it is opt-in only via
+ * `--plugins`, because its contracts grade only with a configured
+ * `queueObserver` and a generated default would promise coverage the
+ * repository cannot produce.
  *
  * Args:
  *   languages (readonly string[]): Languages selected by `gateforge init`.
@@ -144,6 +182,63 @@ function pluginsTemplate(pluginIds: readonly string[]): string {
         `  - id: ${id}\n    version: '${BUNDLED_PLUGIN_VERSIONS[id]}'\n    transport: in-process\n    module: '${BUNDLED_PLUGIN_MODULES[id]}'`,
     )
     .join('\n');
+}
+
+/**
+ * Adds the requested bundled detectors to an existing `.gateforge.yml`
+ * without touching anything else in the owner's file.
+ *
+ * The merge is ADDITIVE: an id already present keeps its owner's entry
+ * (version pin, transport, module) byte for byte, an id that is absent
+ * is appended with the bundled module/version, and no entry is ever
+ * removed — `--plugins` chooses what to ADD, and the plugin list is the
+ * one config section the product's own tip tells a user to change.
+ * Everything outside the `plugins:` sequence (keys, comments, the
+ * owner's own edits) is preserved exactly.
+ *
+ * Args:
+ *   existingText: the current `.gateforge.yml` contents.
+ *   pluginIds: the bundled detector ids to ensure are present.
+ *
+ * Returns:
+ *   string | null: the merged document, or null when every requested id
+ *   is already present (nothing to write).
+ *
+ * Throws:
+ *   UsageError: the merged document would not satisfy the pinned
+ *   config schema (a broken merge must fail here, not at the next run).
+ */
+function mergePluginsIntoConfig(existingText: string, pluginIds: readonly string[]): string | null {
+  const document = parseDocument(existingText);
+  const pluginsNode = document.get('plugins');
+  if (!isYamlSeq(pluginsNode)) {
+    throw new UsageError(
+      'init --plugins: the existing .gateforge.yml has no `plugins:` list to add to; ' +
+        'add the entry by hand (one block per detector: `id`, `version`, `transport`, `module`)',
+    );
+  }
+  const present = new Set<string>();
+  for (const item of pluginsNode.items) {
+    // A `plugins:` entry is a YAML mapping node, not a plain object.
+    if (!isYamlMap(item)) continue;
+    const id = item.get('id');
+    if (typeof id === 'string') present.add(id);
+  }
+  const missing = pluginIds.filter((id) => !present.has(id));
+  if (missing.length === 0) return null;
+  for (const id of missing) {
+    pluginsNode.add({
+      id,
+      version: BUNDLED_PLUGIN_VERSIONS[id],
+      transport: 'in-process',
+      module: BUNDLED_PLUGIN_MODULES[id],
+    });
+  }
+  const merged = document.toString();
+  // Self-check against the pinned schema BEFORE writing (the same
+  // contract the fresh-config path keeps).
+  parseConfig(parseYaml(merged), { file: '.gateforge.yml' });
+  return merged;
 }
 
 /**
@@ -167,27 +262,21 @@ function sourceIncludePatterns(languages: readonly string[]): string[] {
   return patterns.length > 0 ? patterns : ['**/*'];
 }
 /**
- * The starter policies document (plan phase 5): the gradable
- * `persistence:*` namespace for automatically classified resources.
- * UI-semantic `crud:*` stays opt-in and visibly fail-closed until a
- * trusted UI observer exists (ADR 0003 §3).
+ * The starter policies preserve available persistence evidence and use
+ * only transport-level proof for consumed HTTP endpoints.
  */
 /**
- * Opt-in transport-only endpoint policy (plan §8 / D1): proves only that
+ * Transport-only endpoint policy example (plan §8 / D1): proves only that
  * the witness observed a matching HTTP exchange in the bound run. Test
  * attribution is suite-claimed — it does not prove which browser, UI
- * action, or test produced the exchange. Selecting this document
- * changes the guarantee: it is a SEPARATE opt-in policy, never an
- * automatic migration of the default frontend requirement, baselines,
- * or waivers.
+ * action, or test produced the exchange.
  */
 export const TRANSPORT_ONLY_POLICY_EXAMPLE = `\
-# Transport-only endpoint policy (plan §8 / D1, explicit opt-in).
+# Transport-only endpoint policy.
 # Each obligation proves only that the witness observed a matching HTTP
 # exchange in the bound run ("witness observed an HTTP exchange");
 # test attribution is suite-claimed ("suite-claimed"), never proven
-# browser-issued by an independent channel. Selecting this policy narrows the
-# guarantee relative to the default frontend requirement below.
+# browser-issued by an independent channel.
 schemaVersion: 1
 policies:
   - id: frontend-consumed-endpoints-transport-only
@@ -206,10 +295,17 @@ export const POLICIES_TEMPLATE = `\
 # and are graded on the witness's own engine-side observation.
 # UI-semantic crud:* contracts intentionally fail closed (no
 # witness-controlled UI observation channel exists yet) — add them only
-# deliberately. Endpoint proof stays transport-only and opt-in
-# (TRANSPORT_ONLY_POLICY_EXAMPLE below): 'http:frontend-request-observed'
-# has no independent browser/test observation channel, so it is NEVER a
-# starter requirement.
+# deliberately. Consumed HTTP endpoints use transport-only proof;
+# 'http:frontend-request-observed' has no independent browser/test channel
+# and is never included in a new-install starter.
+#
+# A route no UI calls owes nothing below, so a NEW endpoint with no test is
+# invisible until it is consumed. To make every discovered route owe the
+# observation contracts (only NEW debt blocks; run 'gateforge adopt' to
+# forgive what already exists), uncomment the options section below:
+#
+# options:
+#   'http.endpoint.requireObservation': all
 schemaVersion: 1
 policies:
   # Capability-scoped endpoint policies (workflow/validation/...) may be added
@@ -223,6 +319,13 @@ policies:
       - persistence:read
       - persistence:update
       - persistence:delete
+  - id: frontend-consumed-endpoints-transport-only
+    when:
+      kind: http.endpoint
+      consumed: true
+    require:
+      - http:request-observed
+      - http:response-status-ok
 `;
 
 /**
@@ -241,8 +344,8 @@ policies:
  * Task-scoped rules (the `linkage.task` coverage rule and the worker
  * entry-point detector binding) are emitted ONLY when `pack-task` is in
  * the selected plugin set: a coverage rule or detector binding naming an
- * unconfigured detector fails every run closed, and task is opt-in
- * (no semantic verifier).
+ * unconfigured detector fails every run closed, and task is opt-in —
+ * its contracts grade only with a configured `queueObserver`.
  */
 function classificationPolicyTemplate(
   languages: readonly string[],
@@ -327,18 +430,63 @@ volatileFields:
   - created_at
 `;
 }
+/**
+ * The runner names the repository scan can detect, in the order the scan
+ * reports its signals. `playwright` is the frozen default: it is never
+ * written into a new config.
+ */
+const DETECTABLE_RUNNERS = ['playwright', 'vitest', 'cypress', 'pytest'] as const;
+
 /** Builds the `.gateforge.yml` document for the requested languages. */
-function configTemplate(languages: readonly string[], pluginIds: readonly string[], options: { strictE2E?: boolean } = {}): string {
+function configTemplate(
+  languages: readonly string[],
+  pluginIds: readonly string[],
+  /** `strictnessMode` writes the owner-owned `mode:` key; undefined writes NO key, which is today's byte-identical config. */
+  options: {
+    strictE2E?: boolean;
+    enforcement?: boolean;
+    historyRetentionDays?: number | 'off';
+    strictnessMode?: StrictnessMode;
+    /** `runner` writes the owner-owned `runner:` key; undefined writes NO key (playwright is the default). */
+    runner?: string;
+  } = {},
+): string {
   const enforcementBlock =
-    options.strictE2E === true
+    options.enforcement === true
       ? `# Enforcement: standard mode combines the local hook with a mandatory
 # trusted server check. strictE2E makes waived/baselined in-scope E2E
 # obligations NOT proof (they block with ENFORCEMENT_UNTRUSTED).
 enforcement:
   mode: standard
-  strictE2E: true
+  strictE2E: ${String(options.strictE2E === true)}
+  receiptStage: pre-push
 `
       : '';
+  // The owner-owned strictness key. Only written when a preset named it:
+  // without a preset the config stays byte-identical to today's, and an
+  // ABSENT key means `strict` (the frozen behavior).
+  const strictnessBlock =
+    options.strictnessMode === undefined
+      ? ''
+      : `# How hard the gate blocks: strict = block everything, changed = block
+# only the debt this change touches, warn = report everything and block
+# nothing. This softens the GATE, never the evidence.
+mode: ${options.strictnessMode}
+`;
+  // The owner-owned runner key: only written when the scan detected a
+  // single non-Playwright runner. An absent key means `playwright`, the
+  // frozen default, so an existing/ambiguous setup is byte-identical.
+  const runnerBlock =
+    options.runner === undefined
+      ? ''
+      : `# The test runner the supervised gate drives. Playwright is the default when
+# this key is absent; the scan detected another runner in this repository.
+runner: ${options.runner}
+`;
+  const historyBlock =
+    options.historyRetentionDays === undefined
+      ? ''
+      : `history:\n  retentionDays: ${String(options.historyRetentionDays)}\n`;
   return `\
 # gateforge project configuration (schemaVersion 1)
 schemaVersion: 1
@@ -374,7 +522,7 @@ witness:
   maxDurationSeconds: 5
 clock:
   mode: system
-${enforcementBlock}\
+${runnerBlock}${historyBlock}${strictnessBlock}${enforcementBlock}\
 `;
 }
 
@@ -435,7 +583,12 @@ You are gated by Gateforge. Work one blocking item at a time.
 2. Read the single \`next:\` block: \`cause\`, \`why\`, and exactly one \`do:\` line.
 3. Do the single \`do:\` line. Stop. Re-run \`gateforge next\`.
 
-\`next\` prints ONE action — never a dump. Mapping is intent, not proof.
+
+## Setup guides
+
+- Environment rules: \`node_modules/@gate-forge/cli/guides/TEST-ENVIRONMENT.md\`.
+- Quickstart: \`node_modules/@gate-forge/cli/guides/QUICKSTART.md\`.
+  (both ship with the installed CLI package)
 
 ## Proof lives in the overlay
 
@@ -479,8 +632,10 @@ with a surface map — they do NOT rewrite existing journeys.
 - New proof tests go here: \`tests/e2e/gateforge/<resource>.<op>.spec.js\`.
 - Do not rewrite existing \`tests/e2e/**\` journeys into \`evidence.ui\`.
 - Do not use \`gateforge tests mark\` as proof: mappings are intent, not proof.
-- Fixture shape: \`example/e2e/accounts-crud-journey.spec.js\` in the
-  gateforge monorepo and the \`@gate-forge/pack-playwright\` README.
+- Fixture shape: \`node_modules/@gate-forge/pack-playwright/examples/overlay-proof.spec.js\`
+  (a complete, runnable proof test shipped with the pack you installed —
+  copy it here and change the surface). Journey-writing rules:
+  \`node_modules/@gate-forge/pack-playwright/README.md\`.
 `;
 
 /**
@@ -509,7 +664,10 @@ request sent), not "the engine typed the form".`;
 async function resolveRecommended(io: Io, options: Readonly<Record<string, unknown>>): Promise<boolean> {
   if (options['accept-recommended'] === true) return true;
   if (!process.stdin.isTTY) {
-    writeLine(io.stdout, 'tip: re-run with --plugins <comma,list> to change detectors');
+    writeLine(
+      io.stdout,
+      'tip: re-run with --plugins <comma,list> to add detectors (entries already in .gateforge.yml are kept; nothing else in the file changes)',
+    );
     return true;
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -519,6 +677,77 @@ async function resolveRecommended(io: Io, options: Readonly<Record<string, unkno
   } finally {
     rl.close();
   }
+}
+/**
+ * Resolves the goal `init` should set up. Three paths, in order:
+ *
+ * 1. `--preset light|normal|strict` — an agent or CI run picks the goal
+ *    explicitly.
+ * 2. A real terminal — ONE question ("What should Gateforge do for
+ *    you?") with three choices, each explained in one line.
+ * 3. No terminal and no `--preset` — light only, stated ONCE on the
+ *    line that also names `--preset <light|normal|strict>`. Gateforge
+ *    never guesses normal or strict for someone who is not there:
+ *    guessing strict blocks a team, guessing normal pretends a gate
+ *    nobody asked for.
+ *
+ * A run that already carries explicit enforcement flags (`--blocking`,
+ * `--strict-e2e`, …) has chosen for itself: no preset is applied and the
+ * generated config keeps today's exact bytes.
+ *
+ * Args:
+ *   io: process context (prompt + informational output).
+ *   options: parsed init flags.
+ *   enforcementFlagGiven (boolean): true when an enforcement flag was
+ *     passed and therefore wins over any preset.
+ *
+ * Returns:
+ *   Promise<{ name: InitPresetName; settings: InitPresetSettings;
+ *   autoChosen?: boolean } | null>: the applied goal (with
+ *   `autoChosen` when no human chose it), or null when the run kept
+ *   today's behavior.
+ */
+async function resolveGoal(
+  io: Io,
+  options: Readonly<Record<string, unknown>>,
+  enforcementFlagGiven: boolean,
+  configExisted: boolean,
+): Promise<{ name: InitPresetName; settings: InitPresetSettings; autoChosen?: boolean } | null> {
+  const explicit = options['preset'];
+  if (explicit !== undefined && isInitPresetName(explicit)) {
+    if (!enforcementFlagGiven) return { name: explicit, settings: INIT_PRESETS[explicit] };
+    writeLine(
+      io.stdout,
+      `note: --preset ${explicit} is ignored because an enforcement flag decides the wiring; the preset's meaning: ${INIT_PRESETS[explicit].explanation}`,
+    );
+    return null;
+  }
+  if (enforcementFlagGiven) return null;
+  const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
+  if (!interactive) {
+    // ONE line: which goal this run applied, and the flag that changes
+    // it. The closing summary used to state the same choice a second
+    // time, twenty lines later, in different words.
+    writeLine(
+      io.stdout,
+      configExisted
+        ? 'no terminal: keeping your existing .gateforge.yml — its `mode:` still decides how hard the gate blocks (the light goal wrote nothing here); ' +
+          CHOOSE_ANOTHER_GOAL_ADVICE
+        : `no terminal: writing the light preset (report everything, block nothing) — ${CHOOSE_ANOTHER_GOAL_ADVICE}`,
+    );
+    return { name: 'light', settings: INIT_PRESETS.light, autoChosen: true };
+  }
+  writeLine(io.stdout, renderGoalQuestion());
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let name: InitPresetName;
+  try {
+    name = parseGoalAnswer(await rl.question(' '));
+  } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : String(error));
+  } finally {
+    rl.close();
+  }
+  return { name, settings: INIT_PRESETS[name] };
 }
 /**
  * Asks (TTY only) whether gateforge should be a blocking gate. Flags win:
@@ -539,6 +768,97 @@ async function resolveBlocking(io: Io, options: Readonly<Record<string, unknown>
   } finally {
     rl.close();
   }
+}
+
+/** Asks how long to retain supervised run history in a new interactive setup.
+ *
+ * Args:
+ *   io: process context used for the prompt and informational output.
+ *
+ * Returns:
+ *   Promise<number | 'off' | undefined>: selected retention; undefined leaves the feature off.
+ */
+async function resolveHistoryRetention(io: Io): Promise<number | 'off' | undefined> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question('Keep supervised run history? [14 days/off] (default 14): ')).trim().toLowerCase();
+    if (answer === '') return 14;
+    if (answer === 'off') return 'off';
+    const days = Number(answer);
+    if (Number.isInteger(days) && days >= 1 && days <= 90) return days;
+    throw new UsageError("init: history retention must be an integer from 1 to 90, or 'off'");
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * Resolves which behavior packs' cases `init` enables (plan 2026-09-30
+ * Phase 4). Flags win, then the terminal question, then nothing.
+ *
+ * A non-interactive run — an agent, a CI job, a test — NEVER enables a
+ * pack silently: it prints what it found and the exact flag that
+ * enables each pack, and returns none. `--no-behavior` prints nothing at
+ * all, so a repository that shows no behavior pack keeps `init`
+ * byte-identical.
+ *
+ * Args:
+ *   io: process context (the question is asked on the real terminal).
+ *   input: the detected packs and the owner's explicit flags.
+ *
+ * Returns:
+ *   Promise<BehaviorNamespace[]>: the enabled namespaces, in print order.
+ */
+async function resolveBehaviorPacks(
+  io: Io,
+  input: {
+    detectedPacks: readonly DetectedBehaviorPack[];
+    explicit: readonly BehaviorNamespace[];
+    enableAll: boolean;
+    disabled: boolean;
+  },
+): Promise<BehaviorNamespace[]> {
+  if (input.disabled) return [];
+  if (input.explicit.length > 0) return [...input.explicit];
+  if (input.detectedPacks.length === 0) return [];
+  if (input.enableAll) return input.detectedPacks.map((pack) => pack.namespace);
+  if (!process.stdin.isTTY) {
+    writeLine(
+      io.stdout,
+      'behavior packs detected in this repository (nothing is enabled without a flag):',
+    );
+    for (const pack of input.detectedPacks) {
+      writeLine(io.stdout, `  ${pack.namespace} — ${behaviorPackEvidence(pack)}`);
+    }
+    writeLine(io.stdout, 'enable their cases, then re-run init:');
+    for (const pack of input.detectedPacks) {
+      writeLine(io.stdout, `  gateforge init --behavior-packs ${pack.namespace}`);
+    }
+    if (input.detectedPacks.length > 1) {
+      const all = input.detectedPacks.map((pack) => pack.namespace).join(',');
+      writeLine(io.stdout, `  gateforge init --behavior-packs ${all}`);
+    }
+    return [];
+  }
+  const enabled: BehaviorNamespace[] = [];
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    writeLine(
+      io.stdout,
+      'behavior packs detected in this repository — enable the cases for the ones this app really has:',
+    );
+    for (const pack of input.detectedPacks) {
+      writeLine(io.stdout, `  ${pack.namespace} — ${behaviorPackEvidence(pack)}`);
+      const answer = (await rl.question(`enable ${pack.namespace} behavior cases? [y/N] `))
+        .trim()
+        .toLowerCase();
+      if (answer === 'y' || answer === 'yes') enabled.push(pack.namespace);
+    }
+  } finally {
+    rl.close();
+  }
+  return BEHAVIOR_NAMESPACES.filter((namespace) => enabled.includes(namespace));
 }
 
 /**
@@ -629,6 +949,58 @@ async function resolveDocsExclusionsForInit(
   writeLine(io.stdout, 'tip: non-interactive init keeps full evidence identity; use --docs-exclude <folder,...> to opt in');
   return { folders: [], changed: false };
 }
+/**
+ * Resolves the init owner's explicit Python bytecode exclusion list.
+ *
+ * Args:
+ *   io: process context.
+ *   options: parsed init flags.
+ *   config: validated Gateforge configuration.
+ *
+ * Returns:
+ *   object: validated files and whether the declaration must be written.
+ *
+ * Throws:
+ *   UsageError: invalid flags or an unconfirmed owner-list change.
+ */
+function resolveCacheExclusionsForInit(
+  io: Io,
+  options: Readonly<Record<string, unknown>>,
+  config: ReturnType<typeof loadConfig>,
+): { files: string[]; changed: boolean } {
+  const current = loadCacheExclusions(io.cwd, config);
+  const declarationExists = existsSync(join(io.cwd, ...CACHE_EXCLUSIONS_PATH.split('/')));
+  const requestedValue = stringFlag(options, 'cache-exclude');
+  const confirmUpdate = options['confirm-cache-exclusions'] === true;
+  if (
+    typeof options['confirm-cache-exclusions'] !== 'boolean' &&
+    options['confirm-cache-exclusions'] !== undefined
+  ) {
+    throw new UsageError("init: '--confirm-cache-exclusions' must be a boolean flag");
+  }
+  if (requestedValue === undefined) {
+    if (confirmUpdate) throw new UsageError('init: --confirm-cache-exclusions requires --cache-exclude');
+    return { files: current, changed: false };
+  }
+  const requested = requestedValue.trim() === ''
+    ? []
+    : validateRequestedCacheFiles(
+        io.cwd,
+        requestedValue.split(',').map((file) => file.trim()).filter((file) => file.length > 0),
+        config,
+      );
+  const changed = JSON.stringify(requested) !== JSON.stringify(current);
+  if (declarationExists && changed && !confirmUpdate) {
+    throw new UsageError(
+      `init: changing ${CACHE_EXCLUSIONS_PATH} needs explicit owner review; repeat with --confirm-cache-exclusions`,
+    );
+  }
+  if (declarationExists && !changed && confirmUpdate) {
+    throw new UsageError('init: --confirm-cache-exclusions requires a changed --cache-exclude list');
+  }
+  return { files: requested, changed };
+}
+
 
 /**
  * Runs discovery over the repo's own include/exclude config, infers a
@@ -680,15 +1052,24 @@ async function proposePlanesConfig(cwd: string, io: Io): Promise<void> {
       `note: ${inference.skippedTestTables} table(s) under test directories were excluded from plane inference (fixtures are not business surface)`,
     );
   }
-  if (inference.config === null) {
-    writeLine(io.stdout, `tip: ${inference.note ?? 'nothing to propose'}`);
-    return;
-  }
-  const serialized = `${JSON.stringify(inference.config, null, 2)}\n`;
+  // A reviewed file with zero rules is a real answer, not a failure:
+  // it declares no plane, which is exactly what the classifier already
+  // assumes while the file is absent. Writing it anyway is what makes
+  // `gateforge init --planes` the runnable prerequisite the
+  // `gateforge next` guidance prints for an unresolved route.
+  const serialized = `${JSON.stringify(inference.config ?? { rules: [] }, null, 2)}\n`;
   // Self-check the draft against the runtime's strict reader contract
   // BEFORE writing (a broken proposal must fail here, not at the next run).
   parsePlanesConfigText(serialized, planesPath);
   writeFileSync(planesPath, serialized, 'utf8');
+  if (inference.config === null) {
+    writeLine(
+      io.stdout,
+      `created: ${planesPath} (no rule could be inferred — ${inference.note ?? 'nothing to propose'}; ` +
+        'the file declares no plane, so every table still blocks until you add a reviewed rule)',
+    );
+    return;
+  }
   writeLine(
     io.stdout,
     `created: ${planesPath} (${inference.config.rules.length} rule(s) inferred from model directories — review the reasons before the next gateforge run)`,
@@ -706,6 +1087,10 @@ async function proposePlanesConfig(cwd: string, io: Io): Promise<void> {
  *   number: exit code (0).
  */
 export async function initCommand(io: Io, argv: readonly string[]): Promise<number> {
+  // The ledger every writer below fills: the closing summary names only
+  // what THIS run created or kept, so it can never offer to delete the
+  // owner's pre-existing config, baselines, waivers, hooks or CI file.
+  io.initPaths ??= { created: [], preserved: [] };
   const { options } = parseArgs(argv);
   if (options['help'] === true) {
     writeLine(io.stdout, INIT_USAGE);
@@ -714,6 +1099,8 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   rejectUnknownFlags(
     options,
     [
+      'preset',
+      'explain-presets',
       'languages',
       'plugins',
       'accept-recommended',
@@ -731,12 +1118,32 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       'planes',
       'no-planes',
       'behavior',
+      'no-behavior',
+      'behavior-packs',
       'docs-exclude',
       'confirm-doc-exclusions',
+      'cache-exclude',
+      'confirm-cache-exclusions',
       'help',
     ],
     INIT_USAGE,
   );
+  // --explain-presets prints the ONE mapping table and exits: it must
+  // never scan, prompt or write, so an agent can read what a preset
+  // means before choosing one.
+  if (options['explain-presets'] === true) {
+    writeLine(io.stdout, renderPresetTable());
+    return 0;
+  }
+  if (typeof options['explain-presets'] !== 'boolean' && options['explain-presets'] !== undefined) {
+    throw new UsageError("flag '--explain-presets' must be a boolean flag");
+  }
+  const presetValue = options['preset'];
+  if (presetValue !== undefined && !isInitPresetName(presetValue)) {
+    throw new UsageError(
+      `flag '--preset' must be 'light', 'normal' or 'strict' (got '${String(presetValue)}')`,
+    );
+  }
   // --proof validation BEFORE any writes: the selected proof path
   // (overlay default, observe reuses the existing suite).
   const proofValue = options['proof'];
@@ -786,10 +1193,25 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   if (explicitLanguages !== null && explicitLanguages.length === 0) {
     throw new UsageError(`flag '--languages' requires at least one language`);
   }
-  const strictE2E = options['strict-e2e'] === true;
   if (typeof options['strict-e2e'] !== 'boolean' && options['strict-e2e'] !== undefined) {
-    throw new UsageError(`flag '--strict-e2e' must be a boolean flag`);
+    throw new UsageError("flag '--strict-e2e' must be a boolean flag");
   }
+  // Goal resolution (plan Phase 1/2): --preset wins, then the one goal
+  // question in a terminal, then light with a loud note. A run that
+  // already carries explicit enforcement flags has chosen for itself, so
+  // no preset is applied and today's byte-identical behavior is kept.
+  const enforcementFlagGiven =
+    options['blocking'] === true ||
+    options['no-blocking'] === true ||
+    options['pre-commit'] === true ||
+    options['no-pre-commit'] === true ||
+    options['witnessed'] !== undefined ||
+    options['mode'] !== undefined ||
+    options['ci'] === true ||
+    options['no-ci'] === true ||
+    options['strict-e2e'] === true;
+  const goal = await resolveGoal(io, options, enforcementFlagGiven, existsSync(join(io.cwd, '.gateforge.yml')));
+  const strictE2E = goal !== null ? goal.settings.strictE2E : options['strict-e2e'] === true;
 
   // Strict-setup preflight (plan Phase 0 item 4): BEFORE anything is
   // written — a strict setup demanding an unavailable proof channel
@@ -811,6 +1233,22 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
           signals: noScan ? [] : scanRepo(io.cwd).signals,
         }
       : scanRepo(io.cwd);
+  // Which runner the scan saw. The `runner:` key is owner-owned, so it
+  // is written ONLY when exactly one non-Playwright runner was detected:
+  // Playwright stays the frozen default, and an ambiguous repository
+  // (Playwright + something else, or several others) keeps today's
+  // behavior plus one plain line naming the choice it left to the owner.
+  const detectedRunners = DETECTABLE_RUNNERS.filter((runner) => scan.signals.includes(runner));
+  const otherRunners = detectedRunners.filter((runner) => runner !== 'playwright');
+  const detectedRunner =
+    detectedRunners.includes('playwright') || otherRunners.length !== 1 ? undefined : otherRunners[0];
+  if (otherRunners.length > 0 && detectedRunner === undefined) {
+    writeLine(
+      io.stdout,
+      `note: other test runners detected (${otherRunners.join(', ')}); the new config keeps the default runner — ` +
+        "set `runner: <playwright|pytest|vitest|cypress>` in .gateforge.yml to pick one",
+    );
+  }
   const recommended = explicitPlugins ?? recommendPlugins(scan);
   writeLine(io.stdout, renderScanBlock(scan, recommended, proofMode));
 
@@ -821,19 +1259,40 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   }
 
   const cwd = io.cwd;
+  // Whether `.gateforge.yml` was already there BEFORE this run: the
+  // preset summary must tell the truth about what changed.
+  const existedConfigAtStart = existsSync(join(io.cwd, '.gateforge.yml'));
+  const historyRetentionDays = existsSync(join(cwd, '.gateforge.yml')) ? undefined : await resolveHistoryRetention(io);
   const languages = scan.languages;
   const pluginIds = recommended;
+  const configOptions = {
+    strictE2E,
+    enforcement:
+      strictE2E ||
+      options['blocking'] === true ||
+      options['pre-commit'] === true ||
+      (options['witnessed'] === 'staged' || options['witnessed'] === 'full'),
+    historyRetentionDays,
+    // A preset names the owner-owned strictness key; without one the key
+    // stays absent, which means `strict` (today's frozen behavior).
+    strictnessMode: goal?.settings.strictnessMode,
+    // The scanned runner, when it is unambiguous and not Playwright.
+    runner: detectedRunner,
+  };
   const generatedDraftConfig = (): ReturnType<typeof loadConfig> =>
-    parseConfig(parseYaml(configTemplate(languages, pluginIds, { strictE2E })), { file: '.gateforge.yml' });
+    parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });
   let draftConfig: ReturnType<typeof loadConfig>;
   if (existsSync(join(cwd, '.gateforge.yml'))) {
     try {
       draftConfig = loadConfig(join(cwd, '.gateforge.yml'));
     } catch (error) {
       const docsChoiceRequested = stringFlag(options, 'docs-exclude') !== undefined;
+      const cacheChoiceRequested = stringFlag(options, 'cache-exclude') !== undefined;
       if (
         docsChoiceRequested ||
+        cacheChoiceRequested ||
         existsSync(join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/'))) ||
+        existsSync(join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/'))) ||
         (process.stdin.isTTY === true && process.stdout.isTTY === true)
       ) {
         throw error;
@@ -844,6 +1303,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     draftConfig = generatedDraftConfig();
   }
   const docsExclusionChoice = await resolveDocsExclusionsForInit(io, options, draftConfig);
+  const cacheExclusionChoice = resolveCacheExclusionsForInit(io, options, draftConfig);
   const gateforgeDir = join(cwd, '.gateforge');
   const targets: Array<{ path: string; write: () => void; label: string }> = [
     {
@@ -853,8 +1313,8 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         // Self-check the template against the pinned schema before
         // writing anything (a broken template must fail here, not in
         // every later command).
-        parseConfig(parseYaml(configTemplate(languages, pluginIds, { strictE2E })), { file: '.gateforge.yml' });
-        writeFileSync(join(cwd, '.gateforge.yml'), configTemplate(languages, pluginIds, { strictE2E }), 'utf8');
+        parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });
+        writeFileSync(join(cwd, '.gateforge.yml'), configTemplate(languages, pluginIds, configOptions), 'utf8');
       },
     },
     {
@@ -925,28 +1385,98 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       },
     });
   }
+  if (cacheExclusionChoice.changed) {
+    const exclusionPath = join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/'));
+    const exclusionText = renderCacheExclusions(cacheExclusionChoice.files);
+    targets.push({
+      path: exclusionPath,
+      label: 'owner-declared Python bytecode exclusions',
+      write: () => {
+        const temporaryPath = join(gateforgeDir, `.cache-exclusions-${randomUUID()}.tmp`);
+        try {
+          writeFileSync(temporaryPath, exclusionText, { flag: 'wx', encoding: 'utf8' });
+          renameSync(temporaryPath, exclusionPath);
+        } catch (error) {
+          if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+          throw error;
+        }
+      },
+    });
+  }
 
   mkdirSync(join(gateforgeDir, 'adapters'), { recursive: true });
   mkdirSync(join(gateforgeDir, 'waivers'), { recursive: true });
   mkdirSync(join(gateforgeDir, 'baselines'), { recursive: true });
 
-  // Behavior-profile setup (plan 2026-09-19 §4.11): `--behavior` scaffolds
-  // .gateforge/behavior.yml (scaffold only — never real approval) and
-  // wires `behaviorPolicy` into a NEW .gateforge.yml; an existing config
-  // is left untouched with an instruction to add the key manually.
-  // `--no-behavior` skips; default (flag absent) skips.
-  const behaviorFlag = options['behavior'] === true;
+  // Behavior-case setup (plan 2026-09-19 §4.11, Phase 4 of
+  // 2026-09-25): `--behavior` scaffolds .gateforge/behavior.yml
+  // (scaffold only — never real approval) and wires `behaviorPolicy`
+  // into a NEW .gateforge.yml; an existing config is left untouched with
+  // the exact line to add. `--behavior-packs <pack,...>` enables the
+  // named packs' example cases; `--no-behavior` skips.
+  //
+  // Detection decides what init OFFERS, never what it enables: flags
+  // win, then the terminal question, then nothing. A non-interactive
+  // (agent/CI) run prints the exact flag for each pack it found and
+  // enables none of them.
   const noBehavior = options['no-behavior'] === true;
-  const wantBehavior = behaviorFlag && !noBehavior;
+  const behaviorFlag = options['behavior'] === true;
+  const packsValue = options['behavior-packs'];
+  if (typeof packsValue === 'boolean' || Array.isArray(packsValue)) {
+    throw new UsageError("flag '--behavior-packs' may only be given once");
+  }
+  if (typeof packsValue !== 'string' && packsValue !== undefined) {
+    throw new UsageError("flag '--behavior-packs' must be a comma-separated list of pack names");
+  }
+  let requestedNamespaces: BehaviorNamespace[] = [];
+  if (packsValue !== undefined) {
+    try {
+      requestedNamespaces = parseBehaviorPacks(packsValue);
+    } catch (cause) {
+      throw new UsageError(
+        `flag '--behavior-packs': ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+    if (requestedNamespaces.length === 0) {
+      throw new UsageError("flag '--behavior-packs' requires at least one pack name");
+    }
+  }
+  // The `task` pack is offered ONLY when the owner's config declares a
+  // `queueObserver`: without the engine's own queue read every `task:*`
+  // case fails closed, so recommending it would print a flag whose cases
+  // can never be satisfied. Absent the block the offer is byte-identical
+  // to a repository that has no background work at all.
+  const detectedPacks =
+    noScan || noBehavior
+      ? []
+      : detectBehaviorPacks(cwd, draftConfig.queueObserver !== undefined);
+  const enabledNamespaces = await resolveBehaviorPacks(io, {
+    detectedPacks,
+    explicit: requestedNamespaces,
+    enableAll: behaviorFlag && requestedNamespaces.length === 0,
+    disabled: noBehavior,
+  });
+  const wantBehavior = enabledNamespaces.length > 0 || (behaviorFlag && !noBehavior);
   if (wantBehavior) {
     const behaviorPath = join(gateforgeDir, 'behavior.yml');
+    const enabledPacks = detectedPacks.filter((pack) => enabledNamespaces.includes(pack.namespace));
+    const template = `${BEHAVIOR_TEMPLATE}${behaviorSkeletonExamples(enabledPacks)}`;
     if (existsSync(behaviorPath)) {
       writeLine(io.stdout, `exists, leaving untouched: ${behaviorPath}`);
+      for (const pack of enabledPacks) {
+        writeLine(
+          io.stdout,
+          `  the ${pack.namespace} example case for this repository — add it under 'endpoints:' in ${behaviorPath}:`,
+        );
+        for (const line of behaviorSkeletonExamples([pack]).split('\n').slice(1)) {
+          writeLine(io.stdout, `  ${line}`);
+        }
+      }
     } else {
       targets.push({
         path: behaviorPath,
         label: 'complete-behavior document (SCAFFOLD — not approval)',
-        write: () => writeFileSync(behaviorPath, BEHAVIOR_TEMPLATE, 'utf8'),
+        write: () => writeFileSync(behaviorPath, template, 'utf8'),
       });
     }
     if (!existsSync(join(cwd, '.gateforge.yml'))) {
@@ -954,7 +1484,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         path: join(cwd, '.gateforge.yml'),
         label: 'config (with behaviorPolicy)',
         write: () => {
-          const text = configTemplate(languages, pluginIds, { strictE2E });
+          const text = configTemplate(languages, pluginIds, configOptions);
           const withBehavior = text.replace(
             /^policies:/m,
             'behaviorPolicy: .gateforge/behavior.yml\npolicies:',
@@ -966,22 +1496,57 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     } else {
       writeLine(
         io.stdout,
-        'note: existing .gateforge.yml left untouched — add `behaviorPolicy: .gateforge/behavior.yml` to enable the profile',
+        'note: existing .gateforge.yml left untouched — add this line to it to enable the profile:',
+      );
+      writeLine(io.stdout, '  behaviorPolicy: .gateforge/behavior.yml');
+    }
+  }
+
+  // An EXPLICIT `--plugins` on an initialized repository ADDS the
+  // requested detectors to the owner's config instead of being ignored.
+  // The merge is additive (an existing entry keeps the owner's version
+  // pin; nothing is removed) and touches only the `plugins:` list, so
+  // the product's own tip — "re-run with --plugins … to change
+  // detectors" — is finally true. Every other key, comment, and edit in
+  // the file is preserved byte for byte, and the schema is checked
+  // before anything is written.
+  if (explicitPlugins !== null && existsSync(join(cwd, '.gateforge.yml'))) {
+    const configPath = join(cwd, '.gateforge.yml');
+    const merged = mergePluginsIntoConfig(readFileSync(configPath, 'utf8'), explicitPlugins);
+    if (merged === null) {
+      writeLine(
+        io.stdout,
+        `${explicitPlugins.join(', ')} already configured in ${configPath}; leaving it untouched`,
+      );
+    } else {
+      writeFileSync(configPath, merged, 'utf8');
+      const added = loadConfig(configPath).plugins
+        .map((plugin) => plugin.id)
+        .filter((id) => explicitPlugins.includes(id));
+      recordInitPath(io, cwd, configPath, 'preserved');
+      writeLine(
+        io.stdout,
+        `updated: ${configPath} (added detector(s): ${added.join(', ')} — every other key left as it was)`,
       );
     }
   }
 
   for (const target of targets) {
     if (existsSync(target.path)) {
-      if (target.label === 'owner-declared documentation exclusions' && docsExclusionChoice.changed) {
+      if (
+        (target.label === 'owner-declared documentation exclusions' && docsExclusionChoice.changed) ||
+        (target.label === 'owner-declared Python bytecode exclusions' && cacheExclusionChoice.changed)
+      ) {
         target.write();
         writeLine(io.stdout, `updated: ${target.path}`);
         continue;
       }
+      recordInitPath(io, cwd, target.path, 'preserved');
       writeLine(io.stdout, `exists, leaving untouched: ${target.path}`);
       continue;
     }
     target.write();
+    recordInitPath(io, cwd, target.path, 'created');
     writeLine(io.stdout, `created: ${target.path}`);
   }
   // Observe proof checklist (observe proof only): the work no scaffold
@@ -1006,6 +1571,17 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       'set GATEFORGE_APPROVED_POLICY_DIGEST in a protected owner environment to this exact digest; without a matching pin, Gateforge refuses to use the exclusions',
     );
   }
+  if (cacheExclusionChoice.files.length > 0) {
+    const writtenConfig = loadConfig(join(cwd, '.gateforge.yml'));
+    const approvalDigest = trustedPolicyDigestForConfig(cwd, writtenConfig);
+    writeLine(io.stdout, `owner-declared Python bytecode files: ${cacheExclusionChoice.files.join(', ')}`);
+    writeLine(io.stdout, `warning: ${CACHE_EXCLUSIONS_GUARANTEE}`);
+    writeLine(io.stdout, `candidate policy digest to approve outside the repository: ${approvalDigest}`);
+    writeLine(
+      io.stdout,
+      'set GATEFORGE_APPROVED_POLICY_DIGEST in a protected owner environment to this exact digest; without a matching pin, Gateforge refuses to use the exclusions',
+    );
+  }
   // Plane-config proposal (flags win; TTY prompt fills the gap;
   // non-interactive defaults to scaffold-only, like every granular step):
   //   --planes / --no-planes
@@ -1013,7 +1589,14 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   //       discovered tables live in — a review artifact with a reason on
   //       every rule, written only when absent, never silently applied
   //       (the next run reads it and the user reviews first).
-  if (languages.includes('python')) {
+  //
+  // An EXPLICIT `--planes` is always honored: it is the runnable
+  // prerequisite the `gateforge next` guidance prints for an unresolved
+  // route, and a language gate would make that printed command a no-op
+  // on exactly the repositories that need it. The proposal itself is
+  // conservative — no discovered table means no inferred rule.
+  const planesRequested = options['planes'] === true;
+  if (planesRequested || languages.includes('python')) {
     if (await resolvePlanes(io, options)) {
       await proposePlanesConfig(cwd, io);
     }
@@ -1053,15 +1636,25 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   if (witnessedValue !== undefined && modeValue !== undefined) {
     throw new UsageError("init: --witnessed selects the pre-commit execution mode and cannot be combined with '--mode'");
   }
-  const blocking = await resolveBlocking(io, options);
-  const preCommit = options['pre-commit'] === true || blocking || witnessedValue !== undefined;
-  const ci = options['ci'] === true || blocking;
+  // The goal decides the wiring; explicit flags already short-circuited
+  // goal resolution above, so nothing here can contradict a flag. When
+  // there is no goal, today's granular behavior is unchanged.
+  const blocking = goal !== null ? goal.settings.wiring === 'blocking' : await resolveBlocking(io, options);
+  const preCommit =
+    options['pre-commit'] === true ||
+    blocking ||
+    witnessedValue !== undefined ||
+    (goal !== null && goal.settings.wiring === 'pre-commit');
+  const ci = options['ci'] === true || blocking || (goal !== null && goal.settings.ci);
+  const receiptStage = preCommit ? loadConfig(join(cwd, '.gateforge.yml')).enforcement?.receiptStage : undefined;
   const mode: 'changed' | 'staged' =
     typeof modeValue === 'string'
       ? (modeValue as 'changed' | 'staged')
-      : blocking
-        ? 'staged'
-        : 'changed';
+      : goal !== null
+        ? goal.settings.mode
+        : blocking
+          ? 'staged'
+          : 'changed';
   if (preCommit) {
     const hookDir = join(gateforgeDir, 'hooks');
     mkdirSync(hookDir, { recursive: true });
@@ -1074,8 +1667,12 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         : witnessedValue === 'full'
           ? ['pre-commit', '--scope', 'full']
           : mode === 'staged'
-            ? ['check', '--staged', '--require-e2e']
-            : ['check', '--changed'];
+            ? receiptStage === 'pre-push' || receiptStage === 'ci'
+              ? ['check', '--staged']
+              : ['check', '--staged', '--require-e2e']
+            : receiptStage === 'pre-commit'
+              ? ['check', '--changed', '--require-e2e']
+              : ['check', '--changed'];
     ensureHookScript(io, engineRootFromInvocation(), gateArgs);
     // The ACTIVE hook (plan Phase 5 item 1): install into the resolved
     // hooks directory AND verify activation — never merely write a
@@ -1103,6 +1700,11 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     // integrates through the framework config instead (appendPreCommitHook
     // below) — the hook block runs on every commit like any other.
     const frameworkManaged = outcome.status === 'framework';
+    // The undo list must name the hook this run installed and NOT name
+    // one that was already there.
+    if (outcome.hookPath !== null) {
+      recordInitPath(io, cwd, outcome.hookPath, outcome.status === 'installed' ? 'created' : 'preserved');
+    }
     switch (outcome.status) {
       case 'installed':
         writeLine(io.stdout, `installed: ${outcome.detail}`);
@@ -1134,7 +1736,39 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         : `blocking gate wired: active pre-commit hook (${gateArgs.join(' ')}) + .gitlab-ci.yml include. ` +
             'Honest limit: `git commit --no-verify` bypasses the local hook (ADR 0005 D1) — standard enforcement also requires the trusted server check.',
     );
+    if (receiptStage === 'pre-push') {
+      const pushHook = installPrePushHook(cwd, io.env);
+      if (pushHook.status === 'conflict' || pushHook.status === 'incomplete') {
+        throw new UsageError(`${pushHook.detail}\nRequired action:\n${pushHook.action}`);
+      }
+      if (pushHook.hookPath !== null) {
+        recordInitPath(io, cwd, pushHook.hookPath, pushHook.status === 'installed' ? 'created' : 'preserved');
+      }
+      writeLine(io.stdout, `${pushHook.status}: ${pushHook.detail}`);
+    }
+    writeServerProtectionInstructions(io);
+  }
+  // A preset can ask for the CI job without a local hook (`normal`):
+  // the server check is then the only place the gate runs, which is a
+  // real choice, not a fallback.
+  if (ci && !preCommit) {
+    writeSharedGitlabCiTemplate(io, 'strict');
+  }
+  // What the goal wrote, in plain words, plus the command that undoes it.
+  if (goal !== null) {
+    const ledger = io.initPaths;
+    for (const line of renderPresetSummary(goal.name, {
+      configExisted: existedConfigAtStart,
+      autoChosen: goal.autoChosen === true,
+      created: [...(ledger?.created ?? [])],
+      repoHasCommitHook: existsSync(join(cwd, '.git/hooks/pre-commit')),
+      repoHasCi: existsSync(join(cwd, '.gitlab-ci.yml')) || existsSync(join(cwd, '.github/workflows/gateforge.yml')),
+    })) {
+      writeLine(io.stdout, line);
+    }
   }
   writeLine(io.stdout, 'skeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines');
+  const alembicOptIn = renderAlembicOptIn(cwd);
+  if (alembicOptIn !== null) writeLine(io.stdout, alembicOptIn);
   return 0;
 }

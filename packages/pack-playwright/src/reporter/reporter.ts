@@ -52,8 +52,8 @@
  * construction; a missing drain leaves no sessions open, and the
  * witness rejects every submission fail-closed.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, relative, resolve, sep } from 'node:path';
 import { canonicalOf } from '../json.js';
 import type { Classification, HttpRouteCandidate } from '@gate-forge/core';
 import {
@@ -67,6 +67,7 @@ import {
   ENV_WITNESS_URL,
 } from '../constants.js';
 import { appendSpoolEvent, spoolPathFor } from '../supervisor/spool.js';
+import { failureDiagnosisOf, type SerializedFailure } from '../diagnosis.js';
 import { WitnessClient, type IssuedLedgerRecord } from '../fixture/witness-client.js';
 import { resolveWitnessUrl } from '../fixture/witness-client.js';
 import {
@@ -112,7 +113,53 @@ interface ReporterRunSummary {
   schemaVersion: 1;
   selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
   selectedClaims: { selected: number; satisfied: number; blocking: number; waived: number };
-  repositoryDebt: { obligations: number; unclaimed: number; blocking: number };
+  /**
+   * `blocking` is the LEGACY total (blocking claims + every unclaimed
+   * obligation, baselined or not) and stays exactly as it was.
+   *
+   * There is deliberately NO baselined/newlyBlocking split here: the
+   * reporter grades claims only. It has no waivers, no scope and no
+   * adopted baseline, so any split it printed was a guess beside the
+   * gate's — a real run showed `87 new blocking` here and `0` from the
+   * CLI for the same run. The gate grades debt and owns its numbers.
+   */
+  repositoryDebt: {
+    obligations: number;
+    unclaimed: number;
+    blocking: number;
+  };
+}
+
+/**
+ * The scope the CLI graded, from the run-scope view it writes before the
+ * suite starts. A run that graded a SELECTION (a named test list, a
+ * changed slice) observed no repository-wide debt, so the reporter must
+ * not verdict on it.
+ */
+export type ReporterRunScope = 'full' | 'changed' | 'named';
+
+/** The CLI-written run-scope view (`<stateDir>/run-scope.json`). */
+interface RunScopeDocument {
+  readonly scope?: unknown;
+}
+
+/** Reads a state-dir JSON document, or null when it is absent or unusable. */
+function readStateView(stateDir: string, name: string): unknown {
+  try {
+    return JSON.parse(readFileSync(join(stateDir, name), 'utf8')) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The scope the CLI graded for this run. Absent or unreadable means a
+ * whole-repository run — the conservative reading, since anything
+ * narrower means the reporter observed no repository-wide debt.
+ */
+function runScopeOf(stateDir: string): ReporterRunScope {
+  const scope = (readStateView(stateDir, 'run-scope.json') as RunScopeDocument | null)?.scope;
+  return scope === 'named' || scope === 'changed' ? scope : 'full';
 }
 
 /** The claim-injections document the orchestrating CLI writes. */
@@ -159,16 +206,32 @@ export interface ReporterSuiteLike {
  * Args:
  *   rows: the per-claim ledger rows.
  *   unclaimedObligations: count of run obligations with no claim row.
+ *   scope: the scope the CLI graded (a selection run never verdicts
+ *     repository debt it did not observe).
  *
  * Returns:
  *   string: the aggregate summary line.
  */
-export function gateSummaryLine(rows: readonly LedgerRow[], unclaimedObligations: number): string {
+export function gateSummaryLine(
+  rows: readonly LedgerRow[],
+  unclaimedObligations: number,
+  scope: ReporterRunScope = 'full',
+): string {
   const blocking = rows.filter((row) => isBlocking(row.verdict));
   const authority =
     'final gate result: the gateforge CLI (test-gates/check), never this reporter';
   if (blocking.length > 0) {
     return `GATEFORGE GATE: FAIL (${String(blocking.length)}/${String(rows.length)} claimed obligations not satisfied; ${authority})`;
+  }
+  if (unclaimedObligations > 0 && scope !== 'full') {
+    // A selection run graded its own claims and nothing else. Printing
+    // "NOT PASSED" here would state a verdict about debt the run never
+    // observed, and it would contradict the CLI exit code printed
+    // seconds later — two verdicts, one run, one of them wrong.
+    return (
+      `GATEFORGE GATE: SELECTION (${String(rows.length)} satisfied, 0 blocking; ` +
+      `repository verdict not graded here — ${authority})`
+    );
   }
   if (unclaimedObligations > 0) {
     return (
@@ -192,11 +255,47 @@ export interface GateforgeReporterOptions {
   outcomesPath?: string;
   /** Obligations document path override (precedence over GATEFORGE_OBLIGATIONS env). */
   obligationsPath?: string;
+  /**
+   * Absolute CANDIDATE ROOT every reported file identity is relative
+   * to. A supervised run hands it as trusted CONSTRUCTOR DATA because
+   * the runner child does not run from there: it runs from the
+   * selected native config directory, exactly as enumeration did and as
+   * the project's own relative paths require. The identities the
+   * supervisor registered — and every claim injection keyed by them —
+   * are repo-relative, so anchoring them at the child's cwd would
+   * rename `frontend/tests/x.spec.ts` to `tests/x.spec.ts`, miss every
+   * claim injection and fail every session binding closed.
+   *
+   * Absent (the standalone reporter a project runs itself, wired only
+   * through the environment) means the process cwd, which IS the honest
+   * root for that case.
+   */
+  candidateRoot?: string;
+
+  /**
+   * Absolute path of the engine's own generated preparation-freeze
+   * controller spec, when the trusted CLI armed the global native
+   * freeze. A test whose location file IS this file is the engine's
+   * control, not a candidate case: it produces no lifecycle event, no
+   * outcome row and no claim, so the native count and the registered
+   * expected set speak about the candidate's own tests only.
+   *
+   * The comparison is on the resolved absolute path (never a title, a
+   * basename or a project-name prefix), so a candidate test that merely
+   * borrows the controller's name — or lives beside it — is never
+   * excluded. The path arrives already symlink-resolved: the spec lives
+   * in a private per-run temporary directory (`/tmp` is commonly a
+   * symlink), and the runner reports it under the `testDir` the config
+   * was handed, so both sides must name the same physical file. Absent
+   * means every reported test is a candidate case, exactly as before.
+   */
+  controlSpecPath?: string;
 }
 
 /**
- * The gateforge reporter. No options today; the constructor signature is
- * the Playwright reporter contract (`(options: object)`).
+ * The gateforge reporter. Its constructor signature is the Playwright
+ * reporter contract (`(options: object)`); every path and the identity
+ * root arrive as options.
  */
 export class GateforgeReporter {
   private readonly rows: ClaimRow[] = [];
@@ -212,8 +311,23 @@ export class GateforgeReporter {
   private readonly runnerErrors: string[] = [];
   /** The lifecycle spool file (null when the run has no state dir). */
   private readonly spoolFile: string | null;
+  /**
+   * The candidate root file identities are relative to, when the
+   * trusted supervisor supplied one; null means the process cwd (the
+   * standalone reporter's own honest root).
+   */
+  private readonly candidateRoot: string | null;
   /** Resolved run-state paths (options win, env is the legacy fallback). */
   private readonly resolved: { stateDir: string | null; runId: string | null; outcomesPath: string | null; obligationsPath: string | null };
+  /**
+   * Absolute path of the engine's own generated preparation-freeze
+   * controller spec, or null when this run armed no freeze. A test
+   * located exactly at this path is the engine's control: it reaches
+   * neither the lifecycle spool, nor the outcomes document, nor the
+   * claim registry, so the native count and the registered expected set
+   * speak about the candidate's own tests only.
+   */
+  private readonly controlSpecPath: string | null;
 
   constructor(options: GateforgeReporterOptions = {}) {
     const stateDir = options.stateDir ?? process.env[ENV_STATE_DIR];
@@ -226,6 +340,18 @@ export class GateforgeReporter {
       outcomesPath: outcomesPath !== undefined && outcomesPath !== '' ? outcomesPath : null,
       obligationsPath: obligationsPath !== undefined && obligationsPath !== '' ? obligationsPath : null,
     };
+    this.candidateRoot =
+      options.candidateRoot !== undefined && options.candidateRoot.length > 0
+        ? resolve(options.candidateRoot)
+        : null;
+    // Resolved once, in this process, from TRUSTED CONSTRUCTOR DATA: the
+    // exact control file the CLI pinned before the run. A candidate test
+    // can never name it, and one that merely borrows the controller's
+    // title or lives in the same directory is untouched.
+    this.controlSpecPath =
+      options.controlSpecPath !== undefined && options.controlSpecPath.length > 0
+        ? resolve(options.controlSpecPath)
+        : null;
     const wired =
       (process.env[ENV_WITNESS_URL] ?? '') !== '' ||
       (this.resolved.stateDir ?? '') !== '';
@@ -259,6 +385,11 @@ export class GateforgeReporter {
     test: ReporterTest,
     result: { workerIndex?: number },
   ): void {
+    // The engine's own freeze controller is NOT a candidate case: it
+    // opens no session, so the registered expected set never has to
+    // contain it and the drain never tries. The exclusion is by the
+    // pinned absolute control file, never by title or project name.
+    if (this.isFreezeControl(test)) return;
     if (this.spoolFile === null) return;
     const workerIndex = typeof result.workerIndex === 'number' ? result.workerIndex : 0;
     const claims = [...new Set([...this.annotationClaimsOf(test), ...this.injectedClaimsFor(test)])].sort();
@@ -279,11 +410,74 @@ export class GateforgeReporter {
   }
 
   /** Collects claims + test identity + the outcome row at test end (synchronous). */
-  onTestEnd(test: ReporterTest, result: { status: string; workerIndex?: number; retry?: number }): void {
-    // Phase 4: capture the outcome row for trusted runner supervision
-    // (every test, claimed or not — the expected set includes them all).
+  onTestEnd(
+    test: ReporterTest,
+    result: {
+      status: string;
+      workerIndex?: number;
+      retry?: number;
+      duration?: number;
+      errors?: SerializedFailure[];
+    },
+  ): void {
+    // Same absolute-file exclusion as onTestBegin: the engine's own
+    // controller contributes NO outcome row, so it never enters the
+    // runner-outcomes document supervision compares against the planned
+    // expected set, nor the selected-test counts it prints. A refused
+    // release still fails the run honestly: the runner's own final status
+    // becomes 'failed', the drain records the refusal as a conflict, and
+    // the sealed receipt is never written.
+    if (this.isFreezeControl(test)) return;
     const titlePath = this.titlePathOf(test);
     const file = this.repoRelativeOf(test);
+    const finishedAt = new Date().toISOString();
+    if (this.resolved.stateDir !== null && typeof result.duration === 'number') {
+      const diagnosticsDir = join(this.resolved.stateDir, 'diagnostics');
+      mkdirSync(diagnosticsDir, { recursive: true });
+      appendFileSync(
+        join(diagnosticsDir, 'test-timing.jsonl'),
+        `${JSON.stringify({
+          testId: test.id,
+          file: file ?? '',
+          titlePath,
+          status: result.status,
+          durationMs: result.duration,
+          finishedAt,
+        })}\n`,
+        'utf8',
+      );
+    }
+    if (
+      result.status === 'timedOut' &&
+      typeof result.duration === 'number' &&
+      this.resolved.stateDir !== null
+    ) {
+      const timingPath = join(this.resolved.stateDir, 'diagnostics', 'adapter-timing.jsonl');
+      let witnessDurationMs = 0;
+      if (existsSync(timingPath)) {
+        for (const line of readFileSync(timingPath, 'utf8').split(/\r?\n/).filter(Boolean)) {
+          try {
+            const timing = JSON.parse(line) as { testId?: unknown; runId?: unknown; durationMs?: unknown };
+            if (
+              timing.testId === test.id &&
+              timing.runId === this.resolved.runId &&
+              typeof timing.durationMs === 'number'
+            ) {
+              witnessDurationMs += timing.durationMs;
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+      const appDurationMs = Math.max(0, result.duration - witnessDurationMs);
+      console.warn(
+        `[gateforge] timeout split for ${test.id}: app/runner ${appDurationMs}ms, ` +
+          `witness adapter ${witnessDurationMs}ms`,
+      );
+    }
+    // Phase 4: capture the outcome row for trusted runner supervision
+    // (every test, claimed or not — the expected set includes them all).
     this.runnerOutcomes.push({
       testId: test.id,
       ...(file !== null ? { file } : { file: '' }),
@@ -306,6 +500,10 @@ export class GateforgeReporter {
         project: this.projectOf(test),
         outcome: result.status,
         attempt: (typeof result.retry === 'number' ? result.retry : 0) + 1,
+        // Additive diagnosis for a non-passing test: the CI progress
+        // stream and the failures artifact are the only readers, and the
+        // CLI screens the message before printing or writing it.
+        ...(result.status === 'passed' ? {} : (failureDiagnosisOf(result.errors) ?? {})),
       });
     }
     // Claims: native annotations keep working unchanged; Phase 4 adds
@@ -377,14 +575,15 @@ export class GateforgeReporter {
 
     const ledger = this.ledgerRows(obligations, classifications, records, now, httpRoutes);
     writeJson(stateDir, 'ledger.json', ledger);
-    const unclaimed =
+    const unclaimedIds =
       obligations === null
-        ? 0
+        ? new Set<string>()
         : new Set(
             obligations.obligations
               .filter((entry) => !this.rows.some((row) => row.claims.includes(entry.id)))
               .map((entry) => entry.id),
-          ).size;
+          );
+    const unclaimed = unclaimedIds.size;
     const summary = this.runSummary(ledger, obligations, unclaimed);
     writeJson(stateDir, 'run-summary.json', summary);
     console.log(
@@ -396,11 +595,11 @@ export class GateforgeReporter {
       `selected claims: ${String(summary.selectedClaims.satisfied)} satisfied, ${String(summary.selectedClaims.blocking)} blocking ` +
         `(selected: ${String(summary.selectedClaims.selected)}, waived: ${String(summary.selectedClaims.waived)})`,
     );
-    console.log(
-      `repository debt: ${String(summary.repositoryDebt.unclaimed)} unclaimed / ` +
-        `${String(summary.repositoryDebt.obligations)} obligations (${String(summary.repositoryDebt.blocking)} blocking)`,
-    );
-    this.printLedger(ledger, unclaimed);
+    // Debt is the gate's to grade: the reporter cannot see the waivers,
+    // the scope or the adopted baseline it graded against, so it names
+    // no debt count (one run, one number).
+    console.log('repository debt: graded by gateforge after the run');
+    this.printLedger(ledger, unclaimed, runScopeOf(stateDir));
     this.printRegistryMismatches(obligations, records);
 
     const blocking = ledger.some((row) => isBlocking(row.verdict));
@@ -415,6 +614,12 @@ export class GateforgeReporter {
   }
 
   /** Builds non-authoritative counts from the runner events and ledger.
+   *
+   * The debt here is the LEGACY, reporter-observable total only
+   * (blocking claims + every unclaimed obligation, baselined or not).
+   * How much of it the adopted baseline forgave is NOT derivable here —
+   * the reporter never loads the baseline, the waivers or the graded
+   * scope — so the gate owns that number alone.
    *
    * Args:
    *   ledger: selected claimed-obligation results from the real engine.
@@ -442,6 +647,10 @@ export class GateforgeReporter {
     const satisfied = ledger.filter((row) => row.verdict === 'satisfied').length;
     const blockingClaims = ledger.filter((row) => isBlocking(row.verdict));
     const waived = ledger.filter((row) => row.verdict === 'waived').length;
+    const distinctBlockingClaims = new Set(blockingClaims.map((row) => row.claim)).size;
+    // No debt split is computed here: the reporter cannot know which
+    // obligations the adopted baseline forgave, and a guessed split
+    // contradicts the gate line printed seconds later.
     return {
       schemaVersion: 1,
       selectedTests: { selected: outcomes.length, passed, failed, skipped, expectedFailures },
@@ -449,7 +658,9 @@ export class GateforgeReporter {
       repositoryDebt: {
         obligations: obligations?.obligations.length ?? 0,
         unclaimed,
-        blocking: new Set(blockingClaims.map((row) => row.claim)).size + unclaimed,
+        // Legacy total, unchanged: blocking claims + every unclaimed
+        // obligation, baselined or not.
+        blocking: distinctBlockingClaims + unclaimed,
       },
     };
   }
@@ -520,12 +731,40 @@ export class GateforgeReporter {
     return parent.location === undefined || parent.location === null;
   }
 
-  /** Repo-relative posix file of a test (null when unknown). */
+  /**
+   * Repo-relative posix file of a test (null when unknown), relative to
+   * the CANDIDATE ROOT the supervisor handed the reporter — never to
+   * the runner child's cwd, which for a nested project is its config
+   * directory and would report every identity one directory short.
+   */
   private repoRelativeOf(test: ReporterTest): string | null {
     if (test.location?.file === undefined || test.location.file === null) return null;
     const raw = test.location.file;
     if (raw.length === 0) return null;
-    return relative(process.cwd(), raw).split(sep).join('/');
+
+    return relative(this.candidateRoot ?? process.cwd(), raw).split(sep).join('/');
+  }
+
+  /**
+   * Whether this test IS the engine's own freeze controller.
+   *
+   * The answer is the resolved ABSOLUTE location file against the
+   * resolved absolute control path the trusted CLI pinned — nothing
+   * else. A test title, a project name, a directory or a basename is
+   * never a sufficient identity, so a candidate test that happens to be
+   * called `gateforge global preparation freeze`, or that sits beside
+   * the control file, is still a candidate case.
+   *
+   * @param test: the reported test.
+   *
+   * @returns
+   *   boolean: true only for the pinned control file itself.
+   */
+  private isFreezeControl(test: ReporterTest): boolean {
+    if (this.controlSpecPath === null) return false;
+    const file = test.location?.file;
+    if (typeof file !== 'string' || file.length === 0) return false;
+    return resolve(file) === this.controlSpecPath;
   }
 
   /** Native annotation claims of one test (`{type: 'gateforge'}`). */
@@ -750,7 +989,7 @@ export class GateforgeReporter {
    * obligations block; the authoritative CLI remains the only final
    * gate result.
    */
-  private printLedger(rows: LedgerRow[], unclaimedObligations: number): void {
+  private printLedger(rows: LedgerRow[], unclaimedObligations: number, scope: ReporterRunScope): void {
     const width = Math.max('CLAIMED OBLIGATION'.length, ...rows.map((row) => row.claim.length));
     console.log('\n=== GATEFORGE VERDICTS ===');
     if (rows.length === 0) {
@@ -767,7 +1006,7 @@ export class GateforgeReporter {
         console.log(`           - records: ${row.recordIds.join(', ')}`);
       }
     }
-    console.log(gateSummaryLine(rows, unclaimedObligations));
+    console.log(gateSummaryLine(rows, unclaimedObligations, scope));
     console.log('==========================\n');
   }
 

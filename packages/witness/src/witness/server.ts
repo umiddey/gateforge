@@ -1,0 +1,6088 @@
+/**
+ * The loopback witness service (pin #7, owner G6).
+ *
+ * A node:http server on an OS-assigned port, reachable ONLY on loopback.
+ * Every request must carry `x-gateforge-run: <token>` (per-run token);
+ * without it the witness answers 401. The run token is the SUITE's
+ * credential; a second, stronger capability — the verifier key
+ * (`x-gateforge-verifier`), which the tested suite NEVER receives —
+ * guards the supervisor surface. Endpoint authority (enforcement-review
+ * fix 3: the runner child holds NO supervisor rights):
+ *
+ * | Endpoint                          | Required authority                      |
+ * |-----------------------------------|-----------------------------------------|
+ * | `GET /health`                     | run token                               |
+ * | `GET /records`                    | run token                               |
+ * | `GET /classifications`            | run token                               |
+ * | `POST /records`                   | run token + OPEN session credential     |
+ * | `POST /witness/pre-observation`   | run token + OPEN session credential     |
+ * | `POST /witness/persistence`       | run token + OPEN session credential     |
+ * | `POST /witness/http-observation`  | run token + OPEN session credential     |
+ * | `POST /sessions/resolve`          | run token (worker proves its identity;  |
+ * |                                   | answers only OPEN supervisor sessions)  |
+ * | `POST /sessions/intervals/*`      | run token + OPEN session credential     |
+ * | `POST /browser/surface`           | run token + OPEN session credential     |
+ * | `POST /browser/action`            | run token + OPEN session credential     |
+ * | `POST /browser/visible`           | run token + OPEN session credential     |
+ * | `POST /run-context`               | run token + verifier key (supervisor)   |
+ * | `GET /ledger-attestation`         | run token + verifier key (supervisor)   |
+ * | `POST /runs/expected-set`         | run token + verifier key (supervisor)   |
+ * | `POST /runs/server-e2e-declarations` | run token + verifier key (supervisor)|
+  * | `POST /runs/observe-declarations` | run token + verifier key (supervisor)   |
+  * | `POST /observe/finalize`      | run token + verifier key (supervisor)   |
+ * | `POST /witness/server-persistence` | run token + verifier key (supervisor;  |
+ * |                                   | the drain forwards intents — the suite |
+ * |                                   | can only WRITE spool lines)            |
+ * | `GET /runs/execution-trace`       | run token + verifier key (supervisor)   |
+ * | `POST /sessions/open`             | run token + verifier key (supervisor);  |
+ * |                                   | test must be in the registered set      |
+ * | `POST /sessions/close`            | run token + verifier key (supervisor)   |
+ * | `POST /sessions/release`          | run token + verifier key (supervisor)   |
+ *
+ * Endpoints:
+ *
+ * - `POST /runs/expected-set` — SUPERVISOR ONLY: registers the expected
+ *   test set BEFORE the run (enforcement-review fix 2a), bound to this
+ *   run; identical re-registration is idempotent, any change or late
+ *   registration is 409. Returns the domain-separated enumeration digest.
+ * - `POST /sessions/open`    — SUPERVISOR ONLY: registers one started
+ *   test as a session binding (runId, sessionId, testId, worker). One
+ *   OPEN session per worker; an identical open (worker, testId)
+ *   re-binds idempotently. When an expected set is registered, the test
+ *   must belong to it (an invented testId is refused typed).
+ * - `POST /sessions/close`   — SUPERVISOR ONLY: seals the session with
+ *   the observed outcome. Closing SEALS: every later submission for the
+ *   session is rejected (no post-hoc record injection).
+ * - `POST /sessions/release` — SUPERVISOR ONLY: releases the session's
+ *   WORKER SLOT on the worker-side lifecycle end, before the runner's
+ *   main process has reported that test's outcome. Submissions and the
+ *   session proxy are refused from that moment (nothing can be
+ *   attributed to a finished test), and the outcome is still owed: the
+ *   later `/sessions/close` records it, and an outcome that never
+ *   arrives leaves the session outcome-less, which grades not-passed.
+ * - `GET /runs/execution-trace` — SUPERVISOR ONLY: the witness-side
+ *   session record (enforcement-review fix 2b) — per expected test,
+ *   every session with its open/seal ticks and outcome. THE execution
+ *   authority supervision grades completeness from.
+ * - `POST /sessions/resolve` — the worker-side fixture proves WHICH open
+ *   session it runs under by the exact (workerIndex, testId) pair; only
+ *   an open session answers, with the session credential.
+ * - `POST /sessions/identity` — SESSION-AUTHENTICATED: the running
+ *   test registers the login of the tenant it just created, for ITSELF
+ *   and only while its own session is OPEN (`{sessionId, sessionToken,
+ *   seat, values}`). The identity lives in witness memory, is keyed by
+ *   that session id, is dropped when the session closes or is released,
+ *   and never reaches a record, the run state, a log or a report. It
+ *   changes only WHO the engine reads as — the engine still performs
+ *   every read, and a wrong tenant makes the row unfound (fail closed).
+ *   Without a registration the adapter reads through the process-global
+ *   witness environment seat, exactly as before.
+ * - `POST /sessions/intervals/{open,close}` — the fixture marks a
+ *   witness-recorded observation interval per UI action (start/end ticks
+ *   from the witness's monotonic clock). Proxy exchanges observed
+ *   OUTSIDE every interval of a session are never consumable as that
+ *   session's evidence — direct setup traffic cannot become browser
+ *   evidence.
+ * - `POST /records`          — test-side primitives submit UI evidence
+ *   ({claimId, kind, payload, testId, sessionId, sessionToken}) → the
+ *   witness ISSUES a record with service-computed provenance ONLY under
+ *   a valid OPEN session (the record's testId is forced to the
+ *   session's supervisor-registered value; a mismatching testId is
+ *   refused). Unknown primitive kinds → 400 (GF-11, GF-14).
+ * - `POST /witness/persistence` — the fixture asks the witness to run
+ *   the engine-side adapter (GET-only) for one entity → the witness
+ *   executes the read, stamps a `persistence.entity` record from the
+ *   ADAPTER RESPONSE, and returns {recordId, runId, verdictRelevant}.
+ *   Raw adapter bodies never cross back into the test process. Wire is
+ *   the pin-#7 shape extended with `testId` + `claimId` + the session
+ *   credential so persistence records bind to the claim the engine
+ *   grades, under the session the supervisor opened.
+ * - `POST /witness/server-persistence` — SUPERVISOR ONLY: the trusted
+ *   drain forwards one persistence claim INTENT (drained from the
+ *   runner-side `persistence-intents.jsonl` spool the supervised suite
+ *   may only WRITE); the witness executes the resource's adapter SERVER
+ *   PROBE itself (behind the same attestation chain as every adapter
+ *   read) and stamps a WITNESSED `persistence.entity` record carrying
+ *   `channel: 'server'` + `declaredKind: 'server-e2e'` — the
+ *   server-witnessed channel for backend-only tables (a transactional
+ *   outbox) that can never honestly appear in a UI. Probes run ONLY in
+ *   this trusted process; missing adapter/probe/declaration and replayed
+ *   sequences resolve to typed failures, never to satisfaction.
+  * - `POST /runs/observe-declarations` — SUPERVISOR ONLY: registers the
+  *   `observed-e2e` obligations BEFORE the run (same bind-once contract
+  *   as the server-e2e set).
+  * - `POST /observe/finalize` — SUPERVISOR ONLY: resolves one OPEN
+  *   session's observe-declared claims against its own proxied traffic
+  *   plus independent adapter reads; stamps witnessed
+  *   `persistence.observed` records (`channel: 'observe'`) for whatever
+  *   resolves. Non-resolutions are typed notes — never satisfaction,
+  *   never a run failure.
+ * - `POST /witness/http-observation` — consumes one engine-observed
+ *   proxied exchange for an http:* claim. Phase 1: the caller must hold
+ *   a valid OPEN session and the exchange must have been observed
+ *   through THAT session's proxy prefix WITHIN one of its recorded
+ *   action intervals — another test's/worker's request can never
+ *   satisfy a claim (E11/E12 foundation).
+ * - `GET /records`           — the issued ledger (the ONLY input the
+ *   reporter copies into `records.json`; fabricated bundles never enter
+ *   it — GF-23).
+ * - `GET /classifications`   — per-resource primaryKey/exposure/plane/
+ *   lifecycle projection for the reporter's per-claim ledger.
+ * - `GET /health`            — readiness + attestation scope identity.
+ *
+ * Attestation (GF-10, GF-13): the attestation subject and every adapter
+ * read base must be loopback; adapter bases must present an
+ * `x-gateforge-env-fingerprint` marker matching the adapter's declared
+ * fingerprint (and the run's pinned target fingerprint when set).
+ * Mismatches REJECT the record — never `satisfied`.
+ *
+ * At shutdown the witness appends the record ids it issued to
+ * `manifest.json` in the run-state dir (pin #4/#7).
+ */
+import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createHash, randomUUID } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
+import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import {
+  ATTESTATION_VERSION,
+  attestationMac,
+  behaviorActionDigestOf,
+  DEFAULT_QUEUE_POLL_INTERVAL_MS,
+  DEFAULT_QUEUE_TERMINAL_TIMEOUT_MS,
+  BehaviorCatalogSchema,
+  BEHAVIOR_CASE_KIND,
+  enumerationDigestOf,
+  interpretObservedPath,
+  pathMatchesShape,
+  recordIdOf,
+  resolveHttpRoute,
+  type BehaviorCatalog,
+  type Classification,
+  type HttpRouteCandidate,
+  type QueueObservation,
+  type RecordOrigin,
+  type TracedSession,
+  type TwinShape,
+} from '@gate-forge/core';
+import { canonicalOf } from '../json.js';
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  KNOWN_RECORD_KINDS,
+  LOOPBACK_HOSTNAME,
+  OBSERVED_KIND,
+  PERSISTENCE_KIND,
+  RUN_HEADER,
+  VERIFIER_HEADER,
+} from '../constants.js';
+import { loadAdapters, makeAdapterContext } from './adapter-registry.js';
+import {
+  AttestationError,
+  assertLoopback,
+  envFingerprintMismatch,
+  probeEnvFingerprint,
+} from './env-attestation.js';
+import { hostResolverRules, isLoopbackAddress, pinnedLoopbackIps, pinnedGet } from './loopback-pins.js';
+import { loadClassifications, toClassificationView } from './classifications.js';
+import {
+  EngineBrowserError,
+  EngineBrowserManager,
+  driveEngineAction,
+  readEngineVisible,
+  type EngineOperation,
+} from './browser.js';
+// TYPE-ONLY (see witness/browser.ts): the structural page surface, with
+// no runtime Playwright dependency in this package.
+import type { Page } from 'playwright';
+import {
+  SURFACE_DESCRIPTOR_VERSION,
+  validateSurface,
+  type SurfaceDescriptor,
+} from '../surface.js';
+import type {
+  AdapterContext,
+  BehaviorCatalogRequest,
+  BehaviorCatalogResponse,
+  BehaviorExecuteRequest,
+  BehaviorExecuteResponse,
+  BehaviorPrincipalRequest,
+  BehaviorPrincipalResponse,
+  BrowserActionRequest,
+  BrowserActionResponse,
+  BrowserSurfaceRequest,
+  BrowserVisibleRequest,
+  BrowserVisibleResponse,
+  CaseExecutionState,
+  EvidenceAdapter,
+  ExpectedSetRequest,
+  ExpectedSetResponse,
+  ExecutionTraceResponse,
+  IssuedRecord,
+  ObserveCollection,
+  ObserveDeclarationsRequest,
+  ObserveFinalizeRequest,
+  ObserveFinalizeResponse,
+  ObserveFinalizedObligation,
+  ObserveMutation,
+  PersistenceRequest,
+  PersistenceResponse,
+  PreObservationRequest,
+  PreObservationResponse,
+  RecordsRequest,
+  RecordsResponse,
+  ScopeSnapshot,
+  ServerE2eDeclarationsRequest,
+  ServerE2eDeclarationsResponse,
+  ServerPersistenceIntentRequest,
+  ServerPersistenceResponse,
+  ServerPreObservationResponse,
+  SessionCloseRequest,
+  SessionIdentity,
+  SessionOpenRequest,
+  SessionReleaseRequest,
+  SessionResolveRequest,
+  TestSession,
+  TwinShapeReport,
+  TwinShapesResponse,
+  WitnessHandle,
+  WitnessOptions,
+} from './types.js';
+import { ChaosScheduler, chaosRouteKey, type ChaosOptions, type ChaosScheduleEntry } from './chaos.js';
+import { recordTwinShape, type TwinShapePlan } from './twin-shapes.js';
+import {
+  assertNoStartedConflict,
+  parseRunOptions,
+  type AppliedRunOptions,
+  type RunOptions,
+} from './run-options.js';
+import type { FixtureLease } from './fixture-provider.js';
+import { validateScopeSnapshot } from './behavior.js';
+import { BEHAVIOR_BODY_LIMIT_BYTES, BehaviorDriverError, driveBehaviorRequest } from './behavior-request.js';
+import { OBSERVE_CHANNEL, OBSERVED_E2E_TEST_KIND, SERVER_CHANNEL, SERVER_E2E_TEST_KIND } from '../constants.js';
+import { QueueObserverError } from '../queue/observer.js';
+import { driveTaskDelivery, TaskDriverError, type TaskDeliverAction } from './task.js';
+
+const MAX_BODY_BYTES = 1024 * 1024;
+const OBLIGATION_ID_PATTERN = /^[^:]+:.+$/;
+/**
+ * Bounded response snapshot the observation proxy keeps per forwarded
+ * exchange: at most this many body bytes are hashed into the snapshot,
+ * while the TOTAL byte count is tracked separately. The response still
+ * streams to the browser unbuffered — the snapshot is a tap, not a gate.
+ */
+const OBSERVED_BODY_SNAPSHOT_BYTES = 16384;
+/**
+ * Bounded request-body snapshot the observation proxy keeps per
+ * forwarded exchange (Observe channel, Phase 2): the request body is
+ * already buffered for forwarding, so retaining a capped copy costs one
+ * slice. Bodies beyond the cap are flagged truncated — an observe
+ * finalize can never echo what it cannot see, so oversized intents
+ * grade typed-missing instead of satisfying on a prefix. Binary-safe:
+ * stored raw; the finalize path parses JSON/form text from it.
+ */
+const OBSERVED_REQUEST_BODY_BYTES = 65536;
+/**
+ * Cap on one response scalar retained for entity attribution: entity
+ * ids are short, so a longer scalar is dropped rather than retained
+ * (the attribution set stays a handful of small strings per exchange).
+ */
+const OBSERVED_RESPONSE_ID_CHARS = 128;
+
+/**
+ * The declared collection-read rows the WITNESS itself parsed out of
+ * ONE proxied 2xx response body: the entity ids the returned rows
+ * named (in response order), or the typed reason no usable row was
+ * named. Captured ONLY for a route a claimed adapter's observe read
+ * declares as a collection, so no other response body is parsed or
+ * retained — the snapshot the ids came from is otherwise hashed and
+ * discarded.
+ */
+interface ObservedCollectionRows {
+  /** The declared rowsKey the ids were read under (null = response root). */
+  rowsKey: string | null;
+  /** The declared idKey every id was read from. */
+  idKey: string;
+  /** The declared id field of every returned row, in response order. */
+  ids: Array<string | number>;
+  /** Why no usable rows were named (typed note text), or null. */
+  error: string | null;
+}
+
+/**
+ * One collection-read route this session may parse a response for.
+ * `shape` is the single declared collection every claiming resource
+ * agreed on, or null once two of them disagree — a route whose shape
+ * is ambiguous is never parsed, so a body is never read under a
+ * contract that did not declare it. `declarations` keeps one label per
+ * claiming resource, in claim order, so the refusal can NAME what
+ * disagreed instead of reporting a missing parse.
+ */
+interface CollectionRoute {
+  shape: ObserveCollection | null;
+  declarations: string[];
+}
+/** One engine-observed proxied exchange (arrival order via `seq`). */
+interface ObservedExchange {
+  method: string;
+  path: string;
+  status: number;
+  seq: number;
+  /** sha256 hex of the bounded response-body snapshot. */
+  bodySha256: string;
+  /** TOTAL response body bytes observed (may exceed the snapshot). */
+  bodyBytes: number;
+  /**
+   * Capped copy of the request body (Observe channel): the first
+   * OBSERVED_REQUEST_BODY_BYTES bytes the client sent, retained from
+   * the forward buffer. Null when the request carried no body.
+   */
+  requestBody: Buffer | null;
+  /** True when the request body exceeded the snapshot cap. */
+  requestTruncated: boolean;
+  /** TOTAL request body bytes received. */
+  requestBytes: number;
+  /** Lowercased request content-type without parameters, or null. */
+  requestContentType: string | null;
+  /**
+   * The OPEN-or-later session whose proxy prefix the exchange arrived
+   * through (Phase 1 attribution); null when the exchange bypassed every
+   * session channel — such exchanges are never consumable as evidence.
+   */
+  sessionId: string | null;
+  /** Witness-monotonic tick stamped when the exchange completed. */
+  tick: number;
+
+  /**
+   * Declared collection-read rows parsed from THIS exchange's 2xx
+   * response body, present only when an adapter's observe read
+   * declares the route as a collection. Absent means nothing was
+   * captured — never an empty row set, never an inferred one.
+   */
+  collectionRows?: ObservedCollectionRows;
+  /**
+   * The competing collection declarations this exchange's route
+   * carries, when two claimed reads declared DIFFERENT shapes for it.
+   * The body was not parsed at all; the finalize names the conflict.
+   */
+  collectionConflict?: string[];
+}
+
+/**
+ * One proxied exchange's RESPONSE attribution facts: the rendered
+ * scalar values its bounded JSON response body named (a create
+ * response names the entity it just created), plus whether that body
+ * was readable at all.
+ *
+ * This log is APPEND-ONLY and never consumed: an entry carries no
+ * request body and can therefore never itself become evidence. It
+ * exists so a create finalize can tell "another session's own observed
+ * create" apart from "a writer outside every session channel" when
+ * several tests create the same resource in parallel — the
+ * attribution is made of witness-proxied traffic, never of a
+ * suite-declared id and never of a raw before/after diff.
+ */
+interface ObservedResponseAttribution {
+  seq: number;
+  method: string;
+  path: string;
+  status: number;
+  /** Rendered scalar values the response body named (short ids only). */
+  named: string[];
+  /** False when no named key could be read (non-JSON, truncated, unparsable). */
+  readable: boolean;
+}
+
+/** Fail-closed witness configuration/startup error. */
+export class WitnessStartupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WitnessStartupError';
+  }
+}
+
+/**
+ * One resource's Observe before-snapshot: the witness's own adapter-list
+ * observation at session open (canonical-entity-key → normalized id +
+ * fields), or the error that made the resource unobservable. Snapshots
+ * are taken with the SAME attested adapter transport as every read, so
+ * the finalize path grades before/after from witness-held state only.
+ */
+interface ObserveResourceSnapshot {
+  resourceId: string;
+  adapterName: string;
+  before: Map<string, { entityId: unknown; fields: unknown }>;
+  error: string | null;
+}
+
+/** An HTTP JSON error the witness answers (status + {error, detail?}). */
+class HttpError extends Error {
+  readonly status: number;
+  readonly detail: string | null;
+  constructor(status: number, message: string, detail: string | null = null) {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+/**
+ * Witness-side required-case execution (plan 2026-09-19 §4.6, Phase 4):
+ * one execution per required case per run. Transitions run
+ * `fixture-prepared -> before-snapshot-complete -> … -> sealed`, each
+ * requiring the previous; `failed` is terminal (the failure fact is
+ * diagnostic — it never becomes a satisfying observation).
+ */
+interface CaseExecution {
+  /** Witness-issued execution id (UUID). */
+  executionId: string;
+  /** Canonical case id (catalog digest, not the readable slug). */
+  caseId: string;
+  /** Supervisor-registered testId this execution belongs to. */
+  testId: string;
+  /** Session that drove the execution. */
+  sessionId: string;
+  /** Current lifecycle state. */
+  state: CaseExecutionState;
+  /** Isolated fixture lease (released on failure/shutdown). */
+  lease: FixtureLease;
+  /** Validated authoritative before snapshots (sealed with the record). */
+  beforeSnapshots: ScopeSnapshot[];
+  /** Authoritative before checkpoints per scope (scope → checkpoint). */
+  beforeCheckpoints: Record<string, string>;
+  /** Terminal failure detail (null unless failed). */
+  detail: string | null;
+}
+
+/** Running witness state. */
+interface WitnessState {
+  options: Required<
+    Pick<WitnessOptions, 'runId' | 'token' | 'requestTimeoutMs' | 'host'>
+  > & {
+    mountPath: string | null;
+  } & WitnessOptions;
+  adapters: Map<string, EvidenceAdapter>;
+  /** Loopback host matching the browser-facing app's cookie origin. */
+  proxyHost: string;
+  /** Numeric loopback address resolved once before any proxy listens. */
+  proxyBindHost: string;
+  classifications: Record<string, Classification>;
+  ledger: Map<string, IssuedRecord>;
+  /**
+   * Engine-side pre-observations (audit rounds 4-5): snapshots taken
+   * BEFORE a claimed action, consumed by the matching persistence read.
+   * Two kinds — an id-set snapshot (create: was the entity absent?) and
+   * an entity-fields snapshot (update: what changed?). In-memory,
+   * single-use: the suite can reference real observations but can never
+   * fabricate, replay, or mutate their contents, and expectations never
+   * come from the suite.
+   */
+  preObservations: Map<
+    string,
+    | { resourceId: string; kind: 'ids'; ids: string[] }
+    | { resourceId: string; kind: 'entity'; entityId: string; found: boolean; fields?: unknown }
+  >;
+  /**
+   * SERVER-WITNESSED channel state. `serverE2eDeclarations` holds the
+   * obligation ids the TRUSTED supervisor registered as mapping kind
+   * 'server-e2e' BEFORE the run (verifier-key surface, same authority
+   * as the expected set) — null until bound; a server intent for an
+   * unregistered obligation is refused typed, so a browser-kind claim
+   * can never be satisfied through this channel. `serverPreObservations`
+   * holds the witness's own probe observations taken BEFORE a claimed
+   * mutation (create absence / update before-state), single-use, keyed
+   * by claimId + canonical entity key. `serverIntentSequences` is the
+   * last accepted intent sequence per claimId — strictly increasing, so
+   * a replayed or reordered spool line resolves to a typed failure and
+   * no bearer of an intent can re-drive a stale observation.
+   */
+  serverE2eDeclarations: Set<string> | null;
+  serverPreObservations: Map<
+    string,
+    { resourceId: string; kind: 'absence' | 'entity'; found: boolean; fields?: unknown }
+  >;
+  serverIntentSequences: Map<string, number>;
+  /**
+   * OBSERVE channel state (Phase 2). `observeDeclarations` holds the
+   * obligation ids the TRUSTED supervisor registered as mapping kind
+   * 'observed-e2e' BEFORE the run (verifier-key surface, same authority
+   * as the server-e2e set) — null until bound; the finalize path
+   * stamps `channel: 'observe'` records only for these obligations.
+   * `observeSnapshots` holds the witness's own adapter-list snapshots
+   * taken at session open, keyed by session then resource: the
+   * before-state every observe postcondition grades against. A snapshot
+   * error (no adapter, no list, probe/read trouble) is DATA the
+   * finalize reports as a typed note — sessions still open and tests
+   * still run; the claim simply stays blocking.
+   */
+  observeDeclarations: Set<string> | null;
+  observeSnapshots: Map<string, Map<string, ObserveResourceSnapshot>>;
+  server: Server;
+  /**
+   * ADR 0004 D7: requests the witness-owned loopback observation proxy
+   * actually forwarded during this run, in arrival order. Suite-callable
+   * endpoints may CONSUME a matching observation to issue a witnessed
+   * `http.request` record — they can never fabricate or mutate one.
+   */
+  observed: ObservedExchange[];
+  /**
+   * Append-only response attribution log (Observe channel): what each
+   * proxied exchange's JSON response NAMED, kept after the exchange
+   * itself is consumed, so a create finalize can attribute a
+   * concurrently created entity to the observed exchange that returned
+   * it. Entries carry no request body and are never evidence
+   * themselves.
+   */
+  observedResponses: ObservedResponseAttribution[];
+  observedSeq: number;
+  proxyServer: Server | null;
+  nowIso: () => string;
+  stopped: boolean;
+  /**
+   * Witness-monotonic clock (plan Phase 1): a strictly increasing
+   * counter stamped at session open/close, interval open/close, and
+   * exchange completion. It orders the session-relative evidence rules
+   * (interval membership) WITHOUT trusting any suite-supplied time.
+   */
+  tick: number;
+  /**
+   * Supervisor-opened test sessions (plan Phase 1) keyed by sessionId.
+   * The suite cannot create, extend, or resurrect one: only the
+   * supervisor channel (`/sessions/open`) mints sessions, and closing
+   * seals permanently.
+   */
+  sessions: Map<string, TestSession>;
+  /** workerIndex → the OPEN session on that worker (one at a time). */
+  workerSessions: Map<number, string>;
+  /**
+   * Per-session adapter identities (plan Phase 4b item 3b), keyed by
+   * sessionId. Witness MEMORY only: the credential a test registered for
+   * itself, dropped with its session (close, release, shutdown), never
+   * serialized into a record, the run state or a report, and never
+   * consulted for a read that belongs to another session.
+   */
+  sessionIdentities: Map<string, SessionIdentity>;
+  /**
+   * Trusted run context bound via `POST /run-context` (plan §11.4): the
+   * frozen `{runId, invocationId, inputDigest}` the witness attests.
+   * Set once, before any observation or issuance; a witness that already
+   * observed, issued, or holds an in-flight proxy exchange refuses
+   * binding (409). `observedSeqAtBind` watermarks observations that
+   * completed before binding — they are never consumable under the new
+   * context, closing the bind/observe race.
+   */
+  runContext: { runId: string; invocationId: string; inputDigest: string } | null;
+  observedSeqAtBind: number;
+  /** Proxy exchanges currently in flight (request received, response open). */
+  proxyInFlight: number;
+  /**
+   * Timing chaos (E63): the seeded release plan the observation proxy
+   * applies, plus the schedule it actually used. Null in every run that
+   * did not ask for chaos - the byte-identical path. The recorded
+   * entries are the replay record a finding is explained with.
+   */
+  chaos: { options: ChaosOptions; entries: ChaosScheduleEntry[] } | null;
+  /**
+   * Twin path coverage (E64): the shape plan this run's proxy records
+   * with. Null in every run that did not configure
+   * `enforcement.twinPaths` — the byte-identical path, where no shape
+   * is computed and none is stored. Which sessions are observation-only
+   * is NOT decided here: the marks travel with the registered expected
+   * set (below), because only the registered identity survives from
+   * enumeration to execution.
+   */
+  twinShapes: TwinShapePlan | null;
+  /**
+   * The expected test set the supervisor registered BEFORE the run
+   * (enforcement-review fix 2a), keyed by the identity join key
+   * (project, file, titlePath). Once bound, `/sessions/open` accepts
+   * only tests in this set, and the execution trace reports sessions
+   * grouped by these registered identities.
+   */
+  expectedTests: Map<
+    string,
+    { testId: string | null; project: string | null; file: string; titlePath: string[]; observationOnly: boolean }
+  >;
+  /** Domain-separated digest over the registered expected set. */
+  enumerationDigest: string | null;
+  /**
+   * Complete-behavior catalog (plan 2026-09-19 §4.7, Phase 4): the
+   * compiled catalog plus allowed case/test assignments the TRUSTED
+   * supervisor registered BEFORE the run (verifier-key surface,
+   * one-time bind). Null until bound; `/behavior/execute` resolves
+   * every case from this binding — never from worker input.
+   */
+  behaviorCatalog: {
+    catalog: BehaviorCatalog;
+    catalogDigest: string;
+    assignments: Map<string, Set<string>>;
+    /** Complete route inventory for principal attribution (supervisor-supplied). */
+    routes: HttpRouteCandidate[];
+    /** Authority profile digest sealed into every case record. */
+    authorityProfileDigest: string;
+    /**
+     * Approved surface descriptors for surface-driven cases, keyed by
+     * surface key (supervisor-supplied, validated). The driver resolves
+     * descriptors here — never from worker-supplied objects.
+     */
+    surfaces: Map<string, SurfaceDescriptor>;
+  } | null;
+  /**
+   * Required-case executions keyed by canonical caseId — one execution
+   * per required case per run. Declared idempotency/retry attempts are
+   * steps WITHIN a case, never second executions of it.
+   */
+  caseExecutions: Map<string, CaseExecution>;
+  /**
+   * The engine-owned browser (plan Phase 1 item 4): Chromium contexts
+   * the witness drives itself, one per session. Test code holds no
+   * handle over these pages — every browser proof comes from engine
+   * observation, never suite assertion.
+   */
+  engineBrowser: EngineBrowserManager | null;
+}
+
+/** Codepoint-wise comparison for deterministic ordering. */
+function compareStrings(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Chaos session identity of the SHARED (unattributed) proxy: one
+ * stable name, so a schedule that lands on the shared port is still
+ * reproducible instead of keyed by a random session uuid.
+ */
+const SHARED_PROXY_CHAOS_SESSION = 'shared-proxy';
+
+/** The expected-set identity join key (project, file, titlePath). */
+function expectedKey(project: string | null, file: string, titlePath: readonly string[]): string {
+  return `${project ?? '-'}\u0000${file}\u0000${titlePath.join('>')}`;
+}
+
+/**
+ * Normalizes the declared observation-proxy mount prefix (null when
+ * unset/empty). Fail-closed on values that can never be a plain path
+ * prefix — a malformed declaration would otherwise silently mismatch
+ * obligation identities, the exact failure the option exists to prevent.
+ */
+function normalizeMountPath(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  let path = raw.trim();
+  if (!path.startsWith('/')) path = `/${path}`;
+  if (path.length > 1) path = path.replace(/\/+$/, '');
+  if (path === '/' || /[\s?#]/.test(path)) {
+    throw new WitnessStartupError(
+      `invalid mountPath '${raw}': declare the browser-facing mount prefix as a non-empty ` +
+        "absolute path like '/api'",
+    );
+  }
+  return path;
+}
+
+/**
+ * Lowercases a request content-type header to its media type without
+ * parameters (`'Application/JSON; charset=utf-8'` → `'application/json'`),
+ * or null when absent/unparseable. The Observe finalize path uses it to
+ * decide body parsing (JSON vs form); anything else is ineligible.
+ */
+function contentTypeOf(raw: string | string[] | undefined): string | null {
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof first !== 'string') return null;
+  const media = first.split(';')[0]?.trim().toLowerCase() ?? '';
+  return media.length > 0 ? media : null;
+}
+
+/**
+ * Strips the declared mount prefix from a proxied request URL (path
+ * plus possible query/fragment), returning the backend-facing URL the
+ * proxy forwards AND records. A request outside the prefix passes
+ * through untouched, and with no declared prefix the URL is returned
+ * byte-identical (the unmounted proxy's behavior).
+ */
+function stripMountPath(rawUrl: string, mountPath: string | null): string {
+  if (mountPath === null) return rawUrl;
+  const queryStart = rawUrl.search(/[?#]/);
+  const pathPart = queryStart === -1 ? rawUrl : rawUrl.slice(0, queryStart);
+  const suffix = queryStart === -1 ? '' : rawUrl.slice(queryStart);
+  if (pathPart === mountPath) return `/${suffix}`;
+  if (pathPart.startsWith(`${mountPath}/`)) {
+    return `${pathPart.slice(mountPath.length)}${suffix}`;
+  }
+  return rawUrl;
+}
+
+/**
+ * The collection-read routes the proxy must parse a response body
+ * for, keyed by `<METHOD> <normalized path>`: every `read` binding a
+ * session actually CLAIMS and the supervisor actually declared, whose
+ * observe binding names a collection. Built from the loaded adapter
+ * map, the session's claims and the bound declarations only — so the
+ * proxy parses nothing, copies nothing and retains nothing for any
+ * other route, however large those response bodies are.
+ *
+ * Two claimed reads may share one route only by declaring the SAME
+ * collection shape. When they disagree the route keeps `shape: null`
+ * and every label, so the proxy parses that body for NEITHER of them
+ * and the refusal can name what conflicted — one resource's rows can
+ * never be read under another resource's `rowsKey`/`idKey`.
+ *
+ * A session's claims are fixed at open and the declarations are bound
+ * before the run, so the caller builds this once per proxy port and
+ * reuses it for every exchange on it.
+ */
+function collectionReadRoutes(state: WitnessState, sessionId: string | null): Map<string, CollectionRoute> {
+  const routes = new Map<string, CollectionRoute>();
+  if (sessionId === null || state.observeDeclarations === null) return routes;
+  const session = state.sessions.get(sessionId);
+  if (session === undefined) return routes;
+  for (const claim of session.claims) {
+    if (!state.observeDeclarations.has(claim)) continue;
+    const resourceId = resourceIdOfObligation(claim);
+    if (observeOperation(claim.slice(resourceId.length + 1)) !== 'read') continue;
+    const adapterName = state.classifications[resourceId]?.evidenceAdapter ?? resourceId;
+    const read = state.adapters.get(adapterName)?.observe?.read;
+    if (read?.collection === undefined) continue;
+    const route = `${read.method} ${normalizeObservedPath(read.path)}`;
+    const declared = read.collection;
+    const label = `${resourceId} (rowsKey=${JSON.stringify(declared.rowsKey ?? null)}, idKey=${JSON.stringify(declared.idKey)})`;
+    const existing = routes.get(route);
+    if (existing === undefined) {
+      routes.set(route, { shape: declared, declarations: [label] });
+      continue;
+    }
+    const agrees =
+      existing.shape !== null &&
+      (existing.shape.rowsKey ?? null) === (declared.rowsKey ?? null) &&
+      existing.shape.idKey === declared.idKey;
+    if (agrees) continue;
+    existing.shape = null;
+    existing.declarations.push(label);
+  }
+  return routes;
+}
+
+/**
+ * Reads the DECLARED row ids out of one bounded response-body snapshot
+ * for a collection-read binding: a non-empty row array (at the
+ * declared `rowsKey`, or at the root when none was declared) whose
+ * every row is an object carrying a short, scalar, unique `idKey`.
+ *
+ * Only that one field is read. Counts, totals, metadata and any other
+ * arbitrary scalar in the body are never examined — a response that
+ * names no usable row therefore names nothing, and the finalize path
+ * turns that into a typed note rather than evidence.
+ *
+ * Args:
+ *   snapshot: the bounded response bytes already hashed into the
+ *     exchange's body digest (nothing larger is retained anywhere).
+ *   contentType: lowercased response media type, or null.
+ *   truncated: whether the body exceeded the snapshot cap.
+ *   collection: the adapter's declared collection shape.
+ *
+ * Returns:
+ *   ObservedCollectionRows: the declared row ids, or the typed reason
+ *   the body named none.
+ */
+function parseCollectionRows(
+  snapshot: Buffer,
+  contentType: string | null,
+  truncated: boolean,
+  collection: ObserveCollection,
+): ObservedCollectionRows {
+  // Every exit carries the declared shape these ids were read under,
+  // so a finalize can refuse a capture another declaration produced.
+  const declared = { rowsKey: collection.rowsKey ?? null, idKey: collection.idKey };
+  if (truncated) {
+    return {
+      ...declared,
+      ids: [],
+      error:
+        `the collection response exceeded the ${String(OBSERVED_BODY_SNAPSHOT_BYTES)}-byte witness ` +
+        'snapshot cap — a truncated body names no complete rows',
+    };
+  }
+  if (contentType !== 'application/json') {
+    return {
+      ...declared,
+      ids: [],
+      error: `the collection response is '${contentType ?? '<none>'}', not JSON — no row can be read from it`,
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(snapshot.toString('utf8'));
+  } catch {
+    return { ...declared, ids: [], error: 'the collection response is not parseable JSON' };
+  }
+  let rows: unknown[];
+  if (collection.rowsKey === undefined) {
+    if (!Array.isArray(parsed)) {
+      return {
+        ...declared,
+        ids: [],
+        error: 'the binding declares no rowsKey, so the collection response root must be the row array',
+      };
+    }
+    rows = parsed;
+  } else {
+    const container = isPlainObject(parsed) ? parsed[collection.rowsKey] : undefined;
+    if (!Array.isArray(container)) {
+      return {
+        ...declared,
+        ids: [],
+        error: `the collection response carries no row array at the declared rowsKey '${collection.rowsKey}'`,
+      };
+    }
+    rows = container;
+  }
+  if (rows.length === 0) {
+    return { ...declared, ids: [], error: 'the collection response returned no rows' };
+  }
+  const ids: Array<string | number> = [];
+  // Prototype-free: an id is arbitrary candidate data, so `'constructor'`
+  // must count as a fresh id and never as an already-seen one.
+  const seen: Record<string, true> = Object.create(null) as Record<string, true>;
+  for (let index = 0; index < rows.length; index++) {
+    const row: unknown = rows[index];
+    if (!isPlainObject(row)) {
+      return { ...declared, ids: [], error: `row ${String(index)} of the collection response is not an object` };
+    }
+    const id = row[collection.idKey];
+    if (typeof id === 'number') {
+      if (!Number.isFinite(id)) {
+        return {
+          ...declared,
+          ids: [],
+          error: `row ${String(index)} carries a non-finite '${collection.idKey}' id`,
+        };
+      }
+    } else if (typeof id !== 'string' || id.length === 0 || id.length > OBSERVED_RESPONSE_ID_CHARS) {
+      return {
+        ...declared,
+        ids: [],
+        error:
+          `row ${String(index)} carries no usable '${collection.idKey}' id (a short string or a finite ` +
+          'number)',
+      };
+    }
+    // One id names one row: a repeat makes the response ambiguous
+    // about what it listed, so the whole capture is refused.
+    if (seen[String(id)] !== undefined) {
+      return {
+        ...declared,
+        ids: [],
+        error: `the collection response names '${String(id)}' more than once — its rows are ambiguous`,
+      };
+    }
+    seen[String(id)] = true;
+    ids.push(id);
+  }
+  return { ...declared, ids, error: null };
+}
+
+/**
+ * Starts one loopback reverse-proxy server forwarding to the run's
+ * attested proxy target. `sessionId` names the session the port belongs
+ * to (null = the shared unattributed proxy): every exchange completing
+ * on this port is recorded as an engine observation stamped with that
+ * session id and the witness-monotonic completion tick.
+ *
+ * Args:
+ *   state: running witness state.
+ *   sessionId: owning session id, or null for the shared proxy.
+ *
+ * Returns:
+ *   Promise<Server>: the listening server (OS-assigned loopback port).
+ *
+ * Throws:
+ *   Error: when the server fails to bind.
+ */
+async function startObservedProxy(
+  state: WitnessState,
+  sessionId: string | null,
+  chaosSession: string,
+): Promise<Server> {
+  const proxyTargetUrl = new URL(state.options.proxyTarget as string);
+  // One scheduler per proxy port: a session's `k` and its recorded
+  // schedule are its own, so two tests in one run can never shift each
+  // other's timing. `chaosSession` is the supervisor-issued test id
+  // (stable across replays), never the random session uuid.
+  //
+  // Built on FIRST USE, not at proxy creation: the shared proxy is
+  // created at start-up, before the run context (and with it the run
+  // options) is bound, and a bound plan must still take effect. Keyed
+  // by the live plan, so a witness re-planned mid-run rebuilds rather
+  // than serving a stale schedule.
+  let chaos: ChaosScheduler | null = null;
+  let chaosPlan: ChaosOptions | null = null;
+  const chaosFor = (): ChaosScheduler | null => {
+    if (state.chaos === null) return null;
+    if (chaos === null || chaosPlan !== state.chaos.options) {
+      chaos = new ChaosScheduler(state.chaos.options, chaosSession);
+      chaosPlan = state.chaos.options;
+    }
+    return chaos;
+  };
+  // The collection-read routes THIS port must parse a response for,
+  // resolved from the session's claims and the bound declarations on
+  // first use and reused for every exchange after — a session's claims
+  // are fixed at open, and the declaration set is replaced (never
+  // mutated) on a rebind, so its identity is the whole invalidation
+  // key. Empty for the shared proxy and for every run that declared no
+  // collection read: the common case then parses nothing at all.
+  let collectionRoutes: Map<string, CollectionRoute> | null = null;
+  let collectionRoutesFor: Set<string> | null = null;
+  const collectionFor = (method: string, path: string): CollectionRoute | null => {
+    if (collectionRoutes === null || collectionRoutesFor !== state.observeDeclarations) {
+      collectionRoutesFor = state.observeDeclarations;
+      collectionRoutes = collectionReadRoutes(state, sessionId);
+    }
+    if (collectionRoutes.size === 0) return null;
+    return collectionRoutes.get(`${method} ${path}`) ?? null;
+  };
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      // Mount-prefix handling: forward the backend-facing (STRIPPED)
+      // URL, and record the same STRIPPED path below, so observations
+      // match the backend-derived obligation identities the suite
+      // claims. With no declared mount path the URL is forwarded and
+      // recorded byte-identical to today.
+      const forwardUrl = stripMountPath(req.url ?? '/', state.options.mountPath);
+      // In-flight accounting (plan §11.4): a proxy exchange that starts
+      // before `/run-context` binds must refuse the bind — otherwise
+      // traffic from an older invocation could be signed under the new
+      // context.
+      state.proxyInFlight += 1;
+      // Timing chaos (E63): the release slot is reserved at ARRIVAL, so
+      // the per-route key `k` counts requests in the order the suite
+      // made them - never in the order responses happened to complete.
+      const chaos = chaosFor();
+      const chaosSlot =
+        chaos === null ? null : chaos.reserve(chaosRouteKey(req.method ?? 'GET', forwardUrl), Date.now());
+      let chaosHeld = chaosSlot !== null && chaosSlot.releaseAt <= Date.now();
+      let settledFlight = false;
+      const settleFlight = (): void => {
+        if (!settledFlight) {
+          settledFlight = true;
+          state.proxyInFlight -= 1;
+        }
+      };
+      // b59/b60 lesson (phase7-runtime e22ec24): `agent: false` is
+      // load-bearing. On Node >=19 the default global agent keeps sockets
+      // alive while dev servers close idle keep-alive sockets at their
+      // keepAliveTimeout - reusing a socket the target closed mid-handshake
+      // intermittently killed exactly one browser exchange per batch. A
+      // fresh loopback connection per forwarded exchange costs nothing and
+      // removes the reuse race.
+      const forwardResponse = (upstream: IncomingMessage): void => {
+        // The release moment: the schedule records what this run
+        // actually did, which is what makes a red run replayable.
+        if (chaosSlot !== null && chaos !== null) {
+          state.chaos?.entries.push(chaos.release(chaosSlot, chaosHeld));
+        }
+        const status = upstream.statusCode ?? 0;
+        const observedPath = normalizeObservedPath(forwardUrl);
+        // Bounded response-body snapshot: the tap is attached BEFORE
+        // piping so both consumers receive the stream; forwarding to
+        // the browser stays unbuffered (the snapshot never gates the
+        // response). Total bytes are counted even beyond the snapshot
+        // limit; only the snapshot is hashed.
+        const snapshot: Buffer[] = [];
+        let snapshotBytes = 0;
+        let totalBytes = 0;
+        upstream.on('data', (chunk: Buffer) => {
+          totalBytes += chunk.length;
+          if (snapshotBytes < OBSERVED_BODY_SNAPSHOT_BYTES) {
+            const room = OBSERVED_BODY_SNAPSHOT_BYTES - snapshotBytes;
+            const taken = chunk.length > room ? chunk.subarray(0, room) : chunk;
+            snapshot.push(Buffer.from(taken)); // copy: detach from the stream pool
+            snapshotBytes += taken.length;
+          }
+        });
+        upstream.on('end', () => {
+          const seq = (state.observedSeq += 1);
+          const method = (req.method ?? 'GET').toUpperCase();
+          // Twin path coverage (E64): the request's SHAPE, computed at
+          // record time from the method and the target the proxy
+          // already saw. Only the shape is kept — a route template and
+          // the allowlisted query values — so the raw URL never enters
+          // the shape list an owner pastes into a bug. Absent a plan
+          // this line does not exist for the run.
+          const twinSession = sessionId === null ? undefined : state.sessions.get(sessionId);
+          if (twinSession !== undefined && state.twinShapes !== null) {
+            recordTwinShape(twinSession.twinShapes, method, forwardUrl, state.twinShapes);
+          }
+          const bodySnapshot = Buffer.concat(snapshot);
+          const responseContentType = contentTypeOf(upstream.headers['content-type']);
+          // Collection reads (declared, never inferred): only a route
+          // this session actually claimed as a collection read has its
+          // response parsed here, and only the declared row id field is
+          // kept — every other route's body is hashed and dropped. A
+          // route two claims declare DIFFERENT shapes for is not parsed
+          // at all; the conflict travels so the finalize can name it.
+          const collectionRoute = status >= 200 && status <= 299 ? collectionFor(method, observedPath) : null;
+          const collectionShape = collectionRoute === null ? null : collectionRoute.shape;
+          const collectionConflict =
+            collectionRoute !== null && collectionRoute.shape === null ? collectionRoute.declarations : null;
+          state.observed.push({
+            method,
+            path: observedPath,
+            status,
+            seq,
+            bodySha256: createHash('sha256').update(bodySnapshot).digest('hex'),
+            bodyBytes: totalBytes,
+            requestBody: body.length === 0 ? null : Buffer.from(body.subarray(0, OBSERVED_REQUEST_BODY_BYTES)),
+            requestTruncated: body.length > OBSERVED_REQUEST_BODY_BYTES,
+            requestBytes: body.length,
+            requestContentType: contentTypeOf(req.headers['content-type']),
+            sessionId,
+            tick: (state.tick += 1),
+            ...(collectionShape !== null
+              ? {
+                  collectionRows: parseCollectionRows(
+                    bodySnapshot,
+                    responseContentType,
+                    totalBytes > OBSERVED_BODY_SNAPSHOT_BYTES,
+                    collectionShape,
+                  ),
+                }
+              : collectionConflict !== null
+                ? { collectionConflict }
+                : {}),
+          });
+          // Response attribution (Observe channel): what the response
+          // NAMED, kept even after the exchange is consumed, so a
+          // create finalize can tell a concurrent observed create
+          // apart from a writer outside every session channel.
+          state.observedResponses.push({
+            seq,
+            method,
+            path: observedPath,
+            status,
+            ...responseAttribution(
+              bodySnapshot,
+              responseContentType,
+              totalBytes > OBSERVED_BODY_SNAPSHOT_BYTES,
+            ),
+          });
+          settleFlight();
+        });
+        upstream.on('error', settleFlight);
+        res.writeHead(status, upstream.headers);
+        upstream.pipe(res);
+      };
+      const forward = request(
+        {
+          protocol: proxyTargetUrl.protocol,
+          hostname: proxyTargetUrl.hostname,
+          port: proxyTargetUrl.port,
+          method: req.method,
+          path: forwardUrl,
+          headers: { ...req.headers, host: proxyTargetUrl.host },
+          agent: false,
+        },
+        (upstream) => {
+          // Chaos holds a response back by PAUSING the upstream stream:
+          // the browser receives the same bytes, the same status and
+          // the same headers, only later. With no plan this is exactly
+          // the unheld path below.
+          if (chaosSlot !== null) {
+            const waitMs = Math.max(0, chaosSlot.releaseAt - Date.now());
+            upstream.pause();
+            const held = setTimeout(() => {
+              upstream.resume();
+              forwardResponse(upstream);
+            }, waitMs);
+            upstream.once('error', () => clearTimeout(held));
+            // The hold this response actually got: a response whose
+            // upstream overran its slot is recorded with no delay.
+            chaosHeld = waitMs > 0;
+            return;
+          }
+          forwardResponse(upstream);
+        },
+      );
+      forward.on('error', () => {
+        settleFlight();
+        if (!res.headersSent) sendJson(res, 502, { error: 'observation proxy upstream failed' });
+        else res.end();
+      });
+      if (body.length > 0) forward.write(body);
+      forward.end();
+    });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, state.proxyBindHost, () => resolveListen());
+  });
+  server.removeAllListeners('error');
+  return server;
+}
+
+/** The base URL of a started observation-proxy server. */
+function proxyUrlOf(state: WitnessState, server: Server): string {
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new WitnessStartupError('observation proxy failed to bind an OS-assigned port');
+  }
+  return `http://${formatHost(state.proxyHost)}:${address.port}`;
+}
+
+/**
+ * Starts the DEDICATED session proxy port (plan Phase 1) and stores it
+ * on the session. Only called when the run wires an observation proxy;
+ * the worker's browser uses this origin for the whole test, so all of
+ * its traffic — absolute paths included — is attributed to the session.
+ *
+ * Args:
+ *   state: running witness state.
+ *   session: the freshly opened session.
+ */
+async function startSessionProxy(state: WitnessState, session: TestSession): Promise<void> {
+  if (
+    typeof state.options.proxyTarget !== 'string' ||
+    state.options.proxyTarget.length === 0
+  ) {
+    session.proxyUrl = null;
+    return;
+  }
+  const server = await startObservedProxy(state, session.sessionId, session.testId);
+  session.proxyServer = server;
+  session.proxyUrl = proxyUrlOf(state, server);
+}
+
+/** Closes one session's dedicated proxy port (sealed = channel gone). */
+async function stopSessionProxy(session: TestSession): Promise<void> {
+  const server = session.proxyServer;
+  session.proxyServer = null;
+  if (server === null) return;
+  await new Promise<void>((resolveClose) => {
+    server.close(() => resolveClose());
+  });
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The service-issued recordId comes from the frozen core primitive
+ * (`recordIdOf`, pin #1/#7): sha256 over GF-canonical JSON of the record
+ * identity. Sharing one implementation with the engine's provenance
+ * verifier guarantees the witness issues exactly what evaluation can
+ * recompute — an entry that never passed through the service has no
+ * matching hash, so shape-level fabrication (a hex string the service
+ * never issued) cannot line up with the ledger the reporter copies.
+ */
+export { recordIdOf };
+
+/** Reads the JSON request body (sized; malformed → HttpError). */
+function readBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolveBody, rejectBody) => {
+    let raw = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => {
+      raw += chunk;
+      if (raw.length > MAX_BODY_BYTES) {
+        rejectBody(new HttpError(400, 'request body too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (raw.length === 0) {
+        rejectBody(new HttpError(400, 'request body is required'));
+        return;
+      }
+      try {
+        resolveBody(JSON.parse(raw) as unknown);
+      } catch (error) {
+        rejectBody(new HttpError(400, `request body is not valid JSON: ${(error as Error).message}`));
+      }
+    });
+    req.on('error', rejectBody);
+  });
+}
+
+/**
+ * The engine page for one session, or a typed failure when the witness
+ * was started without a browser launcher.
+ *
+ * The runner-neutral witness never assumes a browser: a caller that
+ * wants the engine-browser proof channel injects an
+ * `EngineBrowserLauncher`, and a caller that does not get a typed
+ * refusal here instead of a crash deep inside a proof attempt.
+ *
+ * Args:
+ *   state: the running witness state.
+ *   sessionId: the supervisor-opened session the page belongs to.
+ *
+ * Returns:
+ *   Promise<Page>: the engine's own page for the session.
+ *
+ * Throws:
+ *   EngineBrowserError: when no engine browser launcher was configured.
+ */
+async function enginePageFor(state: WitnessState, sessionId: string): Promise<Page> {
+  const manager = state.engineBrowser;
+  if (manager === null) {
+    throw new EngineBrowserError(
+      'engine-browser actions need an engine browser launcher, and this witness was started ' +
+        'without one (the runner-neutral witness never assumes a browser): start the witness with ' +
+        'engineBrowserLauncher, or prove the behavior through the observed-HTTP channel instead',
+    );
+  }
+  return manager.pageFor(sessionId);
+}
+
+/**
+ * Starts the witness service.
+ *
+ * Args:
+ *   options: run identity + token (required), state dir, adapters dir,
+ *     classifications path, target/attestation config, timeout, clock.
+ *
+ * Returns:
+ *   WitnessHandle: {url, stop} once the server listens.
+ *
+ * Throws:
+ *   WitnessStartupError / AdapterRegistryError / AttestationError:
+ *     fail-closed startup problems (GF-10 blocks non-loopback targets
+ *     HERE, before any adapter request can be constructed).
+ */
+export async function startWitness(options: WitnessOptions): Promise<WitnessHandle> {
+  if (typeof options.runId !== 'string' || options.runId.length === 0) {
+    throw new WitnessStartupError('witness requires a runId (GATEFORGE_RUN_ID)');
+  }
+  if (typeof options.token !== 'string' || options.token.length === 0) {
+    throw new WitnessStartupError('witness requires a token (GATEFORGE_RUN_TOKEN)');
+  }
+  const cwd = process.cwd();
+  const adaptersDir =
+    options.adaptersDir === null || options.adaptersDir === undefined
+      ? null
+      : resolve(cwd, options.adaptersDir);
+  const classificationsPath =
+    options.classificationsPath === null || options.classificationsPath === undefined
+      ? null
+      : resolve(cwd, options.classificationsPath);
+
+  const adapters =
+    adaptersDir === null ? new Map<string, EvidenceAdapter>() : await loadAdapters(adaptersDir);
+  const classifications = loadClassifications(classificationsPath);
+
+  const targetBaseUrl = options.targetBaseUrl ?? null;
+  // The mount prefix declares how the browser-facing deployment mounts
+  // the backend for the OBSERVATION PROXY; it is meaningless without one.
+  const mountPath = normalizeMountPath(options.mountPath);
+  if (mountPath !== null && (options.proxyTarget === undefined || options.proxyTarget === '')) {
+    throw new WitnessStartupError(
+      'witness option mountPath requires proxyTarget: the mount prefix declares how the ' +
+        'observation proxy bridges the browser-facing deployment and the backend',
+    );
+  }
+  // GF-10: the attestation subject must be loopback — block at startup,
+  // before any mutation-capable request surface exists.
+  if (targetBaseUrl !== null) {
+    await assertLoopback(targetBaseUrl, 'attestation subject');
+  }
+  // GF-13 minimal v1: when the run pins a fingerprint, the subject's
+  // marker must match before the service opens for business.
+  if (
+    targetBaseUrl !== null &&
+    options.targetFingerprint !== null &&
+    options.targetFingerprint !== undefined
+  ) {
+    const probe = await probeEnvFingerprint(
+      targetBaseUrl,
+      options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    );
+    const mismatch = envFingerprintMismatch(
+      probe,
+      options.targetFingerprint,
+      options.targetFingerprint,
+    );
+    if (mismatch !== null) {
+      throw new AttestationError(
+        `attestation subject '${targetBaseUrl}' failed startup attestation: ${mismatch}`,
+      );
+    }
+  }
+  // Keep the browser-facing logical hostname and the control host separate.
+  // Resolve the proxy bind address once, and never bind a non-loopback result.
+  const proxyHostname = options.proxyTarget ? new URL(options.proxyTarget).hostname : null;
+  const proxyHost = proxyHostname === null
+    ? options.host ?? LOOPBACK_HOSTNAME
+    : proxyHostname.replace(/^\[|\]$/g, '');
+  let proxyBindHost = proxyHost;
+  if (proxyHostname !== null) {
+    await assertLoopback(options.proxyTarget as string, 'observation proxy target');
+    const resolved = await lookup(proxyHost);
+    if (!isLoopbackAddress(resolved.address)) {
+      throw new AttestationError(`observation proxy hostname '${proxyHost}' resolved to a non-loopback bind address`);
+    }
+    proxyBindHost = resolved.address;
+  }
+
+  const state: WitnessState = {
+    options: {
+      ...options,
+      runId: options.runId,
+      token: options.token,
+      mountPath,
+      verifierKey:
+        typeof options.verifierKey === 'string' && options.verifierKey.length > 0
+          ? options.verifierKey
+          : null,
+      requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      host: options.host ?? LOOPBACK_HOSTNAME,
+    },
+    adapters,
+    proxyHost,
+    proxyBindHost,
+    classifications,
+    ledger: new Map(),
+    preObservations: new Map(),
+    serverE2eDeclarations: null,
+    serverPreObservations: new Map(),
+    serverIntentSequences: new Map(),
+    observeDeclarations: null,
+    observeSnapshots: new Map(),
+    observed: [],
+    observedResponses: [],
+    observedSeq: 0,
+    runContext: null,
+    observedSeqAtBind: 0,
+    proxyInFlight: 0,
+    chaos:
+      options.chaos === undefined || options.chaos === null
+        ? null
+        : { options: options.chaos, entries: [] },
+    twinShapes: options.twinShapes === undefined || options.twinShapes === null ? null : options.twinShapes,
+    expectedTests: new Map(),
+    enumerationDigest: null,
+    behaviorCatalog: null,
+    caseExecutions: new Map(),
+    tick: 0,
+    sessions: new Map(),
+    workerSessions: new Map(),
+    sessionIdentities: new Map(),
+    // The engine browser is OPTIONAL here and required only by the
+    // ENGINE-BROWSER proof channel: this package is runner-neutral and
+    // must not assume a browser is installed. A witness started without
+    // a launcher serves every other surface unchanged and fails closed
+    // with a typed cause the moment an engine-browser action is asked
+    // for. `@gate-forge/pack-playwright` supplies Chromium by default,
+    // so its consumers see no change.
+    engineBrowser:
+      options.engineBrowserLauncher === undefined
+        ? null
+        : new EngineBrowserManager(options.engineBrowserLauncher),
+    proxyServer: null,
+    server: undefined as unknown as Server,
+    nowIso: options.now ?? (() => new Date().toISOString()),
+    stopped: false,
+  };
+
+  state.server = createServer((req, res) => {
+    void handleRequest(state, req, res);
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    state.server.once('error', rejectListen);
+    state.server.listen(0, state.options.host, () => resolveListen());
+  });
+  state.server.removeAllListeners('error');
+
+  const address = state.server.address();
+  if (address === null || typeof address === 'string') {
+    await stopWitness(state);
+    throw new WitnessStartupError('witness failed to bind an OS-assigned port');
+  }
+  const url = `http://${formatHost(state.options.host)}:${address.port}`;
+
+  // ADR 0004 D7: the witness-owned loopback reverse proxy. Traffic
+  // aimed at a witness proxy is forwarded to the attested target and
+  // (method, path, status, bounded body snapshot, total body bytes)
+  // recorded as an ENGINE observation; a suite-callable endpoint consumes
+  // a matching observation to issue a witnessed record. A proxy never
+  // needs the run token: it serves the browser, holds no authority, and
+  // can only add observations the engine itself saw.
+  //
+  // Phase 1 session channels: the shared proxy (below) stays the
+  // UNATTRIBUTED channel — its exchanges carry sessionId null and are
+  // never consumable as a test's evidence. Each supervisor-opened
+  // session additionally gets a DEDICATED loopback proxy port (see
+  // `startSessionProxy`): the worker's browser uses that origin for the
+  // whole test, so every absolute-path form action, link, and fetch on
+  // it lands on the session's own channel — attribution by ORIGIN, not
+  // by URL rewriting.
+  let proxyUrl: string | null = null;
+  if (typeof state.options.proxyTarget === 'string' && state.options.proxyTarget.length > 0) {
+    state.proxyServer = await startObservedProxy(state, null, SHARED_PROXY_CHAOS_SESSION);
+    proxyUrl = proxyUrlOf(state, state.proxyServer);
+  }
+
+  // DNS binding (loopback-pins): the startup asserts above pinned every
+  // operator-provided hostname to its approved loopback IPs. Hand the
+  // resulting resolver rules to the engine browser BEFORE it can launch —
+  // its traffic for those names then cannot leave loopback even if DNS
+  // changes mid-run, while Host headers and origins (tenant routing)
+  // stay exactly as the suite addresses them.
+  state.engineBrowser?.setDnsPinRules(hostResolverRules(pinnedLoopbackIps()));
+
+  const handle = Object.freeze({
+    url,
+    proxyUrl,
+    stop: (): Promise<void> => stopWitness(state),
+  });
+  return handle;
+}
+
+/**
+ * Canonicalizes an observed request path (query/fragment stripped, one
+ * leading slash, trailing slashes dropped, root '/' stays '/').
+ * Lockstep with core's `interpretObservedPath` (plan §9 steps 1-3):
+ * duplicate slashes are NOT collapsed and percent-encodings are NEVER
+ * decoded on either side — noncanonical routing meaning stays visible
+ * so the verifier blocks instead of matching a different endpoint.
+ */
+function normalizeObservedPath(rawPath: string): string {
+  let path = rawPath.split('?')[0]?.split('#')[0] ?? '/';
+  if (!path.startsWith('/')) path = `/${path}`;
+  if (path.length > 1) path = path.replace(/\/+$/, '');
+  return path;
+}
+
+/**
+ * Consumes one engine-observed request matching (method, path) and
+ * issues witnessed `http.request` records bound to the declaring test's
+ * obligation claims (ADR 0004 D7, plan §8 / D1 transport-only semantics).
+ * The witness observes that an HTTP exchange traversed the proxy; WHICH
+ * browser, UI action, or test produced it is suite-claimed attribution,
+ * never independent proof. Single-use at the EXCHANGE level: an
+ * observation proves exactly one real request — it is consumed on first
+ * match and can never be re-claimed, replayed, or extended later. One
+ * genuine exchange genuinely instantiates every contract its endpoint
+ * declares of it (a compiler emits `http:frontend-request-observed` AND
+ * `http:response-status-ok` per consumed endpoint; ADR 0004 D8 calls the
+ * latter "the same witnessed record carrying a 2xx status"), so the
+ * consumed exchange issues one record PER claim id the declaring test
+ * itself declared — all carrying the identical engine-observed payload,
+ * each still independently provenance-verified and shape/status-checked
+ * by the verdict engine. The payload is
+ * `{method, url, status, bodySha256, bodyBytes}` — the bounded response
+ * snapshot hash and total byte count ride in the record, a tamper-evident
+ * trace of exactly what the engine observed.
+ *
+ * An optional `expectedStatus` narrows the consume match to exchanges
+ * the target answered with that exact status. This stays honest: the
+ * suite still cannot fabricate or mutate observations — it only selects
+ * WHICH real exchange it is accounting for. It exists because one
+ * (method, path) shape can legitimately fire several times per run with
+ * different statuses (e.g. the SPA's unauthenticated `/me` probe ahead of
+ * the authenticated one); FIFO-without-status would bind a `:response-
+ * status-ok` claim to an observed 401 the journey never intended.
+ */
+async function handleHttpObservation(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const testId = body['testId'];
+  const method = body['method'];
+  const path = body['path'];
+  const expectedStatus = body['expectedStatus'];
+  // A split legacy assignment (distinct `claimId` vs `obligationId`)
+  // is ambiguous caller intent — fail closed instead of silently
+  // picking one (plan §8 step 7: no silent wrong-obligation binding).
+  if (
+    typeof body['claimId'] === 'string' &&
+    body['claimId'].length > 0 &&
+    typeof body['obligationId'] === 'string' &&
+    body['obligationId'].length > 0 &&
+    body['claimId'] !== body['obligationId']
+  ) {
+    sendJson(res, 400, {
+      error:
+        'http observation refuses a split claimId/obligationId assignment: supply one ' +
+        'explicit obligation id (or a claimIds list)',
+    });
+    return;
+  }
+  // Claim binding: `claimIds` (the declaring test's claimed obligation
+  // ids for this endpoint) — with the singular legacy `claimId` /
+  // `obligationId` pair still accepted and folded in.
+  const rawClaimIds = Array.isArray(body['claimIds'])
+    ? [...body['claimIds'], body['claimId'], body['obligationId']]
+    : [body['claimIds'], body['claimId'], body['obligationId']];
+  const claimIds: string[] = [];
+  for (const entry of rawClaimIds) {
+    if (entry === undefined || entry === null) continue;
+    if (typeof entry !== 'string' || !OBLIGATION_ID_PATTERN.test(entry)) {
+      sendJson(res, 400, {
+        error:
+          'http observation requires claimIds as obligation-id strings ' +
+          "'<resourceId>:<contract>' (a singular legacy claimId/obligationId is still accepted)",
+      });
+      return;
+    }
+    if (!claimIds.includes(entry)) claimIds.push(entry);
+  }
+  if (
+    claimIds.length === 0 ||
+    typeof testId !== 'string' ||
+    testId.length === 0 ||
+    typeof method !== 'string' ||
+    typeof path !== 'string' ||
+    path.length === 0 ||
+    (expectedStatus !== undefined &&
+      (typeof expectedStatus !== 'number' || !Number.isInteger(expectedStatus)))
+  ) {
+    sendJson(res, 400, {
+      error:
+        'http observation requires testId, method, and path strings plus at least one ' +
+        "claimed obligation id ('<resourceId>:<contract>'); expectedStatus, when present, " +
+        'must be an integer status code',
+    });
+    return;
+  }
+  const wanted = normalizeObservedPath(path);
+  // Phase 1 (E11/E12 foundation): the consuming side must hold a valid
+  // OPEN session, and only an exchange observed through THAT session's
+  // proxy prefix WITHIN one of its recorded action intervals can be
+  // consumed — a request supplied by another test/worker (different
+  // session channel) or by setup traffic outside every interval is
+  // never credited to this test's claims.
+  const session = requireOpenSession(state, body);
+  requireSessionTestId(session, testId);
+  // Bind watermark (plan §11.4): observations that completed before the
+  // trusted context bound predate it and are never consumable under the
+  // new invocation — closing the proxy/bind race where a request started
+  // before binding but its response ends after it.
+  const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
+  const matchesShape = (entry: ObservedExchange): boolean =>
+    entry.seq > watermark &&
+    entry.method === method.toUpperCase() &&
+    entry.path === wanted &&
+    (expectedStatus === undefined || entry.status === expectedStatus);
+  const index = state.observed.findIndex(
+    (entry) =>
+      entry.sessionId === session.sessionId &&
+      tickWithinSessionInterval(session, entry.tick) &&
+      matchesShape(entry),
+  );
+  if (index === -1) {
+    // Precise fail-closed diagnostics: distinguish "outside every
+    // interval" from "another session's channel" from "no such traffic".
+    const unattributed = state.observed.find((entry) => entry.sessionId === null && matchesShape(entry));
+    const foreign = state.observed.find(
+      (entry) => entry.sessionId !== null && entry.sessionId !== session.sessionId && matchesShape(entry),
+    );
+    const outsideInterval = state.observed.find(
+      (entry) => entry.sessionId === session.sessionId && matchesShape(entry),
+    );
+    if (outsideInterval !== undefined) {
+      sendJson(res, 409, {
+        error:
+          `an engine-observed ${method.toUpperCase()} ${wanted} exists for this session but its ` +
+          'completion tick falls outside every recorded UI-action observation interval — the ' +
+          'fixture marks an interval per UI action, so traffic outside those windows (setup ' +
+          'calls, stray navigation) is never browser evidence',
+      });
+      return;
+    }
+    if (foreign !== undefined) {
+      sendJson(res, 409, {
+        error:
+          `the engine-observed ${method.toUpperCase()} ${wanted} traversed ANOTHER session's ` +
+          'channel; exchanges are consumable only by the session whose proxy prefix they ' +
+          'arrived through (a request supplied by another test/worker is never credited)',
+      });
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        `no engine-observed request matches ${method.toUpperCase()} ${wanted}` +
+        `${expectedStatus === undefined ? '' : ` with status ${String(expectedStatus)}`}` +
+        `${unattributed === undefined ? '' : ' (traffic bypassed every session channel)'}; drive ` +
+        'traffic through this session\'s observation-proxy prefix before claiming the obligation',
+    });
+    return;
+  }
+  const observedRequest = state.observed[index] as ObservedExchange;
+  // Consume the exchange FIRST (single-use), then issue one record per
+  // distinct claimed obligation id — same payload, per-claim identity.
+  state.observed.splice(index, 1);
+  // Witness-side activity (review recheck fix 2026-09-14): consuming an
+  // engine-observed session exchange is an observation the witness made;
+  // count it.
+  session.activity += 1;
+  const payload = {
+    method: observedRequest.method,
+    url: observedRequest.path,
+    status: observedRequest.status,
+    bodySha256: observedRequest.bodySha256,
+    bodyBytes: observedRequest.bodyBytes,
+    sessionId: session.sessionId,
+  };
+  const issued = claimIds.map((claimId) =>
+    issueRecord(state, claimId, 'http.request', session.testId, payload, 'engine-observed'),
+  );
+  const first = issued[0] as IssuedRecord;
+  sendJson(res, 200, {
+    recordId: first.recordId,
+    runId: first.runId,
+    trust: first.trust,
+    status: observedRequest.status,
+    records: issued.map((record) => ({ recordId: record.recordId, obligationId: record.obligationId })),
+  });
+}
+
+/**
+ * Resolves the engine browser's UI subject — the ONE attested
+ * application origin the engine may drive (fake-frontend fix
+ * 2026-09-14): `targetBaseUrl`, provisioned through trusted witness
+ * configuration (orchestrator env/flags), never from suite input. A
+ * copyable fingerprint header cannot authenticate application identity,
+ * so origin equality with this provisioned subject is the identity —
+ * loopback + fingerprint remain as attestation defense in depth, never
+ * as identity.
+ *
+ * Args:
+ *   state: running witness state.
+ *
+ * Returns:
+ *   string: the normalized trusted base (no trailing slash).
+ *
+ * Throws:
+ *   HttpError: 409 when no attested subject is provisioned (browser
+ *     proof without a provisioned subject fails closed — it never
+ *     falls back to a suite-supplied origin).
+ */
+function requireTrustedUiBase(state: WitnessState): string {
+  const base = state.options.targetBaseUrl;
+  if (base === null || base === undefined || base === '') {
+    throw new HttpError(
+      409,
+      'no attested UI subject is provisioned for this witness (targetBaseUrl): browser proof ' +
+        'requires the orchestrator to provision the application origin through trusted ' +
+        'configuration — the engine never drives a suite-supplied origin',
+    );
+  }
+  return base.replace(/\/+$/, '');
+}
+
+/**
+ * `POST /browser/surface` (plan Phase 1 item 4): registers the
+ * consumer-declared surface descriptor for one open session. The
+ * descriptor is validated structurally engine-side; selectors are
+ * locators only — registration proves nothing by itself.
+ *
+ * The driven origin is NOT negotiable here (fake-frontend fix
+ * 2026-09-14): a `appBaseUrl` field is rejected outright (400) — the
+ * engine drives exactly the provisioned attested subject
+ * (`requireTrustedUiBase`), which must be loopback (GF-10) and, when
+ * the run pins a target fingerprint, must present it (GF-13). A test
+ * that could name its own frontend could point the engine at a fake
+ * that replays the real API — origin equality with trusted
+ * configuration is the only application identity.
+ */
+async function handleBrowserSurface(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BrowserSurfaceRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'browser surface body must be an object');
+  }
+  const { testId, surface } = body as Record<string, unknown>;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'browser surface requires a non-empty testId');
+  }
+  if ((body as Record<string, unknown>)['appBaseUrl'] !== undefined) {
+    throw new HttpError(
+      400,
+      'browser surface rejects appBaseUrl: the engine drives exactly the provisioned attested ' +
+        'subject from trusted witness configuration — suite-supplied origins are never accepted ' +
+        '(a test-named frontend could replay the real API behind a copied fingerprint header)',
+    );
+  }
+  const session = requireOpenSession(state, body);
+  requireSessionTestId(session, testId);
+  let validated: SurfaceDescriptor;
+  try {
+    validated = validateSurface(surface as SurfaceDescriptor);
+  } catch (error) {
+    throw new HttpError(
+      400,
+      `browser surface descriptor rejected: ${(error as Error).message}`,
+    );
+  }
+  // The trusted subject, resolved BEFORE any browser exists: loopback
+  // attestation (GF-10/GF-13) runs against the provisioned origin, never
+  // a suite URL.
+  const trustedBase = requireTrustedUiBase(state);
+  await assertLoopback(trustedBase, 'engine browser base');
+  const pinned = state.options.targetFingerprint ?? null;
+  if (pinned !== null) {
+    const probe = await probeEnvFingerprint(trustedBase, state.options.requestTimeoutMs);
+    const mismatch = envFingerprintMismatch(probe, pinned, pinned);
+    if (mismatch !== null) {
+      throw new HttpError(409, `engine browser subject rejected: ${mismatch}`);
+    }
+  }
+  session.engineSurface = {
+    surface: validated as unknown as Record<string, unknown>,
+  };
+  sendJson(res, 200, { registered: true as const });
+}
+
+/** Requires the session's registered engine surface (409 when absent). */
+function requireEngineSurface(
+  session: TestSession,
+): { surface: SurfaceDescriptor } {
+  const registered = session.engineSurface;
+  if (registered === null) {
+    throw new HttpError(
+      409,
+      'no engine surface is registered for this session: the fixture must register the ' +
+        'consumer-declared surface descriptor first (POST /browser/surface) — the engine ' +
+        'drives no browser without it',
+    );
+  }
+  return {
+    surface: registered.surface as unknown as SurfaceDescriptor,
+  };
+}
+
+/** Validates browser claim ids: non-empty, obligation-shaped, one resource. */
+function requireBrowserClaims(body: Record<string, unknown>): { claimIds: string[]; resourceId: string } {
+  const raw = body['claimIds'];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new HttpError(400, 'browser calls require a non-empty claimIds array of obligation ids');
+  }
+  const claimIds: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || !OBLIGATION_ID_PATTERN.test(entry)) {
+      throw new HttpError(
+        400,
+        `browser claimIds must be obligation ids '<resourceId>:<contract>' (got '${String(entry)}')`,
+      );
+    }
+    if (!claimIds.includes(entry)) claimIds.push(entry);
+  }
+  const resources = new Set(claimIds.map((id) => id.slice(0, id.indexOf(':'))));
+  if (resources.size !== 1) {
+    throw new HttpError(
+      400,
+      'browser calls bind one resource per action: claimIds span several resources ' +
+        `(${[...resources].sort(compareStrings).join(', ')}) — drive one action per resource`,
+    );
+  }
+  return { claimIds, resourceId: [...resources][0] as string };
+}
+
+/**
+ * `POST /browser/action` (plan Phase 1 item 4): performs ONE constrained
+ * surface operation on the session's engine-owned page and issues
+ * engine-observed records for exactly what the engine did. The full
+ * binding in one call: the relevant rendered control + entered values,
+ * the actual action, the resulting application request + entity
+ * identity, the visible outcome, and an engine-side pre-observation
+ * consumed by the later persistence read. Captured exchanges join the
+ * witness observation log inside the engine interval, binding the
+ * existing HTTP-observation consume path to this operation.
+ * Natural-key adapters capture create absence with an entity-scoped read
+ * instead of a collection listing.
+ *
+ * Args:
+ *   state: witness state and loaded adapter registry.
+ *   res: HTTP response to the action request.
+ *   body: validated browser operation and its requested entity data.
+ *
+ * Returns:
+ *   Promise<void>: completes after the action evidence is issued.
+ */
+async function handleBrowserAction(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BrowserActionRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'browser action body must be an object');
+  }
+  const { testId, operation, fields, entityId } = body as Record<string, unknown>;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'browser action requires a non-empty testId');
+  }
+  if (operation !== 'create' && operation !== 'read' && operation !== 'update' && operation !== 'delete') {
+    throw new HttpError(400, "browser action operation must be one of 'create' | 'read' | 'update' | 'delete'");
+  }
+  if (fields !== undefined && !isPlainObject(fields)) {
+    throw new HttpError(400, 'browser action fields, when present, must be a string-valued object');
+  }
+  if (entityId !== undefined && typeof entityId !== 'string') {
+    throw new HttpError(400, 'browser action entityId, when present, must be a string');
+  }
+  const session = requireOpenSession(state, body);
+  const boundTestId = requireSessionTestId(session, testId);
+  const { claimIds, resourceId } = requireBrowserClaims(body);
+  const classification = state.classifications[resourceId] as Classification | undefined;
+  const adapterName = classification?.evidenceAdapter ?? resourceId;
+  const naturalKeyCreate =
+    operation === 'create' && state.adapters.get(adapterName)?.identity === 'natural-key';
+  if (naturalKeyCreate && (typeof entityId !== 'string' || entityId.length === 0)) {
+    throw new HttpError(400, 'natural-key create requires an entityId for an entity-scoped pre-observation');
+  }
+  const { surface } = requireEngineSurface(session);
+  // The driven origin comes from trusted configuration on EVERY call —
+  // never from stored suite input (there is none anymore).
+  const appBaseUrl = requireTrustedUiBase(state);
+
+  // The engine's own observation interval (witness clock, never suite
+  // time): exchanges captured during the drive land inside it.
+  const { intervalId } = openActionInterval(state, session, operation);
+  // Engine-side pre-observation BEFORE the drive (create: id-set or
+  // natural-key entity; update: entity-fields delta) — the persistence
+  // read later consumes it under the same session.
+  let preObservationId: string | null = null;
+  if (operation === 'create' || operation === 'update') {
+    const pre = await takePreObservation(
+      state,
+      session,
+      resourceId,
+      operation === 'update' ? (entityId ?? '') : naturalKeyCreate ? (entityId as string) : undefined,
+    );
+    preObservationId = pre.observationId;
+  }
+  try {
+    const page = await enginePageFor(state, session.sessionId);
+    const observation = await driveEngineAction(page, appBaseUrl, surface, operation as EngineOperation, {
+      ...(fields !== undefined ? { fields: fields as Record<string, string> } : {}),
+      ...(entityId !== undefined ? { entityId } : {}),
+    });
+    // Publish the captured exchanges into the witness observation log
+    // INSIDE the engine interval (ticks between open and close), so the
+    // existing single-use http-observation consume path binds them.
+    for (const exchange of observation.exchanges) {
+      state.observed.push({
+        method: exchange.method,
+        path: exchange.path,
+        status: exchange.status,
+        seq: (state.observedSeq += 1),
+        bodySha256: createHash('sha256').update(exchange.body).digest('hex'),
+        bodyBytes: exchange.body.length,
+        // Engine-captured exchanges carry no request body (the engine
+        // typed the input; entered fields ride the ui.action record) —
+        // they can never serve an observe finalize, which requires the
+        // proxied request bytes.
+        requestBody: null,
+        requestTruncated: false,
+        requestBytes: 0,
+        requestContentType: null,
+        sessionId: session.sessionId,
+        tick: (state.tick += 1),
+      });
+    }
+    // Suite-submittable intervals/records stay open-submission; the
+    // ENGINE's own window closes here — late suite traffic after this
+    // tick is outside the engine interval and never credited.
+    closeActionInterval(state, session, intervalId);
+    // Witness-side activity: the engine drove a real browser action
+    // under the session; count it.
+    session.activity += 1;
+    // One engine-observed ui.action per claimed obligation (same
+    // payload, per-claim identity — the http-observation convention).
+    // The payload carries what the ENGINE observed: the operation, the
+    // rendered entity id, and the ENTERED input (exact-value echo
+    // source) — never suite-declared outcomes.
+    const issued = claimIds.map((claimId) =>
+      issueRecord(
+        state,
+        claimId,
+        'ui.action',
+        boundTestId,
+        {
+          operation,
+          entityId: observation.entityId,
+          fields: observation.enteredFields,
+          sessionId: session.sessionId,
+          anchorId: intervalId,
+        },
+        'engine-observed',
+      ),
+    );
+    const appStatus =
+      operation === 'read'
+        ? (observation.exchanges[0]?.status ?? 0)
+        : (observation.exchanges.find((entry) => entry.method !== 'GET' && entry.method !== 'HEAD' && entry.status < 400)?.status ?? 0);
+    const response: BrowserActionResponse = {
+      entityId: observation.entityId,
+      enteredFields: observation.enteredFields,
+      renderedFields: observation.renderedFields,
+      appStatus,
+      anchorId: intervalId,
+      preObservationId,
+      recordIds: issued.map((record) => record.recordId),
+    };
+    sendJson(res, 200, response);
+  } catch (error) {
+    // The drive failed AFTER the interval opened: seal the window so a
+    // failed action never leaves a dangling interval for later traffic
+    // to borrow, then fail the call (the test fails; the gate blocks).
+    try {
+      closeActionInterval(state, session, intervalId);
+    } catch {
+      // already closed — ignore
+    }
+    if (error instanceof EngineBrowserError) {
+      throw new HttpError(409, `engine browser action failed: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * `POST /browser/visible` (plan Phase 1 item 4): re-reads the rendered
+ * result for the engine-observed entity on the session's engine page
+ * and issues engine-observed visible-result records (row readback for
+ * mutations, form readback for reads).
+ */
+async function handleBrowserVisible(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BrowserVisibleRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'browser visible body must be an object');
+  }
+  const { testId, entityId, operation, anchorId } = body as Record<string, unknown>;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'browser visible requires a non-empty testId');
+  }
+  if (typeof entityId !== 'string' || entityId.length === 0) {
+    throw new HttpError(400, 'browser visible requires a non-empty entityId');
+  }
+  if (operation !== 'create' && operation !== 'read' && operation !== 'update' && operation !== 'delete') {
+    throw new HttpError(400, "browser visible operation must be one of 'create' | 'read' | 'update' | 'delete'");
+  }
+  if (anchorId !== undefined && (typeof anchorId !== 'string' || anchorId.length === 0)) {
+    throw new HttpError(400, 'anchorId must be a non-empty string when present');
+  }
+  const session = requireOpenSession(state, body);
+  const boundTestId = requireSessionTestId(session, testId);
+  const { claimIds } = requireBrowserClaims(body);
+  if (typeof anchorId === 'string') {
+    const interval = session.intervals.get(anchorId);
+    if (interval === undefined || interval.endTick === null || interval.operation !== operation) {
+      throw new HttpError(400, `action anchor '${anchorId}' is unknown or does not match this operation`);
+    }
+    for (const claimId of claimIds) {
+      const action = [...state.ledger.values()].find((record) => {
+        if (
+          record.kind !== 'ui.action' ||
+          record.obligationId !== claimId ||
+          record.testId !== boundTestId ||
+          !isPlainObject(record.payload)
+        ) {
+          return false;
+        }
+        return (
+          record.payload['anchorId'] === anchorId &&
+          record.payload['sessionId'] === session.sessionId &&
+          record.payload['operation'] === operation &&
+          record.payload['entityId'] === entityId
+        );
+      });
+      if (action === undefined) {
+        throw new HttpError(400, `action anchor '${anchorId}' does not identify claim '${claimId}'`);
+      }
+    }
+  }
+  const { surface } = requireEngineSurface(session);
+  // The driven origin comes from trusted configuration on EVERY call —
+  // never from stored suite input (there is none anymore).
+  const appBaseUrl = requireTrustedUiBase(state);
+  try {
+    const page = await enginePageFor(state, session.sessionId);
+    const fields = await readEngineVisible(page, appBaseUrl, surface, operation as EngineOperation, entityId);
+    session.activity += 1;
+    const issued = claimIds.map((claimId) =>
+      issueRecord(
+        state,
+        claimId,
+        'ui.visible-result',
+        boundTestId,
+        {
+          entityId,
+          fields,
+          sessionId: session.sessionId,
+          ...(typeof anchorId === 'string' ? { anchorId } : {}),
+        },
+        'engine-observed',
+      ),
+    );
+    const response: BrowserVisibleResponse = {
+      entityId,
+      fields,
+      recordIds: issued.map((record) => record.recordId),
+    };
+    sendJson(res, 200, response);
+  } catch (error) {
+    if (error instanceof EngineBrowserError) {
+      throw new HttpError(409, `engine browser visible read failed: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+/** Formats the bind host into a URL host (bracketing IPv6 literals). */
+function formatHost(host: string): string {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+}
+
+/** Routes one request through auth + body parse + dispatch. */
+async function handleRequest(
+  state: WitnessState,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  try {
+    const token = req.headers[RUN_HEADER];
+    if (typeof token !== 'string' || !timingSafeEqual(token, state.options.token)) {
+      sendJson(res, 401, { error: 'unauthorized: expected x-gateforge-run with the run token' });
+      return;
+    }
+    const url = new URL(req.url ?? '/', 'http://witness');
+    const path = url.pathname;
+
+    if (req.method === 'GET' && path === '/health') {
+      sendJson(res, 200, {
+        ok: true,
+        runId: state.options.runId,
+        attestationScope: 'loopback+env-fingerprint',
+        adapterCount: state.adapters.size,
+        recordCount: state.ledger.size,
+      });
+      return;
+    }
+    if (req.method === 'GET' && path === '/records') {
+      const records = [...state.ledger.values()].sort((a, b) => compareStrings(a.recordId, b.recordId));
+      sendJson(res, 200, { records });
+      return;
+    }
+    if (req.method === 'GET' && path === '/ledger-attestation') {
+      handleLedgerAttestation(state, res, req.headers[VERIFIER_HEADER]);
+      return;
+    }
+    if (req.method === 'POST' && path === '/run-context') {
+      await handleRunContext(state, res, req.headers[VERIFIER_HEADER], await readBody(req));
+      return;
+    }
+    if (req.method === 'GET' && path === '/classifications') {
+      const resources: Record<string, unknown> = {};
+      for (const key of Object.keys(state.classifications).sort(compareStrings)) {
+        resources[key] = toClassificationView(state.classifications[key] as Classification);
+      }
+      sendJson(res, 200, { resources });
+      return;
+    }
+    if (req.method === 'POST' && path === '/records') {
+      await handleRecords(state, res, (await readBody(req)) as RecordsRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/runs/expected-set') {
+      await handleExpectedSet(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ExpectedSetRequest,
+      );
+      return;
+    }
+    if (req.method === 'POST' && path === '/runs/behavior-catalog') {
+      await handleBehaviorCatalog(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as BehaviorCatalogRequest,
+      );
+      return;
+    }
+    if (req.method === 'POST' && path === '/behavior/execute') {
+      await handleBehaviorExecute(state, res, (await readBody(req)) as BehaviorExecuteRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/behavior/principal') {
+      await handleBehaviorPrincipal(state, res, (await readBody(req)) as BehaviorPrincipalRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/runs/server-e2e-declarations') {
+      await handleServerE2eDeclarations(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ServerE2eDeclarationsRequest,
+      );
+      return;
+    }
+    if (req.method === 'POST' && path === '/runs/observe-declarations') {
+      await handleObserveDeclarations(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ObserveDeclarationsRequest,
+      );
+      return;
+    }
+    if (req.method === 'POST' && path === '/observe/finalize') {
+      await handleObserveFinalize(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ObserveFinalizeRequest,
+      );
+      return;
+    }
+    if (req.method === 'GET' && path === '/runs/chaos-schedule') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      // The replay record: which route key, which request index, how
+      // long it was held, and whether it went out before its
+      // predecessor. `chaos: null` is the honest answer for a run that
+      // never asked for chaos.
+      sendJson(res, 200, {
+        chaos: state.chaos === null ? null : { ...state.chaos.options, schedule: state.chaos.entries },
+      });
+      return;
+    }
+    if (req.method === 'GET' && path === '/runs/twin-shapes') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      // Twin path coverage (E64): the request SHAPES each test's
+      // session exercised, and nothing else — no URL, no body, no
+      // non-allowlisted query value. `enabled: false` is the honest
+      // answer for a run that never configured twin coverage, and it
+      // arrives with an empty list rather than a guess.
+      //
+      // Each entry is keyed by the session's REGISTERED identity, not by
+      // the runner-assigned test id: that id is what the test ran under,
+      // and the supervisor enumerated a different one from the
+      // repository's config (Playwright hashes the file path relative to
+      // the config it loaded). The identity is what both sides speak.
+      const twins: TwinShapeReport[] = [...state.sessions.values()]
+        .filter((session) => session.twinShapes.length > 0)
+        .map((session) => ({
+          identity:
+            session.registered === null
+              ? null
+              : {
+                  file: session.registered.file,
+                  titlePath: [...session.registered.titlePath],
+                  project: session.registered.project,
+                },
+          testId: session.testId,
+          observationOnly: session.observationOnly,
+          shapes: session.twinShapes,
+        }))
+        .sort((left, right) =>
+          compareStrings(
+            left.identity === null ? left.testId : expectedKey(left.identity.project, left.identity.file, left.identity.titlePath),
+            right.identity === null ? right.testId : expectedKey(right.identity.project, right.identity.file, right.identity.titlePath),
+          ),
+        );
+      const response: TwinShapesResponse = { enabled: state.twinShapes !== null, twins };
+      sendJson(res, 200, response);
+      return;
+    }
+    if (req.method === 'GET' && path === '/runs/execution-trace') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      sendJson(res, 200, executionTraceOf(state));
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/open') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      await handleSessionOpen(state, res, (await readBody(req)) as SessionOpenRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/close') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      await handleSessionClose(state, res, (await readBody(req)) as SessionCloseRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/release') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      await handleSessionRelease(state, res, (await readBody(req)) as SessionReleaseRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/resolve') {
+      await handleSessionResolve(state, res, (await readBody(req)) as SessionResolveRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/identity') {
+      await handleSessionIdentity(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/intervals/open') {
+      await handleIntervalOpen(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/intervals/close') {
+      await handleIntervalClose(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
+    if (req.method === 'POST' && path === '/witness/pre-observation') {
+      await handlePreObservation(state, res, (await readBody(req)) as PreObservationRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/witness/persistence') {
+      await handlePersistence(state, res, (await readBody(req)) as PersistenceRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/witness/server-persistence') {
+      await handleServerPersistence(
+        state,
+        res,
+        req.headers[VERIFIER_HEADER],
+        (await readBody(req)) as ServerPersistenceIntentRequest,
+      );
+      return;
+    }
+    if (req.method === 'POST' && path === '/witness/http-observation') {
+      await handleHttpObservation(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
+    if (req.method === 'POST' && path === '/browser/surface') {
+      await handleBrowserSurface(state, res, (await readBody(req)) as BrowserSurfaceRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/browser/action') {
+      await handleBrowserAction(state, res, (await readBody(req)) as BrowserActionRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/browser/visible') {
+      await handleBrowserVisible(state, res, (await readBody(req)) as BrowserVisibleRequest);
+      return;
+    }
+    sendJson(res, 404, { error: `no witness endpoint at ${req.method} ${path}` });
+  } catch (error) {
+    if (error instanceof HttpError) {
+      const detail = error.detail;
+      sendJson(
+        res,
+        error.status,
+        detail === null ? { error: error.message } : { error: error.message, detail },
+      );
+      return;
+    }
+    if (error instanceof AttestationError) {
+      sendJson(res, 409, { error: 'attestation blocked', detail: error.message });
+      return;
+    }
+    sendJson(
+      res,
+      500,
+      { error: `witness internal error: ${error instanceof Error ? error.message : String(error)}` },
+    );
+  }
+}
+
+/** Constant-time token comparison. */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+/**
+ * Enforces the SUPERVISOR capability (enforcement-review fix 3): the
+ * verifier key — the secret the tested suite never receives. The suite's
+ * run token authorizes evidence submission and session resolution, never
+ * session lifecycle, expected-set registration, traces, or attestation.
+ * A witness without a configured verifier key has NO supervisor
+ * capability at all: every supervisor endpoint answers 403 (fail closed)
+ * rather than degrading to run-token authority.
+ *
+ * Args:
+ *   state: running witness state.
+ *   verifier: the `x-gateforge-verifier` header value.
+ *
+ * Throws:
+ *   HttpError: 403 when the witness holds no verifier key (typed
+ *     'supervisor authorization required') or 401 on a key mismatch.
+ */
+function requireSupervisor(state: WitnessState, verifier: unknown): void {
+  const verifierKey = state.options.verifierKey;
+  if (verifierKey === null || verifierKey === undefined) {
+    throw new HttpError(
+      403,
+      'supervisor authorization required: this witness runs without a verifier key, so the ' +
+        'supervisor surface (expected set, session open/close, execution trace) is unavailable — ' +
+        'start the witness with GATEFORGE_WITNESS_VERIFIER_KEY from the orchestrating CLI',
+    );
+  }
+  if (typeof verifier !== 'string' || !timingSafeEqual(verifier, verifierKey)) {
+    throw new HttpError(
+      401,
+      'unauthorized: supervisor endpoints require x-gateforge-verifier with the verifier key ' +
+        '(the run token never authorizes session lifecycle)',
+    );
+  }
+}
+
+/** Sends a GF-canonical JSON response. */
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  res.end(canonicalOf(body));
+}
+
+/**
+ * `POST /runs/expected-set` (enforcement-review fix 2a) — SUPERVISOR
+ * ONLY: registers the expected test set BEFORE the run, bound to this
+ * run in witness memory. Once registered, `/sessions/open` accepts only
+ * tests in this set (an invented testId is refused), and the execution
+ * trace groups sessions by these registered identities. Identical
+ * re-registration is idempotent (200); any change is 409; registration
+ * after any session was opened is 409 (the expected set is a PRE-run
+ * fact). The response carries the domain-separated enumeration digest
+ * the sealed execution result binds.
+ *
+ * Args:
+ *   state: running witness state.
+ *   res: response to answer.
+ *   verifier: the `x-gateforge-verifier` header value.
+ *   body: the parsed request body ({tests: [...]}, identity-shaped).
+ */
+async function handleExpectedSet(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ExpectedSetRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || !Array.isArray(body['tests'])) {
+    throw new HttpError(400, 'expected-set body must be {tests: [...]}');
+  }
+  const tests: Array<{
+    testId: string | null;
+    project: string | null;
+    file: string;
+    titlePath: string[];
+    observationOnly: boolean;
+  }> = [];
+  for (const entry of body['tests']) {
+    if (typeof entry !== 'object' || entry === null) {
+      throw new HttpError(400, 'expected-set tests must be objects');
+    }
+    const row = entry as Record<string, unknown>;
+    const testId = row['testId'] === undefined || row['testId'] === null ? null : row['testId'];
+    const project = row['project'] === undefined || row['project'] === null ? null : row['project'];
+    // Twin path coverage (E64): the raw-twin mark rides on the identity,
+    // which is the only part of a registration that survives from
+    // enumeration to execution. Absent = an ordinary session, so a
+    // registration without the field is byte-identical to before.
+    const observationOnly = row['observationOnly'] === true;
+    if (
+      (testId !== null && typeof testId !== 'string') ||
+      (project !== null && typeof project !== 'string') ||
+      typeof row['file'] !== 'string' ||
+      row['file'].length === 0 ||
+      !Array.isArray(row['titlePath']) ||
+      (row['titlePath'] as unknown[]).length === 0 ||
+      !(row['titlePath'] as unknown[]).every((part) => typeof part === 'string' && part.length > 0) ||
+      (row['observationOnly'] !== undefined && typeof row['observationOnly'] !== 'boolean')
+    ) {
+      throw new HttpError(
+        400,
+        'expected-set tests require file (non-empty string), titlePath (non-empty string array), ' +
+          'and optional testId/project strings and an optional observationOnly boolean',
+      );
+    }
+    tests.push({
+      testId: testId,
+      project: project,
+      file: row['file'],
+      titlePath: row['titlePath'] as string[],
+      observationOnly,
+    });
+  }
+  const digest = enumerationDigestOf(tests);
+  if (state.enumerationDigest !== null) {
+    if (state.enumerationDigest === digest) {
+      sendJson(res, 200, { bound: true as const, enumerationDigest: digest, count: state.expectedTests.size });
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'an expected set is already bound to this run and differs; the expected set is a PRE-run ' +
+        'fact and is never relabeled — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (state.sessions.size > 0) {
+    sendJson(res, 409, {
+      error:
+        'sessions were already opened on this witness; the expected set must be registered ' +
+        'BEFORE the run — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  state.expectedTests.clear();
+  for (const test of tests) {
+    state.expectedTests.set(expectedKey(test.project, test.file, test.titlePath), test);
+  }
+  state.enumerationDigest = digest;
+  sendJson(res, 200, { bound: true as const, enumerationDigest: digest, count: state.expectedTests.size });
+}
+
+/**
+ * Binds the compiled behavior catalog plus allowed case/test assignments
+ * (plan 2026-09-19 §4.7, Phase 4): supervisor-only, one-time, before any
+ * session opens. The worker can never register a catalog or assign
+ * itself cases — `/behavior/execute` resolves everything from this
+ * binding.
+ */
+async function handleBehaviorCatalog(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: BehaviorCatalogRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || !('catalog' in body) || !isPlainObject(body['assignments'])) {
+    throw new HttpError(
+      400,
+      'behavior-catalog body must be {catalog, assignments: {testId: [caseId, ...]}, routes: [...], authorityProfileDigest}',
+    );
+  }
+  const parsed = BehaviorCatalogSchema.safeParse(body['catalog']);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue === undefined ? '' : ` at '${issue.path.map(String).join('.')}':`;
+    throw new HttpError(400, `behavior catalog is invalid${path} ${issue?.message ?? 'unknown schema error'}`);
+  }
+  const catalog = parsed.data as BehaviorCatalog;
+  const rawRoutes = (body as Record<string, unknown>)['routes'];
+  if (!Array.isArray(rawRoutes) || rawRoutes.length === 0) {
+    throw new HttpError(
+      400,
+      'behavior-catalog routes must be the non-empty complete route inventory — principal attribution needs every applicable route (no any-endpoint fallback)',
+    );
+  }
+  const routes: HttpRouteCandidate[] = [];
+  for (let index = 0; index < rawRoutes.length; index += 1) {
+    const row = rawRoutes[index] as Record<string, unknown> | null;
+    if (
+      typeof row !== 'object' ||
+      row === null ||
+      typeof row['resourceId'] !== 'string' ||
+      (row['resourceId'] as string).length === 0 ||
+      typeof row['method'] !== 'string' ||
+      (row['method'] as string).length === 0 ||
+      typeof row['canonicalPath'] !== 'string' ||
+      (row['canonicalPath'] as string).length === 0
+    ) {
+      throw new HttpError(400, `behavior-catalog routes[${String(index)}] must be {resourceId, method, canonicalPath}`);
+    }
+    routes.push({
+      resourceId: row['resourceId'] as string,
+      method: (row['method'] as string).toUpperCase(),
+      canonicalPath: row['canonicalPath'] as string,
+    });
+  }
+  routes.sort((a, b) => (a.resourceId < b.resourceId ? -1 : a.resourceId > b.resourceId ? 1 : 0));
+  const authorityProfileDigest = (body as Record<string, unknown>)['authorityProfileDigest'];
+  if (typeof authorityProfileDigest !== 'string' || !/^[0-9a-f]{64}$/.test(authorityProfileDigest)) {
+    throw new HttpError(400, 'behavior-catalog authorityProfileDigest must be 64-char lowercase hex');
+  }
+  // Approved surface descriptors (Phase 6): optional map of surface key
+  // to descriptor. Each descriptor is structurally validated NOW —
+  // worker-supplied surfaces are never resolved at drive time.
+  const surfaces = new Map<string, SurfaceDescriptor>();
+  const rawSurfaces = (body as Record<string, unknown>)['surfaces'];
+  if (rawSurfaces !== undefined) {
+    if (!isPlainObject(rawSurfaces)) {
+      throw new HttpError(400, 'behavior-catalog surfaces must be a map of surface key to descriptor');
+    }
+    for (const [surfaceKey, descriptor] of Object.entries(rawSurfaces)) {
+      if (surfaceKey.length === 0) {
+        throw new HttpError(400, 'behavior-catalog surface keys must be non-empty');
+      }
+      try {
+        surfaces.set(surfaceKey, validateSurface(descriptor as SurfaceDescriptor));
+      } catch (error) {
+        throw new HttpError(400, `behavior-catalog surface '${surfaceKey}' is invalid: ${(error as Error).message}`);
+      }
+    }
+  }
+  const assignments = new Map<string, Set<string>>();
+  for (const [testId, ids] of Object.entries(body['assignments'] as Record<string, unknown>)) {
+    if (testId.length === 0 || !Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === 'string')) {
+      throw new HttpError(
+        400,
+        `behavior-catalog assignment for test '${testId}' must be a non-empty array of case ids`,
+      );
+    }
+    const resolved = new Set<string>();
+    for (const id of ids as string[]) {
+      const found = catalog.cases.find((item) => item.caseId === id);
+      if (found === undefined) {
+        throw new HttpError(
+          400,
+          `behavior-catalog assignment for test '${testId}' names unknown case '${id}' — cases resolve by canonical case id only`,
+        );
+      }
+      resolved.add(found.caseId);
+    }
+    assignments.set(testId, resolved);
+  }
+  if (state.behaviorCatalog !== null) {
+    if (state.behaviorCatalog.catalogDigest === catalog.catalogDigest) {
+      const response: BehaviorCatalogResponse = {
+        bound: true,
+        caseCount: catalog.cases.length,
+        assignmentCount: assignments.size,
+        routeCount: routes.length,
+      };
+      sendJson(res, 200, response);
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'a behavior catalog is already bound to this run and differs; the catalog is a PRE-run ' +
+        'fact and is never relabeled — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (state.sessions.size > 0) {
+    sendJson(res, 409, {
+      error:
+        'sessions were already opened on this witness; the behavior catalog must be registered ' +
+        'BEFORE the run — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  state.behaviorCatalog = { catalog, catalogDigest: catalog.catalogDigest, assignments, routes, authorityProfileDigest, surfaces };
+  const response: BehaviorCatalogResponse = {
+    bound: true,
+    caseCount: catalog.cases.length,
+    assignmentCount: assignments.size,
+    routeCount: routes.length,
+  };
+  sendJson(res, 200, response);
+}
+
+/**
+ * Executes one required behavior case through the witness-owned lifecycle
+ * (plan 2026-09-19 §4.6, Phase 4): the worker names an allowed caseId and
+ * nothing else. Actor credentials, expectations, before-state, and origin
+ * resolve from the supervisor-bound catalog and the trusted fixture
+ * provider — input/actor overrides are request errors, never proof.
+ *
+ * Phase 4 executes fixture preparation plus the authoritative before
+ * snapshot; the principal operation driver lands in Phase 5, so a
+ * successful call leaves the execution at `before-snapshot-complete`
+ * with a redacted reference (no credentials, no subjects).
+ */
+async function handleBehaviorExecute(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BehaviorExecuteRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'behavior/execute body must be {sessionId, sessionToken, caseId}');
+  }
+  const keys = Object.keys(body).sort();
+  if (keys.length !== 3 || keys[0] !== 'caseId' || keys[1] !== 'sessionId' || keys[2] !== 'sessionToken') {
+    throw new HttpError(
+      400,
+      'behavior/execute accepts exactly {sessionId, sessionToken, caseId} — unknown keys are errors; ' +
+        'a worker can name an allowed case but cannot post actor credentials, expectations, or origin',
+    );
+  }
+  const caseId = body['caseId'];
+  if (typeof caseId !== 'string' || caseId.length === 0) {
+    throw new HttpError(400, 'behavior/execute requires a non-empty string caseId');
+  }
+  const binding = state.behaviorCatalog;
+  if (binding === null) {
+    throw new HttpError(
+      409,
+      'no behavior catalog is bound to this run — register POST /runs/behavior-catalog before the run',
+    );
+  }
+  const session = requireOpenSession(state, body);
+  const compiled = binding.catalog.cases.find((item) => item.caseId === caseId);
+  if (compiled === undefined) {
+    throw new HttpError(400, `behavior/execute names unknown case '${caseId}' — cases resolve by canonical case id only`);
+  }
+  // Assignment keys are the SUPERVISOR-REGISTERED test ids (the same
+  // trusted identity the expected set binds). A runner's own ad-hoc
+  // session id is not that identity, so the session resolves through the
+  // registration it was minted for; a session that carries no
+  // registration (no expected set) can only match its own id literally.
+  const allowed =
+    binding.assignments.get(session.testId) ??
+    (session.registered === null || session.registered.testId === null
+      ? undefined
+      : binding.assignments.get(session.registered.testId));
+  if (allowed === undefined || !allowed.has(compiled.caseId)) {
+    throw new HttpError(
+      403,
+      `case '${compiled.definition.id}' is not assigned to test '${session.testId}' — a test executes only its own allowed cases`,
+    );
+  }
+  if (state.caseExecutions.has(compiled.caseId)) {
+    throw new HttpError(
+      409,
+      `case '${compiled.definition.id}' was already executed in this run — one execution per required case per run`,
+    );
+  }
+  const provider = state.options.fixtureProvider ?? null;
+  if (provider === null) {
+    throw new HttpError(
+      409,
+      'no trusted fixture provider is configured — strong behavior cases block (suite-supplied fixtures are never a fallback)',
+    );
+  }
+  let lease;
+  try {
+    lease = await provider.prepare({
+      recipe: compiled.definition.fixture,
+      runId: state.options.runId,
+      caseId: compiled.caseId,
+    });
+  } catch (error) {
+    throw new HttpError(500, `fixture preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (
+    lease === null ||
+    typeof lease !== 'object' ||
+    typeof (lease as { namespace?: unknown }).namespace !== 'string' ||
+    ((lease as { namespace?: unknown }).namespace as string).length === 0
+  ) {
+    try {
+      await provider.release((lease as { leaseId?: string } | null)?.leaseId ?? 'unknown');
+    } catch {
+      // Release is best-effort; the preparation failure below is the verdict.
+    }
+    throw new HttpError(500, 'fixture preparation returned a malformed lease (fail closed)');
+  }
+  const executionId = randomUUID();
+  const execution: CaseExecution = {
+    executionId,
+    caseId: compiled.caseId,
+    testId: session.testId,
+    sessionId: session.sessionId,
+    state: 'fixture-prepared' as CaseExecutionState,
+    lease: lease as FixtureLease,
+    beforeSnapshots: [],
+    beforeCheckpoints: {},
+    detail: null,
+  };
+  state.caseExecutions.set(compiled.caseId, execution);
+  const failExecution = (detail: string): HttpError => {
+    execution.state = 'failed';
+    execution.detail = detail;
+    // Namespace cleanup runs on errors without changing the verdict.
+    // Fire-and-forget with a floor: the thrown error carries the failure.
+    void Promise.resolve(provider.release(execution.lease.leaseId)).catch(() => {});
+    return new HttpError(409, detail);
+  };
+  // Authoritative before snapshots over every declared effect scope. Any
+  // incomplete collection fails the execution with a diagnostic fact —
+  // never a satisfying observation.
+  const checkpoints: Record<string, string> = {};
+  for (const effect of compiled.effects) {
+    const adapter = state.adapters.get(effect.adapter);
+    if (adapter === undefined) {
+      throw failExecution(
+        `observation incomplete: no reviewed adapter '${effect.adapter}' for scope '${effect.scope}' (OBSERVATION_SCOPE_INCOMPLETE)`,
+      );
+    }
+    if (typeof adapter.snapshotScope !== 'function') {
+      throw failExecution(
+        `observation incomplete: adapter '${effect.adapter}' cannot observe scope '${effect.scope}' — snapshotScope is unavailable (OBSERVATION_SCOPE_INCOMPLETE)`,
+      );
+    }
+    const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl ?? '';
+    const ctx = makeAdapterContext(
+      baseUrl,
+      effect.resourceId,
+      () => {
+        throw new Error('snapshot observations must not use the candidate GET transport');
+      },
+      state.options.adapterReadAuthorization
+        ? { authorization: state.options.adapterReadAuthorization }
+        : undefined,
+    );
+    let snapshot;
+    try {
+      snapshot = await adapter.snapshotScope(ctx, { scope: effect.scope, fixtureNamespace: execution.lease.namespace });
+    } catch (error) {
+      throw failExecution(
+        `observation incomplete: scope '${effect.scope}' collection failed: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+      );
+    }
+    const validated = validateScopeSnapshot(snapshot, {
+      scope: effect.scope,
+      fixtureNamespace: execution.lease.namespace,
+      identityFields: effect.identityFields,
+      fields: effect.fields,
+    });
+    if (!validated.ok) {
+      throw failExecution(`observation incomplete: ${validated.detail} (OBSERVATION_SCOPE_INCOMPLETE)`);
+    }
+    checkpoints[effect.scope] = validated.snapshot.checkpoint;
+    execution.beforeSnapshots.push(snapshot as ScopeSnapshot);
+  }
+  execution.beforeCheckpoints = checkpoints;
+  execution.state = 'before-snapshot-complete';
+  const firstCheckpoint = Object.values(checkpoints).sort()[0] ?? null;
+  const response: BehaviorExecuteResponse = {
+    caseId: compiled.caseId,
+    executionId,
+    namespace: execution.lease.namespace,
+    beforeCheckpoint: firstCheckpoint,
+    state: execution.state,
+  };
+  sendJson(res, 200, response);
+}
+
+/** Request action shape for the principal driver. */
+interface BehaviorRequestActionShape {
+  kind: 'request';
+  method: string;
+  pathTemplate: string;
+  path: Record<string, { from: string; value?: unknown; key?: string }>;
+  query: Record<string, { from: string; value?: unknown; key?: string }>;
+  body: { encoding: string; fields?: Record<string, { from: string; value?: unknown; key?: string }>; fixture?: string };
+  credentialVariant: 'valid' | 'missing' | 'corrupted';
+  signatureProfile?: string;
+}
+
+/** Surface action shape for the principal driver. */
+interface BehaviorSurfaceActionShape {
+  kind: 'surface';
+  surface: string;
+  operation: 'create' | 'read' | 'update' | 'delete';
+  subject?: { from: string; value?: unknown; key?: string };
+  fields: Record<string, { from: string; value?: unknown; key?: string }>;
+  files?: Record<string, string>;
+}
+
+/** Principal action shapes the witness drives (deliver/sequence land in Phase 8). */
+type BehaviorPrincipalAction = BehaviorRequestActionShape | BehaviorSurfaceActionShape | { kind: string };
+
+/**
+ * Drives one surface action through the engine-owned browser (plan
+ * 2026-09-19 Phase 6): resolves the surface descriptor from the
+ * supervisor-bound bundle (never a worker object), resolves
+ * subject/fields from the trusted lease, drives with the existing
+ * engine browser drivers, and reads the rendered result back itself.
+ * Error banners, navigation, and state checks are engine observations —
+ * never inferred from test source.
+ */
+async function driveSurfacePrincipal(
+  state: WitnessState,
+  binding: NonNullable<WitnessState['behaviorCatalog']>,
+  execution: CaseExecution,
+  compiled: { caseId: string; definition: { id: string; actor: string } },
+  action: {
+    surface: string;
+    operation: 'create' | 'read' | 'update' | 'delete';
+    subject?: { from: string; value?: unknown; key?: string };
+    fields: Record<string, { from: string; value?: unknown; key?: string }>;
+    files?: Record<string, string>;
+  },
+  failExecution: (detail: string) => HttpError,
+  session: TestSession,
+): Promise<{
+  operationId: string;
+  browserObservation: { url: string; entityId: string; visibleFields: Record<string, unknown> };
+  submittedValues: unknown;
+}> {
+  const descriptor = binding.surfaces.get(action.surface);
+  if (descriptor === undefined) {
+    throw failExecution(
+      `surface '${action.surface}' has no approved descriptor in the bound bundle — strong cases resolve surfaces from the approved bundle, not worker objects (BEHAVIOR_BINDING_MISMATCH)`,
+    );
+  }
+  if (action.files !== undefined && Object.keys(action.files).length > 0) {
+    throw failExecution(
+      'surface file inputs need fixture file materialization, unsupported in this profile — declare the upload as an explicit engine-http multipart case or omit files (OBSERVATION_SCOPE_INCOMPLETE)',
+    );
+  }
+  const resolveField = (raw: { from: string; value?: unknown; key?: string }, what: string): string => {
+    if (raw.from === 'literal') {
+      if (typeof raw.value !== 'string') {
+        throw failExecution(`surface ${what} literal must be a string (BEHAVIOR_BINDING_MISMATCH)`);
+      }
+      return raw.value;
+    }
+    if (raw.from === 'fixture' && typeof raw.key === 'string') {
+      const segments = raw.key.split('.');
+      let current: unknown = execution.lease.subjects;
+      for (const segment of segments) {
+        if (typeof current !== 'object' || current === null || Array.isArray(current)) {
+          throw failExecution(`surface ${what} fixture key '${raw.key}' does not resolve (BEHAVIOR_BINDING_MISMATCH)`);
+        }
+        if (!Object.prototype.hasOwnProperty.call(current, segment)) {
+          throw failExecution(`surface ${what} fixture key '${raw.key}' does not resolve (BEHAVIOR_BINDING_MISMATCH)`);
+        }
+        current = (current as Record<string, unknown>)[segment];
+      }
+      if (typeof current !== 'string') {
+        throw failExecution(`surface ${what} fixture key '${raw.key}' is not a string (BEHAVIOR_BINDING_MISMATCH)`);
+      }
+      return current;
+    }
+    throw failExecution(`surface ${what} uses an unsupported value source (BEHAVIOR_BINDING_MISMATCH)`);
+  };
+  let subject: string | undefined;
+  if (action.subject !== undefined) {
+    subject = resolveField(action.subject, 'subject');
+  }
+  const fields: Record<string, string> = {};
+  for (const [name, raw] of Object.entries(action.fields)) {
+    fields[name] = resolveField(raw, `field '${name}'`);
+  }
+  let appBase: string;
+  try {
+    appBase = requireTrustedUiBase(state);
+  } catch (error) {
+    throw failExecution(error instanceof Error ? error.message : String(error));
+  }
+  let page;
+  try {
+    page = await enginePageFor(state, session.sessionId);
+  } catch (error) {
+    throw failExecution(
+      `engine browser unavailable: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+    );
+  }
+  let observation;
+  try {
+    observation = await driveEngineAction(page, appBase, descriptor, action.operation, {
+      ...(Object.keys(fields).length > 0 ? { fields } : {}),
+      ...(subject !== undefined ? { entityId: subject } : {}),
+    });
+  } catch (error) {
+    throw failExecution(
+      `engine surface ${action.operation} failed: ${error instanceof Error ? error.message : String(error)} (BEHAVIOR_EFFECT_MISMATCH)`,
+    );
+  }
+  let visible: Record<string, string>;
+  try {
+    visible = await readEngineVisible(page, appBase, descriptor, action.operation, observation.entityId);
+  } catch (error) {
+    throw failExecution(
+      `engine visible read failed: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+    );
+  }
+  let url: string;
+  try {
+    url = page.url();
+  } catch (error) {
+    throw failExecution(`engine page url unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return {
+    operationId: randomUUID(),
+    browserObservation: { url, entityId: observation.entityId, visibleFields: { ...visible } },
+    submittedValues: {
+      surface: action.surface,
+      operation: action.operation,
+      ...(subject !== undefined ? { subject } : {}),
+      fields: { ...fields },
+    },
+  };
+}
+
+/**
+ * Drives the principal operation of a prepared case (plan 2026-09-19
+ * §4.6, Phase 5): resolves the execution, runs the witness-owned
+ * engine-http request driver for `request` actions, attributes the
+ * captured attempt against the bound route inventory, resolves the
+ * completion barrier, observes after-state, and issues the sealed
+ * `behavior.case` record(s) — one per compiled obligation. Grading
+ * happens core-side, never here.
+ *
+ * `surface` actions need the Phase 6 browser driver; `deliver` and
+ * `sequence` need Phase 8 — all block with an explicit cause.
+ */
+async function handleBehaviorPrincipal(
+  state: WitnessState,
+  res: ServerResponse,
+  body: BehaviorPrincipalRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'behavior/principal body must be {sessionId, sessionToken, executionId}');
+  }
+  const keys = Object.keys(body).sort();
+  if (keys.length !== 3 || keys[0] !== 'executionId' || keys[1] !== 'sessionId' || keys[2] !== 'sessionToken') {
+    throw new HttpError(400, 'behavior/principal accepts exactly {sessionId, sessionToken, executionId}');
+  }
+  const executionId = body['executionId'];
+  if (typeof executionId !== 'string' || executionId.length === 0) {
+    throw new HttpError(400, 'behavior/principal requires a non-empty string executionId');
+  }
+  const binding = state.behaviorCatalog;
+  if (binding === null) {
+    throw new HttpError(409, 'no behavior catalog is bound to this run');
+  }
+  const session = requireOpenSession(state, body);
+  const execution = [...state.caseExecutions.values()].find((item) => item.executionId === executionId);
+  if (execution === undefined) {
+    throw new HttpError(400, `behavior/principal names unknown execution '${executionId}'`);
+  }
+  if (execution.sessionId !== session.sessionId) {
+    throw new HttpError(
+      403,
+      'behavior/principal session does not own this execution — executions belong to the session that prepared them',
+    );
+  }
+  if (execution.state === 'sealed') {
+    throw new HttpError(409, 'behavior/principal execution is already sealed — one execution per required case per run');
+  }
+  if (execution.state === 'failed') {
+    throw new HttpError(409, `behavior/principal execution failed: ${execution.detail ?? 'unknown failure'}`);
+  }
+  if (execution.state !== 'before-snapshot-complete') {
+    throw new HttpError(409, `behavior/principal execution is in state '${execution.state}', not ready for the principal`);
+  }
+  const compiled = binding.catalog.cases.find((item) => item.caseId === execution.caseId);
+  if (compiled === undefined) {
+    throw new HttpError(409, 'behavior/principal case vanished from the bound catalog (fail closed)');
+  }
+  const failExecution = (detail: string): HttpError => {
+    execution.state = 'failed';
+    execution.detail = detail;
+    const provider = state.options.fixtureProvider ?? null;
+    if (provider !== null) {
+      void Promise.resolve(provider.release(execution.lease.leaseId)).catch(() => {});
+    }
+    return new HttpError(409, detail);
+  };
+  const action = compiled.definition.action as BehaviorPrincipalAction;
+  const actorProfile = compiled.definition.actor;
+  const provider = state.options.fixtureProvider ?? null;
+  // The sealed principal evidence: exactly one of the two drivers fills
+  // its half. Request cases seal attempts + request observations;
+  // surface cases seal the browser observation.
+  let attempts: Array<{
+    engineRequestId: string;
+    method: string;
+    path: string;
+    endpointResourceId: string | null;
+    actorRef: string;
+    requestDigest: string;
+    status: number | null;
+    responseDigest: string | null;
+  }> = [];
+  let requestObservations: Array<{
+    engineRequestId: string;
+    method: string;
+    path: string;
+    query: Record<string, unknown>;
+    body: unknown;
+    status: number | null;
+    responseBody: unknown;
+  }> = [];
+  let browserObservation:
+    | { url: string; entityId: string; visibleFields: Record<string, unknown> }
+    | undefined = undefined;
+  let queueObservation: QueueObservation | undefined = undefined;
+  let submittedValues: unknown;
+  let operationId: string;
+  execution.state = 'principal-executing';
+  if (action.kind === 'request') {
+    const requestAction = action as BehaviorRequestActionShape;
+    if (compiled.definition.channel !== 'engine-http') {
+      throw failExecution(
+        `case '${compiled.definition.id}' requires the '${compiled.definition.channel}' channel — the Phase 8 task driver produces that evidence`,
+      );
+    }
+    if (provider === null || typeof provider.resolveCredential !== 'function') {
+      throw failExecution('no trusted credential resolver is configured — the principal cannot authenticate engine-side');
+    }
+    const origin = state.options.targetBaseUrl ?? null;
+    if (origin === null || origin === '') {
+      throw failExecution('no approved subject origin is configured for the principal driver');
+    }
+    let driven;
+    try {
+      driven = await driveBehaviorRequest({
+        action: {
+          kind: 'request',
+          method: requestAction.method,
+          pathTemplate: requestAction.pathTemplate,
+          path: requestAction.path,
+          query: requestAction.query,
+          body: requestAction.body,
+          credentialVariant: requestAction.credentialVariant,
+          ...(requestAction.signatureProfile !== undefined ? { signatureProfile: requestAction.signatureProfile } : {}),
+        },
+        lease: execution.lease,
+        actorProfile,
+        origin,
+        resolveCredential: (credentialRef: string) => provider.resolveCredential!(credentialRef),
+        timeoutMs: state.options.requestTimeoutMs,
+      });
+    } catch (error) {
+      if (error instanceof BehaviorDriverError) {
+        throw failExecution(`principal driver: ${error.message} (OBSERVATION_SCOPE_INCOMPLETE)`);
+      }
+      throw failExecution(`principal driver failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    execution.state = 'principal-captured';
+    // Attribute the captured attempt against the bound inventory with the
+    // compiled endpoint as expected — the grader re-resolves
+    // independently; a misdirected principal fails here with a diagnostic
+    // instead of sealing evidence for the wrong endpoint.
+    const interpreted = interpretObservedPath(driven.path);
+    if (!interpreted.ok) {
+      throw failExecution(`principal captured a noncanonical path: ${interpreted.reason} (BEHAVIOR_BINDING_MISMATCH)`);
+    }
+    const expectedEndpoint = compiled.endpointResourceId ?? compiled.resourceId;
+    const resolution = resolveHttpRoute(driven.method, interpreted.path, binding.routes, expectedEndpoint);
+    if (resolution.status !== 'match') {
+      const reason =
+        resolution.status === 'ambiguous'
+          ? `ambiguous route attribution for ${driven.method} ${interpreted.path} (BEHAVIOR_BINDING_MISMATCH)`
+          : resolution.status === 'mismatch'
+            ? `principal reached '${resolution.matched.resourceId}', not the required endpoint '${expectedEndpoint}' (BEHAVIOR_BINDING_MISMATCH)`
+            : resolution.status === 'nomatch'
+              ? `principal ${driven.method} ${interpreted.path} matches no inventoried route (BEHAVIOR_BINDING_MISMATCH)`
+              : resolution.reason;
+      throw failExecution(reason);
+    }
+    operationId = driven.engineRequestId;
+    attempts = [
+      {
+        engineRequestId: driven.engineRequestId,
+        method: driven.method,
+        path: driven.path,
+        endpointResourceId: resolution.matched.resourceId,
+        actorRef: actorProfile,
+        requestDigest: driven.requestDigest,
+        status: driven.status,
+        responseDigest: driven.responseDigest,
+      },
+    ];
+    requestObservations = [
+      {
+        engineRequestId: driven.engineRequestId,
+        method: driven.method,
+        path: driven.path,
+        query: { ...driven.query },
+        body: driven.body,
+        status: driven.status,
+        responseBody: driven.responseBody,
+      },
+    ];
+    submittedValues = { path: driven.path, query: { ...driven.query }, body: driven.body };
+  } else if (action.kind === 'surface') {
+    const surfaceAction = action as BehaviorSurfaceActionShape;
+    const surfaceChannel: string = compiled.definition.channel;
+    if (surfaceChannel !== 'engine-browser') {
+      throw failExecution(
+        `surface case '${compiled.definition.id}' requires the engine-browser channel — blocked, never satisfied`,
+      );
+    }
+    const driven = await driveSurfacePrincipal(state, binding, execution, compiled, surfaceAction, failExecution, session);
+    operationId = driven.operationId;
+    browserObservation = driven.browserObservation;
+    submittedValues = driven.submittedValues;
+    execution.state = 'principal-captured';
+  } else if (action.kind === 'deliver') {
+    if (compiled.definition.channel !== 'engine-task') {
+      throw failExecution(
+        `delivery case '${compiled.definition.id}' requires the engine-task channel — blocked, never satisfied`,
+      );
+    }
+    const queueChannel = state.options.queueChannel ?? null;
+    if (queueChannel === null) {
+      throw failExecution(
+        `case '${compiled.definition.id}' needs the engine's queue observer, and this repository declares no ` +
+          '`queueObserver` block — the engine reads the delivery queue itself (fail closed)',
+      );
+    }
+    const attemptsRule = compiled.definition.expect.state.find((rule) => rule.kind === 'attempts') as
+      | { kind: 'attempts'; count: number }
+      | undefined;
+    if (attemptsRule === undefined) {
+      throw failExecution(
+        `case '${compiled.definition.id}' declares no 'attempts' rule — the engine cannot stamp an attempt bound (BEHAVIOR_BINDING_MISMATCH)`,
+      );
+    }
+    const deliverAction = action as unknown as TaskDeliverAction;
+    let driven;
+    try {
+      driven = await driveTaskDelivery({
+        action: deliverAction,
+        attemptBound: attemptsRule.count,
+        subjects: execution.lease.subjects as Record<string, unknown>,
+        channel: queueChannel,
+        pollIntervalMs: DEFAULT_QUEUE_POLL_INTERVAL_MS,
+        terminalTimeoutMs: DEFAULT_QUEUE_TERMINAL_TIMEOUT_MS,
+      });
+    } catch (error) {
+      if (error instanceof QueueObserverError) {
+        throw failExecution(`queue observer: ${error.message}`);
+      }
+      if (error instanceof TaskDriverError) {
+        throw failExecution(`task driver: ${error.message}`);
+      }
+      throw failExecution(`task driver failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    queueObservation = driven.observation;
+    submittedValues = driven.submittedValues;
+    operationId = String(driven.submittedValues['deliveryId']);
+    execution.state = 'principal-captured';
+  } else {
+    throw failExecution(
+      `case '${compiled.definition.id}' uses a '${action.kind}' action — that driver does not exist yet`,
+    );
+  }
+  // Completion barrier: immediate effects resolve at once; barrier
+  // effects need a real checkpoint from an adapter observer.
+  const barrierEffects = compiled.effects.filter((effect) => effect.completion === 'barrier');
+  if (barrierEffects.length > 0) {
+    for (const effect of barrierEffects) {
+      const adapter = state.adapters.get(effect.adapter);
+      if (adapter === undefined || typeof adapter.awaitBarrier !== 'function') {
+        throw failExecution(
+          `observation incomplete: no barrier observer for scope '${effect.scope}' (OBSERVATION_SCOPE_INCOMPLETE)`,
+        );
+      }
+      const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl ?? '';
+      const ctx = makeAdapterContext(
+        baseUrl,
+        effect.resourceId,
+        () => {
+          throw new Error('barrier observations must not use the candidate GET transport');
+        },
+        state.options.adapterReadAuthorization
+          ? { authorization: state.options.adapterReadAuthorization }
+          : undefined,
+      );
+      let barrier;
+      try {
+        barrier = await adapter.awaitBarrier(ctx, {
+          scope: effect.scope,
+          fixtureNamespace: execution.lease.namespace,
+          operationId,
+          deadlineMs: state.options.barrierTimeoutMs ?? 30_000,
+        });
+      } catch (error) {
+        throw failExecution(
+          `observation incomplete: barrier for scope '${effect.scope}' failed: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+        );
+      }
+      if (barrier === null || typeof barrier !== 'object' || barrier.complete !== true) {
+        throw failExecution(
+          `async effect did not complete before the barrier deadline — premature success is blocked (OBSERVATION_SCOPE_INCOMPLETE)`,
+        );
+      }
+    }
+  }
+  execution.state = 'barrier-reached';
+  // Authoritative after snapshots over every declared effect scope.
+  const afterSnapshots: ScopeSnapshot[] = [];
+  const afterCheckpoints: Record<string, string> = {};
+  for (const effect of compiled.effects) {
+    const adapter = state.adapters.get(effect.adapter);
+    if (adapter === undefined || typeof adapter.snapshotScope !== 'function') {
+      throw failExecution(`observation incomplete: scope '${effect.scope}' lost its observer (OBSERVATION_SCOPE_INCOMPLETE)`);
+    }
+    const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl ?? '';
+    const ctx = makeAdapterContext(
+      baseUrl,
+      effect.resourceId,
+      () => {
+        throw new Error('snapshot observations must not use the candidate GET transport');
+      },
+      state.options.adapterReadAuthorization
+        ? { authorization: state.options.adapterReadAuthorization }
+        : undefined,
+    );
+    let snapshot;
+    try {
+      snapshot = await adapter.snapshotScope(ctx, { scope: effect.scope, fixtureNamespace: execution.lease.namespace });
+    } catch (error) {
+      throw failExecution(
+        `observation incomplete: after-scope '${effect.scope}' collection failed: ${error instanceof Error ? error.message : String(error)} (OBSERVATION_SCOPE_INCOMPLETE)`,
+      );
+    }
+    const validated = validateScopeSnapshot(snapshot, {
+      scope: effect.scope,
+      fixtureNamespace: execution.lease.namespace,
+      identityFields: effect.identityFields,
+      fields: effect.fields,
+    });
+    if (!validated.ok) {
+      throw failExecution(`observation incomplete: ${validated.detail} (OBSERVATION_SCOPE_INCOMPLETE)`);
+    }
+    afterCheckpoints[effect.scope] = validated.snapshot.checkpoint;
+    afterSnapshots.push(snapshot as ScopeSnapshot);
+  }
+  execution.state = 'after-snapshot-complete';
+  // Seal: strip snapshots to the core strict shape (no witness-local
+  // validation extras), then issue one record per compiled obligation.
+  const stripSnapshot = (snapshot: ScopeSnapshot) => ({
+    scope: snapshot.scope,
+    fixtureNamespace: snapshot.fixtureNamespace,
+    complete: snapshot.complete,
+    checkpoint: snapshot.checkpoint,
+    entities: snapshot.entities.map((entity) => ({ entityId: entity.entityId, fields: { ...entity.fields } })),
+  });
+  const actorLease = execution.lease.actors[actorProfile];
+  const payload = {
+    payloadVersion: 1 as const,
+    caseId: compiled.caseId,
+    caseSpecDigest: compiled.specDigest,
+    obligationIds: [...compiled.obligationIds],
+    endpointResourceId: compiled.endpointResourceId,
+    operationId,
+    sessionId: session.sessionId,
+    executionId: execution.executionId,
+    fixtureNamespace: execution.lease.namespace,
+    actor: {
+      principalId: typeof actorLease?.principalId === 'string' ? actorLease.principalId : actorProfile,
+      tenantId: typeof actorLease?.tenantId === 'string' || actorLease?.tenantId === null ? (actorLease?.tenantId ?? null) : null,
+      roles: Array.isArray(actorLease?.roles) ? [...(actorLease?.roles as string[])] : [],
+    },
+    actionDigest: behaviorActionDigestOf(compiled.definition.action),
+    submittedValues: submittedValues as Record<string, never>,
+    attempts,
+    requestObservations,
+    ...(browserObservation === undefined ? {} : { browserObservation }),
+    ...(queueObservation === undefined ? {} : { queueObservation }),
+    fixtureValues: { ...(execution.lease.subjects as Record<string, unknown>) },
+    before: execution.beforeSnapshots.map(stripSnapshot),
+    after: afterSnapshots.map(stripSnapshot),
+    completion: {
+      complete: true,
+      checkpoint: Object.values(afterCheckpoints).sort().join('+') || Object.values(execution.beforeCheckpoints).sort().join('+'),
+    },
+    channel: compiled.definition.channel,
+    authorityProfileDigest: binding.authorityProfileDigest,
+    state: 'sealed' as const,
+  };
+  const recordIds: string[] = [];
+  for (const obligationId of compiled.obligationIds) {
+    const issued = issueRecord(state, obligationId, BEHAVIOR_CASE_KIND, session.testId, payload, 'engine-observed');
+    recordIds.push(issued.recordId);
+  }
+  recordIds.sort();
+  execution.state = 'sealed';
+  const response: BehaviorPrincipalResponse = {
+    caseId: compiled.caseId,
+    executionId: execution.executionId,
+    recordIds,
+    state: execution.state,
+  };
+  sendJson(res, 200, response);
+}
+
+/**
+ * Builds the witness-side execution trace (enforcement-review fix 2b):
+ * per registered expected test, every recorded session with its open/
+ * seal ticks and outcome. When no expected set is registered, sessions
+ * are grouped by their own open identity (the legacy/standalone shape).
+ * This record lives ONLY in witness memory — the suite cannot mint,
+ * alter, or replay it — and is the authority supervision grades
+ * completeness from.
+ */
+function executionTraceOf(state: WitnessState): ExecutionTraceResponse {
+  const byKey = new Map<
+    string,
+    ExecutionTraceResponse['tests'][number]
+  >();
+  for (const session of state.sessions.values()) {
+    const key =
+      session.registered !== null
+        ? expectedKey(session.registered.project, session.registered.file, session.registered.titlePath)
+        : `runtime\u0000${session.sessionId}`;
+    let entry = byKey.get(key);
+    if (entry === undefined) {
+      entry = {
+        testId: session.registered?.testId ?? session.testId,
+        project: session.registered?.project ?? null,
+        file: session.registered?.file ?? '',
+        titlePath: session.registered?.titlePath ?? [],
+        sessions: [],
+      };
+      byKey.set(key, entry);
+    }
+    const traced: TracedSession = {
+      sessionId: session.sessionId,
+      openedTick: session.openedTick,
+      sealedTick: session.sealedTick,
+      outcome: session.outcome,
+      // Witness-side activity (review recheck fix 2026-09-14): the count
+      // of session-bound observations the witness itself made. A sealed
+      // 'passed' session with zero activity blocks supervision — the
+      // runner-reported outcome alone proves nothing.
+      activity: session.activity,
+    };
+    entry.sessions.push(traced);
+  }
+  return {
+    enumerationDigest: state.enumerationDigest,
+    tests: [...byKey.entries()]
+      .sort((a, b) => compareStrings(a[0], b[0]))
+      .map(([, entry]) => ({ ...entry, sessions: [...entry.sessions].sort((a, b) => a.openedTick - b.openedTick) })),
+  };
+}
+
+/**
+ * `POST /sessions/open` (plan Phase 1; enforcement-review fix 3) —
+ * SUPERVISOR ONLY: the trusted CLI (which owns the verifier key) registers
+ * one started test. The witness issues the session binding — (runId,
+ * sessionId, testId, worker) — and, when an observation proxy is active,
+ * a per-session browser mount segment. One session may be OPEN per worker
+ * at a time (a worker runs one test at a time; overlapping sessions would
+ * make interval attribution ambiguous — fail closed instead). Re-opening
+ * the identical (worker, testId) pair while it is still open is
+ * idempotent (double `testBegin` dispatch safety).
+ *
+ * When an expected set is registered (fix 2a), the opened test must
+ * belong to it — matched by the registered (project, file, titlePath)
+ * identity the supervisor carries from the runner's lifecycle spool — so
+ * a suite-invented testId can never mint a session.
+ *
+ * The suite holds the run token but CANNOT mint sessions with it: the
+ * run token alone answers 403 typed.
+ */
+async function handleSessionOpen(
+  state: WitnessState,
+  res: ServerResponse,
+  body: SessionOpenRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session open body must be an object');
+  }
+  const { testId, workerIndex } = body;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'session open requires a non-empty testId (the runner-assigned test id)');
+  }
+  if (typeof workerIndex !== 'number' || !Number.isInteger(workerIndex) || workerIndex < 0) {
+    throw new HttpError(400, 'session open requires a non-negative integer workerIndex');
+  }
+  // Expected-set membership (fix 2a): once the supervisor registered the
+  // expected tests, sessions exist only for them. Identity comes from the
+  // supervisor's spool drain (file + titlePath + project).
+  let registered: {
+    testId: string | null;
+    project: string | null;
+    file: string;
+    titlePath: string[];
+    observationOnly: boolean;
+  } | null = null;
+  if (state.enumerationDigest !== null) {
+    const file = typeof body['file'] === 'string' ? body['file'] : null;
+    const rawTitlePath = Array.isArray(body['titlePath'])
+      ? (body['titlePath'] as unknown[]).filter((part): part is string => typeof part === 'string')
+      : null;
+    const project = typeof body['project'] === 'string' ? body['project'] : null;
+    registered =
+      file !== null && rawTitlePath !== null && rawTitlePath.length > 0
+        ? state.expectedTests.get(expectedKey(project, file, rawTitlePath)) ?? null
+        : null;
+    if (registered === null) {
+      throw new HttpError(
+        403,
+        `session open refused: test '${testId}' is not in the registered expected set — ` +
+          'sessions are minted only for the tests the supervisor registered before the run',
+      );
+    }
+  }
+  const existingWorkerSession = state.workerSessions.get(workerIndex);
+  if (existingWorkerSession !== undefined) {
+    const open = state.sessions.get(existingWorkerSession) as TestSession | undefined;
+    if (open !== undefined && open.testId === testId) {
+      // Idempotent re-open of the identical (worker, testId) session.
+      sendJson(res, 200, sessionView(state, open));
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        `worker ${String(workerIndex)} already carries an open session for testId ` +
+        `'${open === undefined ? existingWorkerSession : open.testId}'; a worker runs one test ` +
+        'at a time — close the session before opening another',
+    });
+    return;
+  }
+  // Phase 4 claim injection: the supervisor carries the mapped obligation
+  // claims for this test on the session-open path. Claims stay
+  // DECLARATIONS (they never satisfy anything by themselves), but the
+  // witness normalizes them — obligation-id-shaped, sorted, deduplicated
+  // — and refuses malformed values so a typo cannot silently redirect
+  // evidence to a nonexistent claim identity.
+  const rawClaims = body['claims'];
+  let claims: string[] = [];
+  if (rawClaims !== undefined) {
+    if (!Array.isArray(rawClaims)) {
+      throw new HttpError(400, 'session open claims, when present, must be an array of obligation ids');
+    }
+    const seen = new Set<string>();
+    for (const claim of rawClaims) {
+      if (typeof claim !== 'string' || !OBLIGATION_ID_PATTERN.test(claim)) {
+        throw new HttpError(
+          400,
+          `session open claims must be obligation ids '<resourceId>:<contract>' (got '${String(claim)}')`,
+        );
+      }
+      seen.add(claim);
+    }
+    claims = [...seen].sort(compareStrings);
+  }
+  // Twin path coverage (E64): the supervisor marks a RAW twin's session
+  // observation-only, and the mark is decided HERE, engine-side, from
+  // the run's own registered set — never from a suite-supplied flag, and
+  // never from the runner-assigned testId: Playwright hashes a test's
+  // file path relative to the config it loaded, so the id enumerated
+  // from the repository's own config is NOT the id this session runs
+  // under. The registered identity (project, file, titlePath) resolved
+  // above is what both sides speak.
+  // An observation-only session is refused every submission below, so
+  // it can issue no record, no attestation and satisfy nothing; what it
+  // contributes is the request SHAPES its proxy saw. A session with
+  // claims is never observation-only: a test that claims an obligation
+  // is being graded, not compared.
+  const observationOnly = claims.length === 0 && (registered?.observationOnly ?? false);
+  const sessionId = randomUUID();
+  const session: TestSession = {
+    sessionId,
+    token: randomUUID(),
+    testId,
+    workerIndex,
+    status: 'open',
+    openedTick: (state.tick += 1),
+    sealedTick: null,
+    outcome: null,
+    intervals: new Map(),
+    // Filled below: the session's DEDICATED observation-proxy port.
+    proxyUrl: null,
+    proxyServer: null,
+    claims,
+    // The registered expected-set identity this session was minted for
+    // (enforcement-review fix 2b); null when no expected set is bound.
+    registered:
+      registered !== null
+        ? {
+            testId: registered.testId,
+            project: registered.project,
+            file: registered.file,
+            titlePath: [...registered.titlePath],
+          }
+        : null,
+    // Witness-side activity counter: incremented at every observation
+    // the witness itself makes under this session (records, intervals,
+    // exchanges, pre-observations). Diagnostic corroboration only —
+    // execution authority is the supervisor-observed trusted lifecycle,
+    // not this count.
+    activity: 0,
+    // Engine-browser surface registration (plan Phase 1 item 4): the
+    // validated consumer descriptor + loopback app base the engine
+    // drives for this session. Null until the fixture registers it.
+    engineSurface: null,
+    observationOnly,
+    twinShapes: [],
+  };
+  // Session attribution channel (plan Phase 1): a dedicated loopback
+  // proxy port whose traffic is attributed to THIS session. Exists only
+  // when an observation proxy is wired; otherwise nothing browser-side
+  // is attributable.
+  await startSessionProxy(state, session);
+  state.sessions.set(sessionId, session);
+  state.workerSessions.set(workerIndex, sessionId);
+  // Observe before-snapshots (Phase 2): the witness lists the
+  // observe-declared resources ITSELF at open. Total by construction —
+  // a snapshot failure is finalize data, never an open failure.
+  try {
+    await takeObserveSnapshots(state, session);
+  } catch {
+    state.observeSnapshots.delete(sessionId);
+  }
+  sendJson(res, 200, sessionView(state, session));
+}
+
+/** The session view returned to supervisor and worker (the credential). */
+function sessionView(state: WitnessState, session: TestSession): {
+  sessionId: string;
+  sessionToken: string;
+  testId: string;
+  workerIndex: number;
+  openedTick: number;
+  proxyUrl: string | null;
+  claims: string[];
+} {
+  void state;
+  return {
+    sessionId: session.sessionId,
+    sessionToken: session.token,
+    testId: session.testId,
+    workerIndex: session.workerIndex,
+    openedTick: session.openedTick,
+    proxyUrl: session.proxyUrl,
+    claims: [...session.claims],
+  };
+}
+
+/**
+ * `POST /sessions/close` (plan Phase 1; enforcement-review fix 3) —
+ * SUPERVISOR ONLY (enforced at dispatch): the supervisor seals the
+ * session with the observed outcome. Sealing is FINAL — every later
+ * submission, interval, or resolve for the session is rejected, so
+ * records cannot be injected after the test ended. Closing an unknown
+ * session fails (400); closing an already-sealed session is idempotent
+ * (safe re-delivery). The suite has NO reachable close path: the run
+ * token alone answers 403 before this handler runs.
+ *
+ * A RELEASED session (`outcome-pending`, see `POST /sessions/release`)
+ * is not open: the worker already stopped submitting, and its proxy is
+ * already dead. This close then only RECORDS the runner's outcome for
+ * it — the confirmation the release deliberately deferred. A second,
+ * DIFFERENT outcome for the same session is refused (409): two
+ * outcomes for one test is a confused lifecycle and never reads as a
+ * pass.
+ */
+async function handleSessionClose(
+  state: WitnessState,
+  res: ServerResponse,
+  body: SessionCloseRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session close body must be an object');
+  }
+  const { sessionId, outcome } = body;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw new HttpError(400, 'session close requires a sessionId');
+  }
+  if (outcome !== undefined && typeof outcome !== 'string') {
+    throw new HttpError(400, 'session close outcome, when present, must be a string');
+  }
+  const session = state.sessions.get(sessionId);
+  if (session === undefined) {
+    throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
+  }
+  if (session.status === 'outcome-pending') {
+    if (typeof outcome === 'string') {
+      if (session.outcome !== null && session.outcome !== outcome) {
+        throw new HttpError(
+          409,
+          `session '${sessionId}' already carries outcome '${session.outcome}'; a second, different ` +
+            `outcome ('${outcome}') for the same test is a confused lifecycle and is refused`,
+        );
+      }
+      session.outcome = outcome;
+    }
+    // The session's own evidence died with its proxy at release; the
+    // observe snapshots are dropped HERE, at the moment the outcome is
+    // finally recorded, so an unreleased session's before-state can
+    // never be consumed by a later call.
+    state.observeSnapshots.delete(sessionId);
+    state.sessionIdentities.delete(sessionId);
+    sendJson(res, 200, { sealed: true as const });
+    return;
+  }
+
+  if (session.status === 'open') {
+    session.status = 'sealed';
+    session.sealedTick = (state.tick += 1);
+    session.outcome = typeof outcome === 'string' ? outcome : null;
+    state.workerSessions.delete(session.workerIndex);
+    // Observe snapshots die with the session: finalize runs BEFORE seal
+    // (the drain finalizes a passed test, then seals), so anything left
+    // here belongs to a test that never finalized — unsealed evidence
+    // must not linger for a later call to consume.
+    state.observeSnapshots.delete(sessionId);
+    // The registered identity dies with the session: a later read has no
+    // credential of this session's to inherit, ever.
+    state.sessionIdentities.delete(session.sessionId);
+    // The dedicated channel dies with the session: nothing can observe
+    // (or submit) through it afterwards. The engine browser context dies
+    // too — a sealed session's pages are never driven again.
+    await stopSessionProxy(session);
+    await state.engineBrowser?.closeSession(session.sessionId);
+  }
+  sendJson(res, 200, { sealed: true as const });
+}
+
+/**
+ * `POST /sessions/identity` — SESSION-AUTHENTICATED (plan Phase 4b item
+ * 3b): the running test registers the login of the tenant it just
+ * created, for ITS OWN open session.
+ *
+ * The authority here is one sentence long: a registration changes WHO the
+ * engine reads as, for one session. The engine still performs every
+ * read, a wrong tenant makes the row unfound (the app answers 403/404 and
+ * the entity grades absent — fail closed, never an open verdict), and the
+ * identity cannot touch another session or a record it did not cause.
+ *
+ * Refusals are the load-bearing part:
+ * - no session credential, or one this witness never issued → 400/403
+ *   (the same posture as every other session-authenticated call);
+ * - a sealed or released session → 409 (no identity can outlive its
+ *   session, so none can be registered after the end);
+ * - a malformed seat or values bag → 400, so a half credential is never
+ *   stored and silently completed from the process-global seat later.
+ *
+ * The credential stays in witness memory: the response echoes the seat
+ * NAME only, and nothing here writes to a record, the run state, a log or
+ * a report.
+ */
+async function handleSessionIdentity(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session identity body must be an object');
+  }
+  // Authenticated as the session it names: a caller can only ever
+  // register an identity for the session whose secret it presents.
+  const session = requireOpenSession(state, body);
+  const seat = body['seat'];
+  if (typeof seat !== 'string' || seat.length === 0) {
+    throw new HttpError(400, "session identity requires a seat (the adapter seat it authenticates)");
+  }
+  const values = body['values'];
+  if (!isPlainObject(values) || Object.keys(values).length === 0) {
+    throw new HttpError(
+      400,
+      'session identity requires values: the seat\'s credential variables keyed by the same ' +
+        'witness env var names the adapter seat declares',
+    );
+  }
+  const credential: Record<string, string> = {};
+  for (const [name, value] of Object.entries(values)) {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new HttpError(
+        400,
+        `session identity value for '${name}' must be a non-empty string ` +
+          '(credential VALUES stay in witness memory; the adapter seat still names them)',
+      );
+    }
+    credential[name] = value;
+  }
+  state.sessionIdentities.set(session.sessionId, { seat, values: Object.freeze(credential) });
+  sendJson(res, 200, { registered: true as const, seat });
+}
+
+/**
+ * The adapter identity one session registered for itself, or null (the
+ * process-global environment seat). Only the session's OWN reads may
+ * resolve it.
+ *
+ * Args:
+ *   state: the running witness state.
+ *   session: the session the read runs under.
+ *
+ * Returns:
+ *   SessionIdentity | null: the registered identity, or null.
+ */
+function sessionIdentityOf(state: WitnessState, session: TestSession): SessionIdentity | null {
+  return state.sessionIdentities.get(session.sessionId) ?? null;
+}
+
+/**
+ * `POST /sessions/release` — SUPERVISOR ONLY (enforced at dispatch).
+ *
+ * The worker finishes a test and announces its own end; the runner's
+ * MAIN process may still be seconds away from reporting that test's
+ * outcome. Rather than hold the worker's single session slot for an
+ * event the worker does not control, the supervisor RELEASES the slot:
+ * the worker is unbound (its next test opens its own session at once),
+ * the session's proxy dies and every submission path is refused from
+ * this moment on — so no traffic can be attributed to a test that has
+ * already finished. The OUTCOME is still owed and is recorded by the
+ * later close; a released session whose outcome never arrives grades
+ * not-passed, exactly like a session sealed without an outcome.
+ *
+ * Releasing an already-released or already-sealed session is idempotent
+ * (safe re-delivery); releasing an unknown session fails (400).
+ */
+async function handleSessionRelease(
+  state: WitnessState,
+  res: ServerResponse,
+  body: SessionReleaseRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session release body must be an object');
+  }
+  const { sessionId } = body;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw new HttpError(400, 'session release requires a sessionId');
+  }
+  const session = state.sessions.get(sessionId);
+  if (session === undefined) {
+    throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
+  }
+  if (session.status === 'open') {
+    session.status = 'outcome-pending';
+    session.sealedTick = (state.tick += 1);
+    // Only THIS session's binding leaves the worker: the next test on
+    // that worker opens its own session immediately.
+    if (state.workerSessions.get(session.workerIndex) === sessionId) {
+      state.workerSessions.delete(session.workerIndex);
+    }
+    // The dedicated channel dies with the release: no exchange can be
+    // observed through this session after its test finished.
+    await stopSessionProxy(session);
+    await state.engineBrowser?.closeSession(session.sessionId);
+  }
+  sendJson(res, 200, { released: true as const });
+}
+
+/**
+ * `POST /sessions/resolve` (plan Phase 1): the worker-side fixture asks
+ * for the session credential of the OPEN session bound to its exact
+ * (workerIndex, testId) pair. Only an open session answers — a sealed
+ * or never-opened session 404s — so the fixture can never obtain a
+ * credential for a session the supervisor did not open for exactly this
+ * test instance.
+ */
+async function handleSessionResolve(
+  state: WitnessState,
+  res: ServerResponse,
+  body: SessionResolveRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'session resolve body must be an object');
+  }
+  const { testId, workerIndex } = body;
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'session resolve requires a non-empty testId');
+  }
+  if (typeof workerIndex !== 'number' || !Number.isInteger(workerIndex) || workerIndex < 0) {
+    throw new HttpError(400, 'session resolve requires a non-negative integer workerIndex');
+  }
+  const sessionId = state.workerSessions.get(workerIndex);
+  const session = sessionId === undefined ? undefined : state.sessions.get(sessionId);
+  if (session === undefined || session.status !== 'open' || session.testId !== testId) {
+    sendJson(res, 404, {
+      error:
+        `no open session for (workerIndex ${String(workerIndex)}, testId '${testId}'); the ` +
+        'supervisor (the gateforge reporter) opens a session per started test — run under ' +
+        'the pack reporter so evidence primitives can resolve their session',
+    });
+    return;
+  }
+  sendJson(res, 200, sessionView(state, session));
+}
+
+/**
+ * Enforces the supervisor-issued session credential on a submission:
+ * the session must EXIST (403 otherwise), carry a token that matches
+ * (timing-safe), and still be OPEN (409 once sealed — late submissions
+ * after close are rejected fail closed).
+ */
+function requireOpenSession(state: WitnessState, body: Record<string, unknown>): TestSession {
+  const sessionId = body['sessionId'];
+  const sessionToken = body['sessionToken'];
+  if (typeof sessionId !== 'string' || sessionId.length === 0 || typeof sessionToken !== 'string') {
+    throw new HttpError(
+      400,
+      'submissions require the supervisor-issued session credential (sessionId + sessionToken); ' +
+        'run under the gateforge reporter so the test session is opened and resolved',
+    );
+  }
+  const session = state.sessions.get(sessionId);
+  if (session === undefined || !timingSafeEqual(sessionToken, session.token)) {
+    throw new HttpError(
+      403,
+      'session credential is unknown to this witness: sessions are issued only by the ' +
+        'supervisor channel (/sessions/open) and cannot be minted from the run token',
+    );
+  }
+  if (session.status !== 'open') {
+    throw new HttpError(
+      409,
+      `session for testId '${session.testId}' was sealed at tick ${String(session.sealedTick)}: ` +
+        'late submissions after session close are rejected (no post-hoc record injection)',
+    );
+  }
+  // Twin path coverage (E64): an OBSERVATION-ONLY session (a raw twin)
+  // is refused every submission. Its requests were recorded as shapes
+  // and that is all it may ever contribute: no record, no attestation,
+  // no interval, nothing that can satisfy an obligation. The refusal
+  // is engine-side, so "the raw twin proves nothing" is enforced
+  // rather than a promise the suite makes about itself.
+  if (session.observationOnly) {
+    throw new HttpError(
+      403,
+      `session for testId '${session.testId}' is OBSERVATION-ONLY (twin path coverage): its requests ` +
+        'were recorded as shapes and it can issue no record, no attestation and satisfy nothing — ' +
+        'a raw twin is a comparison subject, never a witness',
+    );
+  }
+  return session;
+}
+
+/**
+ * Forces the submission's testId onto the session: the record's test
+ * identity is the supervisor-registered one, never a caller-declared
+ * value — a suite-supplied testId cannot assign evidence to another
+ * test (plan Phase 1 work item 2).
+ */
+function requireSessionTestId(session: TestSession, testId: unknown): string {
+  if (testId !== session.testId) {
+    throw new HttpError(
+      403,
+      `submission testId '${String(testId)}' does not match the open session's ` +
+        `supervisor-registered testId '${session.testId}' — records bind to the session ` +
+        'the supervisor opened, never to a caller-declared test id',
+    );
+  }
+  return session.testId;
+}
+
+/**
+ * Opens a UI-action observation interval on the witness clock (at most
+ * one open per session — opening auto-closes the previous). Shared by
+ * the suite-callable endpoint and the engine browser driver: both
+ * produce witness-stamped windows, never suite-supplied times.
+ */
+function openActionInterval(
+  state: WitnessState,
+  session: TestSession,
+  operation: string,
+): { intervalId: string; startTick: number } {
+  for (const interval of session.intervals.values()) {
+    if (interval.endTick === null) interval.endTick = (state.tick += 1);
+  }
+  const intervalId = randomUUID();
+  const startTick = (state.tick += 1);
+  session.intervals.set(intervalId, { startTick, endTick: null, operation });
+  // Witness-side activity: a recorded UI-action interval is a
+  // witness-kept window; count it.
+  session.activity += 1;
+  return { intervalId, startTick };
+}
+
+/** Seals one UI-action observation interval (unknown/duplicate → throw). */
+function closeActionInterval(
+  state: WitnessState,
+  session: TestSession,
+  intervalId: string,
+): { startTick: number; endTick: number } {
+  const interval = session.intervals.get(intervalId);
+  if (interval === undefined) {
+    throw new HttpError(400, `interval '${intervalId}' is unknown for this session`);
+  }
+  if (interval.endTick !== null) {
+    throw new HttpError(409, `interval '${intervalId}' is already closed (endTick ${String(interval.endTick)})`);
+  }
+  interval.endTick = (state.tick += 1);
+  return { startTick: interval.startTick, endTick: interval.endTick };
+}
+
+/**
+ * `POST /sessions/intervals/open`: the fixture marks the START of a
+ * UI-action observation interval on the witness's monotonic clock. At
+ * most one interval is open per session — opening a new one auto-closes
+ * the previous (a dangling interval must not silently widen the
+ * evidence window).
+ */
+async function handleIntervalOpen(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const session = requireOpenSession(state, body);
+  const operation = body['operation'];
+  if (typeof operation !== 'string' || operation.length === 0) {
+    throw new HttpError(400, 'interval open requires a non-empty operation label');
+  }
+  const { intervalId, startTick } = openActionInterval(state, session, operation);
+  sendJson(res, 200, { intervalId, startTick });
+}
+
+/**
+ * `POST /sessions/intervals/close`: seals a UI-action observation
+ * interval. Closing an unknown interval fails (400); closing twice is
+ * refused (409) — a sealed window must not be stretched after the fact.
+ */
+async function handleIntervalClose(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const session = requireOpenSession(state, body);
+  const intervalId = body['intervalId'];
+  if (typeof intervalId !== 'string' || intervalId.length === 0) {
+    throw new HttpError(400, 'interval close requires an intervalId');
+  }
+  const { startTick, endTick } = closeActionInterval(state, session, intervalId);
+  sendJson(res, 200, { startTick, endTick });
+}
+
+/**
+ * Whether an exchange observed at `tick` falls inside one of the
+ * session's recorded UI-action intervals (open intervals extend to the
+ * current moment — an observe arriving between action end and interval
+ * close still sees the window). Exchanges outside every interval are
+ * NEVER credited: that is setup traffic, not the browser action
+ * (plan Phase 1 item 6).
+ */
+function tickWithinSessionInterval(session: TestSession, tick: number): boolean {
+  for (const interval of session.intervals.values()) {
+    if (tick >= interval.startTick && (interval.endTick === null || tick <= interval.endTick)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * `POST /records`: validates and issues a submitted evidence record.
+ * Unknown primitive kinds → 400 (GF-11: an unregistered primitive name
+ * has no registration path; GF-14: the audit-event primitive is
+ * implementation-gated and does not exist yet). Only the two UI
+ * primitives are suite-submittable; `http.request` and persistence
+ * records are witness-issued only (engine-side observation), so no
+ * claimed-side path can mint them. Phase 1: issuance requires a valid
+ * OPEN session — the record's testId is forced onto the session's
+ * supervisor-registered value and the payload carries the session id,
+ * so every record self-describes the channel it was minted through.
+ */
+async function handleRecords(
+  state: WitnessState,
+  res: ServerResponse,
+  body: RecordsRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'request body must be an object');
+  }
+  const { claimId, kind, payload, testId } = body as Record<string, unknown>;
+  if (typeof claimId !== 'string' || !OBLIGATION_ID_PATTERN.test(claimId)) {
+    throw new HttpError(400, "claimId must be an obligation id '<resourceId>:<contract>'");
+  }
+  if (typeof kind !== 'string' || !KNOWN_RECORD_KINDS.includes(kind)) {
+    throw new HttpError(
+      400,
+      `unknown evidence primitive '${String(kind)}'; accepted kinds: ${KNOWN_RECORD_KINDS.join(', ')} ` +
+        '(http.request and persistence records are witness-issued only: /witness/http-observation ' +
+        'and /witness/persistence)',
+    );
+  }
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'testId must be a non-empty string');
+  }
+  if (!isPlainObject(payload)) {
+    throw new HttpError(400, 'payload must be a JSON object');
+  }
+  const session = requireOpenSession(state, body);
+  requireSessionTestId(session, testId);
+  const record = issueRecord(
+    state,
+    claimId,
+    kind,
+    session.testId,
+    { ...payload, sessionId: session.sessionId },
+    'suite-submitted',
+  );
+  // Witness-side activity (review recheck fix 2026-09-14): a submitted
+  // record under an open session is a session-bound event the witness
+  // issued; count it. (Content trust stays claimed — the count only
+  // corroborates session liveness for supervision, never evidence
+  // strength.)
+  session.activity += 1;
+  const response: RecordsResponse = {
+    recordId: record.recordId,
+    trust: record.trust,
+    runId: record.runId,
+  };
+  sendJson(res, 200, response);
+}
+
+/**
+ * `POST /witness/persistence` performs a mediated adapter read and stamps
+ * a persistence record from the adapter response. Raw responses remain
+ * inside the witness process.
+ *
+ * An entity-scoped `found:false` pre-observation proves create absence
+ * only when a natural-key adapter read the exact entity key named by the
+ * same witnessed browser-create anchor. Matching the saved key before
+ * consuming the observation prevents an absence check for one entity
+ * from authorizing creation of another.
+ *
+ * Args:
+ *   state: witness configuration, sessions, and loaded adapters.
+ *   res: HTTP response for the persistence request.
+ *   body: requested resource, entity, claim, and optional action anchor.
+ *
+ * Returns:
+ *   Promise<void>: completes after the observation record is issued.
+ */
+async function handlePersistence(
+  state: WitnessState,
+  res: ServerResponse,
+  body: PersistenceRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'request body must be an object');
+  }
+  const { resourceId, entityId, testId, claimId, preObservationId, anchorId } = body as Record<
+    string,
+    unknown
+  >;
+  if (typeof resourceId !== 'string' || resourceId.length === 0) {
+    throw new HttpError(400, 'resourceId must be a non-empty string');
+  }
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'testId must be a non-empty string');
+  }
+  if (typeof claimId !== 'string' || !OBLIGATION_ID_PATTERN.test(claimId)) {
+    throw new HttpError(400, "claimId must be an obligation id '<resourceId>:<contract>'");
+  }
+  if (
+    preObservationId !== undefined &&
+    (typeof preObservationId !== 'string' || preObservationId.length === 0)
+  ) {
+    throw new HttpError(400, 'preObservationId must be a non-empty string when present');
+  }
+  if (anchorId !== undefined && (typeof anchorId !== 'string' || anchorId.length === 0)) {
+    throw new HttpError(400, 'anchorId must be a non-empty string when present');
+  }
+  // Phase 1: engine-side reads run under the supervisor-opened session,
+  // so the persistence record binds to the same channel the UI action
+  // used (and the record's testId is the session's, never caller-declared).
+  const session = requireOpenSession(state, body);
+  const boundTestId = requireSessionTestId(session, testId);
+  let anchoredFields: string[] | null = null;
+  let anchoredOperation: string | null = null;
+  const boundClaimId = String(claimId);
+  if (typeof anchorId === 'string') {
+    const interval = session.intervals.get(anchorId);
+    if (interval === undefined || interval.endTick === null) {
+      throw new HttpError(400, `action anchor '${anchorId}' is unknown or still open for this session`);
+    }
+    const anchorEndTick = interval.endTick;
+    anchoredOperation = interval.operation;
+    const action = [...state.ledger.values()].find((record) => {
+      if (
+        record.kind !== 'ui.action' ||
+        record.obligationId !== boundClaimId ||
+        record.testId !== boundTestId ||
+        !isPlainObject(record.payload)
+      ) {
+        return false;
+      }
+      return (
+        record.payload['anchorId'] === anchorId &&
+        record.payload['sessionId'] === session.sessionId &&
+        record.payload['operation'] === interval.operation
+      );
+    });
+    if (action === undefined || !isPlainObject(action.payload)) {
+      throw new HttpError(400, `action anchor '${anchorId}' does not identify this claim's witnessed UI action`);
+    }
+    if (isPlainObject(action.payload['fields'])) {
+      anchoredFields = Object.keys(action.payload['fields']);
+    }
+    let sameEntity = false;
+    try {
+      sameEntity = canonicalOf(action.payload['entityId']) === canonicalOf(entityId);
+    } catch {
+      sameEntity = false;
+    }
+    if (!sameEntity) {
+      throw new HttpError(400, `action anchor '${anchorId}' targets a different entity`);
+    }
+    const laterAction = [...state.ledger.values()].some((record) => {
+      if (
+        record.kind !== 'ui.action' ||
+        record.obligationId !== boundClaimId ||
+        record.testId !== boundTestId ||
+        !isPlainObject(record.payload)
+      ) {
+        return false;
+      }
+      const laterAnchorId = record.payload['anchorId'];
+      if (typeof laterAnchorId !== 'string' || laterAnchorId === anchorId) return false;
+      const laterInterval = session.intervals.get(laterAnchorId);
+      if (
+        laterInterval === undefined ||
+        laterInterval.endTick === null ||
+        laterInterval.endTick <= anchorEndTick
+      ) {
+        return false;
+      }
+      try {
+        return canonicalOf(record.payload['entityId']) === canonicalOf(entityId);
+      } catch {
+        return false;
+      }
+    });
+    if (laterAction) {
+      throw new HttpError(
+        409,
+        `persistence for action anchor '${anchorId}' must be observed before another UI action on the same entity`,
+      );
+    }
+    const duplicate = [...state.ledger.values()].some((record) => {
+      return (
+        record.kind.startsWith(PERSISTENCE_KIND) &&
+        record.obligationId === boundClaimId &&
+        record.testId === boundTestId &&
+        isPlainObject(record.payload) &&
+        record.payload['anchorId'] === anchorId
+      );
+    });
+    if (duplicate) {
+      throw new HttpError(409, `persistence for action anchor '${anchorId}' was already observed`);
+    }
+  }
+
+  const { adapterName, adapter, baseUrl } = await adapterReadContext(
+    state,
+    resourceId,
+    anchoredFields ?? undefined,
+  );
+
+  // Consume the referenced pre-observation, if any (single-use). Its
+  // contents — never suite-declared expectations — are what the engine
+  // grades create/update postconditions against.
+  let before: { entityAbsent: boolean } | { found: boolean; fields?: unknown } | undefined;
+  let consumed:
+    | { resourceId: string; kind: 'ids'; ids: string[] }
+    | { resourceId: string; kind: 'entity'; entityId: string; found: boolean; fields?: unknown }
+    | undefined;
+  if (typeof preObservationId === 'string') {
+    const observation = state.preObservations.get(preObservationId);
+    if (observation === undefined || observation.resourceId !== resourceId) {
+      throw new HttpError(
+        400,
+        `pre-observation '${preObservationId}' is unknown, already consumed, or belongs to another resource`,
+      );
+    }
+    if (observation.kind === 'entity') {
+      let sameEntity = false;
+      try {
+        sameEntity = observation.entityId === canonicalOf(entityId);
+      } catch {
+        sameEntity = false;
+      }
+      if (!sameEntity) {
+        throw new HttpError(409, `pre-observation '${preObservationId}' is for a different entity`);
+      }
+    }
+    state.preObservations.delete(preObservationId);
+    consumed = observation;
+    before = { entityAbsent: true }; // refined below for ids-kind snapshots
+  }
+
+  // Execute the adapter's GET-only read through the mediated transport.
+  const adapterHeaders = state.options.adapterReadAuthorization
+    ? { authorization: state.options.adapterReadAuthorization }
+    : undefined;
+  const ctx = makeAdapterContext(
+    baseUrl,
+    resourceId,
+    (path: string) =>
+      adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+    adapterHeaders,
+    // This read belongs to THIS session: it may use the identity THAT
+    // session registered for itself, and no other.
+    { sessionId: session.sessionId, sessionIdentity: sessionIdentityOf(state, session) },
+  );
+  let bodyRaw: unknown;
+  try {
+    bodyRaw = await adapter.read(ctx, entityId);
+  } catch (error) {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' read failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const found = bodyRaw !== null && bodyRaw !== undefined;
+
+  let normalized: { entityId: unknown; fields: unknown } | null = null;
+  if (found) {
+    try {
+      const candidate = adapter.normalize(bodyRaw);
+      if (!isPlainObject(candidate) || !('entityId' in candidate) || !('fields' in candidate)) {
+        throw new Error('normalize must return {entityId, fields}');
+      }
+      normalized = { entityId: candidate['entityId'], fields: candidate['fields'] };
+    } catch (error) {
+      throw new HttpError(
+        409,
+        `adapter '${adapterName}' normalize failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  // Report-only observations; the ENGINE judges identity binding (GF-05).
+  const mismatches: string[] = [];
+  let entityAgrees = true;
+  if (found && entityId !== undefined && normalized !== null) {
+    try {
+      if (canonicalOf(entityId) !== canonicalOf(normalized.entityId)) {
+        entityAgrees = false;
+        mismatches.push(
+          `entityId mismatch: adapter returned ${canonicalOf(normalized.entityId)} for requested ${canonicalOf(entityId)}`,
+        );
+      }
+    } catch {
+      entityAgrees = false;
+    }
+  }
+  // Build `before` from the consumed pre-observation's OWN contents —
+  // never from anything the suite declared.
+  if (consumed !== undefined && before !== undefined) {
+    if (consumed.kind === 'ids') {
+      const observedId =
+        normalized !== null && normalized.entityId !== undefined ? normalized.entityId : entityId;
+      let absent = true;
+      try {
+        absent = !consumed.ids.includes(canonicalOf(observedId));
+      } catch {
+        absent = true; // unrepresentable id: treat as not previously observed
+      }
+      before = { entityAbsent: absent };
+    } else {
+      const naturalKeyCreate =
+        typeof anchorId === 'string' &&
+        anchoredOperation === 'create' &&
+        adapter.identity === 'natural-key';
+      before =
+        naturalKeyCreate && !consumed.found
+          ? { entityAbsent: true }
+          : {
+              found: consumed.found,
+              ...(consumed.found ? { fields: consumed.fields } : {}),
+            };
+    }
+  }
+
+  // The payload IS the engine observation (hashed into the record id).
+  // Declared server-computed fields (E18a): stamped so the engine can
+  // skip the exact-value echo for exactly these keys AND report the
+  // skip. An adapter that declares none is unchanged.
+  const volatileFields = declaredVolatileFields(adapter);
+  const payload: Record<string, unknown> = {
+    resourceId,
+    entityId: found && normalized !== null ? normalized.entityId : entityId ?? null,
+    found,
+    ...(found && normalized !== null ? { fields: normalized.fields } : {}),
+    ...(volatileFields.length > 0 ? { volatileFields } : {}),
+    ...(before !== undefined ? { before } : {}),
+    sessionId: session.sessionId,
+    ...(typeof anchorId === 'string' ? { anchorId } : {}),
+  };
+  const issued = issuePersistenceRecord(state, boundClaimId, boundTestId, payload);
+  // Witness-side activity (review recheck fix 2026-09-14): an
+  // engine-observed persistence read under the session is real work the
+  // witness performed; count it so supervision can corroborate execution.
+  session.activity += 1;
+
+  const response: PersistenceResponse = {
+    recordId: issued.recordId,
+    runId: issued.runId,
+    verdictRelevant: {
+      found,
+      fieldsMatch: entityAgrees,
+      ...(mismatches.length > 0 ? { mismatches } : {}),
+    },
+  };
+  sendJson(res, 200, response);
+}
+
+/**
+ * `POST /witness/pre-observation` (audit rounds 4-5): takes an
+ * engine-side snapshot BEFORE a claimed action, stored in witness
+ * memory and consumed single-use by the paired persistence read. Two
+ * modes:
+ * - with `entityId`: snapshots that entity's observed fields (for
+ *   update postconditions — the engine grades the before/after delta);
+ * - without: snapshots the resource's observed id set via the adapter's
+ *   optional `list` (for create postconditions — the engine grades
+ *   absence-before).
+ * A suite can reference a real observation but cannot fabricate,
+ * replay, or mutate its contents.
+ */
+async function handlePreObservation(
+  state: WitnessState,
+  res: ServerResponse,
+  body: PreObservationRequest,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'request body must be an object');
+  }
+  const { resourceId, testId, claimId, entityId } = body as Record<string, unknown>;
+  if (typeof resourceId !== 'string' || resourceId.length === 0) {
+    throw new HttpError(400, 'resourceId must be a non-empty string');
+  }
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'testId must be a non-empty string');
+  }
+  if (typeof claimId !== 'string' || !OBLIGATION_ID_PATTERN.test(claimId)) {
+    throw new HttpError(400, "claimId must be an obligation id '<resourceId>:<contract>'");
+  }
+  // Phase 1: pre-observations belong to the supervisor-opened session of
+  // the claiming test (the persistence read later consumes them under
+  // the same session).
+  const session = requireOpenSession(state, body);
+  requireSessionTestId(session, testId);
+
+  const { observationId, observed } = await takePreObservation(state, session, resourceId, entityId);
+  const response: PreObservationResponse = { observationId, observed };
+  sendJson(res, 200, response);
+}
+
+/**
+ * Takes an engine-side pre-observation snapshot (shared by the
+ * suite-callable endpoint and the engine browser driver): with
+ * `entityId` an entity-fields snapshot (update postconditions),
+ * without it the resource id-set snapshot (create postconditions).
+ * Snapshots live in witness memory, single-use, and their contents —
+ * never suite-declared expectations — are what the engine grades
+ * against. A suite can reference a real observation but cannot
+ * fabricate, replay, or mutate its contents.
+ */
+async function takePreObservation(
+  state: WitnessState,
+  session: TestSession,
+  resourceId: string,
+  entityId: unknown,
+): Promise<{ observationId: string; observed: number }> {
+  const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
+  const adapterHeaders = state.options.adapterReadAuthorization
+    ? { authorization: state.options.adapterReadAuthorization }
+    : undefined;
+  const ctx = makeAdapterContext(
+    baseUrl,
+    resourceId,
+    (path: string) =>
+      adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+    adapterHeaders,
+    { sessionId: session.sessionId, sessionIdentity: sessionIdentityOf(state, session) },
+  );
+  const observationId = randomUUID();
+
+  if (entityId !== undefined) {
+    // Entity-fields snapshot (update postconditions).
+    let bodyRaw: unknown;
+    try {
+      bodyRaw = await adapter.read(ctx, entityId);
+    } catch (error) {
+      throw new HttpError(
+        409,
+        `adapter '${adapterName}' read failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const found = bodyRaw !== null && bodyRaw !== undefined;
+    let fields: unknown = undefined;
+    if (found) {
+      try {
+        const candidate = adapter.normalize(bodyRaw);
+        if (!isPlainObject(candidate) || !('fields' in candidate)) {
+          throw new Error('normalize must return {entityId, fields}');
+        }
+        fields = candidate['fields'];
+      } catch (error) {
+        throw new HttpError(
+          409,
+          `adapter '${adapterName}' normalize failed during pre-observation: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    state.preObservations.set(observationId, {
+      resourceId,
+      kind: 'entity',
+      entityId: canonicalOf(entityId),
+      found,
+      ...(found ? { fields } : {}),
+    });
+    // Witness-side activity: the engine-side snapshot ran under the
+    // session; count it.
+    session.activity += 1;
+    return { observationId, observed: found ? 1 : 0 };
+  }
+
+  // Resource id-set snapshot (create postconditions).
+  if (typeof adapter.list !== 'function') {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' does not support resource-level pre-observation ` +
+        '(no list export); create postconditions cannot be observed for this resource',
+    );
+  }
+  let raw: unknown;
+  try {
+    raw = await adapter.list(ctx);
+  } catch (error) {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' list failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!Array.isArray(raw)) {
+    throw new HttpError(409, `adapter '${adapterName}' list must return an array of entities`);
+  }
+  const ids: string[] = [];
+  for (const entity of raw) {
+    try {
+      const candidate = adapter.normalize(entity);
+      if (!isPlainObject(candidate) || !('entityId' in candidate)) {
+        throw new Error('normalize must return {entityId, fields}');
+      }
+      ids.push(canonicalOf(candidate['entityId']));
+    } catch (error) {
+      throw new HttpError(
+        409,
+        `adapter '${adapterName}' normalize failed during pre-observation: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  state.preObservations.set(observationId, { resourceId, kind: 'ids', ids: ids.sort(compareStrings) });
+  // Witness-side activity: the engine-side id-set snapshot ran under
+  // the session; count it.
+  session.activity += 1;
+
+  return { observationId, observed: ids.length };
+}
+
+/**
+ * `POST /runs/server-e2e-declarations` — SUPERVISOR ONLY (verifier key;
+ * the same authority as `POST /runs/expected-set`): registers the
+ * obligation ids the trusted mapping layer declared kind `server-e2e`.
+ * This is the gate that makes the server-witnessed channel kind-honest:
+ * the witness refuses (`409`) any server intent whose claimId is not in
+ * this set, so a browser-kind claim can never be satisfied through the
+ * channel and a suite-written intent can never self-declare its kind
+ * (the kind resolves in the trusted CLI mapping layer, which is exactly
+ * why the fact enters through a verifier-key surface, never through the
+ * suite-writable spool). Bound once BEFORE any issuance — identical
+ * re-registration is idempotent, any change or late registration is 409.
+ */
+async function handleServerE2eDeclarations(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ServerE2eDeclarationsRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || !Array.isArray(body['obligations'])) {
+    throw new HttpError(400, 'server-e2e declarations body must be {obligations: [...]}');
+  }
+  const obligations = new Set<string>();
+  for (const entry of body['obligations']) {
+    if (typeof entry !== 'string' || !OBLIGATION_ID_PATTERN.test(entry)) {
+      throw new HttpError(
+        400,
+        `server-e2e declarations must be obligation ids '<resourceId>:<contract>' (got '${String(entry)}')`,
+      );
+    }
+    obligations.add(entry);
+  }
+  if (state.serverE2eDeclarations !== null) {
+    const identical =
+      state.serverE2eDeclarations.size === obligations.size &&
+      [...obligations].every((id) => state.serverE2eDeclarations?.has(id));
+    if (identical) {
+      sendJson(res, 200, {
+        bound: true as const,
+        count: state.serverE2eDeclarations.size,
+        obligations: [...state.serverE2eDeclarations].sort(compareStrings),
+      });
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'server-e2e declarations are already bound to this run and differ; the declaration set ' +
+        'is a PRE-run fact and is never relabeled — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (state.ledger.size > 0 || state.sessions.size > 0 || state.serverPreObservations.size > 0) {
+    sendJson(res, 409, {
+      error:
+        'witness already issued evidence or holds open sessions; server-e2e declarations must be ' +
+        'registered BEFORE the run — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  state.serverE2eDeclarations = obligations;
+  sendJson(res, 200, {
+    bound: true as const,
+    count: obligations.size,
+    obligations: [...obligations].sort(compareStrings),
+  });
+}
+
+/**
+ * `POST /runs/observe-declarations` — SUPERVISOR ONLY: registers the
+ * obligation ids the trusted mapping layer declared kind `observed-e2e`
+ * (Observe channel, Phase 2) BEFORE the run. Same binding contract as
+ * the server-e2e set: bound once, identical re-registration idempotent,
+ * any change or late registration refused — the witness stamps
+ * `channel: 'observe'` records for these obligations only.
+ */
+async function handleObserveDeclarations(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ObserveDeclarationsRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || !Array.isArray(body['obligations'])) {
+    throw new HttpError(400, 'observe declarations body must be {obligations: [...]}');
+  }
+  const obligations = new Set<string>();
+  for (const entry of body['obligations']) {
+    if (typeof entry !== 'string' || !OBLIGATION_ID_PATTERN.test(entry)) {
+      throw new HttpError(
+        400,
+        `observe declarations must be obligation ids '<resourceId>:<contract>' (got '${String(entry)}')`,
+      );
+    }
+    obligations.add(entry);
+  }
+  if (state.observeDeclarations !== null) {
+    const identical =
+      state.observeDeclarations.size === obligations.size &&
+      [...obligations].every((id) => state.observeDeclarations?.has(id));
+    if (identical) {
+      sendJson(res, 200, {
+        bound: true as const,
+        count: state.observeDeclarations.size,
+        obligations: [...state.observeDeclarations].sort(compareStrings),
+      });
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'observe declarations are already bound to this run and differ; the declaration set ' +
+        'is a PRE-run fact and is never relabeled — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (state.ledger.size > 0 || state.sessions.size > 0) {
+    sendJson(res, 409, {
+      error:
+        'witness already issued evidence or holds open sessions; observe declarations must be ' +
+        'registered BEFORE the run — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  state.observeDeclarations = obligations;
+  sendJson(res, 200, {
+    bound: true as const,
+    count: obligations.size,
+    obligations: [...obligations].sort(compareStrings),
+  });
+}
+
+/** Splits `<resourceId>:<contract>` at the first colon (obligation id grammar). */
+function resourceIdOfObligation(obligationId: string): string {
+  const colon = obligationId.indexOf(':');
+  return colon === -1 ? obligationId : obligationId.slice(0, colon);
+}
+
+/** The CRUD operation a `persistence:<op>` contract requires; null otherwise. */
+function observeOperation(contract: string): 'create' | 'read' | 'update' | 'delete' | null {
+  if (!contract.startsWith('persistence:')) return null;
+  const operation = contract.slice('persistence:'.length);
+  if (operation === 'create' || operation === 'read' || operation === 'update' || operation === 'delete') {
+    return operation;
+  }
+  return null;
+}
+
+/**
+ * Takes Observe before-snapshots for one freshly opened session: for
+ * every resource its observe-declared claims name, the witness runs the
+ * resource's adapter `list()` ITSELF and normalizes each body. The
+ * snapshot is the before-state every observe postcondition grades
+ * against — expectations never come from the suite. Per-resource
+ * trouble (no adapter, no list, probe/read/normalize failure) is
+ * stored as an error snapshot: the session still opens and the test
+ * still runs; finalize reports the resource as unobservable instead of
+ * satisfying anything. Total: never throws out of session open.
+ */
+async function takeObserveSnapshots(state: WitnessState, session: TestSession): Promise<void> {
+  if (state.observeDeclarations === null || state.observeDeclarations.size === 0) return;
+  const resources = new Set<string>();
+  for (const claim of session.claims) {
+    if (state.observeDeclarations.has(claim)) resources.add(resourceIdOfObligation(claim));
+  }
+  if (resources.size === 0) return;
+  const perSession = new Map<string, ObserveResourceSnapshot>();
+  state.observeSnapshots.set(session.sessionId, perSession);
+  for (const resourceId of [...resources].sort(compareStrings)) {
+    perSession.set(resourceId, await snapshotObserveResource(state, resourceId));
+  }
+  session.activity += 1;
+}
+
+/** Snapshots one resource's adapter-listed entities (never throws). */
+async function snapshotObserveResource(
+  state: WitnessState,
+  resourceId: string,
+): Promise<ObserveResourceSnapshot> {
+  const failure = (adapterName: string, error: string): ObserveResourceSnapshot => ({
+    resourceId,
+    adapterName,
+    before: new Map(),
+    error,
+  });
+  let adapterName = resourceId;
+  try {
+    const context = await adapterReadContext(state, resourceId);
+    adapterName = context.adapterName;
+    const adapter = context.adapter;
+    if (typeof adapter.list !== 'function') {
+      return failure(
+        adapterName,
+        `adapter '${adapterName}' exports no list() — Observe needs a before-snapshot, so ` +
+          `resource '${resourceId}' is unobservable until the adapter lists its entities`,
+      );
+    }
+    const ctx = observeAdapterContext(state, context.baseUrl, resourceId);
+    return { resourceId, adapterName, before: await observeListEntities(adapterName, adapter, ctx), error: null };
+  } catch (error) {
+    const detail = error instanceof HttpError ? error.message : (error as Error).message;
+    return failure(adapterName, detail);
+  }
+}
+
+/** Builds the GET-only adapter transport for observe snapshots/reads. */
+function observeAdapterContext(state: WitnessState, baseUrl: string, resourceId: string): AdapterContext {
+  const headers = state.options.adapterReadAuthorization
+    ? { authorization: state.options.adapterReadAuthorization }
+    : undefined;
+  return makeAdapterContext(
+    baseUrl,
+    resourceId,
+    (path: string) => adapterGet(baseUrl, state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+    headers,
+  );
+}
+
+/**
+ * Lists + normalizes a resource's entities through its adapter (the
+ * witness's own observation). Throws HttpError (409) on list/normalize
+ * trouble — callers turn it into a typed observe note, never
+ * satisfaction.
+ */
+async function observeListEntities(
+  adapterName: string,
+  adapter: EvidenceAdapter,
+  ctx: AdapterContext,
+): Promise<Map<string, { entityId: unknown; fields: unknown }>> {
+  if (typeof adapter.list !== 'function') {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' exports no list() — Observe needs entity snapshots`,
+    );
+  }
+  let listed: unknown;
+  try {
+    listed = await adapter.list(ctx);
+  } catch (error) {
+    throw new HttpError(409, `adapter '${adapterName}' list failed: ${(error as Error).message}`);
+  }
+  if (!Array.isArray(listed)) {
+    throw new HttpError(409, `adapter '${adapterName}' list must return an array of entities`);
+  }
+  const out = new Map<string, { entityId: unknown; fields: unknown }>();
+  for (const raw of listed) {
+    let normalized: { entityId: unknown; fields: unknown };
+    try {
+      const candidate = adapter.normalize(raw);
+      if (!isPlainObject(candidate) || !('entityId' in candidate) || !('fields' in candidate)) {
+        throw new Error('normalize must return {entityId, fields}');
+      }
+      normalized = { entityId: candidate['entityId'], fields: candidate['fields'] };
+    } catch (error) {
+      throw new HttpError(409, `adapter '${adapterName}' normalize failed: ${(error as Error).message}`);
+    }
+    let key: string;
+    try {
+      key = canonicalOf(normalized.entityId);
+    } catch {
+      throw new HttpError(409, `adapter '${adapterName}' normalized an entity id with no canonical form`);
+    }
+    out.set(key, normalized);
+  }
+  return out;
+}
+
+/**
+ * Matches a recorded observed path against an adapter observe path
+ * template. `{id}` binds exactly one non-empty segment; every other
+ * segment must be literally equal (case-sensitive). Matching reuses
+ * core's canonical shape semantics (`{id}` → `{}`).
+ *
+ * Returns `{id}` (null for id-less create templates) on match, null
+ * otherwise.
+ */
+function matchObserveTemplate(observedPath: string, template: string): { id: string | null } | null {
+  const segments = template.split('/').filter((segment) => segment.length > 0);
+  const idIndex = segments.indexOf('{id}');
+  const canonical = segments.map((segment) => (segment === '{id}' ? '{}' : segment)).join('/');
+  if (!pathMatchesShape(observedPath, canonical.startsWith('/') ? canonical : `/${canonical}`)) {
+    return null;
+  }
+  if (idIndex === -1) return { id: null };
+  const observedSegments = observedPath.split('/').filter((segment) => segment.length > 0);
+  const id = observedSegments[idIndex];
+  if (id === undefined || id.length === 0) return null;
+  return { id };
+}
+
+/** Finds a snapshot key for a path id segment (canonical or numeric-string form). */
+function beforeKeyForSegment(
+  before: Map<string, { entityId: unknown; fields: unknown }>,
+  segment: string,
+): string | null {
+  try {
+    const canonical = canonicalOf(segment);
+    if (before.has(canonical)) return canonical;
+  } catch {
+    return null;
+  }
+  for (const [key, entry] of before) {
+    if (typeof entry.entityId === 'number' && String(entry.entityId) === segment) return key;
+  }
+  return null;
+}
+
+/**
+ * Parses a proxied request body into echoable fields (Observe channel):
+ * JSON objects and form bodies project their top-level scalar
+ * (string/number/boolean) fields — the witness-observed statement of
+ * what the test sent, graded by echo against the adapter read. Nested
+ * envelopes are not entity fields and are skipped (documented); empty,
+ * truncated, oversized, unparsable, or otherwise-typed bodies are
+ * INELIGIBLE (typed error), never echoed from a prefix or a guess.
+ */
+function parseObserveBody(exchange: ObservedExchange): { fields: Record<string, unknown> } | { error: string } {
+  if (exchange.requestBody === null || exchange.requestBytes === 0) {
+    return { error: 'the proxied exchange carried no request body — there is nothing to echo' };
+  }
+  if (exchange.requestTruncated) {
+    return {
+      error:
+        `the request body exceeds the ${String(OBSERVED_REQUEST_BODY_BYTES)}-byte witness snapshot ` +
+        'cap — oversized intents are never echoed from a prefix',
+    };
+  }
+  const contentType = exchange.requestContentType;
+  if (contentType === 'application/json') {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(exchange.requestBody.toString('utf8'));
+    } catch {
+      return { error: 'the request body is not parseable JSON' };
+    }
+    if (!isPlainObject(parsed)) {
+      return { error: 'the JSON request body is not an object' };
+    }
+    const fields: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        fields[key] = value;
+      }
+    }
+    if (Object.keys(fields).length === 0) {
+      return { error: 'the JSON request body carries no echoable scalar fields' };
+    }
+    return { fields };
+  }
+  if (contentType === 'application/x-www-form-urlencoded') {
+    const fields: Record<string, unknown> = {};
+    for (const [key, value] of new URLSearchParams(exchange.requestBody.toString('utf8'))) {
+      fields[key] = value;
+    }
+    if (Object.keys(fields).length === 0) {
+      return { error: 'the form request body carries no fields' };
+    }
+    return { fields };
+  }
+  return {
+    error:
+      `unsupported request content-type '${contentType ?? '<none>'}' — observe echoes JSON and ` +
+      'form bodies only',
+  };
+}
+
+/**
+ * Reads one entity through its adapter at finalize time (the
+ * witness's own after-observation). Throws HttpError (409) on
+ * adapter/normalize trouble — callers note it, never satisfy on it.
+ */
+async function readObserveEntity(
+  state: WitnessState,
+  resourceId: string,
+  id: unknown,
+): Promise<{ adapterName: string; found: boolean; fields: unknown; entityId: unknown }> {
+  const { adapterName, adapter, baseUrl } = await adapterReadContext(state, resourceId);
+  const ctx = observeAdapterContext(state, baseUrl, resourceId);
+  let bodyRaw: unknown;
+  try {
+    bodyRaw = await adapter.read(ctx, id);
+  } catch (error) {
+    throw new HttpError(409, `adapter '${adapterName}' read failed: ${(error as Error).message}`);
+  }
+  const found = bodyRaw !== null && bodyRaw !== undefined;
+  if (!found) return { adapterName, found: false, fields: null, entityId: id };
+  try {
+    const candidate = adapter.normalize(bodyRaw);
+    if (!isPlainObject(candidate) || !('entityId' in candidate) || !('fields' in candidate)) {
+      throw new Error('normalize must return {entityId, fields}');
+    }
+    return { adapterName, found: true, fields: candidate['fields'], entityId: candidate['entityId'] };
+  } catch (error) {
+    throw new HttpError(409, `adapter '${adapterName}' normalize failed: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Reads the canonical keys of every scalar value in one bounded JSON
+ * response-body snapshot: what that response NAMED (a create response
+ * names the entity it just created). A non-JSON, truncated, or
+ * unparsable body yields an UNREADABLE attribution — never a prefix,
+ * never a guess.
+ *
+ * Args:
+ *   snapshot: the bounded response bytes already hashed into the
+ *     exchange's body digest.
+ *   contentType: lowercased response media type, or null.
+ *   truncated: whether the body exceeded the snapshot cap.
+ *
+ * Returns:
+ *   {named, readable}: the canonical keys of the scalars the body
+ *   named (sorted, deduped), and whether it could be read at all.
+ */
+function responseAttribution(
+  snapshot: Buffer,
+  contentType: string | null,
+  truncated: boolean,
+): { named: string[]; readable: boolean } {
+  if (truncated || contentType !== 'application/json') return { named: [], readable: false };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(snapshot.toString('utf8'));
+  } catch {
+    return { named: [], readable: false };
+  }
+  const named = new Set<string>();
+  // Explicit stack, not recursion: a 16 KiB body can nest deeper than
+  // the call stack tolerates, and a deeply nested response is still a
+  // response.
+  const stack: unknown[] = [parsed];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (Array.isArray(value)) {
+      for (const item of value) stack.push(item);
+      continue;
+    }
+    if (isPlainObject(value)) {
+      for (const item of Object.values(value)) stack.push(item);
+      continue;
+    }
+    if (typeof value !== 'string' && typeof value !== 'number') continue;
+    // Entity ids are short; a longer scalar names nothing. The raw
+    // rendered scalar is kept (canonicalized against the snapshot key
+    // at attribution time, so numeric and string ids both resolve).
+    const rendered = String(value);
+    if (rendered.length === 0 || rendered.length > OBSERVED_RESPONSE_ID_CHARS) continue;
+    named.add(rendered);
+  }
+  return { named: [...named].sort(compareStrings), readable: true };
+}
+
+/** The fresh entities an after-list reported (absent from the before-snapshot). */
+type FreshEntity = { entityId: unknown; fields: unknown };
+
+/**
+ * Attributes the entity ONE observed create produced to the exchange
+ * that returned it, so concurrent observed creates of the same
+ * resource cannot make each other ambiguous.
+ *
+ * The id comes from the response the witness proxied — never from the
+ * suite, never from a raw before/after diff alone — and it is
+ * verified against the after-list. Every OTHER new entity must be
+ * named by exactly one other observed exchange of the same mutation:
+ * that is another test's own create through its own session proxy. A
+ * new entity no observed exchange names was written outside every
+ * session channel, and the creation then stays ambiguous (a typed
+ * note, no record).
+ *
+ * Args:
+ *   state: running witness state (the append-only attribution log).
+ *   binding: the adapter's observe binding for this create.
+ *   exchange: the one observed create this claim is crediting.
+ *   fresh: the entities absent from the session-open before-snapshot.
+ *
+ * Returns:
+ *   {key}: the fresh entity this create produced, or {note}: why the
+ *   attribution is not possible (never a guess).
+ */
+function attributeCreatedEntity(
+  state: WitnessState,
+  binding: ObserveMutation,
+  exchange: ObservedExchange,
+  fresh: Map<string, FreshEntity>,
+): { key: string } | { note: string } {
+  /** The fresh keys one attribution record names. */
+  const freshKeysNamedBy = (entry: ObservedResponseAttribution | undefined): string[] => {
+    if (entry === undefined) return [];
+    const keys: string[] = [];
+    for (const scalar of entry.named) {
+      const key = beforeKeyForSegment(fresh, scalar);
+      if (key !== null) keys.push(key);
+    }
+    return keys;
+  };
+  const ownAttribution = state.observedResponses.find((entry) => entry.seq === exchange.seq);
+  const own = freshKeysNamedBy(ownAttribution);
+  let key: string;
+  if (own.length === 1) {
+    key = own[0] as string;
+  } else if (own.length === 0 && fresh.size === 1) {
+    // Exactly one new entity and the response named none of them: the
+    // one create in this window is this session's (an unobserved
+    // writer would have made a second), so nothing is being picked
+    // between. The after-list read still has to confirm the entity.
+    key = [...fresh.keys()][0] as string;
+  } else if (own.length === 0) {
+    return {
+      note:
+        (ownAttribution?.readable === false
+          ? 'the observed create response named no entity (its body is not readable JSON, or it ' +
+            `exceeded the ${String(OBSERVED_BODY_SNAPSHOT_BYTES)}-byte witness snapshot cap)`
+          : 'the observed create response named no entity') +
+        ` among the ${String(fresh.size)} entities new since the session opened — the creation is ` +
+        'ambiguous, so no record is issued',
+    };
+  } else {
+    return {
+      note:
+        `the observed create response named ${String(own.length)} entities new since the session ` +
+        `opened (${[...own].sort(compareStrings).join(', ')}) — the creation is ambiguous, so no ` +
+        'record is issued',
+    };
+  }
+  for (const other of [...fresh.keys()].sort(compareStrings)) {
+    if (other === key) continue;
+    const attributedElsewhere = state.observedResponses.some((entry) => {
+      if (entry.seq === exchange.seq) return false;
+      if (entry.method !== binding.method) return false;
+      if (entry.status < 200 || entry.status > 299) return false;
+      if (matchObserveTemplate(entry.path, binding.path) === null) return false;
+      const named = freshKeysNamedBy(entry);
+      return named.length === 1 && named[0] === other;
+    });
+    if (!attributedElsewhere) {
+      const unattributed = fresh.get(other) as FreshEntity;
+      return {
+        note:
+          `entity ${JSON.stringify(unattributed.entityId) ?? '?'} is new since the session opened and ` +
+          `no observed ${binding.method} ${binding.path} response names it — a writer outside the ` +
+          'observation proxy made the creation ambiguous, so no record is issued',
+      };
+    }
+  }
+  return { key };
+}
+
+/**
+ * `POST /observe/finalize` — SUPERVISOR ONLY: resolves one OPEN
+ * session's observe-declared claims against the session's own proxied
+ * traffic plus independent adapter reads, stamping witnessed
+ * `persistence.observed` records for whatever resolves. The session
+ * must be OPEN (the drain finalizes after a passed test, before seal);
+ * sealed/unknown sessions are refused, so records are never injected
+ * after the test ended. Every non-resolution is a typed NOTE in the
+ * response — never satisfaction, never a run failure (the obligation
+ * stays blocking through verdicts, which is the honest outcome).
+ *
+ * Per obligation (`<resourceId>:persistence:<op>`):
+ * - adapter binding + before-snapshot must exist (else typed note);
+ * - exactly one 2xx session exchange must match the binding (zero →
+ *   missing-traffic note; several → ambiguity note);
+ * - create attributes its id to the response the witness proxied,
+ *   verified against the after-list (a concurrent observed create
+ *   named by its OWN response is not ambiguity; a new entity no
+ *   observed exchange names — a writer outside the proxy — is);
+ *   read/update/delete bind `{id}` from the path against the snapshot,
+ *   except a read that declares `collection`: it resolves the rows its
+ *   own proxied response returned against that same snapshot and reads
+ *   one of them deterministically, never a path id and never a count;
+ *   two claimed reads on one route with DIFFERENT declared shapes
+ *   credit neither and the note names both declarations;
+ * - create/update echo the parsed request-body scalars against the
+ *   adapter read (the record carries both; the ENGINE grades the echo);
+ * - the matched exchange is consumed single-use.
+ */
+async function handleObserveFinalize(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ObserveFinalizeRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body) || typeof body['sessionId'] !== 'string' || body['sessionId'].length === 0) {
+    throw new HttpError(400, 'observe finalize body must be {sessionId}');
+  }
+  const sessionId = body['sessionId'];
+  const session = state.sessions.get(sessionId);
+  if (session === undefined) {
+    throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
+  }
+  if (session.status === 'sealed') {
+    throw new HttpError(
+      409,
+      `session '${sessionId}' is sealed — observe finalizes before seal, never after (records cannot be injected after the test ended)`,
+    );
+  }
+  // A RELEASED session (`outcome-pending`) still finalizes: the release
+  // only unbound the worker slot and killed the proxy, so the traffic
+  // and the before-snapshot it did observe are exactly what an open
+  // session would hold, and no new traffic can join them. The finalize
+  // rides the runner's LATER outcome (the drain finalizes a passed
+  // test, then closes it with that outcome).
+  if (state.observeDeclarations === null) {
+    throw new HttpError(409, 'observe declarations are not bound on this witness — register them before the run');
+  }
+  const finalized: ObserveFinalizedObligation[] = [];
+  const notes: string[] = [];
+  const claims = session.claims.filter((claim) => state.observeDeclarations?.has(claim));
+  for (const claimId of claims) {
+    const outcome = await finalizeObserveClaim(state, session, claimId);
+    if ('record' in outcome) finalized.push(outcome.record);
+    else notes.push(outcome.note);
+  }
+  const response: ObserveFinalizeResponse = { finalized, notes };
+  sendJson(res, 200, response);
+}
+
+/** Resolves one observe-declared claim (record or typed note, never throws). */
+async function finalizeObserveClaim(
+  state: WitnessState,
+  session: TestSession,
+  claimId: string,
+): Promise<{ record: ObserveFinalizedObligation } | { note: string }> {
+  const note = (detail: string): { note: string } => ({ note: `observe '${claimId}': ${detail}` });
+  const resourceId = resourceIdOfObligation(claimId);
+  const operation = observeOperation(claimId.slice(resourceId.length + 1));
+  if (operation === null) {
+    return note('the Observe channel proves persistence:* contracts only — this claim stays blocking');
+  }
+  let adapterName: string;
+  let adapter: EvidenceAdapter;
+  let adapterBaseUrl: string;
+  try {
+    const context = await adapterReadContext(state, resourceId);
+    adapterName = context.adapterName;
+    adapter = context.adapter;
+    adapterBaseUrl = context.baseUrl;
+  } catch (error) {
+    return note(error instanceof HttpError ? error.message : (error as Error).message);
+  }
+  const binding = adapter.observe?.[operation];
+  if (binding === undefined) {
+    return note(
+      `adapter '${adapterName}' declares no observe binding for '${operation}' — declare it in ` +
+        `'.gateforge/adapters/${adapterName}.mjs' to make this obligation observable`,
+    );
+  }
+  const snapshot = state.observeSnapshots.get(session.sessionId)?.get(resourceId);
+  if (snapshot === undefined || snapshot.error !== null) {
+    return note(
+      snapshot?.error !== null && snapshot?.error !== undefined
+        ? `no usable before-snapshot: ${snapshot.error as string}`
+        : 'no before-snapshot for this session — the session opened before observe declarations bound, or the snapshot failed',
+    );
+  }
+  // Bind watermark (plan §11.4, same as http-observation): exchanges
+  // that completed before the trusted context bound predate it.
+  const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
+  const matches: Array<{ exchange: ObservedExchange; id: string | null }> = [];
+  for (const exchange of state.observed) {
+    if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
+    if (exchange.method !== binding.method) continue;
+    if (exchange.status < 200 || exchange.status > 299) continue;
+    const matched = matchObserveTemplate(exchange.path, binding.path);
+    if (matched === null) continue;
+    matches.push({ exchange, id: matched.id });
+  }
+  if (matches.length === 0) {
+    return note(
+      `no ${binding.method} ${binding.path} exchange (2xx) for this session through the observation ` +
+        'proxy — drive traffic through the session proxy prefix before claiming the obligation',
+    );
+  }
+  if (matches.length > 1) {
+    return note(
+      `${String(matches.length)} matching ${binding.method} ${binding.path} exchanges — ambiguous, ` +
+        'refusing to pick one (seed through untracked channels so the mutation stands alone)',
+    );
+  }
+  const matched = matches[0] as { exchange: ObservedExchange; id: string | null };
+  // Resolve the entity id: create attributes the entity to the response
+  // the witness proxied (verified against the witness's own after-list,
+  // so a concurrent observed create cannot make it ambiguous);
+  // read/update/delete bind `{id}` against the session-open snapshot.
+  let entityIdForRead: unknown;
+  let before: { entityAbsent: boolean } | { found: boolean; fields?: unknown } | undefined;
+  if (operation === 'create') {
+    let after: Map<string, FreshEntity>;
+    try {
+      const ctx = observeAdapterContext(state, adapterBaseUrl, resourceId);
+      after = await observeListEntities(adapterName, adapter, ctx);
+    } catch (error) {
+      return note(error instanceof HttpError ? error.message : (error as Error).message);
+    }
+    const fresh = new Map<string, FreshEntity>();
+    for (const [key, entry] of after) {
+      if (!snapshot.before.has(key)) fresh.set(key, entry);
+    }
+    const attributed = attributeCreatedEntity(state, binding, matched.exchange, fresh);
+    if ('note' in attributed) return note(attributed.note);
+    const created = after.get(attributed.key) as FreshEntity;
+    entityIdForRead = created.entityId;
+    before = { entityAbsent: true };
+  } else if (binding.collection !== undefined) {
+    // Collection read: the entities are the rows the response ACTUALLY
+    // returned, resolved against the witness's own session-open
+    // snapshot. A row the app returned but the snapshot never held was
+    // written after this session opened, and a response naming no
+    // such row names nothing to prove — both are typed notes.
+    const conflict = matched.exchange.collectionConflict;
+    if (conflict !== undefined) {
+      return note(
+        `this session claims more than one read on ${binding.method} ${binding.path} and they declare ` +
+          `DIFFERENT collection shapes (${conflict.join(' vs ')}) — the witness parses that response for ` +
+          'neither of them, so no record is issued',
+      );
+    }
+    const rows = matched.exchange.collectionRows;
+    if (rows === undefined) {
+      return note(
+        'the matched collection response carried no parsed rows — a collection read resolves only from ' +
+          'the body the witness proxied for this exchange',
+      );
+    }
+    if (rows.error !== null) return note(rows.error);
+    const declared = binding.collection;
+    if (rows.rowsKey !== (declared.rowsKey ?? null) || rows.idKey !== declared.idKey) {
+      return note(
+        'the rows parsed for this exchange were read under a different declared collection shape — a ' +
+          'collection read resolves only from rows read under its OWN rowsKey/idKey',
+      );
+    }
+    // One pass, one seen-table: every returned id that the witness
+    // already held when the session opened, deduplicated by canonical
+    // key.
+    const held: Record<string, true> = Object.create(null) as Record<string, true>;
+    for (const id of rows.ids) {
+      const key = beforeKeyForSegment(snapshot.before, String(id));
+      if (key !== null) held[key] = true;
+    }
+    const returned = Object.keys(held).sort(compareStrings);
+    if (returned.length === 0) {
+      return note(
+        `the collection response named no entity that existed when this session opened — a read proves ` +
+          'only rows the witness already held, never rows a later writer added',
+      );
+    }
+    // Several rows is the ordinary case for a rendered list, so the
+    // target is the canonically-first one — deterministic, and never
+    // the response's own order — and it is then read through the
+    // adapter exactly like a by-id read.
+    const chosen = snapshot.before.get(returned[0] as string) as { entityId: unknown; fields: unknown };
+    entityIdForRead = chosen.entityId;
+  } else {
+    if (matched.id === null) {
+      return note('the observe binding carries no {id} segment for a non-create operation');
+    }
+    const beforeKey = beforeKeyForSegment(snapshot.before, matched.id);
+    if (beforeKey === null) {
+      return note(
+        `entity '${matched.id}' was not in the session-open snapshot — observe binds {id} ` +
+          'against witness-held before-state, never against suite-declared ids',
+      );
+    }
+    const beforeEntry = snapshot.before.get(beforeKey) as { entityId: unknown; fields: unknown };
+    entityIdForRead = beforeEntry.entityId;
+    if (operation === 'update') before = { found: true, fields: beforeEntry.fields };
+  }
+  // Echo source (create/update only): the witness-observed request
+  // fields. Read/delete carry no echo — presence/absence grades them.
+  let observedFields: Record<string, unknown> = {};
+  if (operation === 'create' || operation === 'update') {
+    const parsed = parseObserveBody(matched.exchange);
+    if ('error' in parsed) return note(parsed.error);
+    observedFields = parsed.fields;
+  }
+  let read: { adapterName: string; found: boolean; fields: unknown; entityId: unknown };
+  try {
+    read = await readObserveEntity(state, resourceId, entityIdForRead);
+  } catch (error) {
+    return note(error instanceof HttpError ? error.message : (error as Error).message);
+  }
+  const volatileFields = declaredVolatileFields(adapter);
+  const payload: Record<string, unknown> = {
+    resourceId,
+    entityId: read.entityId,
+    found: read.found,
+    ...(read.found ? { fields: read.fields ?? {} } : {}),
+    ...(volatileFields.length > 0 ? { volatileFields } : {}),
+    ...(before !== undefined ? { before } : {}),
+    observedFields,
+    exchange: {
+      method: matched.exchange.method,
+      path: matched.exchange.path,
+      status: matched.exchange.status,
+      seq: matched.exchange.seq,
+    },
+    sessionId: session.sessionId,
+    channel: OBSERVE_CHANNEL,
+  };
+  // The record binds runId/claimId/testId and rides the same ledger
+  // attestation MAC as every witnessed record. Contents are
+  // witness-produced (proxy capture + adapter read) — `engine-observed`
+  // origin, witnessed trust; the suite-driven-browser distinction rides
+  // `channel: 'observe'`, which the grader keys off explicitly.
+  const issued = issueRecord(state, claimId, OBSERVED_KIND, session.testId, payload, 'engine-observed');
+  // Single-use: the matched exchange can never credit another claim.
+  const consumed = state.observed.indexOf(matched.exchange);
+  if (consumed !== -1) state.observed.splice(consumed, 1);
+  session.activity += 1;
+  return {
+    record: { obligationId: claimId, recordId: issued.recordId, operation, entityId: read.entityId },
+  };
+}
+
+/**
+ * `POST /witness/server-persistence` — SUPERVISOR ONLY (run token +
+ * verifier key; the trusted CLI drain forwards intents the supervised
+ * suite could only WRITE to the spool): one persistence claim intent
+ * resolved against the app's real state. The WITNESS — never the test
+ * process — executes the resource's adapter SERVER PROBE (witness-side,
+ * behind the same attestation chain as every adapter read: GF-10
+ * loopback + GF-13 fingerprint) and, only on a successful observation,
+ * stamps a WITNESSED `persistence.entity` record carrying
+ * `channel: 'server'` + `declaredKind: 'server-e2e'`, bound to
+ * runId/claimId/testId and covered by the ledger attestation exactly
+ * like every witnessed record.
+ *
+ * Fail-closed resolution (typed causes on the error `detail`):
+ * - obligation not registered `server-e2e` → 409, detail
+ *   `TEST_KIND_UNKNOWN` (declare `kind: server-e2e` in the test map);
+ * - replayed/out-of-order intent sequence → 409 (no stale re-drive);
+ * - create/update post intent without the paired pre intent → 409
+ *   (the engine grades before/after; without a witness-side before
+ *   observation there is nothing to stamp);
+ * - missing adapter / missing `probeServer` export / probe throw or
+ *   malformed probe result → 409 with detail `SERVER_PROBE_UNAVAILABLE`
+ *   — the intent NEVER resolves to satisfaction on probe trouble.
+ *
+ * The intent line itself is suite-writable and proves nothing; it only
+ * selects WHICH entity the witness probes and what the suite expects.
+ * Expectation CONTRADICTION (e.g. create-post but the entity is still
+ * absent) is not a probe failure: the record stamps what the witness
+ * observed and the verdict engine grades the postcondition — one
+ * grading site, engine-owned.
+ */
+async function handleServerPersistence(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: ServerPersistenceIntentRequest,
+): Promise<void> {
+  requireSupervisor(state, verifier);
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'server persistence body must be an object');
+  }
+  const { resourceId, claimId, operation, phase, intent, key, sequence, testId } = body;
+  if (typeof resourceId !== 'string' || resourceId.length === 0) {
+    throw new HttpError(400, 'resourceId must be a non-empty string');
+  }
+  if (typeof claimId !== 'string' || !OBLIGATION_ID_PATTERN.test(claimId)) {
+    throw new HttpError(400, "claimId must be an obligation id '<resourceId>:<contract>'");
+  }
+  if (operation !== 'create' && operation !== 'read' && operation !== 'update' && operation !== 'delete') {
+    throw new HttpError(400, "operation must be one of 'create' | 'read' | 'update' | 'delete'");
+  }
+  // Claim/operation/resource agreement: an intent never steers evidence
+  // onto a different obligation identity than the one it names.
+  if (claimId !== `${resourceId}:persistence:${operation}`) {
+    throw new HttpError(
+      400,
+      `claimId '${claimId}' must equal '<resourceId>:persistence:${operation}' for this intent ` +
+        '(claim, resource, and operation must agree — an intent never redirects evidence)',
+    );
+  }
+  if (phase !== 'pre' && phase !== 'post') {
+    throw new HttpError(400, "phase must be 'pre' or 'post'");
+  }
+  if (intent !== 'expect-present' && intent !== 'expect-absent') {
+    throw new HttpError(400, "intent must be 'expect-present' or 'expect-absent'");
+  }
+  if (typeof sequence !== 'number' || !Number.isInteger(sequence) || sequence < 1) {
+    throw new HttpError(400, 'sequence must be an integer >= 1');
+  }
+  if (typeof testId !== 'string' || testId.length === 0) {
+    throw new HttpError(400, 'testId must be a non-empty string');
+  }
+  // The entity key is the probe subject: scalar or column-keyed object,
+  // always GF-canonical-JSON-representable (it hashes into the record).
+  let entityKey: string;
+  try {
+    entityKey = canonicalOf(key);
+  } catch {
+    throw new HttpError(400, 'key must be a JSON scalar or a column-keyed JSON object');
+  }
+
+  // Kind gate (trusted mapping layer, never the suite): the witness
+  // stamps the server channel ONLY for obligations the supervisor
+  // registered as mapping kind 'server-e2e'.
+  if (
+    state.serverE2eDeclarations === null ||
+    !state.serverE2eDeclarations.has(claimId)
+  ) {
+    throw new HttpError(
+      409,
+      `server persistence intent refused: obligation '${claimId}' is not registered kind ` +
+        `'${SERVER_E2E_TEST_KIND}' on this witness — declare 'kind: ${SERVER_E2E_TEST_KIND}' in the ` +
+        'test-map sidecar and pass the resolved obligations to the supervisor drain ' +
+        '(a browser-kind claim is never satisfied through the server channel)',
+      'TEST_KIND_UNKNOWN',
+    );
+  }
+  // Replay gate: strictly increasing per claimId. A duplicate line (drain
+  // restart, spool replay, forged re-append) resolves to a typed failure
+  // — an intent is resolved at most once per sequence.
+  const lastSequence = state.serverIntentSequences.get(claimId);
+  if (lastSequence !== undefined && sequence <= lastSequence) {
+    throw new HttpError(
+      409,
+      `server persistence intent refused: sequence ${String(sequence)} for '${claimId}' does not ` +
+        `exceed the last accepted (${String(lastSequence)}) — intents are strictly increasing per ` +
+        'claim and a replayed line is never re-driven',
+    );
+  }
+  state.serverIntentSequences.set(claimId, sequence);
+
+  // WITNESS-SIDE probe: the same attestation chain as every adapter read
+  // (reviewed adapter, GF-10 loopback, GF-13 fingerprint), then the
+  // adapter's own probeServer against the app database. Any trouble here
+  // is a typed SERVER_PROBE_UNAVAILABLE failure — never satisfaction.
+  const { adapterName, adapter } = await serverProbeContext(state, resourceId, claimId);
+  const observation = await runServerProbe(state, adapterName, adapter, resourceId, key);
+
+  if (phase === 'pre') {
+    // Pre intents STORE the witness observation; they stamp no record.
+    if (operation === 'create') {
+      if (intent !== 'expect-absent') {
+        throw new HttpError(400, "create pre intents must declare intent 'expect-absent'");
+      }
+    } else if (operation === 'update') {
+      if (intent !== 'expect-present') {
+        throw new HttpError(400, "update pre intents must declare intent 'expect-present'");
+      }
+    } else {
+      throw new HttpError(
+        400,
+        `pre intents apply only to create/update (operation '${operation}' postconditions need no before-state)`,
+      );
+    }
+    const preKey = `${claimId}\u0000${entityKey}`;
+    if (state.serverPreObservations.has(preKey)) {
+      throw new HttpError(
+        409,
+        `server persistence intent refused: claim '${claimId}' already holds a pending ` +
+          'pre-observation for this entity — advance the sequence and post the mutation first',
+      );
+    }
+    state.serverPreObservations.set(preKey, {
+      resourceId,
+      kind: operation === 'create' ? 'absence' : 'entity',
+      found: observation.found,
+      ...(observation.found ? { fields: observation.fields ?? {} } : {}),
+    });
+    const response: ServerPreObservationResponse = { resolved: 'pre', found: observation.found };
+    sendJson(res, 200, response);
+    return;
+  }
+
+  // Post intents consume the paired pre-observation (create/update) and
+  // stamp ONE self-contained witnessed record — the same `before` shapes
+  // the browser path's persistence reads carry, so the verdict engine
+  // grades BOTH channels with the same postcondition code.
+  let before: { entityAbsent: boolean } | { found: boolean; fields?: unknown } | undefined;
+  if (operation === 'create' || operation === 'update') {
+    const preKey = `${claimId}\u0000${entityKey}`;
+    const pre = state.serverPreObservations.get(preKey);
+    const wantedKind = operation === 'create' ? 'absence' : 'entity';
+    if (pre === undefined || pre.resourceId !== resourceId || pre.kind !== wantedKind) {
+      throw new HttpError(
+        409,
+        `server persistence intent refused: no witness-side pre-observation for '${claimId}' on ` +
+          `entity ${entityKey} — write the pre intent (before the mutation) so the engine can ` +
+          'grade the before/after postcondition from its OWN observations',
+      );
+    }
+    state.serverPreObservations.delete(preKey);
+    before =
+      pre.kind === 'absence'
+        ? { entityAbsent: !pre.found }
+        : pre.found
+          ? { found: true, fields: pre.fields }
+          : { found: false };
+  }
+  const payload: Record<string, unknown> = {
+    resourceId,
+    entityId: key,
+    found: observation.found,
+    ...(observation.found ? { fields: observation.fields ?? {} } : {}),
+    ...(before !== undefined ? { before } : {}),
+    channel: SERVER_CHANNEL,
+    declaredKind: SERVER_E2E_TEST_KIND,
+    intent: { phase: 'post', expectation: intent, sequence },
+  };
+  // The record binds runId/claimId/testId (hashed into its provenance id)
+  // and rides the same ledger attestation MAC as every witnessed record.
+  const issued = issuePersistenceRecord(state, claimId, testId, payload);
+  const response: ServerPersistenceResponse = {
+    recordId: issued.recordId,
+    runId: issued.runId,
+    trust: issued.trust,
+    channel: SERVER_CHANNEL,
+    verdictRelevant: { found: observation.found },
+  };
+  sendJson(res, 200, response);
+}
+
+/**
+ * Resolves the reviewed adapter for a server probe, enforcing the FULL
+ * browser-path attestation chain (ADR 0001 reviewed adapter, GF-10
+ * loopback, GF-13 fingerprint) so a server observation is exactly as
+ * trustworthy as an engine-side adapter read. A missing adapter or a
+ * missing `probeServer` export resolves typed SERVER_PROBE_UNAVAILABLE
+ * (actionable; the intent never resolves to satisfaction).
+ */
+async function serverProbeContext(
+  state: WitnessState,
+  resourceId: string,
+  claimId: string,
+): Promise<{ adapterName: string; adapter: EvidenceAdapter }> {
+  let adapterName: string;
+  let adapter: EvidenceAdapter | undefined;
+  try {
+    const context = await adapterReadContext(state, resourceId);
+    adapterName = context.adapterName;
+    adapter = context.adapter;
+  } catch (error) {
+    if (error instanceof HttpError) {
+      throw new HttpError(
+        error.status,
+        `server persistence intent for '${claimId}' failed: ${error.message}`,
+        'SERVER_PROBE_UNAVAILABLE',
+      );
+    }
+    throw error;
+  }
+  if (typeof adapter.probeServer !== 'function') {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' for resource '${resourceId}' exports no server probe ` +
+        `(add 'async probeServer(ctx, subject) => ({found, fields})' to ` +
+        `'.gateforge/adapters/${adapterName}.mjs'); server-witnessed persistence intents ` +
+        'fail closed without one',
+      'SERVER_PROBE_UNAVAILABLE',
+    );
+  }
+  return { adapterName, adapter };
+}
+
+/**
+ * Executes one adapter server probe (witness process ONLY) and validates
+ * the result shape. A throw or a malformed return is a typed
+ * SERVER_PROBE_UNAVAILABLE failure; a well-shaped result — even one that
+ * contradicts the suite's expectation — is an honest observation the
+ * verdict engine grades.
+ */
+async function runServerProbe(
+  state: WitnessState,
+  adapterName: string,
+  adapter: EvidenceAdapter,
+  resourceId: string,
+  key: unknown,
+): Promise<{ found: boolean; fields: Record<string, unknown> | null }> {
+  const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl;
+  const ctx = makeAdapterContext(
+    baseUrl ?? '',
+    resourceId,
+    (path: string) => adapterGet(baseUrl ?? '', state.options.requestTimeoutMs, path, state.options.adapterReadAuthorization),
+    state.options.adapterReadAuthorization
+      ? { authorization: state.options.adapterReadAuthorization }
+      : undefined,
+  );
+  let raw: unknown;
+  try {
+    raw = await adapter.probeServer?.(ctx, key);
+  } catch (error) {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' server probe failed for resource '${resourceId}': ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      'SERVER_PROBE_UNAVAILABLE',
+    );
+  }
+  if (
+    !isPlainObject(raw) ||
+    typeof raw['found'] !== 'boolean' ||
+    !(raw['fields'] === null || raw['fields'] === undefined || isPlainObject(raw['fields']))
+  ) {
+    throw new HttpError(
+      409,
+      `adapter '${adapterName}' server probe must return {found: boolean, fields: object|null} ` +
+        `for resource '${resourceId}' (got ${(() => {
+          try {
+            return canonicalOf(raw);
+          } catch {
+            return '<non-JSON>';
+          }
+        })()})`,
+      'SERVER_PROBE_UNAVAILABLE',
+    );
+  }
+  return {
+    found: raw['found'] as boolean,
+    fields: (raw['fields'] as Record<string, unknown> | null | undefined) ?? null,
+  };
+}
+
+/**
+ * Resolves the reviewed adapter and attested read base for a resource.
+ *
+ * Args:
+ *   state: witness-owned configuration and adapter registry.
+ *   resourceId: plane-qualified resource identity.
+ *   requiredFields: anchored action fields that must be in the adapter projection.
+ *
+ * Returns:
+ *   Promise<{adapterName, adapter, baseUrl}>: validated adapter and its read base.
+ */
+async function adapterReadContext(
+  state: WitnessState,
+  resourceId: string,
+  requiredFields?: readonly string[],
+): Promise<{ adapterName: string; adapter: EvidenceAdapter; baseUrl: string }> {
+  const classification = state.classifications[resourceId] as Classification | undefined;
+  const adapterName = classification?.evidenceAdapter ?? resourceId;
+  const adapter = state.adapters.get(adapterName);
+  if (adapter === undefined) {
+    throw new HttpError(
+      400,
+      `no reviewed evidence adapter registered for resource '${resourceId}' ` +
+        `(looked for '.gateforge/adapters/${adapterName}.mjs'); ` +
+        'user-facing resources cannot be proven without a trusted adapter (ADR 0001)',
+    );
+  }
+  if (adapter.fields !== undefined && requiredFields !== undefined) {
+    let missingFields: string[] | null = null;
+    for (const field of requiredFields) {
+      if (!adapter.fields.includes(field)) {
+        if (missingFields === null) missingFields = [];
+        missingFields.push(field);
+      }
+    }
+    if (missingFields !== null) {
+      missingFields.sort();
+      throw new HttpError(
+        409,
+        `adapter '${adapterName}' fields projection does not expose action field(s): ${missingFields.join(', ')}`,
+      );
+    }
+  }
+
+  const baseUrl = adapter.baseUrl ?? state.options.adapterBaseUrl ?? state.options.targetBaseUrl;
+  if (baseUrl === null || baseUrl === undefined || baseUrl === '') {
+    throw new HttpError(
+      400,
+      `adapter '${adapterName}' has no read base (set GATEFORGE_ADAPTER_BASE_URL, ` +
+        'the adapter baseUrl export, or the attestation target)',
+    );
+  }
+
+  // GF-10 (per-read mediation): never build a request against a
+  // non-loopback base.
+  await assertLoopback(baseUrl, `adapter '${adapterName}'`);
+
+  // GF-13 minimal v1 attestation: the adapter target must present the
+  // marker the adapter declares, and match the run's attested env.
+  const probe = await probeEnvFingerprint(baseUrl, state.options.requestTimeoutMs);
+  const mismatch = envFingerprintMismatch(
+    probe,
+    adapter.environmentFingerprint,
+    state.options.targetFingerprint ?? null,
+  );
+  if (mismatch !== null) {
+    throw new HttpError(
+      409,
+      `persistence record for resource '${resourceId}' rejected: ${mismatch}`,
+      mismatch,
+    );
+  }
+  return { adapterName, adapter, baseUrl };
+}
+
+/**
+ * The GET-only transport adapters use. `path` may be absolute
+ * (http(s)://…) or relative to the adapter base. Timeout is enforced by
+ * aborting the underlying fetch.
+ */
+/**
+ * The server-computed field keys one adapter DECLARED (E18a). Absent on
+ * every adapter that does not declare them, in which case the record
+ * carries no declaration and the exact-value echo applies unchanged.
+ *
+ * Args:
+ *   adapter: the loaded evidence adapter.
+ *
+ * Returns:
+ *   string[]: the declared keys (empty when none).
+ */
+function declaredVolatileFields(adapter: EvidenceAdapter): string[] {
+  const declared = adapter.volatileFields;
+  if (!Array.isArray(declared)) return [];
+  return declared.filter((key): key is string => typeof key === 'string' && key.length > 0);
+}
+
+async function adapterGet(
+  baseUrl: string,
+  timeoutMs: number,
+  path: string,
+  readAuthorization?: string | null,
+): Promise<{ status: number; json(): Promise<unknown>; text(): Promise<string>; headers: Headers }> {
+  const target = /^https?:\/\//.test(path) ? path : `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    // Pinned egress: attested hostnames connect to their
+    // startup-approved loopback IPs (Host preserved for tenant
+    // routing); unpinned names behave exactly as before.
+    const response = await pinnedGet(target, {
+      timeoutMs,
+      headers: {
+        // Operator-issued read-only service credential for the ENGINE's own
+        // adapter reads (see WitnessOptions.adapterReadAuthorization); never
+        // forwarded to the suite and never attached to browser traffic.
+        ...(readAuthorization ? { authorization: readAuthorization } : {}),
+      },
+      signal: controller.signal,
+    });
+    return {
+      status: response.status,
+      headers: response.headers,
+      json: () => response.json() as Promise<unknown>,
+      text: () => response.text(),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Issues one witness-stamped record into the ledger.
+ *
+ * Trust follows ORIGIN, not channel (GF-23, audit round 3): the tested
+ * suite owns the browser and holds the run token, so a submitted
+ * `ui.action`/`ui.visible-result` payload proves only that the suite
+ * asserted it — those records are stamped `trust: 'claimed'` with
+ * `origin: 'suite-submitted'`. Records whose contents the witness
+ * itself observed engine-side (the adapter read behind
+ * `persistence.entity`) are stamped `trust: 'witnessed'` with
+ * `origin: 'engine-observed'`. Attestation (the ledger MAC) proves the
+ * witness issued a record; it can never prove a UI event happened.
+ */
+function issueRecord(
+  state: WitnessState,
+  obligationId: string,
+  kind: string,
+  testId: string,
+  payload: unknown,
+  origin: RecordOrigin,
+): IssuedRecord {
+  const issuedAt = state.nowIso();
+  const recordId = recordIdOf({
+    runId: state.options.runId,
+    obligationId,
+    kind,
+    testId,
+    origin,
+    payload,
+  });
+  const record: IssuedRecord = {
+    schemaVersion: 1,
+    recordId,
+    runId: state.options.runId,
+    trust: origin === 'engine-observed' ? 'witnessed' : 'claimed',
+    obligationId,
+    kind,
+    testId,
+    origin,
+    payload,
+    issuedAt,
+  };
+  state.ledger.set(recordId, record);
+  return record;
+}
+
+/**
+ * Issues a persistence record bound to the claim that requested the
+ * adapter read (same testId/obligationId as the claim). The payload is
+ * the ENGINE OBSERVATION assembled by the caller — entityId + fields
+ * from the ADAPTER RESPONSE (never from caller args), plus the
+ * presence/expectation/before data the engine grades postconditions
+ * against.
+ */
+function issuePersistenceRecord(
+  state: WitnessState,
+  claimId: string,
+  testId: string,
+  payload: Record<string, unknown>,
+): IssuedRecord {
+  return issueRecord(state, claimId, PERSISTENCE_KIND, testId, payload, 'engine-observed');
+}
+
+/** UUID shape for run/invocation identities (validated, never compared across runs). */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 64-char lowercase hex shape for input digests. */
+const INPUT_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * Binds the trusted run context (plan §11.4): the validated current
+ * `{runId, invocationId, inputDigest}` from the trusted CLI/orchestrator
+ * is frozen in witness memory. Requires BOTH the run token (outer gate)
+ * and the verifier key header — a suite holding only the run token gets
+ * 401 and the context is unchanged. Binding is allowed only before any
+ * proxy exchange, pre-observation, or evidence issuance, and while no
+ * proxy exchange is in flight; a used witness answers 409. Repeating the
+ * identical binding is idempotent (200); any change to a bound value is
+ * 409 — bound state is never relabeled.
+ *
+ * Args:
+ *   state: running witness state.
+ *   res: response to answer.
+ *   verifier: the `x-gateforge-verifier` header value.
+ *   body: parsed request body (must carry runId/invocationId/inputDigest).
+ */
+async function handleRunContext(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+  body: unknown,
+): Promise<void> {
+  const verifierKey = state.options.verifierKey;
+  if (verifierKey === null || verifierKey === undefined) {
+    sendJson(res, 409, { error: 'witness has no verifier key; run-context binding is unavailable' });
+    return;
+  }
+  if (typeof verifier !== 'string' || !timingSafeEqual(verifier, verifierKey)) {
+    sendJson(res, 401, { error: 'unauthorized: expected x-gateforge-verifier with the verifier key' });
+    return;
+  }
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'run-context body must be an object');
+  }
+  const record = body as Record<string, unknown>;
+  const runId = record['runId'];
+  const invocationId = record['invocationId'];
+  const inputDigest = record['inputDigest'];
+  if (
+    typeof runId !== 'string' ||
+    !UUID_PATTERN.test(runId) ||
+    typeof invocationId !== 'string' ||
+    !UUID_PATTERN.test(invocationId) ||
+    typeof inputDigest !== 'string' ||
+    !INPUT_DIGEST_PATTERN.test(inputDigest)
+  ) {
+    throw new HttpError(
+      400,
+      'run-context requires runId (UUID), invocationId (UUID), and inputDigest (64-char lowercase hex)',
+    );
+  }
+  if (runId !== state.options.runId) {
+    sendJson(res, 409, {
+      error:
+        `run-context runId '${runId}' does not match this witness run '${state.options.runId}'; ` +
+        'adopt the witness run id first, then bind — a witness already used by an older ' +
+        'invocation is rejected, start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  const existing = state.runContext;
+  if (existing !== null) {
+    if (
+      existing.runId === runId &&
+      existing.invocationId === invocationId &&
+      existing.inputDigest === inputDigest
+    ) {
+      sendJson(res, 200, { bound: true, ...existing, ...appliedEcho(state) });
+      return;
+    }
+    sendJson(res, 409, {
+      error:
+        'run context is already bound and differs; bound state is never relabeled — ' +
+        'start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  if (
+    state.ledger.size > 0 ||
+    state.observed.length > 0 ||
+    state.preObservations.size > 0 ||
+    state.serverPreObservations.size > 0 ||
+    state.serverIntentSequences.size > 0 ||
+    state.sessions.size > 0 ||
+    state.proxyInFlight > 0
+  ) {
+    sendJson(res, 409, {
+      error:
+        'witness already observed or issued evidence (or holds an open test session); ' +
+        'run-context binding is allowed only before any proxy exchange, pre-observation, ' +
+        'server probe, session, or issuance — start a fresh witness for a new invocation',
+    });
+    return;
+  }
+  // The run OPTIONS travel with the context: the same supervisor-
+  // authenticated, before-any-observation moment that already fixes
+  // which run this evidence belongs to also fixes what this run
+  // perturbs and records. A witness STARTED with the same feature must
+  // agree on the plan, or the binding is refused rather than silently
+  // resolved — a run whose timing nobody can name is not a finding.
+  let boundOptions: RunOptions;
+  try {
+    boundOptions = parseRunOptions(record['options']);
+    assertNoStartedConflict(appliedOptionsOf(state), boundOptions);
+  } catch (error) {
+    sendJson(res, 409, { error: (error as Error).message });
+    return;
+  }
+  if (boundOptions.chaos !== undefined && state.chaos === null) {
+    state.chaos = { options: boundOptions.chaos, entries: [] };
+  }
+  if (boundOptions.twinShapes !== undefined && state.twinShapes === null) {
+    state.twinShapes = boundOptions.twinShapes;
+  }
+  state.runContext = { runId, invocationId, inputDigest };
+  state.observedSeqAtBind = state.observedSeq;
+  sendJson(res, 200, { bound: true, runId, invocationId, inputDigest, ...appliedEcho(state) });
+}
+
+/**
+ * The run options a witness is currently applying: the plan it booted
+ * with, or the one a binding handed it. Read from LIVE state, so the
+ * echo answers what the proxy will actually do.
+ *
+ * Args:
+ *   state: running witness state.
+ *
+ * Returns:
+ *   AppliedRunOptions: the effective plans (null = the feature is off).
+ */
+function appliedOptionsOf(state: WitnessState): AppliedRunOptions {
+  return {
+    chaos: state.chaos === null ? null : state.chaos.options,
+    twinShapes: state.twinShapes,
+  };
+}
+
+/**
+ * The bind response's `applied` echo, present only when a run option is
+ * in effect. A plain binding keeps the response it always had; a client
+ * that asked for an option and finds no echo knows it was not applied.
+ *
+ * Args:
+ *   state: running witness state.
+ *
+ * Returns:
+ *   `{ applied }` when chaos or a twin plan is live, else `{}`.
+ */
+function appliedEcho(state: WitnessState): { applied?: AppliedRunOptions } {
+  const applied = appliedOptionsOf(state);
+  return applied.chaos === null && applied.twinShapes === null ? {} : { applied };
+}
+
+/**
+ * Serves the authenticated live attestation (pin #7, GF-23, plan §11.3):
+ * the SAME v2 signed envelope object the shutdown append writes —
+ * `{attestationVersion: 2, runId, invocationId, inputDigest, recordIds,
+ * mac}` with the MAC over the domain-tagged body. Requires the verifier
+ * key — a secret the tested suite never receives — so only an
+ * orchestrator-grade caller (the evaluating CLI) can certify issuance;
+ * the suite's run token authorizes submissions, never attestation.
+ * Without a configured verifier key the witness answers 409, and an
+ * unbound witness answers 409 as well: it must not sign whatever digest
+ * a suite-writable manifest happens to carry.
+ */
+function handleLedgerAttestation(
+  state: WitnessState,
+  res: ServerResponse,
+  verifier: unknown,
+): void {
+  const verifierKey = state.options.verifierKey;
+  if (verifierKey === null || verifierKey === undefined) {
+    sendJson(res, 409, { error: 'witness has no verifier key; attestation is unavailable' });
+    return;
+  }
+  if (typeof verifier !== 'string' || !timingSafeEqual(verifier, verifierKey)) {
+    sendJson(res, 401, { error: 'unauthorized: expected x-gateforge-verifier with the verifier key' });
+    return;
+  }
+  const bound = state.runContext;
+  if (bound === null) {
+    sendJson(res, 409, {
+      error:
+        'witness has no bound run context; bind POST /run-context before observation — ' +
+        'an unbound witness issues no authenticated attestation',
+    });
+    return;
+  }
+  const recordIds = [...state.ledger.keys()].sort(compareStrings);
+  sendJson(res, 200, {
+    attestationVersion: ATTESTATION_VERSION,
+    runId: bound.runId,
+    invocationId: bound.invocationId,
+    inputDigest: bound.inputDigest,
+    recordIds,
+    mac: attestationMac(verifierKey, {
+      runId: bound.runId,
+      invocationId: bound.invocationId,
+      inputDigest: bound.inputDigest,
+      recordIds,
+    }),
+  });
+}
+
+/** Stops the server and appends issued recordIds to the run manifest. */
+async function stopWitness(state: WitnessState): Promise<void> {
+  if (state.stopped) return;
+  state.stopped = true;
+  if (state.proxyServer !== null) {
+    const proxy = state.proxyServer;
+    state.proxyServer = null;
+    await new Promise<void>((resolveClose) => {
+      proxy.close(() => resolveClose());
+    });
+  }
+  for (const session of state.sessions.values()) {
+    await stopSessionProxy(session);
+  }
+  // Phase 4 lifecycle shutdown: release every live fixture lease namespace.
+  // Timeouts/failures release only their own namespace and never flip a
+  // verdict — releases here are best-effort shutdown hygiene.
+  {
+    const provider = state.options.fixtureProvider ?? null;
+    if (provider !== null) {
+      for (const execution of state.caseExecutions.values()) {
+        try {
+          await provider.release(execution.lease.leaseId);
+        } catch {
+          // Best-effort: shutdown must complete.
+        }
+      }
+    }
+  }
+  // The queue channel holds Redis connections the engine opened; a
+  // shutdown that leaks them can outlive the witness process.
+  {
+    const channel = state.options.queueChannel ?? null;
+    if (channel !== null) {
+      try {
+        await channel.observer.close();
+        await channel.deliverer.close();
+      } catch {
+        // Best-effort: shutdown must complete.
+      }
+    }
+  }
+  await state.engineBrowser?.closeAll();
+  await new Promise<void>((resolveClose) => {
+    state.server.close(() => resolveClose());
+  });
+  appendRecordIdsToManifest(state);
+}
+
+/**
+ * Pin #4/#7, plan §11.3–§11.4: at shutdown, append the issued recordIds
+ * to the run manifest in the state dir (sorted, deduplicated; preserves
+ * every other field). Absent manifest → no-op (standalone witness).
+ *
+ * The append NEVER reads a digest from the suite-writable manifest: the
+ * v2 `attestation` envelope is built from the FROZEN bound context
+ * (bound via authenticated `POST /run-context` before any observation)
+ * plus EXACTLY the ids this witness issued — nothing more. The
+ * pre-existing `recordIds` in the manifest came from the suite-writable
+ * file, so merging them in would let a hostile suite have its forged
+ * computed ids signed as issued (audit round 3). They are discarded,
+ * not merged. An unbound witness appends the bare ids for reporting
+ * only — no attestation, so downstream evaluation fails closed.
+ * No legacy `recordIdsMac` is written: v1 MACs never authorize evidence.
+ */
+function appendRecordIdsToManifest(state: WitnessState): void {
+  const stateDir = state.options.stateDir;
+  if (stateDir === null || stateDir === undefined || stateDir === '') return;
+  const manifestPath = join(resolve(process.cwd(), stateDir), 'manifest.json');
+  let raw: string;
+  try {
+    raw = readFileSync(manifestPath, 'utf8');
+  } catch {
+    return;
+  }
+  let manifest: Record<string, unknown>;
+  try {
+    manifest = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return; // malformed manifest: never corrupt it; evaluation reads it leniently
+  }
+  const issued = [...state.ledger.keys()].sort(compareStrings);
+  const updated: Record<string, unknown> = { ...manifest, recordIds: issued };
+  // Drop any legacy v1 MAC the suite (or an older writer) left behind:
+  // it must never authorize evidence, not even when it verifies.
+  delete updated['recordIdsMac'];
+  const verifierKey = state.options.verifierKey;
+  const bound = state.runContext;
+  if (verifierKey !== null && verifierKey !== undefined && bound !== null) {
+    updated['invocationId'] = bound.invocationId;
+    updated['inputDigest'] = bound.inputDigest;
+    updated['attestation'] = {
+      attestationVersion: ATTESTATION_VERSION,
+      runId: bound.runId,
+      invocationId: bound.invocationId,
+      inputDigest: bound.inputDigest,
+      recordIds: issued,
+      mac: attestationMac(verifierKey, {
+        runId: bound.runId,
+        invocationId: bound.invocationId,
+        inputDigest: bound.inputDigest,
+        recordIds: issued,
+      }),
+    };
+  }
+  // Temporary file + rename: this runs at shutdown, where a container
+  // exit can kill the process mid-write; an in-place write would leave a
+  // truncated manifest and every later grade would fail closed on it.
+  const temporary = `${manifestPath}.tmp-${String(process.pid)}`;
+  writeFileSync(temporary, `${canonicalOf(updated)}\n`, 'utf8');
+  renameSync(temporary, manifestPath);
+}
+
+export type { WitnessHandle } from './types.js';

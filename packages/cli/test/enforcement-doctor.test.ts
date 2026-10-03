@@ -6,7 +6,7 @@
  * agent-writable is reported as NOT active. Exit is 0 whenever the
  * doctor runs (diagnostic), `--json` is deterministic.
  */
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { withTempRepo } from '@gate-forge/core';
 import { installFixture, runCli } from './helpers.js';
@@ -19,9 +19,11 @@ function gitEnv(): NodeJS.ProcessEnv {
 
 interface DoctorJson {
   mode: 'standard' | 'managed';
+  level: number;
   strictE2E: boolean;
   ready: boolean;
   checks: Array<{ id: string; status: 'ok' | 'warn' | 'fail'; detail: string }>;
+  engine: { version: string; source: string; unpublished: boolean };
 }
 
 /** Parses the doctor's deterministic JSON output. */
@@ -43,17 +45,27 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(result.code).toBe(0); // the doctor always runs (diagnostic)
       const report = parseDoctor(result.stdout);
       expect(report.mode).toBe('standard');
+      expect(report.engine.version).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(report.engine.source).toMatch(/^(registry|local path )/);
+      expect(typeof report.engine.unpublished).toBe('boolean');
       expect(report.strictE2E).toBe(false);
       expect(report.checks.map((entry) => entry.id)).toEqual([
+        'adapters',
         'behavior-profile',
+        'ci',
         'config',
         'enforcement-mode',
+        'engine-browser',
         'hook',
+        'hook-mutation',
         'managed-guarantee',
         'observer',
         'runner',
+        'server-protection',
         'snapshot',
+        'strictness-mode',
         'trusted-binary-policy',
+        'verifier-key-location',
       ]);
       expect(checkById(report, 'config').status).toBe('ok');
       // Behavior profile not configured: ok (basic behavior only).
@@ -73,6 +85,208 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(checkById(report, 'runner').status).toBe('fail');
       expect(checkById(report, 'snapshot').status).toBe('ok');
       expect(report.ready).toBe(false);
+    });
+  });
+
+  it('detects file mutations from repeated pre-commit hook runs and recommends gate ordering', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.pre-commit-config.yaml': [
+          'repos:',
+          '  - repo: local',
+          '    hooks:',
+          '      - id: formatter',
+          '        name: formatter',
+          '        entry: ./tools/formatter',
+          '        language: system',
+          '      - id: gateforge-check',
+          '        name: gateforge-check',
+          '        entry: gateforge check --require-e2e',
+          '        language: system',
+          '',
+        ].join('\n'),
+        'mockbin/pre-commit': '#!/bin/sh\nprintf x >> mutation-marker.txt\n',
+        'mutation-marker.txt': 'start\n',
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      });
+      const report = parseDoctor(result.stdout);
+      const mutation = checkById(report, 'hook-mutation');
+      expect(result.code).toBe(0);
+      expect(mutation.status).toBe('warn');
+      expect(mutation.detail).toContain('mutation-marker.txt');
+      // The advice has to be actionable in the ORDER the owner meets
+      // it: the hook does not exist yet, so it must name the command
+      // that installs it and the position to give it.
+      expect(mutation.detail).toContain('gateforge init --blocking');
+      expect(mutation.detail).toContain('FIRST in .pre-commit-config.yaml');
+      expect(mutation.detail).not.toContain('put gateforge-check first');
+    });
+  });
+
+  it('ignores hook writes to git-ignored cache files because they never enter the input snapshot', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.pre-commit-config.yaml': ['repos:', '  - repo: local', '    hooks:', '      - id: lint', '        name: lint', '        entry: true', '        language: system', ''].join('\n'),
+        'mockbin/pre-commit': '#!/bin/sh\nmkdir -p .lint_cache && printf "*\\n" > .lint_cache/.gitignore && date +%N >> .lint_cache/state\n',
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      });
+      const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
+      expect(mutation.status).toBe('ok');
+    });
+  });
+
+  it('lists at most five changed files and counts the rest', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.pre-commit-config.yaml': ['repos:', '  - repo: local', '    hooks:', '      - id: lint', '        name: lint', '        entry: true', '        language: system', ''].join('\n'),
+        'mockbin/pre-commit': '#!/bin/sh\nfor i in 1 2 3 4 5 6 7 8; do date +%N >> "generated-$i.txt"; done\n',
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      });
+      const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
+      expect(mutation.status).toBe('warn');
+      expect(mutation.detail).toContain('generated-1.txt');
+      expect(mutation.detail).toContain('and 3 more');
+      expect(mutation.detail).not.toContain('generated-8.txt');
+    });
+  });
+
+  it('runs hooks with the invoking user home so installed interpreters and hook caches are found', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const home = repo.path('fake-home');
+      const dataHome = repo.path('fake-home/.local/share');
+      mkdirSync(dataHome, { recursive: true });
+      repo.writeFiles({
+        '.pre-commit-config.yaml': ['repos:', '  - repo: local', '    hooks:', '      - id: lint', '        name: lint', '        entry: true', '        language: system', ''].join('\n'),
+        'mockbin/pre-commit': [
+          '#!/bin/sh',
+          `[ "$HOME" = "${home}" ] && [ "$XDG_DATA_HOME" = "${dataHome}" ] && exit 0`,
+          'i=0; while [ $i -lt 40 ]; do echo "noise line $i: interpreter not found"; i=$((i+1)); done >&2',
+          'exit 1',
+          '',
+        ].join('\n'),
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+        HOME: home,
+        XDG_DATA_HOME: dataHome,
+      });
+      const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
+      expect(result.code).toBe(0);
+      expect(mutation.status).toBe('ok');
+    });
+  });
+
+  it('summarizes failing hook runs in a few lines instead of the full log', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.pre-commit-config.yaml': ['repos:', '  - repo: local', '    hooks:', '      - id: lint', '        name: lint', '        entry: true', '        language: system', ''].join('\n'),
+        'mockbin/pre-commit': '#!/bin/sh\ni=0; while [ $i -lt 40 ]; do echo "noise line $i"; i=$((i+1)); done >&2\nexit 1\n',
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      });
+      const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
+      expect(mutation.status).toBe('warn');
+      expect(mutation.detail).toContain('noise line 39');
+      expect(mutation.detail).not.toContain('noise line 10');
+      expect(mutation.detail).toContain('pre-commit run --all-files');
+    });
+  });
+
+  it('warns when the active verifier key is present in repository state without exposing it', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const secret = 'doctor-active-verifier-key';
+      const exposed = repo.path('.gateforge/verifier.key');
+      writeFileSync(exposed, secret, { mode: 0o600 });
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        GATEFORGE_WITNESS_VERIFIER_KEY: secret,
+      });
+      const report = parseDoctor(result.stdout);
+      const check = checkById(report, 'verifier-key-location');
+      expect(check.status).toBe('warn');
+      expect(check.detail).toContain('.gateforge/verifier.key');
+      expect(result.stdout).not.toContain(secret);
+    });
+  });
+  it('recognizes a wired CI template as level 2 without claiming server protection', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge/ci/gitlab-gateforge.yml': 'gateforge:e2e-gate:\n  script:\n    - check --candidate-commit "$CI_COMMIT_SHA"\n',
+        '.gitlab-ci.yml': "include:\n  - local: '.gateforge/ci/gitlab-gateforge.yml'\n",
+      });
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json']);
+      const report = parseDoctor(result.stdout);
+      expect(result.code).toBe(0);
+      expect(report.level).toBe(2);
+      expect(checkById(report, 'server-protection').status).toBe('warn');
+    });
+  });
+  it('verifies GitHub protection only when the API reports the required gateforge check', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.github/workflows/gateforge.yml': '# Generated by Gateforge\n',
+        'mockbin/gh': '#!/bin/sh\nprintf \'{"required_status_checks":{"contexts":["gateforge"]}}\\n\'\n',
+      });
+      const ghPath = repo.path('mockbin/gh');
+      chmodSync(ghPath, 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        GH_TOKEN: 'test-token',
+        GITHUB_REPOSITORY: 'owner/project',
+        GITHUB_BASE_REF: 'main',
+        PATH: `${repo.path('mockbin')}:${process.env.PATH ?? ''}`,
+      });
+      const report = parseDoctor(result.stdout);
+      expect(result.code).toBe(0);
+      expect(report.level).toBe(3);
+      expect(checkById(report, 'server-protection')).toMatchObject({
+        status: 'ok',
+        detail: expect.stringContaining("required status check 'gateforge'"),
+      });
+    });
+  });
+  it('verifies GitLab protection and pipeline requirements from read-only API responses', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge/ci/gitlab-gateforge.yml': 'gateforge:e2e-gate:\n',
+        '.gitlab-ci.yml': "include:\n  - local: '.gateforge/ci/gitlab-gateforge.yml'\n",
+        'mockbin/glab':
+          '#!/bin/sh\ncase "$2" in\n' +
+          '  projects/123) printf \'{"only_allow_merge_if_pipeline_succeeds":true}\\n\' ;;\n' +
+          '  projects/123/protected_branches/main) printf \'{"name":"main","allow_force_push":false}\\n\' ;;\n' +
+          '  *) exit 1 ;;\nesac\n',
+      });
+      const glabPath = repo.path('mockbin/glab');
+      chmodSync(glabPath, 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        GITLAB_TOKEN: 'test-token',
+        CI_PROJECT_ID: '123',
+        CI_DEFAULT_BRANCH: 'main',
+        PATH: `${repo.path('mockbin')}:${process.env.PATH ?? ''}`,
+      });
+      const report = parseDoctor(result.stdout);
+      expect(result.code).toBe(0);
+      expect(report.level).toBe(3);
+      expect(checkById(report, 'server-protection').status).toBe('ok');
     });
   });
 
@@ -120,7 +334,17 @@ describe('enforcement doctor (determinism + text surface)', () => {
       installFixture(repo);
       const first = await runCli(repo, ['enforcement', 'doctor', '--json']);
       const second = await runCli(repo, ['enforcement', 'doctor', '--json']);
-      expect(first.stdout).toBe(second.stdout);
+      // The host-load advisory reports the machine's live load average and
+      // free disk, which move between two runs; every other byte is a
+      // function of the repository and must not move.
+      const withoutLiveHostFacts = (stdout: string): string =>
+        JSON.stringify(JSON.parse(stdout), (_key, value: unknown) =>
+          typeof value === 'object' && value !== null && (value as { id?: unknown }).id === 'host-load'
+            ? { id: 'host-load', live: true }
+            : value,
+        );
+      expect(withoutLiveHostFacts(first.stdout)).toContain('"id":"host-load","live":true');
+      expect(withoutLiveHostFacts(first.stdout)).toBe(withoutLiveHostFacts(second.stdout));
       const text = await runCli(repo, ['enforcement', 'doctor']);
       expect(text.code).toBe(0);
       expect(text.stdout).toContain('gateforge enforcement doctor');

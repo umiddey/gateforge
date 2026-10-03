@@ -26,10 +26,11 @@ const byId = new Map(parsed.policies.map((policy) => [policy.id, policy]));
 /** Contract namespaces with no honest evidence channel today. */
 const UNPRODUCIBLE_NAMESPACES = ['auth:', 'workflow:', 'webhook:', 'task:', 'validation:'];
 
-describe('init policies template: persistence-only starter (Phase 1)', () => {
-  it('parses and lists exactly the persistence starter policy', () => {
+describe('init policies template: starter evidence policies', () => {
+  it('parses and lists the persistence and transport starters', () => {
     expect(parsed.policies.map((policy) => policy.id)).toEqual([
       'user-facing-persistence',
+      'frontend-consumed-endpoints-transport-only',
     ]);
   });
 
@@ -75,9 +76,13 @@ describe('init policies template: persistence-only starter (Phase 1)', () => {
     ]);
   });
 
-  it('transport-only endpoint proof stays an explicit opt-in, never the starter', () => {
-    expect(TRANSPORT_ONLY_POLICY_EXAMPLE).toContain('http:request-observed');
-    expect(byId.get('frontend-consumed-endpoints-transport-only')).toBeUndefined();
+  it('selects transport-only HTTP evidence in the new-install starter policy', () => {
+    const policy = byId.get('frontend-consumed-endpoints-transport-only');
+    expect(policy?.when).toEqual({ kind: 'http.endpoint', consumed: true });
+    expect(policy?.require).toEqual(['http:request-observed', 'http:response-status-ok']);
+    expect(parsed.policies.flatMap((entry) => entry.require)).not.toContain(
+      'http:frontend-request-observed',
+    );
   });
 });
 

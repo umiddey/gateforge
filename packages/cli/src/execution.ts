@@ -32,28 +32,36 @@ import {
   superviseExecution,
   trustedPolicyDigest,
   verifyGateReceipt,
+  RunRecordSchema,
+  runRecordMac,
+  verifyRunRecord,
+  type RunRecord,
   type BlockingEntry,
   type CauseCode,
   type Claim,
   type ExecutionResult,
   type ExecutedOutcome,
   type GateReceipt,
+  type BehaviorCatalog,
   type Obligation,
   type PlannedInstance,
   type ResolvedMappings,
   type ResourceGraph,
   type RunnerExecutionEnvelope,
+  type RunnerInstanceOutcome,
   type SupervisionFinding,
   type TestCatalog,
   type TracedTestInput,
 } from '@gate-forge/core';
+import { QUARANTINE_DIR } from '@gate-forge/core';
 import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';
 import { normalizeRepoModule } from './input-snapshot.js';
 import { DOCS_EXCLUSIONS_PATH } from './docs-exclusions.js';
+import { CACHE_EXCLUSIONS_PATH } from './cache-exclusions.js';
 import type { GateforgeConfig } from '@gate-forge/core';
-import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
+import type { ProjectScope, RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 import { environmentIdentity } from './input-snapshot.js';
 
@@ -101,6 +109,7 @@ export function computeTrustedPolicyDigest(
     sidecar: string;
     adaptersDir: string;
     waiverFiles: readonly string[];
+    quarantineFiles?: readonly string[];
     pluginModules: readonly string[];
   },
 ): string {
@@ -150,6 +159,15 @@ export function computeTrustedPolicyDigest(
   const waiverEntries = configPaths.waiverFiles
     .map((path) => entry(path, path, true))
     .sort((a, b) => a.name.localeCompare(b.name));
+  // Flaky-test quarantines remove tests from
+  // the REQUIRED set, so their bytes belong to the pinned revision exactly
+  // like waiver bytes do: an agent-authored quarantine is a policy change
+  // and cannot authorize its own weaker run. A repository with no
+  // quarantine directory contributes NO entries, so the digest of a repo
+  // that never adopted quarantine is byte-identical to before.
+  const quarantineEntries = (configPaths.quarantineFiles ?? [])
+    .map((path) => entry(path, path, true))
+    .sort((a, b) => a.name.localeCompare(b.name));
   const pluginEntries = configPaths.pluginModules.map((module) => entry(module, module, true));
   const behaviorEntry =
     configPaths.behaviorPolicy === undefined || configPaths.behaviorPolicy === null
@@ -166,6 +184,9 @@ export function computeTrustedPolicyDigest(
   const docsExclusionsEntry = existsSync(join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/')))
     ? [entry(DOCS_EXCLUSIONS_PATH, DOCS_EXCLUSIONS_PATH, true)]
     : [];
+  const cacheExclusionsEntry = existsSync(join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/')))
+    ? [entry(CACHE_EXCLUSIONS_PATH, CACHE_EXCLUSIONS_PATH, true)]
+    : [];
   return trustedPolicyDigest([
     entry('.gateforge.yml', configPaths.config, true),
     entry(configPaths.policies, configPaths.policies, true),
@@ -173,9 +194,11 @@ export function computeTrustedPolicyDigest(
     behaviorEntry,
     runtimeEntry,
     ...docsExclusionsEntry,
+    ...cacheExclusionsEntry,
     entry('.gateforge/test-map.yml', configPaths.sidecar, false),
     ...adapterEntries,
     ...waiverEntries,
+    ...quarantineEntries,
     ...pluginEntries,
   ]);
 }
@@ -211,6 +234,17 @@ export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfi
   } catch {
     // Absent waivers dir: no waiver inputs (deterministic absence).
   }
+  const quarantineFiles: string[] = [];
+  const quarantineDir = join(cwd, ...QUARANTINE_DIR.split('/'));
+  try {
+    for (const item of readdirSync(quarantineDir, { withFileTypes: true })) {
+      if (item.isFile() && item.name.endsWith('.yml')) {
+        quarantineFiles.push(`${QUARANTINE_DIR}/${item.name}`);
+      }
+    }
+  } catch {
+    // Absent quarantine dir: no quarantine inputs (deterministic absence).
+  }
   const pluginModules: string[] = [];
   for (const plugin of config.plugins) {
     const module = plugin.module;
@@ -228,6 +262,7 @@ export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfi
     sidecar: TEST_MAP_RELATIVE,
     adaptersDir: config.adapters,
     waiverFiles: [...new Set(waiverFiles)].sort(),
+    quarantineFiles: [...new Set(quarantineFiles)].sort(),
     pluginModules: [...new Set(pluginModules)].sort(),
   });
 }
@@ -360,6 +395,151 @@ export function planExpectedSet(catalog: TestCatalog): PlannedRow[] {
 }
 
 /**
+ * Groups the plan's test files by the project each row belongs to, so the
+ * supervised run can scope files per project instead of collecting every
+ * selected file under every project.
+ *
+ * Project identity is the join key the whole pipeline speaks: catalog rows,
+ * the registered expected set, session opens, and the execution trace all
+ * key on `(project, file, titlePath)`. A project-scoped config — most
+ * importantly the standard Playwright auth pattern, a `setup` project with
+ * `testMatch: /.*\.setup\.ts/` plus a dependent project — therefore needs the
+ * RUN to select files per project too, or the runner executes identities the
+ * expected set never bound (their sessions are refused, so they produce no
+ * evidence) and the executed count outruns the planned total.
+ *
+ * A project-less row contributes to no scope: its file stays in the global
+ * selection so the row still executes.
+ *
+ * `projectDependencies` (the graph the enumeration captured from the
+ * RUNNER's own resolved config) is carried through as ordering data: the
+ * synthesized config emits the edge so Playwright runs a `setup` project's
+ * tests before the dependent project. `projectStorageStates` is carried
+ * the same way, as the path each project declared to read: the standard
+ * auth pattern's dependent project is handed the state its setup project
+ * saved, while the setup project itself keeps no state. With no graph, or
+ * for a project that declares no edges and no state, the emitted scopes
+ * are exactly what they were before — a single-project run stays
+ * byte-identical.
+ *
+ * Args:
+ *   rows: the planned expected set (fixed before the run).
+ *   projectDependencies: project name → the names it depends on, as the
+ *     enumeration captured them.
+ *   projectStorageStates: project name → the `use.storageState` path it
+ *     declared, as the enumeration captured it.
+ *
+ * Returns:
+ *   ProjectScope[]: one entry per project that owns at least one file,
+ *   sorted by project name.
+ */
+export function plannedProjectScopes(
+  rows: readonly PlannedRow[],
+  projectDependencies?: Readonly<Record<string, readonly string[]>>,
+  projectStorageStates?: Readonly<Record<string, string>>,
+): ProjectScope[] {
+  const filesByProject = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const project = row.planned.project;
+    if (project === null || project.length === 0) continue;
+    const files = filesByProject.get(project) ?? new Set<string>();
+    files.add(row.planned.file);
+    filesByProject.set(project, files);
+  }
+  return [...filesByProject.entries()]
+    .map(([name, files]) => {
+      const dependencies = [...new Set(projectDependencies?.[name] ?? [])].sort();
+      const storageState = projectStorageStates?.[name];
+      return {
+        name,
+        files: [...files].sort(),
+        ...(dependencies.length > 0 ? { dependencies } : {}),
+        // Absent for a project that declares no state — that project runs
+        // with no session, which is what the `setup` project needs.
+        ...(storageState === undefined ? {} : { storageState }),
+      };
+    })
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+}
+
+/**
+ * Expands a narrowed plan with the tests of every project its selected
+ * projects depend on, transitively.
+ *
+ * A `--scope changed` or `--test` plan that selects only a DEPENDENT
+ * project's test would otherwise leave the dependency out entirely, and
+ * Playwright then runs that test without the setup step it needs (the auth
+ * artifact it reads was never produced). The runner also REJECTS a
+ * synthesized config whose `dependencies` names a project the config omits,
+ * so the plan must carry the dependency's rows before the edge can be
+ * emitted at all. This is the closure Playwright performs itself when
+ * running that project — the plan mirrors the run, so the registered
+ * expected set binds every identity the run will execute.
+ *
+ * A FULL run already contains every project's rows, so the closure adds
+ * nothing and the plan is unchanged; the same holds for a config with no
+ * dependencies.
+ *
+ * Rows already present are never duplicated, and the result is sorted by
+ * logical key — the plan's own order — so a narrowed run's row order stays
+ * as deterministic as a full run's.
+ *
+ * @param rows: the narrowed plan (what the run will execute).
+ * @param allRows: the full planned set the narrowing selected from.
+ * @param projectDependencies: project name → dependency names, as the
+ *   enumeration captured them from the runner's resolved config.
+ *
+ * @returns
+ *   PlannedRow[]: the narrowed rows plus every dependency project's rows.
+ */
+export function plannedRowsWithProjectDependencies(
+  rows: readonly PlannedRow[],
+  allRows: readonly PlannedRow[],
+  projectDependencies: Readonly<Record<string, readonly string[]>>,
+): PlannedRow[] {
+  // Seed the walk with the plan's OWN projects, but remember which
+  // projects were reached only THROUGH AN EDGE: those, and only those,
+  // contribute their whole row set. A project the selection already
+  // named contributes nothing new — a `--test` run that picked ONE test
+  // of a three-test file must not have its two file neighbours pulled
+  // back in "because they share a project".
+  const seeded = new Set<string>();
+  const reachedByEdge = new Set<string>();
+  const queue: string[] = [];
+  for (const row of rows) {
+    const project = row.planned.project;
+    if (project === null || project.length === 0 || seeded.has(project)) continue;
+    seeded.add(project);
+    queue.push(project);
+  }
+  while (queue.length > 0) {
+    const project = queue.shift() as string;
+    for (const dependency of projectDependencies[project] ?? []) {
+      if (seeded.has(dependency)) continue;
+      seeded.add(dependency);
+      reachedByEdge.add(dependency);
+      queue.push(dependency);
+    }
+  }
+  if (reachedByEdge.size === 0) return [...rows];
+  const selected = new Set(rows.map((row) => row.planned.logicalKey));
+  const added = allRows.filter(
+    (row) =>
+      row.planned.project !== null &&
+      reachedByEdge.has(row.planned.project) &&
+      !selected.has(row.planned.logicalKey),
+  );
+  if (added.length === 0) return [...rows];
+  return [...rows, ...added].sort((left, right) =>
+    left.planned.logicalKey < right.planned.logicalKey
+      ? -1
+      : left.planned.logicalKey > right.planned.logicalKey
+        ? 1
+        : 0,
+  );
+}
+
+/**
  * The obligation slice a `--scope changed` run must certify (plan Goal 2,
  * opt-in scoped sealing): the changed files joined to resources through
  * the SAME join-aware source map the diff scoping grades by
@@ -400,12 +580,35 @@ export function planScopedExpectedSet(input: {
   obligations: readonly Obligation[];
   graph: ResourceGraph;
   changedFiles: readonly string[];
-  behaviorCatalog?: import('@gate-forge/core').BehaviorCatalog | null;
+  behaviorCatalog?: BehaviorCatalog | null;
+  /**
+   * The pin-#2 fingerprints this run's grading forgives — the ADOPTED
+   * baseline, supplied only when `evaluateRun` would really waive them
+   * (strict E2E supplies none: there a waiver is not proof). An affected
+   * obligation in this set stays uncovered instead of blocking.
+   */
+  forgivenFingerprints?: ReadonlySet<string>;
 }): {
   plannedRows: PlannedRow[];
   affected: Obligation[];
   coveredFingerprints: string[];
   unclaimed: Array<{ obligationId: string; detail: string }>;
+  /**
+   * The distinct test files the testable claimed instances live in
+   * (additive, plan 2026-09-25 runner-agnostic evidence): the runner
+   * slice a NON-Playwright runner plans from, since its expected set
+   * comes from its adapter enumeration rather than the Playwright
+   * catalog rows {@link planExpectedSet} filters.
+   */
+  requiredFiles: string[];
+  /**
+   * Affected obligations with no testable claim that the run's own
+   * grading forgives through the ADOPTED baseline (additive, E62): they
+   * are NOT blockers, and they stay in the sealed covered set so a
+   * consumer's own `check --require-e2e` still demands exactly what the
+   * full path grades.
+   */
+  adopted: Array<{ obligationId: string; detail: string }>;
 } {
   const changed = new Set(input.changedFiles);
   const sources = sourcesByResourceId(input.graph, input.behaviorCatalog);
@@ -448,6 +651,8 @@ export function planScopedExpectedSet(input: {
   const requiredFiles = new Set<string>();
   const claimedObligations = new Set<string>();
   const unclaimed: Array<{ obligationId: string; detail: string }> = [];
+  const adopted: Array<{ obligationId: string; detail: string }> = [];
+  const forgiven = input.forgivenFingerprints;
   for (const obligation of affected) {
     const bindings = bindingsByObligation.get(obligation.id) ?? [];
     let testable = false;
@@ -464,21 +669,45 @@ export function planScopedExpectedSet(input: {
     }
     if (testable) {
       claimedObligations.add(obligation.id);
-    } else {
-      unclaimed.push({
+      continue;
+    }
+    // Adopted debt (E62): an affected obligation with no testable claim
+    // whose fingerprint the ADOPTED baseline forgives is not a blocker.
+    // The same run's grading waives exactly these obligations
+    // (`applyBaseline`), so the full path runs green over the very debt
+    // that used to block the narrow one — the two paths must agree. A
+    // fingerprint the baseline never adopted still blocks (shrink-only,
+    // fail closed), and strict E2E passes no set at all: there a waiver
+    // is not proof and the blocker must stand.
+    if (forgiven !== undefined && forgiven.has(obligationFingerprint(obligation))) {
+      adopted.push({
         obligationId: obligation.id,
         detail:
-          `changed-scope planning: obligation '${obligation.id}' is affected by the changed files but ` +
-          'no declared mapping (sidecar entry or native annotation) resolves to a test the current ' +
-          'catalog still enumerates — narrower selection is never guessed; map a test or run full scope',
+          `changed-scope planning: obligation '${obligation.id}' is affected by the changed files, has no ` +
+          'declared mapping, and is forgiven by the adopted baseline — it stays uncovered by this slice',
       });
+      continue;
     }
+    unclaimed.push({
+      obligationId: obligation.id,
+      detail:
+        `changed-scope planning: obligation '${obligation.id}' is affected by the changed files but ` +
+        'no declared mapping (sidecar entry or native annotation) resolves to a test the current ' +
+        'catalog still enumerates — narrower selection is never guessed; map a test or run full scope',
+    });
   }
   const plannedRows = planExpectedSet(input.catalog).filter((row) => requiredFiles.has(row.planned.file));
   const coveredFingerprints = [
     ...new Set(affected.map((obligation) => obligationFingerprint(obligation))),
   ].sort(compareStrings);
-  return { plannedRows, affected, coveredFingerprints, unclaimed };
+  return {
+    plannedRows,
+    affected,
+    coveredFingerprints,
+    unclaimed,
+    adopted,
+    requiredFiles: [...requiredFiles].sort(compareStrings),
+  };
 }
 
 /**
@@ -487,9 +716,21 @@ export function planScopedExpectedSet(input: {
  * instance identity; rows outside the plan keep their framework-side
  * identity string so the supervision mismatch names them.
  *
+ * Runner-agnostic read path (plan 2026-09-25, runner-agnostic
+ * evidence): adapters behind the `RunnerAdapter` contract (pytest,
+ * vitest, cypress) return their structured outcomes IN the execution
+ * envelope and write no Playwright runner-outcomes document. When the
+ * document is absent, the envelope's rows are joined through the SAME
+ * identity (their logical key is `<file>#<title path>`), so every
+ * runner grades planned-versus-executed identically. An empty envelope
+ * outcome list still resolves to no rows — the Playwright
+ * missing-document case is byte-identical to before.
+ *
  * Args:
  *   outcomesDoc: the parsed runner-outcomes document (or null).
  *   plannedRows: the planned rows (identity join).
+ *   envelopeOutcomes: the adapter envelope's own outcome rows (used
+ *     only when the outcomes document is absent).
  *
  * Returns:
  *   ExecutedOutcome[]: supervision-normalized executed outcomes.
@@ -497,14 +738,31 @@ export function planScopedExpectedSet(input: {
 export function executedOutcomesOf(
   outcomesDoc: RunnerOutcomesDocument | null,
   plannedRows: readonly PlannedRow[],
+  envelopeOutcomes: readonly RunnerInstanceOutcome[] = [],
 ): ExecutedOutcome[] {
-  if (outcomesDoc === null) return [];
   const logicalKeyByKey = new Map(
     plannedRows.map((row) => [
       `${row.planned.project ?? '-'}\u0000${row.planned.file}\u0000${row.planned.titlePath.join('>')}`,
       row.planned.logicalKey,
     ]),
   );
+  if (outcomesDoc === null) {
+    return envelopeOutcomes.map((outcome) => {
+      const hash = outcome.logicalKey.indexOf('#');
+      const file = hash > 0 ? outcome.logicalKey.slice(0, hash) : outcome.logicalKey;
+      const titlePath = hash > 0 ? outcome.logicalKey.slice(hash + 1).split('>') : [];
+      const key = `${outcome.project ?? '-'}\u0000${file}\u0000${titlePath.join('>')}`;
+      return {
+        logicalKey: logicalKeyByKey.get(key) ?? outcome.logicalKey,
+        project: outcome.project,
+        file,
+        titlePath,
+        status: outcome.status,
+        attempt: outcome.attempt >= 1 ? outcome.attempt : 1,
+        expectedFailure: outcome.expectedFailure === true,
+      };
+    });
+  }
   return outcomesDoc.outcomes.map((row) => {
     const key = `${row.project ?? '-'}\u0000${row.file}\u0000${row.titlePath.join('>')}`;
     return {
@@ -515,6 +773,7 @@ export function executedOutcomesOf(
       status: normalizeOutcomeStatus(row.status),
       attempt: row.attempt >= 1 ? row.attempt : 1,
       expectedFailure: row.expectedFailure === true,
+      ...(typeof row.testId === 'string' && row.testId.length > 0 ? { runnerTestId: row.testId } : {}),
     };
   });
 }
@@ -550,12 +809,13 @@ export interface SealExecutionResultInput {
   runner: string;
   /**
    * Selection mode (additive, default `full-relevant-suite`): a
-   * `--scope changed` run seals `mapped-selection` — the execution
-   * result, its digest, and every receipt binding it then name the
-   * SLICE that actually ran, so a scoped receipt can never be mistaken
-   * for a whole-suite seal.
+   * `--scope changed` run seals `mapped-selection` and a hand-picked
+   * `--test` run reports `named-selection` — the execution result, its
+   * digest, and every receipt binding it then name the SLICE that
+   * actually ran, so a slice can never be mistaken for a whole-suite
+   * seal.
    */
-  mode?: 'full-relevant-suite' | 'mapped-selection';
+  mode?: 'full-relevant-suite' | 'mapped-selection' | 'named-selection';
   /** Logical keys selected. */
   logicalKeys: readonly string[];
   /** The catalog the selection was planned from. */
@@ -582,9 +842,36 @@ export interface SealExecutionResultInput {
    * the execution result so receipts bind the enforced expected set.
    */
   enumerationDigest?: string;
+  /**
+   * The timing-chaos plan this run executed under (E63), plus the
+   * schedule the witness proxy used. Additive and optional: without
+   * `--chaos` the sealed result has no `chaos` key at all.
+   */
+  chaos?: {
+    /** The `--chaos <seed>` the owner replayed. */
+    seed: number;
+    /** Upper bound of every applied delay, in whole milliseconds. */
+    maxDelayMs: number;
+    /** Whether a later response may be released before an earlier one. */
+    reorder: boolean;
+    /** Per-response release decisions (method + pathname, k, delay). */
+    schedule: readonly ExecutionResultChaosEntry[];
+  };
   /** Run start/end instants (ISO-8601). */
   startedAt: string;
   finishedAt: string;
+}
+
+/** One recorded chaos release decision (method + pathname, k, delay). */
+export interface ExecutionResultChaosEntry {
+  /** `METHOD /pathname` (query stripped) — never a secret. */
+  routeKey: string;
+  /** 1-based index of the request under its route key. */
+  k: number;
+  /** Milliseconds the response was actually held back. */
+  delayMs: number;
+  /** True when the plan released this response before the previous one. */
+  releasedBefore: boolean;
 }
 
 /** The sealed execution result plus its digest. */
@@ -620,7 +907,7 @@ export function sealExecutionResult(input: SealExecutionResultInput): SealedExec
     mode: input.mode ?? ('full-relevant-suite' as const),
     logicalKeys: [...new Set(input.logicalKeys)].sort(),
   };
-  const executed = executedOutcomesOf(input.outcomesDoc, input.plannedRows);
+  const executed = executedOutcomesOf(input.outcomesDoc, input.plannedRows, input.envelope.outcomes);
   const supervision = superviseExecution(
     input.plannedRows.map((row) => row.input),
     {
@@ -656,6 +943,7 @@ export function sealExecutionResult(input: SealExecutionResultInput): SealedExec
     ...(input.sessionTrace !== undefined && input.sessionTrace !== null
       ? { sessionTrace: input.sessionTrace }
       : {}),
+    ...(input.chaos !== undefined ? { chaos: input.chaos } : {}),
     runnerExit: input.envelope.processExit,
     complete: supervision.complete,
     causes: supervision.findings.map((finding) => ({
@@ -703,6 +991,42 @@ export interface IssueGateReceiptInput {
    * verification under a provisioned pin.
    */
   approvedPolicyDigest?: string | null;
+  /** CLI identity that sealed the receipt (optional for legacy receipts). */
+  engine?: { version: string; source: string; unpublished: boolean };
+  /** Configured stage for receipt enforcement, omitted for legacy configs. */
+  receiptStage?: 'pre-push' | 'pre-commit' | 'ci';
+  /** Parent full-receipt commit carried into this receipt, when applicable. */
+  carriedFrom?: string;
+  /** Digest of the authenticated parent receipt carried forward. */
+  parentReceiptDigest?: string;
+  /** Digest of the parent document this run re-sealed from (test-only). */
+  resealedFrom?: string;
+  /**
+   * Which kind of parent `resealedFrom` names: a verified gate receipt
+   * or a whole-suite run record. Omitted for a receipt parent (absence
+   * reads as `receipt`, so re-seals sealed before the field existed stay
+   * byte-identical).
+   */
+  resealedFromKind?: 'receipt' | 'run-record';
+  /** How many parent outcomes this run carried unchanged (re-seal). */
+  carriedTests?: number;
+  /** How many tests this run re-executed (re-seal). */
+  rerunTests?: number;
+  /** The class Gateforge itself computed for the sealed change set. */
+  changeClass?: 'test-only';
+  /** The changed paths Gateforge itself diffed between the sealed trees. */
+  changedPaths?: readonly string[];
+  /**
+   * The changed paths the owner declaration `enforcement.resealRuntimeFiles`
+   * kept out of the classification: runtime state the run itself rewrites,
+   * which no sealed commit tracks (re-seal).
+   */
+  resealDisregarded?: readonly string[];
+  /**
+   * Canonical digest of the evidence union this re-seal sealed: the
+   * carried parent records and claims together with the re-run's own.
+   */
+  carriedEvidenceDigest?: string;
   /** Normalized invocation. */
   invocation: string;
   /** Selection digest. */
@@ -808,10 +1132,32 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
     // included ONLY when strict enforcement provisioned a pin, so
     // receipts sealed without one stay byte-compatible with v1.
     ...(input.approvedPolicyDigest ? { approvedPolicyDigest: input.approvedPolicyDigest } : {}),
+    // Receipt engine identity is additive; legacy receipts remain valid.
+    ...(input.engine !== undefined ? { engine: input.engine } : {}),
+    ...(input.receiptStage !== undefined ? { receiptStage: input.receiptStage } : {}),
+    ...(input.carriedFrom !== undefined ? { carriedFrom: input.carriedFrom } : {}),
+    ...(input.parentReceiptDigest !== undefined ? { parentReceiptDigest: input.parentReceiptDigest } : {}),
+    ...(scoped ? { scope: 'changed' as const, coveredObligationFingerprints: covered } : {}),
+    // Additive test-only re-seal bindings: present ONLY when this run
+    // re-sealed from a verified parent, and MAC-covered like every other
+    // field. CI recomputes all of them from the two sealed trees.
+    ...(input.resealedFrom !== undefined
+      ? {
+          resealedFrom: input.resealedFrom,
+          ...(input.resealedFromKind !== undefined ? { resealedFromKind: input.resealedFromKind } : {}),
+          carriedTests: input.carriedTests,
+          rerunTests: input.rerunTests,
+          changeClass: input.changeClass,
+          ...(input.changedPaths !== undefined ? { changedPaths: [...input.changedPaths] } : {}),
+          ...(input.resealDisregarded !== undefined ? { resealDisregarded: [...input.resealDisregarded] } : {}),
+          ...(input.carriedEvidenceDigest !== undefined
+            ? { carriedEvidenceDigest: input.carriedEvidenceDigest }
+            : {}),
+        }
+      : {}),
     // Additive scope binding (opt-in scoped supervised runs): present
     // ONLY for changed-scope seals, so every earlier receipt stays
     // byte-compatible with v1 (absence reads as `full`).
-    ...(scoped ? { scope: 'changed' as const, coveredObligationFingerprints: covered } : {}),
     invocation: input.invocation,
     selectionDigest: input.selectionDigest,
     catalogDigest: input.catalogDigest,
@@ -835,6 +1181,111 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
   const verified = verifyGateReceipt(input.verifierKey, signed);
   if (!verified.ok) {
     throw new UsageError(`issued gate receipt failed self-verification (${verified.rejection}) — fail closed`);
+  }
+  return signed;
+}
+
+/** The full binding set of a run record (everything but the MAC). */
+export interface IssueRunRecordInput {
+  /** Witness verifier secret that authenticates the record. */
+  verifierKey: string;
+  /** Non-secret key id, when the active keyring publishes one. */
+  verifierKeyId?: string;
+  /** Run manifest identity of the run that produced the record. */
+  runId: string;
+  /** Fresh trusted invocation identity of that run. */
+  invocationId: string;
+  /** 64-hex digest of the canonical input snapshot the run tested. */
+  inputDigest: string;
+  /** Candidate HEAD sha, or null when unavailable. */
+  gitSha: string | null;
+  /** Parent commit sha, or null when unavailable. */
+  parentSha: string | null;
+  /** Trusted policy/config revision digest. */
+  trustedPolicyDigest: string;
+  /** Owner-approved policy revision the run was pinned to. */
+  approvedPolicyDigest: string;
+  /** Normalized invocation. */
+  invocation: string;
+  /** Selection digest (the expected test set, fixed pre-run). */
+  selectionDigest: string;
+  /** Catalog digest (the enumeration the selection was planned from). */
+  catalogDigest: string;
+  /** Digest of the sealed execution result. */
+  executionResultDigest: string;
+  /** Digest over the run's per-test outcomes. */
+  testOutcomesDigest: string;
+  /** How many tests the whole-suite run planned. */
+  plannedTests: number;
+  /** How many of them the run reported as passed. */
+  passedTests: number;
+  /** Evidence attestation digest, or null when the run carried none. */
+  evidenceAttestationDigest: string | null;
+  /** Immutable Git tree actually tested (or null outside a Git checkout). */
+  candidateTreeId: string | null;
+  /** Digest binding the approved engine/policy bundle version. */
+  engineBundleDigest: string;
+  /** Digest binding the controller-issued execution-profile record. */
+  executionBoundaryDigest: string;
+  /** Issuance instant (ISO-8601). */
+  issuedAt: string;
+}
+
+/**
+ * Issues the authenticated run record: the evidence a whole-suite run
+ * leaves behind when it sealed NO gate receipt because a test failed.
+ *
+ * A record is not a receipt. It carries every binding a receipt binds —
+ * execution result, attestation, candidate tree, input snapshot,
+ * approved policy, engine bundle, execution boundary, catalog, per-test
+ * outcomes — and no verdict, so nothing downstream can mistake it for
+ * proof. Its own domain tag (`gateforge.run-record.v1`) means no
+ * receipt verifier can ever accept it.
+ *
+ * Args:
+ *   input: the full binding set + verifier key.
+ *
+ * Returns:
+ *   RunRecord: the signed record.
+ *
+ * Throws:
+ *   UsageError: when the signed record fails its own schema or its own
+ *     verification (fail closed).
+ */
+export function issueRunRecord(input: IssueRunRecordInput): RunRecord {
+  const parsed = RunRecordSchema.parse({
+    schemaVersion: 1,
+    recordVersion: 1,
+    recordId: randomUUID(),
+    ...(input.verifierKeyId !== undefined ? { verifierKeyId: input.verifierKeyId } : {}),
+    runId: input.runId,
+    invocationId: input.invocationId,
+    inputDigest: input.inputDigest,
+    gitSha: input.gitSha,
+    parentSha: input.parentSha,
+    trustedPolicyDigest: input.trustedPolicyDigest,
+    approvedPolicyDigest: input.approvedPolicyDigest,
+    invocation: input.invocation,
+    selectionDigest: input.selectionDigest,
+    catalogDigest: input.catalogDigest,
+    executionResultDigest: input.executionResultDigest,
+    testOutcomesDigest: input.testOutcomesDigest,
+    plannedTests: input.plannedTests,
+    passedTests: input.passedTests,
+    evidenceAttestationDigest: input.evidenceAttestationDigest,
+    candidateTreeId: input.candidateTreeId,
+    engineBundleDigest: input.engineBundleDigest,
+    executionBoundaryDigest: input.executionBoundaryDigest,
+    issuedAt: input.issuedAt,
+    mac: RECEIPT_MAC_PLACEHOLDER,
+  });
+  const { mac: placeholder, ...body } = parsed;
+  void placeholder;
+  const signed: RunRecord = { ...parsed, mac: runRecordMac(input.verifierKey, body) };
+  // Self-check: the issued record must verify under its own authority.
+  const verified = verifyRunRecord(input.verifierKey, signed);
+  if (!verified.ok) {
+    throw new UsageError(`issued run record failed self-verification (${verified.detail}) — fail closed`);
   }
   return signed;
 }

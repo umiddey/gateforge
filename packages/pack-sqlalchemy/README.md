@@ -22,9 +22,11 @@ with `ast.parse` and reports:
 | Source construct | Emitted as |
 | --- | --- |
 | Declarative class with literal `__tablename__` (legacy `declarative_base()` and 2.0 `DeclarativeBase` styles) | `sqlalchemy.table` resource + class symbol |
+| SQLModel class (`class X(SQLModel, table=True)` or a shared `SQLModel` base) with no `__tablename__` | `sqlalchemy.table` resource named by SQLModel's own rule (the lowercased class name, provenance `sqlmodel-class-name`) + class symbol |
+| SQLModel class WITHOUT `table=True` (a plain class, or `table=False`) | nothing — it is not a table |
 | Direct `Table("name", ...)` call | `sqlalchemy.table` resource (provenance `table-call-first-arg`) |
 | Abstract base (`__abstract__ = True`) or `DeclarativeBase` subclass with no table facts | class symbol only (`abstract: true` / base); never a business resource |
-| Class whose tablename is a decorated function, f-string, call, name ref, or SQLModel `table=True` | class symbol with `tablenameUnresolved: true` + typed `unresolved` entry |
+| Class whose tablename is a decorated function, f-string, call, name ref, or `table=True` on a non-SQLModel base | class symbol with `tablenameUnresolved: true` + typed `unresolved` entry |
 | Class with bases but no literal tablename anywhere | class symbol + `no_tablename_source` unresolved entry (the graph resolves through its repo-wide symbol table when a base carries a literal — same-file AND cross-file) |
 | Plain classes (mixins, no bases, no table facts) | nothing |
 | Malformed Python file | `PARSE_ERROR` finding with a line number; the file contributes no resources (GF-19) |
@@ -33,7 +35,8 @@ with `ast.parse` and reports:
 
 - **Business table resource** — `kind: "sqlalchemy.table"`, identity in
   `attributes.resourceName`, plus `classQname`, `scope`, `tableName`,
-  `tablenameProvenance` (`literal` | `table-call-first-arg`),
+  `tablenameProvenance` (`literal` | `table-call-first-arg` |
+  `sqlmodel-class-name`),
   `hasTableArgs`/`tableArgsSchema` (literal `schema` from
   `__table_args__`), `tableKeywordTrue`, `abstract`, `baseNames`.
 - **Class-symbol resource** — `kind: "gateforge.class"` with the graph's
@@ -43,9 +46,9 @@ with `ast.parse` and reports:
 - **Unresolved entries** — `{code, detail, location}` at the class
   statement; codes: `computed_tablename` (decorator count + return
   expression kind retained in full, GF-02), `table_name_derived_runtime`
-  (`table=True`), `no_tablename_source`. The graph retires an entry it
-  resolves and synthesizes `inherited_tablename_unresolved` when it
-  cannot.
+  (`table=True` on a non-SQLModel base), `no_tablename_source`. The graph
+  retires an entry it resolves and synthesizes
+  `inherited_tablename_unresolved` when it cannot.
 - **Findings** — `DUPLICATE_TABLE_NAME` (GF-20, **base-qualified**:
   a same-name group is flagged unless every pair provably sits on a
   different declarative Base root — separate `MetaData` at runtime — so
@@ -245,6 +248,67 @@ instead of scanning with partial trust). Precedence: the programmatic
 `plane` factory option wins and the config file is not read at all; an
 explicit `planesConfig` option overrides the document; the default
 document path can be moved with `planesConfigPath`.
+
+## Per-tenant singletons
+
+A table whose UNIQUE constraint — or whose UNIQUE **index** — includes the
+tenant scope column admits at most ONE row per tenant. A `create` of such a
+resource is therefore provable only on a brand-new tenant, while the
+witness's adapter reads use one process-global login: the create reads as
+"the fixed tenant already has that row". The pack reports that as an
+ADDITIVE fact and never as a verdict:
+
+- `attributes.uniqueConstraints` — every declared
+  `UniqueConstraint("a", "b")`, `Index("ix", "a", "b", unique=True)`, and
+  column-level `unique=True`, as `{name, kind, columns}` (`kind` is
+  `constraint` | `index` | `column`; `name` is `null` when unnamed). The
+  attribute is **absent** when the table declares no unique constraint, and
+  a computed column expression or a non-literal `unique` flag is never
+  guessed.
+- `attributes.singletonPerTenant` — `{constraint, tenantColumn, columns}`,
+  minted only when BOTH facts are provable: the table's plane evidence is
+  `tenant` AND one declared unique constraint includes a recognized
+  tenant-scope column (`TENANT_SCOPE_COLUMNS`: `tenant_id`, `tenant`,
+  `tenantId`, `tenant_uuid`, `tenant_key`). The first qualifying constraint
+  in written order is the one reported; every one of them says the same.
+
+Both are attributes, not signals: nothing blocks on them. The gate turns
+the tag into one non-blocking `RESOURCE_SINGLETON_PER_TENANT` advisory per
+resource that owes a `persistence:create`, naming the constraint, the
+tenant column and how to prove it (create the tenant in the test, then
+register that tenant's login with the witness for that session only — see
+`packages/cli/guides/TEST-ENVIRONMENT.md`). A table on another plane, an
+unreviewed table, or a unique constraint that excludes the tenant scope
+column is left byte-identical to before.
+
+### Declaring the tenant scope columns
+
+The default list above recognizes the usual spellings only. When the
+scope column is named differently — the ledger table scoped by
+`contractor_id`, unique `(contractor_id, ledger_id, kind)` — the owner
+declares it in `.gateforge.yml`:
+
+```yaml
+# .gateforge.yml
+tenancy:
+  scopeColumns: [contractor_id]
+```
+
+- The declaration **replaces** `TENANT_SCOPE_COLUMNS`; it never extends
+  it. With the block above, `contractor_id` is recognized and `tenant_id`
+  is not, so the recognized scope is exactly what the owner said.
+- **Absent** (no file, no `tenancy` block, no `scopeColumns`) means the
+  default list, byte-identical to a pack without this channel.
+- The block must be a nonempty list of column names; anything else fails
+  closed with `invalid config <path>: …` rather than quietly disabling
+  the tag. The pack validates its own block only — the CLI owns the rest
+  of the config document.
+- The key lives in `.gateforge.yml`, so it is inside the trusted policy
+  digest: widening the recognized tenant scope is an owner-approved
+  policy-revision change, never an agent-editable toggle.
+- Programmatically: `createSqlalchemyDetector({ tenancyScopeColumns: [...] })`
+  (or `{ configPath }`) overrides the document channel entirely.
+
 
 ## Plane and resource classification
 

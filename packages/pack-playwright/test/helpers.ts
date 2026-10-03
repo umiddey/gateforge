@@ -232,25 +232,46 @@ export function writeFixtureProject(
 	);
 }
 
-/** Writes the HONEST adapter for `tenant.accounts` into a temp project. */
-export function writeHonestAdapter(dir: string, fingerprint = FINGERPRINT): void {
+/**
+ * Writes the reviewed adapter used by browser-engine fixtures.
+ *
+ * Args:
+ *   dir: disposable project root.
+ *   fingerprint: target fingerprint to stamp, defaulting to the example value.
+ *   fields: optional adapter projection declared for engine-side persistence checks.
+ *   identity: optional natural-key mode, which deliberately omits the collection list.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeHonestAdapter(
+  dir: string,
+  fingerprint = FINGERPRINT,
+  fields?: readonly string[],
+  identity?: 'natural-key',
+): void {
 	writeFileSync(
 		join(dir, '.gateforge/adapters/tenant.accounts.mjs'),
 		[
 			'// Reviewed evidence adapter for tenant.accounts (GET-only).',
 			'export default {',
+			...(identity !== undefined ? ["  identity: 'natural-key',"] : []),
 			'  async read(ctx, id) {',
 			'    const res = await ctx.get(`/api/accounts/${encodeURIComponent(String(id))}`);',
 			'    if (res.status === 404) return null;',
 			'    if (res.status !== 200) throw new Error(`adapter read failed: HTTP ${res.status}`);',
 			'    return res.json();',
 			'  },',
-			'  async list(ctx) {',
-			'    const res = await ctx.get(\'/api/accounts\');',
-			'    if (res.status !== 200) throw new Error(`adapter list failed: HTTP ${res.status}`);',
-			'    const body = await res.json();',
-			'    return body.accounts;',
-			'  },',
+			...(identity === 'natural-key'
+				? []
+				: [
+						'  async list(ctx) {',
+						'    const res = await ctx.get(\'/api/accounts\');',
+						'    if (res.status !== 200) throw new Error(`adapter list failed: HTTP ${res.status}`);',
+						'    const body = await res.json();',
+						'    return body.accounts;',
+						'  },',
+					]),
 			'  normalize(body) {',
 			'    return {',
 			'      entityId: body.id,',
@@ -258,6 +279,7 @@ export function writeHonestAdapter(dir: string, fingerprint = FINGERPRINT): void
 			'    };',
 			'  },',
 			"  deletion: 'archive',",
+			...(fields !== undefined ? [`  fields: ${JSON.stringify(fields)},`] : []),
 			`  environmentFingerprint: '${fingerprint}',`,
 			'};',
 			'',
@@ -620,7 +642,15 @@ export { resolve };
  */
 export function writeObserveAdapter(
 	dir: string,
-	options: { list?: boolean; observe?: boolean; fingerprint?: string } = {},
+	options: {
+		list?: boolean;
+		observe?: boolean;
+		fingerprint?: string;
+		/** Overrides the read binding: a by-id path, or a collection route. */
+		read?: { path: string; collection?: { rowsKey?: string; idKey: string } };
+		/** Server-computed fields the adapter declares (never inferred). */
+		volatileFields?: readonly string[];
+	} = {},
 ): void {
 	const fingerprint = options.fingerprint ?? FINGERPRINT;
 	const lines = [
@@ -654,15 +684,69 @@ export function writeObserveAdapter(
 		`  environmentFingerprint: '${fingerprint}',`,
 	);
 	if (options.observe !== false) {
+		const read = options.read ?? { path: '/api/accounts/{id}' };
+		const collection =
+			read.collection === undefined
+				? ''
+				: `, collection: { ${
+						read.collection.rowsKey === undefined ? '' : `rowsKey: '${read.collection.rowsKey}', `
+					}idKey: '${read.collection.idKey}' }`;
 		lines.push(
 			'  observe: {',
 			"    create: { method: 'POST', path: '/api/accounts' },",
-			"    read: { method: 'GET', path: '/api/accounts/{id}' },",
+			`    read: { method: 'GET', path: '${read.path}'${collection} },`,
 			"    update: { method: 'PATCH', path: '/api/accounts/{id}' },",
 			"    delete: { method: 'POST', path: '/api/accounts/{id}/archive' },",
 			'  },',
 		);
 	}
+	if (options.volatileFields !== undefined) {
+		lines.push(`  volatileFields: [${options.volatileFields.map((field) => `'${field}'`).join(', ')}],`);
+	}
 	lines.push('};', '');
 	writeFileSync(join(dir, '.gateforge/adapters/tenant.accounts.mjs'), lines.join('\n'));
+}
+
+/**
+ * Writes a SECOND reviewed adapter (`tenant.orders`) whose observe read
+ * is a collection over the SAME `GET /api/accounts` route the accounts
+ * adapter declares. Used to prove that two claimed resources sharing
+ * one route with DIFFERENT declared shapes credit neither, and that
+ * an identical shape still yields single-use consumption.
+ */
+export function writeSecondCollectionAdapter(
+	dir: string,
+	collection: { rowsKey: string; idKey: string },
+): void {
+	writeFileSync(
+		join(dir, '.gateforge/adapters/tenant.orders.mjs'),
+		[
+			'// Reviewed evidence adapter for tenant.orders (same list route, own collection shape).',
+			'export default {',
+			'  async read(ctx, id) {',
+			'    const res = await ctx.get(`/api/accounts/${encodeURIComponent(String(id))}`);',
+			'    if (res.status === 404) return null;',
+			"    if (res.status !== 200) throw new Error('adapter read failed');",
+			'    return res.json();',
+			'  },',
+			'  async list(ctx) {',
+			"    const res = await ctx.get('/api/accounts');",
+			"    if (res.status !== 200) throw new Error('adapter list failed');",
+			'    return (await res.json()).accounts;',
+			'  },',
+			'  normalize(body) {',
+			'    return {',
+			'      entityId: body.id,',
+			'      fields: { first_name: body.first_name, last_name: body.last_name, status: body.status },',
+			'    };',
+			'  },',
+			"  deletion: 'archive',",
+			`  environmentFingerprint: '${FINGERPRINT}',`,
+			'  observe: {',
+			`    read: { method: 'GET', path: '/api/accounts', collection: { rowsKey: '${collection.rowsKey}', idKey: '${collection.idKey}' } },`,
+			'  },',
+			'};',
+			'',
+		].join('\n'),
+	);
 }

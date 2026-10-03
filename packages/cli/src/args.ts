@@ -15,7 +15,37 @@ export interface ParsedArgs {
 }
 
 /** Flags that carry no value (bare presence). */
-const BOOLEAN_FLAGS = new Set(['json', 'changed', 'staged', 'help', 'version', 'confirm', 'confirm-doc-exclusions', 'blocking', 'no-blocking', 'strict-e2e', 'pytest', 'require-e2e', 'pre-commit', 'no-pre-commit', 'ci', 'no-ci', 'planes', 'no-planes', 'accept-recommended', 'no-scan', 'result-only']);
+const BOOLEAN_FLAGS: Record<string, true> = {
+  json: true,
+  changed: true,
+  staged: true,
+  help: true,
+  version: true,
+  confirm: true,
+  'confirm-doc-exclusions': true,
+  'confirm-cache-exclusions': true,
+  blocking: true,
+  'no-blocking': true,
+  'strict-e2e': true,
+  pytest: true,
+  'require-e2e': true,
+  'pre-commit': true,
+  'no-pre-commit': true,
+  ci: true,
+  'no-ci': true,
+  planes: true,
+  'no-planes': true,
+  'accept-recommended': true,
+  'no-scan': true,
+  failed: true,
+  'result-only': true,
+  timing: true,
+  'no-cache': true,
+  'explain-presets': true,
+  'dry-run': true,
+  probe: true,
+  'strict-preflight': true,
+};
 
 /**
  * Parses argv (without node/script) into options + positionals.
@@ -55,7 +85,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     let value: string | boolean;
     if (inlineValue !== undefined) {
       value = inlineValue;
-    } else if (BOOLEAN_FLAGS.has(name)) {
+    } else if (BOOLEAN_FLAGS[name] === true) {
       value = true;
     } else {
       const next = argv[index + 1];
@@ -68,6 +98,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     const existing = options[name];
     if (existing === undefined) {
       options[name] = value;
+    } else if (Array.isArray(existing)) {
+      // A third or later repeat appends; stringifying the array would
+      // fuse the earlier values into one comma-joined value.
+      options[name] = [...existing, String(value)];
     } else if (typeof existing === 'string' && typeof value === 'string') {
       options[name] = [existing, value];
     } else {
@@ -98,4 +132,29 @@ export function stringFlag(options: Record<string, unknown>, name: string): stri
     return undefined;
   }
   return value;
+}
+
+/**
+ * Reads a repeatable string flag as a list of values. A single
+ * occurrence yields a one-element list; an absent flag yields
+ * undefined. Blank values are dropped (an empty selector would never
+ * match anything and would silently narrow nothing).
+ *
+ * Args:
+ *   options: parsed options.
+ *   name: flag name.
+ *
+ * Returns:
+ *   string[] | undefined: the values in argv order, or undefined when
+ *   the flag is absent or carries only blank values.
+ */
+export function repeatableStringFlag(
+  options: Record<string, unknown>,
+  name: string,
+): string[] | undefined {
+  const value = options[name];
+  if (value === undefined) return undefined;
+  const raw = Array.isArray(value) ? value : [value];
+  const values = raw.map(String).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  return values.length === 0 ? undefined : values;
 }

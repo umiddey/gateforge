@@ -431,6 +431,66 @@ describe('endpoint capability and consumption matchers (ADR 0004 D8)', () => {
   });
 });
 
+describe('http.endpoint.requireObservation option (plan Phase 4c, E60)', () => {
+  const OBSERVATION_POLICY: PolicyFile = {
+    schemaVersion: 1,
+    policies: [
+      {
+        id: 'frontend-consumed-endpoints-transport-only',
+        when: { kind: 'http.endpoint', consumed: true },
+        require: ['http:request-observed', 'http:response-status-ok'],
+      },
+    ],
+  };
+  const WIDENED: PolicyFile = {
+    ...OBSERVATION_POLICY,
+    options: { 'http.endpoint.requireObservation': 'all' },
+  };
+
+  it("'all' makes an unconsumed endpoint owe the observation contracts; absent does not", () => {
+    const unconsumed = endpointGraph({ capabilities: ['crud-read'], frontendConsumed: false });
+    expect(
+      evaluatePolicies({ graph: unconsumed, policies: OBSERVATION_POLICY }).obligations,
+    ).toEqual([]);
+    expect(
+      evaluatePolicies({ graph: unconsumed, policies: WIDENED }).obligations.map((o) => o.id),
+    ).toEqual([
+      'tenant.http-post-api-accounts-a1b2c3d4:http:request-observed',
+      'tenant.http-post-api-accounts-a1b2c3d4:http:response-status-ok',
+    ]);
+  });
+
+  it("'all' never widens a consumed:false policy or a table", () => {
+    const notConsumed: PolicyFile = {
+      schemaVersion: 1,
+      options: { 'http.endpoint.requireObservation': 'all' },
+      policies: [{ id: 'not-consumed', when: { consumed: false }, require: ['audit:retention'] }],
+    };
+    expect(
+      evaluatePolicies({
+        graph: endpointGraph({ capabilities: ['crud-read'], frontendConsumed: true }),
+        policies: notConsumed,
+      }).obligations,
+    ).toEqual([]);
+    const tables = evaluatePolicies({
+      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'hard' })),
+      policies: notConsumed,
+    });
+    expect(tables.obligations.map((o) => o.id)).toEqual(['tenant.accounts:audit:retention']);
+  });
+
+  it("the explicit 'consumed' default is byte-identical to an absent options section", () => {
+    const explicit: PolicyFile = {
+      ...OBSERVATION_POLICY,
+      options: { 'http.endpoint.requireObservation': 'consumed' },
+    };
+    const graph = endpointGraph({ capabilities: ['crud-read'], frontendConsumed: true });
+    expect(canonicalJson(evaluatePolicies({ graph, policies: explicit }))).toBe(
+      canonicalJson(evaluatePolicies({ graph, policies: OBSERVATION_POLICY })),
+    );
+  });
+});
+
 describe('internal resources (ADR 0001)', () => {
   const INTERNAL_POLICY: PolicyFile = {
     schemaVersion: 1,

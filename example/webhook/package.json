@@ -1,0 +1,12 @@
+{
+  "name": "gateforge-webhook-example",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Webhook receiver with a Gateforge behavior setup a fresh copy can follow to green.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "gate": "node scripts/gate.mjs"
+  },
+  "license": "ISC"
+}

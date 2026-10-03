@@ -1,0 +1,808 @@
+/**
+ * Test-only re-seal, end to end through the REAL CLI: a full
+ * supervised run seals a whole-suite receipt, ONE test file changes,
+ * and `test-gates --changed --scope changed` re-runs exactly the
+ * affected tests, carries the rest, and seals a receipt bound to the
+ * parent. The path is OPT-IN: only `enforcement.reseal: true` enables
+ * it, in every gate mode including the strict default.
+ */
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { sha256Canonical, withTempRepo, type TempRepo } from '@gate-forge/core';
+import { runCli } from './helpers.js';
+import {
+  changeEvidenceSpecAndReseal,
+  changeOneSpecAndReseal,
+  EVIDENCE_SPECS,
+  fixOrdersSpecAndReseal,
+  fixFailingSpecAndReseal,
+  installAndRunFailingEvidenceParent,
+  installAndSealEvidenceParent,
+  stateRecords,
+  installAndRunFailingParent,
+  installAndSealParent,
+  sealedExecution,
+  sealedReceipt,
+  sealedRunRecord,
+  SPECS,
+  writeIgnoredRuntimeState,
+} from './reseal-e2e-fixture.js';
+
+describe('test-only re-seal (real CLI, end to end)', () => {
+  it('re-runs only the changed spec, re-seals from the parent, and passes check --require-e2e', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo);
+      const parent = sealedReceipt(repo);
+      expect(parent.scope).toBeUndefined();
+      expect(parent.resealedFrom).toBeUndefined();
+      expect(parent.verdictSummary.blocking).toBe(0);
+      const fullExecution = sealedExecution(repo);
+      expect(fullExecution.outcomes.map((row) => row.logicalKey).sort()).toEqual([
+        'playwright:chromium:e2e/accounts.spec.mjs:reads an account',
+        'playwright:chromium:e2e/orders.spec.mjs:reads an order',
+      ]);
+      const parentDigest = sha256Canonical(parent as unknown as Record<string, never>);
+
+      await changeOneSpecAndReseal(repo, env);
+
+      const execution = sealedExecution(repo);
+      expect(execution.outcomes.map((row) => row.logicalKey)).toEqual([
+        'playwright:chromium:e2e/accounts.spec.mjs:reads an account',
+      ]);
+      expect(execution.outcomes.every((row) => row.status === 'passed')).toBe(true);
+
+      const receipt = sealedReceipt(repo);
+      expect(receipt.changeClass).toBe('test-only');
+      expect(receipt.changedPaths).toEqual(['e2e/accounts.spec.mjs']);
+      expect(receipt.rerunTests).toBe(1);
+      expect(receipt.carriedTests).toBe(1);
+      expect(receipt.resealedFrom).toBe(parentDigest);
+
+      // The parent chain is retained next to the new receipt, and CI
+      // recomputes the re-seal from it with its own engine and key.
+      expect(existsSync(join(repo.root, '.gateforge/test-gates/reseal-chain/hop-1-receipt.json'))).toBe(true);
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 180_000);
+
+  it('re-seals under the strict default when the owner opts in, and never without the key', async () => {
+    await withTempRepo({}, async (repo) => {
+      // Strict is the default mode; `enforcement.reseal: true` is the
+      // owner's explicit request, and it is honored there too.
+      const env = await installAndSealParent(repo, 'enforcement:\n  reseal: true\n');
+      await changeOneSpecAndReseal(repo, env);
+      expect(sealedReceipt(repo).changeClass).toBe('test-only');
+    });
+  }, 180_000);
+
+  it('never re-seals without the opt-in, and writes no run record for a slice run', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo, '');
+      const stateDir = join(repo.root, '.gateforge/test-gates');
+      // The clean parent run sealed a receipt, so it left no run record
+      // behind: a receipt supersedes the record of its own run.
+      expect(existsSync(join(stateDir, 'run-record.json'))).toBe(false);
+
+      const refused = await changeOneSpecAndReseal(repo, env, { expectReseal: false });
+      expect(refused.stderr).toContain('the re-seal path is off (`enforcement.reseal` is not true) → changed-scope run');
+      expect(refused.stderr).not.toContain('only test files changed');
+      // The refused re-seal falls through to the ordinary changed-scope
+      // path, which seals nothing here (E07: no stale proof survives),
+      // and a SLICE run never leaves a run record either.
+      expect(existsSync(join(stateDir, 'receipt.json'))).toBe(false);
+      expect(existsSync(join(stateDir, 'run-record.json'))).toBe(false);
+      // Nothing of the re-seal machinery is written without the
+      // opt-in, not even the retained evidence copy.
+      expect(existsSync(join(stateDir, 'reseal-parent'))).toBe(false);
+    });
+  }, 180_000);
+});
+
+describe('test-only re-seal from a RUN RECORD (a failed parent run)', () => {
+  it('re-seals after fixing only the failing test file, and the receipt passes check --require-e2e', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+
+      // A failing run seals no receipt but leaves a MAC'd, digest-bound
+      // run record — the same evidence without a gate verdict.
+      const record = sealedRunRecord(repo) as {
+        executionResultDigest: string;
+        candidateTreeId: string;
+        testOutcomesDigest: string;
+        mac: string;
+        verdictSummary?: unknown;
+      };
+      expect(record.mac).toMatch(/^[0-9a-f]{64}$/);
+      expect(record.verdictSummary).toBeUndefined();
+      expect(record.candidateTreeId).toMatch(/^[0-9a-f]{40}$/);
+      const failedExecution = sealedExecution(repo);
+      expect(failedExecution.outcomes.map((row) => row.status).sort()).toEqual(['failed', 'passed']);
+
+      await fixFailingSpecAndReseal(repo, env);
+
+      const receipt = sealedReceipt(repo);
+      expect(receipt.resealedFromKind).toBe('run-record');
+      expect(receipt.resealedFrom).toBe(sha256Canonical(record as never));
+      expect(receipt.parentReceiptDigest).toBeUndefined();
+      expect(receipt.rerunTests).toBe(1);
+      expect(receipt.carriedTests).toBe(1);
+      expect(sealedExecution(repo).outcomes.every((row) => row.status === 'passed')).toBe(true);
+      expect(existsSync(join(repo.root, '.gateforge/test-gates/reseal-chain/hop-1-run-record.json'))).toBe(true);
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 180_000);
+
+  it('never accepts a run record as a receipt: a failed run leaves require-e2e blocked', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      expect(existsSync(join(repo.root, '.gateforge/test-gates/run-record.json'))).toBe(true);
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code).not.toBe(0);
+      expect(checked.stdout).not.toContain('run-record');
+    });
+  }, 180_000);
+
+  it('refuses the re-seal when the failed test is outside the affected set', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      // A DIFFERENT test file changes; the failing one does not.
+      repo.commitFiles({ 'e2e/orders.spec.mjs': `${SPECS['e2e/orders.spec.mjs'] as string}// touched\n` }, 'touch one spec');
+      const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(resealed.stderr).toContain(
+        "the previous run's test playwright:chromium:e2e/accounts.spec.mjs:reads an account failed outside the affected set → changed-scope run",
+      );
+      expect(resealed.stderr).not.toContain('only test files changed');
+      expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 180_000);
+
+  it('refuses a run record whose MAC was made with a foreign key', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      const path = join(repo.root, '.gateforge/test-gates/run-record.json');
+      const forged = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+      writeFileSync(path, `${JSON.stringify({ ...forged, mac: 'f'.repeat(64) }, null, 2)}\n`, 'utf8');
+
+      const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(resealed.stderr).not.toContain('only test files changed');
+      expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 180_000);
+});
+
+describe('a runtime file the run itself rewrites (owner-declared)', () => {
+  // The state directory sits OUTSIDE the runner's test root, exactly
+  // as it does on the consumer: the specs live in `e2e/`, the login
+  // stage writes its storage state into a gitignored `.auth/`.
+  const DECLARED = "mode: changed\nenforcement:\n  reseal: true\n  resealRuntimeFiles:\n    - '.auth/*.json'\n";
+  const UNDECLARED = 'mode: changed\nenforcement:\n  reseal: true\n';
+
+  it('refuses it with one plain line when the owner declared nothing', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo, UNDECLARED);
+      writeIgnoredRuntimeState(repo, 'contractor.json', 'a');
+      const run = await changeOneSpecAndReseal(repo, env, { expectReseal: false });
+      expect(run.stderr.split('\n').filter((row) => row.startsWith('test-gates: app file changed'))).toEqual([
+        'test-gates: app file changed: .auth/contractor.json → changed-scope run',
+      ]);
+      expect(run.stderr).not.toContain('only test files changed');
+      expect(run.stderr).not.toContain('re-seal disregards');
+    });
+  }, 180_000);
+
+  it('re-seals when the owner declared it, records it, and check --require-e2e recomputes the same decision', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo, DECLARED);
+      // The bytes are the run's own: ignored by Git, absent from every
+      // commit, present in the sealed candidate tree.
+      writeIgnoredRuntimeState(repo, 'contractor.json', 'a');
+      expect(repo.git(['ls-files', '.auth/contractor.json']).stdout.trim()).toBe('');
+      expect(repo.git(['check-ignore', '.auth/contractor.json']).stdout.trim()).toBe('.auth/contractor.json');
+      // A second stage rewrites both before the fix run.
+      writeIgnoredRuntimeState(repo, 'employee.json', 'b');
+      writeIgnoredRuntimeState(repo, 'contractor.json', 'c');
+
+      const resealed = await changeOneSpecAndReseal(repo, env);
+
+      expect(resealed.stderr).toContain(
+        'test-gates: re-seal disregards 2 declared runtime file(s): .auth/contractor.json, .auth/employee.json',
+      );
+      expect(sealedReceipt(repo).resealDisregarded).toEqual([
+        '.auth/contractor.json',
+        '.auth/employee.json',
+      ]);
+      // The receipt still names the REAL tree difference; the
+      // declaration only removed those paths from the classification.
+      expect(sealedReceipt(repo).changedPaths).toEqual([
+        '.auth/contractor.json',
+        '.auth/employee.json',
+        'e2e/accounts.spec.mjs',
+      ]);
+      // The consumer recomputes with its own engine, key and config, so
+      // an agreeing recomputation is the proof the declaration is sound.
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 180_000);
+
+  it('prints no disregard line when the declaration covers nothing', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo, DECLARED);
+      const plain = await changeOneSpecAndReseal(repo, env);
+      expect(plain.stderr).not.toContain('re-seal disregards');
+      expect(sealedReceipt(repo).resealDisregarded).toBeUndefined();
+    });
+  }, 180_000);
+
+  it('never lets the declaration hide a TRACKED file', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo, DECLARED);
+      // The same declared glob, on a path this run COMMITS: an owner
+      // declaration is an assertion about ignored runtime bytes, never
+      // about source, so trackedness is what decides.
+      repo.writeFiles({ '.auth/contractor.json': '{"token":"a"}\n' });
+      repo.git(['add', '-f', '.auth/contractor.json']);
+      repo.commit('track the state file');
+      writeIgnoredRuntimeState(repo, 'contractor.json', 'b');
+      repo.git(['add', '-f', '.auth/contractor.json']);
+      repo.commitFiles(
+        { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race fix\n` },
+        'a tracked state file changed next to a test fix',
+      );
+      const refused = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(refused.stderr.split('\n').filter((row) => row.startsWith('test-gates: app file changed'))).toEqual([
+        'test-gates: app file changed: .auth/contractor.json → changed-scope run',
+      ]);
+      expect(refused.stderr).not.toContain('re-seal disregards');
+      expect(refused.stderr).not.toContain('only test files changed');
+    });
+  }, 240_000);
+});
+
+describe('one plain reason line when a re-seal parent cannot be used', () => {
+  // The consumer's case: the previous run tested bytes the merge-base
+  // commit does not contain (an uncommitted edit), so its sealed tree is
+  // not the tree of that commit. That refusal is correct — and it must
+  // be visible, not a silent fall-through to the changed-scope path.
+  const UNCOMMITTED = { 'e2e/orders.spec.mjs': `${SPECS['e2e/orders.spec.mjs'] as string}// edited, never committed\n` };
+
+  async function fixAndRunChanged(
+    repo: TempRepo,
+    gateConfig: string,
+  ): Promise<{ stderr: string; stdout: string; code: number; parentSha: string }> {
+    const env = await installAndRunFailingParent(repo, gateConfig, { uncommittedChanges: UNCOMMITTED });
+    // The parent is bound to the commit ITS OWN document names — no CI
+    // variable is involved, and none is set.
+    const parentSha = sealedRunRecord(repo)['gitSha'] as string;
+    repo.commitFiles(
+      { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
+      'fix the race in the one failing spec',
+    );
+    const run = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+    return { ...run, stderr: run.stderr.split(repo.root).join('<repo>'), parentSha };
+  }
+
+  it('names the uncommitted tree when the previous run tested uncommitted changes', async () => {
+    await withTempRepo({}, async (repo) => {
+      const run = await fixAndRunChanged(repo, 'mode: changed\nenforcement:\n  reseal: true\n');
+      const line = `test-gates: the previous run cannot be re-sealed from: its sealed tree is not the tree of commit ${run.parentSha.slice(0, 7)} (uncommitted changes were tested) → changed-scope run`;
+      expect(run.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'))).toEqual([line]);
+      expect(run.stderr).not.toContain('only test files changed');
+      expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 180_000);
+
+  it('names a replaced execution result', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      // A later run replaced the execution result the record binds: the
+      // record no longer describes the evidence beside it.
+      const path = join(repo.root, '.gateforge/test-gates/execution-result.json');
+      const replaced = JSON.parse(readFileSync(path, 'utf8')) as { outcomes: Array<{ status: string }> };
+      for (const outcome of replaced.outcomes) if (outcome.status === 'failed') outcome.status = 'passed';
+      writeFileSync(path, `${JSON.stringify(replaced, null, 2)}\n`, 'utf8');
+      repo.commitFiles(
+        { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
+        'fix the race in the one failing spec',
+      );
+
+      const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(resealed.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'))).toEqual([
+        'test-gates: the previous run cannot be re-sealed from: its execution result was replaced by a later run → changed-scope run',
+      ]);
+      expect(resealed.stderr).not.toContain('only test files changed');
+    });
+  }, 180_000);
+
+  it('prints nothing when the re-seal path is off, byte for byte', async () => {
+    const on = await withTempRepo({}, (repo) => fixAndRunChanged(repo, 'mode: changed\nenforcement:\n  reseal: true\n'));
+    const off = await withTempRepo({}, (repo) => fixAndRunChanged(repo, 'mode: changed\nenforcement:\n  reseal: false\n'));
+    const lines = on.stderr.split('\n');
+    const reasonLine = lines.findIndex((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'));
+    expect(reasonLine).toBeGreaterThan(-1);
+    // The opted-in run differs from the opted-out one by EXACTLY that one
+    // line — nothing else about the run changes.
+    expect(lines.filter((_, index) => index !== reasonLine).join('\n')).toBe(off.stderr);
+  }, 300_000);
+});
+
+/**
+ * The carried EVIDENCE of a re-seal. The suites above prove a carried
+ * test's OUTCOME; these prove the other half — the witness-issued
+ * records and claims that made its obligations satisfied. Without them
+ * a re-sealed run grades every obligation only a carried test proved as
+ * `missing`, and `check --changed --require-e2e` exits 1 on evidence the
+ * parent run actually witnessed.
+ */
+describe('a re-seal carries the witness EVIDENCE of the tests it carries', () => {
+  /** The per-obligation verdicts `check` graded. */
+  function verdicts(stdout: string): Array<{ obligationId: string; verdict: string }> {
+    return (JSON.parse(stdout) as { verdicts: Array<{ obligationId: string; verdict: string }> }).verdicts;
+  }
+
+  it('keeps a carried obligation satisfied after a run-record re-seal (the consumer case)', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndRunFailingEvidenceParent(repo);
+            try {
+            // The parent run witnessed a record for BOTH obligations; the
+            // failing test took its gate verdict, not its evidence, away.
+            expect(stateRecords(repo)).toHaveLength(2);
+
+            await fixOrdersSpecAndReseal(repo, env);
+            const receipt = sealedReceipt(repo);
+            expect(receipt.resealedFromKind).toBe('run-record');
+            expect(receipt.carriedTests).toBe(1);
+            expect(receipt.rerunTests).toBe(1);
+            expect(receipt.carriedEvidenceDigest).toMatch(/^[0-9a-f]{64}$/);
+
+            const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+            expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+            // The obligation ONLY the carried test proved stays satisfied: the
+            // state dir's evidence is the union, not this run's three records.
+            expect(
+              verdicts(checked.stdout).find((row) => row.obligationId === 'tenant.accounts:persistence:read')?.verdict,
+            ).toBe('satisfied');
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
+
+  it('keeps a carried obligation satisfied after a receipt re-seal', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndSealEvidenceParent(repo);
+            try {
+            repo.commitFiles(
+              { 'e2e/orders.spec.mjs': `${EVIDENCE_SPECS['e2e/orders.spec.mjs'] as string}// a comment\n` },
+              'touch one spec',
+            );
+            const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+            expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
+            expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous receipt');
+            expect(sealedReceipt(repo).resealedFromKind).toBe('receipt');
+
+            const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+            expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+            expect(verdicts(checked.stdout).find((row) => row.obligationId === 'tenant.accounts:persistence:read')?.verdict).toBe(
+              'satisfied',
+            );
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
+
+  it('never carries a re-run test\'s parent record: a test that stopped proving leaves its obligation missing', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndRunFailingEvidenceParent(repo);
+            try {
+            // The fix removes the failing test's persistence intent: the
+            // re-run proves nothing, so the parent's record must NOT survive.
+            await fixOrdersSpecAndReseal(repo, env, { keepEvidence: false });
+            const orders = stateRecords(repo).filter(
+              (row) => (row as { obligationId?: string }).obligationId === 'tenant.orders:persistence:read',
+            );
+            expect(orders).toEqual([]);
+
+            const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+            expect(checked.code).not.toBe(0);
+            const graded = verdicts(checked.stdout);
+            expect(graded.find((row) => row.obligationId === 'tenant.orders:persistence:read')?.verdict).toBe('missing');
+            // The carried test's own evidence still holds.
+            expect(graded.find((row) => row.obligationId === 'tenant.accounts:persistence:read')?.verdict).toBe('satisfied');
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
+
+  it('fails closed when the retained parent evidence was tampered with', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndRunFailingEvidenceParent(repo);
+            try {
+            await fixOrdersSpecAndReseal(repo, env);
+            const retained = join(repo.root, '.gateforge/test-gates/reseal-chain/hop-1-records.json');
+            const records = JSON.parse(readFileSync(retained, 'utf8')) as Array<Record<string, unknown>>;
+            const accounts = records.find((row) => row['obligationId'] === 'tenant.accounts:persistence:read');
+            (accounts?.['payload'] as Record<string, unknown>)['found'] = false;
+            writeFileSync(retained, `${JSON.stringify(records, null, 2)}\n`, 'utf8');
+
+            const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+            expect(checked.code).not.toBe(0);
+            expect(checked.stdout).toContain('EVIDENCE_STALE');
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
+});
+
+/**
+ * The parent is bound to the commit the PARENT DOCUMENT names, which
+ * must exist here and be an ancestor of HEAD. No CI variable is
+ * involved: `CI_MERGE_REQUEST_DIFF_BASE_SHA` is a merge base, not the
+ * commit the previous pipeline tested, and no CI sets it to the
+ * parent — so a re-seal that needs it can never work in a real merge
+ * request.
+ */
+describe('the parent is bound to its OWN commit, never to a CI variable', () => {
+  it('re-seals and passes check --require-e2e in a pipeline that sets no base variable at all', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      // A merge request publishes a diff BASE, never the commit the
+      // previous pipeline tested, so the re-seal is asked for with no
+      // such variable in the environment at all.
+      const { CI_MERGE_REQUEST_DIFF_BASE_SHA: _unpublished, ...reSealEnv } = env;
+      expect(reSealEnv['GITHUB_BASE_REF']).toBeUndefined();
+      // The failed run is at M1; the fix is M2, a child of it.
+      const parentSha = sealedRunRecord(repo)['gitSha'] as string;
+      const fixSha = repo.commitFiles(
+        { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
+        'fix the race in the one failing spec',
+      );
+      expect(repo.git(['merge-base', '--is-ancestor', parentSha, fixSha], { allowFailure: true }).status).toBe(0);
+
+      const resealed = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], reSealEnv);
+      expect(resealed.code, `${resealed.stdout}\n${resealed.stderr}`).toBe(0);
+      expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous run');
+      expect(sealedReceipt(repo).changeClass).toBe('test-only');
+
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 180_000);
+
+  it('ignores a CI_MERGE_REQUEST_DIFF_BASE_SHA naming a commit that is not the parent', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndSealParent(repo);
+      // A commit that exists in this repository and is NOT the parent:
+      // the sibling branch below. Publishing it is exactly what a CI
+      // does, and the re-seal must not be decided by it.
+      repo.git(['checkout', '--orphan', 'sibling']);
+      const siblingSha = repo.commitFiles(
+        { 'e2e/orders.spec.mjs': `${SPECS['e2e/orders.spec.mjs'] as string}// work on a sibling branch\n` },
+        'a change that lives on another branch',
+      );
+      repo.git(['checkout', 'main']);
+
+      const resealed = await changeOneSpecAndReseal(repo, {
+        ...env,
+        CI_MERGE_REQUEST_DIFF_BASE_SHA: siblingSha,
+      });
+      expect(resealed.stderr).toContain('only test files changed: re-ran 1 test(s), kept 1 from the previous receipt');
+      expect(siblingSha).not.toBe(sealedReceipt(repo).gitSha);
+    });
+  }, 180_000);
+
+  it('refuses a parent sealed on a sibling branch, naming the real rule', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      const parentSha = sealedRunRecord(repo)['gitSha'] as string;
+      // A branch with no shared history: HEAD no longer descends from
+      // the commit the run record was sealed at.
+      repo.git(['checkout', '--orphan', 'sibling']);
+      repo.commitFiles(
+        { 'e2e/orders.spec.mjs': `${SPECS['e2e/orders.spec.mjs'] as string}// work on a sibling branch\n` },
+        'a change that lives on another branch',
+      );
+
+      const refused = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(
+        refused.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed')),
+      ).toEqual([
+        `test-gates: the previous run cannot be re-sealed from: it was sealed at commit ${parentSha.slice(0, 7)}, which is not an ancestor of HEAD → changed-scope run`,
+      ]);
+      expect(refused.stderr).not.toContain('only test files changed');
+      expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 180_000);
+});
+
+/**
+ * CONSECUTIVE re-seals. One re-seal is a chain of length 1; the
+ * consumer fixes one test at a time, so the second fix arrives while
+ * the first re-seal is the only parent in the run state. The parent of
+ * a re-seal is therefore a re-seal, and every hop's evidence has to
+ * survive to it — otherwise the second `check --changed --require-e2e`
+ * grades the untouched spec `missing` on evidence three runs witnessed.
+ */
+describe('consecutive test-only re-seals', () => {
+  const THREE = ['accounts', 'orders', 'invoices'];
+
+  /** The per-obligation verdicts `check` graded, with their trust tier. */
+  function graded(stdout: string): Array<{ obligationId: string; verdict: string; trustTier: string }> {
+    return (JSON.parse(stdout) as { verdicts: Array<{ obligationId: string; verdict: string; trustTier: string }> })
+      .verdicts;
+  }
+
+  it('re-seals twice in a row from a clean full parent and still passes check --require-e2e', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndSealEvidenceParent(repo, THREE);
+      try {
+        const full = sealedReceipt(repo);
+        expect(full.verdictSummary.total).toBe(3);
+        expect(full.resealedFrom).toBeUndefined();
+        const hopOneDigest = sha256Canonical(full as unknown as Record<string, never>);
+
+        // Hop 1: one test file changes, the other two carry.
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/orders.spec.mjs', {
+          carried: 2,
+          message: 'touch the orders spec',
+        });
+        const hopOne = sealedReceipt(repo);
+        expect(hopOne.resealedFrom).toBe(hopOneDigest);
+        expect(hopOne.rerunTests).toBe(1);
+        expect(hopOne.carriedTests).toBe(2);
+        expect(existsSync(join(repo.root, '.gateforge/test-gates/reseal-chain/hop-1-receipt.json'))).toBe(true);
+
+        const afterOne = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(afterOne.code, `${afterOne.stdout}\n${afterOne.stderr}`).toBe(0);
+
+        // Hop 2: a DIFFERENT test file changes, so the second re-seal's
+        // parent is the first re-seal and its carried count spans the
+        // whole chain.
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/invoices.spec.mjs', {
+          carried: 2,
+          message: 'touch the invoices spec',
+        });
+        const hopTwo = sealedReceipt(repo);
+        expect(hopTwo.resealedFrom).toBe(sha256Canonical(hopOne as unknown as Record<string, never>));
+        expect(hopTwo.resealedFromKind).toBe('receipt');
+        expect(hopTwo.carriedTests).toBe(2);
+        expect(hopTwo.rerunTests).toBe(1);
+        expect(existsSync(join(repo.root, '.gateforge/test-gates/reseal-chain/hop-2-receipt.json'))).toBe(true);
+
+        const afterTwo = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(afterTwo.code, `${afterTwo.stdout}\n${afterTwo.stderr}`).toBe(0);
+        // Every obligation — the two re-run ones and the one NO hop ever
+        // re-ran — is satisfied on witnessed evidence.
+        expect(graded(afterTwo.stdout).map((row) => [row.obligationId, row.verdict, row.trustTier])).toEqual([
+          ['tenant.accounts:persistence:read', 'satisfied', 'witnessed'],
+          ['tenant.invoices:persistence:read', 'satisfied', 'witnessed'],
+          ['tenant.orders:persistence:read', 'satisfied', 'witnessed'],
+        ]);
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
+
+  it('re-seals twice in a row from a FAILED full parent and still passes check --require-e2e', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndRunFailingEvidenceParent(repo, THREE);
+      try {
+        const record = sealedRunRecord(repo);
+
+        // Hop 1 from the run record the failed run left: orders re-runs,
+        // the other two carry.
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/orders.spec.mjs', {
+          carried: 2,
+          parentKind: 'run',
+          message: 'fix the race in the orders spec',
+          fix: true,
+        });
+        const hopOne = sealedReceipt(repo);
+        expect(hopOne.resealedFromKind).toBe('run-record');
+        expect(hopOne.resealedFrom).toBe(sha256Canonical(record as never));
+
+        const afterOne = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(afterOne.code, `${afterOne.stdout}\n${afterOne.stderr}`).toBe(0);
+
+        // Hop 2 from that re-seal, over the run record beneath it.
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/invoices.spec.mjs', {
+          carried: 2,
+          message: 'touch the invoices spec',
+        });
+        const hopTwo = sealedReceipt(repo);
+        expect(hopTwo.resealedFrom).toBe(sha256Canonical(hopOne as unknown as Record<string, never>));
+        expect(hopTwo.carriedTests).toBe(2);
+
+        const afterTwo = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(afterTwo.code, `${afterTwo.stdout}\n${afterTwo.stderr}`).toBe(0);
+        expect(graded(afterTwo.stdout).map((row) => [row.obligationId, row.verdict, row.trustTier])).toEqual([
+          ['tenant.accounts:persistence:read', 'satisfied', 'witnessed'],
+          ['tenant.invoices:persistence:read', 'satisfied', 'witnessed'],
+          ['tenant.orders:persistence:read', 'satisfied', 'witnessed'],
+        ]);
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
+
+  it('fails closed when the retained SECOND hop evidence was tampered with', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndSealEvidenceParent(repo, THREE);
+      try {
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/orders.spec.mjs', {
+          carried: 2,
+          message: 'touch the orders spec',
+        });
+        await changeEvidenceSpecAndReseal(repo, env, 'e2e/invoices.spec.mjs', {
+          carried: 2,
+          message: 'touch the invoices spec',
+        });
+
+        // The DEEPER hop's witness envelope: hop 2 is the first
+        // re-seal, and it is the only envelope that authorizes the
+        // records it carried — so re-macing it with a foreign key is
+        // what a tamperer has to do to keep them.
+        const retained = join(repo.root, '.gateforge/test-gates/reseal-chain/hop-2-attestations.json');
+        const envelopes = JSON.parse(readFileSync(retained, 'utf8')) as Array<Record<string, unknown>>;
+        for (const envelope of envelopes) envelope['mac'] = 'a'.repeat(64);
+        writeFileSync(retained, `${JSON.stringify(envelopes, null, 2)}\n`, 'utf8');
+
+        const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+        expect(checked.code).not.toBe(0);
+        expect(checked.stdout).toContain('EVIDENCE_STALE');
+        // Hop 1 authenticates the union against EVERY contributing
+        // run's envelope, so the deeper hop's forged MAC is caught
+        // there, naming the reason exactly.
+        expect(checked.stdout).toContain(
+          "re-seal hop 1's retained evidence does not recompute: its evidence attestation does not verify with this keyring",
+        );
+      } finally {
+        await close();
+      }
+    });
+  }, 300_000);
+
+  it('refuses the sixth consecutive re-seal and takes the normal changed-scope path', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { env, close } = await installAndSealEvidenceParent(repo, THREE);
+      try {
+        // Five consecutive re-seals: the bound this path chains to.
+        for (let hop = 1; hop <= 5; hop += 1) {
+          await changeEvidenceSpecAndReseal(repo, env, 'e2e/orders.spec.mjs', {
+            carried: 2,
+            message: `hop ${String(hop)} of the orders spec`,
+          });
+        }
+        expect(sealedReceipt(repo).carriedTests).toBe(2);
+        // Seven members per hop, minus the run record a receipt-parent
+        // hop does not carry.
+        expect(readdirSync(join(repo.root, '.gateforge/test-gates/reseal-chain')).filter((name) =>
+          name.startsWith('hop-5-'),
+        )).toEqual([
+          'hop-5-attestations.json',
+          'hop-5-catalog.json',
+          'hop-5-claims.json',
+          'hop-5-execution-result.json',
+          'hop-5-receipt.json',
+          'hop-5-records.json',
+        ]);
+
+        // The sixth: the same test-only change, refused with the bound.
+        const refused = await changeEvidenceSpecAndReseal(
+          repo,
+          env,
+          'e2e/orders.spec.mjs',
+          { carried: 2, message: 'hop 6 of the orders spec', expectReseal: false },
+        );
+        expect(refused.stderr.split('\n').filter((row) => row.startsWith('test-gates: the run state'))).toEqual([
+          'test-gates: the run state already retains 5 consecutive re-seals, the bound this path may chain to → changed-scope run',
+        ]);
+        expect(refused.stderr).not.toContain('only test files changed');
+        // It took the ordinary changed-scope path: the receipt of record
+        // is an ordinary one over HEAD, not a sixth re-seal, and the
+        // chain is gone with it.
+        const sealed = sealedReceipt(repo);
+        expect(sealed.gitSha).toBe(repo.headSha());
+        expect(sealed.changeClass).toBeUndefined();
+        expect(sealed.resealedFrom).toBeUndefined();
+        expect(existsSync(join(repo.root, '.gateforge/test-gates/reseal-chain'))).toBe(false);
+      } finally {
+        await close();
+      }
+    });
+  }, 600_000);
+});
+
+/**
+ * The parent's WITNESS EVIDENCE is retained at the moment the run that
+ * witnessed it seals its receipt or writes its run record — not read
+ * back out of the live run state at re-seal time. Every consumer runs
+ * something in between: a materialization pre-step that rewrites
+ * `manifest.json` without the witness envelope, a hand-picked
+ * result-only selection. None of that may take the envelope away from
+ * the re-seal, and a retained copy nobody can authenticate refuses
+ * exactly as a missing one does.
+ */
+describe('the parent evidence survives an intermediate run', () => {
+  const STATE_DIR = join('.gateforge', 'test-gates');
+
+  it('re-seals from a failing parent after a pre-step run rewrote the run manifest', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      const parentRunId = sealedRunRecord(repo)['runId'];
+
+      // The consumer's gate script materializes its state with a legacy
+      // suite run into the SAME state dir before every run. It rewrites
+      // `manifest.json` — and therefore erases the witness envelope the
+      // failing run's own manifest held — while the run record it wrote
+      // and the records/claims beside it stay exactly where they were.
+      await runCli(repo, ['test-gates', '--suite', 'true', '--out', STATE_DIR, '--format', 'json'], env);
+      const rewritten = JSON.parse(
+        readFileSync(join(repo.root, STATE_DIR, 'manifest.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(rewritten['attestation']).toBeUndefined();
+      expect(sealedRunRecord(repo)['runId']).toBe(parentRunId);
+
+      // The re-seal still authenticates the parent's evidence, and what
+      // it carries is graded by a consumer as usual.
+      await fixFailingSpecAndReseal(repo, env);
+      expect(sealedReceipt(repo).resealedFromKind).toBe('run-record');
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 240_000);
+
+  it('re-seals from a failing parent after a hand-picked result-only run', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+
+      const selection = await runCli(
+        repo,
+        ['test-gates', '--test', 'playwright:chromium:e2e/orders.spec.mjs:reads an order', '--result-only', '--format', 'json'],
+        env,
+      );
+      expect(selection.code, `${selection.stdout}\n${selection.stderr}`).toBe(0);
+      // A report seals nothing and clears nothing, so the parent's run
+      // record is still the parent the re-seal must read.
+      expect(sealedRunRecord(repo)['runId']).toBeTruthy();
+
+      await fixFailingSpecAndReseal(repo, env);
+      const checked = await runCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], env);
+      expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
+    });
+  }, 240_000);
+
+  it('refuses a tampered retained copy with the same plain line, and takes the normal path', async () => {
+    await withTempRepo({}, async (repo) => {
+      const env = await installAndRunFailingParent(repo);
+      const retained = join(repo.root, STATE_DIR, 'reseal-parent', 'evidence.json');
+      const copy = JSON.parse(readFileSync(retained, 'utf8')) as { attestation?: { mac?: string } };
+      copy.attestation = { ...(copy.attestation ?? {}), mac: 'a'.repeat(64) };
+      writeFileSync(retained, `${JSON.stringify(copy, null, 2)}\n`, 'utf8');
+
+      repo.commitFiles(
+        { 'e2e/accounts.spec.mjs': `${SPECS['e2e/accounts.spec.mjs'] as string}// the race is fixed\n` },
+        'fix the race in the one failing spec',
+      );
+      const refused = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+      expect(refused.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'))).toEqual([
+        'test-gates: the previous run cannot be re-sealed from: its evidence attestation does not verify with this keyring → changed-scope run',
+      ]);
+      expect(refused.stderr).not.toContain('only test files changed');
+      // The ordinary changed-scope path ran instead, and it sealed an
+      // ORDINARY receipt: the fixed spec is proven, nothing is carried.
+      const sealed = sealedReceipt(repo);
+      expect(sealed.changeClass).toBeUndefined();
+      expect(sealed.resealedFrom).toBeUndefined();
+    });
+  }, 240_000);
+});

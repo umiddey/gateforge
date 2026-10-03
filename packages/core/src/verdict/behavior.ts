@@ -21,9 +21,14 @@
  * - declarative bulk/import exact-set comparison (missing, extra, or
  *   duplicate entities fail).
  *
- * Phase 5 grades `request` actions over the `engine-http` channel.
- * `surface` (Phase 6), `deliver`, and `sequence` (Phase 8) actions, and
- * non-HTTP channels, block with an explicit phase cause — never a pass.
+ * `request` cases grade over the `engine-http` channel, `surface` cases
+ * over `engine-browser` (the Phase 6 browser driver), and `deliver`
+ * cases over `engine-task`: the engine
+ * produces the delivery, reads the queue back until every job settled,
+ * and seals that read — `attempts` rules grade from it, and a delivery
+ * case without one settles nothing about the background job.
+ * `sequence` actions and non-HTTP channels still block with an
+ * explicit phase cause — never a pass.
  */
 import { canonicalJson, sha256Canonical, type JsonValue } from '../canonical-json.js';
 import { compareStrings } from '../graph/util.js';
@@ -35,6 +40,7 @@ import {
   type BehaviorCasePayload,
 } from '../schemas/behavior-evidence.js';
 import type { Obligation } from '../schemas/obligation.js';
+import type { QueueObservation } from '../schemas/queue-observer.js';
 import type { HttpRouteCandidate } from './registry.js';
 import { interpretObservedPath, resolveHttpRoute } from './pack-verifiers.js';
 
@@ -383,6 +389,11 @@ function scopeDelta(
 
 type RuleGrade = { ok: true } | { ok: false; reason: string };
 
+/** Whether a declared state rule is an `attempts` rule (graded only over a queue observation). */
+function isAttemptsRule(rule: unknown): boolean {
+  return typeof rule === 'object' && rule !== null && 'kind' in rule && rule.kind === 'attempts';
+}
+
 /** Grades one state rule; records explained identities for atomicity. */
 function gradeStateRule(
   obligationId: string,
@@ -397,7 +408,9 @@ function gradeStateRule(
   if (kind === 'attempts') {
     return {
       ok: false,
-      reason: `'${obligationId}': 'attempts' rules require the Phase 8 delivery trace — blocked, never satisfied`,
+      reason:
+        `'${obligationId}': 'attempts' rules are graded over the engine's own queue ` +
+        "observation, not a scope snapshot — declare the case on the 'engine-task' channel; blocked, never satisfied",
     };
   }
   if (typeof rule['scope'] !== 'string') {
@@ -890,6 +903,9 @@ function gradeRequiredCase(
       recordIds: [],
     };
   }
+  if (action['kind'] === 'deliver') {
+    return gradeTaskCase(obligation, compiled, caseId, records, context);
+  }
   if (action['kind'] !== 'request' && action['kind'] !== 'surface') {
     return {
       status: 'missing',
@@ -1048,9 +1064,7 @@ function gradeRequiredCase(
   const explained = new Map<string, ExplainedLedger>();
   const scopeKeyOf = (effectId: string): string | null =>
     compiled.effects.find((effect) => effect.id === effectId)?.scope ?? null;
-  let sawAttemptsRule = false;
   for (const rule of compiled.definition.expect.state) {
-    if ((rule as { kind?: unknown }).kind === 'attempts') sawAttemptsRule = true;
     const graded = gradeStateRule(
       obligationId,
       rule as unknown as Record<string, unknown>,
@@ -1061,13 +1075,14 @@ function gradeRequiredCase(
       scopeKeyOf,
     );
     if (!graded.ok) {
-      if (graded.reason.includes('Phase 8')) {
+      // No queue observation exists on this channel: the evidence is
+      // absent (fail closed), not contradicted.
+      if (isAttemptsRule(rule) || graded.reason.includes('Phase 8')) {
         return { status: 'missing', reason: graded.reason, recordIds: [recordId] };
       }
       return { status: 'invalid', reason: `${graded.reason} (BEHAVIOR_EFFECT_MISMATCH)`, recordIds: [recordId] };
     }
   }
-  void sawAttemptsRule;
 
   const declaredScopes = new Set(compiled.effects.map((effect) => effect.scope));
   // Read contracts additionally require zero delta on every scope.
@@ -1391,7 +1406,7 @@ function gradeSurfaceCase(
       scopeKeyOf,
     );
     if (!graded.ok) {
-      if (graded.reason.includes('Phase 8')) {
+      if (isAttemptsRule(rule) || graded.reason.includes('Phase 8')) {
         return { status: 'missing', reason: graded.reason, recordIds: [recordId] };
       }
       return { status: 'invalid', reason: `${graded.reason} (BEHAVIOR_EFFECT_MISMATCH)`, recordIds: [recordId] };
@@ -1416,6 +1431,319 @@ function gradeSurfaceCase(
         reason:
           `'${obligationId}': scope '${scope}' has ${String(unexplained.length)} unexplained change(s) ` +
           'beside the declared effect (BEHAVIOR_UNEXPECTED_EFFECT)',
+        recordIds: [recordId],
+      };
+    }
+  }
+  return { status: 'satisfied', recordIds: [recordId] };
+}
+
+/** One graded `attempts` rule outcome with its verdict polarity. */
+type AttemptsGrade = { ok: true } | { ok: false; reason: string; status: 'missing' | 'invalid' };
+
+/**
+ * Grades one `attempts` rule over the engine's OWN read of the queue.
+ * Nothing here consults the test: the
+ * sealed observation carries the delivery identities the engine
+ * stamped, the per-job attempt counts the queue reported, and the
+ * transition timeline the engine sampled.
+ *
+ * The claims it settles:
+ * - `terminal: succeeded` — every produced job reached the queue's
+ *   completed state (a job still waiting, delayed, active or paused is
+ *   not a success, it is an unsettled delivery);
+ * - `terminal: failed` — every job reached the queue's failed state;
+ * - `terminal: rejected` — every job failed on its FIRST attempt (the
+ *   error class the policy declares non-retryable);
+ * - `count` — the declared attempt bound: no job may exceed it and the
+ *   queue's own declared bound may not exceed it either;
+ * - `minAttempts` (optional) — every job must have USED at least that
+ *   many attempts, so "retries up to N" cannot be satisfied by a queue
+ *   that never retried anything;
+ * - `recoveredFromStall` (optional) — the timeline must show a lost
+ *   worker being reclaimed: a job sampled `active` and later observed
+ *   non-terminal with UNCHANGED attempts and no failure reason (an
+ *   error retry raises both), and the delivery still settled.
+ *
+ * Args:
+   obligationId: the obligation being graded (diagnostics).
+   rule: the compiled `attempts` rule.
+ *   action: the case's compiled `deliver` action.
+   observation: the sealed engine queue observation.
+
+ * Returns:
+   AttemptsGrade: pass, or the verdict polarity plus the reason.
+ */
+function gradeAttemptsRule(
+  obligationId: string,
+  rule: Record<string, unknown>,
+  action: Record<string, unknown>,
+  observation: QueueObservation,
+): AttemptsGrade {
+  const fail = (reason: string): AttemptsGrade => ({ ok: false, reason, status: 'invalid' });
+  const declaredResource = rule['resourceId'];
+  if (declaredResource !== action['resourceId']) {
+    return fail(
+      `'${obligationId}': the 'attempts' rule names resource '${String(declaredResource)}' but the case ` +
+      `delivers to '${String(action['resourceId'])}' (BEHAVIOR_BINDING_MISMATCH)`,
+    );
+  }
+  if (observation.complete !== true) {
+    return fail(
+      `'${obligationId}': the engine read queue '${observation.queue}' for ${String(observation.waitedMs)} ms and ` +
+      'the delivery never reached a terminal state — a stuck background job is not a terminal outcome (BEHAVIOR_EFFECT_MISMATCH)',
+    );
+  }
+  const declaredDeliveries = action['count'];
+  if (observation.deliveryIds.length !== declaredDeliveries) {
+    return fail(
+      `'${obligationId}': the engine produced ${String(declaredDeliveries)} deliveries but sealed ` +
+      `${String(observation.deliveryIds.length)} (BEHAVIOR_BINDING_MISMATCH)`,
+    );
+  }
+  if (observation.jobs.length !== observation.deliveryIds.length) {
+    return fail(
+      `'${obligationId}': the queue holds ${String(observation.jobs.length)} job(s) for ` +
+      `${String(observation.deliveryIds.length)} engine deliveries — a duplicate or an extra delivery is ambiguity, not proof (BEHAVIOR_BINDING_MISMATCH)`,
+    );
+  }
+  const produced = new Set(observation.deliveryIds);
+  const terminal = rule['terminal'];
+  const bound = rule['count'] as number;
+  const floor = rule['minAttempts'] as number | undefined;
+  for (const job of observation.jobs) {
+    if (job.deliveryId === null || !produced.has(job.deliveryId)) {
+      return fail(
+        `'${obligationId}': queue job '${job.jobId}' carries no engine delivery identity ` +
+        `(read as '${String(job.deliveryId)}') — the engine only grades deliveries it produced itself (BEHAVIOR_BINDING_MISMATCH)`,
+      );
+    }
+    if (terminal === 'succeeded' && job.state !== 'completed') {
+      return fail(
+        `'${obligationId}': job '${job.jobId}' ended in state '${job.state}', not 'completed' — the queue itself ` +
+        'says the delivery did not succeed (BEHAVIOR_EFFECT_MISMATCH)',
+      );
+    }
+    if (terminal === 'failed' && job.state !== 'failed') {
+      return fail(
+        `'${obligationId}': job '${job.jobId}' ended in state '${job.state}', not 'failed' (BEHAVIOR_EFFECT_MISMATCH)`,
+      );
+    }
+    if (terminal === 'rejected' && (job.state !== 'failed' || job.attemptsMade !== 1)) {
+      return fail(
+        `'${obligationId}': job '${job.jobId}' is declared terminal-on-error but the queue reports state ` +
+        `'${job.state}' after ${String(job.attemptsMade)} attempt(s) — the error class was retried (BEHAVIOR_EFFECT_MISMATCH)`,
+      );
+    }
+    if (job.maxAttempts === null) {
+      return fail(
+        `'${obligationId}': job '${job.jobId}' declares no attempt bound in the queue, so a retry bound ` +
+        `of ${String(bound)} cannot be proven (OBSERVATION_SCOPE_INCOMPLETE)`,
+      );
+    }
+    if (job.maxAttempts > bound) {
+      return fail(
+        `'${obligationId}': job '${job.jobId}' declares an attempt bound of ${String(job.maxAttempts)}, above the ` +
+        `declared ${String(bound)} (BEHAVIOR_BINDING_MISMATCH)`,
+      );
+    }
+    if (job.attemptsMade > bound) {
+      return fail(
+        `'${obligationId}': job '${job.jobId}' ran ${String(job.attemptsMade)} attempts, above the declared bound of ` +
+        `${String(bound)} (BEHAVIOR_EFFECT_MISMATCH)`,
+      );
+    }
+    if (typeof floor === 'number' && job.attemptsMade < floor) {
+      return fail(
+        `'${obligationId}': job '${job.jobId}' ran ${String(job.attemptsMade)} attempt(s) — the declared rule ` +
+        `requires at least ${String(floor)}, so the retry path was never exercised (BEHAVIOR_EFFECT_MISMATCH)`,
+      );
+    }
+  }
+  if (rule['recoveredFromStall'] === true) {
+    // A lost-worker reclaim, as the engine's own timeline saw it: the
+    // same job was handed out AGAIN with UNCHANGED attempts and no
+    // failure reason recorded between the two hand-outs (an error retry
+    // raises attemptsMade and sets a reason before the re-queue). A
+    // reclaim back onto the wait list is accepted too, for a queue that
+    // parked the job before another worker took it.
+    const reclaims = new Set<string>();
+    const activeAt = new Map<string, number>();
+    for (const sample of observation.samples) {
+      if (sample.failedReason !== null) continue;
+      if (sample.state === 'active') {
+        const key = `${sample.jobId}|${String(sample.attemptsMade)}`;
+        if (activeAt.has(key)) reclaims.add(sample.jobId);
+        else activeAt.set(key, sample.atMs);
+        continue;
+      }
+      if (sample.state !== 'waiting' && sample.state !== 'delayed') continue;
+      const startedAt = activeAt.get(`${sample.jobId}|${String(sample.attemptsMade)}`);
+      if (startedAt !== undefined && sample.atMs > startedAt) reclaims.add(sample.jobId);
+    }
+    const settled = observation.jobs.filter((job) => reclaims.has(job.jobId));
+    if (settled.length === 0) {
+      return fail(
+        `'${obligationId}': no job was observed being reclaimed from a lost worker (handed out again with ` +
+        'unchanged attempts and no failure reason) — nothing proves the queue recovers a killed worker ' +
+        '(BEHAVIOR_EFFECT_MISMATCH)',
+      );
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * Grades one task-driven required case:
+ * the engine produced the delivery itself, read the queue back until
+ * every job settled, and sealed that read. Proof is the sealed
+ * observation plus the declared state effects — never the suite's
+ * account of what the job did. HTTP attempts and browser observations
+ * are rejected outright: a task claim proved by a request would be a
+ * different (transport) claim.
+ *
+ * @param obligation the obligation being graded.
+ * @param compiled the compiled case from the trusted catalog.
+ * @param caseId the compiled case id.
+ * @param records the run's ledger records.
+ * @param context the trusted grading context.
+ *
+ * @returns the case outcome.
+ */
+function gradeTaskCase(
+  obligation: Obligation,
+  compiled: CompiledBehaviorCase,
+  caseId: string,
+  records: readonly BehaviorRecordLike[],
+  context: BehaviorGradeContext,
+): RequiredCaseOutcome {
+  const obligationId = obligation.id;
+  if (compiled.definition.channel !== 'engine-task') {
+    return {
+      status: 'missing',
+      reason:
+        `'${obligationId}': delivery case '${compiled.definition.id}' requires the ` +
+        `'${compiled.definition.channel}' channel — a delivery is only provable engine-side`,
+      recordIds: [],
+    };
+  }
+  const matched = matchSingleCaseRecord(obligation, compiled, caseId, records, context);
+  if (matched.kind === 'outcome') return matched.outcome;
+  const { recordId, payload } = matched;
+  const bound = validateCaseBindings(obligation, compiled, caseId, recordId, payload, context);
+  if (bound.kind === 'outcome') return bound.outcome;
+  if (payload.attempts.length > 0 || payload.browserObservation !== undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `'${obligationId}': delivery case record '${recordId}' carries transport evidence — a background ` +
+        'delivery is proved by the queue state the engine read, not by an HTTP attempt (BEHAVIOR_BINDING_MISMATCH)',
+      recordIds: [recordId],
+    };
+  }
+  const observation = payload.queueObservation;
+  if (observation === undefined) {
+    return {
+      status: 'missing',
+      reason:
+        `'${obligationId}': delivery case '${compiled.definition.id}' sealed no queue observation — the ` +
+        "engine's own queue observer produces that evidence",
+      recordIds: [recordId],
+    };
+  }
+  const beforeBuilt = indexSnapshots(payload.before, compiled);
+  const afterBuilt = indexSnapshots(payload.after, compiled);
+  if (!beforeBuilt.ok || !afterBuilt.ok) {
+    return {
+      status: 'invalid',
+      reason: `'${obligationId}': ${(beforeBuilt.ok ? afterBuilt : beforeBuilt as { reason: string }).reason}`,
+      recordIds: [recordId],
+    };
+  }
+  const valueCtx: GradeValueContext = {
+    fixtureValues: payload.fixtureValues,
+    observation: null,
+    before: (beforeBuilt as { index: ScopeIndex }).index,
+  };
+  const beforeIndex = (beforeBuilt as { index: ScopeIndex }).index;
+  const afterIndex = (afterBuilt as { index: ScopeIndex }).index;
+  const action = compiled.definition.action as unknown as Record<string, unknown>;
+  // The engine produced the delivery: the sealed submitted values and
+  // the queue jobs must agree on the identity the engine stamped.
+  const submitted = payload.submittedValues as Record<string, unknown> | null;
+  if (typeof submitted !== 'object' || submitted === null || Array.isArray(submitted)) {
+    return {
+      status: 'invalid',
+      reason: `'${obligationId}': case record '${recordId}' sealed no delivery identity (BEHAVIOR_BINDING_MISMATCH)`,
+      recordIds: [recordId],
+    };
+  }
+  const stampedKey = submitted['idempotencyKey'];
+  const mismatchedKey = observation.jobs.find(
+    (job) => typeof stampedKey === 'string' && job.idempotencyKey !== stampedKey,
+  );
+  if (mismatchedKey !== undefined) {
+    return {
+      status: 'invalid',
+      reason:
+        `'${obligationId}': queue job '${mismatchedKey.jobId}' carries idempotency key ` +
+        `'${mismatchedKey.idempotencyKey}', not the engine-stamped '${String(stampedKey)}' (BEHAVIOR_BINDING_MISMATCH)`,
+      recordIds: [recordId],
+    };
+  }
+  const explained = new Map<string, ExplainedLedger>();
+  const scopeKeyOf = (effectId: string): string | null =>
+    compiled.effects.find((effect) => effect.id === effectId)?.scope ?? null;
+  let sawAttemptsRule = false;
+  for (const rule of compiled.definition.expect.state) {
+    if (rule.kind === 'attempts') {
+      sawAttemptsRule = true;
+      const graded = gradeAttemptsRule(obligationId, rule as unknown as Record<string, unknown>, action, observation);
+      if (!graded.ok) {
+        return { status: graded.status, reason: graded.reason, recordIds: [recordId] };
+      }
+      continue;
+    }
+    const graded = gradeStateRule(
+      obligationId,
+      rule as unknown as Record<string, unknown>,
+      beforeIndex,
+      afterIndex,
+      valueCtx,
+      explained,
+      scopeKeyOf,
+    );
+    if (!graded.ok) {
+      return { status: 'invalid', reason: `${graded.reason} (BEHAVIOR_EFFECT_MISMATCH)`, recordIds: [recordId] };
+    }
+  }
+  if (!sawAttemptsRule) {
+    return {
+      status: 'invalid',
+      reason:
+        `'${obligationId}': delivery case '${compiled.definition.id}' declares no 'attempts' rule — without one ` +
+        'the queue read settles nothing about the background job (BEHAVIOR_BINDING_MISMATCH)',
+      recordIds: [recordId],
+    };
+  }
+  for (const scope of new Set(compiled.effects.map((effect) => effect.scope))) {
+    const beforeScope = beforeIndex.get(scope);
+    const afterScope = afterIndex.get(scope);
+    if (beforeScope === undefined || afterScope === undefined) continue;
+    const ledger = explained.get(scope);
+    if (ledger?.complete.has(scope) === true) continue;
+    const delta = scopeDelta(beforeScope, afterScope);
+    const unexplained = [
+      ...delta.added.filter((key) => !ledger?.added.has(key)),
+      ...delta.removed.filter((key) => !ledger?.removed.has(key)),
+      ...delta.changed.filter((key) => !ledger?.changed.has(key)),
+    ];
+    if (unexplained.length > 0) {
+      return {
+        status: 'invalid',
+        reason:
+          `'${obligationId}': scope '${scope}' has ${String(unexplained.length)} unexplained change(s) ` +
+          'beside the declared effect — a correct delivery plus a wrong secondary effect still fails (BEHAVIOR_UNEXPECTED_EFFECT)',
         recordIds: [recordId],
       };
     }

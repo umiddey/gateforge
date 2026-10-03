@@ -26,6 +26,8 @@ import { resolveStateDir } from '../src/state.js';
 import { runtimeReuseDigest } from '../src/runtime.js';
 import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
 import { loadDocsExclusions } from '../src/docs-exclusions.js';
+import { loadCacheExclusions } from '../src/cache-exclusions.js';
+import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { FIXED_AT, installFixture } from './helpers.js';
 
 /** Loads the fixture config from an absolute path. */
@@ -171,6 +173,59 @@ describe('input snapshot (§11.2)', () => {
     });
   });
 
+  it('preserves default input behavior and owner-excludes bytecode from tree identity', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const cacheFile = 'src/__pycache__/accounts.cpython-313.pyc';
+      repo.writeFiles({
+        '.gitignore': 'src/__pycache__/\n',
+        [cacheFile]: 'first-bytecode\n',
+        '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - \"${cacheFile}\"\n`,
+      });
+      const config = fixtureConfig(repo);
+      const exclusions = loadCacheExclusions(repo.root, config);
+      expect(exclusions).toEqual([cacheFile]);
+      const approvedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
+      const stateDir = resolveStateDir(repo.root);
+      const gitDir = resolveGitDir(repo.root, process.env);
+      if (gitDir === null) throw new Error('test repository has no Git directory');
+      const strictInput = computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest;
+      const approvedInput = computeInputSnapshot({
+        cwd: repo.root,
+        config,
+        stateDir,
+        cacheExclusions: exclusions,
+      }).inputDigest;
+      const strictTree = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+      const approvedTree = computeCandidateTreeId(
+        gitDir,
+        repo.root,
+        process.env,
+        stateDir,
+        'record',
+        [],
+        [],
+        exclusions,
+      );
+
+      repo.writeFiles({ [cacheFile]: 'rewritten-bytecode\n' });
+
+      expect(approvedInput).toBe(strictInput);
+      expect(computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest).toBe(strictInput);
+      expect(
+        computeInputSnapshot({ cwd: repo.root, config, stateDir, cacheExclusions: exclusions }).inputDigest,
+      ).toBe(approvedInput);
+      expect(computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record')).not.toBe(strictTree);
+      expect(
+        computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record', [], [], exclusions),
+      ).toBe(approvedTree);
+      expect(trustedPolicyDigestForConfig(repo.root, config)).toBe(approvedPolicyDigest);
+      repo.writeFiles({
+        '.gateforge/cache-exclusions.yml': `# owner approval revision\nschemaVersion: 1\nfiles:\n  - \"${cacheFile}\"\n`,
+      });
+      expect(trustedPolicyDigestForConfig(repo.root, config)).not.toBe(approvedPolicyDigest);
+    });
+  });
   it('rejects exclusions that overlap source, gate inputs, or symlinks', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
@@ -409,18 +464,84 @@ describe('input snapshot (§11.2)', () => {
     });
   });
 
-  it('rejects escaping, broken, and directory symlinks with unsupported-snapshot', async () => {
+  it('records a dangling tracked symlink by its link text and keeps the run usable', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      mkdirSync(join(repo.root, 'skills'), { recursive: true });
+      symlinkSync('../.venv/skills/fastapi', join(repo.root, 'skills/fastapi'));
+      repo.git(['add', '-A']);
+      repo.git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@gateforge.invalid', 'commit', '--quiet', '-m', 'dangling link']);
+      const entries = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      const dangling = entries.find((entry) => entry.path === 'skills/fastapi');
+      expect(dangling?.type).toBe('dangling-symlink');
+      expect(dangling?.linkTarget).toBe('../.venv/skills/fastapi');
+      expect(filesDigest(repo)).toMatch(/^[0-9a-f]{64}$/);
+      // The link text IS the identity: retargeting moves the digest...
+      const baseline = filesDigest(repo);
+      unlinkSync(join(repo.root, 'skills/fastapi'));
+      symlinkSync('../.venv/skills/sqlmodel', join(repo.root, 'skills/fastapi'));
+      expect(filesDigest(repo)).not.toBe(baseline);
+      // ...and bootstrapping the target turns the entry into a real
+      // symlink entry (with target bytes) with a different digest.
+      repo.writeFiles({ '.venv/skills/sqlmodel': 'model\n' });
+      const afterBootstrap = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      expect(afterBootstrap.find((entry) => entry.path === 'skills/fastapi')?.type).toBe('symlink');
+      expect(filesDigest(repo)).not.toBe(baseline);
+    });
+  });
+
+  it('still rejects a symlink escaping the repository with unsupported-snapshot', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       symlinkSync('/etc/hostname', join(repo.root, 'src/escape.txt'));
       expect(() => filesDigest(repo)).toThrow(UnsupportedSnapshotError);
-      rmSync(join(repo.root, 'src/escape.txt'));
-      symlinkSync(join(repo.root, 'src/no-such-target.txt'), join(repo.root, 'src/broken.txt'));
-      expect(() => filesDigest(repo)).toThrow(UnsupportedSnapshotError);
-      rmSync(join(repo.root, 'src/broken.txt'));
-      mkdirSync(join(repo.root, 'src/subdir'), { recursive: true });
-      symlinkSync(join(repo.root, 'src/subdir'), join(repo.root, 'src/dirlink'));
-      expect(() => filesDigest(repo)).toThrow(UnsupportedSnapshotError);
+    });
+  });
+
+  it('records a tracked DIRECTORY symlink by its link text and keeps the run usable (F2)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      mkdirSync(join(repo.root, '.venv/skills/fastapi'), { recursive: true });
+      mkdirSync(join(repo.root, '.agents/skills'), { recursive: true });
+      symlinkSync('../../.venv/skills/fastapi', join(repo.root, '.agents/skills/fastapi'));
+      repo.git(['add', '-A']);
+      repo.git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@gateforge.invalid', 'commit', '--quiet', '-m', 'directory skill link']);
+      const entries = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      const link = entries.find((entry) => entry.path === '.agents/skills/fastapi');
+      // The link text IS the identity; the target directory is never walked.
+      expect(link?.type).toBe('directory-symlink');
+      expect(link?.linkTarget).toBe('../../.venv/skills/fastapi');
+      expect(filesDigest(repo)).toMatch(/^[0-9a-f]{64}$/);
+      // Retargeting the link moves the digest...
+      const baseline = filesDigest(repo);
+      unlinkSync(join(repo.root, '.agents/skills/fastapi'));
+      symlinkSync('../../.venv/skills/sqlmodel', join(repo.root, '.agents/skills/fastapi'));
+      expect(filesDigest(repo)).not.toBe(baseline);
+      // ...and a link whose target is not a directory becomes a plain
+      // `symlink` entry (target bytes in the digest), a different type.
+      repo.writeFiles({ '.venv/skills/sqlmodel': 'model\n' });
+      const afterRetype = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      expect(afterRetype.find((entry) => entry.path === '.agents/skills/fastapi')?.type).toBe('symlink');
+      expect(filesDigest(repo)).not.toBe(baseline);
+    });
+  });
+
+  it('records a tracked link to a NOT-YET-CREATED directory like a dangling link (F2)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      mkdirSync(join(repo.root, '.agents/skills'), { recursive: true });
+      // The template shape after the venv is bootstrapped: the link text
+      // names a directory, and nothing exists at that path yet.
+      symlinkSync('../../.venv/lib/python3.14/site-packages/fastapi', join(repo.root, '.agents/skills/fastapi'));
+      const entries = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      expect(entries.find((entry) => entry.path === '.agents/skills/fastapi')?.type).toBe('dangling-symlink');
+      // The bootstrap turning that path into a directory changes the entry
+      // type (and the digest) instead of failing the run.
+      const baseline = filesDigest(repo);
+      repo.writeFiles({ '.venv/lib/python3.14/site-packages/fastapi/skill.md': 'skill\n' });
+      const after = collectInputFiles(repo.root, fixtureConfig(repo), resolveStateDir(repo.root));
+      expect(after.find((entry) => entry.path === '.agents/skills/fastapi')?.type).toBe('directory-symlink');
+      expect(filesDigest(repo)).not.toBe(baseline);
     });
   });
 
@@ -521,6 +642,37 @@ describe('input snapshot (§11.2)', () => {
       expect(drift.some((line) => line.includes('src/added.txt'))).toBe(true);
     });
   });
+  it('matches published default snapshots and tree identity with ignored bytecode', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const cacheFile = 'src/__pycache__/accounts.cpython-313.pyc';
+      repo.writeFiles({
+        '.gitignore': 'src/__pycache__/\n',
+        [cacheFile]: 'first-bytecode\n',
+      });
+      const config = fixtureConfig(repo);
+      const stateDir = resolveStateDir(repo.root);
+      const gitDir = resolveGitDir(repo.root, process.env);
+      if (gitDir === null) throw new Error('test repository has no Git directory');
+      const beforeFiles = collectInputFiles(repo.root, config, stateDir);
+      const beforeInput = computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest;
+      expect(beforeFiles.some((entry) => entry.path === cacheFile)).toBe(false);
+
+      const beforeTree = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+      repo.writeFiles({ [cacheFile]: 'rewritten-bytecode\n' });
+      const afterFiles = collectInputFiles(repo.root, config, stateDir);
+      const afterInput = computeInputSnapshot({ cwd: repo.root, config, stateDir }).inputDigest;
+      const afterTree = computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+      expect(diffInputFiles(beforeFiles, afterFiles)).toEqual([]);
+      expect(afterInput).toBe(beforeInput);
+      expect(afterTree).not.toBe(beforeTree);
+
+      repo.git(['add', '--all', '--force']);
+      const publishedTree = repo.git(['write-tree']).stdout.trim();
+      expect(afterTree).toBe(publishedTree);
+    });
+  });
+
 
   it('never hashes tokens, keys, or absolute paths into the digest', async () => {
     await withTempRepo({}, async (repo) => {

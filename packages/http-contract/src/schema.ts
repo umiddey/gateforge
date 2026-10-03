@@ -52,6 +52,28 @@ export const HttpLocationSchema = z
 export type HttpLocation = z.infer<typeof HttpLocationSchema>;
 
 /**
+ * One field a frontend call site reads off a call's response: the field
+ * name exactly as the code writes it, and where that read happens. Pure
+ * evidence — the fact never decides anything on its own.
+ */
+export const ResponseReadSchema = z
+  .object({
+    field: z.string().min(1),
+    location: HttpLocationSchema,
+    /**
+     * Index of the `||` / `??` fallback chain this operand belongs to, in
+     * source order within the call; absent for a read that stands alone.
+     * The operands of one chain are ONE decision about ONE result, so the
+     * response-model check judges them together: when a chain reads a
+     * declared field, its other operands are the defensive fallbacks and
+     * no field is missing.
+     */
+    chain: z.number().int().min(0).optional(),
+  })
+  .strict();
+export type ResponseRead = z.infer<typeof ResponseReadSchema>;
+
+/**
  * One discovered HTTP surface. Strict: unknown fields are rejected so a
  * detector cannot smuggle unversioned payloads through the join.
  */
@@ -72,6 +94,24 @@ export const HttpContractFactSchema = z
     requestSchemaSymbols: z.array(z.string().min(1)).min(1).optional(),
     /** Response model symbols (server-route facts). */
     responseSchemaSymbols: z.array(z.string().min(1)).min(1).optional(),
+    /**
+     * Wire names the route's response model answers to (plan 2026-09-25
+     * Phase 4b item 5): every pydantic field name plus every declared
+     * alias, in declaration order. Present ONLY when the detector proved
+     * a concrete model — an unknown/Any/dict model, an unresolvable
+     * symbol, or a model with an unprovable base stays absent, never a
+     * partial list. A frontend read with no entry here is exactly the
+     * dropped-field drift `RESPONSE_FIELD_MISSING_FROM_MODEL` reports.
+     */
+    responseModelFields: z.array(z.string().min(1)).min(1).optional(),
+    /**
+     * Fields the call site reads off this call's response, each with the
+     * location of the read (plan 2026-09-25 Phase 4b item 5). Bounded
+     * static reads of the detected call's own result — `.data.<field>`
+     * and destructuring of the awaited result or its payload — within the
+     * enclosing function, same file, never inferred across files.
+     */
+    responseReads: z.array(ResponseReadSchema).min(1).optional(),
     /** Frontend callsite identifiers (frontend-call facts only). */
     callsites: z.array(z.string().min(1)).min(1).optional(),
     /** Where the fact was found. */

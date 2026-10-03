@@ -60,6 +60,13 @@ export function createBehaviorApp({ store = null, backend = null } = {}) {
   const app = express();
   app.use(express.urlencoded({ extended: false }));
   app.use(express.json());
+  // Environment attestation marker (GF-13): the witness refuses to start
+  // against an unattested subject, so the loopback reference app stamps
+  // the same fingerprint its reviewed adapter declares.
+  app.use((req, res, next) => {
+    res.set('x-gateforge-env-fingerprint', 'behavior-loopback-v1');
+    next();
+  });
 
   async function loadAccount(req, res, next) {
     const account = await accounts.get(req.params.id);
@@ -72,11 +79,11 @@ export function createBehaviorApp({ store = null, backend = null } = {}) {
   }
 
   // --- Profile surface (customer self-service) ---------------------------
-  app.get('/profile/accounts', profileListHandler);
+  app.get('/profile/accounts', profileAccountsListHandler);
   app.get('/profile/accounts/:id/edit', loadAccount, profileEditHandler);
   app.post('/profile/accounts/:id', loadAccount, profileUpdateHandler);
 
-  async function profileListHandler(req, res) {
+  async function profileAccountsListHandler(req, res) {
     const rows = (await accounts.list()).map((account) => accountRow(account, '/profile/accounts')).join('');
     res.send(layout('Profile accounts', `<h1>Profile accounts</h1><ul>${rows}</ul>`));
   }
@@ -96,11 +103,11 @@ export function createBehaviorApp({ store = null, backend = null } = {}) {
   }
 
   // --- Admin surface (privileged operator) -------------------------------
-  app.get('/admin/accounts', adminListHandler);
+  app.get('/admin/accounts', adminAccountsListHandler);
   app.get('/admin/accounts/:id/edit', loadAccount, adminEditHandler);
   app.post('/admin/accounts/:id', loadAccount, adminUpdateHandler);
 
-  async function adminListHandler(req, res) {
+  async function adminAccountsListHandler(req, res) {
     const rows = (await accounts.list()).map((account) => accountRow(account, '/admin/accounts')).join('');
     res.send(layout('Admin accounts', `<h1>Admin accounts</h1><ul>${rows}</ul>`));
   }
@@ -120,10 +127,10 @@ export function createBehaviorApp({ store = null, backend = null } = {}) {
   }
 
   // --- Import surface (bulk spreadsheet-style ingest) --------------------
-  app.get('/imports/accounts', importFormHandler);
-  app.post('/imports/accounts', importCreateHandler);
+  app.get('/imports/accounts', importAccountsFormHandler);
+  app.post('/imports/accounts', importAccountsCreateHandler);
 
-  async function importFormHandler(req, res) {
+  async function importAccountsFormHandler(req, res) {
     res.send(
       layout(
         'Import accounts',
@@ -136,7 +143,7 @@ export function createBehaviorApp({ store = null, backend = null } = {}) {
     );
   }
 
-  async function importCreateHandler(req, res) {
+  async function importAccountsCreateHandler(req, res) {
     // The form posts urlencoded when no file is chosen; a file-bearing
     // multipart post without a multipart parser is a 415 (explicit
     // rejection observation — never a silent partial import).
@@ -171,14 +178,14 @@ export function createBehaviorApp({ store = null, backend = null } = {}) {
   }
 
   // --- Trusted read API (adapter surface; independent observer reads here in tests) ---
-  app.get('/api/accounts', apiListHandler);
-  app.get('/api/accounts/:id', loadAccount, apiReadHandler);
+  app.get('/api/accounts', accountsListApiHandler);
+  app.get('/api/accounts/:id', loadAccount, accountsReadApiHandler);
 
-  async function apiListHandler(req, res) {
+  async function accountsListApiHandler(req, res) {
     res.json({ accounts: await accounts.list() });
   }
 
-  async function apiReadHandler(req, res) {
+  async function accountsReadApiHandler(req, res) {
     res.json(req.account);
   }
 

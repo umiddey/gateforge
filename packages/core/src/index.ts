@@ -223,6 +223,34 @@ export type { Waiver } from './schemas/waiver.js';
 export type { WaiverScope } from './schemas/waiver.js';
 
 /**
+ * Flaky-test quarantine: one owner-approved,
+ * always-expiring removal of a test from the required set. Never proof,
+ * never blocking, and an obligation only it covered stays `missing`.
+ */
+export { QuarantineSchema } from './schemas/quarantine.js';
+/** Inferred quarantine type. */
+export type { Quarantine } from './schemas/quarantine.js';
+
+/**
+ * Owner-chosen gate strictness: the optional
+ * `mode` key (`strict` default = today's behavior, `changed`, `warn`) and
+ * the pure gate decision derived from it.
+ */
+export {
+  DEFAULT_STRICTNESS_MODE,
+  decideStrictness,
+  resolveStrictnessMode,
+  strictnessSummaryLine,
+  StrictnessModeSchema,
+} from './strictness.js';
+/** Strictness decision types (mode, effective exit code, honest debt view). */
+export type {
+  ChangedBlockingScope,
+  StrictnessDecision,
+  StrictnessMode,
+} from './strictness.js';
+
+/**
  * Baseline (pin #3): `.gateforge/baselines/obligations.json` —
  * `{schemaVersion, fingerprints}` with a sorted, duplicate-free list.
  */
@@ -293,14 +321,17 @@ export {
   RuntimeConfigSchema,
   RuntimeServiceSchema,
   RuntimeReadinessSchema,
+  RecipeStepSchema,
+  RecipeEnvFileSchema,
   isNormalizedRepoRelativePath,
   SERVICE_PORT_PLACEHOLDER,
   SERVICE_URL_PLACEHOLDER,
   DEFAULT_PREPARE_TIMEOUT_SECONDS,
   DEFAULT_READY_TIMEOUT_SECONDS,
+  DEFAULT_RECIPE_STEP_TIMEOUT_SECONDS,
 } from './schemas/runtime-config.js';
 /** Inferred staged-runtime types. */
-export type { RuntimeConfig, RuntimeService, RuntimeReadiness } from './schemas/runtime-config.js';
+export type { RuntimeConfig, RuntimeService, RuntimeReadiness, RecipeStep } from './schemas/runtime-config.js';
 
 /**
  * Behavior policy / catalog / evidence (plan 2026-09-19): owner-approved
@@ -326,6 +357,13 @@ export {
   BEHAVIOR_CATALOG_DOMAIN,
   HTTP_EFFECT_VERIFIED,
   HTTP_READ_RESULT_VERIFIED,
+  BEHAVIOR_SIGNATURE_ALGORITHMS,
+  BEHAVIOR_SIGNATURE_FORGERIES,
+  BEHAVIOR_SIGNING_SECRET_HEADER,
+  DEFAULT_SIGNATURE_HEADER,
+  DEFAULT_SIGNATURE_TIMESTAMP_HEADER,
+  DEFAULT_SIGNATURE_ATTEMPT_HEADER,
+  parseBehaviorSignatureProfile,
 } from './schemas/index.js';
 export type {
   BehaviorPolicy,
@@ -338,6 +376,44 @@ export type {
   BehaviorCatalogRegistration,
   BehaviorCasePayload,
   ScopeSnapshot,
+  BehaviorSignatureProfile,
+  BehaviorSignatureAlgorithm,
+  BehaviorSignatureForgery,
+} from './schemas/index.js';
+
+/**
+ * Engine-owned queue observer: the
+ * owner-declared `queueObserver` configuration, the normalized
+ * vocabulary every queue implementation maps onto, and the sealed
+ * observation the engine's own reads are graded against.
+ */
+export {
+  QueueBindingSchema,
+  QueueConnectionSchema,
+  QueueJobObservationSchema,
+  QueueJobSampleSchema,
+  QueueObservationSchema,
+  QueueObserverConfigSchema,
+  DEFAULT_QUEUE_LIST_LIMIT,
+  DEFAULT_QUEUE_POLL_INTERVAL_MS,
+  DEFAULT_QUEUE_TERMINAL_TIMEOUT_MS,
+  MAX_QUEUE_FIELD_CHARS,
+  MAX_QUEUE_LIST_LIMIT,
+  MAX_QUEUE_SAMPLES,
+  QUEUE_JOB_STATES,
+  QUEUE_OBSERVER_CONFIG_ENV,
+  QUEUE_OBSERVER_ENV,
+  TERMINAL_QUEUE_JOB_STATES,
+  parseQueueObserverConfigJson,
+} from './schemas/index.js';
+export type {
+  QueueBinding,
+  QueueConnection,
+  QueueJobObservation,
+  QueueJobSample,
+  QueueJobState,
+  QueueObservation,
+  QueueObserverConfig,
 } from './schemas/index.js';
 
 /**
@@ -450,13 +526,18 @@ export type { FingerprintInput, ObligationFingerprintSource } from './fingerprin
  * optional coverage policy. Unknown keys and unknown schemaVersion are
  * rejected.
  */
-export { GateforgeConfigSchema, ConfigPluginSchema, EnforcementConfigSchema } from './config/index.js';
+export { GateforgeConfigSchema, ConfigPluginSchema, EnforcementConfigSchema, AlembicConfigSchema } from './config/index.js';
 /** Inferred `.gateforge.yml` type. */
-export type { GateforgeConfig } from './config/index.js';
+export type { GateforgeConfig, AlembicConfig } from './config/index.js';
 /** Inferred config-plugin-entry type. */
 export type { ConfigPlugin } from './config/index.js';
 /** Inferred enforcement-section type (mode + strictE2E; off by default). */
 export type { EnforcementConfig } from './config/index.js';
+/**
+ * Inferred `tenancy` section (plan 2026-09-25 Phase 4b item 3a): the
+ * owner-declared tenant scope columns. ABSENT = the pack's default list.
+ */
+export type { TenancyConfig } from './config/index.js';
 
 /**
  * Diagnostics config (plan 2026-09-13 §3.5): explicitly registered
@@ -642,6 +723,7 @@ export {
   ClassifierContradictionSchema,
   ClassificationDecisionTraceSchema,
   EffectiveClassificationSchema,
+  LifecycleDerivationSchema,
   compileGlob,
   globMatch,
   pathInScope,
@@ -661,6 +743,7 @@ export type {
   ClassifierContradiction,
   ClassificationDecisionTrace,
   EffectiveClassification,
+  LifecycleDerivation,
 } from './classifier/index.js';
 
 // ---------------------------------------------------------------------------
@@ -770,6 +853,14 @@ export { evaluateObligation } from './verdict/index.js';
  */
 export { evaluateObligations } from './verdict/index.js';
 
+/**
+ * Declared server-computed fields (E18a): the adapter's `volatileFields`
+ * as the witness stamped them onto a persistence record, and the
+ * entered keys the exact-value echo therefore skipped. Reports surface
+ * every skip — a declared skip is never a silent one.
+ */
+export { volatileFieldsOf, volatileEchoSkips } from './verdict/index.js';
+
 /** The five gate-blocking verdicts (`satisfied`/`waived` are clean). */
 export { BLOCKING_VERDICTS } from './verdict/index.js';
 export {
@@ -790,11 +881,19 @@ export {
  */
 export {
   registerContractCapabilities,
+  setContractAvailability,
   capabilityFor,
   allCapabilities,
   type ContractCapability,
   type ContractAvailability,
 } from './verdict/index.js';
+
+/**
+ * Engine-owned queue observer: binds the
+ * owner-declared `queueObserver` block and moves the `task` contract
+ * namespace's availability with it.
+ */
+export { bindQueueObserver } from './verdict/index.js';
 
 /**
  * Cause mapping + strict preflight (plan 2026-09-13 §5.4 / Phase 0 item
@@ -880,6 +979,7 @@ export {
   resolveTestMappings,
   mappingSuggestions,
   mappingGradingClaims,
+  withoutQuarantinedBindings,
 } from './mapping/resolve.js';
 /** Inferred mapping-resolver types. */
 export type {
@@ -958,6 +1058,24 @@ export type { GateReceiptBody } from './receipt/index.js';
 export { GateReceiptSchema, ReceiptVerdictSummarySchema, ReceiptScopeSchema } from './schemas/gate-receipt.js';
 export type { ReceiptVerdictSummary, ReceiptScope } from './schemas/gate-receipt.js';
 export type { ReceiptRejection, ReceiptVerification } from './receipt/index.js';
+/**
+ * Run record (plan 2026-09-29 re-seal rule 1): the MAC'd, digest-bound
+ * record a COMPLETE whole-suite run leaves when it sealed no gate
+ * receipt because a test failed. It binds the same evidence a receipt
+ * binds and carries NO verdict; only the test-only re-seal path reads
+ * it, and only as a parent to recompute from.
+ */
+export {
+  RUN_RECORD_DOMAIN,
+  RUN_RECORD_VERSION,
+  runRecordMac,
+  verifyRunRecord,
+  testOutcomesDigestOf,
+} from './receipt/index.js';
+
+export { RunRecordSchema } from './schemas/run-record.js';
+export type { RunRecord, RunRecordBody } from './schemas/run-record.js';
+export type { RunRecordRejection, RunRecordVerification } from './receipt/index.js';
 
 /**
  * Trusted runner supervision (plan Phase 4 item 4, ADR 0005 D2): the
@@ -998,6 +1116,29 @@ export { loadWaivers } from './waivers/index.js';
  * a hand-edit (there is deliberately no overwrite).
  */
 export { serializeWaiver, writeWaiver } from './waivers/index.js';
+
+/**
+ * Quarantine directory loader: reads
+ * `.gateforge/quarantine/*.yml` against the INJECTED clock and fails
+ * closed on a missing attribution field, a duplicate test key, or a
+ * duration beyond the documented 14-day ceiling.
+ */
+export {
+  loadQuarantines,
+  QUARANTINE_DIR,
+  QUARANTINE_MAX_DAYS,
+  QUARANTINE_MAX_DURATION_MS,
+  GateforgeQuarantineError,
+  serializeQuarantine,
+  writeQuarantine,
+} from './quarantine/index.js';
+/** Quarantine loader types (problems, loaded records, load partitions). */
+export type {
+  LoadedQuarantine,
+  QuarantineLoadOptions,
+  QuarantineLoadResult,
+  QuarantineProblem,
+} from './quarantine/index.js';
 
 /** Fail-closed waiver-configuration error; carries every problem found. */
 export { GateforgeWaiverError } from './waivers/index.js';
@@ -1066,6 +1207,8 @@ export { adoptClassificationBlocked, shrinkClassificationBlocked } from './basel
  * waiver counts). Deterministic; identical inputs serialize identically.
  */
 export { renderRun } from './report/index.js';
+export { humanMessage, ENGINE_UPGRADE_REFUSAL_PREFIX } from './report/human-message.js';
+export type { HumanMessageEntry } from './report/human-message.js';
 
 /** Exit codes (contract 4): 0 clean/waived, 1 unresolved, 2 config. */
 export { runExitCode } from './report/index.js';
@@ -1075,11 +1218,16 @@ export type { RunExitCode } from './report/index.js';
 export type { WaiverCounts } from './report/index.js';
 /** Options for renderRun (format, blocking entries, counts, manifest). */
 export type { RenderRunOptions } from './report/index.js';
+export type { EngineMetadata } from './report/index.js';
 /** Effective evaluation scope carried by run reports (plan §12.4). */
 export type { ScopeMetadata } from './report/index.js';
 /** Measured supervised work and repository debt carried by run reports. */
 export type { RunExecutionSummary } from './report/index.js';
+export type { RepositoryDebt } from './report/index.js';
+/** The one repository-debt definition every surface reports from. */
+export { BASELINE_VERDICT_REASON, repositoryDebtOf } from './report/index.js';
 export type { DiagnosticContext } from './report/index.js';
+export type { LifecycleDerivationReportEntry } from './report/index.js';
 
 // ---------------------------------------------------------------------------
 // Fixture harness (G7) — deterministic temp repos, injected clock/env,
@@ -1183,3 +1331,4 @@ export type {
   VitestRunOptions,
   VitestRunResult,
 } from './testing/index.js';
+export * from './twin-paths.js';

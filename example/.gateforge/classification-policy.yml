@@ -1,0 +1,47 @@
+# Repository-wide deterministic classification rules (ADR 0003 D5).
+# Effective classifications are computed automatically from detector
+# signals on every run: unknown exposure defaults user-facing, unknown
+# lifecycle operations default enabled, and internal requires a complete
+# closed-world certificate. This file NEVER classifies a resource by hand.
+schemaVersion: 1
+# Globs a closed-world proof must cover; any parse/unresolved hole inside
+# them invalidates every suppressive decision in scope.
+scanRoots:
+  - '**/*'
+# Entry-point categories trusted as internal reachability (an internality
+# certificate may rely only on these).
+trustedInternalEntryPoints:
+  - category: worker
+    patterns: ['**/workers/**', '**/jobs/**']
+    # No detector binding: task is opt-in (no semantic verifier), so this
+    # category can never certify reachability until pack-task is selected.
+  # Categories WITHOUT a detector binding can never certify: no plugin may
+  # assert their reachability. Bind one when a bundled detector exists.
+  - category: migration
+    patterns: ['**/migrations/**']
+  - category: maintenance-command
+    patterns: ['**/scripts/maintenance/**']
+# Organization internal rules — certificate INPUTS, never overrides.
+internalRules: []
+# Coverage requirements for COMPLETE-scan proofs (closed-world
+# certificates). Each rule: the named detector must report examining
+# every file matching appliesTo. Declaring none means no scan is
+# provably complete and closed-world proofs stay unavailable.
+coverage:
+  - capability: exposure.http
+    detector: gateforge.pack-http
+    appliesTo:
+      - '**/*.ts'
+      - '**/*.js'
+      - '**/*.tsx'
+      - '**/*.jsx'
+      - '**/*.mjs'
+      - '**/*.cjs'
+# Supported source declaration syntax consumed by the classifier.
+declarations:
+  internality: 'gateforge:internal'
+  archiveState: 'gateforge:archive-state'
+# Bookkeeping columns that never satisfy an update by themselves.
+volatileFields:
+  - updated_at
+  - created_at

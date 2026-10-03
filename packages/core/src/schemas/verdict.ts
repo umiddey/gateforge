@@ -42,10 +42,10 @@ export type UnresolvedReason = z.infer<typeof UnresolvedReasonSchema>;
 /**
  * Stable cause codes for the shared report model (plan §5.4, ADR 0005).
  * Blocking-obligation causes name WHY an obligation is not satisfied and
- * select its next action; the three `DIAGNOSTIC_*` codes are advisory
- * result causes for the separate diagnostic run (plan §3.5) — never
- * obligation verdicts. The seven verdict VALUES are unchanged; causes
- * enrich them without weakening any contract.
+ * select its next action. `DIAGNOSTIC_*` codes advise on the separate
+ * diagnostic run; `TEST_MAP_OUT_OF_SYNC` advises on generated mappings.
+ * These report advisories are never obligation verdicts. The seven verdict
+ * VALUES are unchanged; causes enrich reports without weakening contracts.
  */
 export const CauseCodeSchema = z.enum([
   'TEST_INVENTORY_INCOMPLETE',
@@ -53,6 +53,7 @@ export const CauseCodeSchema = z.enum([
   'TEST_MAPPING_MISSING',
   'TEST_MAPPING_AMBIGUOUS',
   'TEST_MAPPING_STALE',
+  'TEST_MAP_OUT_OF_SYNC',
   'EVIDENCE_NOT_COLLECTED',
   'VERIFIER_UNSUPPORTED',
   'TEST_NOT_EXECUTED',
@@ -79,6 +80,20 @@ export const CauseCodeSchema = z.enum([
   'ENFORCEMENT_BOUNDARY_UNVERIFIED',
   'RUNTIME_PREPARATION_FAILED',
   'RUNTIME_READINESS_FAILED',
+  'QUARANTINE_EXPIRED',
+  'MIGRATION_MISSING',
+  'MIGRATION_LINEAGE_BROKEN',
+  'MIGRATION_DOWNGRADE_NOOP',
+  'MIGRATION_DRIFT',
+  'MIGRATION_ROUNDTRIP_FAILED',
+  'MIGRATION_DATA_LOST',
+  'MIGRATION_CONFLICT',
+  'MIGRATION_SCRATCH_UNSAFE',
+  'ADAPTER_CANNOT_WITNESS',
+  'ADAPTER_VOLATILE_FIELD_SKIPPED',
+  'RESOURCE_SINGLETON_PER_TENANT',
+  'RESPONSE_FIELD_MISSING_FROM_MODEL',
+  'TWIN_PATH_DIVERGENT',
 ]);
 
 /** Inferred cause-code union. */
@@ -97,6 +112,7 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
     '— that cannot satisfy the obligation.',
   TEST_MAPPING_AMBIGUOUS: 'Correct the exact mapping',
   TEST_MAPPING_STALE: 'Correct the exact mapping',
+  TEST_MAP_OUT_OF_SYNC: 'gateforge tests sync',
   EVIDENCE_NOT_COLLECTED:
     'Write an overlay test in `tests/e2e/gateforge/` using the Gateforge Playwright fixture ' +
     '(`evidence.ui.*` + `persistence.verify`). Do not rewrite existing journeys. Mappings ' +
@@ -135,7 +151,35 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   RUNTIME_PREPARATION_FAILED:
     'Repair the tracked `runtime.prepare` command (its failure log is under run state `runtime/`) — ' +
     'the candidate runtime must build or install before the gate can execute',
+  QUARANTINE_EXPIRED:
+    'Owner: renew or delete the expired quarantine (`gateforge quarantine <testKey> --owner --approver --reason --expires`); an expired quarantine blocks',
   RUNTIME_READINESS_FAILED:
     'Repair the tracked `runtime.services` command or readiness probe — the candidate ' +
     'runtime must become ready before evidence is trusted',
+  MIGRATION_MISSING: 'Write an Alembic revision for the changed model, then run `gateforge check`',
+  MIGRATION_LINEAGE_BROKEN:
+    'Repair the migration chain so it has one head, unique revision ids, and existing parents, then run `gateforge check`',
+  MIGRATION_DOWNGRADE_NOOP:
+    'Implement downgrade() so the chain round-trips, or pin the revision in `alembic.irreversible`, then run `gateforge check`',
+  MIGRATION_DRIFT: 'Make `alembic check` clean against the models, then run `gateforge check`',
+  MIGRATION_ROUNDTRIP_FAILED:
+    'Fix the migration so upgrade, downgrade base, and upgrade head succeed on a disposable database, then run `gateforge check`',
+  MIGRATION_DATA_LOST: 'Preserve declared table rows across the upgrade, then run `gateforge check`',
+  MIGRATION_CONFLICT: 'Rebase onto the target head and merge the named revisions, then run `gateforge check`',
+  MIGRATION_SCRATCH_UNSAFE:
+    'Set `alembic.scratch.adminUrl` to a trusted disposable Postgres admin URL. The engine only creates and drops `gf_tmp_` databases',
+  ADAPTER_CANNOT_WITNESS:
+    'Give the adapter a complete paged collection read (or a natural key) so a create can be proven; until then the engine cannot witness that obligation',
+  ADAPTER_VOLATILE_FIELD_SKIPPED:
+    'Review the adapter: it declares this field server-computed, so the entered value was not echo-checked. Drop the declaration if the app should store what was entered',
+  RESOURCE_SINGLETON_PER_TENANT:
+    'Witness this create on a fresh tenant: the unique constraint admits one row per tenant, so ' +
+    "register the new tenant's login with the witness for THIS session only " +
+    '(POST /sessions/identity) and prove the create there',
+  RESPONSE_FIELD_MISSING_FROM_MODEL:
+    'The frontend reads a field the response model does not declare: restore the field on the ' +
+    'response model (or read the one it declares). A test that mocks the response proves nothing ' +
+    'about this read',
+  TWIN_PATH_DIVERGENT:
+    'Make the raw test and its witnessed twin send the same request: align the shared helper defaults, or map the pair with `twinOf`',
 });

@@ -117,6 +117,17 @@ export function canonicalizeFacts(
     if (typeof responseModel === 'string' && responseModel.length > 0) {
       fact.responseSchemaSymbols = [responseModel];
     }
+    // Wire names the response model answers to (plan 2026-09-25 Phase 4b
+    // item 5). The python scanner emits them only for a provably
+    // concrete model, so anything else arrives absent here too and the
+    // shared fact carries no field list to compare frontend reads against.
+    const responseModelFields = attributes['responseModelFields'];
+    if (Array.isArray(responseModelFields) && responseModelFields.length > 0) {
+      const names = responseModelFields.filter(
+        (name): name is string => typeof name === 'string' && name.length > 0,
+      );
+      if (names.length === responseModelFields.length) fact.responseModelFields = names;
+    }
     const requestSchemas = attributes['requestSchemaSymbols'];
     if (Array.isArray(requestSchemas)) {
       const names = requestSchemas.filter(

@@ -182,6 +182,8 @@ export interface ObligationVerdict extends VerdictOutcome {
   readonly cause?: CauseCode | null;
   /** Human next action for the cause; null when unmapped or clean. */
   readonly nextAction?: string | null;
+  /** Changed paths that brought the obligation into the current scope. */
+  readonly inScopeBecause?: string[];
 }
 
 /** Pin-#9 evaluation context. Malformed entries degrade, never crash. */
@@ -215,6 +217,18 @@ export interface VerdictContext {
    * cases instead of the legacy any-claim-satisfied shortcut.
    */
   behavior?: BehaviorObligationContext | null;
+  /**
+   * Engine-issued Alembic witness records for this process. Suite-writable
+   * `records` never satisfy `alembic:*`. Absent means no engine execution.
+   */
+  engineAlembicRecords?: readonly {
+    obligationId: string;
+    kind: string;
+    trust?: string;
+    origin?: string;
+    payload?: unknown;
+    recordId?: string;
+  }[];
   /** Injected clock instant (invariant 7) — the only time source. */
   now: Date | string;
 }
@@ -536,7 +550,14 @@ function exactValueEchoFailure(
       `'${operation}' input against`
     );
   }
+  // Declared volatile fields (E18a): the adapter states that the server
+  // computes these keys itself, so the entered value is not expected to
+  // survive. That is a DECLARED fact about the app, never a silently
+  // ignored mismatch: every skip is reported (volatileEchoSkips) and
+  // surfaces as a report advisory.
+  const volatile = volatileFieldsOf(persistenceRecord);
   for (const key of Object.keys(entered).sort()) {
+    if (volatile.includes(key)) continue;
     const enteredValue = entered[key];
     if (!isJsonValue(enteredValue)) continue;
     const persistedValue = persisted[key];
@@ -551,6 +572,99 @@ function exactValueEchoFailure(
     }
   }
   return null;
+}
+
+/**
+ * The volatile field keys a persistence record's adapter DECLARED
+ * (adapter `volatileFields`, stamped into the record payload by the
+ * witness). An adapter that declares none behaves exactly as before:
+ * the exact-value echo applies to every entered key.
+ *
+ * Args:
+ *   record: a witnessed persistence record.
+ *
+ * Returns:
+ *   string[]: the declared keys, sorted and deduplicated.
+ */
+export function volatileFieldsOf(record: unknown): string[] {
+  const entry = asRecord(record);
+  if (entry === null) return [];
+  const declared = payloadOf(entry)?.['volatileFields'];
+  if (!Array.isArray(declared)) return [];
+  const seen: Record<string, true> = {};
+  for (const key of declared) {
+    if (typeof key === 'string' && key.length > 0) seen[key] = true;
+  }
+  return Object.keys(seen).sort(compareStrings);
+}
+
+/**
+ * The entered keys of the echo check, whichever channel carried them.
+ * Both are engine-issued sealed record payloads, never suite-authored:
+ * - browser: the `ui.action` anchor's DECLARED INPUT `fields`;
+ * - observe: there is no anchor, so the witness-observed request
+ *   `observedFields` ride the persistence record itself (the same
+ *   source observedEchoFailure grades against).
+ *
+ * An anchor's `fields` always wins when it is a plain object, empty or
+ * not: an anchor that declares no input is not an invitation to read
+ * another source. Either way, a declared volatile key is only reported
+ * when the source actually carries a value for it.
+ *
+ * Args:
+ *   anchorOrNull: the witnessed UI-action record, or null when the
+ *     evidence came from the observe channel.
+ *   persistence: the matched persistence record (observed values).
+ *
+ * Returns:
+ *   Record<string, unknown> | null: the entered keys, or null when the
+ *   record carries neither source.
+ */
+function enteredFieldsOf(anchorOrNull: unknown, persistence: RecordLike): Record<string, unknown> | null {
+  const anchor = asRecord(anchorOrNull);
+  if (anchor !== null) {
+    const declared = payloadOf(anchor)?.['fields'];
+    if (isPlainObject(declared)) return declared;
+  }
+  const observed = payloadOf(persistence)?.['observedFields'];
+  return isPlainObject(observed) ? observed : null;
+}
+
+/**
+ * The entered keys the echo check SKIPPED because the adapter declared
+ * them volatile, with the values the engine actually observed. The
+ * caller turns this into a visible report note — a skip is a fact the
+ * owner must see, never a quietly dropped mismatch.
+ *
+ * A satisfied obligation is evidence on either channel: with a
+ * `ui.action` anchor the entered values are the anchor's declared
+ * input fields, and on the observe channel (suite-driven browser over
+ * the session proxy) they are the witness-observed request fields the
+ * persistence record itself carries. Only keys the journey actually
+ * entered are reported — a declared field nobody sent is never a skip.
+ *
+ * Args:
+ *   actionRecord: the witnessed UI-action record, or null when the
+ *     evidence came from the observe channel.
+ *   persistenceRecord: the matched persistence record (observed values).
+ *
+ * Returns:
+ *   Array<{field: string, entered: unknown, persisted: unknown}>: one
+ *   entry per declared-volatile key the journey actually entered.
+ */
+export function volatileEchoSkips(
+  actionRecord: unknown,
+  persistenceRecord: unknown,
+): Array<{ field: string; entered: unknown; persisted: unknown }> {
+  const persistence = asRecord(persistenceRecord);
+  if (persistence === null) return [];
+  const entered = enteredFieldsOf(actionRecord, persistence);
+  if (entered === null) return [];
+  const persisted = payloadOf(persistence)?.['fields'];
+  const observed = isPlainObject(persisted) ? persisted : {};
+  return volatileFieldsOf(persistence)
+    .filter((field) => isJsonValue(entered[field]))
+    .map((field) => ({ field, entered: entered[field], persisted: observed[field] ?? null }));
 }
 
 /**
@@ -587,7 +701,11 @@ function observedEchoFailure(
       `'${operation}' request against`
     );
   }
+  // Same declared-volatile rule as the UI-action echo (E18a): a key the
+  // adapter declares server-computed is not expected to echo back.
+  const volatile = volatileFieldsOf(record);
   for (const key of Object.keys(observed).sort()) {
+    if (volatile.includes(key)) continue;
     const observedValue = observed[key];
     if (!isJsonValue(observedValue)) continue;
     const persistedValue = persisted[key];
@@ -688,9 +806,15 @@ function persistencePostconditionFailure(
     }
     const qualifying = delta.filter((key) => (updateable as readonly string[]).includes(key));
     if (qualifying.length === 0) {
+      if (delta.length > 0) {
+        return (
+          `update postcondition violated: the UI action changed only [${[...delta].sort().join(', ')}], ` +
+          'which is not a user-editable field; the update test must change one of ' +
+          `[${[...updateable].sort().join(', ')}]`
+        );
+      }
       return (
-        'update postcondition violated: the engine-observed delta ' +
-        `[${[...delta].sort().join(', ')}] touches no classification-declared ` +
+        'update postcondition violated: the engine-observed delta touches no classification-declared ' +
         `updateable field (updateableFields: [${[...updateable].sort().join(', ')}])`
       );
     }
@@ -765,10 +889,66 @@ function evaluateClaimEvidence(
   return verifier({ claim, obligation, evidence, primaryKey, resource, httpRoutes });
 }
 
+/**
+ * Adds an unreachable-UI hint only when a complete host route inventory
+ * contains no update-capable endpoint linked to the obligation resource.
+ *
+ * Args:
+ *   outcome: the persistence grader result.
+ *   operation: the obligation operation.
+ *   resource: the host-derived graph resource, when available.
+ *   httpRoutes: the complete host-derived endpoint inventory.
+ *
+ * Returns:
+ *   ClaimOutcome: the unchanged result or one with the route hint appended.
+ */
+function addMissingUpdateRouteHint(
+  outcome: ClaimOutcome,
+  operation: 'create' | 'read' | 'update' | 'delete',
+  resource: { kind: string; attributes: Record<string, unknown> } | null | undefined,
+  httpRoutes: readonly HttpRouteCandidate[] | null | undefined,
+): ClaimOutcome {
+  if (
+    operation !== 'update' ||
+    resource === null ||
+    resource === undefined ||
+    httpRoutes === null ||
+    httpRoutes === undefined ||
+    !('reason' in outcome) ||
+    !outcome.reason.includes('the UI action changed only')
+  ) {
+    return outcome;
+  }
+  const resourceName = resource.attributes['resourceName'];
+  if (typeof resourceName !== 'string') return outcome;
+  const hasUpdateRoute = httpRoutes.some(
+    (route) =>
+      route.linkedResourceName === resourceName &&
+      route.capabilities?.includes('crud-update') === true,
+  );
+  return hasUpdateRoute
+    ? outcome
+    : {
+        ...outcome,
+        reason:
+          `${outcome.reason}; no observed UI request writes these fields — ` +
+          'the feature may be unreachable from the UI',
+      };
+}
+
 // Built-in registrations: persistence/crud semantics stay owned by this
 // module; pack namespaces register through './pack-verifiers.js'.
 registerContractVerifier('crud', (input) => crudClaimVerifier(input));
-registerContractVerifier('persistence', (input) => persistenceClaimVerifier(input.claim, input.evidence, input.obligation, input.primaryKey));
+registerContractVerifier('persistence', (input) =>
+  persistenceClaimVerifier(
+    input.claim,
+    input.evidence,
+    input.obligation,
+    input.primaryKey,
+    input.resource,
+    input.httpRoutes,
+  ),
+);
 registerPackVerifiers();
 
 /**
@@ -886,6 +1066,8 @@ function persistenceClaimVerifier(
   evidence: Array<{ record: RecordLike; trust: TrustTier }>,
   obligation: Obligation,
   primaryKey: readonly string[],
+  resource: { kind: string; attributes: Record<string, unknown> } | null | undefined,
+  httpRoutes: readonly HttpRouteCandidate[] | null | undefined,
 ): ClaimOutcome {
   const requiredOp = persistenceOperation(obligation.contract);
   if (requiredOp === null) {
@@ -1024,13 +1206,14 @@ function persistenceClaimVerifier(
   // upgrades a bare browser missing to invalid (the witness DID observe
   // state; the claim declared the operation and lied) — server first,
   // then observe. Otherwise the browser outcome stands verbatim.
+  let outcome: ClaimOutcome = browser;
   if (browser.status === 'missing') {
     const sharp = serverFailure ?? observeFailure;
     if (sharp !== null) {
-      return { status: 'invalid', reason: `${sharp} (obligation '${obligation.id}')` };
+      outcome = { status: 'invalid', reason: `${sharp} (obligation '${obligation.id}')` };
     }
   }
-  return browser;
+  return addMissingUpdateRouteHint(outcome, requiredOp, resource, httpRoutes);
 }
 
 /**
@@ -1057,11 +1240,12 @@ function browserAnchoredPersistenceClaim(
   // ones do not. Satisfaction weight lives in requirement 2, the
   // engine-observed persistence read.
   const actions = evidence.filter((entry) => entry.record.kind === UI_ACTION_KIND);
-  const matchingAction = actions.find(
+  const matchingActions = actions.filter(
     (entry) =>
       isProvenancedRecord(entry.record) &&
       payloadOf(entry.record)?.['operation'] === requiredOp,
   );
+  const matchingAction = matchingActions[0];
   if (matchingAction === undefined) {
     if (actions.length === 0) {
       return {
@@ -1128,9 +1312,87 @@ function browserAnchoredPersistenceClaim(
       payloadOf(entry.record)?.['channel'] !== SERVER_CHANNEL,
   );
   const witnessedPersistence = persistence.filter((entry) => entry.trust === 'witnessed');
-  const sameEntity = witnessedPersistence.filter((entry) => {
+  const actionAnchorId =
+    typeof actionPayload['anchorId'] === 'string' && actionPayload['anchorId'].length > 0
+      ? actionPayload['anchorId']
+      : null;
+  const sameEntityActions = matchingActions.filter((entry) => {
     const entity = normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey);
     return entity.ok && entity.key === actionEntity.key;
+  });
+  const verifiedAnchorRecords: RecordLike[] = [];
+  if (sameEntityActions.length > 1) {
+    const anchorIds = sameEntityActions.map((entry) => {
+      const anchorId = payloadOf(entry.record)?.['anchorId'];
+      return typeof anchorId === 'string' && anchorId.length > 0 ? anchorId : null;
+    });
+    if (anchorIds.some((anchorId) => anchorId === null) || new Set(anchorIds).size !== anchorIds.length) {
+      return {
+        status: 'invalid',
+        reason:
+          `multiple '${UI_ACTION_KIND}' anchors target entity ${actionEntity.key}, but ` +
+          'per-anchor snapshots are unavailable; refusing timing-dependent persistence evidence',
+      };
+    }
+    for (const [index, action] of sameEntityActions.entries()) {
+      const anchorId = anchorIds[index] as string;
+      const snapshot = witnessedPersistence.find((entry) => {
+        const payload = payloadOf(entry.record);
+        const entity = normalizeEntityId(payload?.['entityId'], primaryKey);
+        return entity.ok && entity.key === actionEntity.key && payload?.['anchorId'] === anchorId;
+      });
+      if (snapshot === undefined) {
+        return {
+          status: 'missing',
+          reason:
+            `no per-anchor '${PERSISTENCE_KIND_PREFIX}*' snapshot for '${UI_ACTION_KIND}' ` +
+            `anchor '${anchorId}' on entity ${actionEntity.key}`,
+        };
+      }
+      const failure = persistencePostconditionFailure(
+        obligation,
+        requiredOp,
+        snapshot.record,
+        actionEntity.key,
+      );
+      if (failure !== null) {
+        return { status: 'invalid', reason: `${failure} (obligation '${obligation.id}')` };
+      }
+      if (requiredOp === 'create' || requiredOp === 'update') {
+        const echoFailure = exactValueEchoFailure(requiredOp, action.record, snapshot.record);
+        if (echoFailure !== null) {
+          return { status: 'invalid', reason: `${echoFailure} (obligation '${obligation.id}')` };
+        }
+      }
+      const visible = evidence.find((entry) => {
+        if (entry.record.kind !== UI_VISIBLE_KIND) return false;
+        const payload = payloadOf(entry.record);
+        const entity = normalizeEntityId(payload?.['entityId'], primaryKey);
+        return entity.ok && entity.key === actionEntity.key && payload?.['anchorId'] === anchorId;
+      });
+      if (
+        visible !== undefined &&
+        fieldsDisagreement(
+          payloadOf(visible.record)?.['fields'],
+          payloadOf(snapshot.record)?.['fields'],
+        ) !== null
+      ) {
+        return {
+          status: 'invalid',
+          reason: `visible and persisted fields disagree (obligation '${obligation.id}')`,
+        };
+      }
+      verifiedAnchorRecords.push(action.record, snapshot.record);
+    }
+  }
+  const sameEntity = witnessedPersistence.filter((entry) => {
+    const payload = payloadOf(entry.record);
+    const entity = normalizeEntityId(payload?.['entityId'], primaryKey);
+    return (
+      entity.ok &&
+      entity.key === actionEntity.key &&
+      (actionAnchorId === null || payload?.['anchorId'] === actionAnchorId)
+    );
   });
   if (sameEntity.length === 0) {
     const claimedPersistence = persistence.find((entry) => entry.trust === 'claimed');
@@ -1213,8 +1475,14 @@ function browserAnchoredPersistenceClaim(
   // engine-observed persisted fields is a fabrication signal).
   const visible = evidence.find((entry) => {
     if (entry.record.kind !== UI_VISIBLE_KIND) return false;
-    const entity = normalizeEntityId(payloadOf(entry.record)?.['entityId'], primaryKey);
-    return entity.ok && entity.key === actionEntity.key;
+    const payload = payloadOf(entry.record);
+    const entity = normalizeEntityId(payload?.['entityId'], primaryKey);
+    const visibleAnchorId = payload?.['anchorId'];
+    const sameAnchor =
+      actionAnchorId === null ||
+      visibleAnchorId === actionAnchorId ||
+      (sameEntityActions.length === 1 && visibleAnchorId === undefined);
+    return entity.ok && entity.key === actionEntity.key && sameAnchor;
   });
   if (visible !== undefined) {
     const disagreement = fieldsDisagreement(
@@ -1232,8 +1500,9 @@ function browserAnchoredPersistenceClaim(
   }
 
   const used = [
-    matchingAction.record,
-    matchingPersistence.record,
+    ...(verifiedAnchorRecords.length > 0
+      ? verifiedAnchorRecords
+      : [matchingAction.record, matchingPersistence.record]),
     ...(visible !== undefined ? [visible.record] : []),
   ]
     .map((record) => (typeof record.recordId === 'string' ? record.recordId : ''));
@@ -1769,6 +2038,56 @@ function gradeCrudSession(params: {
 }
 
 /**
+ * Grades an Alembic obligation from engine-issued records only.
+ *
+ * Args:
+ *   obligation: the parsed obligation. Its contract starts with `alembic:`.
+ *   context: verdict context. Suite records are ignored.
+ *
+ * Returns:
+ *   VerdictOutcome: satisfied only when this process issued a passing witness.
+ */
+function gradeAlembicObligation(obligation: Obligation, context: VerdictContext): VerdictOutcome {
+  const records = (context.engineAlembicRecords ?? []).filter(
+    (record) => record.obligationId === obligation.id && record.kind === 'alembic.witness',
+  );
+  const passing = records.find((record) => {
+    if (record.trust !== 'witnessed' || record.origin !== 'engine-observed') return false;
+    const payload = record.payload;
+    if (payload === null || typeof payload !== 'object') return false;
+    const body = payload as Record<string, unknown>;
+    return (
+      body['producer'] === 'gateforge.engine' &&
+      body['passed'] === true &&
+      body['contract'] === obligation.contract &&
+      typeof body['filesDigest'] === 'string' &&
+      /^[0-9a-f]{64}$/.test(body['filesDigest'])
+    );
+  });
+  if (passing !== undefined) {
+    return { verdict: 'satisfied', reason: null, recordIds: passing.recordId === undefined ? [] : [passing.recordId] };
+  }
+  const failed = records.find((record) => {
+    const payload = record.payload;
+    return payload !== null && typeof payload === 'object' && (payload as Record<string, unknown>)['passed'] === false;
+  });
+  const failedPayload =
+    failed?.payload !== null && typeof failed?.payload === 'object'
+      ? (failed.payload as Record<string, unknown>)
+      : null;
+  const cause = typeof failedPayload?.['cause'] === 'string' ? failedPayload['cause'] : 'MIGRATION_ROUNDTRIP_FAILED';
+  const detail =
+    typeof failedPayload?.['detail'] === 'string'
+      ? failedPayload['detail']
+      : 'no engine-executed Alembic witness exists for this obligation';
+  return {
+    verdict: 'missing',
+    reason: `${cause}: ${detail}`,
+    recordIds: failed?.recordId === undefined ? [] : [failed.recordId],
+  };
+}
+
+/**
  * Evaluates ONE obligation against the run's claims, records, waivers,
  * classification, and injected clock (pin #9). Pure and deterministic:
  * identical inputs produce identical outcomes.
@@ -1799,6 +2118,9 @@ export function evaluateObligation(
     );
   }
   const verified = parsedObligation.data;
+  if (verified.contract.startsWith('alembic:')) {
+    return gradeAlembicObligation(verified, context);
+  }
   const now = parseInstant(context.now);
 
   // 1. Unclassified resources block (invariant 1); unresolved resources

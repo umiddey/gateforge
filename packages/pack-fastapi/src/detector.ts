@@ -135,7 +135,11 @@ export function readFastapiScanConfigOrNull(path: string | null): FastapiScanCon
  */
 export function pythonEnvironment(extra: readonly string[] = []): NodeJS.ProcessEnv {
   const entries = [...extra, PACK_PYTHON_DIR, PROTOCOL_PYTHON_DIR];
-  return { ...process.env, PYTHONPATH: entries.join(delimiter) };
+  return {
+    ...process.env,
+    PYTHONDONTWRITEBYTECODE: '1',
+    PYTHONPATH: entries.join(delimiter),
+  };
 }
 
 /** Options for {@link createFastapiDetector}. */

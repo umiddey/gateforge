@@ -124,7 +124,7 @@ export class PluginSession {
 
     this.#proc = spawn(options.command[0], options.command.slice(1), {
       cwd: options.cwd,
-      env: options.env,
+      env: { ...(options.env ?? process.env), PYTHONDONTWRITEBYTECODE: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     // EPIPE when the plugin died mid-write: the next read surfaces E_EOF.

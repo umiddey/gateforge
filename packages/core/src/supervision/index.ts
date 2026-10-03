@@ -230,7 +230,7 @@ export function superviseExecution(
       cause: 'RUN_INCOMPLETE',
       detail:
         `retry-assisted execution detected${envelope.retriesDetail !== undefined ? ` (${envelope.retriesDetail})` : ''} — ` +
-        'required retries are zero; only first-attempt outcomes prove behavior (plan §3.3 rule 3)',
+        'required retries are zero; only first-attempt outcomes prove behavior',
       logicalKey: null,
     });
   }
@@ -259,7 +259,7 @@ export function superviseExecution(
       findings.push({
         cause: 'RUN_INCOMPLETE',
         detail:
-          `planned instance '${instance.logicalKey}' never executed — a missing selected case blocks the run (plan §3.3 rule 5)`,
+          `planned instance '${instance.logicalKey}' never executed — a selected case is missing, so the run blocks`,
         logicalKey: instance.logicalKey,
       });
     }
@@ -287,14 +287,14 @@ export function superviseExecution(
         cause: 'RUN_INCOMPLETE',
         detail:
           `instance '${outcome.logicalKey}' executed on attempt ${String(outcome.attempt)} — ` +
-          'retry-assisted execution is prohibited (required retries are zero; plan §3.3 rule 3)',
+          'retry-assisted execution is prohibited (required retries are zero)',
         logicalKey: outcome.logicalKey,
       });
     }
     if (outcome.status === 'failed' && !outcome.expectedFailure) {
       findings.push({
         cause: 'TEST_FAILED',
-        detail: `instance '${outcome.logicalKey}' failed on attempt ${String(outcome.attempt)} — the whole run fails (plan §3.3 rule 5)`,
+        detail: `instance '${outcome.logicalKey}' failed on attempt ${String(outcome.attempt)} — the whole run fails`,
         logicalKey: outcome.logicalKey,
       });
       continue;
@@ -303,7 +303,7 @@ export function superviseExecution(
       findings.push({
         cause: 'TEST_NOT_EXECUTED',
         detail:
-          `instance '${outcome.logicalKey}' is an expected failure — an expected-failure exemption never proves behavior (plan §3.3 rule 3)`,
+          `instance '${outcome.logicalKey}' is an expected failure — an expected-failure exemption never proves behavior`,
         logicalKey: outcome.logicalKey,
       });
       continue;
@@ -323,7 +323,7 @@ export function superviseExecution(
       cause: 'RUN_INCOMPLETE',
       detail:
         envelope.fixtureOutcome === 'failed'
-          ? 'the run did not end successfully: a setup, teardown, or runner-level error was observed — fixtures and teardown must pass too (plan §3.3 rule 5)'
+          ? 'the run did not end successfully: a setup, teardown, or runner-level error was observed — fixtures and teardown must pass too'
           : 'the run did not report a final fixture/teardown outcome (crash or lost reporter contact) — fail closed',
       logicalKey: null,
     });

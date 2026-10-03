@@ -69,6 +69,15 @@ export const ExecutedOutcomeSchema = z
     attempt: z.number().int().min(1),
     /** True when the instance was an expected failure (never proves behavior). */
     expectedFailure: z.boolean(),
+    /**
+     * The id the runner itself gave this instance while it ran (e.g.
+     * Playwright's per-run test id). Natively claimed evidence is stamped
+     * with it, and it can differ from the enumerated catalog id (the
+     * trusted config lives in another directory), so a test-only re-seal
+     * needs it to attribute a carried test's records. Absent when the
+     * runner reported none.
+     */
+    runnerTestId: z.string().min(1).optional(),
   })
   .strict();
 
@@ -137,6 +146,28 @@ export type TracedTest = z.infer<typeof TracedTestSchema>;
  * The sealed execution result. Strict: unknown keys are rejected so a
  * hostile run-state edit cannot smuggle extra authority in.
  */
+/**
+ * One timing-chaos release decision (E63): what the observation proxy
+ * did to one proxied response. The route key is method + pathname, so
+ * the record can never carry a query value, a body or a credential.
+ */
+const ChaosScheduleEntrySchema = z
+  .object({
+    /** Supervisor-issued test id the plan released under (never a credential). */
+    session: z.string().min(1),
+    /** `METHOD /pathname` (query stripped). */
+    routeKey: z.string().min(1),
+    /** 1-based index of the request under its route key. */
+    k: z.number().int().min(1),
+    /** The planned release offset: a pure function of seed/session/route/k. */
+    plannedDelayMs: z.number().int().min(0),
+    /** Milliseconds the response was actually held back. */
+    delayMs: z.number().int().min(0),
+    /** True when the plan released this response before the previous one. */
+    releasedBefore: z.boolean(),
+  })
+  .strict();
+
 export const ExecutionResultSchema = z
   .object({
     schemaVersion: SchemaVersionField,
@@ -153,8 +184,13 @@ export const ExecutionResultSchema = z
       .object({
         /** Runner the selection executes under. */
         runner: z.string().min(1),
-        /** Selection mode; `full-relevant-suite` until narrower selection is proven safe. */
-        mode: z.enum(['full-relevant-suite', 'mapped-selection']),
+        /**
+         * Selection mode. `full-relevant-suite` is the whole relevant
+         * suite, `mapped-selection` a diff-linked slice, and
+         * `named-selection` a hand-picked `--test` list — which is only
+         * ever reported (`--result-only`), never sealed into a receipt.
+         */
+        mode: z.enum(['full-relevant-suite', 'mapped-selection', 'named-selection']),
         /** Exact logical keys the run was expected to cover (sorted). */
         logicalKeys: z.array(z.string().min(1)),
       })
@@ -211,6 +247,26 @@ export const ExecutionResultSchema = z
     browsers: z.record(z.string().min(1), z.string()),
     /** 64-hex domain-separated environment identity (node/platform/arch/engines). */
     environmentIdentity: z.string().regex(HEX64, 'environmentIdentity must be 64-char lowercase hex'),
+    /**
+     * Timing chaos (E63): the seeded release plan this run executed
+     * under, plus the schedule the proxy actually used. Additive and
+     * optional, so every run without `--chaos` stays byte-identical.
+     * A chaos run is a FINDING tool: it never seals a receipt, so this
+     * label explains a red run instead of authorizing anything.
+     */
+    chaos: z
+      .object({
+        /** The `--chaos <seed>` the owner replayed. */
+        seed: z.number().int().min(0),
+        /** Upper bound of every applied delay, in whole milliseconds. */
+        maxDelayMs: z.number().int().min(0),
+        /** Whether a later response may be released before an earlier one. */
+        reorder: z.boolean(),
+        /** Per-response release decisions (method + pathname, k, delay). */
+        schedule: z.array(ChaosScheduleEntrySchema),
+      })
+      .strict()
+      .optional(),
     /** Run start instant (ISO-8601). */
     startedAt: z.string().datetime(),
     /** Run end instant (ISO-8601). */
@@ -271,7 +327,7 @@ export function executionResultDigestOf(result: ExecutionResult): string {
  */
 export function selectionDigestOf(selection: {
   runner: string;
-  mode: 'full-relevant-suite' | 'mapped-selection';
+  mode: 'full-relevant-suite' | 'mapped-selection' | 'named-selection';
   logicalKeys: readonly string[];
 }): string {
   return sha256Canonical({

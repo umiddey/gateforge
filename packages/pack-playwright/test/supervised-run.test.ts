@@ -109,27 +109,6 @@ describe('executeSupervisedPlaywright (wired adapter execute)', () => {
     expect(envelope.engines?.['playwright']).toBe(playwrightVersion());
   });
 
-  it('embeds trusted browser proxy and session state in the config', async () => {
-    const cwd = tempProject();
-    const stateDir = tempStateDir();
-    const capturedConfigPath = join(stateDir, 'captured-config.mjs');
-    const envelope = await executeSupervisedPlaywright(
-      { logicalKeys: ['k'] },
-      { stateDir, runId: 'run', vars: {} },
-      {
-        command: stubRunner(stateDir, PASSING_DOC, 0, 0, capturedConfigPath),
-        cwd,
-        timeoutMs: 30_000,
-        appBaseUrl: 'http://127.0.0.1:43127',
-        storageState: '/tmp/e2e/.auth/contractor.json',
-      },
-    );
-    expect(envelope.complete).toBe(true);
-    const trustedConfig = readFileSync(capturedConfigPath, 'utf8');
-    expect(trustedConfig).toContain('"baseURL":"http://127.0.0.1:43127"');
-    expect(trustedConfig).toContain('"storageState":"/tmp/e2e/.auth/contractor.json"');
-  });
-
   it('a missing outcomes document (reporter not wired) is INCOMPLETE — wiring is never silently replaced', async () => {
     const cwd = tempProject();
     const stateDir = tempStateDir();

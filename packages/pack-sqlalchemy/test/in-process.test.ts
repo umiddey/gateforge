@@ -11,13 +11,15 @@
  * the project config" surface).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, copyFileSync, cpSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { DetectorOutputSchema, type Resource } from '@gate-forge/core';
+import { fileURLToPath } from 'node:url';
 import defaultPack, {
   byTableName,
   createSqlalchemyDetector,
+  pythonEnvironment,
 } from '../src/index.js';
 import { ALL_FIXTURES, FIXTURE_ROOT, runDiscover } from './helpers.js';
 
@@ -114,6 +116,33 @@ describe('in-process transport (default export)', () => {
     );
     expect(account?.attributes['plane']).toBeUndefined();
   }, 60_000);
+  it('does not write bytecode while launching the detector', async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'gateforge-sqlalchemy-bytecode-'));
+    const packageCopy = join(tempRoot, 'gateforge_sqlalchemy_detector');
+    const protocolCopy = join(tempRoot, 'gateforge_plugin');
+    const previousBytecodeSetting = process.env['PYTHONDONTWRITEBYTECODE'];
+    delete process.env['PYTHONDONTWRITEBYTECODE'];
+    try {
+      cpSync(fileURLToPath(new URL('../python/gateforge_sqlalchemy_detector', import.meta.url)), packageCopy, {
+        recursive: true,
+        filter: (source) => !source.split(sep).includes('__pycache__') && !/\.(?:pyc|pyo)$/.test(source),
+      });
+      cpSync(fileURLToPath(new URL('../../plugin-protocol/python/gateforge_plugin', import.meta.url)), protocolCopy, {
+        recursive: true,
+        filter: (source) => !source.split(sep).includes('__pycache__') && !/\.(?:pyc|pyo)$/.test(source),
+      });
+      process.chdir(FIXTURE_ROOT);
+      const detector = createSqlalchemyDetector({ env: pythonEnvironment([tempRoot]) });
+      await detector.discover(['example_models.py']);
+      expect(existsSync(join(packageCopy, '__pycache__'))).toBe(false);
+      expect(existsSync(join(protocolCopy, '__pycache__'))).toBe(false);
+    } finally {
+      if (previousBytecodeSetting === undefined) delete process.env['PYTHONDONTWRITEBYTECODE'];
+      else process.env['PYTHONDONTWRITEBYTECODE'] = previousBytecodeSetting;
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('plane mapping (programmatic rules)', () => {

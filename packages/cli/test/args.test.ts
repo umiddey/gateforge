@@ -28,6 +28,11 @@ describe('parseArgs', () => {
     expect(() => stringFlag(parsed.options, 'tag')).toThrow(/may only be given once/);
   });
 
+  it('keeps every value of a flag repeated three or more times, even one containing a comma', () => {
+    const parsed = parseArgs(['--test', 'a', '--test', 'b, with comma', '--test', 'c', '--test', 'd']);
+    expect(parsed.options['test']).toEqual(['a', 'b, with comma', 'c', 'd']);
+  });
+
   it('rejects a missing flag value', () => {
     expect(() => parseArgs(['--format'])).toThrow(/requires a value/);
   });

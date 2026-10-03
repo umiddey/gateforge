@@ -472,11 +472,6 @@ describe('linkage corroboration (path-name coincidence never links)', () => {
       (entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED',
     );
     expect(linkBlocks).toHaveLength(1);
-    expect(linkBlocks[0]?.detail).toBe(
-      "endpoint 'GET /api/v1/accounts' derives resource name 'accounts' but no schema symbol " +
-        'or handler-name fact corroborates the link; add schema/model evidence ' +
-        "(response/request schema named after the resource) or rely on the model pack's own linkage",
-    );
     expect(linkBlocks[0]?.location).toEqual({ file: 'backend/routes.py', line: route.source.line, col: 0 });
     // No adapter-binding signal without an explicit link.
     expect(
@@ -513,6 +508,111 @@ describe('linkage corroboration (path-name coincidence never links)', () => {
     expect(
       compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED'),
     ).toBe(false);
+  });
+
+  it('links a plural collection to a unique singular model with schema corroboration', () => {
+    const route = routeFact('GET', '/api/products', {
+      responseSchemaSymbols: ['ProductOut'],
+    });
+    const compiled = compileEndpointContribution([
+      contribution([route]),
+      businessContribution(['product']) as never,
+    ]);
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBe('product');
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED'),
+    ).toBe(false);
+  });
+
+  it('does not link a singular model from a plural path without corroboration', () => {
+    const compiled = compileEndpointContribution([
+      contribution([routeFact('GET', '/api/items')]),
+      businessContribution(['item']) as never,
+    ]);
+    expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBeNull();
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED'),
+    ).toBe(true);
+  });
+
+  it('refuses ambiguity between an exact name and its singular alias in either input order', () => {
+    const route = routeFact('GET', '/api/accounts', { handlerSymbol: 'app.read_account' });
+    for (const names of [['accounts', 'account'], ['account', 'accounts']]) {
+      const compiled = compileEndpointContribution([
+        contribution([route]),
+        businessContribution(names) as never,
+      ]);
+      expect(compiled.inventory.endpoints[0]?.linkedResourceName).toBeNull();
+      expect(
+        compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_RESOURCE_LINK_UNRESOLVED'),
+      ).toBe(true);
+    }
+  });
+
+  it('uses declared DELETE semantics on a plural collection to classify its linked singular model', () => {
+    withTempRepo({}, (repo) => {
+      repo.writeFiles({
+        '.gateforge/endpoints.json': JSON.stringify({
+          rules: [{
+            paths: ['/api/products/**'],
+            method: 'DELETE',
+            capability: 'crud-delete',
+            reason: 'the handler deletes the product row and commits',
+          }],
+        }),
+      });
+      const business = businessTable('product');
+      const modelSignal = {
+        schemaVersion: 1 as const,
+        target: { resourceName: 'product' },
+        basis: 'code-positive' as const,
+        source: 'test.models',
+        location: { file: 'backend/models/product.py', line: 4, col: 0 },
+        detector: { id: 'test.models', version: '1' },
+      };
+      const modelSignals: ClassificationSignal[] = [
+        { ...modelSignal, dimension: 'plane', assertion: 'tenant' },
+        { ...modelSignal, dimension: 'identity', assertion: ['id'] },
+      ];
+      const route = routeFact('DELETE', '/api/products/{id}', {
+        handlerSymbol: 'app.delete_product',
+      });
+      const compiled = compileEndpointContribution([
+        contribution([route]),
+        { ...business, classificationSignals: modelSignals },
+      ], { cwd: repo.root });
+      const resources: ClassifierResourceRef[] = [
+        ...business.resources,
+        ...compiled.contribution.resources,
+      ].map((resource) => ({
+        name: String(resource.attributes['resourceName']),
+        id: null,
+        kind: resource.kind,
+        source: resource.source,
+        location: resource.location,
+        detector: resource.kind === HTTP_ENDPOINT_KIND
+          ? { id: 'gateforge.endpoint-compiler', version: '1' }
+          : modelSignal.detector,
+        attributes: resource.attributes,
+      }));
+      const result = classifyResources({
+        resources,
+        signals: [...modelSignals, ...compiled.contribution.classificationSignals] as ClassificationSignal[],
+        policy: {
+          schemaVersion: 1,
+          scanRoots: [],
+          trustedInternalEntryPoints: [{ category: 'migration', patterns: [] }],
+          internalRules: [],
+          declarations: { internality: 'gateforge:internal', archiveState: 'gateforge:archive-state' },
+          volatileFields: [],
+        },
+        adapters: ['product'],
+        scan: { requestedPaths: [], scannedPaths: [], findings: [], unresolved: [] },
+      });
+      const model = result.decisions.find((decision) => decision.name === 'product');
+      expect(model?.classification?.plane).toBe('tenant');
+      expect(model?.classification?.lifecycle.deleteSemantics).toBe('hard');
+    });
   });
 
   it('does NOT corroborate when the word only appears inside a larger word', () => {

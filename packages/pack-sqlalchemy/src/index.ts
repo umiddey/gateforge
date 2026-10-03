@@ -53,6 +53,16 @@ export {
   type SqlalchemyPlane,
 } from './planes.js';
 export {
+  applySingletonTags,
+  singletonTagFor,
+  TENANT_SCOPE_COLUMNS,
+  type SingletonPerTenantFact,
+} from './singleton.js';
+export {
+  readTenancyScopeColumnsOrNull,
+  CONFIG_PATH as TENANCY_CONFIG_PATH,
+} from './tenancy.js';
+export {
   EntityAdapterSchema,
   validateEntityAdapter,
   type EntityAdapter,

@@ -7,7 +7,7 @@
  * integrity check, failure-after-evidence blocking a later check, and
  * exact cache reuse on identical authenticated inputs only.
  */
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -33,6 +33,28 @@ import {
   runCli,
   withTempRepo,
 } from './helpers.js';
+
+/**
+ * Reads every regular file under run state, including nested cache entries.
+ *
+ * Args:
+ *   directory: absolute run-state directory to inspect.
+ *
+ * Returns:
+ *   string: concatenated text contents of all regular files.
+ */
+function readStateText(directory: string): string {
+  return readdirSync(directory, { withFileTypes: true })
+    .map((entry) => {
+      const path = join(directory, entry.name);
+      return entry.isDirectory()
+        ? readStateText(path)
+        : entry.isFile()
+          ? readFileSync(path, 'utf8')
+          : '';
+    })
+    .join('\n');
+}
 import {
   trustedPolicyDigestForConfig,
   issueGateReceipt,
@@ -42,15 +64,16 @@ import {
 import { loadReceiptFor, receiptGateBlocking, tryReuseReceipt } from '../src/receipts.js';
 import { testReceiptV2Bindings } from './gate-receipts.js';
 import { executedBehaviorCaseDigest } from '../src/commands/test-gates.js';
-import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js';
+import { computeCandidateTreeSnapshot, resolveGitDir } from '../src/candidate-tree.js';
 import {
   clearGateReceipt,
   readStateDocument,
   resolveStateDir,
+  writeCandidateTreeEntries,
   writeExecutionResult,
   writeGateReceipt,
 } from '../src/state.js';
-import { VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
+import { VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV, VERSION } from '../src/commands/common.js';
 import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 
 const KEY = 'e2e-receipt-verifier-key';
@@ -164,14 +187,20 @@ const EMPTY_CATALOG: TestCatalog = {
 async function sealGreenRun(
   repo: TempRepo,
   inputDigest: string,
-  options: { verifierKey?: string; verifierKeyId?: string; claimInventory?: readonly Claim[] } = {},
+  options: {
+    verifierKey?: string;
+    verifierKeyId?: string;
+    claimInventory?: readonly Claim[];
+    engine?: { version: string; source: string; unpublished: boolean };
+  } = {},
 ): Promise<string> {
   const config = loadConfig(join(repo.root, '.gateforge.yml'));
   const stateDir = resolveStateDir(repo.root);
   const trustedPolicyDigest = trustedPolicyDigestForConfig(repo.root, config);
   const gitDir = resolveGitDir(repo.root, process.env);
-  const candidateTreeId =
-    gitDir === null ? null : computeCandidateTreeId(gitDir, repo.root, process.env, stateDir, 'record');
+  const treeSnapshot =
+    gitDir === null ? null : computeCandidateTreeSnapshot(gitDir, repo.root, process.env, stateDir, 'record');
+  const candidateTreeId = treeSnapshot?.treeId ?? null;
   const plannedRows = [plannedRow()];
   const sealed = sealExecutionResult({
     runId: RUN_ID,
@@ -213,12 +242,14 @@ async function sealGreenRun(
     executionResultDigest: sealed.digest,
     evidenceAttestationDigest: null,
     ...testReceiptV2Bindings(trustedPolicyDigest),
+    ...(options.engine === undefined ? {} : { engine: options.engine }),
     candidateTreeId,
     targetArtifactDigest: targetArtifactDigestOf(candidateTreeId),
     verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
     issuedAt: FIXED_AT,
-  });
+  } as Parameters<typeof issueGateReceipt>[0]);
   writeGateReceipt(stateDir, receipt);
+  writeCandidateTreeEntries(stateDir, treeSnapshot?.entries ?? []);
   return receipt.receiptId;
 }
 
@@ -316,6 +347,21 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
     });
   });
 
+  it('the missing-receipt block names the run command and never appends the read-only discover fallback', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      const line = result.stdout.split('\n').find((row) => row.includes('no gate receipt exists'));
+      expect(line, `stdout:\n${result.stdout}`).toBeDefined();
+      // The copyable command that actually closes this block is the last
+      // thing on the line: `discover --json` is read-only and would send
+      // the user in a terminal loop.
+      expect(line).toContain('Run `gateforge test-gates --changed`. [RUN_INCOMPLETE]');
+      expect(line).not.toContain('discover --json');
+    });
+  });
+
   it('a valid complete receipt for the current input digest passes require-e2e', async () => {
     await withTempRepo({}, async (repo) => {
       installReceiptFixture(repo);
@@ -325,6 +371,19 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
       expect(result.code).toBe(0);
       expect(result.stdout).not.toMatch(/EVIDENCE_STALE|RUN_INCOMPLETE|ENFORCEMENT_UNTRUSTED/);
       expect(receiptId).toMatch(/^[0-9a-f-]{36}$/);
+    });
+  });
+  it('blocks a validly signed receipt sealed by a different engine version', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest, {
+        engine: { version: '0.0.0', source: 'registry', unpublished: false },
+      });
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain("receipt engine version '0.0.0' differs from installed version");
+      expect(result.stdout).toContain('ENFORCEMENT_UNTRUSTED');
     });
   });
   it('uses only claim inventory sealed for the current input digest', async () => {
@@ -395,9 +454,7 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
           expect(`${verified.stdout}\n${verified.stderr}`).not.toContain(keyFile);
         }
         const stateDir = resolveStateDir(repo.root);
-        const stateText = readdirSync(stateDir)
-          .map((name) => readFileSync(join(stateDir, name)))
-          .join('\n');
+        const stateText = readStateText(stateDir);
         expect(stateText).not.toContain(KEY);
         expect(stateText).not.toContain(keyFile);
 
@@ -445,6 +502,136 @@ describe('check --require-e2e: the receipt gate (E07/E13)', () => {
     });
   });
 
+  it('an engine upgrade refusal names the re-seal command and both engine versions', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      const digestBefore = await currentInputDigest(repo);
+      await sealGreenRun(repo, digestBefore, {
+        engine: { version: '0.7.1', source: 'registry', unpublished: false },
+      });
+      // A new engine derives the gate inputs again, so the sealed run is
+      // stale for the current engine (fail closed).
+      repo.writeFiles({ 'ignored-after-seal.env': 'changed after the witnessed run\n' });
+
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      const stale = result.stdout
+        .split('\n')
+        .find((line) => line.includes('[EVIDENCE_STALE]')) as string;
+      expect(stale, result.stdout).toContain(
+        `this receipt was sealed by Gateforge 0.7.1 and this engine is ${VERSION}`,
+      );
+      expect(stale, result.stdout).toContain('Run `gateforge test-gates --changed`. [EVIDENCE_STALE]');
+      expect(stale, result.stdout).not.toContain('discover --json');
+      expect(stale, result.stdout).not.toContain('..');
+    });
+  });
+
+  it('a missing attestation envelope names the re-seal command, never the discover dump', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      const stateDir = resolveStateDir(repo.root);
+      const identity = {
+        runId: RUN_ID,
+        obligationId: 'tenant.accounts',
+        kind: 'http:effect-verified',
+        testId: 'e2e/accounts.spec.ts::deletes an account',
+        origin: 'engine-observed' as const,
+        payload: { status: 204 },
+      };
+      repo.writeFiles({
+        '.gateforge/test-gates/records.json': `${JSON.stringify([
+          { schemaVersion: 1, recordId: recordIdOf(identity), trust: 'witnessed', ...identity },
+        ])}\n`,
+      });
+      expect(existsSync(join(stateDir, 'manifest.json'))).toBe(false);
+
+      const result = await runCli(repo, ['check', '--format', 'json'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      const report = JSON.parse(result.stdout) as { blocking: Array<{ detail?: string; message?: string }> };
+      const missing = report.blocking.find((entry) =>
+        (entry.detail ?? '').includes('no evidence attestation envelope found'),
+      );
+      expect(missing, result.stdout).toBeDefined();
+      expect(missing?.message, result.stdout).toContain('Run `gateforge test-gates --changed`');
+      expect(missing?.message, result.stdout).not.toContain('discover --json');
+      expect(missing?.message, result.stdout).not.toContain('..');
+    });
+  });
+
+  it('names a changed gitignored path after a receipt is sealed', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      repo.writeFiles({
+        '.gitignore': 'ignored-after-seal.env\n',
+        'ignored-after-seal.env': 'before the witnessed run\n',
+      });
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest);
+      repo.writeFiles({ 'ignored-after-seal.env': 'changed after the witnessed run\n' });
+
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('changed "ignored-after-seal.env"');
+      expect(result.stdout).toContain('ignored by git but part of the tested tree');
+      expect(result.stdout).toContain('these paths changed after the run was sealed');
+    });
+  });
+
+  it('still names post-seal changes when the edit lands in the same filesystem timestamp tick as the seal', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      repo.writeFiles({
+        '.gitignore': 'ignored-after-seal.env\n',
+        'ignored-after-seal.env': 'before the witnessed run\n',
+      });
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest);
+      repo.writeFiles({ 'ignored-after-seal.env': 'changed after the witnessed run\n' });
+      // Coarse filesystem clocks give the seal and a quick follow-up edit
+      // the SAME mtime; pin both to one whole second to make that exact.
+      const sameTick = Math.floor(statSync(repo.path('.gateforge/test-gates/receipt.json')).mtimeMs / 1000);
+      utimesSync(repo.path('.gateforge/test-gates/receipt.json'), sameTick, sameTick);
+      utimesSync(repo.path('ignored-after-seal.env'), sameTick, sameTick);
+
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('these paths changed after the run was sealed');
+    });
+  });
+
+  it('suggests docs exclusions when documentation alone changed after a run', async () => {
+    await withTempRepo({}, async (repo) => {
+      installReceiptFixture(repo);
+      repo.writeFiles({
+        '.gitignore': 'docs/guide.md\n',
+        'docs/guide.md': 'before the witnessed run\n',
+      });
+      const digest = await currentInputDigest(repo);
+      await sealGreenRun(repo, digest);
+      repo.writeFiles({ 'docs/guide.md': 'changed after the witnessed run\n' });
+
+      const result = await runCli(repo, ['check', '--require-e2e'], { [VERIFIER_KEY_ENV]: KEY });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain(
+        'Only documentation paths changed; if these are approved documentation folders, run `gateforge init --docs-exclude <folders>`.',
+      );
+    });
+  });
+
+  it('reports an unreadable durable attestation with its owner instead of treating it as absent', async () => {
+    await withTempRepo({}, async (repo) => {
+      const stateDir = resolveStateDir(repo.root);
+      mkdirSync(stateDir, { recursive: true });
+      const manifestPath = join(stateDir, 'manifest.json');
+      writeFileSync(manifestPath, '{"attestation":"signed"}\n', { mode: 0o000 });
+      chmodSync(manifestPath, 0o000);
+
+      expect(() => readStateDocument(stateDir, 'manifest.json')).toThrow(
+        /state file exists at .*not readable by uid \d+ \(owner uid \d+\).*fix ownership/,
+      );
+    });
+  });
   it('a forged mac is a typed ENFORCEMENT_UNTRUSTED rejection', async () => {
     await withTempRepo({}, async (repo) => {
       installReceiptFixture(repo);

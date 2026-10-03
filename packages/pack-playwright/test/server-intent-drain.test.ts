@@ -123,11 +123,15 @@ describe('supervisor drain forwards persistence intents (server-witnessed channe
     try {
       const [pre, post] = createIntents() as [PersistenceIntent, PersistenceIntent];
       appendPersistenceIntent(intentsFile, pre);
-      // TIMING CONTRACT: pre intents are observed at the drain's next
-      // poll, so the suite allows one drain tick before mutating (a
-      // mutation racing the probe would honestly grade absent-before
-      // false and fail closed — this wait keeps the honest run green).
-      await new Promise((resolveSleep) => setTimeout(resolveSleep, 120));
+      // TIMING CONTRACT: the mutation must not race the pre-probe. The
+      // fact to wait for is the drain's own forward progress — once the
+      // witness has ANSWERED the pre intent, its server-side probe has
+      // already read the target, so the create below is honestly graded
+      // absent-before. A fixed sleep only guesses at the poll cadence
+      // and fails under load; this observable cannot lie, and it is not
+      // reachable by the runner-side suite (the child only appends to
+      // the spool and can neither observe nor assert this count).
+      await drain.whenIntentsForwarded(1);
       await fixture.createAccount();
       // The post intent follows the mutation, exactly as a real suite
       // writes it after its app-side operation completes.
@@ -171,8 +175,10 @@ describe('supervisor drain forwards persistence intents (server-witnessed channe
       });
       const [pre, post] = createIntents() as [PersistenceIntent, PersistenceIntent];
       appendPersistenceIntent(persistenceIntentsPathFor(fixture.stateDir, fixture.runId), pre);
-      // One drain tick so the pre intent is observed before the mutation.
-      await new Promise((resolveSleep) => setTimeout(resolveSleep, 120));
+      // The pre intent must be probed before the mutation; wait for the
+      // drain to forward it (see the timing contract above), never for a
+      // guessed number of ticks.
+      await drain.whenIntentsForwarded(1);
       await fixture.createAccount();
       appendPersistenceIntent(persistenceIntentsPathFor(fixture.stateDir, fixture.runId), post);
       const records = await waitForRecords(fixture.witness.url, 1);
@@ -276,6 +282,69 @@ describe('supervisor drain forwards persistence intents (server-witnessed channe
       expect(readFileSync(intentsFile, 'utf8')).toContain('this is not json');
       void SPOOL_DIR_NAME;
     } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('whenIntentsForwarded fails closed when the witness answers nothing', async () => {
+    const fixture = await startDrainFixture();
+    const drain = startSupervisorSpoolDrain({
+      stateDir: fixture.stateDir,
+      runId: fixture.runId,
+      witnessUrl: fixture.witness.url,
+      runToken: TOKEN,
+      verifierKey: VERIFIER_KEY,
+      pollMs: 10,
+      serverE2eObligations: [CREATE_CLAIM],
+    });
+    try {
+      // Nothing was ever written to the spool, so the witness can never
+      // have probed: the wait must reject instead of resolving on an
+      // unproven assumption (a false "the probe already ran" would let a
+      // caller mutate the target mid-probe).
+      await expect(drain.whenIntentsForwarded(1, 50)).rejects.toThrow(
+        /forwarded only 0 of 1 persistence intents/,
+      );
+    } finally {
+      await drain.stop();
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('whenIntentsForwarded(count) waits for the count, not just the next answer', async () => {
+    const fixture = await startDrainFixture();
+    const intentsFile = persistenceIntentsPathFor(fixture.stateDir, fixture.runId);
+    const drain = startSupervisorSpoolDrain({
+      stateDir: fixture.stateDir,
+      runId: fixture.runId,
+      witnessUrl: fixture.witness.url,
+      runToken: TOKEN,
+      verifierKey: VERIFIER_KEY,
+      pollMs: 10,
+      serverE2eObligations: [CREATE_CLAIM],
+    });
+    try {
+      const [pre, post] = createIntents() as [PersistenceIntent, PersistenceIntent];
+      appendPersistenceIntent(intentsFile, pre);
+      // Park a wait for TWO answered intents, then let exactly ONE land.
+      const both = drain.whenIntentsForwarded(2, 5_000);
+      let bothResolved = false;
+      void both.then(() => {
+        bothResolved = true;
+      });
+      await drain.whenIntentsForwarded(1);
+      // A single answer is not the count the caller asked for. The
+      // `await` above has already drained the microtask queue, so a
+      // spurious resolution of `both` is observable here without
+      // waiting on a timer.
+      expect(bothResolved).toBe(false);
+      appendPersistenceIntent(intentsFile, post);
+      await both;
+      expect(bothResolved).toBe(true);
+    } finally {
+      await drain.stop();
       await fixture.witness.stop();
       await fixture.target.stop();
     }

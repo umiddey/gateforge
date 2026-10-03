@@ -10,10 +10,11 @@
  *
  * - walks the workspace with the process filesystem (never `git add`,
  *   `git checkout`, `git diff`, or any hook-running porcelain);
- * - hashes each regular file with `git hash-object -w --stdin` (no
- *   `--path`, so no clean/smudge filter can apply) into the AUTHORITY
- *   object store selected by an explicit `--git-dir`;
- * - builds the tree with `git mktree -z` from NUL-delimited records;
+ * - hashes each regular file and builds every tree object IN PROCESS
+   (SHA-1 over Git's documented `blob <len>\0<bytes>` / `tree <len>\0
+   <entries>` framing) and stores the result as an ordinary loose
+   object in the AUTHORITY object store selected by an explicit
+   `--git-dir` — byte-identical ids, no per-file process spawn;
  * - runs every Git child with a sanitized environment (ambient
  *   `GIT_WORK_TREE`/`GIT_INDEX_FILE`/`GIT_DIR`/object-directory/config
  *   overrides stripped) plus `--no-replace-objects`;
@@ -26,7 +27,8 @@
  */
 import { lstatSync, opendirSync, readFileSync, readlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { LooseObjectWriter, serializeTreePayload, sortTreeEntries } from './git-objects.js';
+import { isAbsolute, join } from 'node:path';
 import { UsageError } from './errors.js';
 import {
   RuntimeReuseBoundaryError,
@@ -69,13 +71,22 @@ export function sanitizedAuthorityEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   return child;
 }
 
-interface TreeEntry {
+/** One included candidate-tree entry with its Git mode, blob id, and repo-relative path. */
+export interface CandidateTreeEntry {
   /** `100644` or `100755` (executability preserved, like `git add`). */
   mode: string;
   /** 40-char blob id. */
   sha: string;
   /** Repo-relative posix path. */
   path: string;
+}
+
+/** Candidate-tree id and the entries used to build it. */
+export interface CandidateTreeSnapshot {
+  /** 40-character immutable Git tree id. */
+  treeId: string;
+  /** Sorted file entries included in the tree. */
+  entries: CandidateTreeEntry[];
 }
 
 /**
@@ -122,25 +133,34 @@ function plumbing(
 }
 
 /**
- * Collects raw tree entries by walking `workspace` (excluding a root
- * `.git` entry and, when given, the run-state output directory — sealed
- * receipts and execution records are run OUTPUTS, never candidate inputs,
- * exactly as the input snapshot treats them). Rejects anything that is
- * not a regular file.
+ * Collects raw tree entries by walking the workspace, excluding run state
+ * and approved documentation/cache paths. Rejects anything that is not a
+ * regular file.
+ *
+ * Args:
+ *   writer: in-process loose-object writer for the authority object store.
+ *   workspace: absolute candidate root.
+ *   excludeDir: absolute run-state path, if any.
+ *   symlinks: reject or record symlink entries.
+ *   reuseMounts: explicitly approved runtime dependency mounts.
+ *   docsExclusions: approved documentation directories.
+ *   cacheExclusions: exact approved Python bytecode files.
+ *
+ * Returns:
+ *   CandidateTreeEntry[]: raw candidate entries after approved exclusions.
  *
  * Throws:
- *   UsageError: on unreadable directories (fail closed — a hole in the
- *   walk must never become a silent omission) or unsupported entries.
+ *   UsageError: unreadable directories or unsupported entries.
  */
 function collectEntries(
-  gitDir: string,
-  env: NodeJS.ProcessEnv,
+  writer: LooseObjectWriter,
   workspace: string,
   excludeDir: string | null,
   symlinks: 'reject' | 'record',
   reuseMounts: readonly RuntimeReuseMount[],
   docsExclusions: readonly string[],
-): TreeEntry[] {
+  cacheExclusions: readonly string[],
+): CandidateTreeEntry[] {
   // Repo-relative posix prefix of the excluded output tree (null = none).
   // Only a directory strictly INSIDE the workspace can be excluded; an
   // outside state dir excludes nothing (prefix never matches).
@@ -155,7 +175,8 @@ function collectEntries(
   }
   const excluded = (rel: string): boolean =>
     (excludePrefix !== null && (rel === excludePrefix || rel.startsWith(`${excludePrefix}/`))) ||
-    docsExclusions.some((folder) => rel === folder || rel.startsWith(`${folder}/`));
+    docsExclusions.some((folder) => rel === folder || rel.startsWith(`${folder}/`)) ||
+    cacheExclusions.includes(rel);
   const inspectExcludedDirectory = (directory: string, relativeDirectory: string): void => {
     let handle;
     try {
@@ -184,7 +205,7 @@ function collectEntries(
       handle.closeSync();
     }
   };
-  const entries: TreeEntry[] = [];
+  const entries: CandidateTreeEntry[] = [];
   const stack: Array<{ dir: string; rel: string }> = [{ dir: workspace, rel: '' }];
   while (stack.length > 0) {
     const current = stack.pop();
@@ -219,6 +240,12 @@ function collectEntries(
             `candidate tree ingestion: cannot inspect '${rel}': ${(error as Error).message}`,
           );
         }
+        if (cacheExclusions.includes(rel)) {
+          if (stat.isSymbolicLink() || !stat.isFile()) {
+            throw new UsageError(`candidate tree ingestion: approved Python bytecode exclusion '${rel}' is not a regular file (fail closed)`);
+          }
+          continue;
+        }
         if (docsExclusions.includes(rel)) {
           if (stat.isSymbolicLink() || !stat.isDirectory()) {
             throw new UsageError(`candidate tree ingestion: approved documentation exclusion '${rel}' is not a real directory (fail closed)`);
@@ -232,13 +259,13 @@ function collectEntries(
             // The external dependency bytes are bound by the reuse digest.
             // Keep only a stable marker here, never the absolute link target.
             const marker = `gateforge-runtime-reuse-mount:v1:${rel}`;
-            const hashed = plumbing(gitDir, env, ['hash-object', '-w', '--stdin'], Buffer.from(marker, 'utf8'));
-            if (hashed.status !== 0) {
-              throw new UsageError(`candidate tree ingestion: hash-object failed for runtime reuse mount '${rel}'`);
-            }
-            const mountSha = hashed.stdout.trim();
-            if (!TREE_PATTERN.test(mountSha)) {
-              throw new UsageError(`candidate tree ingestion: hash-object returned an unusable id for '${rel}'`);
+            let mountSha: string;
+            try {
+              mountSha = writer.write('blob', Buffer.from(marker, 'utf8'));
+            } catch (error) {
+              throw new UsageError(
+                `candidate tree ingestion: cannot store runtime reuse mount '${rel}': ${(error as Error).message}`,
+              );
             }
             entries.push({ mode: '120000', sha: mountSha, path: rel });
             continue;
@@ -259,13 +286,13 @@ function collectEntries(
               `candidate tree ingestion: cannot read symlink '${rel}': ${(error as Error).message}`,
             );
           }
-          const hashed = plumbing(gitDir, env, ['hash-object', '-w', '--stdin'], Buffer.from(target, 'utf8'));
-          if (hashed.status !== 0) {
-            throw new UsageError(`candidate tree ingestion: hash-object failed for '${rel}': ${hashed.stderr.trim()}`);
-          }
-          const linkSha = hashed.stdout.trim();
-          if (!TREE_PATTERN.test(linkSha)) {
-            throw new UsageError(`candidate tree ingestion: hash-object returned an unusable id for '${rel}'`);
+          let linkSha: string;
+          try {
+            linkSha = writer.write('blob', Buffer.from(target, 'utf8'));
+          } catch (error) {
+            throw new UsageError(
+              `candidate tree ingestion: cannot store symlink '${rel}': ${(error as Error).message}`,
+            );
           }
           entries.push({ mode: '120000', sha: linkSha, path: rel });
           continue;
@@ -287,13 +314,11 @@ function collectEntries(
             `candidate tree ingestion: cannot read '${rel}': ${(error as Error).message}`,
           );
         }
-        const hashed = plumbing(gitDir, env, ['hash-object', '-w', '--stdin'], bytes);
-        if (hashed.status !== 0) {
-          throw new UsageError(`candidate tree ingestion: hash-object failed for '${rel}': ${hashed.stderr.trim()}`);
-        }
-        const sha = hashed.stdout.trim();
-        if (!TREE_PATTERN.test(sha)) {
-          throw new UsageError(`candidate tree ingestion: hash-object returned an unusable id for '${rel}'`);
+        let sha: string;
+        try {
+          sha = writer.write('blob', bytes);
+        } catch (error) {
+          throw new UsageError(`candidate tree ingestion: cannot store '${rel}': ${(error as Error).message}`);
         }
         entries.push({
           mode: (stat.mode & 0o111) !== 0 ? '100755' : '100644',
@@ -310,27 +335,62 @@ function collectEntries(
 }
 
 /**
- * Builds one tree object from direct children (blobs + subtrees).
+ * Resolves the `objects` directory the authority object store writes to.
+ *
+ * Uses `rev-parse --git-path objects` with the same explicit `--git-dir`
+ * and sanitized environment as every other authority Git call, so a
+ * linked worktree resolves to its COMMON object store exactly like
+ * `git hash-object -w` did.
+ *
+ * Args:
+ *   gitDir: absolute git dir of the authority object store.
+ *   env: process environment, sanitized for child processes.
+ *
+ * Returns:
+ *   string: absolute path of the `objects` directory.
+ *
+ * Throws:
+ *   UsageError: when the store is not a usable Git object directory.
  */
-function buildLevel(
-  gitDir: string,
-  env: NodeJS.ProcessEnv,
+function resolveObjectsDir(gitDir: string, env: NodeJS.ProcessEnv): string {
+  const resolved = plumbing(gitDir, env, ['rev-parse', '--git-path', 'objects']);
+  const path = resolved.stdout.trim();
+  if (resolved.status !== 0 || path.length === 0) {
+    throw new UsageError(
+      `candidate tree ingestion: cannot resolve the object store: ${resolved.stderr.trim() || 'no output'}`,
+    );
+  }
+  return isAbsolute(path) ? path : join(gitDir, path);
+}
+
+/**
+ * Builds one tree object from direct children (blobs + subtrees) in
+ * process: the payload is assembled in Git's canonical tree order and
+ * stored as a loose object, so the id is the one `git mktree -z` would
+ * have produced for the same children.
+ *
+ * Args:
+ *   writer: in-process loose-object writer for the authority object store.
+ *   children: direct children with Git mode, 40-hex id, and name.
+ *
+ * Returns:
+ *   string: 40-character Git tree id.
+ *
+ * Throws:
+ *   UsageError: when the tree object cannot be stored.
+ */
+function buildTreeLevel(
+  writer: LooseObjectWriter,
   children: Array<{ mode: string; sha: string; name: string }>,
 ): string {
-  const sorted = [...children].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  const lines = sorted
-    .map((child) => {
-      const kind = child.mode === '040000' ? 'tree' : 'blob';
-      return `${child.mode} ${kind} ${child.sha}\t${child.name}\0`;
-    })
-    .join('');
-  const built = plumbing(gitDir, env, ['mktree', '-z'], Buffer.from(lines, 'utf8'));
-  if (built.status !== 0) {
-    throw new UsageError(`candidate tree ingestion: mktree failed: ${built.stderr.trim()}`);
+  let treeId: string;
+  try {
+    treeId = writer.write('tree', serializeTreePayload(sortTreeEntries(children)));
+  } catch (error) {
+    throw new UsageError(`candidate tree ingestion: cannot store tree object: ${(error as Error).message}`);
   }
-  const treeId = built.stdout.trim();
   if (!TREE_PATTERN.test(treeId)) {
-    throw new UsageError('candidate tree ingestion: mktree returned an unusable tree id');
+    throw new UsageError('candidate tree ingestion: built an unusable tree id');
   }
   return treeId;
 }
@@ -339,22 +399,17 @@ function buildLevel(
  * Computes the immutable tree id of a workspace candidate from raw bytes.
  *
  * Args:
- *   gitDir: absolute git dir of the AUTHORITY object store the tree is
- *   pinned into (resolved with {@link resolveGitDir}).
- *   workspace: absolute workspace path (the candidate bytes).
- *   env: process environment (sanitized for every child).
- *   excludeDir: absolute run-state output directory excluded from the
- *   tree (receipts and execution records are outputs, never inputs;
- *   null/omitted excludes nothing).
- *   symlinks: 'reject' (authority ingestion — symlink candidates cannot
- *   be verified) or 'record' (controller sealing — faithful git semantics:
- *   symlinks become 120000 blobs of the target string, never followed).
+ *   gitDir: absolute git dir of the authority object store.
+ *   workspace: absolute workspace path.
+ *   env: process environment, sanitized for child processes.
+ *   excludeDir: optional run-state output directory excluded from the tree.
+ *   symlinks: whether to reject or record symlink entries.
+ *   reuseMounts: approved runtime dependency mounts.
+ *   docsExclusions: owner-approved documentation folders to omit.
+ *   cacheExclusions: exact owner-approved Python bytecode files to omit.
  *
  * Returns:
- *   string: 40-char hex tree id pinned in the authority store.
- *
- * Throws:
- *   UsageError: on plumbing failures or unsupported entries (fail closed).
+ *   string: 40-character Git tree id.
  */
 export function computeCandidateTreeId(
   gitDir: string,
@@ -364,7 +419,199 @@ export function computeCandidateTreeId(
   symlinks: 'reject' | 'record' = 'reject',
   reuseMounts: readonly RuntimeReuseMount[] = [],
   docsExclusions: readonly string[] = [],
+  cacheExclusions: readonly string[] = [],
 ): string {
+  return computeCandidateTree(
+    gitDir,
+    workspace,
+    env,
+    excludeDir ?? null,
+    symlinks,
+    reuseMounts,
+    docsExclusions,
+    cacheExclusions,
+    false,
+  );
+}
+
+/**
+ * Computes the immutable tree id and returns the entries from that same walk.
+ *
+ * Args:
+ *   gitDir: absolute git dir of the authority object store.
+ *   workspace: absolute workspace path.
+ *   env: process environment, sanitized for child processes.
+ *   excludeDir: optional run-state output directory excluded from the tree.
+ *   symlinks: whether to reject or record symlink entries.
+ *   reuseMounts: approved runtime dependency mounts.
+ *   docsExclusions: owner-approved documentation folders to omit.
+ *   cacheExclusions: exact owner-approved Python bytecode files to omit.
+ *
+ * Returns:
+ *   CandidateTreeSnapshot: tree id and the sorted entries used to build it.
+ */
+export function computeCandidateTreeSnapshot(
+  gitDir: string,
+  workspace: string,
+  env: NodeJS.ProcessEnv,
+  excludeDir?: string | null,
+  symlinks: 'reject' | 'record' = 'reject',
+  reuseMounts: readonly RuntimeReuseMount[] = [],
+  docsExclusions: readonly string[] = [],
+  cacheExclusions: readonly string[] = [],
+): CandidateTreeSnapshot {
+  return computeCandidateTree(
+    gitDir,
+    workspace,
+    env,
+    excludeDir ?? null,
+    symlinks,
+    reuseMounts,
+    docsExclusions,
+    cacheExclusions,
+    true,
+  );
+}
+
+/**
+ * Tests whether a sealed candidate tree covers EXACTLY the committed
+ * content of a revision: every non-excluded committed path present
+ * with the same blob. A candidate tree also carries the workspace's
+ * untracked and gitignored bytes (that is what makes it a candidate),
+ * so equality with the commit tree is the wrong test — containment of
+ * the committed bytes is the property a re-seal actually relies on,
+ * and the re-seal then diffs the WHOLE parent tree, so any extra path
+ * is classified like any other changed path.
+ *
+ * Args:
+ *   gitDir: absolute git dir of the authority object store.
+ *   env: sanitized child-process environment.
+ *   treeId: the sealed candidate tree to test.
+ *   commitish: the revision whose content must be covered (`<sha>^{tree}`).
+ *   docsExclusions: approved documentation directories (never sealed).
+ *   cacheExclusions: exact approved Python bytecode files (never sealed).
+ *
+ * Returns:
+ *   boolean: true when every committed, non-excluded path is present
+ *   with the same mode and blob; false on any mismatch or unreadable
+ *   listing (fail closed).
+ */
+export function candidateTreeCoversCommit(
+  gitDir: string,
+  env: NodeJS.ProcessEnv,
+  treeId: string,
+  commitish: string,
+  docsExclusions: readonly string[] = [],
+  cacheExclusions: readonly string[] = [],
+): boolean {
+  const listed = (rev: string): Map<string, string> | null => {
+    const result = plumbing(gitDir, env, ['ls-tree', '-r', '-z', rev]);
+    if (result.status !== 0) return null;
+    const entries = new Map<string, string>();
+    for (const record of result.stdout.split('\0')) {
+      if (record.length === 0) continue;
+      const tab = record.indexOf('\t');
+      if (tab < 0) return null;
+      const [mode, , sha] = record.slice(0, tab).split(/\s+/);
+      const path = record.slice(tab + 1);
+      if (mode === undefined || sha === undefined) return null;
+      if (docsExclusions.some((folder) => path === folder || path.startsWith(`${folder}/`))) continue;
+      if (cacheExclusions.includes(path)) continue;
+      entries.set(path, `${mode} ${sha}`);
+    }
+    return entries;
+  };
+  const committed = listed(commitish);
+  const candidate = listed(treeId);
+  if (committed === null || candidate === null) return false;
+  for (const [path, identity] of committed) {
+    if (candidate.get(path) !== identity) return false;
+  }
+  return true;
+}
+
+/**
+ * Lists every path Git TRACKS in the work tree, as repo-relative posix
+ * paths.
+ *
+ * A native preparation stage may legitimately create or modify a
+ * GENERATED artifact, never a tracked byte: the standard auth pattern's
+ * `playwright/.auth/user.json` is normally untracked (and ignored), while
+ * a repository that COMMITS a fixture session is shipping source, not
+ * output. Reading this set is how the freeze tells those two apart
+ * without ever asking the candidate which bytes it owns.
+ *
+ * @param gitDir: absolute git dir of the authority object store.
+ * @param env: sanitized child-process environment.
+ *
+ * @returns
+ *   Set<string> | null: the tracked paths, or null when the listing could
+ *   not be read (fail closed — the caller treats null as "nothing is
+ *   eligible", never as "everything is").
+ */
+export function listTrackedPaths(gitDir: string, env: NodeJS.ProcessEnv): Set<string> | null {
+  const result = plumbing(gitDir, env, ['ls-files', '-z']);
+  if (result.status !== 0) return null;
+  const tracked = new Set<string>();
+  for (const record of result.stdout.split('\0')) {
+    if (record.length > 0) tracked.add(record);
+  }
+  return tracked;
+}
+
+/**
+ * Builds the candidate tree and avoids the snapshot allocation for id-only callers.
+ *
+ * Args:
+ *   gitDir: absolute git dir of the authority object store.
+ *   workspace: absolute workspace path.
+ *   env: process environment, sanitized for child processes.
+ *   excludeDir: optional run-state output directory excluded from the tree.
+ *   symlinks: whether to reject or record symlink entries.
+ *   reuseMounts: approved runtime dependency mounts.
+ *   docsExclusions: owner-approved documentation folders to omit.
+ *   cacheExclusions: exact approved Python bytecode files to omit.
+ *   includeEntries: whether to return the entries used by the tree walk.
+ *
+ * Returns:
+ *   string | CandidateTreeSnapshot: tree id, with entries when requested.
+ *
+ * Throws:
+ *   UsageError: on plumbing failures or unsupported entries (fail closed).
+ */
+function computeCandidateTree(
+  gitDir: string,
+  workspace: string,
+  env: NodeJS.ProcessEnv,
+  excludeDir: string | null,
+  symlinks: 'reject' | 'record',
+  reuseMounts: readonly RuntimeReuseMount[],
+  docsExclusions: readonly string[],
+  cacheExclusions: readonly string[],
+  includeEntries: false,
+): string;
+function computeCandidateTree(
+  gitDir: string,
+  workspace: string,
+  env: NodeJS.ProcessEnv,
+  excludeDir: string | null,
+  symlinks: 'reject' | 'record',
+  reuseMounts: readonly RuntimeReuseMount[],
+  docsExclusions: readonly string[],
+  cacheExclusions: readonly string[],
+  includeEntries: true,
+): CandidateTreeSnapshot;
+function computeCandidateTree(
+  gitDir: string,
+  workspace: string,
+  env: NodeJS.ProcessEnv,
+  excludeDir: string | null,
+  symlinks: 'reject' | 'record',
+  reuseMounts: readonly RuntimeReuseMount[],
+  docsExclusions: readonly string[],
+  cacheExclusions: readonly string[],
+  includeEntries: boolean,
+): string | CandidateTreeSnapshot {
   try {
     validateRuntimeReuseMounts(workspace, reuseMounts);
   } catch (error) {
@@ -374,10 +621,45 @@ export function computeCandidateTreeId(
         : `candidate tree ingestion: runtime reuse boundary validation failed`,
     );
   }
-  const entries = collectEntries(gitDir, env, workspace, excludeDir ?? null, symlinks, reuseMounts, docsExclusions);
+  const writer = new LooseObjectWriter(resolveObjectsDir(gitDir, env));
+  const entries = collectEntries(
+    writer,
+    workspace,
+    excludeDir,
+    symlinks,
+    reuseMounts,
+    docsExclusions,
+    cacheExclusions,
+  );
+  const treeId = buildTreeFromEntries(writer, gitDir, env, entries);
+  return includeEntries ? { treeId, entries } : treeId;
+}
+
+/**
+ * Assembles the root tree object from flat candidate entries, building
+ * every subtree before the parent that references it.
+ *
+ * Args:
+ *   writer: in-process loose-object writer for the authority object store.
+ *   gitDir: authority object store the root tree is checked in.
+ *   env: sanitized child-process environment.
+ *   entries: candidate entries with mode, blob sha, and repo-relative path.
+ *
+ * Returns:
+ *   string: the 40-character root tree id.
+ *
+ * Throws:
+ *   UsageError: when a tree object cannot be written (fail closed).
+ */
+function buildTreeFromEntries(
+  writer: LooseObjectWriter,
+  gitDir: string,
+  env: NodeJS.ProcessEnv,
+  entries: readonly CandidateTreeEntry[],
+): string {
   // Group by parent directory; build deepest-first so every subtree id
   // exists before its parent references it (mimics `git write-tree`).
-  const filesByDir = new Map<string, TreeEntry[]>();
+  const filesByDir = new Map<string, CandidateTreeEntry[]>();
   const subdirsByDir = new Map<string, Set<string>>();
   const allDirs = new Set<string>(['']);
   for (const entry of entries) {
@@ -417,7 +699,7 @@ export function computeCandidateTreeId(
       }
       children.push({ mode: '040000', sha, name });
     }
-    treeByDir.set(dir, buildLevel(gitDir, env, children));
+    treeByDir.set(dir, buildTreeLevel(writer, children));
   }
   const treeId = treeByDir.get('') ?? '';
   if (!TREE_PATTERN.test(treeId)) {

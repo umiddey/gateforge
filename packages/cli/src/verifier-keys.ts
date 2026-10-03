@@ -7,6 +7,7 @@
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   fsyncSync,
   lstatSync,
@@ -18,8 +19,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { GateReceiptSchema, verifyGateReceipt } from '@gate-forge/core';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { GateReceiptSchema, RunRecordSchema, verifyGateReceipt, verifyRunRecord, type RunRecordVerification } from '@gate-forge/core';
 import { UsageError } from './errors.js';
 import { resolveGitDir } from './candidate-tree.js';
 import { resolveStateDir } from './state.js';
@@ -53,6 +55,11 @@ export type KeyringReceiptVerification =
   | ReturnType<typeof verifyGateReceipt>
   | { ok: false; rejection: 'key-unknown' | 'key-mismatch'; detail: string };
 
+/** Result of verifying a run record with a retained key ring. */
+export type KeyringRunRecordVerification =
+  | RunRecordVerification
+  | { ok: false; rejection: 'key-unknown' | 'key-mismatch'; detail: string };
+
 const KEY_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
 /** Returns the stable non-secret identifier used for an environment key. */
@@ -60,6 +67,18 @@ export function environmentVerifierKeyId(key: string): string {
   return `env-${createHash('sha256').update('gateforge.verifier-key-id.v1\0').update(key).digest('hex').slice(0, 24)}`;
 }
 
+/**
+ * Returns the default owner-managed key-ring path outside the repository.
+ *
+ * Args:
+ *   env: environment used to select XDG_CONFIG_HOME.
+ *
+ * Returns:
+ *   string: absolute path to the default key ring.
+ */
+export function defaultVerifierKeyringPath(env: NodeJS.ProcessEnv): string {
+  return join(env['XDG_CONFIG_HOME'] || join(homedir(), '.config'), 'gateforge', 'verifier-keyring.json');
+}
 /** Resolves the trusted key source and rejects any source inside candidate artifacts. */
 export function resolveVerifierKeyring(
   cwd: string,
@@ -67,8 +86,8 @@ export function resolveVerifierKeyring(
   additionalArtifactRoots: readonly string[] = [],
 ): VerifierKeyring | null {
   const environmentKey = env[VERIFIER_KEY_ENV];
-  const keyFile = env[VERIFIER_KEY_FILE_ENV];
-  if (typeof environmentKey === 'string' && environmentKey.length > 0 && typeof keyFile === 'string' && keyFile.length > 0) {
+  const configuredKeyFile = env[VERIFIER_KEY_FILE_ENV];
+  if (typeof environmentKey === 'string' && environmentKey.length > 0 && typeof configuredKeyFile === 'string' && configuredKeyFile.length > 0) {
     throw new UsageError(
       `set only one verifier-key source: ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV}`,
     );
@@ -77,7 +96,9 @@ export function resolveVerifierKeyring(
     const active = { keyId: environmentVerifierKeyId(environmentKey), key: environmentKey };
     return { active, keys: [active] };
   }
-  if (typeof keyFile !== 'string' || keyFile.length === 0) return null;
+  const defaultKeyFile = configuredKeyFile ?? defaultVerifierKeyringPath(env);
+  const keyFile = configuredKeyFile ?? (existsSync(defaultKeyFile) ? defaultKeyFile : undefined);
+  if (keyFile === undefined) return null;
 
   const path = resolve(cwd, keyFile);
   assertExternalVerifierKeyPath(cwd, path, env, additionalArtifactRoots);
@@ -119,7 +140,7 @@ export function assertExternalVerifierKeyPath(
   return absolutePath;
 }
 
-/** Verifies a receipt with the identified key or any retained key for older receipts. */
+/** Verifies the identified key, trusted key aliases, or retained keys for legacy receipts. */
 export function verifyGateReceiptWithKeyring(
   keyring: VerifierKeyring,
   candidate: unknown,
@@ -131,6 +152,10 @@ export function verifyGateReceiptWithKeyring(
   if (receiptKeyId !== undefined) {
     const selected = keyring.keys.find((entry) => entry.keyId === receiptKeyId);
     if (selected === undefined) {
+      for (const entry of keyring.keys) {
+        const result = verifyGateReceipt(entry.key, candidate, expected);
+        if (result.ok || result.rejection !== 'mac-fail') return result;
+      }
       return {
         ok: false,
         rejection: 'key-unknown',
@@ -143,7 +168,7 @@ export function verifyGateReceiptWithKeyring(
       : {
           ok: false,
           rejection: 'key-mismatch',
-          detail: `KEY_MISMATCH: verifier key '${receiptKeyId}' does not authenticate this receipt`,
+          detail: `KEY_MISMATCH: verifier key '${receiptKeyId}' does not authenticate this receipt (MAC check failed)`,
         };
   }
 
@@ -158,6 +183,64 @@ export function verifyGateReceiptWithKeyring(
     ok: false,
     rejection: 'key-mismatch',
     detail: `KEY_MISMATCH: no trusted verifier key authenticates this receipt${lastMacFailure === null ? '' : ' (MAC check failed)'}`,
+  };
+}
+
+/**
+ * Verifies a run record with the identified key, the trusted key
+ * aliases, or the retained keys for legacy records — the same key-ring
+ * discipline receipts get. A run record names the key that signed it,
+ * so a rotated key still authenticates an older record while an unknown
+ * key id is refused rather than probed.
+ *
+ * Args:
+ *   keyring: the consumer's own trusted key ring.
+ *   candidate: the parsed run-state document.
+ *
+ * Returns:
+ *   KeyringRunRecordVerification: the verified record or a typed reason.
+ */
+export function verifyRunRecordWithKeyring(
+  keyring: VerifierKeyring,
+  candidate: unknown,
+): KeyringRunRecordVerification {
+  const parsed = RunRecordSchema.safeParse(candidate);
+  if (!parsed.success) return verifyRunRecord(keyring.active.key, candidate);
+  const recordKeyId = parsed.data.verifierKeyId;
+  if (recordKeyId !== undefined) {
+    const selected = keyring.keys.find((entry) => entry.keyId === recordKeyId);
+    if (selected === undefined) {
+      for (const entry of keyring.keys) {
+        const result = verifyRunRecord(entry.key, candidate);
+        if (result.ok || result.rejection !== 'mac-fail') return result;
+      }
+      return {
+        ok: false,
+        rejection: 'key-unknown',
+        detail: `KEY_UNKNOWN: verifier key '${recordKeyId}' is not in the trusted key ring`,
+      };
+    }
+    const result = verifyRunRecord(selected.key, candidate);
+    return result.ok || result.rejection !== 'mac-fail'
+      ? result
+      : {
+          ok: false,
+          rejection: 'key-mismatch',
+          detail: `KEY_MISMATCH: verifier key '${recordKeyId}' does not authenticate this run record (MAC check failed)`,
+        };
+  }
+
+  let lastMacFailure: RunRecordVerification | null = null;
+  for (const entry of keyring.keys) {
+    const result = verifyRunRecord(entry.key, candidate);
+    if (result.ok) return result;
+    if (result.rejection === 'mac-fail') lastMacFailure = result;
+    else return result;
+  }
+  return {
+    ok: false,
+    rejection: 'key-mismatch',
+    detail: `KEY_MISMATCH: no trusted verifier key authenticates this run record${lastMacFailure === null ? '' : ' (MAC check failed)'}`,
   };
 }
 
@@ -285,6 +368,15 @@ function openSecureFile(path: string): number {
     return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     if (error instanceof UsageError) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EACCES' || code === 'EPERM') {
+      const info = lstatSync(path);
+      const currentUid = typeof process.getuid === 'function' ? process.getuid() : 'unknown';
+      throw new UsageError(
+        `verifier key exists at '${path}' but is not readable by uid ${String(currentUid)} ` +
+          `(owner uid ${String(info.uid)}) — rerun the suite as this user or fix ownership`,
+      );
+    }
     throw new UsageError(`cannot open verifier key file '${path}': ${(error as Error).message}`);
   }
 }
@@ -303,7 +395,10 @@ function assertSecureFileInfo(info: { isFile(): boolean; mode: number; uid: numb
   if (info.nlink !== 1) throw new UsageError(`verifier key file '${path}' must not have other hard links`);
   const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
   if (currentUid !== null && info.uid !== currentUid) {
-    throw new UsageError(`verifier key file '${path}' must be owned by the current user`);
+    throw new UsageError(
+      `verifier key exists at '${path}' but is not readable by uid ${String(currentUid)} ` +
+        `(owner uid ${String(info.uid)}) — rerun the suite as this user or fix ownership`,
+    );
   }
 }
 

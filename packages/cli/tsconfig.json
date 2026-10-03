@@ -7,7 +7,8 @@
     "paths": {
       "@gate-forge/core": ["../core/src/index.ts"],
       "@gate-forge/http-contract": ["../http-contract/src/index.ts"],
-      "@gate-forge/plugin-protocol": ["../plugin-protocol/src/index.ts"]
+      "@gate-forge/plugin-protocol": ["../plugin-protocol/src/index.ts"],
+      "@gate-forge/pack-alembic": ["../pack-alembic/src/index.ts"]
     }
   },
   "include": ["src", "test", "vitest.config.ts"]

@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfig, type GateforgeConfig } from '@gate-forge/core';
 import {
+  diffNativePlaywrightTests,
   collectPytestSuite,
   discoverTestCatalog,
   inferTestKind,
@@ -201,6 +202,7 @@ describe('static discovery', () => {
     // duplicate keys, crash) the catalog.
     expect(result.unresolved).toHaveLength(0);
     expect(result.entries.map((entry) => entry.title)).toEqual(['real test stays visible']);
+    expect(result.entries[0]?.facts.pageRouteTargets).toEqual(['**/api/**']);
   });
 
   it('merges duplicate unresolved rows (same file, same placeholder title) into one typed row', async () => {
@@ -334,6 +336,39 @@ describe('static discovery', () => {
     expect(result.entries.map((entry) => [entry.file, entry.title])).toEqual([
       ['e2e/aa.spec.ts', 'a'],
       ['e2e/zz.spec.ts', 'b'],
+    ]);
+  });
+  it('reports registration conditions that branch on GATEFORGE environment state', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/env.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "if (process.env.GATEFORGE_STATE_DIR) test('witness branch', () => {});",
+        '',
+      ].join('\n'),
+      'e2e/body.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "test('reads runner env at runtime', async () => {",
+        '  if (process.env.GATEFORGE_RUN_TOKEN) {}',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({
+      cwd: root,
+      include: ['e2e/**/*.ts'],
+      exclude: [],
+    });
+    const warnings =
+      'registrationWarnings' in result && Array.isArray(result.registrationWarnings)
+        ? result.registrationWarnings
+        : [];
+    expect(warnings).toEqual([
+      expect.objectContaining({
+        file: 'e2e/env.spec.ts',
+        titlePath: ['witness branch'],
+        environmentVariable: 'GATEFORGE_STATE_DIR',
+      }),
     ]);
   });
 });
@@ -663,6 +698,36 @@ describe('kind/category inference rules', () => {
 });
 
 describe('native playwright reconciliation', () => {
+  it('reports project-qualified tests that differ between scrubbed and wired registration', () => {
+    const base = {
+      file: 'e2e/accounts.spec.ts',
+      titlePath: ['accounts', 'creates an account'],
+      title: 'creates an account',
+      project: 'chromium',
+      frameworkId: 'spec-1#chromium',
+      location: { file: 'e2e/accounts.spec.ts', line: 1, col: 0 },
+      expectedStatus: 'passed',
+      annotations: [],
+      claims: [],
+    };
+    const wiredTwin = {
+      ...base,
+      titlePath: ['accounts', 'creates an account (unwired twin)'],
+      title: 'creates an account (unwired twin)',
+      frameworkId: 'spec-2#chromium',
+    };
+
+    const diff = diffNativePlaywrightTests([base], [base, wiredTwin]);
+
+    expect(diff.scrubbedOnly).toEqual([]);
+    expect(diff.wiredOnly).toMatchObject([
+      {
+        file: 'e2e/accounts.spec.ts',
+        titlePath: ['accounts', 'creates an account (unwired twin)'],
+        project: 'chromium',
+      },
+    ]);
+  });
   /** Builds a temp playwright project the engine's playwright can list. */
   function makePlaywrightProject(files: Record<string, string>): string {
     const root = makeTempDir('gateforge-pw-list-');
@@ -720,6 +785,7 @@ describe('native playwright reconciliation', () => {
     expect(result.status).toBe('unavailable');
     expect(result.detail).toContain('reconciliation: unavailable — no playwright config');
     expect(result.instances).toEqual([]);
+    expect(result.errors).toEqual([]);
   });
 
   it('fails typed when the invocation exceeds its timeout', async () => {
@@ -1164,6 +1230,23 @@ describe('pytest diagnostic adapter', () => {
       'backend/tests/test_a.py::TestG::test_two[p-1]',
       'backend/tests/test_a.py::test_one',
     ]);
+  });
+  it('collects pytest tests without writing Python bytecode into the repo', async () => {
+    const root = makeTempDir('gateforge-pytest-bytecode-');
+    writeTree(root, { 'backend/helper.py': 'VALUE = 1\n' });
+    const previousBytecodeSetting = process.env['PYTHONDONTWRITEBYTECODE'];
+    delete process.env['PYTHONDONTWRITEBYTECODE'];
+    try {
+      const suite = suiteConfig({
+        argv: ['python3', '-c', 'import backend.helper\nprint("tests/test_a.py::test_one")\n'],
+      });
+      const result = await collectPytestSuite(suite, root);
+      expect(result.status).toBe('discovered');
+      expect(existsSync(join(root, 'backend', '__pycache__'))).toBe(false);
+    } finally {
+      if (previousBytecodeSetting === undefined) delete process.env['PYTHONDONTWRITEBYTECODE'];
+      else process.env['PYTHONDONTWRITEBYTECODE'] = previousBytecodeSetting;
+    }
   });
 
   it('reports collection failure as unavailable with the error (exit 1)', async () => {

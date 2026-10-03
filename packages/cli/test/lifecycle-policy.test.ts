@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo } from '@gate-forge/core';
 import { runPipeline } from '../src/pipeline.js';
@@ -125,7 +125,7 @@ async function runFixture(repoRoot: string) {
 }
 
 describe('classification policy lifecycleRules pipeline', () => {
-  it('mints exact-resource policy disables and omits only those CRUD obligations', async () => {
+  it('mints exact-resource policy disables alongside detector derivations', async () => {
     await withTempRepo({}, async (repo) => {
       installBundledFixture(repo, lifecyclePolicy('accounting history is append-only'));
       repo.writeFiles({
@@ -137,37 +137,182 @@ describe('classification policy lifecycleRules pipeline', () => {
       const orders = pipeline.classification.decisions.find((entry) => entry.name === 'orders');
       expect(accounts?.classification?.lifecycle).toMatchObject({
         create: true,
-        read: true,
+        read: false,
         update: false,
         delete: false,
       });
       expect(accounts?.classification?.rules).toContain(
         'LIFECYCLE_POLICY_DISABLED(update:accounting history is append-only)',
       );
+      const accountDerivations = accounts?.classification?.lifecycleDerivation?.map(
+        (entry) => entry.operation,
+      );
+      expect(accountDerivations).toEqual(['read']);
       expect(orders?.classification?.lifecycle).toMatchObject({
         create: true,
-        read: true,
+        read: false,
         update: true,
-        delete: true,
+        delete: false,
       });
       expect(pipeline.policy.obligations.map((obligation) => obligation.id)).toEqual([
         'tenant.accounts:crud:create',
-        'tenant.accounts:crud:read',
         'tenant.accounts:persistence:create',
-        'tenant.accounts:persistence:read',
         'tenant.orders:crud:create',
-        'tenant.orders:crud:delete',
-        'tenant.orders:crud:read',
         'tenant.orders:crud:update',
         'tenant.orders:persistence:create',
-        'tenant.orders:persistence:delete',
-        'tenant.orders:persistence:read',
         'tenant.orders:persistence:update',
       ]);
       expect(pipeline.policy.blocking).toEqual([]);
     });
   });
+  it('omits operations the detector facts show cannot be performed', async () => {
+    await withTempRepo({}, async (repo) => {
+      installBundledFixture(
+        repo,
+        `schemaVersion: 1
+scanRoots: ['models/**/*.py']
+trustedInternalEntryPoints: []
+internalRules: []
+coverage:
+  - capability: models.sqlalchemy
+    detector: gateforge.pack-sqlalchemy
+    appliesTo: ['models/**/*.py']
+declarations: {}
+volatileFields: []
+`,
+      );
+      repo.writeFiles({
+        '.gateforge/policies.yml': CRUD_POLICIES_YML,
+        'models/accounts.py': `from sqlalchemy import Column, Integer
+from sqlalchemy.orm import declarative_base
 
+Base = declarative_base()
+
+class Account(Base):
+    __tablename__ = 'accounts'
+    __gateforge_delete_semantics__ = 'hard'
+    __gateforge_updateable_fields__ = ()
+    id = Column(Integer, primary_key=True)
+`,
+      });
+      const { pipeline } = await runFixture(repo.root);
+      const accountDecision = pipeline.classification.decisions.find((entry) => entry.name === 'accounts');
+      expect(accountDecision?.classification?.lifecycle).toMatchObject({
+        create: true,
+        read: false,
+        update: false,
+        delete: false,
+      });
+      expect(accountDecision?.classification?.lifecycleDerivation).toEqual([
+        {
+          operation: 'read',
+          disposition: 'not-observable',
+          reason: 'no-read-route',
+          detail: expect.any(String),
+        },
+        {
+          operation: 'update',
+          disposition: 'disabled',
+          reason: 'no-updateable-fields',
+          detail: expect.any(String),
+        },
+        {
+          operation: 'delete',
+          disposition: 'disabled',
+          reason: 'no-delete-route-or-method',
+          detail: expect.any(String),
+        },
+      ]);
+      const accounts = pipeline.policy.obligations.filter((entry) => entry.resourceId === 'tenant.accounts');
+      expect(accounts.map((entry) => entry.contract)).toContain('persistence:create');
+      expect(accounts.map((entry) => entry.contract)).not.toContain('persistence:read');
+      expect(accounts.map((entry) => entry.contract)).not.toContain('persistence:update');
+      expect(accounts.map((entry) => entry.contract)).not.toContain('persistence:delete');
+      expect(pipeline.lifecycleDerivation).toEqual([
+        expect.objectContaining({
+          resourceId: 'tenant.accounts',
+          resourceName: 'accounts',
+          operation: 'read',
+          disposition: 'not-observable',
+          reason: 'no-read-route',
+        }),
+        expect.objectContaining({
+          resourceId: 'tenant.accounts',
+          resourceName: 'accounts',
+          operation: 'update',
+          disposition: 'disabled',
+          reason: 'no-updateable-fields',
+        }),
+        expect.objectContaining({
+          resourceId: 'tenant.accounts',
+          resourceName: 'accounts',
+          operation: 'delete',
+          disposition: 'disabled',
+          reason: 'no-delete-route-or-method',
+        }),
+        expect.objectContaining({
+          resourceId: 'tenant.orders',
+          resourceName: 'orders',
+          operation: 'read',
+          disposition: 'not-observable',
+          reason: 'no-read-route',
+        }),
+        expect.objectContaining({
+          resourceId: 'tenant.orders',
+          resourceName: 'orders',
+          operation: 'delete',
+          disposition: 'disabled',
+          reason: 'no-delete-route-or-method',
+        }),
+      ]);
+    });
+  });
+
+  it('blocks when a model updateable field is missing from adapter projection', async () => {
+    await withTempRepo({}, async (repo) => {
+      installBundledFixture(
+        repo,
+        `schemaVersion: 1
+scanRoots: ['models/**/*.py']
+trustedInternalEntryPoints: []
+internalRules: []
+coverage:
+  - capability: models.sqlalchemy
+    detector: gateforge.pack-sqlalchemy
+    appliesTo: ['models/**/*.py']
+declarations: {}
+volatileFields: []
+`,
+      );
+      const marker = repo.path('adapter-evaluated');
+      repo.writeFiles({
+        '.gateforge/policies.yml': CRUD_POLICIES_YML,
+        '.gateforge/adapters/tenant.accounts.mjs': [
+          "import { writeFileSync } from 'node:fs';",
+          `writeFileSync(${JSON.stringify(marker)}, 'evaluated');`,
+          "export default { fields: ['id', 'name'] };",
+          '',
+        ].join('\n'),
+        'models/accounts.py': `from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class Account(Base):
+    __tablename__ = 'accounts'
+    __gateforge_delete_semantics__ = 'hard'
+    __gateforge_updateable_fields__ = ('description',)
+    id = Column(Integer, primary_key=True)
+    description = Column(String)
+`,
+      });
+      const { pipeline } = await runFixture(repo.root);
+      expect(existsSync(marker)).toBe(false);
+      const contradiction = pipeline.policy.blocking.find((entry) => entry.detail.includes('description'));
+      expect(contradiction).toMatchObject({ kind: 'classification', resourceId: 'tenant.accounts' });
+      expect(contradiction?.detail).toContain("field description is not exposed by adapter 'tenant.accounts' (fields: id, name)");
+    });
+  });
   it('reports a stale exact-resource rule instead of silently dropping it', async () => {
     await withTempRepo({}, async (repo) => {
       installBundledFixture(

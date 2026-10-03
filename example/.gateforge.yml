@@ -1,0 +1,55 @@
+# gateforge project configuration (schemaVersion 1)
+schemaVersion: 1
+project:
+  # Languages detectors should run for (your detector packs decide).
+  languages:
+    - javascript
+  paths:
+    # Globs scanned by every detector; results drive obligations.
+    include:
+      - '**/*.js'
+      - '**/*.jsx'
+      - '**/*.mjs'
+      - '**/*.cjs'
+    exclude:
+      - '**/node_modules/**'
+      - '**/.venv/**'
+      - '**/venv/**'
+      - '**/__pycache__/**'
+      - '**/.pytest_cache/**'
+      - '**/.mypy_cache/**'
+      - '**/dist/**'
+      - '**/build/**'
+      - 'behavior/scripts/**'
+      - 'webhook/scripts/**'
+      # Engine-side modules of the witnessed sub-projects: their evidence
+      # adapters and their fixture providers run inside the witness, never
+      # in the app, so their HTTP calls are not frontend call sites.
+      - 'behavior/.gateforge/**'
+      - 'behavior/fixtures/fixture-provider.mjs'
+      - 'webhook/.gateforge/**'
+      - 'webhook/fixtures/fixture-provider.mjs'
+# Detector plugins. Bundled detectors are preconfigured for the selected
+# languages and are loaded from their trusted package entry points.
+plugins:
+  - id: gateforge.pack-http
+    version: '0.1.0'
+    transport: in-process
+    module: '@gate-forge/pack-http'
+policies: .gateforge/policies.yml
+classificationPolicy: .gateforge/classification-policy.yml
+adapters: .gateforge/adapters
+waivers: .gateforge/waivers
+baselines: .gateforge/baselines/obligations.json
+changed:
+  provider: auto
+witness:
+  maxDurationSeconds: 5
+clock:
+  mode: system
+
+# The test runner the supervised gate drives: playwright (the default when
+# this key is absent), pytest, vitest or cypress. `gateforge init` writes it
+# when the scan sees exactly one non-Playwright runner; see
+# packages/cli/guides/RUNNER-NEUTRAL-EVIDENCE.md.
+# runner: vitest

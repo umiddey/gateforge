@@ -10,16 +10,19 @@
  * `example-e2e` class: CLI process behavior over a real project tree.
  */
 import { existsSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo, CAUSE_NEXT_ACTIONS, type TempRepo } from '@gate-forge/core';
+import { CAUSE_NEXT_ACTIONS, loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
 import {
+  configYml,
   installFixture,
   OBLIGATION_ACCOUNTS,
   OBLIGATION_ORDERS,
   runCli,
 } from './helpers.js';
+import { discoverTestCatalog } from '@gate-forge/pack-playwright';
 
 /** The gateforge monorepo root (for playwright module resolution). */
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -37,11 +40,16 @@ const ACCOUNTS_SPEC = [
   "test('deletes an account', async ({ page }) => {",
   '  await page.goto("/accounts");',
   '});',
+  "test('accounts and orders share a journey', async ({ page }) => {",
+  '  await page.goto("/accounts");',
+  '  await page.goto("/orders");',
+  '});',
   '',
 ].join('\n');
 
 const DELETE_KEY = 'playwright:chromium:e2e/accounts.spec.js:deletes an account';
 const CREATE_KEY = 'playwright:chromium:e2e/accounts.spec.js:Accounts>creates an account';
+const SHARED_KEY = 'playwright:chromium:e2e/accounts.spec.js:accounts and orders share a journey';
 
 /**
  * Installs the standard gateforge fixture (plugin + policies generating
@@ -82,20 +90,30 @@ interface SuggestJson {
   suggestions: Array<{
     obligationId: string;
     cause: string;
-    candidates: Array<{ logicalKey: string; file: string; why: string[] }>;
+    candidates: Array<{ logicalKey: string; file: string; why: string[]; overlaps: string[] }>;
     newTestNeeded: boolean;
   }>;
 }
 
-/** The mark argv for the delete journey, claiming the accounts obligation. */
-function markArgv(obligation: string, extra: string[] = []): string[] {
+/**
+ * Builds argv for declaring one obligation against an existing journey.
+ *
+ * Args:
+ *   obligation: obligation id to declare.
+ *   extra: additional flags passed to the mark command.
+ *   testKey: catalog key of the journey to mark.
+ *
+ * Returns:
+ *   string[]: CLI arguments for `tests mark`.
+ */
+function markArgv(obligation: string, extra: string[] = [], testKey: string = DELETE_KEY): string[] {
   return [
     'tests', 'mark',
-    '--test', DELETE_KEY,
+    '--test', testKey,
     '--kind', 'browser-e2e',
     '--category', 'persistence.delete',
     '--obligation', obligation,
-    '--reason', 'The existing journey deletes an account and checks the result.',
+    '--reason', 'The existing journey exercises the declared operation.',
     ...extra,
   ];
 }
@@ -112,7 +130,7 @@ describe('gateforge tests mark', () => {
       expect(first.stdout).toContain(`- key: ${DELETE_KEY}`);
       expect(first.stdout).toContain('claims:');
       expect(first.stdout).toContain(`- ${OBLIGATION_ACCOUNTS}`);
-      expect(first.stdout).toContain('reason: The existing journey deletes an account');
+      expect(first.stdout).toContain('reason: The existing journey exercises the declared operation.');
 
       const sidecarPath = join(repo.root, '.gateforge/test-map.yml');
       expect(existsSync(sidecarPath)).toBe(true);
@@ -427,7 +445,7 @@ describe('gateforge tests suggest', () => {
       expect(missing?.candidates.some((candidate) => candidate.logicalKey === DELETE_KEY)).toBe(true);
 
       // Mark the existing journey — the mapping suggestion resolves.
-      expect((await runCli(repo, markArgv(OBLIGATION_ACCOUNTS))).code).toBe(0);
+      expect((await runCli(repo, markArgv(OBLIGATION_ACCOUNTS, [], SHARED_KEY))).code).toBe(0);
       const after = await runCli(repo, ['tests', 'suggest', '--json']);
       expect(after.code).toBe(0);
       const afterJson = JSON.parse(after.stdout) as SuggestJson;
@@ -442,6 +460,10 @@ describe('gateforge tests suggest', () => {
       expect(
         afterJson.suggestions.find((suggestion) => suggestion.obligationId === OBLIGATION_ORDERS)?.cause,
       ).toBe('TEST_MAPPING_MISSING');
+      const overlappingCandidate = afterJson.suggestions
+        .find((suggestion) => suggestion.obligationId === OBLIGATION_ORDERS)
+        ?.candidates.find((candidate) => candidate.logicalKey === SHARED_KEY);
+      expect(overlappingCandidate?.overlaps).toContain(OBLIGATION_ACCOUNTS);
 
       // Deterministic ordering + human surface.
       const repeat = await runCli(repo, ['tests', 'suggest', '--json']);
@@ -482,6 +504,148 @@ describe('gateforge tests suggest', () => {
       expect(stale?.cause).toBe('TEST_MAPPING_STALE');
     });
   }, 180_000);
+  it('keeps static rows unknown when native enumeration reports load errors', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      repo.writeFiles({
+        'e2e/accounts.spec.js': [
+          "import { test } from 'playwright/test';",
+          "import 'gateforge-missing-load-dependency';",
+          "test('statically present account journey', async () => {});",
+          '',
+        ].join('\n'),
+        '.gateforge/test-map.yml': [
+          'schemaVersion: 1',
+          'tests:',
+          '  - key: first-mapping',
+          '    selector: { runner: playwright, file: e2e/accounts.spec.js, titlePath: [first] }',
+          '    kind: browser-e2e',
+          `    claims: [${OBLIGATION_ACCOUNTS}]`,
+          '    reason: Existing declaration one.',
+          '  - key: second-mapping',
+          '    selector: { runner: playwright, file: e2e/accounts.spec.js, titlePath: [second] }',
+          '    kind: browser-e2e',
+          `    claims: [${OBLIGATION_ORDERS}]`,
+          '    reason: Existing declaration two.',
+          '',
+        ].join('\n'),
+      });
+
+      const config = loadConfig(repo.path('.gateforge.yml'));
+      const discovered = await discoverTestCatalog({ cwd: repo.root, config });
+      expect(discovered.nativeErrors.length).toBeGreaterThan(0);
+      expect(
+        discovered.catalog.entries.some(
+          (entry) => entry.file === 'e2e/accounts.spec.js' && entry.reconciliation === 'static-only',
+        ),
+      ).toBe(true);
+
+      const suggestion = await runCli(repo, ['tests', 'suggest', '--json']);
+      expect(suggestion.code).toBe(0);
+      const suggestionReport = JSON.parse(suggestion.stdout) as {
+        problems: Array<{ cause: string; detail: string }>;
+      };
+      expect(
+        suggestionReport.problems.filter((problem) => problem.cause === 'TEST_INVENTORY_INCOMPLETE'),
+      ).toHaveLength(1);
+      expect(
+        suggestionReport.problems.filter((problem) => problem.cause === 'TEST_MAPPING_STALE'),
+      ).toHaveLength(0);
+
+      const check = await runCli(repo, ['check', '--format', 'json']);
+      const checkReport = JSON.parse(check.stdout) as {
+        blocking: Array<{ cause?: string; detail?: string }>;
+      };
+      expect(
+        checkReport.blocking.filter((entry) => entry.cause === 'TEST_INVENTORY_INCOMPLETE'),
+      ).toHaveLength(1);
+      expect(
+        checkReport.blocking.filter((entry) => entry.cause === 'TEST_MAPPING_STALE'),
+      ).toHaveLength(0);
+    });
+  }, 180_000);
+
+
+  it('reports failed native enumeration once instead of fanning out stale sidecar mappings', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      repo.writeFiles({
+        '.gateforge.yml': configYml(),
+        'e2e/accounts.spec.js': "import 'gateforge-missing-load-dependency';\n",
+        '.gateforge/test-map.yml': [
+          'schemaVersion: 1',
+          'tests:',
+          '  - key: first-mapping',
+          '    selector: { runner: playwright, file: e2e/accounts.spec.js, titlePath: [first] }',
+          '    kind: browser-e2e',
+          `    claims: [${OBLIGATION_ACCOUNTS}]`,
+          '    reason: Existing declaration one.',
+          '  - key: second-mapping',
+          '    selector: { runner: playwright, file: e2e/accounts.spec.js, titlePath: [second] }',
+          '    kind: browser-e2e',
+          `    claims: [${OBLIGATION_ORDERS}]`,
+          '    reason: Existing declaration two.',
+          '',
+        ].join('\n'),
+      });
+
+      const config = loadConfig(repo.path('.gateforge.yml'));
+      const nativeErrors = (await discoverTestCatalog({ cwd: repo.root, config })).nativeErrors;
+      expect(nativeErrors.length).toBeGreaterThan(0);
+
+      const suggestion = await runCli(repo, ['tests', 'suggest', '--json']);
+      expect(suggestion.code).toBe(0);
+      const suggestionReport = JSON.parse(suggestion.stdout) as {
+        problems: Array<{ cause: string; detail: string; nextAction?: string }>;
+        suggestions: unknown[];
+      };
+      const inventoryProblems = suggestionReport.problems.filter(
+        (problem) => problem.cause === 'TEST_INVENTORY_INCOMPLETE',
+      );
+      expect(inventoryProblems).toHaveLength(1);
+      expect(inventoryProblems[0]?.detail).toContain(`${nativeErrors.length} load error(s)`);
+      expect(inventoryProblems[0]?.detail.endsWith(nativeErrors[0] ?? '')).toBe(true);
+      expect(inventoryProblems[0]?.nextAction).toContain('Install');
+      expect(suggestionReport.problems.filter((problem) => problem.cause === 'TEST_MAPPING_STALE')).toHaveLength(0);
+      expect(suggestionReport.suggestions).toEqual([]);
+
+      const check = await runCli(repo, ['check', '--format', 'json']);
+      const checkReport = JSON.parse(check.stdout) as {
+        blocking: Array<{ cause?: string; detail?: string; nextAction?: string }>;
+      };
+      const checkInventory = checkReport.blocking.filter((entry) => entry.cause === 'TEST_INVENTORY_INCOMPLETE');
+      expect(checkInventory).toHaveLength(1);
+      expect(checkInventory[0]?.detail?.endsWith(nativeErrors[0] ?? '')).toBe(true);
+      expect(checkInventory[0]?.nextAction).toContain('Install');
+      expect(checkReport.blocking.filter((entry) => entry.cause === 'TEST_MAPPING_STALE')).toHaveLength(0);
+
+      const next = await runCli(repo, ['next', '--json']);
+      const nextReport = JSON.parse(next.stdout) as { cause: string; why: string; do: string };
+      expect(nextReport.cause).toBe('TEST_INVENTORY_INCOMPLETE');
+      expect(nextReport.why.endsWith(nativeErrors[0] ?? '')).toBe(true);
+      expect(nextReport.do).toContain('Install');
+
+      const supervised = await runCli(repo, [
+        'test-gates',
+        '--changed',
+        '--scope',
+        'changed',
+        '--result-only',
+        '--format',
+        'json',
+      ]);
+      const supervisedReport = JSON.parse(supervised.stdout) as {
+        blocking: Array<{ cause?: string; detail?: string; nextAction?: string }>;
+      };
+      const supervisedInventory = supervisedReport.blocking.filter(
+        (entry) => entry.cause === 'TEST_INVENTORY_INCOMPLETE',
+      );
+      expect(supervisedInventory, supervised.stdout).toHaveLength(1);
+      expect(supervisedInventory[0]?.detail?.endsWith(nativeErrors[0] ?? '')).toBe(true);
+      expect(supervisedInventory[0]?.nextAction).toContain('Install');
+      expect(supervisedReport.blocking.filter((entry) => entry.cause === 'TEST_MAPPING_STALE')).toHaveLength(0);
+    });
+  }, 180_000);
 });
 
 describe('grading seam (plan §5.3: a mapping declares intent, supplies no result)', () => {
@@ -514,4 +678,138 @@ describe('grading seam (plan §5.3: a mapping declares intent, supplies no resul
       expect(mappedVerdicts.verdicts.every((v) => v.verdict !== 'satisfied' && v.verdict !== 'waived')).toBe(true);
     });
   }, 180_000);
+});
+describe('gateforge tests sync', () => {
+  it('adds static annotation claims and leaves hand-written entries intact', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      repo.writeFiles({
+        'e2e/accounts.spec.js': [
+          "import { test } from 'playwright/test';",
+          "function httpClaims(id) { return { annotation: { type: 'gateforge', description: id } }; }",
+          "test('creates an account', { annotation: { type: 'gateforge', description: 'tenant.accounts:persistence:read' } }, async ({ page }) => { await page.goto('/accounts'); });",
+          "test('reads an account', httpClaims('tenant.orders:persistence:read'), async ({ page }) => { await page.goto('/orders'); });",
+          "test('deletes an account', async ({ page }) => { await page.goto('/accounts'); });",
+          '',
+        ].join('\n'),
+        '.gateforge/test-map.yml': [
+          'schemaVersion: 1',
+          'tests:',
+          `  - key: ${DELETE_KEY}`,
+          '    selector:',
+          '      runner: playwright',
+          '      project: chromium',
+          '      file: e2e/accounts.spec.js',
+          '      titlePath: [deletes an account]',
+          '    kind: browser-e2e',
+          '    categories: [persistence.delete]',
+          `    claims: [${OBLIGATION_ORDERS}]`,
+          '    reason: Existing deletion journey remains owner-mapped.',
+          '',
+        ].join('\n'),
+      });
+      const before = parseYaml(readFileSync(repo.path('.gateforge/test-map.yml'), 'utf8')) as {
+        tests: Array<Record<string, unknown>>;
+      };
+      const handwritten = before.tests[0];
+      const result = await runCli(repo, ['tests', 'sync']);
+      expect(result.code).toBe(0);
+      const after = parseYaml(readFileSync(repo.path('.gateforge/test-map.yml'), 'utf8')) as {
+        tests: Array<Record<string, unknown>>;
+      };
+      expect(after.tests.find((entry) => entry['key'] === DELETE_KEY)).toEqual(handwritten);
+      const generated = after.tests.filter((entry) => entry['source'] === 'annotation');
+      expect(generated).toHaveLength(2);
+      expect(generated).toContainEqual(
+        expect.objectContaining({
+          source: 'annotation',
+          selector: {
+            runner: 'playwright',
+            file: 'e2e/accounts.spec.js',
+            titlePath: ['creates an account'],
+          },
+          claims: [OBLIGATION_ACCOUNTS],
+        }),
+      );
+      expect(generated).toContainEqual(
+        expect.objectContaining({
+          source: 'annotation',
+          selector: {
+            runner: 'playwright',
+            file: 'e2e/accounts.spec.js',
+            titlePath: ['reads an account'],
+          },
+          claims: [OBLIGATION_ORDERS],
+        }),
+      );
+      const bytesAfterSync = readFileSync(repo.path('.gateforge/test-map.yml'), 'utf8');
+      expect((await runCli(repo, ['tests', 'sync'])).code).toBe(0);
+      expect(readFileSync(repo.path('.gateforge/test-map.yml'), 'utf8')).toBe(bytesAfterSync);
+    });
+  }, 120_000);
+  it('reports unresolved static annotation helpers instead of dropping them', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo, { include: "['src/**/*.txt', 'e2e/**/*.spec.js']" });
+      repo.writeFiles({
+        'e2e/unresolved.spec.js': [
+          "import { test } from 'playwright/test';",
+          "function claims() { return { annotation: { type: 'gateforge', description: process.env.GATEFORGE_CLAIM } }; }",
+          "test('uses a computed claim', claims(), async ({ page }) => { await page.goto('/accounts'); });",
+          '',
+        ].join('\n'),
+      });
+
+      const result = await runCli(repo, ['tests', 'sync']);
+
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('UNRESOLVED');
+      expect(result.stdout).toContain('e2e/unresolved.spec.js');
+      expect(result.stdout).toContain('uses a computed claim');
+    });
+  });
+
+  it('warns when generated claims drift without blocking the check or requiring Playwright', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo, { include: "['src/**/*.txt', 'e2e/**/*.spec.js']" });
+      const source = [
+        "import { test } from 'playwright/test';",
+        `test('reads an account', { annotation: { type: 'gateforge', description: '${OBLIGATION_ACCOUNTS}' } }, async ({ page }) => { await page.goto('/accounts'); });`,
+        '',
+      ].join('\n');
+      repo.writeFiles({ 'e2e/accounts.spec.js': source });
+      expect((await runCli(repo, ['tests', 'sync'])).code).toBe(0);
+
+      const checkBefore = await runCli(repo, ['check', '--format', 'json']);
+      const before = JSON.parse(checkBefore.stdout) as {
+        summary: { blocking: number };
+        advisories?: Array<{ cause: string }>;
+        verdicts: Array<{ obligationId: string; cause: string | null }>;
+      };
+      expect(before.advisories ?? []).toHaveLength(0);
+      expect(before.verdicts.find((entry) => entry.obligationId === OBLIGATION_ACCOUNTS)?.cause).not.toBe(
+        'TEST_MAPPING_MISSING',
+      );
+
+      repo.writeFiles({ 'e2e/accounts.spec.js': source.replace(OBLIGATION_ACCOUNTS, OBLIGATION_ORDERS) });
+      const checkAfter = await runCli(repo, ['check', '--format', 'json']);
+      expect(checkAfter.code).toBe(checkBefore.code);
+      const after = JSON.parse(checkAfter.stdout) as {
+        summary: { blocking: number };
+        blocking: Array<{ cause?: string }>;
+        advisories?: Array<{ cause: string; detail: string; nextAction: string }>;
+      };
+      expect(after.advisories).toContainEqual(
+        expect.objectContaining({
+          cause: 'TEST_MAP_OUT_OF_SYNC',
+          nextAction: 'gateforge tests sync',
+        }),
+      );
+      const drift = after.advisories?.find((entry) => entry.cause === 'TEST_MAP_OUT_OF_SYNC');
+      expect(drift?.detail).toContain('e2e/accounts.spec.js');
+      expect(drift?.detail).toContain(OBLIGATION_ACCOUNTS);
+      expect(drift?.detail).toContain(OBLIGATION_ORDERS);
+      expect(after.blocking.some((entry) => entry.cause === 'TEST_MAP_OUT_OF_SYNC')).toBe(false);
+      expect(after.summary.blocking).toBe(before.summary.blocking);
+    });
+  }, 120_000);
 });

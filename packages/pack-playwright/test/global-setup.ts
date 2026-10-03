@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 
 /** Workspace packages built here, in dependency order (core first). */
-const BUILT_PACKAGES = ['core', 'pack-playwright'] as const;
+const BUILT_PACKAGES = ['core', 'witness', 'pack-playwright'] as const;
 
 /**
  * Compiles one workspace package into its dist with its build tsconfig.

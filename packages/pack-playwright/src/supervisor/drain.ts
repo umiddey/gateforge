@@ -10,6 +10,25 @@
  * force-closes any session the runner left open (a crashed worker can
  * never leave the witness holding an open session past the run).
  *
+ * WORKER-SIDE END (the serial-project race): a runner's MAIN process
+ * can report test N's end long after the worker already started test
+ * N+1 of the same file, so a drain that waits for that end leaves the
+ * next test's begin queued behind a cross-process event the worker
+ * does not control (a loaded machine made the next test's session
+ * resolve time out). A worker therefore also spools the end of the
+ * test IT just finished — same process, same order as its own begin,
+ * and with no outcome (only the runner's reporter knows that). The
+ * drain RELEASES the worker slot on that end: the session stops
+ * accepting submissions and its proxy dies at once, so nothing can be
+ * attributed to a finished test, and the next begin opens
+ * immediately. The runner's own `testEnd` still seals that session
+ * moments later, with the observed outcome; an outcome that never
+ * arrives leaves the session outcome-less, which grades not-passed
+ * exactly like a seal without an outcome. Nothing is credited early
+ * and nothing is dropped: a release carries no verdict, and the
+ * lifecycle still fails closed on an outcome with no begin, a begin
+ * with no end at run end, and two different outcomes for one test.
+ *
  * SERVER-WITNESSED persistence channel: the drain also polls the
  * persistence-intents spool (`persistence-intents.jsonl` — claim INTENTS
  * the supervised suite may only WRITE) and forwards each one to the
@@ -36,6 +55,7 @@
 import { CAUSE_NEXT_ACTIONS, type CauseCode } from '@gate-forge/core';
 import { WitnessRequestError } from '../fixture/witness-client.js';
 import { SupervisorClient } from './client.js';
+import { readFreezeRequest } from '../discovery/prepare-barrier.js';
 import {
   persistenceIntentsPathFor,
   readPersistenceIntents,
@@ -71,6 +91,38 @@ export interface SpoolDrainHandle {
    * the run closed downstream.
    */
   stop: () => Promise<{ conflicts: string[]; intentFailures: string[]; observeNotes: string[] }>;
+  /**
+   * Waits until the witness has ANSWERED the first `count` drained
+   * persistence intents (refusals included — a typed refusal is an
+   * answer and lands in `intentFailures`).
+   *
+   * This is the trusted drain's own forward progress, not a runner-side
+   * signal: the supervised child only appends to the spool and can
+   * neither observe nor influence it. A caller that must not mutate the
+   * target between a `pre` intent and the state the witness probes uses
+   * this instead of a guessed sleep — once it resolves, the witness has
+   * already run (and answered) that intent's server-side probe.
+   *
+   * Args:
+   *   count: how many drained intents must have been answered.
+   *   timeoutMs: bound on the wait; the default is generous and only
+   *     fires when the witness is unreachable, never in a genuine run.
+   *
+   * Returns:
+   *   Promise<void>: resolves as soon as the count is reached; rejects
+   *     with a descriptive Error when the bound elapses first.
+   */
+  whenIntentsForwarded: (count: number, timeoutMs?: number) => Promise<void>;
+  /**
+   * Records what the trusted CLI accepted when it froze and released the
+   * candidate. The final audit then requires the spool to carry EXACTLY
+   * ONE accepted-freeze marker, bound to the same prepared tree and the
+   * same pinned control-spec digest, with every body project's
+   * `testBegin` AFTER it in append order.
+   *
+   * @param marker: the prepared tree and pinned spec digest of that release.
+   */
+  markFreezeRelease: (marker: { preparedTreeId: string; specDigest: string }) => void;
 }
 
 /**
@@ -95,38 +147,144 @@ export function startSupervisorSpoolDrain(options: {
   verifierKey: string;
   pollMs?: number;
   serverE2eObligations?: readonly string[];
+  /**
+   * Optional observer of every DRAINED lifecycle event, called before
+   * the drain acts on it. This is how the CLI's CI progress stream
+   * learns what the suite is doing without ever reading runner output:
+   * the event carries the identity, the outcome, and (additively) the
+   * runner's own error message and short stack frames. It is advisory —
+   * a throwing observer is reported and ignored, because no progress
+   * line may ever fail a run.
+   */
+  onTestEvent?: (event: SpoolEvent) => void;
   observeObligations?: readonly string[];
+  /**
+   * The GLOBAL preparation freeze, when this run armed one.
+   *
+   * The drain is the only async pump inside the supervised window, so it
+   * is also where the controller's request is noticed: the trusted CLI
+   * validates the request, validates the prerequisites against the
+   * witness trace, freezes, signs the release and hands back the exact
+   * marker line it appended to this same append-only spool.
+   */
+  freeze?: {
+    /** The engine-owned controller project name. */
+    controllerProject: string;
+    /** Planned projects that must not start before the freeze exists. */
+    bodyProjects: readonly string[];
+    /** Absolute path of the controller's request document. */
+    requestPath: string;
+    /** The trusted CLI's freeze handler; a refusal is recorded as a conflict. */
+    onRequest: (request: unknown) => Promise<void>;
+  };
 }): SpoolDrainHandle {
   const client = new SupervisorClient(options.witnessUrl, options.runToken, options.verifierKey);
   const spoolFile = spoolPathFor(options.stateDir, options.runId);
   const intentsFile = persistenceIntentsPathFor(options.stateDir, options.runId);
   const pollMs = options.pollMs ?? DEFAULT_DRAIN_POLL_MS;
   const openByWorker = new Map<number, OpenSlot>();
+  // Begins that arrived while their worker slot was still busy with an
+  // EARLIER test. A runner announces the next test's begin from the
+  // worker (prompt) while the previous test's end travels through the
+  // runner's main process (late), so the two lifecycles overlap by a
+  // few hundred milliseconds in every genuinely serial project. The
+  // witness mints one session per worker slot, so the queued begin
+  // opens the moment its slot frees — nothing is dropped, nothing is
+  // credited early, and a forged lifecycle still has to survive the
+  // same per-test pairing.
+  const pendingByWorker = new Map<number, SpoolEvent[]>();
   const endedTests = new Set<string>();
+  // Every test whose BEGIN the drain saw. A runner still announces a
+  // lifecycle for the tests its own filters left unexecuted (a named run
+  // registers only the selected tests, so the witness refuses those
+  // opens, or they queue behind a busy worker slot and are dropped when
+  // it frees): their matching end has no session to close, so it is not
+  // a lifecycle conflict. An end whose begin never arrived still fails
+  // the run closed exactly as before.
+  const begunTests = new Set<string>();
+  // Sessions whose WORKER SLOT was released on the worker's own
+  // lifecycle end, keyed by test id: the test is over for the worker
+  // (its session accepts nothing and its proxy is dead), but the
+  // runner's reporter still owes the OUTCOME that confirms the seal.
+  // `outcome` is the one the supervisor already sealed, so a second,
+  // different outcome for the same test is a conflict, not a re-seal.
+  const awaitingOutcome = new Map<string, { sessionId: string; outcome: string | null }>();
   const conflicts: string[] = [];
   const intentFailures: string[] = [];
   const observeNotes: string[] = [];
+  // Forward progress of the persistence channel, and the waiters a
+  // caller parks on it. Counted AFTER the witness answers, so the count
+  // is the drain's own fact and never something the runner child can
+  // assert for itself.
+  let answeredIntents = 0;
+  const forwardWaiters: ForwardWaiter[] = [];
   let offset = 0;
   let intentsOffset = 0;
   let running = true;
+  // The accepted preparation-freeze marker line, remembered so the final
+  // audit can require the spool to hold exactly that line and every body
+  let freezeMarker: { preparedTreeId: string; specDigest: string } | null = null;
+  let freezeRequestSeen = false;
+  // The freeze handler is deliberately NOT chained onto `settling`. It
+  // waits for the supervisor to seal the prerequisite sessions, and those
+  // seals are produced by THIS drain: chaining the wait in front of them
+  // would put it ahead of the very lifecycle ends it waits for, and the
+  // run could then only leave by timing out. Off-chain, the drain keeps
+  // opening and sealing while the handler polls. `stop` awaits the settled
+  // promise so a late refusal still lands in the conflicts.
+  let freezeSettled: Promise<void> = Promise.resolve();
+
   let settling: Promise<void> = Promise.resolve();
+
+/** One parked `whenIntentsForwarded` wait and the count it waits for. */
+interface ForwardWaiter {
+  /** The count this caller is waiting for. */
+  count: number;
+  /** Resolves the caller's promise and clears its timer. */
+  release: () => void;
+  /** Rejects the caller's promise and unparks it. */
+  fail: (error: Error) => void;
+}
+
+/**
+ * Releases exactly the waiters whose count the witness has now reached,
+ * leaving the rest parked. A waiter for a larger count must NOT ride
+ * out on an earlier answer: the caller is waiting for the probe of its
+ * OWN nth intent, and resolving early would let it mutate the target
+ * before that probe ran.
+ */
+const releaseReachedWaiters = (): void => {
+  const stillWaiting: ForwardWaiter[] = [];
+  for (const waiter of forwardWaiters) {
+    if (answeredIntents >= waiter.count) waiter.release();
+    else stillWaiting.push(waiter);
+  }
+  forwardWaiters.length = 0;
+  for (const waiter of stillWaiting) forwardWaiters.push(waiter);
+};
 
   const slotKey = (workerIndex: number, testId: string): string => `${String(workerIndex)}\u0000${testId}`;
 
   const openSessionFor = async (event: SpoolEvent): Promise<void> => {
     const workerIndex = event.workerIndex;
+    begunTests.add(event.testId);
+    // The runner's own `testBegin` for a test whose WORKER-side end
+    // already released the slot: the same lifecycle, arriving over the
+    // slower channel. Re-opening it would be a second lifecycle for one
+    // test, and queueing it would resurrect a finished test — both wrong.
+    // Once the outcome is recorded the check below applies again, so a
+    // genuine re-begin after a sealed outcome still conflicts.
+    if (awaitingOutcome.has(event.testId)) return;
     const existing = openByWorker.get(workerIndex);
     if (existing !== undefined && existing.testId === event.testId) return; // idempotent re-begin
     if (existing !== undefined) {
-      // A second begin over an open worker slot: genuine serial reporter
-      // events never do this (one test per worker at a time). The FIRST
-      // session stands (a forgery must not displace it); the collision is
-      // recorded and fails the run closed downstream.
-      conflicts.push(
-        `lifecycle conflict: worker ${String(workerIndex)} began '${event.testId}' while ` +
-          `'${existing.testId}' was still open — a duplicate begin never occurs in a genuine ` +
-          'serial run (forged or confused lifecycle events fail closed)',
-      );
+      // A second begin over a busy worker slot: the previous test's
+      // end simply has not travelled back yet. The queued begin opens
+      // when the slot frees, so a serial project whose reporter lags
+      // its worker is no longer failed closed for its own ordering.
+      const queued = pendingByWorker.get(workerIndex) ?? [];
+      if (!queued.some((pending) => pending.testId === event.testId)) queued.push(event);
+      pendingByWorker.set(workerIndex, queued);
       return;
     }
     if (endedTests.has(slotKey(workerIndex, event.testId))) {
@@ -146,6 +304,34 @@ export function startSupervisorSpoolDrain(options: {
       ...(event.claims !== undefined && event.claims.length > 0 ? { claims: event.claims } : {}),
     });
     openByWorker.set(workerIndex, { sessionId: opened.sessionId, testId: event.testId });
+  };
+
+  /**
+   * Opens the earliest begin that waited for a worker slot, in arrival
+   * order. A queued begin whose test already ended (a late replay) is
+   * dropped rather than reopened.
+   *
+   * Args:
+   *   workerIndex: the freed slot.
+   *
+   * Returns:
+   *   Promise<void>: resolves once the slot holds its next test (or is
+   *     empty again).
+   */
+  const openNextPending = async (workerIndex: number): Promise<void> => {
+    const queued = pendingByWorker.get(workerIndex);
+    if (queued === undefined || queued.length === 0) return;
+    for (let index = 0; index < queued.length; ) {
+      const next = queued[index] as SpoolEvent;
+      if (openByWorker.has(workerIndex) || endedTests.has(slotKey(workerIndex, next.testId))) {
+        queued.splice(index, 1);
+        continue;
+      }
+      queued.splice(index, 1);
+      await openSessionFor(next);
+      return;
+    }
+    if (queued.length === 0) pendingByWorker.delete(workerIndex);
   };
 
   const sealQuietly = async (slot: OpenSlot, outcome: string | undefined): Promise<void> => {
@@ -193,7 +379,41 @@ export function startSupervisorSpoolDrain(options: {
     }
   };
 
+  /**
+   * Releases one session's worker slot on the worker's own end (see the
+   * module doc). The witness unbinds the worker and kills the session
+   * proxy; the test's outcome stays owed and is sealed by the runner's
+   * own end. A refused release is a conflict, not a silent pass: the
+   * session then keeps its slot and the next begin stays queued.
+   */
+  const releaseQuietly = async (slot: OpenSlot): Promise<void> => {
+    try {
+      await client.releaseSession({ sessionId: slot.sessionId });
+      awaitingOutcome.set(slot.testId, { sessionId: slot.sessionId, outcome: null });
+    } catch (error) {
+      const message =
+        `supervisor session release failed for test '${slot.testId}': ` +
+        `${error instanceof Error ? error.message : String(error)}`;
+      conflicts.push(message);
+      console.warn(`[gateforge] ${message}`);
+    }
+  };
+
   const handleEvent = async (event: SpoolEvent): Promise<void> => {
+    // The observer sees EVERY drained event, including the ones the
+    // lifecycle rules below ignore (a repeated worker end, an end whose
+    // begin never opened): the progress stream counts runner outcomes,
+    // not witness sessions, and must not lose a line to a drain detail.
+    try {
+      options.onTestEvent?.(event);
+    } catch (error) {
+      console.warn(`[gateforge] test event observer failed: ${(error as Error).message}`);
+    }
+    // The accepted-freeze marker is the trusted CLI's own line in this
+    // append-only file. It is ORDERING evidence, never a lifecycle: it
+    // opens nothing, seals nothing, and the audit at stop reads it
+    // against the exact line the CLI appended.
+    if (event.kind === 'freezeRelease') return;
     if (event.kind === 'testBegin') {
       await openSessionFor(event);
       return;
@@ -203,15 +423,55 @@ export function startSupervisorSpoolDrain(options: {
       if (slot !== undefined && slot.testId === event.testId) {
         openByWorker.delete(event.workerIndex);
         endedTests.add(slotKey(event.workerIndex, event.testId));
-        // Observe finalize BEFORE seal (finalize requires an open
+        if (event.outcome === undefined) {
+          // The WORKER's own end: the test is over, but the runner's
+          // reporter still owes its outcome. Release the slot (the
+          // session stops accepting submissions and its proxy dies)
+          // instead of sealing a verdict nobody observed, then open
+          // whatever begin waited for it.
+          await releaseQuietly(slot);
+          await openNextPending(event.workerIndex);
+          return;
+        }
+        // Observe finalize BEFORE seal (finalize requires an unsealed
         // session), and only for passed tests — failed/crashed work
         // gets no evidence, and its claim stays blocking.
         if (event.outcome === 'passed') {
           await finalizeObserveQuietly(slot);
         }
         await sealQuietly(slot, event.outcome);
+        // The slot is free again: open whatever begin waited for it.
+        await openNextPending(event.workerIndex);
         return;
       }
+      // The runner's own end for a test whose WORKER SLOT was already
+      // released: the seal that confirms the release, and the only
+      // source of that test's outcome. A repeated end carrying the SAME
+      // outcome is re-delivery; a DIFFERENT one is a confused lifecycle
+      // and fails the run closed (the witness refuses it too).
+      const released = awaitingOutcome.get(event.testId);
+      if (released !== undefined) {
+        if (event.outcome === undefined) return; // a repeated worker end
+        if (released.outcome !== null && released.outcome !== event.outcome) {
+          conflicts.push(
+            `lifecycle conflict: test '${event.testId}' ended twice with different outcomes ` +
+              `('${released.outcome}' then '${event.outcome}') — one test has one outcome`,
+          );
+          return;
+        }
+        released.outcome = event.outcome;
+        if (event.outcome === 'passed') {
+          await finalizeObserveQuietly({ sessionId: released.sessionId, testId: event.testId });
+        }
+        await sealQuietly({ sessionId: released.sessionId, testId: event.testId }, event.outcome);
+        return;
+      }
+      // The end of a test whose begin the drain saw but never opened a
+      // session for (the witness refused it as outside the registered
+      // expected set, or it queued behind a busy slot and was dropped):
+      // there is nothing to close and nothing to seal, so it is not a
+      // conflict. An end with NO begin at all still is.
+      if (begunTests.has(event.testId)) return;
       // An end with no matching open begin: genuine reporter events are
       // always begin/end paired. A lone end is forgery or confusion —
       // record it and fail the run closed downstream (never open or seal
@@ -264,6 +524,52 @@ export function startSupervisorSpoolDrain(options: {
       intentFailures.push(message);
       console.warn(`[gateforge] ${message}`);
     }
+    // The witness has now answered this intent either way, so the
+    // forward-progress count advances past refusals too.
+    answeredIntents += 1;
+    releaseReachedWaiters();
+  };
+
+  /**
+   * Waits until the witness has answered `count` drained intents.
+   *
+   * Args:
+   *   count: how many drained intents must have been answered.
+   *   timeoutMs: bound on the wait.
+   *
+   * Returns:
+   *   Promise<void>: resolves once the count is reached, rejects when
+   *     the bound elapses first.
+   */
+  const whenIntentsForwarded = async (count: number, timeoutMs = 10_000): Promise<void> => {
+    if (answeredIntents >= count) return;
+    await new Promise<void>((resolveReady, rejectTimeout) => {
+      const waiter: ForwardWaiter = {
+        count,
+        release: () => {
+          clearTimeout(timer);
+          resolveReady();
+        },
+        fail: (error: Error) => {
+          clearTimeout(timer);
+          rejectTimeout(error);
+        },
+      };
+      const timer = setTimeout(() => {
+        const index = forwardWaiters.indexOf(waiter);
+        if (index >= 0) forwardWaiters.splice(index, 1);
+        waiter.fail(
+          new Error(
+            `the supervisor drain forwarded only ${String(answeredIntents)} of ${String(count)} ` +
+              'persistence intents before the wait elapsed — the witness never answered them',
+          ),
+        );
+      }, timeoutMs);
+      forwardWaiters.push(waiter);
+      // An answer that landed while this waiter was being registered
+      // still resolves it — the count is re-checked, never assumed.
+      releaseReachedWaiters();
+    });
   };
 
   const drainOnce = async (): Promise<void> => {
@@ -282,6 +588,33 @@ export function startSupervisorSpoolDrain(options: {
               `'${event.testId}': ${(error as Error).message}`,
           );
         });
+    }
+    // The preparation-freeze request (global snapshot barrier): the
+    // controller worker writes it once it has finished every prerequisite
+    // and is about to ask for the snapshot. The trusted handler validates
+    // the identities, the prerequisite sessions and the workspace diff,
+    // then signs the release; a refusal is recorded as a run conflict and
+    // the controller's own bounded wait fails it from there.
+    //
+    // The request is served EXACTLY ONCE. The document stays on disk for
+    // the rest of the run, so without this latch every later poll would
+    // re-serve it and append a second accepted-freeze marker — which the
+    // final audit is right to treat as a duplicated line. A malformed or
+    // partially written document is likewise not re-read: `readFreezeRequest`
+    // answers null for both, and a missing answer is caught by the audit,
+    // which fails the run closed because no accepted release exists.
+    if (options.freeze !== undefined && !freezeRequestSeen) {
+      const request = readFreezeRequest(options.freeze.requestPath);
+      if (request !== null) {
+        freezeRequestSeen = true;
+        freezeSettled = options.freeze.onRequest(request).catch((error: unknown) => {
+          const message =
+            `preparation freeze refused: ${(error as Error).message} — no body project may run ` +
+            'against an unprepared candidate';
+          conflicts.push(message);
+          console.warn(`[gateforge] ${message}`);
+        });
+      }
     }
     // Persistence claim intents (server-witnessed channel): forwarded in
     // file order under the same serialization as the lifecycle events,
@@ -341,8 +674,23 @@ export function startSupervisorSpoolDrain(options: {
   }
 
   const loop = (async () => {
+    // The PRE-RUN registrations (`settling`) land BEFORE the first poll:
+    // the witness refuses a session open whose observe declarations are
+    // not bound yet, and a runner child waiting on that session would see
+    // a bare "no open session" timeout instead of the real cause. A
+    // registration refusal is already recorded in `conflicts`.
+    await settling.catch(() => undefined);
     while (running) {
-      await drainOnce();
+      try {
+        await drainOnce();
+      } catch (error) {
+        // A single refused poll (a witness restart, a transient refusal)
+        // must NOT end supervision for the whole run: the refusal is
+        // recorded as a conflict — the run still fails closed downstream
+        // — and the next poll retries.
+        const message = `supervisor drain poll failed: ${(error as Error).message}`;
+        if (!conflicts.includes(message)) conflicts.push(message);
+      }
       await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
     }
   })();
@@ -353,13 +701,78 @@ export function startSupervisorSpoolDrain(options: {
       await loop.catch(() => undefined);
       await drainOnce();
       await settling;
+      // A freeze handler still polling when the runner exits is given its
+      // own bound before grading, so a late refusal lands as a recorded
+      // conflict instead of a silently dropped promise.
+      await freezeSettled.catch(() => undefined);
       // Force-close anything the runner left open (crash, lost contact):
       // sealed with NO outcome — the trace grades it not-passed. No
       // observe finalize here: unfinished work gets no evidence.
       const leftover = [...openByWorker.values()];
       openByWorker.clear();
       await Promise.all(leftover.map((slot) => sealQuietly(slot, undefined)));
+      // The preparation-freeze ORDERING audit, read from the file rather
+      // than from processed counts: the whole spool is re-read in file
+      // order and the accepted marker must appear exactly once, with every
+      // body project's begin AFTER it. A body begin that reached the file
+      // earlier — even when it was only processed now, behind a busy worker
+      // slot — started before the candidate was prepared.
+      if (options.freeze !== undefined) {
+        const { events: wholeSpool } = readSpoolEvents(spoolFile, 0);
+        const bodies = new Set(options.freeze.bodyProjects);
+        // ONE ordered pass over the whole spool: every line's position
+        // relative to the accepted marker is decided by the order the
+        // lines are IN, never by when the drain got round to processing
+        // them. A body begin physically before the marker started before
+        // the candidate was prepared, however late it was processed.
+        const markers: SpoolEvent[] = [];
+        let markerIndex = -1;
+        const earlyBodies: string[] = [];
+        for (let index = 0; index < wholeSpool.length; index += 1) {
+          const event = wholeSpool[index] as SpoolEvent;
+          if (event.kind === 'freezeRelease') {
+            markers.push(event);
+            if (markerIndex < 0) markerIndex = index;
+            continue;
+          }
+          if (event.kind !== 'testBegin') continue;
+          const project = event.project ?? '';
+          if (!bodies.has(project)) continue;
+          if (markerIndex < 0 || index < markerIndex) {
+            earlyBodies.push(`${project}#${event.testId}`);
+          }
+        }
+        // A run that armed the barrier must carry EXACTLY ONE marker, and
+        // it must be the release this run itself signed (same prepared
+        // tree, same pinned spec digest) for THIS run's own controller
+        // project. A line the suite appended into the same spool can
+        // therefore never stand in for the real one.
+        if (
+          markers.length !== 1 ||
+          markers[0]?.preparedTreeId !== freezeMarker?.preparedTreeId ||
+          markers[0]?.specDigest !== freezeMarker?.specDigest ||
+          markers[0]?.project !== options.freeze.controllerProject
+        ) {
+          conflicts.push(
+            freezeMarker === null
+              ? 'preparation freeze: this run accepted no prepared-candidate release, so no body project was ' +
+                'allowed to start against a frozen candidate (fail closed)'
+              : `preparation freeze: the lifecycle spool carries ${String(markers.length)} accepted-freeze marker(s) ` +
+                'and none of them is the release this run signed — a forged or duplicated marker never orders a run',
+          );
+        }
+        for (const body of earlyBodies) {
+          conflicts.push(
+            `preparation freeze: body '${body}' began BEFORE the accepted prepared-candidate release was appended — ` +
+              'a body project may never run against an unprepared candidate',
+          );
+        }
+      }
       return { conflicts: [...conflicts], intentFailures: [...intentFailures], observeNotes: [...observeNotes] };
+    },
+    whenIntentsForwarded,
+    markFreezeRelease: (marker): void => {
+      freezeMarker = marker;
     },
   };
 }

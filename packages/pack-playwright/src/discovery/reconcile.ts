@@ -7,11 +7,12 @@
  * TRUST BOUNDARY (plan §3.3, phase 2 item 4): `--list` loads the
  * consumer's playwright config and test modules as UNTRUSTED code —
  * they execute in a child process. This module therefore:
- * - strips every `GATEFORGE_*` variable (witness keys, run tokens, run
- *   state) from the child environment, then sets only an isolated,
- *   secret-free temporary `GATEFORGE_STATE_DIR` so supervised-only test
- *   declarations are registered;
- * - deletes that temporary directory after enumeration;
+ * - strips every `GATEFORGE_*` variable from the scrubbed child
+ *   environment, then sets only an isolated, secret-free temporary
+ *   `GATEFORGE_STATE_DIR`;
+ * - gives wired comparison listings only the safe run-variable allowlist
+ *   actually exposed to runner children;
+ * - removes temporary state after scrubbed enumeration;
  * - enforces a finite timeout (the child is killed; a timeout is a
  *   typed failure, never a hang or an empty inventory);
  * - treats a failed invocation as a typed error (CLI exit 2), while
@@ -37,30 +38,14 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } 
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
+import { fileURLToPath } from 'node:url';
+
+import { buildRunnerChildEnv } from './runner-env.js';
+import { CLAIM_ANNOTATION_TYPE, ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
+import { localPlaywrightCliCandidates } from '../runner-resolution.js';
+import { CONFIG_SEARCH_PRUNED_DIRS, PLAYWRIGHT_CONFIG_NAMES } from './config-locations.js';
 import type { Location } from '@gate-forge/core';
-
-/** Config file names checked at the repo root and one level deep
- * (first match wins within each directory). */
-const PLAYWRIGHT_CONFIG_NAMES = [
-  'playwright.config.ts',
-  'playwright.config.mts',
-  'playwright.config.cts',
-  'playwright.config.js',
-  'playwright.config.mjs',
-  'playwright.config.cjs',
-] as const;
-
-/** Directory names never searched for a nested playwright config
- * (dependency trees, build output, VCS state, runner artifacts). */
-const CONFIG_SEARCH_PRUNED_DIRS: ReadonlySet<string> = new Set([
-  'node_modules',
-  'dist',
-  '.git',
-  'test-results',
-  'coverage',
-  'build',
-]);
+import { PROJECT_GRAPH_PATH_ENV, type ProjectGraphDocument } from '../reporter/project-graph-reporter.js';
 
 /** Default wall-clock bound for one `--list` invocation. */
 export const DEFAULT_LIST_TIMEOUT_MS = 60_000;
@@ -106,19 +91,60 @@ export interface NativeListResult {
   instances: NativeInstance[];
   /** Reporter errors from the JSON document (data, not a throw). */
   errors: string[];
+  /**
+   * Project name → the names it depends on, as the RUNNER resolved them
+   * (see {@link projectGraphReporterEntry}). Absent when the enumeration
+   * could not read the graph — never guessed, and never a partial graph
+   * treated as a complete one.
+   */
+  projectDependencies?: Record<string, string[]>;
+  /**
+   * Project name → the `use.storageState` STRING the runner resolved for
+   * it (the standard auth pattern's declared state file). Absent when no
+   * project declares one, and absent together with
+   * {@link projectDependencies} whenever the graph itself was unreadable.
+   */
+  projectStorageStates?: Record<string, string>;
+}
+
+/**
+ * Resolves the engine-owned project-graph reporter entry.
+ *
+ * Absolute and pack-relative for the same reason the trusted reporter
+ * entry is: the enumeration child must load an ENGINE file by absolute
+ * path, never a candidate-relative one. Resolution works from both the
+ * `src/` and `dist/` layouts.
+ *
+ * @param fromModule: module URL to resolve the pack from (default: this file).
+ *
+ * @returns
+ *   string: absolute `<pack>/dist/reporter/project-graph-reporter.js`.
+ */
+export function projectGraphReporterEntry(fromModule: string = import.meta.url): string {
+  const pkgPath = fileURLToPath(new URL('../../package.json', fromModule));
+  return join(pkgPath.slice(0, -'package.json'.length), 'dist', 'reporter', 'project-graph-reporter.js');
 }
 
 /**
  * The playwright CLI of the repo being scanned, else the pack's own.
- * Resolution order (consumer-first, subdirectory-first): the CONFIG
- * DIRECTORY's own install (a subdirectory project pins the playwright
- * version its config and specs load through — running any other version
- * against it dies with the two-versions-of-@playwright/test conflict),
- * then the repo root's, then the pack's own.
+ * Resolution order (consumer-first, nearest-first): the CONFIG
+ * DIRECTORY's own install and then every directory above it (a
+ * subdirectory project pins the playwright version its config and
+ * specs load through — running any other version against it dies with
+ * the two-versions-of-@playwright/test conflict), and within each
+ * directory the `@playwright/test` CLI before the bare `playwright`
+ * one (see {@link localPlaywrightCliCandidates}).
  *
  * Args:
  *   cwd: absolute repo root.
  *   configDir: config directory repo-relative (`'.'` for root-level).
+ *
+ * Returns:
+ *   string: absolute path of the CLI to invoke.
+ *
+ * Throws:
+ *   TestDiscoveryError: when neither the repo's own nor the pack's CLI
+ *   exists (a broken pack dependency, never a silent fallback).
  */
 function playwrightCliPath(cwd: string, configDir: string): string {
   // CONSUMER-FIRST resolution: a consumer repo pins its own
@@ -126,14 +152,11 @@ function playwrightCliPath(cwd: string, configDir: string): string {
   // through it). Running the pack's CLI against a consumer whose local
   // version differs dies with the two-versions-of-@playwright/test
   // conflict — so the scanned repo's own CLI wins when present
-  // (consumer migration, E22). The pack's CLI remains the fallback
-  // (fixture repos symlink the monorepo node_modules, so they resolve
-  // to the same bytes either way).
-  const searchRoots = configDir !== '.' ? [join(cwd, configDir), cwd] : [cwd];
-  for (const searchRoot of searchRoots) {
-    for (const candidate of localPlaywrightCliCandidates(searchRoot)) {
-      if (existsSync(candidate)) return candidate;
-    }
+  // (consumer migration, E22; install rehearsal F7). The pack's CLI
+  // remains the fallback (fixture repos symlink the monorepo
+  // node_modules, so they resolve to the same bytes either way).
+  for (const candidate of localPlaywrightCliCandidates(join(cwd, configDir))) {
+    if (existsSync(candidate)) return candidate;
   }
   const require = createRequire(import.meta.url);
   const pkgJson = require.resolve('playwright/package.json');
@@ -144,13 +167,6 @@ function playwrightCliPath(cwd: string, configDir: string): string {
   return cli;
 }
 
-/** The scanned repo's local playwright CLI locations, in preference order. */
-export function localPlaywrightCliCandidates(cwd: string): string[] {
-  return [
-    join(cwd, 'node_modules', 'playwright', 'cli.js'),
-    join(cwd, 'node_modules', '@playwright', 'test', 'cli.js'),
-  ];
-}
 
 /**
  * Strips every `GATEFORGE_*` variable from the environment for UNTRUSTED
@@ -175,37 +191,36 @@ export function untrustedEnv(env: NodeJS.ProcessEnv, discoveryStateDir?: string)
 }
 
 /**
- * Finds the consumer's playwright config: at the repo root first, then —
- * only when no root-level config exists — ONE directory level deep
- * (immediate subdirectories, dependency/build/VCS/runner directories
- * pruned), alphabetically first match. Returns the repo-relative posix
- * path (`'playwright.config.ts'`, or `'e2e/playwright.config.ts'` for a
- * subdirectory project), or null when none exists.
+ * Enumerates EVERY playwright config the search space contains, in the
+ * order the choice is made: repo-root configs first (in
+ * {@link PLAYWRIGHT_CONFIG_NAMES} order), then ONE directory level
+ * deep (immediate subdirectories, dependency/build/VCS/runner
+ * directories pruned, alphabetically).
  *
- * Root-level configs always win: an existing root project must keep its
- * exact historical invocation. The nested search only extends discovery
- * to the self-contained subdirectory layout (the config's OWN directory
- * pins its playwright install — see {@link playwrightCliPath}).
+ * Enumeration runs exactly one config, so a repo with several configs
+ * is inventoried as a subset. Listing them all is what lets that
+ * narrowing be reported instead of silent — see
+ * {@link findPlaywrightConfig}.
  *
  * Args:
  *   cwd: absolute repo root.
  *
  * Returns:
- *   string | null: repo-relative posix config path, or null.
+ *   string[]: repo-relative posix config paths, in choice order.
  */
-export function findPlaywrightConfig(cwd: string): string | null {
+export function findPlaywrightConfigs(cwd: string): string[] {
+  const found: string[] = [];
   for (const name of PLAYWRIGHT_CONFIG_NAMES) {
-    const path = join(cwd, name);
-    if (existsSync(path)) return name;
+    if (existsSync(join(cwd, name))) found.push(name);
   }
   let names: string[];
   try {
     names = readdirSync(cwd);
   } catch {
-    return null; // unreadable root: the root-level search already came up empty
+    return found; // unreadable root: the root-level search already came up empty
   }
   const subdirs = names
-    .filter((name) => !CONFIG_SEARCH_PRUNED_DIRS.has(name))
+    .filter((name) => CONFIG_SEARCH_PRUNED_DIRS[name] !== true)
     .filter((name) => {
       try {
         return statSync(join(cwd, name)).isDirectory();
@@ -216,10 +231,69 @@ export function findPlaywrightConfig(cwd: string): string | null {
     .sort();
   for (const dir of subdirs) {
     for (const name of PLAYWRIGHT_CONFIG_NAMES) {
-      if (existsSync(join(cwd, dir, name))) return `${dir}/${name}`;
+      if (existsSync(join(cwd, dir, name))) found.push(`${dir}/${name}`);
     }
   }
-  return null;
+  return found;
+}
+
+/**
+ * Finds the ONE consumer playwright config enumeration runs: at the
+ * repo root first, then — only when no root-level config exists — ONE
+ * directory level deep (see {@link findPlaywrightConfigs}). Returns
+ * the repo-relative posix path (`'playwright.config.ts'`, or
+ * `'e2e/playwright.config.ts'` for a subdirectory project), or null
+ * when none exists.
+ *
+ * Root-level configs always win: an existing root project must keep its
+ * exact historical invocation. The nested search only extends discovery
+ * to the self-contained subdirectory layout (the config's OWN directory
+ * pins its playwright install — see {@link playwrightCliPath}).
+ *
+ * The choice is never silent: when more than one config exists,
+ * {@link listNativePlaywrightTests} names every discovered config, the
+ * one used and why, and the ones NOT inventoried. There is deliberately
+ * no configuration key for the choice: any such key would change WHICH
+ * consumer code runs, not just what is reported, and it would have to
+ * be plumbed through the discovery callers' option sets.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *
+ * Returns:
+ *   string | null: repo-relative posix config path, or null.
+ */
+export function findPlaywrightConfig(cwd: string): string | null {
+  return findPlaywrightConfigs(cwd)[0] ?? null;
+}
+
+/**
+ * Builds the one-line disclosure appended to enumeration's detail when
+ * the repo holds more than one playwright config. Without it a repo
+ * with several suites is silently graded as a subset.
+ *
+ * Args:
+ *   configs: every discovered config, in choice order (first = used).
+ *   used: the config enumeration ran.
+ *
+ * Returns:
+ *   string: the disclosure, or '' when there is nothing to disclose.
+ */
+function configChoiceNote(configs: readonly string[], used: string): string {
+  if (configs.length < 2) return '';
+  const reason = used.includes('/')
+    ? 'no repo-root config exists, so the alphabetically first subdirectory config is inventoried'
+    : 'a repo-root config always wins, so a root project keeps its exact invocation';
+  const listed = configs
+    .map((path) =>
+      path === used
+        ? `${path} (inventoried: ${reason})`
+        : `${path} (not inventoried: its test cases are missing from this catalog)`,
+    )
+    .join(', ');
+  return (
+    ` — note: ${String(configs.length)} playwright configs are present, and only 1 is inventoried: ${listed}`
+  );
 }
 
 /** Minimal JSON-reporter suite node shape (fields discovery consumes). */
@@ -251,10 +325,79 @@ interface ReporterDocument {
   errors?: Array<{ message?: string }>;
 }
 
+/**
+ * True when a parsed graph field is a plain object (never an array, never
+ * null): the container both project-graph maps are.
+ */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** True when a parsed field is an object whose values are all strings. */
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isPlainRecord(value) && Object.values(value).every((entry) => typeof entry === 'string');
+}
+
+/** True when a parsed dependency list is an array of strings. */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry: unknown) => typeof entry === 'string');
+}
+
 /** Converts an absolute path to repo-root-relative posix form. */
 function toRepoRelative(cwd: string, path: string): string {
   const rel = relative(cwd, resolve(cwd, path));
   return rel.split('\\').join('/');
+}
+
+/**
+ * Reads the `version` of an installed package by its directory (the
+ * `<pkg>/package.json` beside a CLI), or null when it is unreadable.
+ *
+ * Args:
+ *   packageDir: absolute directory of the installed package.
+ *
+ * Returns:
+ *   string | null: the declared version, or null when unreadable.
+ */
+function installedVersion(packageDir: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')) as { version?: unknown };
+    return typeof parsed.version === 'string' ? parsed.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Expands a runner load error that is really a playwright VERSION
+ * conflict into one sentence naming both versions and the real cause.
+ * A missing dependency is the wrong diagnosis there: nothing is
+ * missing, the two-versions-of-@playwright/test conflict is (install
+ * rehearsal F7), and the pack's pinned copy must not be what runs the
+ * consumer's project. Every other message is passed through
+ * unchanged.
+ *
+ * Args:
+ *   message: one reporter load error.
+ *   cli: absolute path of the CLI that produced it.
+ *
+ * Returns:
+ *   string: the message, with the conflict named when it is one.
+ */
+function diagnoseRunnerLoadError(message: string, cli: string): string {
+  if (!/did not expect test\(\) to be called here/.test(message)) return message;
+  const require = createRequire(import.meta.url);
+  const packDir = dirname(require.resolve('playwright/package.json'));
+  const runnerDir = dirname(cli);
+  const runnerName = basename(runnerDir) === 'test' ? `@playwright/${basename(runnerDir)}` : basename(runnerDir);
+  const runner = `${runnerName}@${installedVersion(runnerDir) ?? 'unknown version'}`;
+  const pack = `playwright@${installedVersion(packDir) ?? 'unknown version'} (the pack's pin)`;
+  return (
+    `${message} — this is the two-versions-of-@playwright/test conflict, not a missing ` +
+    `dependency: this project was enumerated with ${runner} while the pack pins ${pack}. ` +
+    "Make the project's own @playwright/test the one Gateforge runs (remove the other copy from " +
+    'node_modules), or align both to one version.'
+  );
 }
 
 /**
@@ -272,8 +415,8 @@ function toRepoRelative(cwd: string, path: string): string {
  * invocation (repo-root cwd, auto-discovered config, no `--config`).
  *
  * Args:
- *   options: `cwd` (absolute repo root) and optional `timeoutMs`
- *     (default {@link DEFAULT_LIST_TIMEOUT_MS}).
+ *   options: `cwd` (absolute repo root), optional `timeoutMs`, and
+ *     optional allowlisted wired-runner variables for registration comparison.
  *
  * Returns:
  *   Promise<NativeListResult>: enumerated instances, reporter errors,
@@ -281,13 +424,16 @@ function toRepoRelative(cwd: string, path: string): string {
  *
  * Throws:
  *   TestDiscoveryError: when the child cannot spawn, exceeds the
- *   timeout, or stdout is not parseable reporter JSON.
+ *   timeout, or produced no readable reporter JSON (the report is read
+ *   from the reporter's own output file, never from stdout).
  */
 export async function listNativePlaywrightTests(options: {
   cwd: string;
   timeoutMs?: number;
+  wiredEnv?: Readonly<Record<string, string>>;
 }): Promise<NativeListResult> {
-  const configPath = findPlaywrightConfig(options.cwd);
+  const configs = findPlaywrightConfigs(options.cwd);
+  const configPath = configs[0] ?? null;
   if (configPath === null) {
     return {
       status: 'unavailable',
@@ -301,14 +447,54 @@ export async function listNativePlaywrightTests(options: {
   const childCwd = join(options.cwd, configDir);
   const timeoutMs = options.timeoutMs ?? DEFAULT_LIST_TIMEOUT_MS;
   const cli = playwrightCliPath(options.cwd, configDir);
-  const args = [cli, 'test', '--list', '--reporter=json'];
+  // The JSON report is read from a FILE the runner writes, never from
+  // stdout: a consumer's playwright config routinely prints at load
+  // time (a dotenv/dotenvx banner, a stray `console.log`) and stdout is
+  // the runner's own channel, not a document channel (install
+  // rehearsal F6). The path is absolute, so the reporter's
+  // cwd-relative resolution cannot move it, and the JSON reporter's
+  // `printsToStdio()` turns false — no part of the report can
+  // interleave with the config's logging. The same directory holds the
+  // project-graph document (below) and is removed with the child.
+  const reportDir = mkdtempSync(join(tmpdir(), 'gateforge-playwright-report-'));
+  const reportPath = join(reportDir, 'reporter.json');
+  // The project graph rides along with the json report through an
+  // ENGINE-OWNED reporter (see {@link projectGraphReporterEntry}): the
+  // json reporter's `config.projects[]` does not carry `dependencies` in
+  // any released playwright (verified against 1.58.2 and 1.62.1), and
+  // reading them out of the consumer config would mean trusting candidate
+  // code. Without the built entry the enumeration runs exactly as before
+  // and reports no graph — the field is optional precisely so a missing
+  // graph is honest absence, never a guessed empty one.
+  const graphReporterEntry = projectGraphReporterEntry();
+  const args = [
+    cli,
+    'test',
+    '--list',
+    `--reporter=json${existsSync(graphReporterEntry) ? `,${graphReporterEntry}` : ''}`,
+  ];
   if (configDir !== '.') args.push('--config', basename(configPath));
-  const discoveryStateDir = mkdtempSync(join(tmpdir(), 'gateforge-discovery-state-'));
+  const discoveryStateDir =
+    options.wiredEnv === undefined ? mkdtempSync(join(tmpdir(), 'gateforge-discovery-state-')) : undefined;
   let outcome: { code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null };
+  let reportText: string | null = null;
+  let graphText: string | null = null;
   try {
+    const childEnv: NodeJS.ProcessEnv =
+      options.wiredEnv === undefined
+        ? untrustedEnv(process.env, discoveryStateDir)
+        : buildRunnerChildEnv(options.wiredEnv, process.env);
+    // The evidence fixture binds to the CONSUMER's runner, resolved from
+    // the config directory this enumeration just discovered: that is what
+    // makes a non-root config with its own `node_modules` work, not only a
+    // hoisted repository-root install. Set on BOTH the scrubbed and the
+    // wired child so the two registrations can never differ.
+    childEnv[ENV_PLAYWRIGHT_CONFIG_DIR] = childCwd;
+    childEnv['PLAYWRIGHT_JSON_OUTPUT_FILE'] = reportPath;
+    childEnv[PROJECT_GRAPH_PATH_ENV] = join(reportDir, 'project-graph.json');
     const child = spawn(process.execPath, args, {
       cwd: childCwd,
-      env: untrustedEnv(process.env, discoveryStateDir),
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     outcome = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null }>(
@@ -343,8 +529,23 @@ export async function listNativePlaywrightTests(options: {
       });
     },
   );
+    try {
+      reportText = readFileSync(reportPath, 'utf8');
+    } catch {
+      // A runner that never reached the reporter (or one whose version
+      // predates its output-file support) leaves no file. The whole
+      // captured stream is then the only candidate, and it is read as
+      // one document — never scanned for a plausible-looking substring.
+      reportText = outcome.stdout;
+    }
+    try {
+      graphText = readFileSync(join(reportDir, 'project-graph.json'), 'utf8');
+    } catch {
+      graphText = null;
+    }
   } finally {
-    rmSync(discoveryStateDir, { recursive: true, force: true });
+    if (discoveryStateDir !== undefined) rmSync(discoveryStateDir, { recursive: true, force: true });
+    rmSync(reportDir, { recursive: true, force: true });
   }
   if (outcome.error !== null) {
     throw new TestDiscoveryError(`playwright --list failed to run: ${outcome.error.message}`);
@@ -356,10 +557,12 @@ export async function listNativePlaywrightTests(options: {
   }
   let document: ReporterDocument;
   try {
-    document = JSON.parse(outcome.stdout) as ReporterDocument;
+    document = JSON.parse(reportText ?? '') as ReporterDocument;
   } catch {
     throw new TestDiscoveryError(
-      `playwright --list produced unparseable output (exit ${String(outcome.code)}): ` +
+      `playwright --list produced no readable reporter JSON (exit ${String(outcome.code)}). The report ` +
+        "is read from the reporter's own output file, so a config that logs to stdout no longer corrupts " +
+        'it — this means the run never reached the reporter. Runner output: ' +
         `${(outcome.stderr || outcome.stdout).slice(0, 400)}`,
     );
   }
@@ -413,13 +616,151 @@ export async function listNativePlaywrightTests(options: {
     }
   };
   walkSuites(document.suites ?? [], [], null);
-  const errors = (document.errors ?? []).map((error) => error.message ?? String(error));
+  const errors = (document.errors ?? []).map((error) => diagnoseRunnerLoadError(error.message ?? String(error), cli));
+  // The project graph the runner resolved, plus the storage states its
+  // projects declare. A document that does not parse — or that carries a
+  // field this reader does not understand — is absence, never a partial
+  // graph: a downstream run that emitted a `dependencies` edge from half
+  // a graph would order projects wrongly, and one that honored half the
+  // declared states would authenticate the wrong projects.
+  let projectDependencies: Record<string, string[]> | undefined;
+  let projectStorageStates: Record<string, string> | undefined;
+  if (graphText !== null) {
+    try {
+      const parsed = JSON.parse(graphText) as Partial<ProjectGraphDocument>;
+      // Untrusted input: everything below is checked at runtime, and one
+      // bad field discards the WHOLE document rather than half of it.
+      const graph: unknown = parsed.projectDependencies;
+      const states: unknown = parsed.projectStorageStates;
+      if (parsed.schemaVersion === 2 && isPlainRecord(graph)) {
+        // Null-prototype: a project NAME is candidate data and `__proto__`
+        // is a legal one, so the maps keyed by it must not inherit.
+        const dependencies = Object.create(null) as Record<string, string[]>;
+        const storageStates = Object.create(null) as Record<string, string>;
+        let wellFormed = true;
+        for (const [name, edges] of Object.entries(graph)) {
+          if (!isStringArray(edges)) {
+            wellFormed = false;
+            break;
+          }
+          dependencies[name] = [...new Set(edges.filter((edge) => edge.length > 0))].sort();
+        }
+        if (wellFormed && states !== undefined) {
+          if (!isStringRecord(states)) {
+            wellFormed = false;
+          } else {
+            for (const [name, value] of Object.entries(states)) {
+              // An empty string is carried, not filtered: whether it may
+              // be read is the planner's refusal, never this reader's
+              // silent omission.
+              storageStates[name] = value;
+            }
+          }
+        }
+        if (wellFormed) {
+          projectDependencies = dependencies;
+          // Omitted when nothing declared a state — an empty map would
+          // read as "every project runs with an empty state".
+          if (Object.keys(storageStates).length > 0) projectStorageStates = storageStates;
+        }
+      }
+    } catch {
+      projectDependencies = undefined;
+      projectStorageStates = undefined;
+    }
+  }
   const configDetail = configDir !== '.' ? ` (cwd '${configDir}')` : '';
+  const envDetail =
+    options.wiredEnv === undefined
+      ? 'isolated temporary GATEFORGE_STATE_DIR'
+      : 'allowlisted wired runner variables';
   return {
     status: 'discovered',
-    detail: `native playwright --list over '${configPath}'${configDetail} enumerated ${String(instances.length)} instance(s) as untrusted code (isolated temporary GATEFORGE_STATE_DIR only)`,
+    detail:
+      `native playwright --list over '${configPath}'${configDetail} enumerated ${String(instances.length)} ` +
+      `instance(s) as untrusted code (${envDetail})` + configChoiceNote(configs, configPath),
     instances,
     errors,
+    ...(projectDependencies !== undefined ? { projectDependencies } : {}),
+    ...(projectStorageStates !== undefined ? { projectStorageStates } : {}),
+  };
+}
+
+/**
+ * Finds registration instances present in only one environment's native
+ * Playwright listing, treating project and duplicate instances as identity.
+ *
+ * Args:
+ *   scrubbed: native instances enumerated without run wiring.
+ *   wired: native instances enumerated with the runner's safe run variables.
+ *
+ * Returns:
+ *   An object containing project-qualified instances unique to each listing.
+ */
+export function diffNativePlaywrightTests(
+  scrubbed: readonly NativeInstance[],
+  wired: readonly NativeInstance[],
+): { scrubbedOnly: NativeInstance[]; wiredOnly: NativeInstance[] } {
+  /**
+   * Builds the project-qualified matching identity for one instance.
+   *
+   * Args:
+   *   instance: native test instance.
+   *
+   * Returns:
+   *   string: serialized file, title path, and project tuple.
+   */
+  const keyOf = (instance: NativeInstance): string =>
+    JSON.stringify([instance.file, instance.titlePath, instance.project]);
+  const wiredCounts = new Map<string, number>();
+  for (const instance of wired) {
+    const key = keyOf(instance);
+    wiredCounts.set(key, (wiredCounts.get(key) ?? 0) + 1);
+  }
+  const matchedCounts = new Map<string, number>();
+  const scrubbedOnly: NativeInstance[] = [];
+  for (const instance of scrubbed) {
+    const key = keyOf(instance);
+    const matched = matchedCounts.get(key) ?? 0;
+    if (matched < (wiredCounts.get(key) ?? 0)) {
+      matchedCounts.set(key, matched + 1);
+    } else {
+      scrubbedOnly.push(instance);
+    }
+  }
+  const wiredOnly: NativeInstance[] = [];
+  const emittedCounts = new Map<string, number>();
+  for (const instance of wired) {
+    const key = keyOf(instance);
+    const emitted = emittedCounts.get(key) ?? 0;
+    if (emitted < (matchedCounts.get(key) ?? 0)) {
+      emittedCounts.set(key, emitted + 1);
+    } else {
+      wiredOnly.push(instance);
+    }
+  }
+  /**
+   * Sorts instances deterministically by file, project, and title path.
+   *
+   * Args:
+   *   left: first native test instance.
+   *   right: second native test instance.
+   *
+   * Returns:
+   *   number: standard array comparator result.
+   */
+  const compare = (left: NativeInstance, right: NativeInstance): number => {
+    const byFile = left.file < right.file ? -1 : left.file > right.file ? 1 : 0;
+    if (byFile !== 0) return byFile;
+    const byProject = left.project < right.project ? -1 : left.project > right.project ? 1 : 0;
+    if (byProject !== 0) return byProject;
+    const leftTitlePath = left.titlePath.join('>');
+    const rightTitlePath = right.titlePath.join('>');
+    return leftTitlePath < rightTitlePath ? -1 : leftTitlePath > rightTitlePath ? 1 : 0;
+  };
+  return {
+    scrubbedOnly: scrubbedOnly.sort(compare),
+    wiredOnly: wiredOnly.sort(compare),
   };
 }
 

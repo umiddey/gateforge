@@ -106,7 +106,7 @@ export async function collectPytestSuite(suite: DiagnosticSuite, cwd: string): P
   const argv = pytestCollectArgv(suite);
   const child = spawn(argv[0] ?? '', argv.slice(1), {
     cwd,
-    env: untrustedEnv(process.env),
+    env: { ...untrustedEnv(process.env), PYTHONDONTWRITEBYTECODE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const outcome = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null }>(
@@ -493,13 +493,17 @@ export async function executePytestSuite(
     reportExists: existsSync(reportPath),
     reportUnparsable: false,
   };
+  const childEnv = {
+    ...(options?.env ?? untrustedEnv(process.env)),
+    PYTHONDONTWRITEBYTECODE: '1',
+  };
   const child = spawn(argv[0] ?? '', argv.slice(1), {
     cwd: join(repoRoot, suite.cwd),
     // Advisory default: untrustedEnv strips every GATEFORGE_* name. The
     // witnessed participant override (options.env) is built exclusively
     // by the trusted CLI through buildWitnessedPytestChildEnv — the
     // run-scoped allowlist that never carries the verifier key.
-    env: options?.env ?? untrustedEnv(process.env),
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const outcome = await new Promise<{ code: number | null; signal: string | null; stdout: string; stderr: string; timedOut: boolean; error: Error | null }>(

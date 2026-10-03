@@ -23,13 +23,17 @@ import { testGatesCommand } from './commands/test-gates.js';
 import { preCommitCommand } from './commands/pre-commit.js';
 import { baselineCommand } from './commands/baseline.js';
 import { waiveCommand } from './commands/waive.js';
+import { quarantineCommand } from './commands/quarantine.js';
 import { classifyCommand } from './commands/classify.js';
 import { explainCommand } from './commands/explain.js';
 import { testsCommand } from './commands/tests.js';
+import { adaptersCommand } from './commands/adapters.js';
+import { runCommand } from './commands/run.js';
 
 import { enforcementCommand } from './commands/enforcement.js';
 import { brokerCommand } from './broker.js';
 import { keysCommand } from './commands/keys.js';
+import { historyCommand } from './commands/history.js';
 /** The top-level usage text (also printed for `--help`). */
 export const USAGE = `\
 usage: gateforge <command> [options]
@@ -41,7 +45,8 @@ commands:
                                          .gateforge.yml + skeleton + GATEFORGE.md + overlay README
                                          (idempotent; --blocking installs AND verifies an active
                                          pre-commit hook + CI wiring)
-  enforce                                 wire the blocking pre-commit + CI gate into an initialized repo (idempotent)
+  enforce [--ci github|gitlab] [--witnessed]  wire the blocking pre-commit + CI gate into an initialized repo (idempotent);
+                                           --witnessed also writes the witnessed 'gateforge run' job template
   adopt                                   adopt enforcement: seed the baseline from current debt (the one bulk-add) + wire the gate
   discover [--json]                      run detectors and dump the resource graph
   classify [--json] [--write-snapshot P] inspect effective classifications + typed blocks
@@ -52,10 +57,16 @@ commands:
         --obligation ID... --reason "T"  declare an existing test in .gateforge/test-map.yml (atomic, idempotent)
   tests explain --test K [--json]        requirements/mapping/next action for one existing test
   tests diagnose [--suite N] [--json]    run the configured pytest diagnostic suites (advisory; exit 0/1/2)
+  adapters scaffold [--dry-run]          write a starting-point evidence adapter per business resource
+        [--dry-run]                      that has none (never overwrites; every guess is marked)
+  adapters check [--json]                load and validate every adapter; report the resources with none
+        [--probe --base-url URL]         with the app running: one read-only GET per adapter
+        [--probe-id ID]
   obligations [--json]                   evaluate policies and dump obligations
-  check [--changed] [--staged]           run the full gate and report (F: text|json|sarif). --staged gates the
-        [--require-e2e] [--format F]     EXACT staged candidate (frozen index checkout, never the worktree);
-                                         --require-e2e blocks without a valid, non-stale gate receipt
+  history [--test TEXT] [--failed] [--since ISO]  query retained supervised run history
+  check [--changed] [--staged] [--candidate-commit SHA] run the gate against all files, the exact frozen
+        index, or the selected immutable commit tree; --changed narrows the selected candidate's diff;
+        [--require-e2e] [--format F] require a valid receipt and select text|json|sarif output
   next [--changed] [--json]              print the ONE blocking next action (navigation, not the gate)
   test-gates [--changed] [--suite CMD]   supervised E2E run over the obligations (--changed) or the
         [--out DIR] [--format F]         legacy suite escape hatch; seals a gate receipt on complete success
@@ -71,9 +82,17 @@ commands:
   enforcement doctor [--json]            honest enforcement diagnostics: hook activation, runner/observer readiness,
                                          trusted binary/policy ownership, snapshot mode, standard/managed boundary
   baseline update <fp...>                shrink the baseline to a strict subset (invariant 4)
+  baseline diff <before> <after>         compare adopted obligations by ID without printing fingerprints
   waive <resourceId:contract>            write an expiring, owner-approved waiver for one obligation
         --owner N --approver N           (GF-15: all fields mandatory; justification URL required;
         --justification-url U --expires D  no --force — renewal is a hand-edit of the written file)
+  quarantine <testKey>                  write an expiring, owner-approved flaky-test quarantine
+        --owner N --approver N           (never proof, never blocking; at most 14 days; no --force;
+        --reason "T" --expires D         an expired quarantine BLOCKS until renewed or deleted)
+  run [--] [test-gates flags]    the whole local proof in order: doctor preflight (strict), the optional
+                                         .gateforge/runtime.yml recipe (reset/seed/up/health), the supervised
+                                         test-gates, check --require-e2e, and the recipe's teardown — one line
+                                         per step, exit code = the first failing step's own code
   --version                              print the version
   --help                                 show this help
 
@@ -125,6 +144,8 @@ export async function main(
       return runWithExitCodes(io, () => explainCommand(io, rest));
     case 'tests':
       return runWithExitCodes(io, () => testsCommand(io, rest));
+    case 'adapters':
+      return runWithExitCodes(io, () => adaptersCommand(io, rest));
     case 'obligations':
       return runWithExitCodes(io, () => obligationsCommand(io, rest));
     case 'check':
@@ -133,6 +154,10 @@ export async function main(
       return runWithExitCodes(io, () => nextCommand(io, rest));
     case 'test-gates':
       return runWithExitCodes(io, () => testGatesCommand(io, rest));
+    case 'run':
+      return runWithExitCodes(io, () => Promise.resolve(runCommand(io, rest)));
+    case 'history':
+      return runWithExitCodes(io, () => Promise.resolve(historyCommand(io, rest)));
     case 'pre-commit':
       return runWithExitCodes(io, () => preCommitCommand(io, rest));
     case 'enforcement':
@@ -145,6 +170,8 @@ export async function main(
       return runWithExitCodes(io, () => Promise.resolve(baselineCommand(io, rest)));
     case 'waive':
       return runWithExitCodes(io, () => waiveCommand(io, rest));
+    case 'quarantine':
+      return runWithExitCodes(io, () => quarantineCommand(io, rest));
     default:
       return runWithExitCodes(io, async () => {
         // parseArgs validates flag syntax; unknown commands are usage errors.

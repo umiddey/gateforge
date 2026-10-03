@@ -169,9 +169,78 @@ export const GateReceiptSchema = z
      */
     caseExecutionDigest: z.string().regex(HEX64, 'caseExecutionDigest must be 64-char lowercase hex'),
     /**
-     * 64-hex digest binding the approved engine/policy bundle version
-     * (engine version + trusted policy digest).
+     * ADDITIVE engine identity for comparing the installed CLI version
+     * with the version that sealed this receipt. Optional so receipts
+     * issued before this field retain their existing verification behavior.
      */
+    engine: z
+      .object({
+        version: z.string().min(1),
+        source: z.string().min(1),
+        unpublished: z.boolean(),
+      })
+      .strict()
+      .optional(),
+    /** Additive stage that the installation configured for receipt enforcement. */
+    receiptStage: z.enum(['pre-push', 'pre-commit', 'ci']).optional(),
+    /** Commit sha of the full-scope receipt carried into this candidate. */
+    carriedFrom: z.string().regex(/^[0-9a-f]{40}$/, 'carriedFrom must be a 40-char lowercase sha1 hex').optional(),
+    /** Digest of the authenticated parent receipt whose proof was carried. */
+    parentReceiptDigest: z.string().regex(HEX64, 'parentReceiptDigest must be 64-char lowercase hex').optional(),
+    /**
+     * ADDITIVE test-only re-seal binding: the 64-hex digest of the
+     * VERIFIED parent receipt this run re-sealed from. Equal to
+     * `parentReceiptDigest` (which stays the carried-proof binding) and
+     * present only on a re-sealed receipt — a run that re-ran exactly
+     * the tests a test-only change can affect and carried the rest from
+     * the parent. The recomputation is the consumer's job: CI (and the
+     * broker) diff the two sealed trees themselves and recompute the
+     * classification, never trusting the claimed change class.
+     */
+    resealedFrom: z.string().regex(HEX64, 'resealedFrom must be 64-char lowercase hex').optional(),
+    /**
+     * ADDITIVE: WHICH kind of parent document `resealedFrom` names —
+     * `receipt` (a verified gate receipt) or `run-record` (a whole-suite
+     * run record, the only parent a run that sealed no receipt can
+     * have). Absent reads as `receipt`, so every re-sealed receipt
+     * sealed before this field existed keeps verifying unchanged. A
+     * `run-record` re-seal carries NO `parentReceiptDigest` (there is no
+     * parent receipt to name) and the consumer recomputes the run
+     * record exactly like a parent receipt.
+     */
+    resealedFromKind: z.enum(['receipt', 'run-record']).optional(),
+    /**
+     * ADDITIVE: how many test outcomes this receipt carries unchanged
+     * from the parent receipt (digest-bound to the parent's execution
+     * result and evidence attestation). Absent on every other seal.
+     */
+    carriedTests: z.number().int().min(0).optional(),
+    /** ADDITIVE: how many tests this invocation re-ran with fresh evidence. */
+    rerunTests: z.number().int().min(0).optional(),
+    /**
+     * ADDITIVE change classification. Only one value exists today
+     * (`test-only`); a receipt that carries it MUST carry the re-seal
+     * fields above, and a receipt without it carries none of them.
+     */
+    changeClass: z.literal('test-only').optional(),
+    /**
+     * ADDITIVE: the changed repository-relative paths Gateforge itself
+     * computed from the two sealed trees (sorted, duplicate-free) — the
+     * claim CI recomputes. A CI recomputation that differs from this
+     * list rejects the receipt (EVIDENCE_STALE).
+     */
+    changedPaths: z.array(z.string().min(1)).optional(),
+    /**
+     * ADDITIVE: the changed paths the OWNER declaration
+     * `enforcement.resealRuntimeFiles` kept out of the classification —
+     * runtime state the run itself rewrites, which no sealed commit
+     * tracks. Present only when at least one path was disregarded, and
+     * bound by the receipt MAC like every other re-seal field: the
+     * consumer recomputes the list from the same globs and the two
+     * commit trees, and any difference is `EVIDENCE_STALE`.
+     */
+    resealDisregarded: z.array(z.string().min(1)).optional(),
+    /** 64-hex digest binding the approved engine/policy bundle version. */
     engineBundleDigest: z.string().regex(HEX64, 'engineBundleDigest must be 64-char lowercase hex'),
     /**
      * 64-hex digest binding the controller-issued record of the active
@@ -191,6 +260,18 @@ export const GateReceiptSchema = z
      * be clean when no evidence was required).
      */
     evidenceAttestationDigest: z.string().regex(HEX64, 'evidenceAttestationDigest must be 64-char lowercase hex').nullable(),
+    /**
+     * ADDITIVE: canonical digest of the EVIDENCE UNION this re-seal
+     * sealed — the parent run's carried witness-issued records and
+     * claims together with the re-run's own, exactly as they stand in
+     * the run state. A re-seal carries a test's outcomes AND the
+     * evidence those outcomes were witnessed with; this field binds
+     * that second half, so a consumer recomputes the union from the
+     * retained parent documents and demands the state evidence equal it
+     * (any difference is `EVIDENCE_STALE`). MAC-bound like every other
+     * re-seal field.
+     */
+    carriedEvidenceDigest: z.string().regex(HEX64, 'carriedEvidenceDigest must be 64-char lowercase hex').optional(),
     /** Final verdict summary (blocking must have been 0 at issuance). */
     verdictSummary: ReceiptVerdictSummarySchema,
     /** Issuance instant (ISO-8601). */
@@ -200,6 +281,104 @@ export const GateReceiptSchema = z
   })
   .strict()
   .superRefine((receipt, ctx) => {
+    if ((receipt.carriedFrom === undefined) !== (receipt.parentReceiptDigest === undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['parentReceiptDigest'],
+        message: 'carriedFrom and parentReceiptDigest must be present together',
+      });
+    }
+    // Re-seal coherence (fail closed): the re-seal fields stand or fall
+    // together, and a `test-only` change class is a CLAIM a consumer
+    // must recompute — it never certifies itself. A receipt naming some
+    // of them is malformed, never half-believed.
+    const resealFields = [receipt.resealedFrom, receipt.carriedTests, receipt.rerunTests, receipt.changeClass] as const;
+    const presentResealFields = resealFields.filter((field) => field !== undefined).length;
+    if (presentResealFields > 0 && presentResealFields < resealFields.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resealedFrom'],
+        message: 'resealedFrom, carriedTests, rerunTests and changeClass must be present together',
+      });
+      return;
+    }
+    if (receipt.resealedFromKind !== undefined && presentResealFields !== resealFields.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resealedFromKind'],
+        message: 'resealedFromKind is a re-seal binding and stands or falls with the re-seal fields',
+      });
+    }
+    if (receipt.resealDisregarded !== undefined && presentResealFields !== resealFields.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resealDisregarded'],
+        message: 'resealDisregarded is a re-seal binding and stands or falls with the re-seal fields',
+      });
+    }
+    // The carried-EVIDENCE binding is a re-seal binding: a receipt that
+    // carries one half of a re-seal's proof without the other is
+    // malformed, never half-believed.
+    if (receipt.carriedEvidenceDigest !== undefined && presentResealFields !== resealFields.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['carriedEvidenceDigest'],
+        message: 'carriedEvidenceDigest is a re-seal binding and stands or falls with the re-seal fields',
+      });
+    }
+    if (presentResealFields === resealFields.length) {
+      // A `run-record` parent is NOT a receipt: `resealedFrom` then
+      // names the run record's own digest and no carried-receipt binding
+      // may be claimed. A `receipt` parent keeps the identity rule.
+      if (receipt.resealedFromKind === 'run-record') {
+        if (receipt.parentReceiptDigest !== undefined || receipt.carriedFrom !== undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['parentReceiptDigest'],
+            message: 'a run-record re-seal names no parent receipt, so it carries no parentReceiptDigest',
+          });
+          return;
+        }
+      } else if (receipt.resealedFrom !== receipt.parentReceiptDigest) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['resealedFrom'],
+          message: 'resealedFrom must equal the parentReceiptDigest it re-sealed from',
+        });
+        return;
+      }
+      const paths = receipt.changedPaths ?? [];
+      const sortedPaths = [...paths].sort();
+      for (let index = 0; index < paths.length; index += 1) {
+        if (paths[index] !== sortedPaths[index]) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['changedPaths', index],
+            message: "changedPaths must be sorted; expected '" + String(sortedPaths[index]) + "' at index " + String(index),
+          });
+          return;
+        }
+      }
+      // The disregarded list is a CLAIM the consumer recomputes entry
+      // for entry, so it is sorted exactly like `changedPaths`: an
+      // unordered claim could never be reproduced.
+      const disregarded = receipt.resealDisregarded ?? [];
+      const sortedDisregarded = [...disregarded].sort();
+      for (let index = 0; index < disregarded.length; index += 1) {
+        if (disregarded[index] !== sortedDisregarded[index]) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['resealDisregarded', index],
+            message:
+              "resealDisregarded must be sorted; expected '" +
+              String(sortedDisregarded[index]) +
+              "' at index " +
+              String(index),
+          });
+          return;
+        }
+      }
+    }
     // Scope/coverage coherence (fail closed): the covered set exists only
     // for changed-scope receipts, and a changed-scope receipt without one
     // would claim authority over an unnamed slice. Ordering/duplication

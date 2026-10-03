@@ -9,7 +9,6 @@
  *   - validation:error-message-explicit   — the 400 names the failing field
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -17,31 +16,16 @@ const SERVER_PATH = fileURLToPath(
   new URL('../../../example/validation/server.js', import.meta.url),
 );
 
-function pickFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.unref();
-    probe.on('error', reject);
-    probe.listen(0, 'localhost', () => {
-      const addr = probe.address();
-      if (typeof addr === 'object' && addr !== null) {
-        const port = addr.port;
-        probe.close(() => resolve(port));
-      } else {
-        reject(new Error('no port'));
-      }
-    });
-  });
-}
-
-async function awaitReady(child: ChildProcess): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
+/** Resolves with the child's real listening URL, once its stdout reports it. */
+function awaitReady(child: ChildProcess): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
     let buf = '';
     const onData = (chunk: Buffer) => {
       buf += chunk.toString('utf8');
-      if (buf.includes('listening on')) {
+      const port = /listening on http:\/\/[^:\s]+:(\d+)/.exec(buf)?.[1];
+      if (port !== undefined && Number(port) > 0) {
         child.stdout?.off('data', onData);
-        resolve();
+        resolve(`http://localhost:${port}`);
       }
     };
     child.stdout?.on('data', onData);
@@ -54,13 +38,11 @@ let baseUrl = '';
 let child: ChildProcess | undefined;
 
 beforeAll(async () => {
-  const port = await pickFreePort();
   child = spawn(process.execPath, [SERVER_PATH], {
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, PORT: '0' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  await awaitReady(child);
-  baseUrl = `http://localhost:${port}`;
+  baseUrl = await awaitReady(child);
 }, 30_000);
 
 afterAll(() => {

@@ -7,7 +7,11 @@
  *
  * The child env is now built from an explicit allowlist, never from the
  * ambient environment wholesale:
- * - system basics the runner needs (PATH/HOME, locale, temp dirs);
+ * - system basics the runner needs (PATH/HOME, locale, temp dirs) plus
+ *   the operator-set `PLAYWRIGHT_BROWSERS_PATH` cache directory, which
+ *   the readiness check resolves through the same name (without it the
+ *   doctor green-lights one cache while the child launches from
+ *   `$HOME/.cache/ms-playwright`);
  * - the supervisor-supplied run variables (`RunnerExecutionEnv.vars` —
  *   already sanitized by the CLI);
  * - NON-secret `GATEFORGE_*` run flags from the ambient environment.
@@ -109,7 +113,22 @@ export const RUNNER_GATEFORGE_ALLOWLIST: readonly string[] = [
   'GATEFORGE_REPORTER_FAIL_RUN',
 ];
 
-/** System basics (path/home/locale/temp) the runner needs to function. */
+/**
+ * System basics (path/home/locale/temp) the runner needs to function,
+ * plus the one operator-set CACHE PATH the runner resolves through:
+ * `enforcement doctor` reads the browser cache through
+ * `PLAYWRIGHT_BROWSERS_PATH` and falls back to `$HOME/.cache/ms-playwright`
+ * (`cli/playwright-browsers.ts` `defaultBrowsersPath`), so the child
+ * must see the same variable or the doctor green-lights one directory
+ * while the run launches from another (every test then dies with
+ * `Executable doesn't exist`). It is a directory an operator chose, never
+ * a secret — the same class as `HOME` and the XDG names the CLI already
+ * forwards. The witnessed pytest/session children need no such entry:
+ * they inherit the ambient environment minus every `GATEFORGE_*` name
+ * ({@link buildWitnessedPytestChildEnv},
+ * {@link buildWitnessedSessionRunnerEnv}), so this variable already
+ * crosses there.
+ */
 export const RUNNER_SYSTEM_ALLOWLIST: readonly string[] = [
   'PATH',
   'HOME',
@@ -121,6 +140,7 @@ export const RUNNER_SYSTEM_ALLOWLIST: readonly string[] = [
   'TMPDIR',
   'TEMP',
   'TMP',
+  'PLAYWRIGHT_BROWSERS_PATH',
 ];
 
 /**
@@ -128,6 +148,18 @@ export const RUNNER_SYSTEM_ALLOWLIST: readonly string[] = [
  * wholesale `process.env` merge). Precedence: supervisor-supplied
  * `vars` win over the ambient environment; only allowlisted names are
  * copied at all.
+ *
+ * The child's own record has NO prototype. Every name here is an
+ * arbitrary operator- or supervisor-chosen name, and `constructor`,
+ * `toString` and `__proto__` are both legal environment names and
+ * properties every plain object inherits: on a plain object an
+ * assignment to `__proto__` stores no own key at all (the inherited
+ * accessor swallows it), and a membership test by lookup
+ * (`child[name] === undefined`) reports an inherited property as
+ * already present. This map is the trusted baseline the freeze
+ * controller projects every body worker back to, so a name dropped here
+ * is a name no body worker can ever be projected back to — it keeps
+ * whatever the preparation wrote instead.
  *
  * Args:
  *   vars: supervisor-supplied run variables (must be child-safe; a
@@ -162,7 +194,7 @@ export function buildRunnerChildEnv(
       );
     }
   }
-  const child: Record<string, string> = {};
+  const child = Object.create(null) as Record<string, string>;
   for (const name of [...RUNNER_SYSTEM_ALLOWLIST, ...RUNNER_GATEFORGE_ALLOWLIST]) {
     const value = vars[name] ?? ambient[name];
     if (value !== undefined && value !== '') child[name] = value;
@@ -171,7 +203,8 @@ export function buildRunnerChildEnv(
   // pass through — they arrive from trusted supervision, and the secret
   // and parent-side checks above already ran over ALL of vars.
   for (const [name, value] of Object.entries(vars)) {
-    if (child[name] === undefined && value !== '') child[name] = value;
+    if (Object.hasOwn(child, name)) continue;
+    if (value !== '') child[name] = value;
   }
   return child;
 }
@@ -265,5 +298,118 @@ export function buildWitnessedPytestChildEnv(
     if (name.startsWith('GATEFORGE_')) continue;
     if (value !== '') child[name] = value;
   }
+  return child;
+}
+
+/**
+ * The `GATEFORGE_*` names a witnessed session runner child (a runner
+ * adapter's supervised execute that resolves per-test sessions and
+ * writes the lifecycle spool: the pytest runner child and the Vitest
+ * runner child) may receive: the run identity (STATE_DIR + RUN_ID
+ * locate the lifecycle spool) plus the non-secret submission wiring
+ * (WITNESS_URL + RUN_TOKEN) and the app base URL the session proxy
+ * fronts. The verifier key and every other parent-side name are NEVER
+ * on this list — same trust model as
+ * {@link buildWitnessedPytestChildEnv}, one more non-secret name.
+ */
+export const WITNESSED_SESSION_RUN_ENV: readonly string[] = [
+  ...WITNESSED_PYTEST_RUN_ENV,
+  'GATEFORGE_APP_BASE_URL',
+  // The pack's Vitest reporter's end-barrier TEST SEAM (see
+  // ../vitest/reporter.ts): a filesystem path, never a secret, and
+  // completely inert unless a test sets it. It exists so a test can
+  // hold the reporter's `testEnd` deterministically instead of racing a
+  // loaded machine for the same effect.
+  'GATEFORGE_VITEST_END_BARRIER',
+];
+
+/**
+ * Builds a witnessed session runner child's environment: the ambient
+ * environment minus EVERY `GATEFORGE_*` name, plus the
+ * {@link WITNESSED_SESSION_RUN_ENV} names from `vars`.
+ *
+ * Fail closed, same discipline as the other builders: a caller that
+ * stuffs the verifier key — or any parent-side name OUTSIDE the
+ * session allowlist — into `vars` is a wiring bug and throws instead
+ * of leaking.
+ *
+ * Args:
+ *   vars: supervisor-supplied run variables (run-scoped allowlist wins
+ *     over ambient; a forbidden name here throws).
+ *   ambient: the parent environment (default `process.env`).
+ *
+ * Returns:
+ *   Record<string, string>: the runner child's environment.
+ *
+ * Throws:
+ *   RunnerEnvError: when `vars` carries the verifier key or a
+ *     parent-side name that is not on the session allowlist.
+ */
+export function buildWitnessedSessionRunnerEnv(
+  vars: Readonly<Record<string, string>>,
+  ambient: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  for (const secret of RUNNER_SECRET_ENV) {
+    if (vars[secret] !== undefined) {
+      throw new RunnerEnvError(
+        `refusing to pass '${secret}' to the runner child: signing material never reaches ` +
+          'untrusted test code through ANY channel',
+      );
+    }
+  }
+  const allowed = new Set<string>(WITNESSED_SESSION_RUN_ENV);
+  for (const parentSide of RUNNER_PARENT_SIDE_ENV) {
+    if (!allowed.has(parentSide) && vars[parentSide] !== undefined) {
+      throw new RunnerEnvError(
+        `refusing to pass '${parentSide}' to the runner child: only the run-scoped names ` +
+          `[${WITNESSED_SESSION_RUN_ENV.join(', ')}] cross — the child can never address ` +
+          'obligations, adapters, classifications, or the outcomes document',
+      );
+    }
+  }
+  const child: Record<string, string> = {};
+  for (const [name, value] of Object.entries(ambient)) {
+    if (value === undefined || value === '') continue;
+    if (name.startsWith('GATEFORGE_')) continue;
+    child[name] = value;
+  }
+  for (const name of WITNESSED_SESSION_RUN_ENV) {
+    const value = vars[name] ?? ambient[name];
+    if (value !== undefined && value !== '') child[name] = value;
+  }
+  for (const [name, value] of Object.entries(vars)) {
+    if (name.startsWith('GATEFORGE_')) continue;
+    if (value !== '') child[name] = value;
+  }
+  return child;
+}
+
+/**
+ * Builds the pytest runner child's environment for a supervised,
+ * session-producing run (the `PytestRunnerAdapter` execute path): the
+ * neutral witnessed-session environment plus the plugin directory
+ * prepended to PYTHONPATH so `-p gateforge_pytest_plugin` resolves.
+ *
+ * Args:
+ *   vars: supervisor-supplied run variables (run-scoped allowlist wins
+ *     over ambient; a forbidden name here throws).
+ *   ambient: the parent environment (default `process.env`).
+ *   pluginDir: absolute directory the pack ships the pytest plugin in.
+ *
+ * Returns:
+ *   Record<string, string>: the runner child's environment.
+ *
+ * Throws:
+ *   RunnerEnvError: when `vars` carries the verifier key or a
+ *     parent-side name that is not on the session allowlist.
+ */
+export function buildWitnessedPytestSessionEnv(
+  vars: Readonly<Record<string, string>>,
+  ambient: NodeJS.ProcessEnv = process.env,
+  pluginDir: string,
+): Record<string, string> {
+  const child = buildWitnessedSessionRunnerEnv(vars, ambient);
+  const existingPath = child['PYTHONPATH'];
+  child['PYTHONPATH'] = existingPath !== undefined && existingPath !== '' ? `${pluginDir}:${existingPath}` : pluginDir;
   return child;
 }

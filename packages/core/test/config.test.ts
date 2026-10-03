@@ -6,6 +6,7 @@ import {
   GateforgeConfigError,
   loadConfig,
   parseConfig,
+  RuntimeConfigSchema,
 } from '../src/index.js';
 import { parse as parseYaml } from 'yaml';
 
@@ -46,6 +47,47 @@ describe('parseConfig (pin #6)', () => {
     expect(config.project.languages).toEqual(['python']);
     expect(config.plugins).toHaveLength(2);
     expect(config.clock.mode).toBe('system');
+  });
+
+  it('defaults an absent runner key to playwright (frozen behavior)', () => {
+    const config = parseConfig(validConfig);
+    expect(config.runner).toBe('playwright');
+  });
+
+  it('accepts each supported runner value', () => {
+    for (const runner of ['pytest', 'vitest', 'cypress'] as const) {
+      expect(parseConfig({ ...validConfig, runner }).runner).toBe(runner);
+    }
+    expect(parseConfig({ ...validConfig, runner: 'playwright' }).runner).toBe('playwright');
+  });
+
+  it('accepts repo-relative runtime-file globs and rejects anything that escapes the repo root', () => {
+    expect(
+      parseConfig({
+        ...validConfig,
+        enforcement: { reseal: true, resealRuntimeFiles: ['e2e/.auth/*.json', 'e2e/.auth/**'] },
+      }).enforcement?.resealRuntimeFiles,
+    ).toEqual(['e2e/.auth/*.json', 'e2e/.auth/**']);
+    // Absent by default: a repository that declares nothing is untouched.
+    expect(parseConfig(validConfig).enforcement?.resealRuntimeFiles).toBeUndefined();
+    for (const bad of ['/etc/.env', '../outside.json', 'e2e//state.json', 'C:/state.json', '']) {
+      expect(() => parseConfig({ ...validConfig, enforcement: { resealRuntimeFiles: [bad] } })).toThrow();
+    }
+  });
+
+  it('rejects an unknown runner through the plain config-error path', () => {
+    let caught: unknown;
+    try {
+      parseConfig({ ...validConfig, runner: 'mocha' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(GateforgeConfigError);
+    const diagnostics = (caught as GateforgeConfigError).diagnostics;
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.jsonPath).toBe('$.runner');
+    expect(diagnostics[0]?.expected).toContain('"playwright"');
+    expect(diagnostics[0]?.got).toBe('"mocha"');
   });
 
   it("rejects the reserved engine issuer id 'gateforge.core' (red-team V1)", () => {
@@ -100,6 +142,58 @@ clock:
     const config = parseConfig({ ...validConfig, behaviorPolicy: '.gateforge/behavior.yml' });
     expect(config.behaviorPolicy).toBe('.gateforge/behavior.yml');
     expect(() => parseConfig({ ...validConfig, behaviorPolicy: '' })).toThrow(GateforgeConfigError);
+  });
+
+  it('accepts an owner-declared tenant scope column list, and nothing else', () => {
+    const config = parseConfig({ ...validConfig, tenancy: { scopeColumns: ['contractor_id'] } });
+    expect(config.tenancy?.scopeColumns).toEqual(['contractor_id']);
+    // An empty list declares nothing; it is rejected rather than read as
+    // "this repository has no tenant scope at all".
+    expect(() => parseConfig({ ...validConfig, tenancy: { scopeColumns: [] } })).toThrow(GateforgeConfigError);
+    expect(() => parseConfig({ ...validConfig, tenancy: { scopeColumn: ['contractor_id'] } })).toThrow(
+      GateforgeConfigError,
+    );
+    // ABSENT stays absent: today's behavior, byte-identical.
+    expect(parseConfig({ ...validConfig }).tenancy).toBeUndefined();
+  });
+  it('accepts optional harness commands and bounded history retention', () => {
+    const config = parseConfig({
+      ...validConfig,
+      harness: {
+        up: 'tools/up.sh',
+        reset: 'tools/reset.sh',
+        seed: 'tools/seed.sh',
+        health: 'tools/health.sh',
+        down: 'tools/down.sh',
+        serviceLogs: { command: 'docker compose logs --tail ${lines} ${service}', services: ['db', 'worker'] },
+      },
+      history: {},
+    });
+    expect(config.harness?.seed).toBe('tools/seed.sh');
+    expect(config.history?.retentionDays).toBe(14);
+  });
+
+  it('validates absent-log health probes as one runtime probe kind', () => {
+    const runtime = RuntimeConfigSchema.parse({
+      schemaVersion: 1,
+      health: [{
+        name: 'worker-startup',
+        logAbsent: { command: './tools/recent-worker-logs.sh', pattern: 'worker startup failed' },
+      }],
+    });
+    expect(runtime.health?.[0]?.logAbsent?.pattern).toBe('worker startup failed');
+    expect(RuntimeConfigSchema.safeParse({
+      schemaVersion: 1,
+      health: [{
+        name: 'ambiguous',
+        tcp: '127.0.0.1:5432',
+        logAbsent: { command: './tools/logs.sh', pattern: 'failed' },
+      }],
+    }).success).toBe(false);
+  });
+
+  it('rejects history retention above ninety days', () => {
+    expect(() => parseConfig({ ...validConfig, history: { retentionDays: 91 } })).toThrow(GateforgeConfigError);
   });
 
   it('rejects schemaVersion drift with the never-migrated message', () => {

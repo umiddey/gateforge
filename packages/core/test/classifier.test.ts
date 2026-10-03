@@ -591,6 +591,22 @@ describe('lifecycle lattice', () => {
     expect(entry.blocks.map((block) => block.code)).toEqual(['INCOMPLETE_PROOF_SCOPE']);
   });
 
+  it('derives only unsupported operations and lets positive evidence override an empty update field list', () => {
+    const result = classify({
+      ...cleanInput(
+        [signal({ dimension: 'lifecycle.update', assertion: true })],
+        { resources: [resource({ attributes: { updateableFields: [] } })] },
+      ),
+      deriveLifecycleDefaults: true,
+    });
+    const classification = decision(result).classification;
+    expect(classification?.lifecycle.update).toBe(true);
+    expect(classification?.lifecycleDerivation?.map((entry) => entry.operation)).toEqual([
+      'read',
+      'delete',
+    ]);
+  });
+
   it('owner lifecycle policy disables only the exact resource operation and records its reason', () => {
     const result = classify({
       ...cleanInput(),

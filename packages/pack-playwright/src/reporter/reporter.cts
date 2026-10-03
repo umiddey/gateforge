@@ -42,6 +42,7 @@ interface ReporterTestResult {
   status: string;
   workerIndex?: number;
   retry?: number;
+  duration?: number;
 }
 
 /** The ESM implementation class (resolved at runtime, typed here). */

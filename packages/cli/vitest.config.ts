@@ -13,6 +13,7 @@ export default defineConfig({
       '@gate-forge/plugin-protocol': fileURLToPath(
         new URL('../plugin-protocol/src/index.ts', import.meta.url),
       ),
+      '@gate-forge/pack-alembic': fileURLToPath(new URL('../pack-alembic/src/index.ts', import.meta.url)),
     },
   },
   test: {

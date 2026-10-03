@@ -52,6 +52,42 @@ export const DEFAULT_PREPARE_TIMEOUT_SECONDS = 600;
 export const DEFAULT_READY_TIMEOUT_SECONDS = 60;
 
 /**
+ * One managed-run recipe step (managed-run plan (2026-09-29), Part B): the app-owned
+ * lifecycle command Gateforge sequences for `gateforge run`. Commands
+ * are argv lists (never a shell string), each step carries its own
+ * timeout, and a step may be retried a bounded number of times.
+ */
+export const RecipeStepSchema = z
+  .object({
+    /** Commands to run in order; the first non-zero exit fails the step. */
+    commands: z.array(z.array(z.string().min(1)).min(1)).min(1),
+    /** Wall-clock budget for the whole step (default 600s). */
+    timeoutSeconds: z.number().int().min(1).max(3600).optional(),
+    /** Extra attempts after the first failure (0 = run once, the default). */
+    retries: z.number().int().min(0).max(10).optional(),
+  })
+  .strict();
+
+/** Inferred recipe step shape. */
+export type RecipeStep = z.infer<typeof RecipeStepSchema>;
+
+/** Default wall-clock budget for one managed-run recipe step, in seconds. */
+export const DEFAULT_RECIPE_STEP_TIMEOUT_SECONDS = 600;
+
+/**
+ * Environment file a recipe may load, as a PATH only. An entry carrying
+ * a value (`NAME=value`) is rejected: the recipe never holds secret
+ * material, and `gateforge run` never prints the values it loads.
+ */
+export const RecipeEnvFileSchema = z
+  .string()
+  .min(1)
+  .refine((value) => !value.includes('='), {
+    message: 'env_files entries are paths only — put the secret in the file, never inline',
+  });
+
+
+/**
  * One service readiness probe: a log line matching `log` (regex source
  * over the captured stdout+stderr) OR an `http` GET returning 2xx.
  * Exactly one kind must be declared.
@@ -135,18 +171,61 @@ export const RuntimeConfigSchema = z
         /** Command to run in the checkout (package-manager install, build). */
         command: z.string().min(1).optional(),
         /**
+         * Managed-run preparation commands (managed-run plan (2026-09-29), Part B):
+         * argv lists `gateforge run` executes before the recipe
+         * lifecycle. Absent = no preparation step.
+         */
+        commands: z.array(z.array(z.string().min(1)).min(1)).min(1).optional(),
+        /** Wall-clock budget for `gateforge run`'s preparation step. */
+        runTimeoutSeconds: z.number().int().min(1).max(3600).optional(),
+        /** Extra attempts of the preparation step after a failure. */
+        runRetries: z.number().int().min(0).max(10).optional(),
+        /**
          * Repo-relative dependency directories explicitly allowed to be
          * reused from the user repository (linked, never copied as
          * candidate source). The ONLY sanctioned dependency bridge.
          */
         reuse: z.array(RuntimeReusePathSchema).optional(),
         timeoutSeconds: z.number().int().min(1).max(3600).optional(),
+        preflight: z.array(z.object({
+          name: z.string().min(1),
+          command: z.string().min(1),
+          timeoutSeconds: z.number().int().min(1).max(3600).optional(),
+        }).strict()).optional(),
       })
       .strict()
       .optional(),
+    health: z.array(z.object({
+      name: z.string().min(1),
+      tcp: z.string().min(1).optional(),
+      http: z.string().url().optional(),
+      command: z.string().min(1).optional(),
+      logAbsent: z.object({
+        command: z.string().min(1),
+        pattern: z.string().min(1),
+      }).strict().optional(),
+      tls: z.boolean().optional(),
+      timeoutSeconds: z.number().int().min(1).max(3600).optional(),
+    }).strict().superRefine((probe, ctx) => {
+      const kinds = [probe.tcp !== undefined, probe.http !== undefined, probe.command !== undefined, probe.logAbsent !== undefined].filter(Boolean).length;
+      if (kinds !== 1) ctx.addIssue({ code: 'custom', path: ['tcp'], message: "health requires exactly one of 'tcp', 'http', 'command', or 'logAbsent'" });
+      if (probe.tls === true && probe.http === undefined) ctx.addIssue({ code: 'custom', path: ['tls'], message: "'tls' requires an 'http' health probe" });
+    })).optional(),
+    /** Managed-run lifecycle: start the candidate's own services. */
+    services_up: RecipeStepSchema.optional(),
+    /** Managed-run lifecycle: stop those services (always the last step). */
+    services_down: RecipeStepSchema.optional(),
+    /** Managed-run lifecycle: reset the database/state under test. */
+    reset: RecipeStepSchema.optional(),
+    /** Managed-run lifecycle: seed the fixture the suite expects. */
+    seed: RecipeStepSchema.optional(),
+    /** Managed-run lifecycle: readiness probe for the started services. */
+    healthcheck: RecipeStepSchema.optional(),
+    /** Environment files the recipe loads, as paths only (no values). */
+    env_files: z.array(RecipeEnvFileSchema).optional(),
     /** Candidate-owned services to start, probe, and clean up. */
     services: z.array(RuntimeServiceSchema).optional(),
-    /** Operator environment variable names allowed through to commands/services. */
+    /** Operator environment names allowed through to commands, services and supervised tests. */
     envAllowlist: z.array(z.string().min(1)).optional(),
     /** Whole-run execution budget handed to the supervised gate. */
     executionTimeoutSeconds: z.number().int().min(1).max(3600).optional(),

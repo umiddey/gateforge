@@ -16,6 +16,7 @@
 import {
   AttestationSchema,
   BLOCKING_VERDICTS,
+  BASELINE_VERDICT_REASON,
   blockingEntryFingerprint,
   CAUSE_NEXT_ACTIONS,
   ClaimSchema,
@@ -97,6 +98,15 @@ export interface EvaluateInput {
    */
   claimInventory?: readonly Claim[];
   /**
+   * Framework test ids whose evidence may never be used (owner
+   * quarantine). A quarantined test proves
+   * nothing: its claims are dropped and its evidence records are
+   * discarded before grading, so an obligation only it covered stays
+   * `missing` — the quarantine forgives nothing. Unknown ids here are
+   * harmless (nothing to drop); this is a restriction, never a grant.
+   */
+  excludedTestIds?: readonly string[];
+  /**
    * Coverage facts derived from resolved test mappings (plan §3.6,
    * Phase 3): browser-e2e-declared bindings for CRUD-contract
    * obligations, joined to their inventory tables. Feeds the coverage
@@ -113,7 +123,45 @@ export interface EvaluateInput {
    * issuance.
    */
   witnessVerifierKey?: string | null;
+  /**
+   * The CARRIED evidence of a test-only re-seal: one channel per run
+   * that contributed to the retained evidence union, the parent first.
+   * A chain of re-seals carries records several runs witnessed, each
+   * under its own run identity and input digest, and a record is
+   * authorized ONLY by the envelope of the run that issued it — one
+   * envelope for the whole union would either vouch for records it
+   * never issued or vouch for none of them.
+   *
+   * A re-seal carries a test's outcomes AND the evidence those
+   * outcomes were witnessed with, and that evidence was witnessed
+   * under the CONTRIBUTOR's input digest — which is exactly what this
+   * re-computation proved may differ from the current one. Every
+   * envelope is authenticated here with the same witness verifier
+   * keys as any other, and only the records it names keep their
+   * witnessed trust; every other record grades as it does today. The
+   * consumer's own recomputation (`resealChainBlocking`) is what
+   * proves each envelope belongs to the verified document that binds
+   * it.
+   */
+  carriedEvidence?: readonly {
+    attestation: unknown;
+    runId: string;
+    inputDigest: string;
+    recordIds: readonly string[];
+  }[] | null;
   /** Active and retained keys used to verify older witnessed envelopes. */
+  /**
+   * Engine-issued Alembic witness records from this process. Never read
+   * from suite-writable state. Absent leaves `alembic:*` unproven.
+   */
+  engineAlembicRecords?: readonly {
+    obligationId: string;
+    kind: string;
+    trust?: string;
+    origin?: string;
+    payload?: unknown;
+    recordId?: string;
+  }[];
   witnessVerifierKeys?: readonly string[];
   /**
    * Live v2 attestation envelope fetched by `test-gates` while a wired
@@ -143,6 +191,25 @@ export interface EvaluateInput {
     /** True when the test-gates run mutated its own inputs post-suite. */
     changedInputs?: boolean;
   };
+  /**
+   * Named-run selection: the obligations the
+   * selected tests DECLARE through the trusted mapping resolution
+   * (sidecar or native bindings). When present (non-null), the
+   * evaluation grades ONLY those — an obligation no selected test
+   * claims was never observed by this run, so it is reported in the
+   * repository debt and blocks nothing here. The caller resolves the
+   * declarations, so a channel that mints evidence without writing a
+   * claim row is graded exactly like every other one. Repository-wide
+   * findings (policy, mapping, inventory, the coverage policy) are
+   * findings about the REPOSITORY,
+   * not about the selection, so they stay out of a named run's blocking
+   * set. Evidence-context findings (unauthenticated evidence, changed
+   * inputs, the strict preflight) and every caller-projected
+   * run-execution finding (supervision, lifecycle, intent) still
+   * block: a hand-picked selection never forgives a broken run. Null or
+   * absent grades the whole repository exactly as before.
+   */
+  namedObligationIds?: readonly string[] | null;
   /**
    * Adoption-baseline forgiveness (phase 8 C): the fingerprint set of
    * the ADOPTED baseline. Deliberately caller-provided, never loaded
@@ -213,6 +280,13 @@ export interface EvaluateResult {
   /** Whether any blocking verdict or blocking entry exists. */
   blockingRun: boolean;
   /**
+   * Obligations this evaluation deliberately did not grade because a
+   * named run observed only its own selection (0 for every other run).
+   * Descriptive: it says how much of the repository a hand-picked
+   * selection said nothing about.
+   */
+  notGradedObligations: number;
+  /**
    * Adoption-baseline forgiveness counts (phase 8 C) — kept LOUD: the
    * report prints them on every run so baselined debt is never silently
    * green. Null when no baseline was applied.
@@ -220,6 +294,7 @@ export interface EvaluateResult {
   baselined: {
     obligations: number;
     blockingEntries: number;
+    neverWitnessed: number;
     /**
      * Blocking entries waived via the adopted classification set.
      * Undefined when the receipt carries NO classification layer at all
@@ -230,8 +305,21 @@ export interface EvaluateResult {
   } | null;
 }
 
-/** Keeps only blocking entries plausibly tied to a changed file. */
-function scopeBlocking(
+/**
+ * Keeps only blocking entries plausibly tied to a changed file. Exported
+ * so the `mode: changed` gate decision can reuse the EXACT same
+ * attribution rule the evaluator grades with — a second, looser copy
+ * would let the gate hide debt the report shows.
+ *
+ * Args:
+ *   blocking: the blocking entries the evaluator produced.
+ *   changed: the resolved changed-file set.
+ *   multiSources: the join-aware source map (backend + frontend calls).
+ *
+ * Returns:
+ *   BlockingEntry[]: the entries a change can be held responsible for.
+ */
+export function scopeBlocking(
   blocking: readonly BlockingEntry[],
   changed: ReadonlySet<string>,
   multiSources: Map<string, string[]>,
@@ -405,7 +493,7 @@ export function applyStrictE2E(verdicts: readonly ObligationVerdict[]): Obligati
       ...entry,
       verdict: 'missing' as const,
       reason: `strict E2E mode: ${entry.reason ?? 'waived'} — a waiver is not proof and cannot ` +
-        'authorize the change (plan §3.3); the obligation still requires its own witnessed evidence',
+        'authorize the change; the obligation still requires its own witnessed evidence',
       cause,
       nextAction: CAUSE_NEXT_ACTIONS[cause],
     };
@@ -454,8 +542,29 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     expectedInvocationId: input.evidenceContext?.expectedInvocationId,
     requireInvocationId: input.evidenceContext?.requireInvocationId,
     changedInputs: input.evidenceContext?.changedInputs,
+    carried: input.carriedEvidence ?? null,
   });
-  const records = authorized.records;
+  // Owner quarantine: a quarantined test's
+  // records are discarded HERE — before any verifier sees them — so its
+  // evidence cannot satisfy anything, not even through a claim it shares.
+  const excludedTestIds = new Set(input.excludedTestIds ?? []);
+  const records =
+    excludedTestIds.size === 0
+      ? authorized.records
+      : authorized.records.filter((record) => {
+          const testId = (record as { testId?: string }).testId;
+          return testId === undefined || !excludedTestIds.has(testId);
+        });
+  // Same rule on the declaration side: a quarantined test declares
+  // nothing. Without this, its records could still reach a claim some
+  // other test made for the same obligation.
+  const effectiveClaims =
+    excludedTestIds.size === 0
+      ? claims
+      : claims.filter((claim) => {
+          const testId = (claim as { testId?: string }).testId;
+          return testId === undefined || !excludedTestIds.has(testId);
+        });
 
   // Complete runtime route inventory (plan §9, D2): derived from the
   // graph only — every applicable `http.endpoint` resource, including
@@ -464,7 +573,17 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   // incomplete context blocks HTTP satisfaction in the core resolver.
   const httpRoutes = httpRoutesView(graph);
 
-  const scoped = scopeObligations(input);
+  // Named-run grading: the graded set is exactly what the selection
+  // declares, as resolved by the caller against the current catalog.
+  // `null` and absent both mean "grades the whole repository"; only a
+  // present array narrows the graded set (an empty one is legal and
+  // grades nothing).
+  const namedObligationIds = input.namedObligationIds == null ? null : new Set(input.namedObligationIds);
+  const allScoped = scopeObligations(input);
+  const scoped =
+    namedObligationIds === null
+      ? allScoped
+      : allScoped.filter((obligation) => namedObligationIds.has(obligation.id));
   // Trusted behavior context (plan 2026-09-19 §4.7): the compiled
   // catalog + requirements travel from the controller-bound pipeline
   // output — never CLI configuration, never record payloads. Absent
@@ -483,13 +602,14 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   const verdicts: ObligationVerdict[] = [];
   for (const obligation of scoped) {
     const entries = evaluateObligations([obligation], {
-      claims,
+      claims: effectiveClaims,
       records,
       waivers: waiverLoad.waivers,
       classification: classifications.get(obligation.resourceId) ?? null,
       resource: resourceById.get(obligation.resourceId) ?? null,
       httpRoutes,
       ...(behaviorContext === undefined ? {} : { behavior: behaviorContext }),
+      ...(input.engineAlembicRecords === undefined ? {} : { engineAlembicRecords: input.engineAlembicRecords }),
       now,
     });
     const entry = entries[0];
@@ -500,10 +620,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     });
   }
   const sources = sourcesByResourceId(graph, input.behaviorCatalog);
-  const scopedBlocking =
-    input.changedFiles === null || input.changedFiles === undefined
-      ? [...input.blocking]
-      : scopeBlocking(input.blocking, new Set(input.changedFiles), sources);
+  const scopedBlocking = namedScopeBlocking(input, scoped, namedObligationIds);
   // Evidence-context blockers are never diff-scoped away and never
   // waived: a changed-input or unauthenticated-evidence run must stay
   // visible even when every obligation is waived or unchanged.
@@ -516,7 +633,13 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   const blocking = [
     ...scopedBlocking,
     ...authorized.evidenceBlocking,
-    ...coveragePolicyBlocking(config, graph, input.mappedCoverage ?? []),
+    // The coverage policy grades the whole inventory against the whole
+    // mapping: a repository-wide finding, not a fact about a named
+    // selection. It stays in the report's repository debt and blocks
+    // only the runs that claim the repository.
+    ...(namedObligationIds === null
+      ? coveragePolicyBlocking(config, graph, input.mappedCoverage ?? [])
+      : []),
     ...strictBlocking,
   ];
   // Strict E2E mode (plan §3.3): waived obligations are not proof.
@@ -536,6 +659,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     verdicts: gradedVerdicts,
     blocking: applied.blocking,
     baselined: applied.baselined,
+    notGradedObligations: input.obligations.length - scoped.length,
     waiverCounts: {
       total: waiverLoad.waivers.length + waiverLoad.staleOwner.length + waiverLoad.expired.length,
       active: waiverLoad.waivers.length,
@@ -579,6 +703,7 @@ function applyBaseline(
   baselined: {
     obligations: number;
     blockingEntries: number;
+    neverWitnessed: number;
     classificationBlocked: number | undefined;
   } | null;
 } {
@@ -594,14 +719,16 @@ function applyBaseline(
     return { verdicts: run.verdicts, blocking: run.blocking, baselined: null };
   }
   let obligations = 0;
+  let neverWitnessed = 0;
   const verdicts = run.verdicts.map((entry) => {
     if (!BLOCKING_VERDICTS.includes(entry.verdict)) return entry;
     if (!fingerprints.has(obligationFingerprint(entry.obligation))) return entry;
     obligations += 1;
+    if (entry.trustTier !== 'witnessed') neverWitnessed += 1;
     return {
       ...entry,
       verdict: 'waived' as const,
-      reason: `baselined: adopted as forgiven (was ${entry.verdict}); baseline is shrink-only`,
+      reason: `${BASELINE_VERDICT_REASON} adopted as forgiven (was ${entry.verdict}); baseline is shrink-only`,
     };
   });
   const blocking: BlockingEntry[] = [];
@@ -625,9 +752,45 @@ function applyBaseline(
     baselined: {
       obligations,
       blockingEntries,
+      neverWitnessed,
       classificationBlocked: classificationProvided ? waivedClassifications.size : undefined,
     },
   };
+}
+
+/**
+ * Projects the caller-supplied blocking entries onto the graded set:
+ * diff scope for an ordinary run, and for a named run the selection
+ * rule — only an entry that names a graded obligation survives. The
+ * caller keeps responsibility for the run-execution entries
+ * (supervision, lifecycle, intent, the witness channel), which a named
+ * run projects itself and therefore never reaches this filter.
+ *
+ * Args:
+ *   input: the evaluation input (its blocking entries and diff scope).
+ *   graded: the obligations this evaluation actually graded.
+ *   namedObligationIds: the named selection's obligation ids, or null
+ *     when the run grades the whole repository.
+ *
+ * Returns:
+ *   BlockingEntry[]: the entries that block this run.
+ */
+function namedScopeBlocking(
+  input: EvaluateInput,
+  graded: readonly Obligation[],
+  namedObligationIds: ReadonlySet<string> | null,
+): BlockingEntry[] {
+  if (namedObligationIds === null) {
+    return input.changedFiles === null || input.changedFiles === undefined
+      ? [...input.blocking]
+      : scopeBlocking(input.blocking, new Set(input.changedFiles), sourcesByResourceId(input.graph, input.behaviorCatalog));
+  }
+  const gradedResources = new Set(graded.map((obligation) => obligation.resourceId));
+  return input.blocking.filter(
+    (entry) =>
+      (entry.name !== null && entry.name !== undefined && namedObligationIds.has(entry.name)) ||
+      (entry.resourceId !== null && entry.resourceId !== undefined && gradedResources.has(entry.resourceId)),
+  );
 }
 
 /** Diff-scopes the obligation list itself (check --changed). */
@@ -700,6 +863,19 @@ function authorizeRecords(
     expectedInvocationId?: string | null;
     requireInvocationId?: boolean;
     changedInputs?: boolean;
+    /**
+     * The re-seal's carried envelopes, one per run that contributed to
+     * the retained union: each authenticated against the input digest
+     * of the document that binds it (never the current one — the
+     * re-computation is what proved the trees differ only in test
+     * files), and usable for exactly the records it attests.
+     */
+    carried?: readonly {
+      attestation: unknown;
+      runId: string;
+      inputDigest: string;
+      recordIds: readonly string[];
+    }[] | null;
   } = {},
 ): { records: unknown[]; evidenceBlocking: BlockingEntry[] } {
   const issuedRecordId = /^[0-9a-f]{64}$/;
@@ -718,13 +894,14 @@ function authorizeRecords(
       : null;
 
   const evidenceBlocking: BlockingEntry[] = [];
-  const block = (detail: string): void => {
+  const block = (detail: string, nextAction?: string): void => {
     evidenceBlocking.push({
       kind: 'finding',
       resourceId: null,
       name: null,
       detail,
       location: null,
+      ...(nextAction === undefined ? {} : { nextAction }),
     });
   };
 
@@ -913,17 +1090,61 @@ function authorizeRecords(
     }
   }
 
+  // Carried channel (test-only re-seal): every run that contributed to
+  // the retained evidence union brings its own envelope, validated
+  // against the identity and input digest the re-seal's own
+  // recomputation bound it to. Each authorizes EXACTLY the records it
+  // attests, under its own run id — never this run's, never a record
+  // its envelope does not name, and never a record another
+  // contributor's envelope issued.
+  for (const carried of auth.carried ?? []) {
+    if (verifierKeys.length === 0) break;
+    const carriedParsed = AttestationSchema.safeParse(carried.attestation);
+    if (carriedParsed.success) {
+      const envelope = carriedParsed.data;
+      const macOk = verifierKeys.some((key) =>
+        verifyAttestationMac(
+          key,
+          {
+            runId: carried.runId,
+            invocationId: envelope.invocationId,
+            inputDigest: carried.inputDigest,
+            recordIds: carried.recordIds,
+          },
+          envelope.mac,
+        ),
+      );
+      // The envelope is usable only when it is the one the re-seal's
+      // recomputation bound: its own run identity, its own input
+      // digest, and exactly the records it attests.
+      if (macOk && envelope.runId === carried.runId && envelope.inputDigest === carried.inputDigest) {
+        validEnvelopes.push({
+          runId: carried.runId,
+          invocationId: envelope.invocationId,
+          inputDigest: carried.inputDigest,
+          recordIds: new Set(carried.recordIds),
+        });
+      }
+    }
+    // A carried envelope that does not authenticate authorizes
+    // nothing: its records keep no witnessed trust and grade exactly as
+    // unproven evidence. This run's own evidence is never affected.
+  }
+
   // Explicit evidence-context blockers (visible even when no obligation
   // would otherwise need a record; never waived, never diff-scoped
   // away). Missing-vs-malformed stays distinguished. A run that changed
   // its own inputs reports the single generic blocker — per-envelope
   // details would only restate it.
   if (auth.changedInputs !== true) {
+    // Every attestation rejection (stale digest, other invocation,
+    // tampered or malformed envelope) is repaired the same way: a fresh
+    // supervised run writes a new envelope over the current inputs.
     if (durablePresent && durableRejection !== null && durableDetail !== null) {
-      block(`evidence-context: ${durableDetail}`);
+      block(`evidence-context: ${durableDetail}`, 'gateforge test-gates --changed');
     }
     if (liveRejection !== null && liveDetail !== null && validEnvelopes.length === 0) {
-      block(`evidence-context: ${liveDetail}`);
+      block(`evidence-context: ${liveDetail}`, 'gateforge test-gates --changed');
     }
   }
   if (witnessedCount > 0 && validEnvelopes.length === 0 && !durablePresent && auth.live == null) {
@@ -933,9 +1154,14 @@ function authorizeRecords(
           'prove issuance and witnessed records demote (fail closed)',
       );
     } else if (!legacyOnly) {
+      // A missing envelope is repaired by a fresh supervised run: the
+      // witness writes the envelope at shutdown, so the message names the
+      // re-seal instead of the read-only `discover --json` dump (which
+      // changes nothing).
       block(
         'evidence-context: no evidence attestation envelope found (missing); ' +
           'witnessed records demote (fail closed)',
+        'gateforge test-gates --changed',
       );
     }
   }

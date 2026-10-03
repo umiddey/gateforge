@@ -1,6 +1,6 @@
 /** Owner commands for creating, rotating, and retiring verifier keys. */
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
@@ -9,6 +9,7 @@ import { resolveStateDir } from '../state.js';
 import {
   assertExternalVerifierKeyPath,
   createVerifierKeyringFile,
+  defaultVerifierKeyringPath,
   importEnvironmentVerifierKey,
   readSecureKeyring,
   retireVerifierKey,
@@ -18,11 +19,11 @@ import {
 
 /** Usage for the explicit verifier-key ceremony commands. */
 export const KEYS_USAGE =
-  'usage: gateforge key create --file <external-path> --confirm\n' +
-  '       gateforge key import-env --file <external-path> --confirm\n' +
-  '       gateforge key rotate --file <external-path> --confirm\n' +
-  '       gateforge key retire --file <external-path> --key-id <id> --confirm\n' +
-  '       Key files must be outside the repository and use owner-only permissions.';
+  'usage: gateforge key create [--file <external-path>] --confirm\n' +
+  '       gateforge key import-env [--file <external-path>] --confirm\n' +
+  '       gateforge key rotate [--file <external-path>] --confirm\n' +
+  '       gateforge key retire [--file <external-path>] --key-id <id> --confirm\n' +
+  '       Default: $XDG_CONFIG_HOME/gateforge/verifier-keyring.json (or ~/.config/...); owner-only.';
 
 /** Runs one explicit key-ring owner operation. */
 export function keysCommand(io: Io, argv: readonly string[]): number {
@@ -38,8 +39,8 @@ export function keysCommand(io: Io, argv: readonly string[]): number {
   if (options['confirm'] !== true) {
     throw new UsageError(`key ${operation}: this changes verifier authority; repeat with --confirm after owner review`);
   }
-  const file = stringFlag(options, 'file');
-  if (file === undefined || file.length === 0) throw new UsageError(`key ${operation}: --file is required`);
+  const file = stringFlag(options, 'file') ?? defaultVerifierKeyringPath(io.env);
+  if (file.length === 0) throw new UsageError(`key ${operation}: --file cannot be empty`);
   const allowed = operation === 'retire' ? ['file', 'key-id', 'confirm', 'help'] : ['file', 'confirm', 'help'];
   for (const flag of Object.keys(options)) {
     if (!allowed.includes(flag)) throw new UsageError(`unknown key flag '--${flag}'`);
@@ -47,7 +48,25 @@ export function keysCommand(io: Io, argv: readonly string[]): number {
   const path = assertExternalVerifierKeyPath(io.cwd, resolve(io.cwd, file), io.env, [resolveStateDir(io.cwd)]);
   const keyId = stringFlag(options, 'key-id');
   if (operation === 'create') {
-    if (existsSync(path)) throw new UsageError(`key create: refusing to overwrite existing file '${path}'`);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    if (existsSync(path)) {
+      // The ring is owner state that already resolves: say what is
+      // there, whether anything needs doing, and how to get a NEW key.
+      // A file that is not a readable key ring keeps the plain refusal —
+      // it is an unknown file, not an existing ring, and naming a
+      // rotation for it would be advice nobody could follow.
+      let active: { activeKeyId: string };
+      try {
+        active = readSecureKeyring(path);
+      } catch {
+        throw new UsageError(`key create: refusing to overwrite existing file '${path}'`);
+      }
+      throw new UsageError(
+        `key create: verifier key ring already exists at '${path}'; ` +
+          `active key id: ${active.activeKeyId} (secret not displayed) — ` +
+          'nothing to do while that key is active; run `gateforge key rotate --confirm` for a new key',
+      );
+    }
     const created = createVerifierKeyringFile(path);
     writeLine(io.stdout, `verifier key ring created; active key id: ${created.keyId}; secret not displayed`);
     return 0;

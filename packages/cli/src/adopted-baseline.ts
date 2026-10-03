@@ -30,19 +30,54 @@ import { resolveRepoPath } from './pipeline.js';
  *   carries it. A pre-layer receipt (no `classificationBlocked` field) is
  *   simply NOT ADOPTED for that layer — nothing classification-shaped is
  *   waived without the recorded set (fail closed, backward compatible).
+ *
+ * Args:
+ *   cwd: repository root.
+ *   baselinesPath: configured baseline path.
+ *
+ * Returns:
+ *   adopted baseline fingerprint and identity metadata, or null when not adopted.
  */
 export function resolveAdoptedBaseline(
   cwd: string,
   baselinesPath: string,
-): { fingerprints: ReadonlySet<string>; classificationBlocked?: ReadonlySet<string> } | null {
+):
+  | {
+      fingerprints: ReadonlySet<string>;
+      classificationBlocked?: ReadonlySet<string>;
+      adoptedAt: string;
+      obligationFingerprintsById?: ReadonlyMap<string, string>;
+      obligationSourcesById?: ReadonlyMap<string, readonly string[]>;
+    }
+  | null {
   const baselinePath = resolveRepoPath(cwd, baselinesPath);
   const adoption = loadAdoptionRecord(join(dirname(baselinePath), ADOPTION_RECORD_FILENAME));
   if (adoption === null) return null;
+  const fingerprints = new Set(loadBaseline(baselinePath).fingerprints);
+  const obligationFingerprintsById =
+    adoption.obligationFingerprintsById === undefined
+      ? undefined
+      : new Map(
+          Object.entries(adoption.obligationFingerprintsById).filter(([, fingerprint]) =>
+            fingerprints.has(fingerprint),
+          ),
+        );
+  const obligationSourcesById =
+    adoption.obligationSourcesById === undefined || obligationFingerprintsById === undefined
+      ? undefined
+      : new Map(
+          Object.entries(adoption.obligationSourcesById).filter(([id]) =>
+            obligationFingerprintsById.has(id),
+          ),
+        );
   return {
-    fingerprints: new Set(loadBaseline(baselinePath).fingerprints),
+    fingerprints,
     classificationBlocked:
       adoption.classificationBlocked !== undefined
         ? new Set(adoption.classificationBlocked)
         : undefined,
+    adoptedAt: adoption.adoptedAt,
+    obligationFingerprintsById,
+    obligationSourcesById,
   };
 }

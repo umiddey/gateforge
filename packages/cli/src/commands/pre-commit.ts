@@ -11,7 +11,7 @@
  */
 import { cpSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { CAUSE_NEXT_ACTIONS } from '@gate-forge/core';
+import { CAUSE_NEXT_ACTIONS, ExecutionResultSchema } from '@gate-forge/core';
 import { parseArgs, stringFlag } from '../args.js';
 import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
@@ -24,8 +24,10 @@ import {
   prepareRuntime,
   startRuntimeServices,
   stopRuntimeChildren,
+  runtimeChildEnv,
   type RunningRuntime,
 } from '../runtime.js';
+import { postRunHealthNotices, probeHealth } from '../run-reliability.js';
 import { digestRuntimeReuseMounts, type RuntimeReuseMount } from '../runtime-reuse.js';
 import {
   assertRuntimeReuseOwnerApproval,
@@ -36,13 +38,14 @@ import {
   StagedCandidateBlockError,
   type StagedCandidate,
 } from '../staged-candidate.js';
-import { resolveStateDir } from '../state.js';
+import { readLastFullRunSummary, readStateDocument, resolveStateDir } from '../state.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { runCheckGate } from './check.js';
 import { runSupervisedTestGates } from './test-gates.js';
 import { evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import { loadDocsExclusions } from '../docs-exclusions.js';
+import { loadCacheExclusions } from '../cache-exclusions.js';
 
 export const PRE_COMMIT_USAGE =
   'usage: gateforge pre-commit --scope staged|full\n' +
@@ -107,6 +110,7 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     const candidateStateDir = resolveStateDir(checkoutDir);
     const checkoutConfig = loadConfigAt(checkoutDir);
     const docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
+    const cacheExclusions = loadCacheExclusions(checkoutDir, checkoutConfig);
     // The runtime document contains executable commands. Evaluate the same
     // owner-approved policy gate used by supervised runs BEFORE any prepare
     // or service command can start in the staged checkout.
@@ -118,7 +122,7 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     const policyGate = evaluateApprovedPolicy(
       policyResolution,
       trustedPolicyDigestForConfig(checkoutDir, checkoutConfig),
-      checkoutConfig.enforcement?.strictE2E === true || docsExclusions.length > 0,
+      checkoutConfig.enforcement?.strictE2E === true || docsExclusions.length > 0 || cacheExclusions.length > 0,
     );
     if (policyGate.status === 'blocked') {
       return renderCandidateBlock(io, policyGate.detail, policyGate.nextAction);
@@ -167,7 +171,17 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
             'record',
             runtimeReuseMounts,
             docsExclusions,
+            cacheExclusions,
           );
+    // The PREPARED candidate identity the supervised run freezes behind its
+    // native prerequisite stage, captured in THIS process's memory through
+    // a typed callback. It never becomes a state document: the strict check
+    // below must bind the exact tree that was tested, which for a native
+    // repository is the prepared tree rather than the pre-run one. Absent a
+    // freeze (a non-native runner, or a run that planned no project) it
+    // stays null and the check keeps the pre-run identity exactly as
+    // before.
+    let preparedTreeId: string | null = null;
     const runCode = await runSupervisedTestGates(candidateIo, {
       out: undefined,
       format: 'text',
@@ -183,7 +197,27 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
       runtimeReuseMounts,
       runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
       verifierKeyring,
+      onPreparedCandidate: (identity) => {
+        preparedTreeId = identity.preparedTreeId;
+      },
     });
+    if (runtimeDoc !== null && runtimeDoc.health !== undefined) {
+      const healthFailure = await probeHealth(
+        runtimeDoc.health,
+        checkoutDir,
+        runtimeChildEnv(runtimeDoc.envAllowlist ?? [], io.env, {}),
+      );
+      if (healthFailure !== null) {
+        const executionState = readStateDocument(candidateStateDir, 'execution-result.json');
+        const execution = executionState === null ? null : ExecutionResultSchema.safeParse(executionState);
+        const failedTests = execution?.success === true
+          ? execution.data.outcomes.filter((outcome) => outcome.status === 'failed')
+          : [];
+        for (const notice of postRunHealthNotices(healthFailure, failedTests)) {
+          writeLine(io.stderr, notice);
+        }
+      }
+    }
 
     const checkCode =
       runCode === 0
@@ -192,7 +226,10 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
             requireE2E: true,
             format: 'text',
             fixedChangedFiles: frozen.changedPaths,
-            fixedCandidateTreeId: candidateTreeId ?? null,
+            // The identity of the bytes the supervised run actually tested
+            // inside THIS isolated checkout. It is never copied back to the
+            // user workspace, and it never authorizes a different tree.
+            fixedCandidateTreeId: preparedTreeId ?? candidateTreeId ?? null,
             runtimeReuseDigest,
       runtimeReuseMounts,
       runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
@@ -203,8 +240,10 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     copyStateIfPresent(checkoutDir, io.cwd);
     const recheck = recheckStagedCandidate(io.cwd, io.env, frozen);
     if (!recheck.ok) {
+      writeCommitCostHint(io, resolveStateDir(io.cwd));
       return renderCandidateBlock(io, recheck.detail, 'Restage the intended bytes and run the pre-commit gate again.');
     }
+    if (checkCode !== 0) writeCommitCostHint(io, resolveStateDir(io.cwd));
     return checkCode;
   } catch (error) {
     if (error instanceof RuntimeBlockError) {
@@ -218,6 +257,58 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     if (process.cwd() !== previousCwd) process.chdir(previousCwd);
     releaseStagedCandidate(frozen);
   }
+}
+
+/**
+ * Formats the current candidate's test count and the last full-run time.
+ *
+ * Args:
+ *   report: parsed canonical report from the just-finished gate run.
+ *   lastFullRun: saved advisory full-run count and duration, if available.
+ *
+ * Returns:
+ *   string | null: plain-language cost context, or null without a test count.
+ */
+export function formatCommitCostHint(
+  report: unknown,
+  lastFullRun: { testCount: number; durationMs: number } | null,
+): string | null {
+  if (report === null || typeof report !== 'object' || Array.isArray(report)) return null;
+  const execution = (report as Record<string, unknown>)['execution'];
+  if (execution === null || typeof execution !== 'object' || Array.isArray(execution)) return null;
+  const selectedTests = (execution as Record<string, unknown>)['selectedTests'];
+  if (selectedTests === null || typeof selectedTests !== 'object' || Array.isArray(selectedTests)) return null;
+  const count = (selectedTests as Record<string, unknown>)['selected'];
+  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) return null;
+  if (lastFullRun === null) {
+    return `this commit needs ${count} ${count === 1 ? 'test' : 'tests'}; no full-run duration is recorded yet.`;
+  }
+  const minutes = (lastFullRun.durationMs / 60_000).toFixed(1);
+  return (
+    `this commit needs ${count} ${count === 1 ? 'test' : 'tests'}; ` +
+    `last full run took ${minutes} ${minutes === '1.0' ? 'minute' : 'minutes'}.`
+  );
+}
+
+/**
+ * Prints advisory cost context when a witnessed pre-commit gate blocks.
+ *
+ * Args:
+ *   io: process context.
+ *   stateDir: absolute run-state directory containing the latest report.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeCommitCostHint(io: Io, stateDir: string): void {
+  let report: unknown;
+  try {
+    report = readStateDocument(stateDir, 'report.json');
+  } catch {
+    return;
+  }
+  const hint = formatCommitCostHint(report, readLastFullRunSummary(stateDir));
+  if (hint !== null) writeLine(io.stdout, hint);
 }
 
 /** Copies Gateforge run-state artifacts between the user and candidate trees. */

@@ -290,6 +290,109 @@ describe('planScopedExpectedSet (affected set joined, never guessed)', () => {
   });
 });
 
+describe('changed-scope planning against adopted baseline debt (E62)', () => {
+  // The consumer case: a repository whose baseline carries many
+  // never-claimed obligations. A changed file whose resource owns one of
+  // them makes it AFFECTED (join-aware, by design), and the planner
+  // reports it UNCLAIMED — which the caller turns into a hard
+  // EVIDENCE_SCOPE_INCOMPLETE blocker. The full-scope path forgives
+  // exactly those obligations through the adopted baseline, so the same
+  // accepted debt blocked the narrow path and not the wide one.
+  const accountsRead = obligation('tenant.accounts');
+  const ordersRead = obligation('tenant.orders');
+  const accountsReadFp = fp('tenant.accounts');
+  const ordersReadFp = fp('tenant.orders');
+  const debtGraph = graph([
+    { id: 'tenant.accounts', source: 'src/accounts.txt' },
+    { id: 'tenant.orders', source: 'src/orders.txt' },
+  ]);
+
+  /** One unmapped (inferred-only) obligation for each resource. */
+  const debtResolution: ResolvedMappings = {
+    obligations: [
+      {
+        obligationId: 'tenant.accounts:persistence:read',
+        bindings: [{ ...sidecarBinding([row()]), origin: 'inferred' as const }],
+      },
+      {
+        obligationId: 'tenant.orders:persistence:read',
+        bindings: [{ ...sidecarBinding([row({ file: 'e2e/orders.spec.ts' })]), origin: 'inferred' as const }],
+      },
+    ],
+    problems: [],
+  };
+
+  it('an adopted-baseline obligation that is affected is adopted debt, not an unclaimed blocker', () => {
+    const plan = planScopedExpectedSet({
+      catalog: catalog([row(), row({ file: 'e2e/orders.spec.ts', titlePath: ['Orders', 'reads an order'] })]),
+      resolution: debtResolution,
+      obligations: [accountsRead, ordersRead],
+      graph: debtGraph,
+      changedFiles: ['src/accounts.txt'],
+      forgivenFingerprints: new Set([accountsReadFp]),
+    });
+    // Still affected (the join is unchanged) and still in the sealed
+    // covered set, so `check --require-e2e` demands exactly what the
+    // full path grades — but it is NOT a blocker: the owner adopted it.
+    expect(plan.affected.map((entry) => entry.id)).toEqual(['tenant.accounts:persistence:read']);
+    expect(plan.coveredFingerprints).toEqual([accountsReadFp]);
+    expect(plan.unclaimed).toEqual([]);
+    expect(plan.adopted.map((entry) => entry.obligationId)).toEqual([
+      'tenant.accounts:persistence:read',
+    ]);
+  });
+
+  it('an obligation the baseline never adopted still blocks (fail closed)', () => {
+    const plan = planScopedExpectedSet({
+      catalog: catalog([row(), row({ file: 'e2e/orders.spec.ts', titlePath: ['Orders', 'reads an order'] })]),
+      resolution: debtResolution,
+      obligations: [accountsRead, ordersRead],
+      graph: debtGraph,
+      changedFiles: ['src/accounts.txt', 'src/orders.txt'],
+      forgivenFingerprints: new Set([accountsReadFp]),
+    });
+    expect(plan.unclaimed.map((entry) => entry.obligationId)).toEqual(['tenant.orders:persistence:read']);
+    expect(plan.adopted.map((entry) => entry.obligationId)).toEqual(['tenant.accounts:persistence:read']);
+    expect(plan.coveredFingerprints).toEqual([accountsReadFp, ordersReadFp].sort());
+  });
+
+  it('without the adopted set nothing changes: the same obligation is an unclaimed blocker', () => {
+    const plan = planScopedExpectedSet({
+      catalog: catalog([row(), row({ file: 'e2e/orders.spec.ts', titlePath: ['Orders', 'reads an order'] })]),
+      resolution: debtResolution,
+      obligations: [accountsRead, ordersRead],
+      graph: debtGraph,
+      changedFiles: ['src/accounts.txt'],
+    });
+    expect(plan.unclaimed.map((entry) => entry.obligationId)).toEqual(['tenant.accounts:persistence:read']);
+    expect(plan.adopted).toEqual([]);
+  });
+
+  it('a pure test-file change affects only the obligations that file claims (no debt fan-out)', () => {
+    const accountsSpec = row();
+    const plan = planScopedExpectedSet({
+      catalog: catalog([accountsSpec, row({ file: 'e2e/orders.spec.ts', titlePath: ['Orders', 'reads an order'] })]),
+      resolution: {
+        obligations: [
+          { obligationId: 'tenant.accounts:persistence:read', bindings: [sidecarBinding([accountsSpec])] },
+        ],
+        problems: [],
+      },
+      obligations: [accountsRead, ordersRead],
+      graph: debtGraph,
+      changedFiles: ['e2e/accounts.spec.ts'],
+      forgivenFingerprints: new Set([ordersReadFp]),
+    });
+    // The changed spec re-opens exactly the obligations it declares; the
+    // untouched resource's obligation is not affected — and an adopted
+    // baseline on it changes nothing, because it was never in the slice.
+    expect(plan.affected.map((entry) => entry.id)).toEqual(['tenant.accounts:persistence:read']);
+    expect(plan.unclaimed).toEqual([]);
+    expect(plan.adopted).toEqual([]);
+    expect(plan.plannedRows.map((entry) => entry.planned.file)).toEqual(['e2e/accounts.spec.ts']);
+  });
+});
+
 describe('scoped gate receipts (schema coherence + MAC over the new fields)', () => {
   /** Issue helper with the shared binding values. */
   function issue(overrides: Partial<Parameters<typeof issueGateReceipt>[0]> = {}) {

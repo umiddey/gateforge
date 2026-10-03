@@ -1,0 +1,100 @@
+{
+  "name": "@gate-forge/witness",
+  "version": "0.8.0",
+  "license": "Apache-2.0",
+  "description": "Gateforge runner-neutral witness: the loopback HTTP witness proxy, the per-test session tagging contract, and the runner-adapter contract every test runner (Playwright, Cypress, pytest+httpx, Jest/Vitest+supertest) implements to produce the same trusted evidence.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./adapter-kit": {
+      "types": "./dist/adapter-kit/index.d.ts",
+      "import": "./dist/adapter-kit/index.js",
+      "default": "./dist/adapter-kit/index.js"
+    },
+    "./adapter": {
+      "types": "./dist/adapter/index.d.ts",
+      "import": "./dist/adapter/index.js",
+      "default": "./dist/adapter/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/witness-client.d.ts",
+      "import": "./dist/client/witness-client.js",
+      "default": "./dist/client/witness-client.js"
+    },
+    "./constants": {
+      "types": "./dist/constants.d.ts",
+      "import": "./dist/constants.js",
+      "default": "./dist/constants.js"
+    },
+    "./json": {
+      "types": "./dist/json.d.ts",
+      "import": "./dist/json.js",
+      "default": "./dist/json.js"
+    },
+    "./surface": {
+      "types": "./dist/surface.d.ts",
+      "import": "./dist/surface.js",
+      "default": "./dist/surface.js"
+    },
+    "./witness/*": {
+      "types": "./dist/witness/*.d.ts",
+      "import": "./dist/witness/*.js",
+      "default": "./dist/witness/*.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "README.md",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gate-forge/core": "^0.8.0",
+    "yaml": "^2.8.1"
+  },
+  "peerDependencies": {
+    "playwright": ">=1.40.0",
+    "bullmq": "^6.3.10",
+    "ioredis": "^6.0.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    },
+    "bullmq": {
+      "optional": true
+    },
+    "ioredis": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "playwright": "1.58.2",
+    "bullmq": "^6.3.10",
+    "ioredis": "^6.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/gateforge.git",
+    "directory": "packages/witness"
+  },
+  "bugs": {
+    "url": "https://github.com/umiddey/gateforge/issues"
+  },
+  "homepage": "https://github.com/umiddey/gateforge#readme"
+}

@@ -27,6 +27,9 @@ import type {
   SessionCloseResponse,
   SessionOpenRequest,
   SessionOpenResponse,
+  SessionReleaseRequest,
+  SessionReleaseResponse,
+  TwinShapesResponse,
 } from '../witness/types.js';
 import { WitnessRequestError } from '../fixture/witness-client.js';
 
@@ -104,6 +107,18 @@ export class SupervisorClient {
   }
 
   /**
+   * POST /sessions/release: gives the worker's slot back BEFORE the
+   * runner's outcome for that test has arrived (the worker-side
+   * lifecycle end), so the next test the same worker runs opens its
+   * session at once. The session itself stops accepting submissions and
+   * its proxy dies here; the outcome is still owed and is recorded by
+   * the later {@link closeSession}.
+   */
+  async releaseSession(request: SessionReleaseRequest): Promise<SessionReleaseResponse> {
+    return this.request<SessionReleaseResponse>('/sessions/release', request);
+  }
+
+  /**
    * POST /runs/observe-declarations (Observe channel, Phase 2):
    * registers the obligations the trusted mapping layer declared kind
    * `observed-e2e` — the witness then (and only then) stamps
@@ -170,6 +185,41 @@ export class SupervisorClient {
     if (!response.ok) return null;
     try {
       return (await response.json()) as ExecutionTraceResponse;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * GET /runs/twin-shapes (E64): the request SHAPES each test's
+   * session exercised — method, route template, and the values of the
+   * owner's query-key allowlist. Never a URL, a body or a
+   * non-allowlisted value, and never evidence: it exists so a run can
+   * say whether a raw test and its witnessed twin covered the same path.
+   *
+   * Returns:
+   *   Promise<TwinShapesResponse | null>: the shapes, or null when the
+   *   witness cannot serve them (fail closed downstream — never an
+   *   empty success).
+   */
+  async twinShapes(): Promise<TwinShapesResponse | null> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(`${this.url}/runs/twin-shapes`, {
+        method: 'GET',
+        headers: this.headers(),
+        signal: controller.signal,
+      });
+    } catch {
+      return null; // transport failure: the caller fails closed
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!response.ok) return null;
+    try {
+      return (await response.json()) as TwinShapesResponse;
     } catch {
       return null;
     }

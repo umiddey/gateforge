@@ -57,6 +57,21 @@ interface ServerHandle {
  * Boots the example server and waits until it announces a URL on stdout/stderr.
  * Returns the resolved base URL + the spawned ChildProcess.
  */
+/** `Promise.withResolvers` for Node 20 (the supported floor), which lacks it. */
+function withResolvers<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 async function bootServer(): Promise<ServerHandle> {
   const proc = spawn(
     process.execPath,
@@ -66,7 +81,7 @@ async function bootServer(): Promise<ServerHandle> {
   const runsPath = join(tmpdir(), 'gateforge-pack-task-runs.json');
   if (existsSync(runsPath)) rmSync(runsPath);
 
-  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  const { promise, resolve, reject } = withResolvers<string>();
   const onChunk = (chunk: Buffer): void => {
     const text = chunk.toString();
     const match = /listening on (http:\/\/[^ ]+)/.exec(text);
@@ -102,7 +117,7 @@ async function awaitHealthy(baseUrl: string): Promise<void> {
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const u = new URL(url);
   const data = Buffer.from(JSON.stringify(body));
-  const { promise, resolve, reject } = Promise.withResolvers<T>();
+  const { promise, resolve, reject } = withResolvers<T>();
   const req = http.request(
     {
       host: u.hostname,
@@ -136,7 +151,7 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 /** Sends a JSON GET and parses the response. */
 async function getJson<T>(url: string): Promise<T> {
   const u = new URL(url);
-  const { promise, resolve, reject } = Promise.withResolvers<T>();
+  const { promise, resolve, reject } = withResolvers<T>();
   const req = http.request(
     {
       host: u.hostname,
@@ -174,7 +189,7 @@ function readRunsFile(path: string): RunRow[] {
 async function stopServer(proc: ChildProcess, runsPath: string): Promise<void> {
   if (!proc.killed) {
     proc.kill('SIGTERM');
-    const { promise, resolve } = Promise.withResolvers<void>();
+    const { promise, resolve } = withResolvers<void>();
     proc.on('exit', () => resolve());
     setTimeout(() => resolve(), 1_000);
     await promise;

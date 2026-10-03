@@ -234,6 +234,26 @@ export function activeClientSymbolNamesIn(config: ClientScanConfig, file: string
   }
   return [...names].sort();
 }
+/**
+ * One field the call site reads off this call's response: the name
+ * exactly as the code writes it, and where that read happens. Collected
+ * by the same bounded static pass that resolves the call target —
+ * `.data.<field>`, `.data['<field>']`, and destructuring of the awaited
+ * result or of its payload, inside the enclosing function, same file.
+ */
+export interface ResponseRead {
+  field: string;
+  location: Location;
+  /**
+   * Index of the `||` / `??` fallback chain this operand belongs to, in
+   * source order within the call; absent for a read that stands alone.
+   * `res.data?.invoice_id || res.data?.invoice?.id` is one decision about
+   * ONE result, so its operands are judged together by the response-model
+   * check instead of one by one.
+   */
+  chain?: number;
+}
+
 
 /** One discovered frontend call (one row per source callsite). */
 export interface ClientCall {
@@ -254,6 +274,13 @@ export interface ClientCall {
   /** Producing client, e.g. `fetch`, `axios`, `apiClient`, `apiGet`. */
   framework: string;
   location: Location;
+  /**
+   * Fields this call site reads off the response, in source order.
+   * Absent when the code reads none — the attribute is minted only when
+   * it says something, so a call with no read stays byte-identical to
+   * the pre-feature contract.
+   */
+  responseReads?: ResponseRead[];
 }
 
 export interface ClientScanUnresolved {
@@ -265,6 +292,482 @@ export interface ClientScanUnresolved {
 export interface ClientScanResult {
   calls: ClientCall[];
   unresolved: ClientScanUnresolved[];
+}
+
+/**
+ * The one payload property this model follows: the axios/kit response
+ * envelope whose `data` member carries the decoded body.
+ */
+const PAYLOAD_PROPERTY = 'data';
+
+/**
+ * Members of `Response`, of the collection prototypes and of `Object`
+ * itself. A read of one of these is a JavaScript member, never a
+ * response-model field, so it is never collected — without this a
+ * `res.data.map(...)` on a list endpoint would read as a missing field.
+ */
+const NEVER_MODEL_FIELDS: Readonly<Record<string, boolean>> = {
+  at: true, catch: true, concat: true, constructor: true, entries: true, every: true,
+  filter: true, find: true, findIndex: true, flat: true, flatMap: true, finally: true,
+  forEach: true, get: true, has: true, headers: true, includes: true, indexOf: true,
+  join: true, keys: true, length: true, map: true, message: true, name: true, ok: true,
+  prototype: true, push: true, reduce: true, shift: true, slice: true, some: true,
+  sort: true, status: true, statusText: true, then: true, toJSON: true, toString: true,
+  unshift: true, values: true, valueOf: true,
+};
+
+/**
+ * Members of the response envelope that decide whether the call
+ * SUCCEEDED. A branch that opens on one of them of the call's own result
+ * is a guard: the error body a failure branch reads is the framework's,
+ * never the success model.
+ */
+const ENVELOPE_MEMBERS: Readonly<Record<string, boolean>> = {
+  ok: true,
+  status: true,
+  statusText: true,
+};
+
+/** The `ok` envelope member; its polarity is the whole verdict. */
+const OK_MEMBER = 'ok';
+
+/** The last status a successful call answers with (2xx/3xx). */
+const SUCCESS_STATUS = 299;
+
+/** The first status a failing call answers with. */
+const FAILURE_STATUS = 400;
+
+/** `||` and `??` are the two ways code writes a fallback chain. */
+function chainOperator(kind: ts.SyntaxKind): boolean {
+  return kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken;
+}
+
+/**
+ * Which arm of a guard runs on the call SUCCEEDING, on it FAILING, or
+ * neither being statically known.
+ */
+type GuardPolarity = 'success' | 'failure' | 'unknown';
+
+/** The numeric value of a boolean or numeric literal, else null. */
+function literalValue(node: ts.Expression): number | null {
+  const expression = unwrapExpression(node);
+  if (expression.kind === ts.SyntaxKind.TrueKeyword) return 1;
+  if (expression.kind === ts.SyntaxKind.FalseKeyword) return 0;
+  if (ts.isNumericLiteral(expression)) {
+    const value = Number(expression.text);
+    return Number.isFinite(value) ? value : null;
+  }
+  return null;
+}
+
+/** The names a binding pattern binds, in source order. */
+function bindingNames(name: ts.BindingName): string[] {
+  if (ts.isIdentifier(name)) return [name.text];
+  const names: string[] = [];
+  for (const element of name.elements) {
+    if (ts.isOmittedExpression(element) || element.dotDotDotToken !== undefined) continue;
+    names.push(...bindingNames(element.name));
+  }
+  return names;
+}
+
+/** The literal key a binding element or property names, or `''`. */
+function propertyNameText(name: ts.PropertyName | undefined): string {
+  if (name === undefined) return '';
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
+  return '';
+}
+
+/** Strips `await`, parentheses and non-null assertions from an expression. */
+function unwrapExpression(node: ts.Expression): ts.Expression {
+  let current = node;
+  for (;;) {
+    const parent: ts.Node | undefined = current.parent;
+    if (parent === undefined) return current;
+    if (
+      ts.isAwaitExpression(parent) ||
+      ts.isParenthesizedExpression(parent) ||
+      parent.kind === ts.SyntaxKind.AsExpression ||
+      parent.kind === ts.SyntaxKind.NonNullExpression ||
+      parent.kind === ts.SyntaxKind.SatisfiesExpression
+    ) {
+      current = parent as ts.Expression;
+      continue;
+    }
+    return current;
+  }
+}
+
+/** One bound name and what it holds: the response envelope or the payload. */
+interface ReadHolder {
+  name: string;
+  /** `true` when the name holds the decoded body itself. */
+  payload: boolean;
+}
+
+/**
+ * The bounded static read of the response fields one detected call is
+ * consumed through (plan 2026-09-25 Phase 4b item 5).
+ *
+ * The model is deliberately small and file-local, and it never guesses:
+ *
+ * - the call's own awaited result is followed through `await` and
+ *   parentheses; `<result>.data` is the payload (axios/kit envelope) and
+ *   `<result>` alone is the envelope;
+ * - a name bound from either of those (`const r = await call`,
+ *   `const { data: d } = await call`, `const d = (await call).data`) is
+ *   followed by NAME inside the enclosing function-like (nested
+ *   function-likes included, so a `useEffect` callback still counts);
+ * - every `holder.<field>`, `holder.data.<field>`, `holder.data['<field>']`
+ *   and `holder['<field>']` is a read, and so is each key of an object
+ *   destructuring of a holder or of `<holder>.data`;
+ * - computed access (`d[key]`), a reassigned (`let`) holder, and a read
+ *   of a JavaScript member (`data.map`, `data.length`, …) yield nothing;
+ * - a branch that opens on the call's OWN envelope (`if (res.ok)`,
+ *   `if (!res.ok)`, `if (res.status >= 400)`, `res.ok ? … : …`) is read
+ *   for its POLARITY, and only its FAILURE arm is not collected: the
+ *   body a failure branch reads is the error envelope, not the success
+ *   model. An undecidable condition (a compound test, a comparison this
+ *   pass cannot read) drops BOTH arms. A read AFTER the guard is
+ *   collected as usual;
+ * - a read that is one operand of a `||` / `??` chain carries the chain's
+ *   index, so the response-model check can judge the whole chain at once
+ *   instead of flagging a defensive fallback.
+ *
+ * A read is recorded once per field and location, in source order.
+ */
+function responseReadsOf(
+  file: string,
+  call: ts.CallExpression,
+  source: ts.SourceFile,
+): ResponseRead[] {
+  const reads = new Map<string, ResponseRead>();
+  const chainRoots: ts.Node[] = [];
+  // Reads the BINDING pass already saw (an inline `(await call).data.x`).
+  // They are recorded first and replayed once `add` knows the holders,
+  // which the binding pass is what discovers.
+  const bound: Array<{ field: string; node: ts.Node }> = [];
+  let add: (field: string, node: ts.Node) => void = (field, node) => {
+    bound.push({ field, node });
+  };
+
+  const awaited = unwrapExpression(call);
+  const envelopeAccess =
+    awaited.parent !== undefined &&
+    ts.isPropertyAccessExpression(awaited.parent) &&
+    awaited.parent.expression === awaited &&
+    awaited.parent.name.text === PAYLOAD_PROPERTY
+      ? awaited.parent
+      : undefined;
+  const payload = envelopeAccess;
+  const holders: ReadHolder[] = [];
+  bindHolder(awaited, false, holders, add);
+  if (payload !== undefined) bindHolder(payload, true, holders, add);
+
+  const responseNames = new Set(holders.filter((h) => !h.payload).map((h) => h.name));
+  const payloadNames = new Set(holders.filter((h) => h.payload).map((h) => h.name));
+  /** Whether an expression IS the decoded payload of this call. */
+  const isPayload = (node: ts.Expression): boolean => {
+    const expression = unwrapExpression(node);
+    if (ts.isIdentifier(expression)) return payloadNames.has(expression.text);
+    return (
+      ts.isPropertyAccessExpression(expression) &&
+      expression.name.text === PAYLOAD_PROPERTY &&
+      ts.isIdentifier(expression.expression) &&
+      responseNames.has(expression.expression.text)
+    );
+  };
+
+  let scope: ts.Node = source;
+  for (let node: ts.Node | undefined = call; node !== undefined; node = node.parent) {
+    if (ts.isFunctionLike(node)) {
+      scope = node;
+      break;
+    }
+  }
+  // A branch that opens on the call's OWN envelope (`if (!res.ok)`,
+  // `if (res.status >= 400)`, `res.ok ? … : …`) is a guard: which side
+  // runs is not statically known, and the error body a failure branch
+  // reads is the framework's, not the success model. Nothing inside such a
+  // branch is a proven read of the success model — see the failure-path
+  // note in the module doc.
+  const guarded = new Set<ts.Node>();
+  const isHolderName = (node: ts.Node): boolean =>
+    ts.isIdentifier(node) && responseNames.has(node.text);
+  /** The envelope member of this call's own result an expression reads. */
+  const envelopeMember = (node: ts.Node): string | null =>
+    ts.isPropertyAccessExpression(node) &&
+    isHolderName(node.expression) &&
+    ENVELOPE_MEMBERS[node.name.text] === true
+      ? node.name.text
+      : null;
+  const mentionsEnvelope = (node: ts.Node): boolean => {
+    if (envelopeMember(node) !== null) return true;
+    let found = false;
+    const inspect = (at: ts.Node): void => {
+      if (found) return;
+      if (envelopeMember(at) !== null) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(at, inspect);
+    };
+    ts.forEachChild(node, inspect);
+    return found;
+  };
+  /**
+   * The polarity of an envelope guard, or null when the condition does not
+   * test this call's envelope at all.
+   *
+   * `if (res.ok)` / `if (res.ok === true)` / `if (res.status >= 400)` /
+   * `if (res.status !== 201)` and their negations are decided here, so the
+   * SUCCESS arm keeps its reads — the error envelope belongs to the
+   * failure arm only. A compound condition, a comparison this cannot
+   * read, or a `statusText`/`headers` test is `unknown`: neither arm is a
+   * proven read of the success model.
+   */
+  const guardPolarity = (condition: ts.Expression): GuardPolarity | null => {
+    const expression = unwrapExpression(condition);
+    if (ts.isPrefixUnaryExpression(expression) && expression.operator === ts.SyntaxKind.ExclamationToken) {
+      const inner = guardPolarity(expression.operand);
+      if (inner === null || inner === 'unknown') return inner;
+      return inner === 'success' ? 'failure' : 'success';
+    }
+    const bare = envelopeMember(expression);
+    if (bare !== null) return bare === OK_MEMBER ? 'success' : 'unknown';
+    if (!ts.isBinaryExpression(expression)) {
+      return mentionsEnvelope(expression) ? 'unknown' : null;
+    }
+    const member = envelopeMember(expression.left);
+    if (member === null) return mentionsEnvelope(expression) ? 'unknown' : null;
+    const expected = literalValue(expression.right);
+    if (expected === null) return 'unknown';
+    const isOk = member === OK_MEMBER;
+    const kind = expression.operatorToken.kind;
+    const equality = kind === ts.SyntaxKind.EqualsEqualsToken || kind === ts.SyntaxKind.EqualsEqualsEqualsToken;
+    const inequality =
+      kind === ts.SyntaxKind.ExclamationEqualsToken || kind === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+    if (isOk) {
+      // A boolean compared with a boolean literal: `!==` is the negated
+      // equality, so `ok !== true` is the failure arm.
+      if (!equality && !inequality) return 'unknown';
+      const satisfied = (succeeded: boolean): boolean => {
+        const same = (succeeded ? 1 : 0) === expected;
+        return inequality ? !same : same;
+      };
+      if (satisfied(true) && !satisfied(false)) return 'success';
+      if (!satisfied(true) && satisfied(false)) return 'failure';
+      return 'unknown';
+    }
+    if (inequality) {
+      // `status !== 200` reads as "not the success I expected", which is
+      // the failure arm even though a 404 satisfies it too.
+      if (expected >= 200 && expected <= SUCCESS_STATUS) return 'failure';
+      if (expected >= FAILURE_STATUS) return 'success';
+      return 'unknown';
+    }
+    const succeeded = expected >= 200 && expected <= SUCCESS_STATUS;
+    const failed = expected >= FAILURE_STATUS;
+    switch (kind) {
+      case ts.SyntaxKind.EqualsEqualsToken:
+      case ts.SyntaxKind.EqualsEqualsEqualsToken:
+        if (succeeded) return 'success';
+        if (failed) return 'failure';
+        return 'unknown';
+      case ts.SyntaxKind.LessThanToken:
+        return SUCCESS_STATUS < expected ? 'success' : FAILURE_STATUS < expected ? 'failure' : 'unknown';
+      case ts.SyntaxKind.LessThanEqualsToken:
+        return SUCCESS_STATUS <= expected ? 'success' : FAILURE_STATUS <= expected ? 'failure' : 'unknown';
+      case ts.SyntaxKind.GreaterThanToken:
+        return SUCCESS_STATUS > expected ? 'success' : FAILURE_STATUS > expected ? 'failure' : 'unknown';
+      case ts.SyntaxKind.GreaterThanEqualsToken:
+        return SUCCESS_STATUS >= expected ? 'success' : FAILURE_STATUS >= expected ? 'failure' : 'unknown';
+      default:
+        return 'unknown';
+    }
+  };
+  const markGuards = (node: ts.Node): void => {
+    if (ts.isIfStatement(node)) {
+      const polarity = guardPolarity(node.expression);
+      if (polarity === 'failure') guarded.add(node.thenStatement);
+      else if (polarity === 'success' && node.elseStatement !== undefined) {
+        guarded.add(node.elseStatement);
+      } else if (polarity === 'unknown') {
+        guarded.add(node.thenStatement);
+        if (node.elseStatement !== undefined) guarded.add(node.elseStatement);
+      }
+    }
+    if (ts.isConditionalExpression(node)) {
+      // A ternary on the envelope is the same guard as an `if`: only its
+      // failure arm is the error envelope.
+      const polarity = guardPolarity(node.condition);
+      if (polarity === 'failure') guarded.add(node.whenTrue);
+      else if (polarity === 'success') guarded.add(node.whenFalse);
+      else if (polarity === 'unknown') {
+        guarded.add(node.whenTrue);
+        guarded.add(node.whenFalse);
+      }
+    }
+    ts.forEachChild(node, markGuards);
+  };
+  markGuards(scope);
+  /** Whether a node sits inside one of the guarded branch bodies. */
+  const insideGuard = (node: ts.Node): boolean => {
+    for (let at: ts.Node | undefined = node; at !== undefined && at !== scope; at = at.parent) {
+      if (guarded.has(at)) return true;
+    }
+    return false;
+  };
+  /** The outermost `||` / `??` chain an operand belongs to, if any. */
+  const chainOf = (node: ts.Node): ts.Node | undefined => {
+    for (let at: ts.Node | undefined = node; at !== undefined && at !== scope; at = at.parent) {
+      if (ts.isBinaryExpression(at) && chainOperator(at.operatorToken.kind)) return at;
+    }
+    return undefined;
+  };
+  add = (field: string, node: ts.Node): void => {
+    if (field.length === 0 || NEVER_MODEL_FIELDS[field] === true) return;
+    if (insideGuard(node)) return;
+    const location = locationOf(file, source, node);
+    const key = `${field}@${String(location.line)}:${String(location.col)}`;
+    if (reads.has(key)) return;
+    const root = chainOf(node);
+    if (root === undefined) {
+      reads.set(key, { field, location });
+      return;
+    }
+    let index = chainRoots.indexOf(root);
+    if (index < 0) {
+      chainRoots.push(root);
+      index = chainRoots.length - 1;
+    }
+    reads.set(key, { field, location, chain: index });
+  };
+  for (const read of bound) add(read.field, read.node);
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(node) && isPayload(node.expression)) {
+      add(node.name.text, node);
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      ts.isStringLiteralLike(node.argumentExpression) &&
+      isPayload(node.expression)
+    ) {
+      add(node.argumentExpression.text, node);
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      ts.isObjectBindingPattern(node.name) &&
+      isPayload(node.initializer)
+    ) {
+      for (const element of node.name.elements) {
+        const field = bindingKey(element);
+        if (field.length > 0) add(field, element);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(scope);
+  const ordered = [...reads.values()].sort((left, right) => {
+    const where =
+      (left.location.file < right.location.file ? -1 : left.location.file > right.location.file ? 1 : 0) ||
+      left.location.line - right.location.line ||
+      left.location.col - right.location.col ||
+      (left.field < right.field ? -1 : left.field > right.field ? 1 : 0);
+    return where;
+  });
+  // Chain numbers are handed out in discovery order; renumber them by
+  // where each chain FIRST appears in source, so the fact is independent
+  // of the traversal.
+  const firstOf = (index: number): ResponseRead =>
+    ordered.find((read) => read.chain === index) as ResponseRead;
+  const chains = [...new Set(ordered.map((read) => read.chain))]
+    .filter((index): index is number => index !== undefined)
+    .sort(
+      (left, right) =>
+        firstOf(left).location.line - firstOf(right).location.line ||
+        firstOf(left).location.col - firstOf(right).location.col,
+    );
+  const renumbered = new Map(chains.map((index, position) => [index, position]));
+  return ordered.map((read) =>
+    read.chain === undefined ? read : { ...read, chain: renumbered.get(read.chain) ?? read.chain },
+  );
+
+  /** The key a binding element pulls off the object it destructures. */
+  function bindingKey(element: ts.BindingElement): string {
+    const declared = propertyNameText(element.propertyName);
+    if (declared.length > 0) return declared;
+    return ts.isIdentifier(element.name) ? element.name.text : '';
+  }
+
+  /**
+   * Records what the awaited result (or its `.data` payload) binds to:
+   * a name to follow, or — for a destructured payload — the field keys
+   * that destructuring itself reads. `status`/`headers` and every other
+   * envelope member are not response-model fields, so they are ignored.
+   */
+  function bindHolder(
+    node: ts.Expression,
+    isPayloadNode: boolean,
+    into: ReadHolder[],
+    addRead: (field: string, node: ts.Node) => void,
+  ): void {
+    const parent: ts.Node | undefined = node.parent;
+    if (parent === undefined) return;
+    if (ts.isVariableDeclaration(parent) && parent.initializer === node) {
+      // A `let` holder can be reassigned before the read, so the name no
+      // longer provably holds this call's response; a `const` one does.
+      const declarationList = parent.parent;
+      const isConst =
+        ts.isVariableDeclarationList(declarationList) &&
+        (ts.getCombinedNodeFlags(declarationList) & ts.NodeFlags.Const) !== 0;
+      if (!isConst) return;
+      if (ts.isIdentifier(parent.name)) {
+        into.push({ name: parent.name.text, payload: isPayloadNode });
+        return;
+      }
+      // An array destructuring pulls ELEMENTS, not named fields, out of a
+      // response: there is no field name to compare against a model.
+      if (!ts.isObjectBindingPattern(parent.name)) return;
+      // `const { data: d } = await call` — the payload is one level in;
+      // every other envelope key is not a response-model field.
+      if (!isPayloadNode) {
+        for (const element of parent.name.elements) {
+          if (bindingKey(element) !== PAYLOAD_PROPERTY) continue;
+          for (const name of bindingNames(element.name)) into.push({ name, payload: true });
+        }
+        return;
+      }
+      for (const element of parent.name.elements) {
+        const field = bindingKey(element);
+        if (field.length > 0) addRead(field, element);
+      }
+      return;
+    }
+    if (ts.isBindingElement(parent) && parent.initializer === node) {
+      if (!isPayloadNode) {
+        if (bindingKey(parent) === PAYLOAD_PROPERTY && ts.isObjectBindingPattern(parent.name)) {
+          for (const name of bindingNames(parent.name)) into.push({ name, payload: true });
+        }
+        return;
+      }
+      if (ts.isObjectBindingPattern(parent.name)) {
+        // `const { data: { dueDate } } = await call` — the nested keys
+        // are the fields the body is read through.
+        for (const element of parent.name.elements) {
+          const field = bindingKey(element);
+          if (field.length > 0) addRead(field, element);
+        }
+        return;
+      }
+      const key = bindingKey(parent);
+      if (key.length > 0) addRead(key, parent);
+      return;
+    }
+    if (ts.isPropertyAccessExpression(parent) && parent.expression === node) {
+      // `(await call).data.<field>` reads one field of the body inline.
+      if (isPayloadNode) addRead(parent.name.text, parent);
+    }
+  }
 }
 
 const VERB_METHODS: ReadonlyMap<string, HttpMethod> = new Map([
@@ -525,11 +1028,15 @@ function extractCall(
   const source = model?.source;
   if (source === undefined) return;
   const location = locationOf(file, source, call);
+  // The response fields THIS call site reads (plan 2026-09-25 Phase 4b
+  // item 5) — the same bounded, file-local pass, attached to whichever
+  // call shape below is recognized.
+  const reads = responseReadsOf(file, call, source);
   const expression = call.expression;
 
   // fetch(url[, {method}])
   if (ts.isIdentifier(expression) && expression.text === 'fetch') {
-    extractClientCall(call, 'fetch', 'GET', file, config, table, calls, unresolved, location);
+    extractClientCall(call, 'fetch', 'GET', file, config, table, calls, unresolved, location, undefined, reads);
     return;
   }
   // axios.get(url), apiClient.post(url), window.fetch(url)
@@ -538,7 +1045,7 @@ function extractCall(
     const verb = expression.name.text.toLowerCase();
     const isFetchObject = objectName === 'window' && expression.name.text === 'fetch';
     if (isFetchObject) {
-      extractClientCall(call, 'fetch', 'GET', file, config, table, calls, unresolved, location);
+      extractClientCall(call, 'fetch', 'GET', file, config, table, calls, unresolved, location, undefined, reads);
       return;
     }
     // Per-symbol scoping (phase 3): the symbol counts only where its
@@ -550,7 +1057,7 @@ function extractCall(
       // proven literal baseURL joins into the emitted path (fetch has no
       // instance and never joins).
       const baseURL = table.instanceBaseURL(objectName, file);
-      extractClientCall(call, objectName, method, file, config, table, calls, unresolved, location, baseURL);
+      extractClientCall(call, objectName, method, file, config, table, calls, unresolved, location, baseURL, reads);
       return;
     }
   }
@@ -572,7 +1079,7 @@ function extractCall(
   }
   if (configCall !== null && framework !== null) {
     const baseURL = table.instanceBaseURL(framework, file);
-    extractConfiguredCall(configCall, framework, file, config, table, calls, unresolved, location, baseURL);
+    extractConfiguredCall(configCall, framework, file, config, table, calls, unresolved, location, baseURL, reads);
     return;
   }
   // Configured wrapper: the declaration must exist in the scanned set as
@@ -615,7 +1122,7 @@ function extractCall(
       });
       return;
     }
-    resolveAndRecord(urlNode, wrapperConfig.name, wrapperConfig.method, file, config, bound, calls, unresolved, location);
+    resolveAndRecord(urlNode, wrapperConfig.name, wrapperConfig.method, file, config, bound, calls, unresolved, location, reads);
     return;
   }
   // A module-scope function whose body issues client calls IS a client
@@ -691,7 +1198,8 @@ function extractClientCall(
   calls: ClientCall[],
   unresolved: ClientScanUnresolved[],
   location: Location,
-  baseURL?: string,
+  baseURL?: string | undefined,
+  reads: ResponseRead[] = [],
 ): void {
   const urlNode = call.arguments[0];
   if (urlNode === undefined) {
@@ -738,7 +1246,7 @@ function extractClientCall(
     }
   }
   if (method === null) return;
-  resolveAndRecord(urlNode, framework, method, file, config, table, calls, unresolved, location, baseURL);
+  resolveAndRecord(urlNode, framework, method, file, config, table, calls, unresolved, location, reads, baseURL);
 }
 
 function extractConfiguredCall(
@@ -750,7 +1258,8 @@ function extractConfiguredCall(
   calls: ClientCall[],
   unresolved: ClientScanUnresolved[],
   location: Location,
-  baseURL?: string,
+  baseURL?: string | undefined,
+  reads: ResponseRead[] = [],
 ): void {
   const configNode = call.arguments[0];
   if (configNode === undefined || !ts.isObjectLiteralExpression(configNode)) {
@@ -796,7 +1305,7 @@ function extractConfiguredCall(
     });
     return;
   }
-  resolveAndRecord(urlNode, framework, method, file, config, table, calls, unresolved, location, baseURL);
+  resolveAndRecord(urlNode, framework, method, file, config, table, calls, unresolved, location, reads, baseURL);
 }
 
 /**
@@ -849,6 +1358,7 @@ function resolveAndRecord(
   calls: ClientCall[],
   unresolved: ClientScanUnresolved[],
   location: Location,
+  reads: ResponseRead[] = [],
   baseURL?: string,
 ): void {
   const resolved = table.evaluate(urlNode, file);
@@ -877,6 +1387,7 @@ function resolveAndRecord(
     ...(joined.joined !== undefined ? { joinedBaseURL: joined.joined } : {}),
     framework,
     location,
+    ...(reads.length > 0 ? { responseReads: reads } : {}),
   });
 }
 

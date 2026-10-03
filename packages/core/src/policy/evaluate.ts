@@ -251,14 +251,19 @@ export function evaluatePolicies(input: PolicyEvaluationInput): PolicyEvaluation
         name: resource.name,
         detail:
           `resource '${resource.id ?? resource.name}' has no effective classification ` +
-          '(the classifier blocked it definitionally); run ' +
-          `'gateforge explain ${resource.id ?? resource.name}' for the typed ` +
-          'reason and its in-code resolution',
+          '(the classifier blocked it definitionally)',
         location: resource.location,
+        nextAction: 'gateforge classify --json',
       });
       continue;
     }
-    generateObligations(resource, policyFile.policies, obligations, obligationIds);
+    generateObligations(
+      resource,
+      policyFile.policies,
+      obligations,
+      obligationIds,
+      policyFile.options?.['http.endpoint.requireObservation'] === 'all',
+    );
   }
 
   for (const entry of input.graph.unresolved) {
@@ -316,12 +321,13 @@ function generateObligations(
   policies: Policy[],
   obligations: Obligation[],
   obligationIds: Set<string>,
+  observationScopeAll: boolean,
 ): void {
   const classification = resource.classification;
   if (classification === null || resource.id === null) return;
   const exposure = classification.exposure;
   for (const policy of policies) {
-    if (!policyMatches(policy, resource, exposure)) continue;
+    if (!policyMatches(policy, resource, exposure, observationScopeAll)) continue;
     for (const contract of policy.require) {
       if (
         contract.startsWith(CRUD_CONTRACT_PREFIX) ||
@@ -354,6 +360,7 @@ function policyMatches(
   policy: Policy,
   resource: GraphResource,
   exposure: 'user-facing' | 'internal',
+  observationScopeAll: boolean,
 ): boolean {
   const when = policy.when;
   if (when.kind !== undefined && when.kind !== resource.kind) return false;
@@ -373,14 +380,26 @@ function policyMatches(
     }
   }
   if (when.consumed !== undefined) {
+    // Plan Phase 4c (E60): the pinned
+    // `http.endpoint.requireObservation: all` option widens ONLY the
+    // `consumed: true` matcher of an endpoint-scoped policy to the
+    // whole discovered route inventory, so a new route no UI calls
+    // owes the observation contracts too (blocking
+    // TEST_MAPPING_MISSING until mapped or baselined). A `consumed:
+    // false` policy and every non-endpoint resource are untouched —
+    // the option narrows nothing and adds no contract.
+    const observationScopeWidened =
+      observationScopeAll && when.kind === HTTP_ENDPOINT_RESOURCE_KIND && when.consumed === true;
     // Endpoint consumption match: `true` requires the attribute to be
     // EXACTLY true; `false` matches everything else (including absent —
     // non-endpoint resources are "not consumed", never match-excluded).
-    if (when.consumed === true && resource.attributes['frontendConsumed'] !== true) {
-      return false;
-    }
-    if (when.consumed === false && resource.attributes['frontendConsumed'] === true) {
-      return false;
+    if (!observationScopeWidened) {
+      if (when.consumed === true && resource.attributes['frontendConsumed'] !== true) {
+        return false;
+      }
+      if (when.consumed === false && resource.attributes['frontendConsumed'] === true) {
+        return false;
+      }
     }
   }
   return true;

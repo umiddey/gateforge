@@ -1,7 +1,6 @@
 /**
- * `gateforge tests`: the existing-test workflow (plan 2026-09-13
- * Phase 2-3, Phase 4 diagnose). Five subcommands:
- *
+ * `gateforge tests`: seven subcommands for test inventory, annotation sync,
+ * mapping, and diagnostic workflows.
  * - `discover` — inventory the repository's tests into the derived
  *   run-state catalog (Phase 2).
  * - `suggest` — resolve mappings for the run's obligations and produce
@@ -13,6 +12,8 @@
  *   obligation registry, then write/update `.gateforge/test-map.yml`
  *   ATOMICALLY and idempotently, printing the exact diff. Never edits
  *   test files, never adds waivers, refuses contradictions.
+ * - `sync` — regenerate only annotation-sourced entries from an AST-only
+ *   scan; hand-written sidecar entries are never modified.
  * - `explain` — the per-test §4 report: requirements, existing-test
  *   identity, mapping origin, honest execution status, next action, and
  *   `New test needed`. Exit 2 for an unknown key.
@@ -31,12 +32,14 @@
  * contract: 0 ok, 2 config/usage errors (including unknown keys/ids and
  * failed native enumeration).
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';import {
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
   canonicalJson,
   compareStrings,
   mappingSuggestions,
   TestKindSchema,
+  TestMapSchema,
   type Claim,
   type GateforgeConfig,
   type JsonValue,
@@ -51,7 +54,9 @@ import { join } from 'node:path';import {
 import {
   discoverTestCatalog,
   TestDiscoveryError,
+  scanTestFiles,
   type DiscoverResult,
+  type StaticRegistrationWarning,
 } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { diagnosticsJson, renderDiagnosticsText, runDiagnosticSuites } from '../diagnostics.js';
@@ -70,22 +75,28 @@ import {
   loadOptionalTestMap,
   relativeToRepo,
   resolveRepositoryMappings,
+  nativeInventoryBlocking,
   serializeTestMap,
   TEST_MAP_RELATIVE,
+  annotationTestMapEntries,
   writeTestMapAtomic,
 } from '../mapping.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { resolveProvider } from '../providers.js';
 import { httpRoutesView, resolveStateDir } from '../state.js';
+import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
+import { loadCacheExclusions } from '../cache-exclusions.js';
 
 export const TESTS_USAGE = `\
 usage: gateforge tests discover [--json] [--pytest]
+       gateforge tests catalog [--json]
        gateforge tests surface-doctor [--json]
        gateforge tests suggest [--changed] [--json]
        gateforge tests mark --test <key> --kind <kind> [--category <c>]... \\
          --obligation <id>... --reason "<text>"
+       gateforge tests sync [--json]
        gateforge tests explain --test <key> [--json]
        gateforge tests diagnose [--suite <name>] [--json]`;
 
@@ -117,12 +128,16 @@ export async function testsCommand(io: Io, argv: readonly string[]): Promise<num
   switch (subcommand) {
     case 'discover':
       return discoverSubcommand(io, options);
+    case 'catalog':
+      return catalogSubcommand(io, options);
     case 'surface-doctor':
       return surfaceDoctorSubcommand(io, options);
     case 'suggest':
       return suggestSubcommand(io, options);
     case 'mark':
       return markSubcommand(io, options);
+    case 'sync':
+      return syncSubcommand(io, options);
     case 'explain':
       return explainSubcommand(io, options);
     case 'diagnose':
@@ -170,7 +185,12 @@ async function runDiscovery(
 ): Promise<DiscoverResult> {
   let discovered: DiscoverResult;
   try {
-    discovered = await discoverTestCatalog({ cwd, config, collectPytest });
+    discovered = await discoverTestCatalog({
+      cwd,
+      config,
+      collectPytest,
+      excludeFile: engineGeneratedStateFileFilter(cwd, stateDir),
+    });
   } catch (error) {
     // A failed native enumeration is a config/environment problem
     // (exit 2), never an empty catalog.
@@ -182,6 +202,85 @@ async function runDiscovery(
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, CATALOG_FILE_NAME), `${discovered.json}\n`, 'utf8');
   return discovered;
+}
+/**
+ * Builds a derived test catalog with mapped claims and related HTTP routes.
+ *
+ * Args:
+ *   io: repository context and output streams.
+ *   options: parsed catalog flags.
+ *
+ * Returns:
+ *   Promise<number>: zero when discovery completes, two for usage or discovery errors.
+ */
+async function catalogSubcommand(
+  io: Io,
+  options: Record<string, string | boolean | string[]>,
+): Promise<number> {
+  rejectUnknownFlags(options, ['json', 'help'], TESTS_USAGE);
+  const config = loadConfigAt(io.cwd);
+  const stateDir = resolveStateDir(io.cwd);
+  const discovered = await runDiscovery(io.cwd, config, stateDir, false);
+  const sidecar = loadOptionalTestMap(io.cwd);
+  const entries = discovered.catalog.entries.map((entry) => {
+    const claims = new Set<string>(
+      sidecar?.tests.find((declaration) => declaration.key === entry.logicalKey)?.claims ?? [],
+    );
+    for (const claim of discovered.nativeClaims) {
+      if (claim.testFile === entry.file && (claim.testId === entry.logicalKey || claim.testId === entry.title)) {
+        claims.add(claim.obligationId);
+      }
+    }
+    const sortedClaims = [...claims].sort(compareStrings);
+    const source = readFileSync(join(io.cwd, entry.file), 'utf8');
+    const routePattern = /(?:goto|route|url|path)\s*\(\s*(['"`])(\/[^'"`]*?)\1/g;
+    const routeMatches: string[] = [];
+    for (const match of source.matchAll(routePattern)) {
+      const route = match[2];
+      if (route !== undefined) routeMatches.push(route);
+    }
+    const routes = [...new Set(routeMatches)].sort(compareStrings);
+    return { file: entry.file, title: entry.title, claims: sortedClaims, routes };
+  });
+  if (options['json'] === true) {
+    writeLine(io.stdout, canonicalJson({ schemaVersion: 1, entries } as unknown as JsonValue));
+  } else {
+    writeLine(io.stdout, `tests catalog: ${entries.length} test(s)`);
+    for (const entry of entries) {
+      writeLine(io.stdout, `  ${entry.file}: ${entry.title}`);
+      if (entry.claims.length > 0) writeLine(io.stdout, `    claims: ${entry.claims.join(', ')}`);
+      if (entry.routes.length > 0) writeLine(io.stdout, `    routes: ${entry.routes.join(', ')}`);
+    }
+  }
+  writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests catalog');
+  return 0;
+}
+
+/**
+ * Prints static warnings for test registrations controlled by Gateforge
+ * environment state without changing the machine-readable catalog.
+ *
+ * Args:
+ *   io: command output streams.
+ *   warnings: registration warnings from static discovery.
+ *   command: command label used to identify the advisory.
+ *
+ * Returns:
+ *   void.
+ */
+function writeRegistrationWarnings(
+  io: Io,
+  warnings: readonly StaticRegistrationWarning[],
+  command: string,
+): void {
+  for (const warning of warnings) {
+    writeLine(
+      io.stderr,
+      `${command}: registration warning ${warning.file}:${String(warning.location.line)}: ` +
+        `${warning.titlePath.join(' > ')} is conditional on ${warning.environmentVariable}; ` +
+        'keep test registration independent of Gateforge run variables',
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,17 +296,18 @@ async function discoverSubcommand(
   const asJson = options['json'] === true;
   const config = loadConfigAt(io.cwd);
   const stateDir = resolveStateDir(io.cwd);
-  const { catalog, json } = await runDiscovery(io.cwd, config, stateDir, options['pytest'] === true);
+  const discovered = await runDiscovery(io.cwd, config, stateDir, options['pytest'] === true);
+  const { catalog, json } = discovered;
 
   if (asJson) {
     writeLine(io.stdout, json);
+    writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests discover');
     return 0;
   }
-
-  const discovered = catalog.entries.filter((entry) => entry.discoveryStatus === 'discovered').length;
+  const discoveredCount = catalog.entries.filter((entry) => entry.discoveryStatus === 'discovered').length;
   writeLine(
     io.stdout,
-    `test catalog: discovered=${String(discovered)}` +
+    `test catalog: discovered=${String(discoveredCount)}` +
       ` unresolved=${String(catalog.unresolved.length)}` +
       ` parseErrors=${String(catalog.parseErrors.length)}` +
       ` inventoryComplete=${catalog.inventoryComplete ? 'true' : 'false'}`,
@@ -221,6 +321,16 @@ async function discoverSubcommand(
   for (const summary of catalog.runnerSummaries) {
     writeLine(io.stdout, `runner ${summary.runner}/${summary.name}: ${summary.status} — ${summary.detail}`);
   }
+  const edges = Object.entries(discovered.projectDependencies ?? {})
+    .filter(([, dependencies]) => dependencies.length > 0)
+    .map(([name, dependencies]) => `${name} → ${dependencies.join(', ')}`)
+    .sort();
+  if (edges.length > 0) {
+    // The runner's OWN resolved graph, not a reading of the consumer
+    // config: a supervised run orders its projects by exactly these edges.
+    writeLine(io.stdout, `project dependencies: ${edges.join('; ')}`);
+  }
+  writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests discover');
   if (catalog.unresolved.length > 0) {
     writeLine(io.stdout, `unresolved (${String(catalog.unresolved.length)}):`);
     for (const gap of catalog.unresolved) {
@@ -251,7 +361,7 @@ async function discoverSubcommand(
 interface SuggestionJson {
   obligationId: string;
   cause: string;
-  candidates: Array<{ logicalKey: string; file: string; why: string[] }>;
+  candidates: Array<{ logicalKey: string; file: string; why: string[]; overlaps: string[] }>;
   missingEvidence: string;
   nextAction: string;
   newTestNeeded: boolean;
@@ -276,12 +386,15 @@ async function suggestSubcommand(
   const provider = diffScoped ? resolveProvider(config.changed.provider, io.cwd, io.env).provider : 'all-files';
   const pipeline = await runPipeline({ cwd: io.cwd, env: io.env, config, provider, stateDir });
   const discovered = await runDiscovery(io.cwd, config, stateDir, true);
+  writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests suggest');
   const mapped = await resolveRepositoryMappings({
     cwd: io.cwd,
     config,
     obligations: pipeline.policy.obligations,
     catalog: discovered.catalog,
     nativeClaims: discovered.nativeClaims,
+    nativeErrors: discovered.nativeErrors,
+    nativeInstances: discovered.nativeInstances,
     behaviorCatalog: pipeline.behaviorCatalog,
   });
 
@@ -300,11 +413,31 @@ async function suggestSubcommand(
     );
   }
 
-  const suggestions = mappingSuggestions({
-    catalog: discovered.catalog,
-    obligationIds: scoped.map((obligation) => obligation.id),
-    resolution: mapped.resolution,
-  });
+  // A COMPLETE enumeration failure of the CONFIGURED runner hides the
+  // suggestions (an empty inventory would read as "no candidates"
+  // instead of "the runner could not enumerate"). The runner is
+  // `config.runner` — absent means playwright, the historical behavior.
+  const enumerationFailedCompletely =
+    mapped.nativeErrors.length > 0 &&
+    !discovered.catalog.entries.some((entry) => entry.runner === config.runner);
+  const suggestions = enumerationFailedCompletely
+    ? []
+    : mappingSuggestions({
+        catalog: discovered.catalog,
+        obligationIds: scoped.map((obligation) => obligation.id),
+        resolution: mapped.resolution,
+      });
+  const mappingProblems = [
+    ...mapped.resolution.problems,
+    ...(mapped.nativeLoadProblem === null
+      ? []
+      : [
+          {
+            ...mapped.nativeLoadProblem,
+            nextAction: nativeInventoryBlocking(mapped.nativeLoadProblem)[0]?.nextAction ?? '',
+          },
+        ]),
+  ];
   // Required-case hints (plan 2026-09-19 Phase 6 item 6): candidates
   // come from the current inventory (resolver suggestions above); the
   // unmapped required cases name what final approval still needs —
@@ -329,6 +462,14 @@ async function suggestSubcommand(
           pipeline.behaviorCatalog?.cases.find((item) => item.caseId === caseId)?.definition.id ?? caseId,
       );
   };
+  const obligationsByTestKey = new Map<string, string[]>();
+  for (const group of mapped.resolution.obligations) {
+    for (const binding of group.bindings) {
+      const obligations = obligationsByTestKey.get(binding.logicalKey) ?? [];
+      obligations.push(group.obligationId);
+      obligationsByTestKey.set(binding.logicalKey, obligations);
+    }
+  }
   const suggestionJson: SuggestionJson[] = suggestions.map((suggestion) => ({
     obligationId: suggestion.obligationId,
     cause: suggestion.cause,
@@ -336,6 +477,9 @@ async function suggestSubcommand(
       logicalKey: candidate.logicalKey,
       file: candidate.file,
       why: [...candidate.why],
+      overlaps: [...new Set(obligationsByTestKey.get(candidate.logicalKey) ?? [])]
+        .filter((obligationId) => obligationId !== suggestion.obligationId)
+        .sort(compareStrings),
     })),
     missingEvidence: suggestion.missingEvidence,
     nextAction: suggestion.nextAction,
@@ -353,7 +497,7 @@ async function suggestSubcommand(
           changedFiles: [...pipeline.changedFiles].sort(compareStrings),
           obligationsInScope: scoped.length,
         },
-        problems: mapped.resolution.problems as unknown as JsonValue,
+        problems: mappingProblems as unknown as JsonValue,
         suggestions: suggestionJson,
       } as unknown as JsonValue),
     );
@@ -364,12 +508,13 @@ async function suggestSubcommand(
     io.stdout,
     `suggest: ${String(pipeline.policy.obligations.length)} obligation(s) considered` +
       ` (${String(scoped.length)} in ${scopeMode} scope),` +
-      ` ${String(mapped.resolution.problems.length)} mapping problem(s),` +
+      ` ${String(mappingProblems.length)} mapping problem(s),` +
       ` ${String(suggestions.length)} suggestion(s)`,
   );
-  for (const problem of mapped.resolution.problems) {
+  for (const problem of mappingProblems) {
     const where = problem.obligationId === null ? '' : ` for '${problem.obligationId}'`;
     writeLine(io.stdout, `problem [${problem.cause}]${where}: ${problem.detail}`);
+    if ('nextAction' in problem) writeLine(io.stdout, `  next action: ${problem.nextAction}`);
   }
   for (const suggestion of suggestions) {
     writeLine(io.stdout, `[${suggestion.cause}] ${suggestion.obligationId}`);
@@ -386,6 +531,13 @@ async function suggestSubcommand(
         writeLine(io.stdout, `  - ${candidate.logicalKey} (${candidate.file})`);
         for (const why of candidate.why) {
           writeLine(io.stdout, `    why: ${why}`);
+        }
+        const overlaps = obligationsByTestKey.get(candidate.logicalKey) ?? [];
+        const otherObligations = [...new Set(overlaps)]
+          .filter((obligationId) => obligationId !== suggestion.obligationId)
+          .sort(compareStrings);
+        if (otherObligations.length > 0) {
+          writeLine(io.stdout, `    already declared for: ${otherObligations.join(', ')}`);
         }
       }
     }
@@ -615,6 +767,84 @@ function assertKindDeclarationAllowed(entry: TestCatalogEntry, kind: TestKind, k
 // tests explain (Phase 3)
 // ---------------------------------------------------------------------------
 
+/**
+ * Synchronizes generated test-map declarations without changing handwritten entries.
+ *
+ * Args:
+ *   io: process context.
+ *   options: parsed command flags.
+ *
+ * Returns:
+ *   number: 0 when the static scan is complete, 1 when unresolved rows
+ *   need owner review, or 2 for invalid configuration or sidecar data.
+ */
+async function syncSubcommand(
+  io: Io,
+  options: Record<string, string | boolean | string[]>,
+): Promise<number> {
+  rejectUnknownFlags(options, ['json'], TESTS_USAGE);
+  const config = loadConfigAt(io.cwd);
+  const stateDir = resolveStateDir(io.cwd);
+  const scan = scanTestFiles({
+    cwd: io.cwd,
+    include: config.project.paths.include,
+    exclude: config.project.paths.exclude,
+    excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
+  });
+  const generated = annotationTestMapEntries(scan);
+  const previous = loadOptionalTestMap(io.cwd);
+  const handwritten = (previous?.tests ?? []).filter((entry) => entry.source !== 'annotation');
+  const candidate = { schemaVersion: 1 as const, tests: [...handwritten, ...generated] };
+  const parsed = TestMapSchema.safeParse(candidate);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue === undefined ? '' : ` at '${issue.path.map(String).join('.')}':`;
+    throw new UsageError(`annotation sync produced an invalid test map${path} ${issue?.message ?? 'unknown schema error'}`);
+  }
+  const previousContent = serializeTestMap(previous ?? { schemaVersion: 1, tests: [] });
+  const nextContent = serializeTestMap(parsed.data as TestMap);
+  const changed = previousContent !== nextContent;
+  if (changed) writeTestMapAtomic(io.cwd, parsed.data as TestMap);
+
+  const unresolved = [
+    ...scan.parseErrors.map(
+      (entry) =>
+        `UNRESOLVED ${entry.file}:${entry.location.line}:${entry.location.col}: ${entry.message}`,
+    ),
+    ...scan.unresolved.map(
+      (entry) =>
+        `UNRESOLVED ${entry.file}:${entry.location.line}:${entry.location.col}: ` +
+        `${entry.titlePath.join(' > ')} — ${entry.code}: ${entry.detail}`,
+    ),
+    ...scan.entries
+      .filter((entry) => entry.annotationIssue !== undefined)
+      .map(
+        (entry) =>
+          `UNRESOLVED ${entry.file}:${entry.location.line}:${entry.location.col}: ` +
+          `${entry.titlePath.join(' > ')} — ${entry.annotationIssue}`,
+      ),
+  ].sort(compareStrings);
+  const asJson = options['json'] === true;
+  if (asJson) {
+    writeLine(
+      io.stdout,
+      canonicalJson({
+        schemaVersion: 1,
+        generatedEntries: generated.length,
+        changed,
+        unresolved,
+        nextAction: unresolved.length > 0 ? 'Review unresolved static test annotations.' : null,
+      }),
+    );
+  } else {
+    writeLine(
+      io.stdout,
+      `tests sync: ${generated.length} annotation mapping(s) ${changed ? 'updated' : 'unchanged'}`,
+    );
+    for (const row of unresolved) writeLine(io.stdout, row);
+  }
+  return unresolved.length > 0 ? 1 : 0;
+}
 /** Implements `tests explain --test <key>`. */
 async function explainSubcommand(
   io: Io,
@@ -644,7 +874,8 @@ async function explainSubcommand(
     obligations: pipeline.policy.obligations,
     catalog: discovered.catalog,
     nativeClaims: discovered.nativeClaims,
-    behaviorCatalog: pipeline.behaviorCatalog,
+    nativeErrors: discovered.nativeErrors,
+    nativeInstances: discovered.nativeInstances,
   });
   const entry = discovered.catalog.entries.find((candidate) => candidate.logicalKey === testKey);
   if (entry === undefined) {
@@ -840,6 +1071,7 @@ async function diagnoseSubcommand(
   const asJson = options['json'] === true;
   const suiteName = stringFlag(options, 'suite');
   const config = loadConfigAt(io.cwd);
+  const cacheExclusions = loadCacheExclusions(io.cwd, config);
   const stateDir = resolveStateDir(io.cwd);
 
   // The alarm runs WITHOUT a browser or witness (§3.5), but it still
@@ -848,7 +1080,7 @@ async function diagnoseSubcommand(
   let preFiles: ReturnType<typeof collectInputFiles> | null = null;
   let snapshotUnavailable = false;
   try {
-    preFiles = collectInputFiles(io.cwd, config, stateDir);
+    preFiles = collectInputFiles(io.cwd, config, stateDir, [], [], cacheExclusions);
   } catch (error) {
     if (error instanceof SnapshotUnavailableError) {
       snapshotUnavailable = true;
@@ -867,7 +1099,7 @@ async function diagnoseSubcommand(
   });
   let inputDigest: string | null = null;
   if (!snapshotUnavailable) {
-    const postDiscovery = collectInputFiles(io.cwd, config, stateDir);
+    const postDiscovery = collectInputFiles(io.cwd, config, stateDir, [], [], cacheExclusions);
     const drift = preFiles === null ? [] : diffInputFiles(preFiles, postDiscovery);
     if (drift.length > 0) {
       throw new UsageError(
@@ -882,6 +1114,7 @@ async function diagnoseSubcommand(
       obligations: pipeline.policy.obligations,
       httpRoutes: httpRoutesView(pipeline.graph),
       plugins: pipeline.manifest.plugins.map((plugin) => ({ id: plugin.id, version: plugin.version })),
+      cacheExclusions,
     }).inputDigest;
   }
 

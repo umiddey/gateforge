@@ -11,7 +11,10 @@ import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { SchemaVersionField, TransportSchema } from '../schemas/common.js';
 import { CoveragePolicySchema } from '../schemas/coverage-policy.js';
+import { QueueObserverConfigSchema } from '../schemas/queue-observer.js';
 import { z } from 'zod';
+import { StrictnessModeSchema } from '../strictness.js';
+import { bindQueueObserver } from '../verdict/pack-verifiers.js';
 
 /**
  * A plugin entry in `.gateforge.yml`. Unlike a run-manifest plugin
@@ -84,6 +87,18 @@ export const ConfigPluginSchema = z
 export type ConfigPlugin = z.infer<typeof ConfigPluginSchema>;
 
 /**
+ * True when one declared glob is a usable repo-root-relative POSIX
+ * pattern: not absolute, no Windows drive, no backslash, and no
+ * `..` segment. A path that escapes the repo root is never a
+ * declaration Gateforge can evaluate against a tree path, so it must
+ * fail the config load rather than silently match nothing.
+ */
+function isRepoRelativeGlob(value: string): boolean {
+  if (value.length === 0 || value.includes('\\') || value.startsWith('/') || /^[A-Za-z]:/.test(value)) return false;
+  return !value.split('/').some((segment) => segment === '..' || segment === '');
+}
+
+/**
  * Enforcement-mode configuration (plan 2026-09-13 §3.4/§3.3, ADR 0005
  * D1/D4). OPTIONAL and off by default — enabling strict E2E is an
  * explicit, tracked owner decision.
@@ -125,6 +140,76 @@ export const EnforcementConfigSchema = z
     approvedPolicyDigest: z
       .string()
       .regex(/^[0-9a-f]{64}$/, 'approvedPolicyDigest must be 64-char lowercase hex')
+      .optional(),
+    /**
+     * Stage that requires a sealed E2E receipt. Omission preserves the
+     * behavior of existing configurations.
+     */
+    receiptStage: z.enum(['pre-push', 'pre-commit', 'ci']).optional(),
+    /**
+     * ADDITIVE owner switch for the test-only re-seal path: after a
+     * change that touches only test code, `test-gates --changed`
+     * re-runs exactly the affected tests and re-seals a receipt that
+     * carries the rest from the verified parent receipt. OPT-IN in
+     * EVERY mode (strict included): only `true` enables it, so a
+     * repository that declares nothing — or declares `false` — keeps
+     * the pre-existing full-run behavior byte for byte. The consumer
+     * recomputes every re-seal from the sealed trees (design rule 8),
+     * so the switch turns on a cheaper run, never a weaker check.
+     */
+    reseal: z.boolean().optional(),
+    /**
+     * ADDITIVE owner declaration beside `enforcement.reseal`: repo-
+     * root-relative POSIX globs for RUNTIME STATE THE RUN ITSELF
+     * REWRITES inside the repository — a witnessed login stage's
+     * storage state, a runner's own cache. Such bytes are gitignored
+     * workspace state, so every sealed candidate tree differs from the
+     * last one in them and no re-seal could ever succeed without a
+     * declaration.
+     *
+     * The declaration is an OWNER ASSERTION (like the documentation
+     * exclusions), so it is deliberately narrow: the re-seal
+     * disregards a matching changed path ONLY when the path is absent
+     * from BOTH sealed commits, i.e. when it exists solely as
+     * untracked/ignored workspace bytes. A tracked path never matches,
+     * so a declaration can never hide a source change. The receipt
+     * records what was disregarded and CI recomputes it from the same
+     * globs; a difference is `EVIDENCE_STALE`.
+     *
+     * Absent (the default) changes nothing: the classifier disregards
+     * nothing and a run is byte-identical to before.
+     */
+    resealRuntimeFiles: z
+      .array(z.string().min(1, 'resealRuntimeFiles entries must be non-empty strings'))
+      .refine((entries) => entries.every(isRepoRelativeGlob), {
+        message:
+          'resealRuntimeFiles entries must be repo-root-relative globs (no absolute path, no backslash, no "." or ".." segment)',
+      })
+      .optional(),
+    /**
+     * Twin path coverage (E64, additive; ABSENT = off). A raw test and
+     * its witnessed twin that the catalog/test-map links are compared by
+     * REQUEST SHAPE: the run reports `TWIN_PATH_DIVERGENT` when the two
+     * exercised different request paths (the shared-helper-defaults bug:
+     * `?tab=all` in one, `?tab=open` in the other, so "green" proved
+     * nothing about the path the witnessed twin covered).
+     *
+     * `advisory` reports the finding and leaves the exit code alone;
+     * `block` makes it a blocking entry (exit 1). Absent, no proxy is
+     * wired, no shape is recorded, no finding exists, and the report is
+     * byte-identical to a run without this key.
+     */
+    twinPaths: z.enum(['advisory', 'block']).optional(),
+    /**
+     * Owner-declared query keys whose VALUES a twin shape may carry
+     * (`enforcement.twinQueryKeys`). Absent or empty = keys only: a
+     * shape says a parameter was sent and never says what it said, so
+     * no non-allowlisted value can reach a report or the state
+     * directory. The default is the safe one precisely because a shape
+     * list is something an owner pastes into a bug.
+     */
+    twinQueryKeys: z
+      .array(z.string().min(1, 'twinQueryKeys entries must be non-empty query-key names'))
       .optional(),
   })
   .strict();
@@ -197,6 +282,8 @@ export const DiagnosticsConfigSchema = z
   .object({
     /** Explicitly registered diagnostic suites. */
     suites: z.array(DiagnosticSuiteSchema),
+    /** Opt-in host load and disk sampling for supervised runs. */
+    hostLoad: z.boolean().optional(),
   })
   .strict()
   .superRefine((diagnostics, ctx) => {
@@ -218,6 +305,90 @@ export const DiagnosticsConfigSchema = z
   });
 
 /** Inferred diagnostics-section shape. */
+/** Inferred diagnostics-section shape. */
+/**
+ * One declared column copy that must survive a rename.
+ */
+export const AlembicColumnCopySchema = z
+  .object({
+    /** Column present at the previous head. */
+    from: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+    /** Column that must carry the same fingerprint after upgrade. */
+    to: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  })
+  .strict();
+
+/** One owner-declared table whose rows must survive upgrade. */
+export const AlembicSeedTableSchema = z
+  .object({
+    /** Table name. */
+    name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+    /** Columns whose fingerprints must be stable when they exist on both sides. */
+    columns: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).min(1),
+    /** Optional rename copies. Absent means no rename mapping. */
+    copies: z.array(AlembicColumnCopySchema).optional(),
+  })
+  .strict();
+
+/**
+ * One named Alembic chain. Absent `alembic` config means the pack is off.
+ */
+export const AlembicChainSchema = z
+  .object({
+    /** Stable chain name. No dots or colons (resource id segment). */
+    name: z.string().regex(/^[A-Za-z0-9_-]+$/),
+    /** Repo-relative versions directory. */
+    migrations: z.string().min(1),
+    /** Model globs. A change here without a migration blocks. */
+    models: z.array(z.string().min(1)).min(1),
+    /** Importable module that owns the metadata. Defaults from the first model path. */
+    modelsModule: z.string().min(1).optional(),
+    /** Attribute path of the MetaData object. Defaults to `Base.metadata`. */
+    metadata: z.string().min(1).optional(),
+    /** Repo-relative alembic.ini, recorded as an input. Defaults to `alembic.ini`. */
+    alembicIni: z.string().min(1).optional(),
+  })
+  .strict();
+
+/**
+ * Opt-in Alembic migration obligations. Absent means a repository behaves
+ * exactly as it did before this key existed.
+ */
+export const AlembicConfigSchema = z
+  .object({
+    /** Named chains. One is enough. */
+    chains: z.array(AlembicChainSchema).min(1),
+    /**
+     * Trusted admin URL. The engine creates `gf_tmp_<id>` in this server
+     * and drops it. Never taken from the test environment.
+     */
+    scratch: z
+      .object({
+        adminUrl: z.string().min(1),
+      })
+      .strict(),
+    /** Optional data-preservation seed and declared tables. */
+    seed: z
+      .object({
+        path: z.string().min(1),
+        tables: z.array(AlembicSeedTableSchema).min(1),
+      })
+      .strict()
+      .optional(),
+    /** Owner-pinned revisions that may skip downgrade. Visible in reports. */
+    irreversible: z.array(z.string().min(1)).default([]),
+    /** When set, lineage and roundtrip also run on the merge with this ref. */
+    merge: z
+      .object({
+        targetRef: z.string().min(1),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+/** Inferred Alembic config. */
+export type AlembicConfig = z.infer<typeof AlembicConfigSchema>;
 export type DiagnosticsConfig = z.infer<typeof DiagnosticsConfigSchema>;
 
 /**
@@ -261,6 +432,39 @@ export const GateforgeConfigSchema = z
     waivers: z.string().min(1),
     /** Path to the baseline document (`.gateforge/baselines/obligations.json`). */
     baselines: z.string().min(1),
+    /**
+     * Supervised run surfaces (additive, optional). `progress` selects
+     * the CI progress stream: `auto` (the default) writes it to stderr
+     * under CI and OFF everywhere else, so a local run's output is
+     * byte-identical to a run without this key; `off`, `stderr`, or
+     * `file:<path>` say so explicitly. The stream is never evidence and
+     * no gate reads it.
+     */
+    run: z
+      .object({
+        /** `auto` | `off` | `stderr` | `file:<path>`. */
+        progress: z.string().min(1),
+        /**
+         * Timing-chaos bounds (E63). The SEED is never configured here:
+         * only `gateforge test-gates --chaos <seed>` switches chaos on,
+         * so a repository that configures bounds without the flag runs
+         * byte-identically. `maxDelayMs` caps every applied delay
+         * (default 400) and `reorder` decides whether a later response
+         * on one route may be released before an earlier one (default
+         * on). Neither is evidence and no gate reads them.
+         */
+        chaos: z
+          .object({
+            /** Upper bound of every applied delay, in whole milliseconds. */
+            maxDelayMs: z.number().int().min(0).max(5000).optional(),
+            /** Whether a later response may be released before an earlier one. */
+            reorder: z.boolean().optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
     /** Changed-file provider selection (architecture contract 5). */
     changed: z
       .object({
@@ -299,6 +503,18 @@ export const GateforgeConfigSchema = z
         }
       }),
     /**
+     * Owner-chosen gate strictness:
+     * `strict` (today's behavior, also the default when this key is
+     * absent), `changed` (block only on debt this change touches), or
+     * `warn` (evaluate and report everything, exit 0). It changes the
+     * GATE, never the evidence: counts, verdicts and cause codes are
+     * identical in every mode, and the active mode is printed in every
+     * report. Security-sensitive: the key lives in `.gateforge.yml`, so
+     * it is inside the trusted policy digest — an agent cannot soften
+     * the gate without the owner repinning the policy revision.
+     */
+    mode: StrictnessModeSchema.optional(),
+    /**
      * Enforcement modes (plan 2026-09-13 §3.3/§3.4, ADR 0005 D1/D4).
      * ABSENT = feature off (standard mode, strict E2E off) so existing
      * configs keep their exact behavior; enabling strict E2E is opt-in.
@@ -320,6 +536,16 @@ export const GateforgeConfigSchema = z
      */
     behaviorPolicy: z.string().min(1).optional(),
     /**
+     * Engine-owned queue observer: the
+     * trusted read that lets the engine grade `task:*` contracts from
+     * the queue's own job state instead of the test's word. ABSENT = no
+     * queue reader exists, the `task` namespace stays unavailable, and
+     * every `engine-task` case blocks fail-closed — the block lives in
+     * `.gateforge.yml`, so it is inside the trusted policy digest and
+     * the candidate cannot point the engine at a queue it controls.
+     */
+    queueObserver: QueueObserverConfigSchema.optional(),
+    /**
      * Registered diagnostic suites (plan 2026-09-13 §3.5). ABSENT = no
      * suites; the advisory alarm is opt-in via explicit, tracked
      * configuration — gateforge never scans for or launches anything the
@@ -335,11 +561,87 @@ export const GateforgeConfigSchema = z
      * authenticated input snapshot.
      */
     runtime: z.string().min(1).optional(),
+    /** Owner-declared test environment lifecycle commands; absent means off. */
+    harness: z
+      .object({
+        up: z.string().min(1).optional(),
+        reset: z.string().min(1).optional(),
+        seed: z.string().min(1).optional(),
+        health: z.string().min(1).optional(),
+        down: z.string().min(1).optional(),
+        serviceLogs: z.object({
+          command: z.string().min(1),
+          services: z.array(z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/)).min(1),
+          lines: z.number().int().min(1).max(1000).default(100),
+        }).strict().optional(),
+      })
+      .strict()
+      .optional(),
+    /** Local run-history retention; absent or 'off' disables history. */
+    history: z
+      .object({
+        retentionDays: z.union([z.literal('off'), z.number().int().min(1).max(90)]).default(14),
+      })
+      .strict()
+      .optional(),
+    /**
+     * Opt-in Alembic migration obligations. ABSENT = feature off. A
+     * repository without this key generates no migration obligations
+     * and sees no other behavior change.
+     */
+    alembic: AlembicConfigSchema.optional(),
+    /**
+     * The test runner the supervised gate drives (plan 2026-09-25,
+     * runner-agnostic evidence): `playwright` (the default and today's
+     * only wired surface), `pytest`, `vitest`, or `cypress`. ABSENT
+     * means `playwright`, so an existing repository parses and behaves
+     * byte-identically. The key lives in `.gateforge.yml`, so it is
+     * inside the trusted policy digest: switching runners is an
+     * owner-approved policy-revision change, never an agent-editable
+     * toggle. An unknown value fails the load through the plain
+     * config-error path (exit 2).
+     */
+    runner: z.enum(['playwright', 'pytest', 'vitest', 'cypress']).default('playwright'),
+    /**
+     * Owner-declared tenant scope (plan 2026-09-25 Phase 4b item 3a).
+     * The sqlalchemy pack recognizes a FIXED default list of tenant
+     * scope column names (`tenant_id`, `tenant`, `tenantId`,
+     * `tenant_uuid`, `tenant_key`); an application whose scope column is
+     * spelled differently (`contractor_id`, `org_id`, ...) declares it
+     * here so a per-tenant singleton table is still recognized. The
+     * declaration REPLACES the default list — it never extends it, so
+     * the recognized scope is exactly what the owner said. ABSENT = the
+     * default list, byte-identical to today's behavior for every
+     * repository that has no opinion. Security-sensitive: the key lives
+     * in `.gateforge.yml`, so it is inside the trusted policy digest —
+     * an agent cannot widen the recognized tenant scope without the
+     * owner repinning the policy revision.
+     */
+    tenancy: z
+      .object({
+        /**
+         * The column names that carry the tenant scope in this
+         * repository. A nonempty list is required when the key is
+         * present: an empty list is a claim ("nothing is tenant
+         * scoped") that would silently disable the tag, so it is
+         * rejected instead.
+         */
+        scopeColumns: z.array(z.string().min(1)).min(1).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
 /** Inferred `.gateforge.yml` shape. */
 export type GateforgeConfig = z.infer<typeof GateforgeConfigSchema>;
+
+/**
+ * Inferred `.gateforge.yml` `tenancy` section (plan Phase 4b item 3a):
+ * the owner-declared tenant scope columns. ABSENT means the pack's
+ * default list — today's behavior, byte-identical.
+ */
+export type TenancyConfig = NonNullable<GateforgeConfig['tenancy']>;
 
 /**
  * One actionable config diagnostic: where, what, and expected-vs-got.
@@ -602,5 +904,11 @@ export function loadConfig(path = '.gateforge.yml'): GateforgeConfig {
     ]);
   }
 
-  return parseConfig(document, { file: path });
+  const config = parseConfig(document, { file: path });
+  // The `queueObserver` block decides whether the engine owns a queue
+  // reader at all, so loading the owner's config is exactly where the
+  // `task` namespace's availability is bound. A repository without the
+  // block binds "none" and every task contract stays fail-closed.
+  bindQueueObserver(config.queueObserver);
+  return config;
 }

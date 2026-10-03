@@ -8,10 +8,12 @@
  * Engine resolution order: developer override, repository-pinned CLI,
  * recorded engine checkout, explicit engine path, then PATH fallback.
  */
+import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { UsageError } from '../errors.js';
 import { join } from 'node:path';
 import type { Io } from '../io.js';
-import { writeLine } from '../io.js';
+import { recordInitPath, writeLine } from '../io.js';
 import { VERSION } from './common.js';
 
 /** Marker boundaries for the Gateforge-owned generated wrapper script. */
@@ -120,6 +122,64 @@ const PRE_COMMIT_BLOCK = `# --- gateforge (generated): blocking static gate ----
         pass_filenames: false
 `;
 
+/**
+ * The install block every generated Gateforge CI job runs first: it
+ * installs the declared Node packages from their lockfiles, resolves
+ * the pinned Gateforge, and refuses to continue on any other version.
+ * Unindented, so each job indents it into its own YAML block scalar.
+ */
+export const CI_INSTALL_SCRIPT: readonly string[] = [
+  'set -eu',
+  'set -f',
+  'install_node_package() {',
+  '  package_dir="$1"',
+  '  if [ ! -f "$package_dir/package.json" ]; then',
+  '    echo "Gateforge CI: package.json not found in $package_dir" >&2',
+  '    return 1',
+  '  fi',
+  '  if [ -f "$package_dir/pnpm-lock.yaml" ]; then',
+  '    corepack pnpm --dir "$package_dir" install --frozen-lockfile',
+  '  elif [ -f "$package_dir/yarn.lock" ]; then',
+  '    corepack yarn --cwd "$package_dir" install --frozen-lockfile',
+  '  elif [ -f "$package_dir/package-lock.json" ] || [ -f "$package_dir/npm-shrinkwrap.json" ]; then',
+  '    npm ci --prefix "$package_dir"',
+  '  else',
+  '    npm install --prefix "$package_dir"',
+  '  fi',
+  '}',
+  'install_node_package .',
+  'for package_dir in $GATEFORGE_CI_NESTED_PACKAGE_DIRS; do',
+  '  case "$package_dir" in',
+  '    /*|..|../*|*/..|*/../*) echo "Gateforge CI: nested package path must stay inside the repository: $package_dir" >&2; exit 1 ;;',
+  '  esac',
+  '  install_node_package "$package_dir"',
+  'done',
+  'run_gateforge() {',
+  '  if [ -f pnpm-lock.yaml ]; then',
+  '    corepack pnpm exec gateforge "$@"',
+  '  elif [ -f yarn.lock ]; then',
+  '    corepack yarn run gateforge "$@"',
+  '  else',
+  '    if [ ! -x node_modules/.bin/gateforge ]; then',
+  '      echo "Gateforge CI: install @gate-forge/cli as an exact root devDependency" >&2',
+  '      return 1',
+  '    fi',
+  '    node_modules/.bin/gateforge "$@"',
+  '  fi',
+  '}',
+  'actual_version=$(run_gateforge --version)',
+  'if [ "$actual_version" != "$GATEFORGE_VERSION" ]; then',
+  '  echo "Gateforge CI: expected $GATEFORGE_VERSION but installed $actual_version" >&2',
+  '  exit 1',
+  'fi',
+  'echo "Gateforge CI: using pinned Gateforge $actual_version"',
+];
+
+/** Indents a script block into a YAML block scalar body (6 spaces). */
+export function ciScriptBlock(lines: readonly string[]): string {
+  return lines.map((line) => (line.length === 0 ? '' : `      ${line}`)).join('\n');
+}
+
 export type GitlabGateMode = 'strict' | 'check';
 
 /** Renders one CI template with the gate command chosen by the wiring command. */
@@ -128,10 +188,32 @@ export function renderGitlabCiTemplate(mode: GitlabGateMode = 'check'): string {
   const gateSteps =
     mode === 'strict'
       ? [
-          '    - run_gateforge test-gates --changed',
-          '    - run_gateforge check --changed --require-e2e',
+          '    - |',
+          '      if [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then',
+          '        base_pipelines=$(curl --silent --show-error --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines?sha=$CI_MERGE_REQUEST_DIFF_BASE_SHA&status=success&per_page=100" 2>/dev/null || true)',
+          `        base_pipeline_id=$(printf '%s' "$base_pipelines" | node -e 'let data="";process.stdin.on("data",chunk=>data+=chunk).on("end",()=>{try{const rows=JSON.parse(data);const row=rows.find(item=>item.sha===process.env.CI_MERGE_REQUEST_DIFF_BASE_SHA&&item.source==="push"&&item.ref===process.env.CI_DEFAULT_BRANCH);process.stdout.write(row?String(row.id):"")}catch{}})')`,
+          '        if [ -n "$base_pipeline_id" ]; then',
+          '          base_jobs=$(curl --silent --show-error --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines/$base_pipeline_id/jobs?per_page=100" 2>/dev/null || true)',
+          `          base_job_id=$(printf '%s' "$base_jobs" | node -e 'let data="";process.stdin.on("data",chunk=>data+=chunk).on("end",()=>{try{const rows=JSON.parse(data);const row=rows.find(item=>item.name==="gateforge:e2e-gate"&&item.status==="success");process.stdout.write(row?String(row.id):"")}catch{}})')`,
+          '          if [ -n "$base_job_id" ]; then',
+          '            mkdir -p .gateforge/test-gates',
+          '            if curl --silent --show-error --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$base_job_id/artifacts/.gateforge/test-gates/receipt.json" --output .gateforge/test-gates/receipt.json && curl --silent --show-error --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$base_job_id/artifacts/.gateforge/test-gates/execution-result.json" --output .gateforge/test-gates/execution-result.json; then',
+          '              echo "Gateforge CI: downloaded exact merge-base receipt artifact"',
+          '            else',
+          '              echo "Gateforge CI: merge-base receipt artifact unavailable; carry-forward disabled"',
+          '            fi',
+          '          fi',
+          '        fi',
+          '      fi',
+          '    - |',
+          '      if [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then',
+          '        run_gateforge test-gates --changed --scope changed',
+          '      else',
+          '        run_gateforge test-gates --changed',
+          '      fi',
+          '    - run_gateforge check --changed --candidate-commit "$CI_COMMIT_SHA" --require-e2e',
         ].join('\n')
-      : '    - run_gateforge check --changed';
+      : '    - run_gateforge check --changed --candidate-commit "$CI_COMMIT_SHA"';
   const artifacts =
     mode === 'strict'
       ? [
@@ -140,7 +222,8 @@ export function renderGitlabCiTemplate(mode: GitlabGateMode = 'check'): string {
           '    paths:',
           '      - .gateforge/test-gates/report.json',
           '      - .gateforge/test-gates/receipt.json',
-          '    expire_in: 1 week',
+          '      - .gateforge/test-gates/execution-result.json',
+          '    expire_in: 90 days',
         ].join('\n')
       : '';
   return `# Generated by Gateforge ${VERSION}. Add @gate-forge/cli at exactly ${VERSION} to the root package.
@@ -161,55 +244,189 @@ ${jobName}:
     GATEFORGE_CI_NESTED_PACKAGE_DIRS: ""
   script:
     - |
-      set -eu
-      set -f
-      install_node_package() {
-        package_dir="$1"
-        if [ ! -f "$package_dir/package.json" ]; then
-          echo "Gateforge CI: package.json not found in $package_dir" >&2
-          return 1
-        fi
-        if [ -f "$package_dir/pnpm-lock.yaml" ]; then
-          corepack pnpm --dir "$package_dir" install --frozen-lockfile
-        elif [ -f "$package_dir/yarn.lock" ]; then
-          corepack yarn --cwd "$package_dir" install --frozen-lockfile
-        elif [ -f "$package_dir/package-lock.json" ] || [ -f "$package_dir/npm-shrinkwrap.json" ]; then
-          npm ci --prefix "$package_dir"
-        else
-          npm install --prefix "$package_dir"
-        fi
-      }
-      install_node_package .
-      for package_dir in $GATEFORGE_CI_NESTED_PACKAGE_DIRS; do
-        case "$package_dir" in
-          /*|..|../*|*/..|*/../*) echo "Gateforge CI: nested package path must stay inside the repository: $package_dir" >&2; exit 1 ;;
-        esac
-        install_node_package "$package_dir"
-      done
-      run_gateforge() {
-        if [ -f pnpm-lock.yaml ]; then
-          corepack pnpm exec gateforge "$@"
-        elif [ -f yarn.lock ]; then
-          corepack yarn run gateforge "$@"
-        else
-          if [ ! -x node_modules/.bin/gateforge ]; then
-            echo "Gateforge CI: install @gate-forge/cli as an exact root devDependency" >&2
-            return 1
-          fi
-          node_modules/.bin/gateforge "$@"
-        fi
-      }
-      actual_version=$(run_gateforge --version)
-      if [ "$actual_version" != "$GATEFORGE_VERSION" ]; then
-        echo "Gateforge CI: expected $GATEFORGE_VERSION but installed $actual_version" >&2
-        exit 1
-      fi
-      echo "Gateforge CI: using pinned Gateforge $actual_version"
+${ciScriptBlock(CI_INSTALL_SCRIPT)}
 ${gateSteps}
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 ${artifacts}
 `;
+}
+
+/**
+ * Renders the install step of the generated GitHub Actions workflow.
+ *
+ * With no engine source declared (the default) this is exactly the
+ * historical registry install, byte for byte. With a source declared
+ * it is the same install of THAT source — a tarball or directory of an
+ * engine that is not (or not yet) on the registry — and the value is
+ * passed through the step environment, never interpolated into the
+ * command line, so it cannot become a shell fragment.
+ *
+ * Args:
+ *   engineSource: the declared `@gate-forge/cli` source (npm
+ *     tarball path, directory, or any npm specifier), or null.
+ *
+ * Returns:
+ *   string: the workflow's install step source.
+ */
+function githubInstallStep(engineSource: string | null): string {
+  if (engineSource === null) {
+    return `      - name: Install Gateforge
+        run: npm install --no-save --package-lock=false @gate-forge/cli@${VERSION}
+`;
+  }
+  return `      - name: Install Gateforge
+        env:
+          GATEFORGE_CI_ENGINE_SOURCE: ${JSON.stringify(engineSource)}
+        run: npm install --no-save --package-lock=false "$GATEFORGE_CI_ENGINE_SOURCE"
+`;
+}
+
+/**
+ * Renders the strict GitHub Actions workflow and keeps secrets in the
+ * protected workflow environment.
+ *
+ * `engineSource` selects where CI installs the engine from: null (the
+ * default) renders today's registry-only workflow unchanged, while a
+ * tarball/directory source renders the same workflow installing that
+ * source. The variable is read from the owner's environment when
+ * `gateforge init --blocking`/`enforce` runs — see
+ * {@link engineSourceFromEnv}.
+ *
+ * Args:
+ *   engineSource: the declared engine source, or null for the registry.
+ *
+ * Returns:
+ *   string: workflow source.
+ */
+export function renderGithubActionsTemplate(engineSource: string | null = null): string {
+  const installStep = githubInstallStep(engineSource);
+  const sourceNote =
+    engineSource === null
+      ? ''
+      : `#
+# Engine source: GATEFORGE_CI_ENGINE_SOURCE was set when this file was
+# generated, so CI installs "${engineSource}" instead of the registry
+# release. Unset it and re-run the generator for a registry install.`;
+  return `# Generated by Gateforge ${VERSION}; review before enabling required checks.${sourceNote}
+name: Gateforge
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gateforge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+${installStep}      - name: Locate exact merge-base receipt
+        if: github.event_name == 'pull_request'
+        id: base
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: |
+          base_sha=$(git merge-base "$GITHUB_SHA" "origin/$GITHUB_BASE_REF")
+          run_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/gateforge.yml/runs?head_sha=$base_sha&status=success&per_page=100" --jq '[.workflow_runs[] | select(.event == "push")][0].id // empty')
+          printf 'run_id=%s\\n' "$run_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: gateforge-test-gates
+          run-id: \${{ steps.base.outputs.run_id }}
+          github-token: \${{ github.token }}
+          repository: \${{ github.repository }}
+          path: .gateforge/test-gates
+      - name: Verify witnessed receipt
+        env:
+          GATEFORGE_WITNESS_VERIFIER_KEY: \${{ secrets.GATEFORGE_WITNESS_VERIFIER_KEY }}
+          GATEFORGE_APPROVED_POLICY_DIGEST: \${{ secrets.GATEFORGE_APPROVED_POLICY_DIGEST }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            ./node_modules/.bin/gateforge test-gates --changed --scope changed
+          else
+            ./node_modules/.bin/gateforge test-gates --changed
+          fi
+          ./node_modules/.bin/gateforge check --changed --candidate-commit "$GITHUB_SHA" --require-e2e
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && success()
+        with:
+          name: gateforge-test-gates
+          path: |
+            .gateforge/test-gates/receipt.json
+            .gateforge/test-gates/execution-result.json
+          if-no-files-found: error
+          retention-days: 90
+`;
+}
+
+/**
+ * Reads the declared CI engine source from the owner's environment.
+ *
+ * `GATEFORGE_CI_ENGINE_SOURCE` lets a release that is not (yet) on the
+ * registry wire CI against its own tarball or directory instead. An
+ * empty or absent variable is the historical registry install, so the
+ * generated workflow is unchanged for every existing repo. A value that
+ * npm would read as a flag is refused rather than silently installed.
+ *
+ * Args:
+ *   env: the process environment.
+ *
+ * Returns:
+ *   string | null: the declared source, or null for the registry.
+ *
+ * Throws:
+ *   UsageError: when the declared source is not a single non-empty
+ *     specifier or would read as an npm flag.
+ */
+export function engineSourceFromEnv(env: Readonly<Record<string, string | undefined>>): string | null {
+  const declared = (env['GATEFORGE_CI_ENGINE_SOURCE'] ?? '').trim();
+  if (declared === '') return null;
+  if (declared.startsWith('-') || /[\s"'`$]/.test(declared)) {
+    throw new UsageError(
+      'GATEFORGE_CI_ENGINE_SOURCE must be one npm specifier for @gate-forge/cli ' +
+        '(a tarball path, a directory, or a package@version) — no flags, quotes, or spaces. ' +
+        'Unset it to install the published release from the registry.',
+    );
+  }
+  return declared;
+}
+
+/**
+ * Writes the generated GitHub Actions workflow only when absent.
+ *
+ * Args:
+ *   io: process context.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeGithubActionsTemplate(io: Io): void {
+  const engineSource = engineSourceFromEnv(io.env);
+  const dir = join(io.cwd, '.github', 'workflows');
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'gateforge.yml');
+  if (!existsSync(path)) {
+    writeFileSync(path, renderGithubActionsTemplate(engineSource));
+    recordInitPath(io, io.cwd, path, 'created');
+    writeLine(
+      io.stdout,
+      engineSource === null
+        ? `created: ${path}`
+        : `created: ${path} (engine installed from ${engineSource}, not the registry)`,
+    );
+  } else {
+    recordInitPath(io, io.cwd, path, 'preserved');
+    writeLine(io.stdout, `exists, leaving untouched: ${path}`);
+  }
 }
 
 /**
@@ -225,8 +442,10 @@ export function writeEngineReference(io: Io, engineRoot: string | null): void {
   }
   if (!existsSync(path)) {
     writeFileSync(path, `${engineRoot}\n`);
+    recordInitPath(io, io.cwd, path, 'created');
     writeLine(io.stdout, `created: ${path} (engine checkout root)`);
   } else {
+    recordInitPath(io, io.cwd, path, 'preserved');
     writeLine(io.stdout, `exists, leaving untouched: ${path}`);
   }
 }
@@ -252,8 +471,10 @@ export function ensureHookScript(
   if (!existsSync(hookScript)) {
     writeFileSync(hookScript, hookScriptTemplate(gateArgs));
     chmodSync(hookScript, 0o755);
+    recordInitPath(io, io.cwd, hookScript, 'created');
     writeLine(io.stdout, `created: ${hookScript}`);
   } else {
+    recordInitPath(io, io.cwd, hookScript, 'preserved');
     const current = readFileSync(hookScript, 'utf8');
     if (isGeneratedHookScript(current)) {
       const updated = replaceGeneratedHookBlock(current, hookScriptTemplate(gateArgs));
@@ -271,20 +492,54 @@ export function ensureHookScript(
   return hookScript;
 }
 
+/**
+ * Reports whether a repository-relative path is tracked in the index.
+ *
+ * The undo line has to name a command that really works, and
+ * `git restore` only restores a tracked path. An unreadable index, a
+ * missing git, or an untracked file all answer `false`: then the undo
+ * is "delete the appended entry", never a command that would fail.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   relativePath: repository-relative posix path.
+ *
+ * Returns:
+ *   boolean: true when git has the path in its index.
+ */
+function isTracked(cwd: string, relativePath: string): boolean {
+  return spawnSync('git', ['ls-files', '--error-unmatch', '--', relativePath], {
+    cwd,
+    stdio: 'ignore',
+  }).status === 0;
+}
+
 /** Appends the gateforge-check hook to .pre-commit-config.yaml (idempotent). */
 export function appendPreCommitHook(io: Io): void {
   const path = join(io.cwd, '.pre-commit-config.yaml');
   if (existsSync(path)) {
     const current = readFileSync(path, 'utf8');
     if (current.includes('gateforge-check')) {
+      recordInitPath(io, io.cwd, path, 'preserved');
       writeLine(io.stdout, `exists, leaving untouched: ${path} (gateforge-check)`);
       return;
     }
     writeFileSync(path, `${current.endsWith('\n') ? current : current + '\n'}${PRE_COMMIT_BLOCK}`);
-    writeLine(io.stdout, `updated: ${path} (gateforge-check hook appended)`);
+    // One line, one action: the file belongs to the OWNER, so the line
+    // says so and carries the exact way back. The command is printed
+    // only where it really works — `git restore` needs a tracked file,
+    // and an untracked config has nothing to restore.
+    const undo = isTracked(io.cwd, '.pre-commit-config.yaml')
+      ? 'undo: git restore -- .pre-commit-config.yaml'
+      : 'undo: delete the appended gateforge-check entry from .pre-commit-config.yaml (the file is not tracked by git, so there is nothing to restore)';
+    writeLine(
+      io.stdout,
+      `updated: ${path} (gateforge-check hook appended) — your repo's own hook file: ${undo}`,
+    );
     return;
   }
   writeFileSync(path, `repos:\n${PRE_COMMIT_BLOCK}`);
+  recordInitPath(io, io.cwd, path, 'created');
   writeLine(io.stdout, `created: ${path} (with gateforge-check hook)`);
 }
 
@@ -295,16 +550,20 @@ export function writeGitlabCiTemplate(io: Io, mode: GitlabGateMode = 'check'): v
   const path = join(dir, 'gitlab-gateforge.yml');
   if (!existsSync(path)) {
     writeFileSync(path, renderGitlabCiTemplate(mode));
+    recordInitPath(io, io.cwd, path, 'created');
     writeLine(io.stdout, `created: ${path}`);
   } else {
+    recordInitPath(io, io.cwd, path, 'preserved');
     writeLine(io.stdout, `exists, leaving untouched: ${path}`);
   }
   const gitlabCi = join(io.cwd, '.gitlab-ci.yml');
   if (!existsSync(gitlabCi)) {
     writeFileSync(gitlabCi, `include:\n  - local: '.gateforge/ci/gitlab-gateforge.yml'\n`);
+    recordInitPath(io, io.cwd, gitlabCi, 'created');
     writeLine(io.stdout, `created: ${gitlabCi} (includes the gateforge jobs)`);
     return;
   }
+  recordInitPath(io, io.cwd, gitlabCi, 'preserved');
   const current = readFileSync(gitlabCi, 'utf8');
   if (current.includes('gitlab-gateforge.yml')) {
     writeLine(io.stdout, `exists, leaving untouched: ${gitlabCi} (gateforge include present)`);
@@ -320,15 +579,57 @@ export function writeGitlabCiTemplate(io: Io, mode: GitlabGateMode = 'check'): v
   writeLine(io.stdout, `updated: ${gitlabCi} (include appended)`);
 }
 
-/** Wires everything: engine reference + hook script + pre-commit block + CI template. */
+/**
+ * Writes the selected CI provider's template.
+ *
+ * Args:
+ *   io: process context.
+ *   provider: GitHub Actions or GitLab CI.
+ *   mode: strict or static-check job mode.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeCiTemplate(io: Io, provider: 'github' | 'gitlab', mode: GitlabGateMode = 'check'): void {
+  if (provider === 'github') {
+    writeGithubActionsTemplate(io);
+  } else {
+    writeGitlabCiTemplate(io, mode);
+  }
+}
+/**
+ * Prints owner-run steps for making the generated CI job mandatory.
+ *
+ * Args:
+ *   io: process context.
+ *
+ * Returns:
+ *   void.
+ */
+export function writeServerProtectionInstructions(io: Io): void {
+  writeLine(
+    io.stdout,
+    [
+      'Server setup (review and run explicitly; Gateforge does not change branch settings):',
+      'GitHub: gh api --method PUT "repos/OWNER/REPO/branches/BRANCH/protection" --input - <<\'JSON\'',
+      '{"required_status_checks":{"strict":true,"contexts":["gateforge"]},"enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null}',
+      'JSON',
+      'GitLab: glab api --method PUT "projects/PROJECT_ID" -f only_allow_merge_if_pipeline_succeeds=true',
+      'GitLab: glab api --method POST "projects/PROJECT_ID/protected_branches" -f name=BRANCH -f push_access_level=0 -f merge_access_level=30 -f allow_force_push=false',
+    ].join('\n'),
+  );
+}
+
+/** Wires engine, local hooks, and the selected CI provider. */
 export function ensureBlockingWiring(
   io: Io,
   engineRoot: string | null,
   gateArgs: readonly string[] = ['check', '--changed'],
   ciMode: GitlabGateMode = 'check',
+  provider: 'github' | 'gitlab' = 'gitlab',
 ): void {
   writeEngineReference(io, engineRoot);
   ensureHookScript(io, engineRoot, gateArgs);
   appendPreCommitHook(io);
-  writeGitlabCiTemplate(io, ciMode);
+  writeCiTemplate(io, provider, ciMode);
 }

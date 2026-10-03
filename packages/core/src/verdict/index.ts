@@ -8,6 +8,8 @@ export {
   evaluateObligation,
   evaluateObligations,
   parseInstant,
+  volatileEchoSkips,
+  volatileFieldsOf,
 } from './evaluate.js';
 export type {
   ObligationVerdict,
@@ -21,6 +23,7 @@ export {
   registeredNamespaces,
   registerContractCapabilities,
   capabilityFor,
+  setContractAvailability,
   allCapabilities,
   type ClaimEvidenceInput,
   type ClaimOutcome,
@@ -49,6 +52,7 @@ export {
  */
 export {
   registerPackVerifiers,
+  bindQueueObserver,
   interpretObservedPath,
   resolveHttpRoute,
   pathMatchesShape,

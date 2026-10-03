@@ -608,9 +608,85 @@ describe('strict supervised gate (test-gates --changed + receipt + check)', () =
         ]) {
           expect(report.verdicts.find((entry) => entry.obligationId === id)?.verdict).toBe('satisfied');
         }
+        // The Playwright no-change proof (runner-agnostic evidence): the
+        // documents this genuine engine-browser run produces keep
+        // EXACTLY today's key sets. Any renamed, dropped or added key in
+        // the JSON report, the sealed execution result or the receipt
+        // fails here — the Playwright path is not rewritten.
+        expect(Object.keys(report).sort()).toEqual([
+          'blocking',
+          'diagnosticContext',
+          'engine',
+          'execution',
+          'run',
+          'schemaVersion',
+          'scope',
+          'summary',
+          'verdicts',
+          'waiverCounts',
+        ]);
+        const sealedResult = JSON.parse(
+          readFileSync(join(repo.root, '.gateforge/test-gates/execution-result.json'), 'utf8'),
+        ) as { selection?: { runner?: string } };
+        expect(Object.keys(sealedResult as Record<string, unknown>).sort()).toEqual([
+          'browsers',
+          'catalogDigest',
+          'causes',
+          'claimInventory',
+          'complete',
+          'engines',
+          'enumerationDigest',
+          'environmentIdentity',
+          'finishedAt',
+          'fixtureOutcome',
+          'inputDigest',
+          'invocationId',
+          'maxAttemptObserved',
+          'outcomes',
+          'planned',
+          'runId',
+          'runnerExit',
+          'schemaVersion',
+          'selection',
+          'selectionDigest',
+          'sessionTrace',
+          'shardCompleteness',
+          'startedAt',
+          'trustedPolicyDigest',
+        ]);
+        expect(sealedResult.selection?.runner).toBe('playwright');
         // The sealed receipt exists and verifies under the same pin.
         const receiptRaw = readFileSync(join(repo.root, '.gateforge/test-gates/receipt.json'), 'utf8');
         expect(receiptRaw).toContain('"approvedPolicyDigest"');
+        expect(Object.keys(JSON.parse(receiptRaw) as Record<string, unknown>).sort()).toEqual([
+          'approvedPolicyDigest',
+          'behaviorCatalogDigest',
+          'candidateTreeId',
+          'caseExecutionDigest',
+          'catalogDigest',
+          'engine',
+          'engineBundleDigest',
+          'evidenceAttestationDigest',
+          'executionBoundaryDigest',
+          'executionResultDigest',
+          'gitSha',
+          'inputDigest',
+          'invocation',
+          'invocationId',
+          'issuedAt',
+          'mac',
+          'parentSha',
+          'receiptId',
+          'receiptVersion',
+          'requiredCaseSetDigest',
+          'runId',
+          'schemaVersion',
+          'selectionDigest',
+          'targetArtifactDigest',
+          'trustedPolicyDigest',
+          'verdictSummary',
+          'verifierKeyId',
+        ]);
         const originalReceipt = JSON.parse(receiptRaw) as {
           receiptId: string;
           runId: string;
@@ -1158,6 +1234,8 @@ policies:
             `selected result stdout:\n${selectedResult.stdout}\nstderr:\n${selectedResult.stderr}`,
           ).toBe(0);
           const selectedReport = JSON.parse(selectedResult.stdout) as {
+            outcome: string;
+            engine: { version: string; source: string; unpublished: boolean };
             diagnosticContext: { scope: string; authority: string };
             execution: {
               selectedTests: { selected: number; passed: number };
@@ -1165,6 +1243,10 @@ policies:
               repositoryDebt: { blocking: number; unclaimed: number };
             };
           };
+          expect(selectedReport.outcome).toBe('partial-selection');
+          expect(selectedReport.engine.version).toMatch(/^\d+\.\d+\.\d+$/);
+          expect(selectedReport.engine.source).toMatch(/^(registry|local path )/);
+          expect(typeof selectedReport.engine.unpublished).toBe('boolean');
           expect(selectedReport.diagnosticContext).toMatchObject({ scope: 'changed', authority: 'non-authoritative' });
           expect(selectedReport.execution.selectedTests).toMatchObject({ selected: 3, passed: 3 });
           expect(selectedReport.execution.selectedClaims).toMatchObject({ selected: 3, satisfied: 3, blocking: 0 });
@@ -1350,6 +1432,98 @@ policies:
     }
   }, 600_000);
 
+  it('a named run executes exactly the named spec location, not its file neighbours', async () => {
+    // The operator environment (verifier key + approved pin) lives
+    // outside the candidate, as in the native journey above.
+    const operatorEnv: Record<string, string> = {
+      GATEFORGE_WITNESS_VERIFIER_KEY: 'strict-supervised-verifier-key',
+      GATEFORGE_APPROVED_POLICY_DIGEST: 'pending-pin-computation',
+    };
+    const savedOperator: Record<string, string | undefined> = {};
+    const setOperator = (values: Record<string, string>): void => {
+      for (const [key, value] of Object.entries(values)) {
+        if (!(key in savedOperator)) savedOperator[key] = process.env[key];
+        process.env[key] = value;
+      }
+    };
+    const restoreOperator = (): void => {
+      for (const [key, value] of Object.entries(savedOperator)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    };
+    setOperator(operatorEnv);
+    try {
+      await withTempRepo({}, async (repo) => {
+        // The default fixture spec carries a create AND an update test;
+        // the update test depends on the id the create test created, so
+        // it can only pass when the whole file runs. Naming the create
+        // test must therefore execute exactly that `file:line`.
+        installStrictFixture(repo);
+        repo.git(['add', '-A']);
+        repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'named location fixture']);
+        repo.writeFiles({ 'src/accounts.js': '// fixture source: the accounts resource lives here.\n// change: audited comment.\n' });
+        const app = await startApp();
+        const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+        try {
+          const config = loadConfigAt(repo.root);
+          const env: Record<string, string> = {
+            GATEFORGE_WITNESS_VERIFIER_KEY: 'strict-supervised-verifier-key',
+            GATEFORGE_APP_BASE_URL: proxy.url,
+            GATEFORGE_TARGET_BASE_URL: proxy.url,
+            GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+            GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, config),
+          };
+          setOperator(env);
+          const selector =
+            'playwright:chromium:specs/crud.spec.js:creates an account through the rendered UI';
+          const named = await runSupervisedCli(
+            repo,
+            ['test-gates', '--test', selector, '--result-only', '--format', 'json'],
+            env,
+          );
+          const why = `named test-gates stdout:\n${named.stdout}\nstderr:\n${named.stderr}`;
+          expect(named.code, why).toBe(0);
+          const report = JSON.parse(named.stdout) as {
+            selectors?: Array<{ selector: string; logicalKeys: string[] }>;
+            execution?: {
+              scope?: string;
+              testsPerformedThisInvocation?: number;
+              selectedTests?: { selected: number; passed: number; failed?: number };
+              selectedClaims?: { selected: number; satisfied: number; blocking: number };
+              repositoryDebt?: { obligations: number };
+            };
+            diagnosticContext?: { scope?: string };
+            summary: { blocking: number };
+            verdicts: Array<{ obligationId: string; verdict: string }>;
+          };
+          expect(report.selectors, why).toEqual([{ selector, logicalKeys: [selector] }]);
+          // Exactly ONE test ran: the file's other journeys were
+          // narrowed away by their `file:line`, never merely ignored.
+          expect(report.execution?.testsPerformedThisInvocation, why).toBe(1);
+          expect(report.execution?.selectedTests, why).toMatchObject({ selected: 1, passed: 1, failed: 0 });
+          expect(report.execution?.scope, why).toBe('named');
+          expect(report.diagnosticContext?.scope, why).toBe('named');
+          // The grading is the named test's own claim; the rest of the
+          // repository is reported, never graded.
+          expect(report.execution?.selectedClaims?.selected, why).toBe(1);
+          expect(report.summary.blocking, why).toBe(0);
+          expect(
+            (report.execution?.repositoryDebt?.obligations ?? 0) > (report.execution?.selectedClaims?.selected ?? 0),
+            why,
+          ).toBe(true);
+          // A hand-picked selection never seals a gate receipt.
+          expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json'))).toBe(false);
+        } finally {
+          await proxy.stop();
+          app.stop();
+        }
+      });
+    } finally {
+      restoreOperator();
+    }
+  }, 600_000);
+
   it('a candidate that weakens its own required checks is rejected under the approved pin (E17)', async () => {
     await withTempRepo({}, async (repo) => {
       installStrictFixture(repo);
@@ -1489,7 +1663,7 @@ test('unrelated smoke test claims no obligation', async () => {
       expect(staged.stdout).toContain('execution: changed scope, executed; 3 test(s) run in this invocation');
       expect(staged.stdout).toContain('selected tests: 3 passed, 0 failed (selected 3; 0 skipped; 0 expected failures)');
       expect(staged.stdout).toContain('selected claims: 3 satisfied, 0 blocking');
-      expect(staged.stdout).toContain('repository debt: 0 blocking / 3 obligations');
+      expect(staged.stdout).toMatch(/repository debt: [^\n]*\b0 new blocking \/ 3 obligations/);
       expect(staged.stdout).toMatch(/diagnostic context: scope=changed candidateTreeId=[0-9a-f]{40} inputDigest=[0-9a-f]{64}/);
       const stagedReport = JSON.parse(
         readFileSync(join(repo.root, '.gateforge/test-gates/report.json'), 'utf8'),
@@ -1549,7 +1723,7 @@ test('unrelated smoke test claims no obligation', async () => {
       expect(full.stdout).toContain('execution: full scope, executed; 4 test(s) run in this invocation');
       expect(full.stdout).toContain('selected tests: 4 passed, 0 failed (selected 4; 0 skipped; 0 expected failures)');
       expect(full.stdout).toContain('selected claims: 3 satisfied, 0 blocking');
-      expect(full.stdout).toContain('repository debt: 0 blocking / 3 obligations');
+      expect(full.stdout).toMatch(/repository debt: [^\n]*\b0 new blocking \/ 3 obligations/);
       expect(full.stdout).toContain('documentation exclusions: folders=docs approvalStatus=matched');
       const fullReceipt = JSON.parse(
         readFileSync(join(repo.root, '.gateforge/test-gates/receipt.json'), 'utf8'),
@@ -1614,4 +1788,57 @@ prepare:
       );
     });
   }, 180_000);
+  it('requires a matching owner pin and reports exact Python bytecode exclusions', async () => {
+    await withTempRepo({}, async (repo) => {
+      const cacheFile = 'generated/__pycache__/accounts.cpython-313.pyc';
+      installStrictFixture(repo);
+      repo.writeFiles({
+        '.gitignore': 'node_modules\ntest-results\nplaywright-report\n.playwright\n.gateforge/test-gates\ngenerated/__pycache__/\n',
+        '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - \"${cacheFile}\"\n`,
+        [cacheFile]: 'first-bytecode\n',
+      });
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'cache exclusion fixture']);
+      const config = loadConfigAt(repo.root);
+      const pin = trustedPolicyDigestForConfig(repo.root, config);
+      const args = ['check', '--require-e2e', '--format', 'json'];
+
+      const unpinned = await runWorkspaceCli(repo, args, { GATEFORGE_APPROVED_POLICY_DIGEST: '' });
+      expect(unpinned.code, `${unpinned.stdout}\n${unpinned.stderr}`).toBe(1);
+      const unpinnedReport = JSON.parse(unpinned.stdout) as {
+        diagnosticContext: { cacheExclusions?: { files: string[]; approvalStatus: string } };
+      };
+      expect(unpinnedReport.diagnosticContext.cacheExclusions).toMatchObject({
+        files: [cacheFile],
+        approvalStatus: 'missing',
+      });
+
+      const approved = await runWorkspaceCli(repo, args, { GATEFORGE_APPROVED_POLICY_DIGEST: pin });
+      expect(approved.code).toBe(1);
+      const approvedReport = JSON.parse(approved.stdout) as {
+        diagnosticContext: {
+          candidateTreeId: string | null;
+          inputDigest: string | null;
+          cacheExclusions?: { files: string[]; approvalStatus: string; approvalDigest: string | null };
+        };
+      };
+      expect(approvedReport.diagnosticContext.cacheExclusions).toMatchObject({
+        files: [cacheFile],
+        approvalStatus: 'matched',
+        approvalDigest: pin,
+      });
+      const approvedInput = approvedReport.diagnosticContext.inputDigest;
+      const approvedTree = approvedReport.diagnosticContext.candidateTreeId;
+
+      repo.writeFiles({ [cacheFile]: 'rewritten-bytecode\n' });
+      const changedCache = await runWorkspaceCli(repo, args, { GATEFORGE_APPROVED_POLICY_DIGEST: pin });
+      expect(changedCache.code).toBe(1);
+      const changedReport = JSON.parse(changedCache.stdout) as {
+        diagnosticContext: { candidateTreeId: string | null; inputDigest: string | null };
+      };
+      expect(changedReport.diagnosticContext.inputDigest).toBe(approvedInput);
+      expect(changedReport.diagnosticContext.candidateTreeId).toBe(approvedTree);
+    });
+  });
+
 });

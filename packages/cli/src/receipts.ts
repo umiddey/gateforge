@@ -20,6 +20,7 @@
  */
 import {
   CAUSE_NEXT_ACTIONS,
+  ENGINE_UPGRADE_REFUSAL_PREFIX,
   ExecutionResultSchema,
   compareStrings,
   executionResultDigestOf,
@@ -37,6 +38,7 @@ import {
   type SnapshotFileEntry,
 } from './input-snapshot.js';
 import { verifyGateReceiptWithKeyring, verifierKeyringFrom, type VerifierKeyring } from './verifier-keys.js';
+import { VERSION } from './commands/common.js';
 
 /** The §5.4 next action per cause (single source: core). */
 const NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = CAUSE_NEXT_ACTIONS;
@@ -87,7 +89,7 @@ export type ReceiptLoad =
   | { status: 'unverified'; detail: string }
   | { status: 'unknown-key'; detail: string }
   | { status: 'key-mismatch'; detail: string }
-  | { status: 'stale'; detail: string }
+  | { status: 'stale'; detail: string; sealedEngineVersion?: string }
   | { status: 'execution-mismatch'; detail: string };
 
 /**
@@ -154,7 +156,16 @@ export function loadReceiptFor(
     if (verified.rejection === 'not-clean') {
       return { status: 'malformed', detail: verified.detail };
     }
-    return { status: 'stale', detail: verified.detail };
+    // A stale rejection is a BINDING failure over an authenticated receipt
+    // (the MAC verified before any digest was compared). Re-verifying with
+    // no expectations recovers the sealed engine identity, so the refusal
+    // can name the versions that disagree; an unsigned or unparseable
+    // document simply carries no version.
+    const authenticated = verifyGateReceiptWithKeyring(keyring, document);
+    const sealedEngineVersion = authenticated.ok ? authenticated.receipt.engine?.version : undefined;
+    return sealedEngineVersion === undefined
+      ? { status: 'stale', detail: verified.detail }
+      : { status: 'stale', detail: verified.detail, sealedEngineVersion };
   }
   const executionRaw = readStateDocument(stateDir, 'execution-result.json');
   if (executionRaw === null) {
@@ -280,30 +291,58 @@ export function receiptGateBlocking(load: ReceiptLoad): BlockingEntry[] {
       },
     ];
   }
-  const block = (cause: CauseCode, detail: string): BlockingEntry => ({
+  const block = (cause: CauseCode, detail: string, nextAction?: string): BlockingEntry => ({
     kind: 'finding',
     resourceId: null,
     name: null,
     detail,
     location: null,
     cause,
-    nextAction: NEXT_ACTIONS[cause],
+    nextAction: nextAction ?? NEXT_ACTIONS[cause],
   });
   switch (load.status) {
     case 'absent':
+      // The one command that closes this block runs the suite. Without it
+      // `humanMessage` substitutes the read-only `discover --json`, and a
+      // block that ends in a no-op is a terminal loop for a new user.
       return [
         block(
           'RUN_INCOMPLETE',
           'require-e2e: no gate receipt exists for the current state — run `gateforge test-gates --changed` ' +
             'to execute the configured E2E suite; record bundles saved without a complete-run receipt are rejected (fail closed)',
+          'gateforge test-gates --changed',
         ),
       ];
     case 'unverified':
       return [block('ENFORCEMENT_UNTRUSTED', `require-e2e: ${load.detail}`)];
     case 'malformed':
       return [block('ENFORCEMENT_UNTRUSTED', `require-e2e: ${load.detail}`)];
-    case 'stale':
-      return [block('EVIDENCE_STALE', `require-e2e: ${load.detail} (E13: tested inputs differ from the candidate — rerun)`)];
+    case 'stale': {
+      const reseal = 'gateforge test-gates --changed';
+      // A sealed receipt from a DIFFERENT engine version is the upgrade
+      // case: the inputs moved because the engine derives them again, so
+      // the refusal says so plainly and names the one command that
+      // re-seals. It leads — this is the cause the user must act on.
+      const upgrade =
+        load.sealedEngineVersion !== undefined && load.sealedEngineVersion !== VERSION
+          ? [
+              block(
+                'EVIDENCE_STALE',
+                `${ENGINE_UPGRADE_REFUSAL_PREFIX}${load.sealedEngineVersion} and this engine is ` +
+                  `${VERSION}; a new engine derives the gate inputs again, so the run must be sealed again`,
+                reseal,
+              ),
+            ]
+          : [];
+      return [
+        ...upgrade,
+        block(
+          'EVIDENCE_STALE',
+          `require-e2e: ${load.detail} (E13: tested inputs differ from the candidate — rerun)`,
+          reseal,
+        ),
+      ];
+    }
     case 'execution-mismatch':
       return [block('ENFORCEMENT_UNTRUSTED', `require-e2e: ${load.detail}`)];
   }

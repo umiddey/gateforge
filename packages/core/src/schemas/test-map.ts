@@ -62,6 +62,8 @@ export const TestMapEntrySchema = z
     selector: TestSelectorSchema,
     /** Declared kind; resolves `unknown`, never observed mocking (§5.3). */
     kind: TestKindSchema.optional(),
+    /** Origin marker for entries generated from test annotations. */
+    source: z.literal('annotation').optional(),
     /** Behavior-category labels (hints only, never proof; §3.2). */
     categories: z.array(z.string().min(1)).optional(),
     /** Claimed obligation ids — at least one; `'*'` never parses. */
@@ -71,6 +73,16 @@ export const TestMapEntrySchema = z
      * Optional: absence is not proof. Duplicate ids fail closed.
      */
     caseIds: z.array(z.string().min(1)).optional(),
+    /**
+     * Twin path coverage (E64): the logical key of the RAW test this
+     * witnessed test is the twin of. Additive and purely declarative —
+     * it grants nothing, claims nothing, and is read only when
+     * `enforcement.twinPaths` is configured (absent = the run never
+     * looks at it). With it, a run can say which two tests are meant to
+     * cover the same request path, so a divergence between them is a
+     * named finding instead of an invisible one.
+     */
+    twinOf: z.string().min(1, 'twinOf must be a non-empty logical key of the raw twin').optional(),
     /** Required free-text why (a declaration must be reviewable). */
     reason: z
       .string()
