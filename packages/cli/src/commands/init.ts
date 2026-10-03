@@ -46,7 +46,8 @@ import { recordInitPath, writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { languageDefaultPlugins, recommendPlugins, renderScanBlock, scanRepo } from '../repo-scan.js';
 import { rejectUnknownFlags } from './common.js';
-import { expandIncludePaths, type ExpandError } from '../glob.js';
+import { expandScanPaths, type ExpandError } from '../glob.js';
+import { gitIgnoredPaths } from '../git-ignored.js';
 import { inferPlanesConfig } from '../planes-inference.js';
 import { hasGateforgeMarker, installCommitHook, installPrePushHook, writeStandaloneGateScript } from '../git-hooks.js';
 import {
@@ -1020,10 +1021,14 @@ async function proposePlanesConfig(cwd: string, io: Io): Promise<void> {
   try {
     const config = loadConfig(join(cwd, '.gateforge.yml'));
     const expandErrors: ExpandError[] = [];
-    const paths = expandIncludePaths(
+    // The same DETECTOR-INPUT scope the pipeline scans: a gitignored
+    // tree (a built report bundle, a local cache) holds no table the
+    // planes proposal should infer from.
+    const paths = expandScanPaths(
       config.project.paths.include,
       config.project.paths.exclude,
       cwd,
+      gitIgnoredPaths(cwd),
       expandErrors,
     );
     // The planes config plays no role in inference (only table SOURCE

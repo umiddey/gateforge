@@ -25,6 +25,10 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+// Same Git-ignore scope as the detector walk (owner decision D5): a
+// generated bundle in a gitignored tree is not the repository's own
+// behavior machinery, so it must not offer a behavior pack.
+import { gitIgnoredPaths, type GitIgnoredScope } from './git-ignored.js';
 
 /**
  * The namespaces the engine drives through an HTTP request: a case in
@@ -209,7 +213,7 @@ export function detectBehaviorPacks(
     ? BEHAVIOR_NAMESPACES
     : HTTP_BEHAVIOR_NAMESPACES;
   const files: string[] = [];
-  collectFiles(cwd, cwd, files);
+  collectFiles(cwd, cwd, files, gitIgnoredPaths(cwd));
   const found = new Map<BehaviorNamespace, DetectedBehaviorPack>();
   for (const file of files) {
     const text = readSmallText(join(cwd, file));
@@ -446,8 +450,16 @@ function slugOf(contract: string): string {
   return contract.slice(contract.indexOf(':') + 1);
 }
 
-/** Recursively collects repo-relative file paths, skipping ignored directories. */
-function collectFiles(root: string, dir: string, out: string[]): void {
+/**
+ * Recursively collects repo-relative file paths, skipping ignored
+ * directories and every path this run's Git-ignore scope excludes.
+ */
+function collectFiles(
+  root: string,
+  dir: string,
+  out: string[],
+  gitIgnored: GitIgnoredScope,
+): void {
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -457,6 +469,8 @@ function collectFiles(root: string, dir: string, out: string[]): void {
   for (const entry of entries) {
     if (IGNORED_DIRS.has(entry)) continue;
     const absolute = join(dir, entry);
+    const relativePath = relative(root, absolute).split('\\').join('/');
+    if (gitIgnored.skipsDirectory(relativePath)) continue;
     let stat: ReturnType<typeof statSync>;
     try {
       stat = statSync(absolute);
@@ -464,9 +478,11 @@ function collectFiles(root: string, dir: string, out: string[]): void {
       continue;
     }
     if (stat.isDirectory()) {
-      collectFiles(root, absolute, out);
+      collectFiles(root, absolute, out, gitIgnored);
+    } else if (gitIgnored.skipsFile(relativePath)) {
+      continue;
     } else if (stat.isFile() && /\.(js|jsx|mjs|cjs|ts|tsx|py)$/.test(entry)) {
-      out.push(relative(root, absolute).split('\\').join('/'));
+      out.push(relativePath);
       if (out.length >= 4_000) return;
     }
   }
