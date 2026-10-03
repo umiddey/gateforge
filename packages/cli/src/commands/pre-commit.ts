@@ -129,7 +129,15 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     }
     const runtimeDoc = loadRuntimeConfigAt(checkoutDir, checkoutConfig.runtime);
     if (runtimeDoc !== null) {
-      assertRuntimeReuseOwnerApproval(frozen.approvedReusePaths, runtimeDoc.prepare?.reuse ?? []);
+      // R1-17: runtime.yml is a trusted-policy input hashed into
+      // the candidate digest, so an owner pin that matched the
+      // candidate revision (policyGate enforced) approves the
+      // requested reuse roots — the first commit introducing
+      // runtime.yml no longer deadlocks. Without a matching pin
+      // the committed base stays the only approver.
+      if (policyGate.status !== 'enforced') {
+        assertRuntimeReuseOwnerApproval(frozen.approvedReusePaths, runtimeDoc.prepare?.reuse ?? []);
+      }
       // Armed BEFORE preparation: a SIGINT during a long prepare (or a
       // readiness wait) still tears the detached process groups down.
       armInterruptHandlers();

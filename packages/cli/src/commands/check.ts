@@ -825,7 +825,15 @@ async function stagedCheckCommand(
     }
     const runtimeDoc = loadRuntimeConfigAt(checkoutDir, checkoutConfig.runtime);
     if (runtimeDoc !== null) {
-      assertRuntimeReuseOwnerApproval(frozen.approvedReusePaths, runtimeDoc.prepare?.reuse ?? []);
+      // R1-17: runtime.yml is a trusted-policy input hashed into
+      // the candidate digest, so an owner pin that matched the
+      // candidate revision (policyGate enforced) approves the
+      // requested reuse roots — the first commit introducing
+      // runtime.yml no longer deadlocks. Without a matching pin
+      // the committed base stays the only approver.
+      if (policyGate.status !== 'enforced') {
+        assertRuntimeReuseOwnerApproval(frozen.approvedReusePaths, runtimeDoc.prepare?.reuse ?? []);
+      }
       const preparedRuntime = await prepareRuntime(io.cwd, checkoutDir, runtimeDoc, io, resolveStateDir(checkoutDir));
       runtimeReuseDigest = preparedRuntime.reuseDigest;
       runtimeReuseMounts = preparedRuntime.reuseMounts;

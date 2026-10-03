@@ -18,6 +18,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { fixtureFingerprint, runCli, installFixture, PLUGIN_SOURCE } from './helpers.js';
+import { trustedPolicyDigestForConfig } from '../src/execution.js';
+import { loadConfigAt } from '../src/commands/common.js';
 import {
   assertRuntimeReuseOwnerApproval,
   freezeStagedCandidate,
@@ -360,5 +362,40 @@ describe('check --staged gates the exact staged candidate (CLI)', () => {
       expect(result.stdout).toContain('ENFORCEMENT_UNTRUSTED');
       expect(result.stdout).toContain('no owner-approved policy digest is provisioned');
       expect(result.stdout).toContain('gateforge enforcement doctor');
+    }));
+
+  it('approves first-commit reuse roots when the policy pin matches the candidate digest', () =>
+    withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      // First commit: runtime.yml introduces a reuse root with NO
+      // committed base to approve it. runtime.yml is a
+      // trusted-policy input hashed into the candidate digest, so
+      // an owner pin that matches that digest approves the
+      // requested reuse roots.
+      repo.writeFiles({
+        '.gateforge.yml': `${readFileSync(repo.path('.gateforge.yml'), 'utf8')}runtime: .gateforge/runtime.yml\n`,
+        '.gateforge/runtime.yml': 'schemaVersion: 1\nprepare:\n  reuse: [node_modules]\n',
+        'node_modules/.keep': 'reused dependency placeholder\n',
+      });
+      repo.stage();
+      const digest = trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root));
+      const pinned = await runCli(repo, ['check', '--staged'], {
+        GATEFORGE_APPROVED_POLICY_DIGEST: digest,
+      });
+      // The matching pin covers runtime.yml: no reuse block — the
+      // gate proceeds to grade the candidate bytes.
+      expect(pinned.stdout).not.toContain('not approved by the committed base');
+      expect(pinned.stdout).not.toContain('ENFORCEMENT_UNTRUSTED');
+      // Without a pin the committed base stays the only approver:
+      // today's block, extended with the pin route.
+      const unpinned = await runCli(repo, ['check', '--staged'], {
+        GATEFORGE_APPROVED_POLICY_DIGEST: undefined,
+      });
+      expect(unpinned.code).toBe(1);
+      expect(unpinned.stdout).toContain('not approved by the committed base');
+      expect(unpinned.stdout).toContain('node_modules');
+      expect(unpinned.stdout).toContain(
+        "or pin GATEFORGE_APPROVED_POLICY_DIGEST to this candidate's digest (runtime.yml is part of it)",
+      );
     }));
 });

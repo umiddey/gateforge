@@ -373,7 +373,8 @@ export function assertRuntimeReuseOwnerApproval(
     throw new StagedCandidateBlockError(
       'ENFORCEMENT_UNTRUSTED',
       `the staged runtime requests dependency reuse not approved by the committed base: ${added.join(', ')}`,
-      'Ask the owner to approve the reuse-root change in a separate trusted revision, then rerun the gate.',
+      'Ask the owner to approve the reuse-root change in a separate trusted revision, then rerun the gate ' +
+        "— or pin GATEFORGE_APPROVED_POLICY_DIGEST to this candidate's digest (runtime.yml is part of it).",
     );
   }
 }
