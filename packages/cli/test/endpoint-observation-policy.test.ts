@@ -191,11 +191,24 @@ describe('http.endpoint.requireObservation (plan Phase 4c, E60)', () => {
     });
   });
 
-  it('option absent: the report bytes are identical to today', async () => {
+  it('option absent: the report bytes are identical to today, apart from the one new advisory', async () => {
     await withTempRepo({}, async (repo) => {
       installRoutesRepo(repo, 'absent', [EXPORT_ROUTE, PARAM_ROUTE]);
       const { stdout } = await runCli(repo, ['check', '--format', 'json']);
-      expect(normalizedReport(stdout)).toBe(GOLDEN_ABSENT);
+      const report = JSON.parse(normalizedReport(stdout)) as {
+        advisories?: Array<{ detail: string }>;
+      };
+      // WHY the bytes differ from the historical golden: THIS fixture has
+      // a by-id route (`GET /accounts/{}`) and no table at all, so 0.9.0
+      // has something to report about it. It is an ADVISORY — never
+      // blocking, absent an owner opt-in — and it is the ONLY delta: it is
+      // asserted exactly here, and every other byte is still compared
+      // against the pre-Phase-4c golden, unchanged.
+      expect(report.advisories).toHaveLength(1);
+      expect(report.advisories?.[0]?.detail).toContain('ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED');
+      expect(report.advisories?.[0]?.detail).toContain("derives resource name 'accounts'");
+      delete report.advisories;
+      expect(JSON.stringify(report)).toBe(GOLDEN_ABSENT);
     });
   });
 

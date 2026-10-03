@@ -196,7 +196,23 @@ describe('resource-kind separation', () => {
   });
 
   it('exposes the full typed code set', () => {
-    expect(HTTP_BLOCK_CODES).toHaveLength(10);
+    // The EXACT set, in registry order: adding a code is a deliberate act
+    // (0.9.0 added ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED, which an existing
+    // repository grades as an advisory unless it opts into `block`), and
+    // this pins that nothing else moved with it.
+    expect(HTTP_BLOCK_CODES).toEqual([
+      'HTTP_PATH_DYNAMIC',
+      'HTTP_METHOD_DYNAMIC',
+      'FASTAPI_PREFIX_UNRESOLVED',
+      'FRONTEND_CALL_TARGET_UNRESOLVED',
+      'FRONTEND_ROUTE_UNWIRED',
+      'FRONTEND_ROUTE_AMBIGUOUS',
+      'ENDPOINT_SEMANTICS_UNRESOLVED',
+      'ENDPOINT_RESOURCE_LINK_UNRESOLVED',
+      'ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED',
+      'ENDPOINT_CAPABILITY_CONTRADICTION',
+      'HTTP_OBSERVATION_UNTRUSTED',
+    ]);
     expect(new Set(HTTP_BLOCK_CODES).size).toBe(HTTP_BLOCK_CODES.length);
   });
 });
