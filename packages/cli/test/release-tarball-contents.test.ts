@@ -228,6 +228,44 @@ describe('release publisher bytecode preflight', () => {
     }
   });
 
+  // npm 12 prints `pack --json --workspaces` as an object keyed by package
+  // name instead of an array; the preflight must read the same entries.
+  function rewriteAsNpm12(root: string): void {
+    const entries = JSON.parse(readFileSync(join(root, 'pack.json'), 'utf8')) as Array<{ name: string }>;
+    writeFileSync(join(root, 'pack.json'), `${JSON.stringify(Object.fromEntries(entries.map((e) => [e.name, e])))}\n`);
+  }
+
+  it('reads the npm 12 keyed-object pack output and still refuses bytecode', () => {
+    const { root, logPath } = stubbedWorkspace([
+      { dir: 'clean-pkg', files: ['package.json'] },
+      { dir: 'dirty-pkg', files: ['package.json', 'python/detector/__pycache__/scan.cpython-312.pyc'] },
+    ]);
+    try {
+      rewriteAsNpm12(root);
+      const result = runReleaseScript(root, logPath);
+      expect(result.status).not.toBe(0);
+      expect(result.output).toContain('@probe/dirty-pkg: python/detector/__pycache__/scan.cpython-312.pyc');
+      expect(result.invocations.filter((line) => line.startsWith('publish'))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes every package from the npm 12 keyed-object pack output', () => {
+    const { root, logPath } = stubbedWorkspace([
+      { dir: 'clean-pkg', files: ['package.json', 'python/detector/scan.py'] },
+      { dir: 'other-pkg', files: ['package.json', 'dist/index.js'] },
+    ]);
+    try {
+      rewriteAsNpm12(root);
+      const result = runReleaseScript(root, logPath);
+      expect(result.status).toBe(0);
+      expect(result.output).toContain('2 published, 0 skipped, 0 failed');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('refuses to publish anything when the packed file list cannot be verified', () => {
     const { root, logPath } = stubbedWorkspace([{ dir: 'clean-pkg', files: ['package.json'] }]);
     try {

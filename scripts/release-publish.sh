@@ -47,6 +47,8 @@ process.stdin.on("end", () => {
     console.error(`npm pack --dry-run --json printed no JSON: ${err.message}`);
     process.exit(1);
   }
+  // npm 11 prints an array of entries; npm 12 prints an object keyed by package name.
+  if (entries !== null && typeof entries === "object" && !Array.isArray(entries)) entries = Object.values(entries);
   if (!Array.isArray(entries) || entries.length === 0) {
     console.error("npm pack --dry-run --json packed no workspace package — run it from the repository root");
     process.exit(1);
