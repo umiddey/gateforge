@@ -730,33 +730,80 @@ async function resolveRecommended(io: Io, options: Readonly<Record<string, unkno
   }
 }
 /**
+ * The wiring flags each preset already implies (R1-1): a flag the
+ * preset implies is a no-op — the preset the owner named is the
+ * goal that applies. `light` wires nothing, so it implies no flag
+ * and no `--no-*` flag can contradict it.
+ */
+const PRESET_IMPLIED_FLAGS: Readonly<Record<InitPresetName, readonly string[]>> = {
+  light: [],
+  normal: ['pre-commit', 'ci'],
+  strict: ['blocking', 'pre-commit', 'ci', 'strict-e2e'],
+};
+
+/** What one wiring flag decides, named in the contradiction error. */
+const PRESET_FLAG_THING: Readonly<Record<string, string>> = {
+  blocking: 'the gate wiring',
+  'pre-commit': 'the pre-commit hook',
+  ci: 'the CI job',
+  'strict-e2e': 'strict E2E',
+};
+
+/**
+ * The preset/flag contradiction (R1-1): null when every given flag
+ * is consistent with the preset (implied by it, or a `--no-*` for
+ * something the preset does not wire — both are no-ops); the
+ * conflicting flag otherwise: a positive wiring flag the preset
+ * does NOT wire, or a `--no-*` flag for something it DOES wire.
+ * Both spellings ask for two different goals at once, so the owner
+ * must drop one of them — silently overriding the named preset
+ * (the old "is ignored" note) hid the choice instead.
+ */
+function presetFlagConflict(
+  preset: InitPresetName,
+  options: Readonly<Record<string, unknown>>,
+): string | null {
+  const implied = PRESET_IMPLIED_FLAGS[preset];
+  for (const flag of ['blocking', 'pre-commit', 'ci', 'strict-e2e'] as const) {
+    const wired = implied.includes(flag);
+    if (options[flag] === true && !wired) return flag;
+    if (wired && options[`no-${flag}`] === true) return `no-${flag}`;
+  }
+  return null;
+}
+/**
  * Resolves the goal `init` should set up. Three paths, in order:
  *
- * 1. `--preset light|normal|strict` — an agent or CI run picks the goal
- *    explicitly.
- * 2. A real terminal — ONE question ("What should Gateforge do for
- *    you?") with three choices, each explained in one line.
- * 3. No terminal and no `--preset` — light only, stated ONCE on the
- *    line that also names `--preset <light|normal|strict>`. Gateforge
- *    never guesses normal or strict for someone who is not there:
- *    guessing strict blocks a team, guessing normal pretends a gate
- *    nobody asked for.
+ * 1. `--preset light|normal|strict` — an agent or CI run picks
+ *    the goal explicitly. An enforcement flag the preset already
+ *    implies is a no-op (the preset applies); one that
+ *    contradicts it throws (R1-1) before any file is written.
+ * 2. A real terminal — ONE question ("What should Gateforge do
+ *    for you?") with three choices, each explained in one line.
+ * 3. No terminal and no `--preset` — light only, stated ONCE on
+ *    the line that also names `--preset <light|normal|strict>`.
+ *    Gateforge never guesses normal or strict for someone who is
+ *    not there: guessing strict blocks a team, guessing normal
+ *    pretends a gate nobody asked for.
  *
- * A run that already carries explicit enforcement flags (`--blocking`,
- * `--strict-e2e`, …) has chosen for itself: no preset is applied and the
- * generated config keeps today's exact bytes.
+ * A run WITHOUT a preset that carries explicit enforcement flags
+ * (`--blocking`, `--strict-e2e`, …) has chosen for itself: no
+ * preset is applied and the generated config keeps today's
+ * exact bytes.
  *
  * Args:
  *   io: process context (prompt + informational output).
  *   options: parsed init flags.
- *   enforcementFlagGiven (boolean): true when an enforcement flag was
- *     passed and therefore wins over any preset.
+ *   enforcementFlagGiven (boolean): true when an enforcement flag
+ *     was passed and therefore wins over any preset.
  *
  * Returns:
  *   Promise<{ name: InitPresetName; settings: InitPresetSettings;
  *   autoChosen?: boolean } | null>: the applied goal (with
- *   `autoChosen` when no human chose it), or null when the run kept
- *   today's behavior.
+ *   `autoChosen` when no human chose it), or null when the run
+ *   kept today's behavior.
+ * @throws UsageError (exit 2): a flag contradicts the named
+ *   preset (R1-1) — nothing is written.
  */
 async function resolveGoal(
   io: Io,
@@ -766,12 +813,17 @@ async function resolveGoal(
 ): Promise<{ name: InitPresetName; settings: InitPresetSettings; autoChosen?: boolean } | null> {
   const explicit = options['preset'];
   if (explicit !== undefined && isInitPresetName(explicit)) {
-    if (!enforcementFlagGiven) return { name: explicit, settings: INIT_PRESETS[explicit] };
-    writeLine(
-      io.stdout,
-      `note: --preset ${explicit} is ignored because an enforcement flag decides the wiring; the preset's meaning: ${INIT_PRESETS[explicit].explanation}`,
-    );
-    return null;
+    const conflict = presetFlagConflict(explicit, options);
+    if (conflict !== null) {
+      throw new UsageError(
+        `--preset ${explicit} already decides ${PRESET_FLAG_THING[conflict.replace(/^no-/, '')]}; ` +
+          `--${conflict} contradicts it — drop one of them`,
+      );
+    }
+    // Every given flag is one the preset already implies (or a
+    // `--no-*` for something it does not wire): a no-op. The
+    // goal the owner named is the one that applies.
+    return { name: explicit, settings: INIT_PRESETS[explicit] };
   }
   if (enforcementFlagGiven) return null;
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
