@@ -231,6 +231,14 @@ export interface EvaluateInput {
      */
     classificationBlocked?: ReadonlySet<string>;
   } | null;
+  /**
+   * 0.9.0 D2: keep the ADOPTED baseline's forgiveness through the strict-E2E
+   * re-grade. Set only by a caller that proved the change set contains no
+   * product, test, manifest or dependency input — only Gateforge-owned
+   * policy inputs, whose integrity the owner-approved policy digest
+   * governs. Owner waivers are never included: a waiver is not proof.
+   */
+  adoptedBaselineSurvivesStrictE2E?: boolean;
 }
 
 /**
@@ -480,14 +488,24 @@ export function strictPreflightBlocking(obligations: readonly Obligation[]): Blo
  *
  * Args:
  *   verdicts: the evaluated verdicts (sorted).
+ *   options: `keepBaselineForgiveness` (0.9.0 D2) leaves ADOPTED-baseline
+ *     verdicts waived when the caller proved the change set holds no
+ *     product, test or dependency input — only Gateforge-owned policy
+ *     inputs whose integrity the owner-approved policy digest governs.
+ *     Owner waivers are unaffected: a waiver is still not proof.
  *
  * Returns:
  *   ObligationVerdict[]: identical unless strict mode converted waived
  *   entries to blocking ones (order and determinism preserved).
  */
-export function applyStrictE2E(verdicts: readonly ObligationVerdict[]): ObligationVerdict[] {
+export function applyStrictE2E(
+  verdicts: readonly ObligationVerdict[],
+  options: { keepBaselineForgiveness?: boolean } = {},
+): ObligationVerdict[] {
+  const keepBaselineForgiveness = options.keepBaselineForgiveness === true;
   return verdicts.map((entry) => {
     if (entry.verdict !== 'waived') return entry;
+    if (keepBaselineForgiveness && (entry.reason ?? '').startsWith(BASELINE_VERDICT_REASON)) return entry;
     const cause: CauseCode = 'ENFORCEMENT_UNTRUSTED';
     return {
       ...entry,
@@ -649,7 +667,12 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   // waived verdict, baselined ones included, back to blocking. Non-strict
   // repos keep the loud, counted baseline forgiveness.
   const applied = applyBaseline(input.baseline ?? null, { verdicts, blocking });
-  const gradedVerdicts = strictE2E ? applyStrictE2E(applied.verdicts) : applied.verdicts;
+  const gradedVerdicts = strictE2E
+    ? applyStrictE2E(
+        applied.verdicts,
+        input.adoptedBaselineSurvivesStrictE2E === true ? { keepBaselineForgiveness: true } : {},
+      )
+    : applied.verdicts;
 
   const blockingRun =
     applied.blocking.length > 0 ||

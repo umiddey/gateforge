@@ -1,6 +1,11 @@
 /**
- * `gateforge explain <resourceId>`: the complete signal/rule/obligation
- * trace for one resource (plan phase 5). Prints the effective
+ * `gateforge explain <resourceId|path>`: the complete signal/rule/obligation
+ * trace for one resource (plan phase 5). A repo-relative PATH is also a
+ * first-class target: when no discovered resource matches it, the command
+ * prints what the file IS and what governs it (Gateforge-owned policy
+ * input, declared gate input, owner-declared documentation folder, known
+ * source of a resource, or an unclassified change), so an unmapped change
+ * can be attributed. For a resource it prints the effective
  * classification with its decision trace (rules, conservative defaults,
  * contributing signals + detector versions, contradictions, decision
  * fingerprint) and every obligation the policy engine generated from it
@@ -8,15 +13,20 @@
  * its in-code resolution path. Deterministic: re-running the command on
  * an unchanged repository prints byte-identical output.
  */
-import { canonicalJson, fingerprintObligation, type JsonValue } from '@gate-forge/core';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { canonicalJson, type GateforgeConfig, fingerprintObligation, type JsonValue } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
+import { classifyGateforgeOwnedInput } from '../gateforge-owned.js';
+import { loadDocsExclusions } from '../docs-exclusions.js';
+import { GIT_SCOPE_CONTROL_BASENAMES, MANIFEST_NAMES } from '../input-snapshot.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { runPipeline } from '../pipeline.js';
 import { resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 
-export const EXPLAIN_USAGE = 'usage: gateforge explain <resourceId> [--json]';
+export const EXPLAIN_USAGE = 'usage: gateforge explain <resourceId|path> [--json]';
 
 /**
  * Runs the explain subcommand.
@@ -58,6 +68,40 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
     (candidate) => candidate.id === target || candidate.name === target,
   );
   if (resource === undefined) {
+    // 0.9.0 problem 26: a repo-relative path is a first-class target. When no
+    // discovered resource matches it, explain what the file IS and what
+    // governs it — that is the answer an owner needs to attribute an unmapped
+    // change (or to see that the file is Gateforge-owned). A target that is
+    // not a path-shaped governance question stays an unknown target.
+    const pathAnswer = pathGovernance({
+      cwd: io.cwd,
+      target,
+      config,
+      resourceSources: resourceSourcesByFile(pipeline.graph.resources),
+      docsFolders: declaredDocsFolders(io.cwd, config),
+    });
+    if (pathAnswer !== null) {
+      if (asJson) {
+        writeLine(
+          io.stdout,
+          canonicalJson({
+            schemaVersion: 1 as const,
+            path: { target, ...pathAnswer } as unknown as JsonValue,
+          }),
+        );
+        return 0;
+      }
+      writeLine(io.stdout, `path ${target}`);
+      writeLine(io.stdout, `  what: ${pathAnswer.what}`);
+      writeLine(io.stdout, `  governed by: ${pathAnswer.governedBy}`);
+      if (pathAnswer.resources.length > 0) {
+        writeLine(io.stdout, `  known source of: ${pathAnswer.resources.join(', ')}`);
+      }
+      if (pathAnswer.nextStep !== null) {
+        writeLine(io.stdout, `  next step: ${pathAnswer.nextStep}`);
+      }
+      return 0;
+    }
     writeLine(io.stderr, `explain: no discovered resource matches '${target}'`);
     const known = pipeline.graph.resources.map((candidate) => candidate.id ?? candidate.name);
     if (known.length > 0) writeLine(io.stderr, `discovered: ${known.join(', ')}`);
@@ -178,4 +222,153 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
   }
   const blocked = (decision?.blocks.length ?? 0) > 0 || resource.classification === null;
   return blocked ? 1 : 0;
+}
+
+/** What the gate knows about one repo-relative path. */
+interface PathGovernance {
+  /** The governance class the path falls into. */
+  kind: 'policy-input' | 'documentation' | 'gate-input' | 'resource-source' | 'unclassified';
+  /** What the file is. */
+  what: string;
+  /** What governs it. */
+  governedBy: string;
+  /** Discovered resources that read this file as a source. */
+  resources: string[];
+  /** The command/step that resolves the situation, when one exists. */
+  nextStep: string | null;
+}
+
+/**
+ * Maps every resource source file to the resource labels that read it.
+ *
+ * Args:
+ *   resources: discovered graph resources.
+ *
+ * Returns:
+ *   Map<string, string[]>: repo-relative source file -> sorted labels.
+ */
+function resourceSourcesByFile(
+  resources: readonly { name: string; source: string }[],
+): Map<string, string[]> {
+  const byFile = new Map<string, string[]>();
+  for (const entry of resources) {
+    byFile.set(entry.source, [...(byFile.get(entry.source) ?? []), entry.name]);
+  }
+  return new Map([...byFile].map(([file, labels]) => [file, labels.sort()]));
+}
+
+/**
+ * The owner-declared documentation folders. An absent or invalid
+ * declaration yields none here — `check` reports the declaration problem
+ * on its own gate.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *   config: the loaded gateforge config.
+ *
+ * Returns:
+ *   string[]: declared documentation folders.
+ */
+function declaredDocsFolders(cwd: string, config: GateforgeConfig): string[] {
+  try {
+    return loadDocsExclusions(cwd, config);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Explains what a repo-relative path is and what governs it (0.9.0 D2 /
+ * problem 26).
+ *
+ * Args:
+ *   args: the repo root, the target, the config, the discovered
+ *     source-file index and the declared documentation folders.
+ *
+ * Returns:
+ *   PathGovernance | null: the answer, or null when the target is not a
+ *   path-shaped governance question at all (unknown target stays exit 1).
+ */
+function pathGovernance(args: {
+  cwd: string;
+  target: string;
+  config: GateforgeConfig;
+  resourceSources: Map<string, string[]>;
+  docsFolders: readonly string[];
+}): PathGovernance | null {
+  const { cwd, target, config } = args;
+  const posix = target.split('\\').join('/');
+  // Absolute paths, parent escapes and targets that name nothing on disk are
+  // not path-shaped governance questions.
+  if (posix.length === 0 || posix.startsWith('/') || posix.split('/').includes('..')) return null;
+  const owned = classifyGateforgeOwnedInput(cwd, posix, config);
+  if (owned !== null) {
+    return {
+      kind: 'policy-input',
+      what: `Gateforge-owned policy input (${owned.kind}) — ${owned.path}`,
+      governedBy:
+        'the owner-approved policy digest: a pin mismatch still blocks, and it is never an ' +
+        'unmapped (CHANGE_UNMAPPED) product change',
+      resources: [],
+      nextStep: null,
+    };
+  }
+  const documentation = args.docsFolders.find(
+    (folder) => posix === folder || posix.startsWith(`${folder}/`),
+  );
+  if (documentation !== undefined) {
+    return {
+      kind: 'documentation',
+      what: `file inside the owner-declared documentation folder '${documentation}'`,
+      governedBy:
+        'an owner assertion, not proof: Gateforge does not prove it cannot affect behavior or tests',
+      resources: [],
+      nextStep: null,
+    };
+  }
+  if (!existsSync(join(cwd, ...posix.split('/')))) return null;
+  const basename = posix.slice(posix.lastIndexOf('/') + 1);
+  if (MANIFEST_NAMES.includes(basename)) {
+    return {
+      kind: 'gate-input',
+      what: 'declared gate input (dependency manifest or lockfile)',
+      governedBy:
+        'the gate itself: a change here can change the scanned inventory, so it expands the scope ' +
+        'to the whole repository and is never unmapped',
+      resources: [],
+      nextStep: null,
+    };
+  }
+  if (GIT_SCOPE_CONTROL_BASENAMES.includes(basename)) {
+    return {
+      kind: 'gate-input',
+      what: 'declared gate input (git ignore/scope control)',
+      governedBy:
+        'the gate itself: a change here can change the scanned inventory, so it expands the scope ' +
+        'to the whole repository and is never unmapped',
+      resources: [],
+      nextStep: null,
+    };
+  }
+  const sources = args.resourceSources.get(posix) ?? [];
+  if (sources.length > 0) {
+    return {
+      kind: 'resource-source',
+      what: 'source file of a discovered resource',
+      governedBy: 'the obligations of those resources (each has its own `gateforge explain`)',
+      resources: sources,
+      nextStep: null,
+    };
+  }
+  return {
+    kind: 'unclassified',
+    what:
+      'unclassified product file: no discovered resource claims it as a source and no gate input covers it',
+    governedBy:
+      'strict E2E mode keeps an unmapped change visible and blocking (CHANGE_UNMAPPED) until it is mapped',
+    resources: [],
+    nextStep:
+      'map the resource it belongs to, declare documentation folders with `gateforge init --docs-exclude <folders>`, ' +
+      'or add the detection that owns it. Never weaken the policy.',
+  };
 }
