@@ -36,8 +36,20 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, type TempRepo } from '@gate-forge/core';
 import {
@@ -47,6 +59,7 @@ import {
   FREEZE_RELEASE_FILE,
   FREEZE_REQUEST_FILE,
   FREEZE_REFUSAL_FILE,
+  TRUSTED_REPORTER_OPTIONS_FILE,
   startAttestationProxy,
 } from '@gate-forge/pack-playwright';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
@@ -235,13 +248,108 @@ const BODY_PROJECTS_TABLE: readonly ConsumerProject[] = [
 export const BODY_PROJECTS: readonly string[] = BODY_PROJECTS_TABLE.map((project) => project.name);
 
 /**
- * Every consumer case the fixture suite plans, in the catalog identity
+ * One body project of the root-scanning layout: its identity, the session
+ * it starts from, and the preparation stages it reads that session behind.
+ */
+interface RootScanBody extends ConsumerProject {
+  /** The session cookie this body starts from. */
+  cookie: string;
+  /** The generated state this body declares as its own `use.storageState`. */
+  statePath: string;
+  /** The preparation projects this body depends on, by name. */
+  prerequisites: readonly string[];
+}
+
+/**
+ * The WIDE body project's name: the project that names neither a `testDir`
+ * nor a `testMatch`, so Playwright's own default match collects every spec
+ * file in the repository. That is the common repository-level shape, and it
+ * is the shape in which anything the engine writes INSIDE the candidate
+ * becomes one of the consumer's own tests.
+ */
+export const ROOT_SCAN_BODY_PROJECT = 'chromium';
+
+/** The wide body project: its spec file, its cases, its declared session. */
+const ROOT_SCAN_BODY: RootScanBody = {
+  name: ROOT_SCAN_BODY_PROJECT,
+  file: 'tests/session.spec.js',
+  titles: [
+    'the prepared session authenticates against the protected route',
+    'every preparation chain really ran before this body',
+    ...DELTA_CLAIM_TITLES,
+  ],
+  cookie: 'gamma-session',
+  statePath: '.auth/gamma.json',
+  prerequisites: ['gamma-auth', 'omega-auth'],
+};
+
+/**
+ * The ordinary body projects that give the remaining generated states a
+ * declaring project.
+ *
+ * A generated output is admissible only where some project declared it as
+ * `use.storageState`, and one project declares one state — so a layout
+ * whose wide body project can declare only one of them needs real body
+ * projects for the rest. A SETUP project can never be one of them: a
+ * project's `use` is applied to every context it opens, including the one a
+ * preparation stage opens for itself, and the stage's own state does not
+ * exist until that stage has written it.
+ */
+const ROOT_SCAN_STATE_BODIES: readonly RootScanBody[] = [
+  {
+    name: 'alpha-body',
+    file: 'tests/alpha-session.spec.js',
+    titles: ['the alpha session authenticates against the protected route'],
+    cookie: 'alpha-session',
+    statePath: '.auth/alpha.json',
+    prerequisites: ['alpha-auth'],
+  },
+  {
+    name: 'beta-body',
+    file: 'tests/beta-session.spec.js',
+    titles: ['the beta session authenticates against the protected route'],
+    cookie: 'beta-session',
+    statePath: '.auth/beta.json',
+    prerequisites: ['beta-auth'],
+  },
+  {
+    name: 'omega-body',
+    file: 'tests/omega-session.spec.js',
+    titles: ['the omega session authenticates against the protected route'],
+    cookie: 'omega-session',
+    statePath: '.auth/omega.json',
+    prerequisites: ['omega-auth'],
+  },
+];
+
+/**
+ * Every consumer case one fixture layout plans, in the catalog identity
+ * form the sealed execution result reports: the four preparation cases
+ * plus that layout's body cases.
+ *
+ * @param options: the fixture variant being installed.
+ *
+ * @returns
+ *   string[]: the planned identities.
+ */
+export function consumerCasesFor(options: NativeFixtureOptions = {}): readonly string[] {
+  const bodies =
+    options.rootScanningConfig === true ? [ROOT_SCAN_BODY, ...ROOT_SCAN_STATE_BODIES] : BODY_PROJECTS_TABLE;
+  return [...PREPARATION_PROJECTS, ...bodies].flatMap((project) =>
+    project.titles.map((title) => `playwright:${project.name}:${project.file}:${title}`),
+  );
+}
+
+/**
+ * Every consumer case the DEFAULT layout plans, in the catalog identity
  * form the sealed execution result reports: four preparation cases and
  * seven body cases.
+ *
+ * The one layout that runs a different body set derives its own through
+ * {@link consumerCasesFor}, so no suite ever has to spell a case identity
+ * by hand.
  */
-export const CONSUMER_CASES: readonly string[] = [...PREPARATION_PROJECTS, ...BODY_PROJECTS_TABLE].flatMap((project) =>
-  project.titles.map((title) => `playwright:${project.name}:${project.file}:${title}`),
-);
+export const CONSUMER_CASES: readonly string[] = consumerCasesFor();
 
 /** How many of those cases belong to a body project. */
 export const BODY_CASE_COUNT: number = BODY_PROJECTS_TABLE.reduce(
@@ -316,16 +424,58 @@ export function consumerOf(statePath: string): string {
 }
 
 /**
- * Repo-relative path of the generated controller spec, when armed.
+ * The generated controller's file NAME, wherever this run placed it.
+ *
+ * The engine generates that spec into a private per-run directory of its
+ * own, OUTSIDE the candidate, and removes it when the run ends: no suite
+ * can predict its path, but its name is the engine's own constant, and it
+ * is the name a lifecycle record or a filesystem sweep must recognize.
+ */
+export const CONTROL_SPEC_FILE: string = FREEZE_CONTROL_SPEC_FILE;
+
+/**
+ * Repo-relative path of the control directory: the handshake's own
+ * documents (request, release, refusal), which the run publishes INSIDE
+ * the run-state directory as evidence and never as candidate code.
  *
  * @param stateDir: repo-relative run-state directory the run actually
  *   resolved (`--out`); the configured one when absent.
  *
  * @returns
- *   string: the repo-relative path of the controller spec.
+ *   string: the repo-relative control directory.
  */
-export function controlSpecPath(stateDir: string = DEFAULT_STATE_DIR): string {
-  return `${stateDir}/${FREEZE_CONTROL_DIR}/${FREEZE_CONTROL_SPEC_FILE}`;
+export function controlDirPath(stateDir: string = DEFAULT_STATE_DIR): string {
+  return `${stateDir}/${FREEZE_CONTROL_DIR}`;
+}
+
+/**
+ * Every generated controller spec still inside the repository, as
+ * repo-relative posix paths.
+ *
+ * The sweep never follows a link: `node_modules` is a link into the
+ * workspace in every fixture variant, and a candidate's own link is not
+ * the engine's output. `.git` holds no candidate file of its own.
+ *
+ * @param repo: the repository to sweep.
+ *
+ * @returns
+ *   string[]: the repo-relative spec paths, empty when the repository
+ *   holds no generated controller code.
+ */
+export function controlSpecsInRepo(repo: TempRepo): readonly string[] {
+  const found: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === '.git') continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name === FREEZE_CONTROL_SPEC_FILE) {
+        found.push(relative(repo.root, path).split(sep).join('/'));
+      }
+    }
+  };
+  visit(repo.root);
+  return found.sort();
 }
 
 /** Repo-relative path of the controller's request document. */
@@ -333,9 +483,17 @@ export function controlRequestPath(): string {
   return `${DEFAULT_STATE_DIR}/${FREEZE_CONTROL_DIR}/${FREEZE_REQUEST_FILE}`;
 }
 
-/** Repo-relative path of the CLI's signed release document. */
-export function controlReleasePath(): string {
-  return `${DEFAULT_STATE_DIR}/${FREEZE_CONTROL_DIR}/${FREEZE_RELEASE_FILE}`;
+/**
+ * Repo-relative path of the CLI's signed release document.
+ *
+ * @param stateDir: repo-relative run-state directory the run actually
+ *   resolved (`--out`); the configured one when absent.
+ *
+ * @returns
+ *   string: the repo-relative release path.
+ */
+export function controlReleasePath(stateDir: string = DEFAULT_STATE_DIR): string {
+  return `${stateDir}/${FREEZE_CONTROL_DIR}/${FREEZE_RELEASE_FILE}`;
 }
 
 /** Repo-relative path of the CLI's failure-only refusal document. */
@@ -423,6 +581,157 @@ export async function runNativeCli(
   child.once('error', reject);
   child.once('exit', (code) => resolve({ code: code ?? 1, stdout, stderr }));
   return promise;
+}
+
+/** One untrusted report node, narrowed to a plain record or to nothing. */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  // The narrowing boundary for every report read below: `JSON.parse`
+  // hands back `any`, so a node is reduced to a plain record here — or to
+  // nothing — before any field of it is read.
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** One untrusted value, narrowed to a list (empty when it is not one). */
+function asList(value: unknown): readonly unknown[] {
+  return Array.isArray(value) ? (value as readonly unknown[]) : [];
+}
+
+/** One named string field of an untrusted node, or `''` when absent. */
+function stringField(node: Record<string, unknown>, field: string): string {
+  const value = node[field];
+  return typeof value === 'string' ? value : '';
+}
+
+/**
+ * The cases the CONSUMER'S OWN Playwright lists: its installed CLI, its own
+ * config, its own working directory, and no Gateforge process anywhere in
+ * the invocation — every `GATEFORGE_*` variable is stripped from the child
+ * first. This is exactly the listing an operator gets from `npx playwright
+ * test --list` in their own repository, so a file the engine left behind
+ * inside that repository shows up here whether or not the engine ever runs
+ * again.
+ *
+ * The report is read from the JSON reporter's own output file rather than
+ * from stdout, because a consumer's config routinely prints at load time
+ * and stdout is not a document channel.
+ *
+ * @param repo: the fixture repository.
+ *
+ * @returns
+ *   Promise<{ code, cases, stdout, stderr }>: the CLI result, and one
+ *   `playwright:<project>:<file>:<title>` identity per listed test — the
+ *   same identity form the sealed execution result reports — sorted.
+ */
+export async function listConsumerCases(repo: TempRepo): Promise<{
+  code: number;
+  cases: readonly string[];
+  stdout: string;
+  stderr: string;
+}> {
+  const reportDir = mkdtempSync(join(tmpdir(), 'gateforge-consumer-list-'));
+  const reportPath = join(reportDir, 'reporter.json');
+  // A NULL-PROTOTYPE child map, so stripping one of the engine's own names
+  // cannot reach a prototype setter instead of the entry it names.
+  const childEnv: NodeJS.ProcessEnv = Object.assign(Object.create(null) as NodeJS.ProcessEnv, process.env);
+  for (const key of Object.keys(childEnv)) {
+    if (key.startsWith('GATEFORGE_')) delete childEnv[key];
+  }
+  childEnv['PLAYWRIGHT_JSON_OUTPUT_FILE'] = reportPath;
+  let stdout = '';
+  let stderr = '';
+  try {
+    const child = spawn(
+      process.execPath,
+      [join(repo.root, 'node_modules', 'playwright', 'cli.js'), 'test', '--list', '--reporter=json'],
+      { cwd: repo.root, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
+    const code = await new Promise<number>((settle, fail) => {
+      child.once('error', fail);
+      // `exit` only means the process ended; the reporter may still be
+      // writing, so the captured streams are read only after `close`.
+      child.once('close', (closed) => settle(closed ?? 1));
+    });
+    return { code, cases: consumerCasesFromReport(repo, reportPath, stdout), stdout, stderr };
+  } finally {
+    rmSync(reportDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The listed identities one Playwright JSON report carries, sorted. Every
+ * node in that document is UNTRUSTED input — a runner that reported
+ * nothing, or reported a shape this fixture does not know, yields an empty
+ * set rather than a plausible-looking guess — and a report the runner
+ * never wrote at all leaves nothing to read.
+ *
+ * The runner reports every file relative to ITS OWN root directory — the
+ * config's `testDir`, which is the repository root only for a config that
+ * declares none — so each reported file is resolved against that root and
+ * then made repo-relative, exactly the identity form the catalog and the
+ * sealed execution result speak.
+ *
+ * @param repo: the repository the listing ran in.
+ * @param reportPath: the reporter's own output file.
+ * @param fallback: the captured stdout, read only when the reporter wrote
+ *   no file of its own.
+ *
+ * @returns
+ *   string[]: `playwright:<project>:<file>:<title>` per listed test.
+ */
+function consumerCasesFromReport(repo: TempRepo, reportPath: string, fallback: string): readonly string[] {
+  let text: string;
+  try {
+    text = readFileSync(reportPath, 'utf8');
+  } catch {
+    text = fallback;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return [];
+  }
+  const report = asRecord(parsed);
+  if (report === null) return [];
+  const config = asRecord(report['config']);
+  // A report that names no root directory at all still names files
+  // relative to the directory the listing ran in.
+  const rootDir = config === null ? repo.root : stringField(config, 'rootDir') || repo.root;
+  const cases: string[] = [];
+  // The top-level suites are the FILE suites the report merges across
+  // projects, so only the suites nested below one carry a describe title.
+  const visit = (node: unknown, titlePath: readonly string[]): void => {
+    const suite = asRecord(node);
+    if (suite === null) return;
+    const file = stringField(suite, 'file');
+    for (const entry of asList(suite['specs'])) {
+      const spec = asRecord(entry);
+      if (spec === null) continue;
+      const reported = stringField(spec, 'file') || file;
+      const specFile = relative(repo.root, isAbsolute(reported) ? reported : resolve(rootDir, reported)).split(sep).join('/');
+      const title = stringField(spec, 'title');
+      for (const raw of asList(spec['tests'])) {
+        const test = asRecord(raw);
+        if (test === null) continue;
+        cases.push(`playwright:${stringField(test, 'projectName')}:${specFile}:${[...titlePath, title].join('>')}`);
+      }
+    }
+    for (const nested of asList(suite['suites'])) {
+      const child = asRecord(nested);
+      if (child === null) continue;
+      visit(child, [...titlePath, stringField(child, 'title')]);
+    }
+  };
+  for (const suite of asList(report['suites'])) visit(suite, []);
+  return cases.sort();
 }
 
 /**
@@ -697,12 +1006,38 @@ export interface NativeFixtureOptions {
    *
    * That is the shape of a real consumer project: the template's own
    * `.gitignore` never hid `.gateforge/test-gates/`. It is exactly the
-   * shape in which the engine's OWN generated `.mjs` controller sits
-   * inside the configured scan scope of every LATER command. The first
-   * real native E2E opts in, so its second run and the strict checks
-   * around it exercise that repeat-use of one workspace.
+   * shape in which the run's OWN generated files sit inside the configured
+   * scan scope of every LATER command. The first real native E2E opts in,
+   * so its second run and the strict checks around it exercise that
+   * repeat-use of one workspace.
    */
   initLikeScanInputs?: boolean;
+  /**
+   * The consumer's Playwright config declares NO `testDir` at all, and its
+   * WIDE body project (`chromium`) declares neither a `testDir` nor a
+   * `testMatch`: the directory it collects from is its config's own
+   * directory — the REPOSITORY ROOT — and Playwright's default match
+   * selects every spec file there. That is the common repository-level
+   * Playwright shape, and it is the shape in which the engine's OWN
+   * generated code, wherever the engine happens to write it, becomes one
+   * of the consumer's own tests.
+   *
+   * The four preparation projects are the very same ones every other
+   * layout runs — same chains, same `testMatch`, same states — and they
+   * declare no browser state at all, because a project's `use` reaches
+   * every context it opens and a preparation stage's own state does not
+   * exist until that stage has written it. The other generated states are
+   * declared by ordinary body projects beside the wide one, which ignores
+   * exactly their spec files (see `rootScanningConfig`). This layout's own
+   * case identities are derived through {@link consumerCasesFor}.
+   *
+   * It also leaves the run-state directory OUT of `.gitignore`, like
+   * `initLikeScanInputs` does: a config that names no `testDir` makes
+   * Playwright honour `.gitignore` by default, so a hidden state directory
+   * would take the engine's own files out of the tree this layout exists to
+   * exercise.
+   */
+  rootScanningConfig?: boolean;
 }
 
 /**
@@ -802,13 +1137,20 @@ function plantReleaseStatement(shape: 'unsigned' | 'forged' | 'replay'): string 
       : `{ schemaVersion: 1, payload, signature: createHash('sha256').update('a signature this invocation never made').digest('base64') }`;
   return `
   // The identities THIS run armed, read out of the generated controller
-  // spec the CLI pinned before it spawned the runner, and the sha256 of
-  // that spec's own current bytes. The armed document is emitted as one
-  // escaped JSON literal inside a JSON.parse call — the only shape that
-  // can carry an own '__proto__' key or a value holding a quote — so the
-  // slice is read between the call's open paren and its closing ');'
-  // and parsed twice: once to the literal, once to the document.
-  const specText = readFileSync(${controlDir} + '/${FREEZE_CONTROL_SPEC_FILE}', 'utf8');
+  // spec, and the sha256 of that spec's own current bytes. The engine
+  // generates that spec into a private per-run directory of its own, so
+  // this stage asks the engine's own run record where it went: the
+  // synthesized runner config pins the absolute path, and that document
+  // is written before any worker process exists. The armed document is
+  // emitted as one escaped JSON literal inside a JSON.parse call — the
+  // only shape that can carry an own '__proto__' key or a value holding a
+  // quote — so the slice is read between the call's open paren and its
+  // closing ');' and parsed twice: once to the literal, once to the
+  // document.
+  const pinned = JSON.parse(readFileSync('${DEFAULT_STATE_DIR}/${TRUSTED_REPORTER_OPTIONS_FILE}', 'utf8'));
+  const specPath = String(pinned?.reporterOptions?.controlSpecPath ?? '');
+  expect(specPath.length > 0, 'this run pinned a controller spec').toBe(true);
+  const specText = readFileSync(specPath, 'utf8');
   const armedAt = specText.indexOf('const ARMED = JSON.parse(');
   const armedEnd = specText.indexOf('\\n', armedAt);
   expect(armedAt >= 0 && armedEnd > armedAt, 'this run armed a freeze controller').toBe(true);
@@ -1238,13 +1580,133 @@ ${claims}`;
 }
 
 /**
- * The consumer's Playwright config. Two uneven-depth preparation chains
+ * The wide body project's spec: what a repository-level `chromium` project
+ * really proves.
+ *
+ * The per-chain environment assertions belong to the narrow layout's four
+ * bodies, where each one inherits exactly one chain's projection. This
+ * layout's wide project proves what is true of the whole suite instead: the
+ * session it declares is a signed credential the protected route accepts
+ * (and refuses to an anonymous caller), both preparation chains really
+ * produced their own signed state before it ran, and it carries the
+ * layout's three claim-bearing journeys — the very {@link DELTA_CLAIMS}
+ * the narrow layout's delta body carries, so the obligations they back stay
+ * mapped to a real case in this layout too.
+ *
+ * @returns
+ *   string: the spec source of the wide body project.
+ */
+function rootScanningBodySpec(): string {
+  // The SAME wiring the narrow layout's delta body uses, so the claim
+  // journeys below drive the very same evidence fixtures and register the
+  // very same UI surface: the pack's own `test` (which carries `evidence`)
+  // extended with the shared accounts surface, reached from this
+  // directory one level up.
+  return `import { readFileSync } from 'node:fs';
+import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
+import { accountsSurface } from '../specs/accounts-surface.js';
+const test = gateforgeTest.extend({ surface: accountsSurface });
+
+test('${(ROOT_SCAN_BODY.titles[0] as string)}', async ({ browser, context, page }) => {
+  // The project context starts from the state this project declared, so the
+  // session it proves is a real credential rather than decorative bytes.
+  const own = (await context.cookies()).find((cookie) => cookie.name === '${ROOT_SCAN_BODY.cookie}');
+  expect(own, 'this body started from the session its own chain saved').toBeDefined();
+  expect(own?.value ?? '', 'the generated session is signed').toMatch(/^[0-9a-z]{1,64}\\.[0-9a-f]{64}$/);
+  // The protected route is the authority: 401 to a caller with no
+  // credential at all, 200 only to the session this run signed. The
+  // project's own state is not inherited by a bare newContext() call, so an
+  // explicit EMPTY state is what makes that caller genuinely anonymous.
+  const anonymous = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+  const denied = await (await anonymous.newPage()).goto(String(process.env.SHOP_PROTECTED_URL) + '/session');
+  expect(denied?.status(), 'the route refuses an unauthenticated caller').toBe(401);
+  await anonymous.close();
+  const granted = await page.goto(String(process.env.SHOP_PROTECTED_URL) + '/session');
+  expect(granted?.status(), 'the route accepts the generated session').toBe(200);
+});
+
+test('${(ROOT_SCAN_BODY.titles[1] as string)}', async () => {
+  // Both chains are dependencies of this project, so both files exist by
+  // the time this test runs, and each carries the signed cookie its own
+  // stage minted: the ordering this asserts is what really happened, not a
+  // claim about it.
+  for (const [statePath, cookieName] of [
+    ['.auth/gamma.json', 'gamma-session'],
+    ['.auth/omega.json', 'omega-session'],
+  ]) {
+    const saved = JSON.parse(readFileSync(statePath, 'utf8'));
+    const cookie = saved.cookies.find((entry) => entry.name === cookieName);
+    expect(cookie, statePath + ' carries the ' + cookieName + ' session').toBeDefined();
+    expect(cookie?.value ?? '', cookieName + ' is a signed credential').toMatch(/^[0-9a-z]{1,64}\\.[0-9a-f]{64}$/);
+  }
+});
+
+${DELTA_CLAIMS}`;
+}
+
+/**
+ * One narrow body spec of the root-scanning layout: the body project that
+ * DECLARES a generated state proves it is a signed credential the
+ * protected route accepts, and refuses to an anonymous caller.
+ *
+ * @param body: the body project whose session this spec proves.
+ *
+ * @returns
+ *   string: the spec source of that body project.
+ */
+function rootScanningStateSpec(body: RootScanBody): string {
+  return `import { readFileSync } from 'node:fs';
+import { test, expect } from '@gate-forge/pack-playwright';
+
+test('${(body.titles[0] as string)}', async ({ browser, context, page }) => {
+  // The project context starts from the state this project DECLARED, so the
+  // session it proves is a real credential rather than decorative bytes.
+  const own = (await context.cookies()).find((cookie) => cookie.name === '${body.cookie}');
+  expect(own, 'this body started from the session its own stage saved').toBeDefined();
+  expect(own?.value ?? '', 'the generated session is signed').toMatch(/^[0-9a-z]{1,64}\\.[0-9a-f]{64}$/);
+  const saved = JSON.parse(readFileSync('${body.statePath}', 'utf8'));
+  expect(
+    saved.cookies.some((cookie) => cookie.name === '${body.cookie}'),
+    '${body.statePath} really carries the ${body.cookie} session',
+  ).toBe(true);
+  // The protected route is the authority: 401 to a caller with no credential
+  // at all, 200 only to the session this run signed. The project's own state
+  // is not inherited by a bare newContext() call, so an explicit EMPTY state
+  // is what makes that caller genuinely anonymous.
+  const anonymous = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+  const denied = await (await anonymous.newPage()).goto(String(process.env.SHOP_PROTECTED_URL) + '/session');
+  expect(denied?.status(), 'the route refuses an unauthenticated caller').toBe(401);
+  await anonymous.close();
+  const granted = await page.goto(String(process.env.SHOP_PROTECTED_URL) + '/session');
+  expect(granted?.status(), 'the route accepts the generated session').toBe(200);
+});
+`;
+}
+
+/**
+ * The consumer's Playwright config, in one of two real shapes:
+ * {@link narrowSpecConfig} — two uneven-depth preparation chains
  * (`alpha-auth` → `beta-auth` → `gamma-auth`, plus the independent
- * `omega-auth`) and four bodies: one that depends on both chains, one on
- * the independent chain, one with NO edges of its own, and one more
- * consumer of the deepest chain's generated state. Every generated state
- * file is declared as some project's `use.storageState`, so the engine's
- * sealed native config nominates all four as generated targets.
+ * `omega-auth`) and four bodies, one per chain — or
+ * {@link rootScanningConfig}, the repository-level shape. In both, every
+ * generated state file is declared as some body's `use.storageState`, so
+ * the engine's sealed native config nominates all four as generated
+ * targets.
+ *
+ * @param options: the fixture variant (a consumer may claim the engine's
+ *   own controller name, which is a conflict the freeze must refuse, and
+ *   one layout declares no `testDir` at all).
+ *
+ * @returns
+ *   string: the consumer config source.
+ */
+function playwrightConfig(options: NativeFixtureOptions): string {
+  return options.rootScanningConfig === true ? rootScanningConfig() : narrowSpecConfig(options);
+}
+
+/**
+ * The narrow layout's config: one `testDir` and one `testMatch` per
+ * project, so each project runs exactly the one spec it names.
  *
  * @param options: the fixture variant (a consumer may claim the engine's
  *   own controller name, which is a conflict the freeze must refuse).
@@ -1252,7 +1714,7 @@ ${claims}`;
  * @returns
  *   string: the consumer config source.
  */
-function playwrightConfig(options: NativeFixtureOptions): string {
+function narrowSpecConfig(options: NativeFixtureOptions): string {
   const reserved =
     options.reservedProjectName === true
       ? `    { name: '${CONTROL_PROJECT}', testMatch: 'alpha-auth.setup.js' },\n`
@@ -1282,6 +1744,58 @@ ${reserved}  ],
 }
 
 /**
+ * The root-scanning layout's config: the shape of a real repository-level
+ * Playwright setup. The config declares NO `testDir` at all, the four
+ * preparation projects name their own file and declare NO browser state,
+ * and the WIDE body project (`chromium`) names neither a `testDir` nor a
+ * `testMatch` — so Playwright's own default match collects every spec file
+ * in the repository, the run state included whenever a run leaves generated
+ * code there.
+ *
+ * The narrow body projects beside it are ordinary consumers: each declares
+ * one generated state as its own `use.storageState`, which is what makes
+ * that write an admissible generated output (the engine nominates generated
+ * targets from declared states alone), and each runs its own spec file. The
+ * wide project ignores exactly THOSE files and nothing else — never the
+ * state directory, never `.gateforge/**` — so it still collects whatever a
+ * run leaves in the repository, and never runs another project's case.
+ *
+ * @returns
+ *   string: the consumer config source.
+ */
+function rootScanningConfig(): string {
+  const declaringBodies = ROOT_SCAN_STATE_BODIES.map(
+    (body) =>
+      `    { name: '${body.name}', testMatch: '${basename(body.file)}', ` +
+      `dependencies: [${body.prerequisites.map((name) => `'${name}'`).join(', ')}], ` +
+      `use: { storageState: '${body.statePath}' } },\n`,
+  ).join('');
+  const ignoredByWideProject = ROOT_SCAN_STATE_BODIES.map((body) => `'${body.file}'`).join(', ');
+  const wideEdges = ROOT_SCAN_BODY.prerequisites.map((name) => `'${name}'`).join(', ');
+  const wideProject =
+    `    { name: '${ROOT_SCAN_BODY_PROJECT}', testIgnore: [${ignoredByWideProject}], ` +
+    `dependencies: [${wideEdges}], use: { storageState: '${ROOT_SCAN_BODY.statePath}' } },\n`;
+  return `import { defineConfig } from 'playwright/test';
+
+export default defineConfig({
+  fullyParallel: false,
+  workers: 1,
+  retries: 0,
+  forbidOnly: true,
+  projects: [
+    { name: 'alpha-auth', testMatch: 'alpha-auth.setup.js' },
+    { name: 'beta-auth', testMatch: 'beta-auth.setup.js', dependencies: ['alpha-auth'] },
+    { name: 'gamma-auth', testMatch: 'gamma-auth.setup.js', dependencies: ['beta-auth'] },
+    { name: 'omega-auth', testMatch: 'omega-auth.setup.js' },
+${declaringBodies}${wideProject}
+  ],
+  use: { headless: true, trace: 'off', browserName: 'chromium' },
+  timeout: 60_000,
+});
+`;
+}
+
+/**
  * Installs the fixture repository and commits it: a real consumer project
  * whose eight Playwright projects prepare real session state and consume it
  * through four bodies.
@@ -1294,15 +1808,20 @@ ${reserved}  ],
  */
 export function installNativeFreezeFixture(repo: TempRepo, options: NativeFixtureOptions = {}): void {
   // A repository at `init`'s defaults declares every parseable source
-  // file as a scan input, so the engine's OWN generated `.mjs`
-  // controller inside the state directory falls inside the scan scope of
-  // the NEXT command over the same workspace. That is the consumer shape
-  // this variant reproduces; every other variant keeps the narrow
-  // `src/**` + `specs/**` scope it always had.
+  // file as a scan input, so the engine's OWN generated files inside the
+  // state directory fall inside the scan scope of the NEXT command over
+  // the same workspace. That is the consumer shape this variant
+  // reproduces; every other variant keeps the narrow `src/**` +
+  // `specs/**` scope it always had.
+  // The root-scanning layout's wide project runs specs under `tests/`, so
+  // that layout's narrow scan scope has to reach them; the two opt-in
+  // scopes above and below never change the default one.
   const scanInclude =
     options.initLikeScanInputs === true
       ? "['**/*.js', '**/*.jsx', '**/*.mjs', '**/*.cjs']"
-      : "['src/**', 'specs/**']";
+      : options.rootScanningConfig === true
+        ? "['src/**', 'specs/**', 'tests/**']"
+        : "['src/**', 'specs/**']";
   const gateforgeConfig = `schemaVersion: 1
 project:
   languages: [javascript]
@@ -1351,86 +1870,96 @@ enforcement:
     'specs/beta-auth.setup.js': betaSpec(),
     'specs/gamma-auth.setup.js': gammaSpec(),
     'specs/omega-auth.setup.js': omegaSpec(options),
-    'specs/delta-body.spec.js': bodySpec({
-      title: (BODY_PROJECTS_TABLE[0] as ConsumerProject).titles[0] as string,
-      ownCookie: ownCookie ?? 'beta-session',
-      fileCookie: 'beta-session',
-      statePath: '.auth/beta.json',
-      // Its OWN chain's values, in the order that chain produced them:
-      // beta's region, gamma's tier, and the ticket alpha created two hops
-      // up. Ordinary native propagation along a dependency chain is
-      // CUMULATIVE, so a value an earlier stage produced is still present
-      // when this body starts.
-      expectEnv: {
-        ...prototypeAlphaChain,
-        SHOP_REGION: 'beta-region',
-        SHOP_TIER: 'gamma-tier',
-        [INTRODUCED_KEY]: 'alpha-created',
-      },
-      // The one ordinary baseline key that chain revoked, and only that
-      // one: a deletion travels the chain exactly as a creation does.
-      absentEnv: [DELETED_BASELINE_KEY],
-      claims: DELTA_CLAIMS,
-    }),
-    'specs/epsilon-body.spec.js': bodySpec({
-      title: (BODY_PROJECTS_TABLE[1] as ConsumerProject).titles[0] as string,
-      ownCookie: ownCookie ?? 'omega-session',
-      fileCookie: 'omega-session',
-      statePath: '.auth/omega.json',
-      // Its own chain's values, plus the baseline values another chain
-      // never touched and another chain DID revoke: both come back
-      // untouched here, because they were projected back to the baseline.
-      expectEnv: {
-        ...prototypeBaseline,
-        SHOP_REGION: 'omega-region',
-        [INTRODUCED_KEY]: 'omega-created',
-        SHOP_TIER: 'gold',
-        [DELETED_BASELINE_KEY]: 'deprecated',
-      },
-      absentEnv: [],
-    }),
-    'specs/zeta-body.spec.js': bodySpec({
-      title: (BODY_PROJECTS_TABLE[2] as ConsumerProject).titles[0] as string,
-      ownCookie: ownCookie ?? 'alpha-session',
-      fileCookie: 'alpha-session',
-      statePath: '.auth/alpha.json',
-      // An independent project has no edge of its own, so EVERY ordinary
-      // baseline value is back exactly as it was and nothing a preparation
-      // stage produced survives.
-      expectEnv: {
-        ...prototypeBaseline,
-        SHOP_REGION: 'eu-west',
-        SHOP_TIER: 'gold',
-        [DELETED_BASELINE_KEY]: 'deprecated',
-      },
-      absentEnv: [INTRODUCED_KEY],
-      rewriteState: options.bodyRewritesGeneratedState === true,
-    }),
-    'specs/eta-body.spec.js': bodySpec({
-      title: (BODY_PROJECTS_TABLE[3] as ConsumerProject).titles[0] as string,
-      ownCookie: ownCookie ?? 'gamma-session',
-      fileCookie: 'gamma-session',
-      statePath: '.auth/gamma.json',
-      // The tail of the deepest chain inherits that WHOLE chain's
-      // environment, not only its immediate prerequisite's: gamma set the
-      // tier, beta's region reached this body two hops down, and alpha's
-      // ticket three hops down.
-      expectEnv: {
-        ...prototypeAlphaChain,
-        SHOP_TIER: 'gamma-tier',
-        SHOP_REGION: 'beta-region',
-        [INTRODUCED_KEY]: 'alpha-created',
-      },
-      // The baseline key that same chain revoked one hop above still does
-      // not come back: a deletion travels the chain as a creation does.
-      absentEnv: [DELETED_BASELINE_KEY],
-    }),
+    // The four narrow body projects, each selected by its own `testMatch`
+    // — or, in the root-scanning layout, the wide project that collects
+    // every spec file in the repository together with the ordinary body
+    // projects that declare the states it cannot.
+    ...(options.rootScanningConfig === true
+      ? Object.fromEntries([
+          [ROOT_SCAN_BODY.file, rootScanningBodySpec()],
+          ...ROOT_SCAN_STATE_BODIES.map((body) => [body.file, rootScanningStateSpec(body)] as const),
+        ])
+      : {
+          'specs/delta-body.spec.js': bodySpec({
+            title: (BODY_PROJECTS_TABLE[0] as ConsumerProject).titles[0] as string,
+            ownCookie: ownCookie ?? 'beta-session',
+            fileCookie: 'beta-session',
+            statePath: '.auth/beta.json',
+            // Its OWN chain's values, in the order that chain produced them:
+            // beta's region, gamma's tier, and the ticket alpha created two hops
+            // up. Ordinary native propagation along a dependency chain is
+            // CUMULATIVE, so a value an earlier stage produced is still present
+            // when this body starts.
+            expectEnv: {
+              ...prototypeAlphaChain,
+              SHOP_REGION: 'beta-region',
+              SHOP_TIER: 'gamma-tier',
+              [INTRODUCED_KEY]: 'alpha-created',
+            },
+            // The one ordinary baseline key that chain revoked, and only that
+            // one: a deletion travels the chain exactly as a creation does.
+            absentEnv: [DELETED_BASELINE_KEY],
+            claims: DELTA_CLAIMS,
+          }),
+          'specs/epsilon-body.spec.js': bodySpec({
+            title: (BODY_PROJECTS_TABLE[1] as ConsumerProject).titles[0] as string,
+            ownCookie: ownCookie ?? 'omega-session',
+            fileCookie: 'omega-session',
+            statePath: '.auth/omega.json',
+            // Its own chain's values, plus the baseline values another chain
+            // never touched and another chain DID revoke: both come back
+            // untouched here, because they were projected back to the baseline.
+            expectEnv: {
+              ...prototypeBaseline,
+              SHOP_REGION: 'omega-region',
+              [INTRODUCED_KEY]: 'omega-created',
+              SHOP_TIER: 'gold',
+              [DELETED_BASELINE_KEY]: 'deprecated',
+            },
+            absentEnv: [],
+          }),
+          'specs/zeta-body.spec.js': bodySpec({
+            title: (BODY_PROJECTS_TABLE[2] as ConsumerProject).titles[0] as string,
+            ownCookie: ownCookie ?? 'alpha-session',
+            fileCookie: 'alpha-session',
+            statePath: '.auth/alpha.json',
+            // An independent project has no edge of its own, so EVERY ordinary
+            // baseline value is back exactly as it was and nothing a preparation
+            // stage produced survives.
+            expectEnv: {
+              ...prototypeBaseline,
+              SHOP_REGION: 'eu-west',
+              SHOP_TIER: 'gold',
+              [DELETED_BASELINE_KEY]: 'deprecated',
+            },
+            absentEnv: [INTRODUCED_KEY],
+            rewriteState: options.bodyRewritesGeneratedState === true,
+          }),
+          'specs/eta-body.spec.js': bodySpec({
+            title: (BODY_PROJECTS_TABLE[3] as ConsumerProject).titles[0] as string,
+            ownCookie: ownCookie ?? 'gamma-session',
+            fileCookie: 'gamma-session',
+            statePath: '.auth/gamma.json',
+            // The tail of the deepest chain inherits that WHOLE chain's
+            // environment, not only its immediate prerequisite's: gamma set the
+            // tier, beta's region reached this body two hops down, and alpha's
+            // ticket three hops down.
+            expectEnv: {
+              ...prototypeAlphaChain,
+              SHOP_TIER: 'gamma-tier',
+              SHOP_REGION: 'beta-region',
+              [INTRODUCED_KEY]: 'alpha-created',
+            },
+            // The baseline key that same chain revoked one hop above still does
+            // not come back: a deletion travels the chain as a creation does.
+            absentEnv: [DELETED_BASELINE_KEY],
+          }),
+        }),
     'playwright.config.mjs': playwrightConfig(options),
     // The MIXED module scope: with `mixedModuleScope`, the root package
-    // declares no module kind at all — so CommonJS is the default for every
-    // file under it, including the generated freeze controller the CLI
-    // writes into the state directory — while the spec directory carries an
-    // ESM package of its own. The native config is an `.mjs` module either
+    // declares no module kind at all — so CommonJS is the default for
+    // every file under it — while the spec directory carries an ESM
+    // package of its own. The native config is an `.mjs` module either
     // way, so the configuration itself is never what changes.
     ...(options.mixedModuleScope === true
       ? {
@@ -1441,14 +1970,16 @@ enforcement:
     // `.auth/` is gitignored: the preparation stages write their genuine
     // session state there, so it exists as ignored workspace bytes and
     // never in a commit. The run-state directory is gitignored for the
-    // same reason in every variant that always had it — except the
-    // init-like one, where a real consumer's `.gitignore` does NOT hide
-    // it, so the persisted controller really is untracked-but-visible
-    // workspace bytes of the shape a second command enumerates.
+    // same reason in every layout that always had it — except the two
+    // opt-in consumer shapes, where a real consumer's `.gitignore` does
+    // NOT hide it: the run's own control documents really are then
+    // untracked-but-visible workspace bytes of the shape a later command
+    // enumerates, and a root-scanning config whose runner honours
+    // `.gitignore` really does walk that directory.
     '.gitignore': [
       'node_modules',
       '.auth/',
-      ...(options.initLikeScanInputs === true ? [] : [DEFAULT_STATE_DIR]),
+      ...(options.initLikeScanInputs === true || options.rootScanningConfig === true ? [] : [DEFAULT_STATE_DIR]),
       '',
     ].join('\n'),
   });

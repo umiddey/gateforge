@@ -399,7 +399,11 @@ export async function executeSupervisedPlaywright(
   // therefore appended, and ONLY when filters are present: with zero
   // filters the whole trusted config runs, adding the file on its own
   // would narrow a full suite to the control alone. The reporter still
-  // excludes that file by identity, so it contributes no case.
+  // excludes that file by identity, so it contributes no case. That path
+  // points OUTSIDE the repository (the spec's private per-run
+  // directory), which is exactly what the runner's positional filter
+  // matches on — the reported file location, not a path below the
+  // config's `testDir`.
   const controlLocation = freeze === null || locations.length === 0 ? [] : [freeze.control.specPath];
   const argv = isStub
     ? [...baseCommand, 'test', '--retries=0', ...locations, ...controlLocation]

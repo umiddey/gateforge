@@ -95,13 +95,15 @@ export const ENGINE_GENERATED_STATE_FILES: readonly string[] = [
   // (pack-playwright `synthesizeTrustedConfig`).
   TRUSTED_CONFIG_FILE,
   TRUSTED_REPORTER_OPTIONS_FILE,
-  // The global native preparation freeze's generated control files
-  // (pack-playwright `discovery/prepare-barrier.ts`). The controller
-  // spec is a `.ts` file the ENGINE generates inside the state
-  // directory — exactly the shape that became a declared input for the
-  // synthesized runner config above, so its name must be registered here
-  // or the documented `check` → `next` sequence would exit 2 in the very
-  // repository that had just run.
+  // The global native preparation freeze's control documents
+  // (pack-playwright `discovery/prepare-barrier.ts`): the controller's
+  // request, the CLI's signed release and its refusal document. The
+  // controller SPEC is generated into a private per-run directory
+  // OUTSIDE the repository, so it is no longer written here; its name
+  // stays registered because a repository that still carries a copy
+  // from an earlier build must be owned by this boundary (an exempt
+  // output) rather than refused as an undeclared input — exactly the
+  // hole the synthesized runner config above already opened.
   FREEZE_CONTROL_SPEC_FILE,
   FREEZE_REFUSAL_FILE,
   FREEZE_RELEASE_FILE,
@@ -125,11 +127,12 @@ export const ENGINE_GENERATED_STATE_SUBTREES: readonly string[] = [
   'diagnostics',
   'history',
   // The freeze barrier's control directory (pack-playwright
-  // `FREEZE_CONTROL_DIR` = `native-freeze`): the generated controller
-  // spec, the controller's request document and the CLI's signed
-  // release. The engine owns every byte below here, so the subtree is
-  // the honest registration even though the three fixed names above
-  // already cover today's files.
+  // `FREEZE_CONTROL_DIR` = `native-freeze`): the controller's request
+  // document, the CLI's signed release and its refusal document — and,
+  // for a repository that still carries one from an earlier build, the
+  // generated controller spec. The engine owns every byte below here,
+  // so the subtree is the honest registration even though the fixed
+  // names above already cover today's files.
   FREEZE_CONTROL_DIR,
   'playwright-artifacts',
   'pytest',
@@ -172,11 +175,12 @@ export function isEngineGeneratedStatePath(stateRelativePath: string): boolean {
  * artifact in the closed-world registry above.
  *
  * Why the seed needs it: the state directory holds real
- * source-shaped files (`trusted.playwright.config.mjs`, the freeze
- * controller spec), and `gateforge init` declares `.mjs`/`.js`/`.ts`
- * scan globs — so after the first run those OUTPUT files were
- * harvested back as tests the repository never declared, and the
- * second run planned a case the runner cannot enumerate.
+ * source-shaped files (`trusted.playwright.config.mjs`, and the freeze
+ * control documents an earlier build parked there), and `gateforge init`
+ * declares `.mjs`/`.js`/`.ts` scan globs — so after the first run those
+ * OUTPUT files were harvested back as tests the repository never
+ * declared, and the second run planned a case the runner cannot
+ * enumerate.
  *
  * What it deliberately does NOT do:
  * - it is a SEED veto only. The native `--list` enumeration, import

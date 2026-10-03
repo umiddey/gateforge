@@ -215,10 +215,11 @@ export interface ProjectScope {
   /**
    * This project's OWN `testDir` (absolute), when it collects files from
    * somewhere other than the config's `testDir`. Only the engine's freeze
-   * controller uses it: its spec is GENERATED code inside the excluded
-   * run-state subtree, which is not necessarily under the repo root the
-   * config pins as `testDir`. A consumer project never gets one — the
-   * files it runs are always repo-relative to the identity root.
+   * controller uses it: its spec is GENERATED code in a private per-run
+   * directory OUTSIDE the repository, which the config's own repo-root
+   * `testDir` never covers and the consumer's own configuration can
+   * never collect. A consumer project never gets one — the files it runs
+   * are always repo-relative to the identity root.
    */
   testDir?: string;
 }

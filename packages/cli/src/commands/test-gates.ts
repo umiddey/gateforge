@@ -138,6 +138,7 @@ import {
   mintFreezeSigningKeyPair,
   nativeConfigDirOf,
   playwrightTestModulePath,
+  removeFreezeSpecDir,
   signFreezeRelease,
   spoolPathFor,
   supervisedRunnerChildEnv,
@@ -2544,8 +2545,9 @@ async function runSupervisedTestGatesInner(
       config,
       collectPytest: true,
       // The state directory this run ACTUALLY resolved (`--out` aware):
-      // the supervised run's own generated config and freeze controller
-      // must not be harvested back as declared tests on a repeat run.
+      // the supervised run's own generated config — and, for a
+      // repository carrying one, an earlier build's freeze control files
+      // — must not be harvested back as declared tests on a repeat run.
       excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
     });
     catalog = discovered.catalog;
@@ -4091,28 +4093,36 @@ async function runSupervisedTestGatesInner(
   if (adapter !== null) {
     // Registration must be identical under planning's scrubbed env and
     // the exact safe run variables before any Playwright test can execute.
-    let wiredNative: NativeListResult;
+    //
+    // Either refusal ends this run BEFORE the supervised window, so it
+    // never reaches the cleanup that follows the final control-spec pin.
+    // The generated controller spec is removed here for the same reason
+    // the witness is stopped here: a run that is over must leave nothing
+    // of itself behind, whatever it refused on.
     try {
-      wiredNative = await listNativePlaywrightTests({ cwd: io.cwd, wiredEnv: suiteEnv });
+      const wiredNative: NativeListResult = await listNativePlaywrightTests({
+        cwd: io.cwd,
+        wiredEnv: suiteEnv,
+      });
+      const registrationDiff = diffNativePlaywrightTests(nativeInstances, wiredNative.instances);
+      if (registrationDiff.scrubbedOnly.length > 0 || registrationDiff.wiredOnly.length > 0) {
+        const details = [
+          ...registrationDiff.scrubbedOnly.map(
+            (instance) => `only with scrubbed env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
+          ),
+          ...registrationDiff.wiredOnly.map(
+            (instance) => `only with wired env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
+          ),
+        ];
+        throw new UsageError(
+          'test-gates: Playwright registration differs between scrubbed and wired --list; no tests were executed\n' +
+            details.join('\n'),
+        );
+      }
     } catch (error) {
       if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+      if (armedFreeze !== null) removeFreezeSpecDir(armedFreeze.control);
       throw error;
-    }
-    const registrationDiff = diffNativePlaywrightTests(nativeInstances, wiredNative.instances);
-    if (registrationDiff.scrubbedOnly.length > 0 || registrationDiff.wiredOnly.length > 0) {
-      if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
-      const details = [
-        ...registrationDiff.scrubbedOnly.map(
-          (instance) => `only with scrubbed env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
-        ),
-        ...registrationDiff.wiredOnly.map(
-          (instance) => `only with wired env: ${instance.file} [${instance.project}] ${instance.titlePath.join(' > ')}`,
-        ),
-      ];
-      throw new UsageError(
-        'test-gates: Playwright registration differs between scrubbed and wired --list; no tests were executed\n' +
-          details.join('\n'),
-      );
     }
   }
   // 6. Execute through the adapter under trusted-config synthesis (the
@@ -4239,9 +4249,9 @@ async function runSupervisedTestGatesInner(
     // Both are checked BEFORE anything is snapshotted or signed: they
     // are inputs to the release decision, not consequences of it.
     //
-    // The spec is GENERATED engine code in the excluded run-state
-    // subtree and the controller can rewrite its own file (it runs
-    // inside the same boundary), so a release signed over a digest
+    // The spec is GENERATED engine code and the controller can rewrite
+    // its own file (it runs as a worker on this same host, from its own
+    // private per-run directory), so a release signed over a digest
     // nothing re-checks would bind a control file nobody verified. The
     // CLI therefore compares the file itself, never the file's own
     // report of itself.
@@ -4394,6 +4404,10 @@ async function runSupervisedTestGatesInner(
   let sessionTrace: readonly TracedTestInput[] | null = null;
   let lifecycleConflicts: string[] = [];
   let intentFailures: string[] = [];
+  // The FINAL control-spec verdict, decided in the `finally` below — at
+  // the close of the supervised window, which is the last moment the
+  // generated spec is read — and consumed below, after the run sealed.
+  let controlSpecDrift: string | null = null;
   // Witnessed pytest participants (server-witnessed persistence channel):
   // typed blocking details for any witnessed suite that did not complete
   // cleanly — collected inside the supervised window below.
@@ -4623,6 +4637,50 @@ async function runSupervisedTestGatesInner(
       writeLine(io.stderr, `warning: host-load diagnostics could not be written: ${(error as Error).message}`);
     }
     executionDurationMs = Math.max(0, Math.round(performance.now() - executionStartedAt));
+    // The FINAL control-spec pin, and the LAST read of the spec.
+    //
+    // It runs here, at the close of the supervised window: after the
+    // runner child exited and the drain stopped, so nothing can still be
+    // executing the controller, and still before ANY receipt, result or
+    // carried re-seal is accepted below — because everything downstream
+    // of this point claims the prepared candidate was frozen under
+    // control nobody replaced. The request-time check proved the pinned
+    // bytes were intact before the release was signed; the bodies then
+    // ran against that control. This is the same guard the synthesized
+    // runner config gets in the pack (`supervised-run.ts`, pinned before
+    // the spawn and compared again after the child exits) and it is
+    // deliberately SEPARATE from it: the trusted config is the whole
+    // authority the runner executes, while the control SPEC is the
+    // handshake document, and one check does not cover the other.
+    //
+    // A control file that moved during the run is an integrity failure,
+    // not a recoverable outcome: fail closed, name the path, write
+    // nothing. As everywhere else here, this is a same-UID
+    // replace-and-restore LIMIT, not a physical sandbox — an attacker
+    // who restores the file between the two reads stays outside this
+    // boundary.
+    if (armedFreeze !== null) {
+      let finalSpecDigest: string | null;
+      try {
+        finalSpecDigest = createHash('sha256').update(readFileSync(armedFreeze.control.specPath)).digest('hex');
+      } catch {
+        finalSpecDigest = null;
+      }
+      if (finalSpecDigest !== armedFreeze.specDigest) {
+        controlSpecDrift =
+          `the generated freeze controller spec at '${armedFreeze.control.specPath}' no longer matches the bytes ` +
+          `this run pinned (expected ${armedFreeze.specDigest.slice(0, 12)}…, found ` +
+          `${finalSpecDigest === null ? 'no readable file' : `${finalSpecDigest.slice(0, 12)}…`}), so the ` +
+          'prepared candidate this run would seal cannot be shown to come from the control it froze under (fail closed)';
+      }
+      // The spec has served its run and nothing above this line reads it
+      // again, so the private directory that held it goes now: no
+      // generated engine file outlives the run inside the candidate's
+      // own bytes. This `finally` covers every outcome of the supervised
+      // window — a completed run, a refusal, an incomplete execution, a
+      // throw — so none of them keeps it.
+      removeFreezeSpecDir(armedFreeze.control);
+    }
   }
   // The suite has finished: close the stream (grading follows) and keep
   // the screened failing-test diagnosis as a Gateforge-owned artifact,
@@ -5021,40 +5079,6 @@ async function runSupervisedTestGatesInner(
   // the prerequisite stage — never a rebound baseline, and never a second
   // snapshot. Both the final drift check and the receipt bind this value.
   const testedTreeId = acceptedPreparedIdentity()?.preparedTreeId ?? frozenTreeId;
-
-  // The FINAL control-spec pin. The request-time check proved the pinned
-  // bytes were intact before the release was signed; the bodies then ran
-  // against that control. This is the same guard the synthesized runner
-  // config gets in the pack (`supervised-run.ts`, pinned before the
-  // spawn and compared again after the child exits) and it is deliberately
-  // SEPARATE from it: the trusted config is the whole authority the runner
-  // executes, while the control SPEC is the handshake document, and one
-  // check does not cover the other.
-  //
-  // It runs here, after the run and before ANY receipt, result or carried
-  // re-seal is accepted, because everything downstream of this point
-  // claims the prepared candidate was frozen under control nobody
-  // replaced. A control file that moved during the run is an integrity
-  // failure, not a recoverable outcome: fail closed, name the path, and
-  // write nothing. As everywhere else here, this is a same-UID
-  // replace-and-restore LIMIT, not a physical sandbox: an attacker who
-  // restores the file between the two reads stays outside this boundary.
-  let controlSpecDrift: string | null = null;
-  if (armedFreeze !== null) {
-    let finalSpecDigest: string | null;
-    try {
-      finalSpecDigest = createHash('sha256').update(readFileSync(armedFreeze.control.specPath)).digest('hex');
-    } catch {
-      finalSpecDigest = null;
-    }
-    if (finalSpecDigest !== armedFreeze.specDigest) {
-      controlSpecDrift =
-        `the generated freeze controller spec at '${armedFreeze.control.specPath}' no longer matches the bytes ` +
-        `this run pinned (expected ${armedFreeze.specDigest.slice(0, 12)}…, found ` +
-        `${finalSpecDigest === null ? 'no readable file' : `${finalSpecDigest.slice(0, 12)}…`}), so the ` +
-        'prepared candidate this run would seal cannot be shown to come from the control it froze under (fail closed)';
-    }
-  }
 
   // The test-only re-seal must hold against the tree this run actually
   // TESTED, and the fresh outcomes it issues must be EXACTLY the tests

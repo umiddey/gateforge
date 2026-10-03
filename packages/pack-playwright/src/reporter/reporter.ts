@@ -283,8 +283,11 @@ export interface GateforgeReporterOptions {
    * The comparison is on the resolved absolute path (never a title, a
    * basename or a project-name prefix), so a candidate test that merely
    * borrows the controller's name — or lives beside it — is never
-   * excluded. Absent means every reported test is a candidate case,
-   * exactly as before.
+   * excluded. The path arrives already symlink-resolved: the spec lives
+   * in a private per-run temporary directory (`/tmp` is commonly a
+   * symlink), and the runner reports it under the `testDir` the config
+   * was handed, so both sides must name the same physical file. Absent
+   * means every reported test is a candidate case, exactly as before.
    */
   controlSpecPath?: string;
 }

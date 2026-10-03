@@ -156,6 +156,7 @@ export {
   mintFreezeSigningKeyPair,
   projectBaselineEnv,
   readFreezeRequest,
+  removeFreezeSpecDir,
   signFreezeRelease,
   writeFreezeRefusal,
   verifyFreezeRelease,

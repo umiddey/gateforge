@@ -37,14 +37,18 @@ import {
   BODY_PROJECTS,
   candidateTreeIdOf,
   CONSUMER_CASES,
+  consumerCasesFor,
   CONTROL_PROJECT,
+  CONTROL_SPEC_FILE,
+  controlDirPath,
   controlRefusalPath,
   controlReleasePath,
   controlRequestPath,
-  controlSpecPath,
+  controlSpecsInRepo,
   GENERATED_STATE,
   installNativeFreezeFixture,
   installOperatorState,
+  listConsumerCases,
   nativeRunEnv,
   newestSpoolLines,
   type NativeFixtureOptions,
@@ -162,8 +166,8 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           // a declared scan input, and the run-state directory is ordinary
           // untracked workspace bytes rather than a gitignored one. That is
           // what makes the SECOND run in this very test the same situation a
-          // real repository reaches — the engine's own generated controller
-          // is inside the configured scan scope of every later command.
+          // real repository reaches — the run's own control documents are
+          // inside the configured scan scope of every later command.
           installNativeFreezeFixture(repo, { initLikeScanInputs: true });
           writeCandidateChange(repo);
           const preRunTree = candidateTreeIdOf(repo);
@@ -185,7 +189,7 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           // row, no outcome row, no witness session, no claim.
           expect(sealed?.planned.filter((row) => row.project === CONTROL_PROJECT)).toEqual([]);
           expect(sealed?.outcomes.filter((outcome) => outcome.project === CONTROL_PROJECT)).toEqual([]);
-          expect(sealed?.sessionTrace?.filter((traced) => traced.file.includes(controlSpecPath()))).toEqual([]);
+          expect(sealed?.sessionTrace?.filter((traced) => traced.file.includes(CONTROL_SPEC_FILE))).toEqual([]);
           expect(freezeOrdering(spoolLines(repo)).controller, 'the controller is not a native lifecycle').toEqual([]);
 
           // The zero-claim preparation stages are genuine executions: each
@@ -238,11 +242,14 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
             expect(index, 'a body test began before the accepted release').toBeGreaterThan(marker);
           }
 
-          // The engine's own controller was written into the state
-          // directory of this workspace, and it is still there: nothing in
-          // this run — or in the check that follows it — may make the gate
-          // pass by deleting the engine's own output.
-          expect(existsSync(repo.path(controlSpecPath())), 'the generated controller persists').toBe(true);
+          // The handshake's own evidence stays in the run state — the
+          // controller asked, the CLI published a signed release, and the
+          // spool carries the one accepted marker — while the generated
+          // controller CODE does not stay behind in this candidate at all:
+          // it is the engine's, it is written per run, and a consumer's
+          // own runner must never find it sitting in their repository.
+          expect(existsSync(repo.path(controlReleasePath())), 'the CLI published its signed release').toBe(true);
+          expect(controlSpecsInRepo(repo), 'no generated controller code was left in this repository').toEqual([]);
 
           // The strict check over the very same prepared candidate.
           const check = await runNativeCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], first.env);
@@ -255,9 +262,9 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           expect(second.code, `second run stdout:\n${second.stdout}\nstderr:\n${second.stderr}`).toBe(0);
           expect(sealedReceipt(repo)?.candidateTreeId).toBe(preparedTree);
           // The second run planned and executed EXACTLY the same consumer
-          // cases: the persisted `.mjs` controller the first run left behind
-          // is not a planned row, an outcome row or an unresolved gap, so
-          // the identities stay the catalog's own.
+          // cases: nothing the first run left behind in this workspace is a
+          // planned row, an outcome row or an unresolved gap, so the
+          // identities stay the catalog's own.
           const resealed = sealedExecution(repo);
           expect(resealed?.complete).toBe(true);
           expect(resealed?.planned.map((row) => row.logicalKey).sort()).toEqual([...CONSUMER_CASES].sort());
@@ -265,9 +272,129 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           expect(resealed?.outcomes.every((outcome) => outcome.status === 'passed' && outcome.attempt === 1)).toBe(true);
           expect(resealed?.planned.filter((row) => row.project === CONTROL_PROJECT)).toEqual([]);
           expect(resealed?.outcomes.filter((outcome) => outcome.project === CONTROL_PROJECT)).toEqual([]);
-          expect(resealed?.sessionTrace?.filter((traced) => traced.file.includes(controlSpecPath()))).toEqual([]);
+          expect(resealed?.sessionTrace?.filter((traced) => traced.file.includes(CONTROL_SPEC_FILE))).toEqual([]);
           expect(freezeOrdering(spoolLines(repo)).controller, 'the controller is not a native lifecycle').toEqual([]);
-          expect(existsSync(repo.path(controlSpecPath())), 'the second run did not delete the controller').toBe(true);
+          expect(controlSpecsInRepo(repo), 'the second run left no controller code behind either').toEqual([]);
+          const recheck = await runNativeCli(
+            repo,
+            ['check', '--changed', '--require-e2e', '--format', 'json'],
+            second.env,
+          );
+          expect(recheck.code, `recheck stdout:\n${recheck.stdout}\nstderr:\n${recheck.stderr}`).toBe(0);
+        });
+      } finally {
+        await app.stop();
+      }
+    },
+    1_500_000,
+  );
+
+  it(
+    'a ROOT-SCANNING consumer config lists only its own cases, and the engine leaves no controller code in its repository',
+    async () => {
+      const app = await startNativeApp();
+      // The common repository-level Playwright shape: the config declares
+      // NO `testDir` at all, the four preparation projects name their own
+      // file, and the ONE body project (`chromium`) names neither a
+      // `testDir` nor a `testMatch` — so the directory the consumer's own
+      // runner enumerates is the REPOSITORY ROOT and its default match
+      // collects every spec file there. That is exactly the situation in
+      // which anything the engine writes inside the candidate becomes one
+      // of the consumer's own tests. The run state is ordinary untracked
+      // workspace bytes here, never a gitignored one.
+      const options: NativeFixtureOptions = { initLikeScanInputs: true, rootScanningConfig: true };
+      const expected = consumerCasesFor(options);
+      try {
+        await withTempRepo({ prefix: 'gateforge-native-root-scan-' }, async (repo) => {
+          installNativeFreezeFixture(repo, options);
+          writeCandidateChange(repo);
+
+          // The baseline the consumer's OWN runner reports before any
+          // Gateforge command has run here: this layout's consumer cases,
+          // and nothing else. No `GATEFORGE_*` variable reaches this child.
+          const pristine = await listConsumerCases(repo);
+          expect(pristine.code, `listing stdout:\n${pristine.stdout}\nstderr:\n${pristine.stderr}`).toBe(0);
+          expect([...pristine.cases]).toEqual([...expected].sort());
+
+          const first = await runSupervised(repo, app, {}, options);
+          expect(first.code, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`).toBe(0);
+          expect((JSON.parse(first.stdout) as GateReport).summary.blocking).toBe(0);
+
+          // EXACT accounting again, over this layout's own identities: the
+          // engine's controller is not a planned row, an outcome row or a
+          // session, and every consumer case ran once and passed.
+          const sealed = sealedExecution(repo);
+          expect(sealed, 'the run sealed an execution result').not.toBeNull();
+          expect(sealed?.complete).toBe(true);
+          expect(sealed?.planned.map((row) => row.logicalKey).sort()).toEqual([...expected].sort());
+          expect(sealed?.outcomes.map((outcome) => outcome.logicalKey).sort()).toEqual([...expected].sort());
+          expect(sealed?.outcomes.every((outcome) => outcome.status === 'passed' && outcome.attempt === 1)).toBe(true);
+          expect(sealed?.planned.filter((row) => row.project === CONTROL_PROJECT)).toEqual([]);
+          expect(sealed?.outcomes.filter((outcome) => outcome.project === CONTROL_PROJECT)).toEqual([]);
+          expect(sealed?.sessionTrace?.filter((traced) => traced.file.includes(CONTROL_SPEC_FILE))).toEqual([]);
+          // The handshake really happened: the controller asked, the CLI
+          // published a signed release, and the spool carries exactly one
+          // accepted marker with no native lifecycle of the controller's
+          // own.
+          expect(existsSync(repo.path(controlRequestPath())), 'the controller asked for a freeze').toBe(true);
+          expect(existsSync(repo.path(controlReleasePath())), 'the CLI published its signed release').toBe(true);
+          const spool = spoolLines(repo);
+          const ordering = freezeOrdering(spool);
+          expect(ordering.markers, 'exactly one accepted freeze marker').toHaveLength(1);
+          expect(ordering.controller, 'the controller is not a native lifecycle').toEqual([]);
+          const marker = ordering.markers[0] as number;
+          expect(ordering.prerequisites).toHaveLength(PREREQUISITE_PROJECTS.length);
+          expect(
+            Math.max(...ordering.prerequisites),
+            'every preparation stage began before the accepted release',
+          ).toBeLessThan(marker);
+          // Every body case of THIS layout began after the accepted
+          // release, read from the spool by the project each identity
+          // names rather than through the narrow layout's project list.
+          const bodyProjects = [
+            ...new Set(
+              expected.map((key) => key.split(':')[1] ?? '').filter((name) => !PREREQUISITE_PROJECTS.includes(name)),
+            ),
+          ];
+          const bodyBegins = spool.flatMap((line, index) =>
+            line.kind === 'testBegin' && bodyProjects.includes(line.project ?? '') ? [index] : [],
+          );
+          expect(bodyBegins, 'every body case really began').toHaveLength(
+            expected.length - PREREQUISITE_PROJECTS.length,
+          );
+          for (const index of bodyBegins) {
+            expect(index, 'a body test began before the accepted release').toBeGreaterThan(marker);
+          }
+
+          // The engine generated a controller for this run and left no
+          // controller code anywhere in the candidate: the repository root
+          // is the very directory this consumer's runner enumerates, and
+          // its own listing still reports exactly this layout's consumer
+          // cases and nothing else.
+          expect(controlSpecsInRepo(repo), 'no generated controller code was left in this repository').toEqual([]);
+          const afterFirst = await listConsumerCases(repo);
+          expect(afterFirst.code, `listing stdout:\n${afterFirst.stdout}\nstderr:\n${afterFirst.stderr}`).toBe(0);
+          expect([...afterFirst.cases]).toEqual([...expected].sort());
+
+          // The strict check over the very same prepared candidate.
+          const check = await runNativeCli(repo, ['check', '--changed', '--require-e2e', '--format', 'json'], first.env);
+          expect(check.code, `check stdout:\n${check.stdout}\nstderr:\n${check.stderr}`).toBe(0);
+
+          // A second supervised run over the SAME workspace: the same
+          // identities, and still no controller code in the repository.
+          const second = await runSupervised(repo, app, {}, options);
+          expect(second.code, `second run stdout:\n${second.stdout}\nstderr:\n${second.stderr}`).toBe(0);
+          const resealed = sealedExecution(repo);
+          expect(resealed?.complete).toBe(true);
+          expect(resealed?.planned.map((row) => row.logicalKey).sort()).toEqual([...expected].sort());
+          expect(resealed?.outcomes.map((outcome) => outcome.logicalKey).sort()).toEqual([...expected].sort());
+          expect(resealed?.outcomes.every((outcome) => outcome.status === 'passed' && outcome.attempt === 1)).toBe(true);
+          expect(resealed?.sessionTrace?.filter((traced) => traced.file.includes(CONTROL_SPEC_FILE))).toEqual([]);
+          expect(controlSpecsInRepo(repo), 'the second run left no controller code behind either').toEqual([]);
+          const afterSecond = await listConsumerCases(repo);
+          expect(afterSecond.code, `listing stdout:\n${afterSecond.stdout}\nstderr:\n${afterSecond.stderr}`).toBe(0);
+          expect([...afterSecond.cases]).toEqual([...expected].sort());
+
           const recheck = await runNativeCli(
             repo,
             ['check', '--changed', '--require-e2e', '--format', 'json'],
@@ -303,12 +430,15 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           const preparedTree = candidateTreeIdOf(repo, custom);
           expect(preparedTree).not.toBeNull();
           expect(sealedReceipt(repo, custom)?.candidateTreeId).toBe(preparedTree);
-          expect(existsSync(repo.path(controlSpecPath(custom))), 'the generated controller is in the custom state').toBe(true);
+          expect(
+            existsSync(repo.path(controlReleasePath(custom))),
+            'the CLI published its signed release into the custom state',
+          ).toBe(true);
           expect(existsSync(repo.path('.gateforge/test-gates')), 'the default state directory was never created').toBe(false);
 
-          // The second run over the SAME workspace: the controller the
-          // first run persisted is inside the declared scan scope, and the
-          // identities stay the catalog's own eleven consumer cases.
+          // The second run over the SAME workspace: the control documents
+          // the first run published are inside the declared scan scope, and
+          // the identities stay the catalog's own eleven consumer cases.
           const second = await runSupervised(repo, app, {}, {}, custom);
           expect(second.code, `second run stdout:\n${second.stdout}\nstderr:\n${second.stderr}`).toBe(0);
           expect((JSON.parse(second.stdout) as GateReport).summary.blocking).toBe(0);
@@ -319,12 +449,13 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           expect(resealed?.outcomes.every((outcome) => outcome.status === 'passed' && outcome.attempt === 1)).toBe(true);
           expect(resealed?.planned.filter((row) => row.project === CONTROL_PROJECT)).toEqual([]);
           expect(resealed?.outcomes.filter((outcome) => outcome.project === CONTROL_PROJECT)).toEqual([]);
-          expect(resealed?.sessionTrace?.filter((traced) => traced.file.includes(controlSpecPath(custom)))).toEqual([]);
-          // Same candidate both times, and the engine's own output is
-          // still on disk: nothing here passes by deleting it.
+          expect(resealed?.sessionTrace?.filter((traced) => traced.file.includes(CONTROL_SPEC_FILE))).toEqual([]);
+          // Same candidate both times, and the handshake's own documents are
+          // still on disk: nothing here passes by deleting the engine's own
+          // evidence, while its generated code belongs to no candidate.
           expect(sealedReceipt(repo, custom)?.candidateTreeId).toBe(preparedTree);
           expect(candidateTreeIdOf(repo, custom)).toBe(preparedTree);
-          expect(existsSync(repo.path(controlSpecPath(custom))), 'the second run did not delete the controller').toBe(true);
+          expect(controlSpecsInRepo(repo), 'no generated controller code was left in this repository').toEqual([]);
           expect(existsSync(repo.path('.gateforge/test-gates')), 'the default state directory was never created').toBe(false);
         });
       } finally {
@@ -708,7 +839,10 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
             // over a release document it did not write, and says which path
             // it found — the control directory is never quietly overwritten.
             expect(readFileSync(repo.path(controlRefusalPath()), 'utf8')).toContain(controlReleasePath());
-            expect(existsSync(repo.path(controlSpecPath())), 'this run armed a controller').toBe(true);
+            expect(
+              controlSpecsInRepo(repo),
+              'the controller this run armed left no generated code in the repository',
+            ).toEqual([]);
             expect(freezeOrdering(newestSpoolLines(repo)).bodies).toHaveLength(0);
           });
         } finally {
@@ -829,7 +963,8 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           expect(result.code).not.toBe(0);
           expect(sealedReceipt(repo)).toBeNull();
           expect(result.stderr).toContain(CONTROL_PROJECT);
-          expect(existsSync(repo.path(controlSpecPath())), 'no controller was ever generated').toBe(false);
+          expect(existsSync(repo.path(controlDirPath())), 'no control document was ever written').toBe(false);
+          expect(controlSpecsInRepo(repo), 'no controller was ever generated').toEqual([]);
           expect(spoolLines(repo)).toEqual([]);
         });
       } finally {
@@ -853,7 +988,8 @@ describe('global native preparation freeze (one prepared candidate, real CLI and
           // documents, no accepted marker — and no receipt either, because
           // the stages still wrote generated bytes into a candidate that was
           // never prepared for them.
-          expect(existsSync(repo.path(controlSpecPath()))).toBe(false);
+          expect(existsSync(repo.path(controlDirPath()))).toBe(false);
+          expect(controlSpecsInRepo(repo), 'no controller code was ever generated').toEqual([]);
           const ordering = freezeOrdering(newestSpoolLines(repo));
           expect(ordering.markers).toHaveLength(0);
           expect(ordering.controller).toHaveLength(0);
