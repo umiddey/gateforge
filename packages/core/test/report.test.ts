@@ -822,3 +822,51 @@ describe('renderRun — local failure reasons when the progress stream is off', 
     expect(Object.keys(withHint).sort()).toEqual(Object.keys(withoutHint).sort());
   });
 });
+
+describe('renderRun — a declared mapping is visible (0.9.0 adoption fix)', () => {
+  const DECLARED_KEY = 'playwright:chromium:e2e/accounts.spec.ts:Accounts>updates an account';
+  const declared = entry(accounts, 'missing', {
+    reason: "no claim declares 'tenant.accounts:crud:update'",
+    cause: 'ENFORCEMENT_UNTRUSTED',
+    nextAction: CAUSE_NEXT_ACTIONS['ENFORCEMENT_UNTRUSTED'],
+    recordIds: [],
+    declaredTests: [DECLARED_KEY],
+  });
+
+  it('prints the declared test and the command that collects its evidence', () => {
+    // On 0.8.x this obligation printed exactly as before `tests mark`: the
+    // declaration was invisible and the action said "repair enforcement".
+    const text = renderRun([declared], { format: 'text' });
+    expect(text).toContain(`mapped to: ${DECLARED_KEY} (not yet witnessed)`);
+    expect(text).toContain('next action: the mapping is declared; run `gateforge test-gates --changed`');
+    expect(text).not.toContain(`next action: ${CAUSE_NEXT_ACTIONS['ENFORCEMENT_UNTRUSTED']}`);
+    // The cause code itself is unchanged — only the advice is.
+    expect(text).toContain('cause: ENFORCEMENT_UNTRUSTED');
+  });
+
+  it('names the declared ids and their mapping state in json', () => {
+    const json = JSON.parse(renderRun([declared], { format: 'json' })) as {
+      verdicts: Array<{ declaredTests?: string[]; mappingState?: string }>;
+    };
+    expect(json.verdicts[0]?.declaredTests).toEqual([DECLARED_KEY]);
+    expect(json.verdicts[0]?.mappingState).toBe('declared-not-witnessed');
+  });
+
+  it('reports a witnessed declaration as declared, never as not yet witnessed', () => {
+    const witnessed = entry(accounts, 'satisfied', {
+      recordIds: ['a'.repeat(64)],
+      declaredTests: [DECLARED_KEY],
+    });
+    const text = renderRun([witnessed], { format: 'text' });
+    expect(text).not.toContain('not yet witnessed');
+  });
+
+  it('adds no mapping line for an obligation with no declaration', () => {
+    const json = JSON.parse(renderRun([entry(accounts, 'missing')], { format: 'json' })) as {
+      verdicts: Array<Record<string, unknown>>;
+    };
+    expect(json.verdicts[0]?.['declaredTests']).toBeUndefined();
+    expect(json.verdicts[0]?.['mappingState']).toBeUndefined();
+    expect(renderRun([entry(accounts, 'missing')], { format: 'text' })).not.toContain('mapped to:');
+  });
+});

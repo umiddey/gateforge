@@ -150,6 +150,14 @@ export interface RepositoryDebt {
 function isBlockingVerdict(verdict: ObligationVerdict): boolean {
   return BLOCKING_VERDICTS.includes(verdict.verdict);
 }
+/**
+ * Next action for an obligation that IS declared-mapped but has no
+ * consulted record: the declaration is done, the missing half is the
+ * witnessed evidence, so the action names the command that collects it
+ * instead of the generic "write a test" advice.
+ */
+const MAPPED_NOT_WITNESSED_NEXT_ACTION =
+  'the mapping is declared; run `gateforge test-gates --changed` so its witnessed evidence covers this change';
 
 /**
  * THE repository-debt definition (plan §2, "One blocking number").
@@ -530,6 +538,10 @@ function jsonReport(
         trustTier: entry.trustTier,
         message,
       };
+      if (entry.declaredTests !== undefined && entry.declaredTests.length > 0) {
+        record['declaredTests'] = [...entry.declaredTests];
+        record['mappingState'] = entry.recordIds.length > 0 ? 'declared' : 'declared-not-witnessed';
+      }
       if (entry.inScopeBecause !== undefined) {
         record['inScopeBecause'] = entry.inScopeBecause;
       }
@@ -884,9 +896,24 @@ function textReport(
       lines.push(`  in scope because: ${entry.inScopeBecause.join(', ') || '<no changed source path>'}`);
     }
     lines.push(`  evidence gap: ${entry.reason ?? '<none>'}`);
+    const declaredTests = entry.declaredTests ?? [];
+    const mappedNotWitnessed = declaredTests.length > 0 && entry.recordIds.length === 0;
+    if (declaredTests.length > 0) {
+      lines.push(
+        `  mapped to: ${declaredTests.join(', ')}${mappedNotWitnessed ? ' (not yet witnessed)' : ''}`,
+      );
+    }
     if (entry.cause !== undefined && entry.cause !== null) {
       lines.push(`  cause: ${entry.cause}`);
-      lines.push(`  next action: ${entry.nextAction ?? '<none>'}`);
+      // The cause's own next action stays in the shared table; what
+      // changes here is PRESENTATION: with a declaration on file and no
+      // records consumed, the honest action is collecting the witnessed
+      // evidence for that declaration, not writing another test.
+      lines.push(
+        `  next action: ${
+          mappedNotWitnessed ? MAPPED_NOT_WITNESSED_NEXT_ACTION : (entry.nextAction ?? '<none>')
+        }`,
+      );
     }
     lines.push(
       `  records: ${entry.recordIds.length > 0 ? entry.recordIds.join(', ') : '<none consulted>'}`,

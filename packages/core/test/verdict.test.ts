@@ -1397,4 +1397,37 @@ describe('evaluateObligations — batch wrapper', () => {
     expect(entries[0]?.verdict).toBe('missing');
     expect(entries[0]?.reason).toContain("no witnessed 'persistence.*'");
   });
+
+  it('names the DECLARED test ids per obligation (0.9.0 adoption fix)', () => {
+    const other = makeObligation({ resourceId: 'tenant.orders' });
+    const entries = evaluateObligations([other, obligation], {
+      // Unshuffled duplicates on purpose: the report needs a stable list.
+      claims: [
+        makeClaim('test-b'),
+        makeClaim('test-a'),
+        makeClaim('test-a'),
+        makeClaim('other-1', other.id),
+        { schemaVersion: 1, obligationId: 'not a claim' },
+      ],
+      records: [],
+      waivers: [],
+      classification,
+      now: NOW,
+    });
+    const accounts = entries.find((entry) => entry.obligation.resourceId === 'tenant.accounts');
+    const orders = entries.find((entry) => entry.obligation.resourceId === 'tenant.orders');
+    expect(accounts?.declaredTests).toEqual(['test-a', 'test-b']);
+    expect(orders?.declaredTests).toEqual(['other-1']);
+  });
+
+  it('leaves declaredTests absent when nothing is declared for the obligation', () => {
+    const entries = evaluateObligations([obligation], {
+      claims: [],
+      records: [],
+      waivers: [],
+      classification,
+      now: NOW,
+    });
+    expect(entries[0]?.declaredTests).toBeUndefined();
+  });
 });

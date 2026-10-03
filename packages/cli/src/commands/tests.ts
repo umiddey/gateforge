@@ -103,6 +103,9 @@ usage: gateforge tests discover [--json] [--pytest]
 /** The derived catalog file under the run-state directory. */
 export const CATALOG_FILE_NAME = 'test-catalog.json';
 
+/** How many ranked candidates the text surface prints per obligation. */
+const SUGGESTED_CANDIDATE_LIMIT = 5;
+
 /**
  * Runs the `tests` command family (discover/suggest/mark/explain).
  *
@@ -361,7 +364,16 @@ async function discoverSubcommand(
 interface SuggestionJson {
   obligationId: string;
   cause: string;
-  candidates: Array<{ logicalKey: string; file: string; why: string[]; overlaps: string[] }>;
+  candidates: Array<{
+    logicalKey: string;
+    file: string;
+    why: string[];
+    overlaps: string[];
+    /** Evidence score behind the rank (higher is a stronger match). */
+    score: number;
+    /** 1-based position in the ranked list. */
+    rank: number;
+  }>;
   missingEvidence: string;
   nextAction: string;
   newTestNeeded: boolean;
@@ -413,6 +425,21 @@ async function suggestSubcommand(
     );
   }
 
+  // Route hints rank candidates by route evidence ("this test talks to
+  // the obligation's route"). They only ADD a ranking signal; without
+  // them the same candidates come back in token order.
+  const routesByResource = new Map<string, string[]>();
+  for (const route of httpRoutesView(pipeline.graph)) {
+    const hints = routesByResource.get(route.resourceId) ?? [];
+    hints.push(`${route.method} ${route.canonicalPath}`);
+    routesByResource.set(route.resourceId, hints);
+  }
+  const routeHints = new Map<string, string[]>();
+  for (const obligation of pipeline.policy.obligations) {
+    const hints = routesByResource.get(obligation.resourceId);
+    if (hints !== undefined) routeHints.set(obligation.id, [...hints]);
+  }
+
   // A COMPLETE enumeration failure of the CONFIGURED runner hides the
   // suggestions (an empty inventory would read as "no candidates"
   // instead of "the runner could not enumerate"). The runner is
@@ -426,6 +453,7 @@ async function suggestSubcommand(
         catalog: discovered.catalog,
         obligationIds: scoped.map((obligation) => obligation.id),
         resolution: mapped.resolution,
+        routeHints,
       });
   const mappingProblems = [
     ...mapped.resolution.problems,
@@ -462,9 +490,13 @@ async function suggestSubcommand(
           pipeline.behaviorCatalog?.cases.find((item) => item.caseId === caseId)?.definition.id ?? caseId,
       );
   };
+  // "already declared for" is about DECLARATIONS: a `test-map.yml` entry
+  // or an `@gateforge` annotation. An inferred or prior-run binding is a
+  // suggestion and never a declaration.
   const obligationsByTestKey = new Map<string, string[]>();
   for (const group of mapped.resolution.obligations) {
     for (const binding of group.bindings) {
+      if (binding.origin !== 'native' && binding.origin !== 'sidecar') continue;
       const obligations = obligationsByTestKey.get(binding.logicalKey) ?? [];
       obligations.push(group.obligationId);
       obligationsByTestKey.set(binding.logicalKey, obligations);
@@ -480,6 +512,8 @@ async function suggestSubcommand(
       overlaps: [...new Set(obligationsByTestKey.get(candidate.logicalKey) ?? [])]
         .filter((obligationId) => obligationId !== suggestion.obligationId)
         .sort(compareStrings),
+      score: candidate.score,
+      rank: candidate.rank,
     })),
     missingEvidence: suggestion.missingEvidence,
     nextAction: suggestion.nextAction,
@@ -526,9 +560,12 @@ async function suggestSubcommand(
       writeLine(io.stdout, `  unmapped cases: ${unmapped.join(', ')} (map with tests mark --case, then prove with witnessed execution)`);
     }
     if (suggestion.candidates.length > 0) {
-      writeLine(io.stdout, '  candidates:');
-      for (const candidate of suggestion.candidates) {
-        writeLine(io.stdout, `  - ${candidate.logicalKey} (${candidate.file})`);
+      writeLine(io.stdout, '  candidates (ranked by evidence):');
+      // The printed list is capped so one weakly-matching repository
+      // cannot bury the answer; `--json` keeps every ranked candidate.
+      const printed = suggestion.candidates.slice(0, SUGGESTED_CANDIDATE_LIMIT);
+      for (const candidate of printed) {
+        writeLine(io.stdout, `  - #${String(candidate.rank)} ${candidate.logicalKey} (${candidate.file})`);
         for (const why of candidate.why) {
           writeLine(io.stdout, `    why: ${why}`);
         }
@@ -539,6 +576,13 @@ async function suggestSubcommand(
         if (otherObligations.length > 0) {
           writeLine(io.stdout, `    already declared for: ${otherObligations.join(', ')}`);
         }
+      }
+      const hidden = suggestion.candidates.length - printed.length;
+      if (hidden > 0) {
+        writeLine(
+          io.stdout,
+          `    ... and ${String(hidden)} more candidate(s) — run \`gateforge tests suggest --json\` for the full ranked list`,
+        );
       }
     }
   }
@@ -995,13 +1039,13 @@ function explainReport(
     let mapping: string;
     let nextAction: string;
     if (sidecarDeclares) {
-      mapping = `declared by agent (test-map.yml)${caseSuffix}`;
+      mapping = `declared in test-map.yml${caseSuffix}`;
       nextAction =
         missingCases.length > 0
           ? `map the missing cases (${missingCases
               .map((caseId) => behaviorCatalog?.cases.find((item) => item.caseId === caseId)?.definition.id ?? caseId)
               .join(', ')}) with tests mark --case; then run the test with the required channel`
-          : 'run the existing test with the browser observer; its witnessed evidence must cover this change (execution and sealing land in Phase 4)';
+          : 'run the existing test with the witness: `gateforge test-gates --changed` executes the suite and collects the witnessed evidence that must cover this change';
     } else if (nativeDeclares) {
       mapping = `declared by native annotation${caseSuffix}`;
       nextAction =
@@ -1009,7 +1053,7 @@ function explainReport(
           ? `native annotations never implicitly claim behavior cases — add an explicit sidecar entry with tests mark --case for: ${missingCases
               .map((caseId) => behaviorCatalog?.cases.find((item) => item.caseId === caseId)?.definition.id ?? caseId)
               .join(', ')}`
-          : 'run the existing test with the browser observer; its witnessed evidence must cover this change (execution and sealing land in Phase 4)';
+          : 'run the existing test with the witness: `gateforge test-gates --changed` executes the suite and collects the witnessed evidence that must cover this change';
     } else if (binding?.origin === 'prior-run') {
       mapping = 'prior run (suggestion only — never satisfies a new run)';
       nextAction = 'confirm the link with tests mark if correct; then run the test with the browser observer';
@@ -1053,7 +1097,8 @@ function explainReport(
       titlePath: [...entry.titlePath],
       inferredKind: entry.inferredKind,
     },
-    execution: 'not run for this change (execution and evidence sealing land in Phase 4)',
+    execution:
+      'not run for this change (`tests explain` is inspection only — run `gateforge test-gates --changed` to execute the suite with the witness)',
     blocks,
   };
 }

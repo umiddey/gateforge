@@ -182,6 +182,14 @@ export interface ObligationVerdict extends VerdictOutcome {
   readonly cause?: CauseCode | null;
   /** Human next action for the cause; null when unmapped or clean. */
   readonly nextAction?: string | null;
+  /**
+   * Test ids DECLARED for this obligation (parsed test-map.yml entries and
+   * native annotations), sorted and deduplicated. Never an inferred or
+   * prior-run binding: a declaration is intent a human wrote, and the
+   * report needs it to say "mapped to <test>, not yet witnessed" instead
+   * of "no test". Absent/undefined when nothing was declared.
+   */
+  readonly declaredTests?: readonly string[];
   /** Changed paths that brought the obligation into the current scope. */
   readonly inScopeBecause?: string[];
 }
@@ -2340,6 +2348,18 @@ export function evaluateObligations(
   context: VerdictContext,
 ): ObligationVerdict[] {
   parseInstant(context.now);
+  // The declared test ids per obligation (the same claim parsing the
+  // single-obligation path applies): report presentation needs to know
+  // "mapped to <test>, not yet witnessed" — an inferred or prior-run
+  // binding is a suggestion and never lands here.
+  const declaredByObligation = new Map<string, string[]>();
+  for (const raw of Array.isArray(context.claims) ? context.claims : []) {
+    const parsed = ClaimSchema.safeParse(raw);
+    if (!parsed.success) continue;
+    const ids = declaredByObligation.get(parsed.data.obligationId) ?? [];
+    ids.push(parsed.data.testId);
+    declaredByObligation.set(parsed.data.obligationId, ids);
+  }
   return obligations
     .map((obligation) => {
       const outcome = evaluateObligation(obligation, context);
@@ -2358,7 +2378,15 @@ export function evaluateObligations(
         verdict: outcome.verdict,
         reason: outcome.reason,
       });
-      return { obligation, ...outcome, trustTier, cause: mapped.cause, nextAction: mapped.nextAction };
+      const declaredTests = sortedUnique(declaredByObligation.get(obligation.id) ?? []);
+      return {
+        obligation,
+        ...outcome,
+        trustTier,
+        cause: mapped.cause,
+        nextAction: mapped.nextAction,
+        ...(declaredTests.length > 0 ? { declaredTests } : {}),
+      };
     })
     .sort((a, b) => compareStrings(a.obligation.id, b.obligation.id));
 }

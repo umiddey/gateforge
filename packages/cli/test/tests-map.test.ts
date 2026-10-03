@@ -90,7 +90,7 @@ interface SuggestJson {
   suggestions: Array<{
     obligationId: string;
     cause: string;
-    candidates: Array<{ logicalKey: string; file: string; why: string[]; overlaps: string[] }>;
+    candidates: Array<{ logicalKey: string; file: string; why: string[]; overlaps: string[]; score: number; rank: number }>;
     newTestNeeded: boolean;
   }>;
 }
@@ -384,9 +384,9 @@ describe('gateforge tests explain', () => {
       expect(explained.code).toBe(0);
       expect(explained.stdout).toContain(`Requirement: ${OBLIGATION_ACCOUNTS}`);
       expect(explained.stdout).toContain(`Existing test: ${DELETE_KEY} (e2e/accounts.spec.js)`);
-      expect(explained.stdout).toContain('Mapping: declared by agent (test-map.yml)');
+      expect(explained.stdout).toContain('Mapping: declared in test-map.yml');
       expect(explained.stdout).toContain('Execution: not run for this change');
-      expect(explained.stdout).toContain('Next action: run the existing test with the browser observer');
+      expect(explained.stdout).toContain('Next action: run the existing test with the witness');
       expect(explained.stdout).toContain('New test needed: no');
 
       // Deterministic: identical output on a second run.
@@ -423,7 +423,7 @@ describe('gateforge tests explain', () => {
       };
       expect(markedReport.blocks).toHaveLength(1);
       expect(markedReport.blocks[0]?.requirement).toBe(OBLIGATION_ACCOUNTS);
-      expect(markedReport.blocks[0]?.mapping).toBe('declared by agent (test-map.yml)');
+      expect(markedReport.blocks[0]?.mapping).toBe('declared in test-map.yml');
       expect(markedReport.blocks[0]?.newTestNeeded).toBe('no');
     });
   }, 180_000);
@@ -644,6 +644,60 @@ describe('gateforge tests suggest', () => {
       expect(supervisedInventory[0]?.detail?.endsWith(nativeErrors[0] ?? '')).toBe(true);
       expect(supervisedInventory[0]?.nextAction).toContain('Install');
       expect(supervisedReport.blocking.filter((entry) => entry.cause === 'TEST_MAPPING_STALE')).toHaveLength(0);
+    });
+  }, 180_000);
+
+  it('ranks candidates, never calls an inference a declaration, and gives one instruction', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      const human = await runCli(repo, ['tests', 'suggest']);
+      expect(human.code).toBe(0);
+
+      // No declaration exists in this repo, so no candidate may claim one:
+      // an inferred binding is a suggestion, never a declaration. On
+      // 0.8.x this printed for hundreds of rows with nothing declared.
+      expect(human.stdout).not.toContain('already declared for:');
+
+      // Ranked: every printed candidate carries its 1-based rank.
+      expect(human.stdout).toContain('candidates (ranked by evidence):');
+      expect(human.stdout).toMatch(/ {2}- #1 playwright:chromium:e2e\/accounts\.spec\.js:/);
+      const candidateLines = human.stdout.split('\n').filter((line) => line.startsWith('  - '));
+      expect(candidateLines.length).toBeGreaterThan(0);
+      for (const line of candidateLines) {
+        expect(line).toMatch(/^ {2}- #\d+ playwright:/);
+      }
+      const json = JSON.parse((await runCli(repo, ['tests', 'suggest', '--json'])).stdout) as SuggestJson;
+      const orders = json.suggestions.find((s) => s.obligationId === OBLIGATION_ORDERS);
+      expect(orders?.candidates.length).toBeGreaterThan(0);
+      for (const candidate of orders?.candidates ?? []) {
+        expect(candidate.overlaps).toEqual([]);
+        expect(candidate.rank).toBeGreaterThan(0);
+      }
+      expect(orders?.candidates.map((candidate) => candidate.rank)).toEqual(
+        orders?.candidates.map((_, index) => index + 1),
+      );
+
+      // One instruction: reuse what exists. The overlay advice is for an
+      // obligation NO existing test fits, and must not contradict this one.
+      const start = human.stdout.indexOf(`[TEST_MAPPING_MISSING] ${OBLIGATION_ORDERS}`);
+      expect(start).toBeGreaterThan(-1);
+      const block = human.stdout.slice(start);
+      expect(block).not.toContain('Overlay: write');
+      expect(block).not.toContain('Do not `tests mark`');
+      expect(block).toContain('observed-e2e');
+    });
+  }, 180_000);
+
+  it('never prints stale roadmap text from `tests explain`', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      expect((await runCli(repo, markArgv(OBLIGATION_ACCOUNTS, [], DELETE_KEY))).code).toBe(0);
+      const explained = await runCli(repo, ['tests', 'explain', '--test', DELETE_KEY]);
+      expect(explained.code).toBe(0);
+      expect(explained.stdout).not.toContain('Phase 4');
+      expect(explained.stdout).not.toContain('declared by agent');
+      expect(explained.stdout).toContain('declared in test-map.yml');
+      expect(explained.stdout).toContain('gateforge test-gates --changed');
     });
   }, 180_000);
 });

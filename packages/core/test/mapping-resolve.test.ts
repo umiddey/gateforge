@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  CAUSE_NEXT_ACTIONS,
   mappingGradingClaims,
   mappingSuggestions,
   resolveTestMappings,
@@ -654,6 +655,87 @@ describe('mappingSuggestions — reuse ordering', () => {
       resolution,
     });
     expect(suggestions).toEqual([]);
+  });
+});
+
+describe('mappingSuggestions — evidence ranking (0.9.0 adoption fix)', () => {
+  /** A catalog whose only candidate evidence is a category label. */
+  const WEAK_KEY = 'playwright:chromium:e2e/account_bank_details.spec.js:probes the account endpoint';
+  /** A catalog row that names the resource, the route, and an unmocked folder. */
+  const STRONG_KEY =
+    'playwright:chromium:tests/e2e/real/accounts_create_matrix.spec.js:@crud(accounts)>company tenant persists';
+
+  const ranked = catalog([
+    row({
+      logicalKey: WEAK_KEY,
+      file: 'e2e/account_bank_details.spec.js',
+      titlePath: ['probes the account endpoint'],
+      title: 'probes the account endpoint',
+      sourceLocation: { file: 'e2e/account_bank_details.spec.js', line: 4, col: 0 },
+      categorySignals: [
+        { label: 'accounts', ruleId: 'category-keywords', location: { file: 'e2e/account_bank_details.spec.js', line: 4, col: 0 } },
+      ],
+    }),
+    row({
+      logicalKey: STRONG_KEY,
+      file: 'tests/e2e/real/accounts_create_matrix.spec.js',
+      titlePath: ['@crud(accounts)', 'company tenant persists'],
+      title: 'company tenant persists',
+      sourceLocation: { file: 'tests/e2e/real/accounts_create_matrix.spec.js', line: 11, col: 0 },
+    }),
+  ]);
+
+  it('ranks the resource+route candidate first instead of the alphabetically earlier one', () => {
+    // On 0.8.x the list came back in logical-key order, so the row under
+    // `e2e/` sorted ahead of the row that actually exercises the route.
+    expect(WEAK_KEY < STRONG_KEY).toBe(true);
+    const resolution = resolveTestMappings(resolveInput({ catalog: ranked }));
+    const suggestions = mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [OBLIGATION],
+      resolution,
+      routeHints: new Map([[OBLIGATION, ['GET /api/v2/accounts']]]),
+    });
+    const candidates = suggestions[0]?.candidates ?? [];
+    expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([STRONG_KEY, WEAK_KEY]);
+    expect(candidates.map((candidate) => candidate.rank)).toEqual([1, 2]);
+    expect(candidates[0]?.score ?? 0).toBeGreaterThan(candidates[1]?.score ?? 0);
+  });
+
+  it('explains the winning rank with the signals that produced it', () => {
+    const resolution = resolveTestMappings(resolveInput({ catalog: ranked }));
+    const suggestions = mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [OBLIGATION],
+      resolution,
+      routeHints: new Map([[OBLIGATION, ['GET /api/v2/accounts']]]),
+    });
+    expect(suggestions[0]?.candidates[0]?.why.join(' ')).toContain('explicit tag');
+  });
+
+  it('tells you to mark the existing test observed-e2e, never to write an overlay as well', () => {
+    const resolution = resolveTestMappings(resolveInput({ catalog: ranked }));
+    const suggestions = mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [OBLIGATION],
+      resolution,
+    });
+    const action = suggestions[0]?.nextAction ?? '';
+    expect(action).toContain('observed-e2e');
+    expect(action).toContain('gateforge test-gates --changed');
+    expect(action).not.toContain('Overlay: write');
+    expect(action).not.toContain('Do not `tests mark`');
+  });
+
+  it('keeps the overlay instruction for an obligation no existing test fits', () => {
+    const resolution = resolveTestMappings(resolveInput({ catalog: catalog([]) }));
+    const suggestions = mappingSuggestions({
+      catalog: catalog([]),
+      obligationIds: [OBLIGATION],
+      resolution,
+    });
+    expect(suggestions[0]?.newTestNeeded).toBe(true);
+    expect(suggestions[0]?.nextAction).toBe(CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING']);
   });
 });
 

@@ -45,7 +45,11 @@ import { CLAIM_ANNOTATION_TYPE, ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.j
 import { localPlaywrightCliCandidates } from '../runner-resolution.js';
 import { CONFIG_SEARCH_PRUNED_DIRS, PLAYWRIGHT_CONFIG_NAMES } from './config-locations.js';
 import type { Location } from '@gate-forge/core';
-import { PROJECT_GRAPH_PATH_ENV, type ProjectGraphDocument } from '../reporter/project-graph-reporter.js';
+import {
+  PROJECT_GRAPH_PATH_ENV,
+  type ProjectGraphDocument,
+  type ProjectTestFileScope,
+} from '../reporter/project-graph-reporter.js';
 
 /** Default wall-clock bound for one `--list` invocation. */
 export const DEFAULT_LIST_TIMEOUT_MS = 60_000;
@@ -105,6 +109,14 @@ export interface NativeListResult {
    * {@link projectDependencies} whenever the graph itself was unreadable.
    */
   projectStorageStates?: Record<string, string>;
+  /**
+   * Per project, the runner's OWN resolved test-file selection
+   * (`testDir`/`testMatch`/`testIgnore`) as the enumeration read it.
+   * Absent when the document carried none or could not be read: absence
+   * means "the runner's selection is unknown", never "it collects
+   * nothing".
+   */
+  testFileScope?: ProjectTestFileScope[];
 }
 
 /**
@@ -625,6 +637,7 @@ export async function listNativePlaywrightTests(options: {
   // declared states would authenticate the wrong projects.
   let projectDependencies: Record<string, string[]> | undefined;
   let projectStorageStates: Record<string, string> | undefined;
+  let testFileScope: ProjectTestFileScope[] | undefined;
   if (graphText !== null) {
     try {
       const parsed = JSON.parse(graphText) as Partial<ProjectGraphDocument>;
@@ -632,6 +645,7 @@ export async function listNativePlaywrightTests(options: {
       // bad field discards the WHOLE document rather than half of it.
       const graph: unknown = parsed.projectDependencies;
       const states: unknown = parsed.projectStorageStates;
+      const rawScopes: unknown = parsed.testFileScope;
       if (parsed.schemaVersion === 2 && isPlainRecord(graph)) {
         // Null-prototype: a project NAME is candidate data and `__proto__`
         // is a legal one, so the maps keyed by it must not inherit.
@@ -658,6 +672,14 @@ export async function listNativePlaywrightTests(options: {
           }
         }
         if (wellFormed) {
+          const parsedScopes = readTestFileScopes(rawScopes);
+          if (parsedScopes === null) {
+            wellFormed = false;
+          } else {
+            testFileScope = parsedScopes;
+          }
+        }
+        if (wellFormed) {
           projectDependencies = dependencies;
           // Omitted when nothing declared a state — an empty map would
           // read as "every project runs with an empty state".
@@ -667,6 +689,7 @@ export async function listNativePlaywrightTests(options: {
     } catch {
       projectDependencies = undefined;
       projectStorageStates = undefined;
+      testFileScope = undefined;
     }
   }
   const configDetail = configDir !== '.' ? ` (cwd '${configDir}')` : '';
@@ -683,7 +706,36 @@ export async function listNativePlaywrightTests(options: {
     errors,
     ...(projectDependencies !== undefined ? { projectDependencies } : {}),
     ...(projectStorageStates !== undefined ? { projectStorageStates } : {}),
+    ...(testFileScope !== undefined ? { testFileScope } : {}),
   };
+}
+
+/**
+ * Reads the runner-resolved per-project test-file selection out of the
+ * untrusted graph document.
+ *
+ * Args:
+ *   value: the document's `testFileScope` field, as untrusted JSON.
+ *
+ * Returns:
+ *   ProjectTestFileScope[]: the well-formed entries; `undefined` when the
+ *   field is absent. null when it is present but malformed — the caller
+ *   then discards the WHOLE document rather than narrowing the catalog
+ *   from half a selection.
+ */
+function readTestFileScopes(value: unknown): ProjectTestFileScope[] | undefined | null {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) return null;
+  const scopes: ProjectTestFileScope[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return null;
+    const candidate = entry as Record<string, unknown>;
+    const { name, testDir, testMatch, testIgnore } = candidate;
+    if (typeof name !== 'string' || typeof testDir !== 'string') return null;
+    if (!isStringArray(testMatch) || !isStringArray(testIgnore)) return null;
+    scopes.push({ name, testDir, testMatch: [...testMatch], testIgnore: [...testIgnore] });
+  }
+  return scopes;
 }
 
 /**

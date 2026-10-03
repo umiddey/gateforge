@@ -67,7 +67,7 @@ never rewrite existing journeys, never `tests mark` as proof.
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. `classify plane` previews or explicitly appends an owner-reviewed endpoint plane rule to the existing `.gateforge/planes.json`; snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
 | `gateforge explain <resourceId\|path> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. A repo-relative PATH is also a target: when no resource matches it, the command prints what the file is and what governs it (Gateforge policy input, declared gate input, owner-declared documentation folder, known source of a resource, or an unclassified change) with the steps that attribute it — this is the answer an unmapped `CHANGE_UNMAPPED` file needs. An unknown target stays unknown (exit 1). | 0/1/2 |
 | `gateforge tests discover [--json] [--pytest]` | Inventory existing tests into the derived run-state catalog: static analysis reconciled with native Playwright enumeration (`--list`). Unresolved wrappers, parse errors, and inventory gaps are DATA (never an empty catalog — failed native enumeration is exit 2). `--pytest` additionally collects the configured diagnostic suites' node ids (`--collect-only`). Playwright enumeration runs ONE config (a repo-root config wins; otherwise the alphabetically first config one directory deep), and when the repo holds more than one the runner line names every config, the one used, why, and the ones NOT inventoried. `inventoryComplete=false` means a reconciliation gap (an enumerated-vs-static mismatch, an unresolved case, or a not-inventoried extra config), not a partial success. | 0/2 |
-| `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`). When Playwright reports load errors and enumerates no tests, report one `TEST_INVENTORY_INCOMPLETE` with the error count and first error instead of stale-mapping fan-out; the action is to install the missing dependency and rerun Gateforge. An inspection surface, NOT a gate: exit 0 even with blocking problems. | 0/2 |
+| `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`). Candidates are RANKED by the evidence their catalog row carries (explicit tag, resource token in title/file, operation word, route segment, unmocked folder, minus mocks) with the matching reason printed as `why:`; the text surface prints the top five and names how many it hid, `--json` carries every candidate with its `rank` and `score`. With a candidate present the next action is to MARK it `observed-e2e` and run it under the witness — the overlay instruction belongs to `newTestNeeded: true`. When Playwright reports load errors and enumerates no tests, report one `TEST_INVENTORY_INCOMPLETE` with the error count and first error instead of stale-mapping fan-out; the action is to install the missing dependency and rerun Gateforge. An inspection surface, NOT a gate: exit 0 even with blocking problems. | 0/2 |
 | `gateforge tests mark --test <key> --kind <kind> [--category <c>]... --obligation <id>... --reason "<text>"` | Declare an existing test in `.gateforge/test-map.yml` (see the test-reuse workflow below). Validates against the CURRENT catalog and obligation registry, writes atomically and idempotently, prints the exact diff. Never edits test files, never adds waivers, refuses contradictions. | 0/2 |
 | `gateforge tests sync [--json]` | AST-only scan of test annotations; updates generated `source: annotation` entries in `.gateforge/test-map.yml` and leaves handwritten entries unchanged. Reports unresolved helpers with source locations; does not run tests. | 0/1/2 |
 | `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, `New test needed`. | 0/2 (unknown key → 2) |
@@ -380,6 +380,81 @@ tests:
 candidate survives resolution. An unsupported proof channel produces a
 capability task (`VERIFIER_UNSUPPORTED`), never a request to generate more
 tests.
+
+### Ranked candidates
+
+Candidates are RANKED by the evidence the catalog row itself carries, not
+listed alphabetically: an explicit `@crud(...)` tag, a resource token in the
+title path or the file, the obligation's operation word, a route segment from
+the run's route inventory, a `real/` (unmocked) folder, minus a mock signal.
+Every weight is additive and printed as a `why:` line, so the order explains
+itself — the score is never a bare number. Ties break on the logical key, so
+the list is deterministic. The text surface prints the top five and says how
+many it hid; `--json` carries every candidate with its `rank` and `score`:
+
+```text
+obligation: tenant.accounts:persistence:create  cause: TEST_MAPPING_MISSING
+  candidates (ranked by evidence):
+  - #1 playwright:chromium:tests/e2e/real/account_create_matrix.spec.js:company tenant persists (tests/e2e/real/account_create_matrix.spec.js)
+    why: explicit tag names this obligation's resource 'accounts'
+    why: lives in a 'real' folder (unmocked)
+    ... and 286 more candidate(s) — run `gateforge tests suggest --json` for the full ranked list
+```
+
+`already declared for: …` is printed only when a DECLARATION exists (a
+`test-map.yml` entry or an `@gateforge` annotation). An inferred or
+prior-run binding is a suggestion, never a declaration, and no longer prints
+that line.
+
+### One instruction, not two
+
+When a candidate exists, the suggestion's next action is to MARK that
+existing test `observed-e2e` and run it under the witness
+(`gateforge tests mark --test <key> --kind observed-e2e --obligation <id>
+--reason "…"` then `gateforge test-gates --changed`). The overlay
+instruction — write `tests/e2e/gateforge/<resource>.<op>.spec.js` — belongs
+to `newTestNeeded: true`, i.e. no existing test fits. A suggestion block
+never tells you to write a new overlay test and, in the same breath, to
+reuse the test it just listed.
+
+### A declared mapping is visible in `check`
+
+After `tests mark`, `check` says `mapped to: <test keys> (not yet witnessed)`
+for every obligation whose test ids are declared but whose records were not
+consulted, and its next action names the command that collects the evidence
+(`gateforge test-gates --changed`) instead of the generic "write a test"
+advice. The JSON report adds `declaredTests` and
+`mappingState: "declared" | "declared-not-witnessed"`. Only DECLARED ids
+appear there — an inferred or prior-run binding never does.
+
+### Runner file scope (`tests discover`)
+
+The static scan is seeded from Gateforge's own include globs, so it finds
+test-shaped calls anywhere in the repository — including files no configured
+runner would ever collect. Each runner's OWN file selection is therefore read
+as data and decides the row's runner:
+
+- Playwright: the enumeration's project-graph reporter records each
+  project's resolved `testDir`, `testMatch` and `testIgnore`. A file outside
+  every project's selection is not a playwright test and is not catalogued as
+  one.
+- Vitest: `vitest.config.*` / `vite.config.*` (at any depth, bounded) are read
+  with the TypeScript AST only — `test.include`, `test.exclude`,
+  `test.globals` literals, never an evaluated expression. A vitest suite
+  inside a playwright-configured repository is catalogued as a vitest row
+  with a `runner-file-scope` weak signal naming the evidence; with
+  `globals: true`, a bare `describe`/`it` is a registration the runner owns,
+  not an `unresolved-test-alias` gap.
+
+Every selection is FAIL-OPEN and says so. A pattern that cannot be translated
+(`!`-negated class, unbalanced group), a computed value, a function-valued
+selector, or a missing config makes the scope select everything — today's
+behaviour — and the runner summary line states which selection could not be
+read. A file that NO runner's selection claims keeps the configured runner
+and stays a blocking row (`reconciliation-static-only`, carrying a
+`no-runner-claims-file` weak signal that says so): ownership is never
+invented.
+`inventoryComplete` is judged over the CONFIGURED runner's unresolved rows.
 
 ## Advisory pytest diagnostics
 

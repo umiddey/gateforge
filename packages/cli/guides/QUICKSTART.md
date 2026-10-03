@@ -147,7 +147,7 @@ gateforge tests suggest
 
 Discovery writes a derived catalog under `.gateforge/test-gates/`. Suggestions are for inspection; they do not create declarations or prove a test.
 
-**You should see:** discovered test keys and suggestions with obligation IDs and any mapping problems.
+**You should see:** discovered test keys and suggestions with obligation IDs and any mapping problems. Candidates are ranked by the evidence their own row carries, so the strongest match is `#1`; each candidate prints the `why:` lines that produced its rank, the text surface shows the top five, and `gateforge tests suggest --json` returns the full ranked list. With a candidate in hand, the next action is to declare that existing test `observed-e2e` and run it under the witness — the overlay-test instruction appears only when no existing test fits (`new test needed: yes`). After a declaration, `gateforge check` prints `mapped to: <test> (not yet witnessed)` for obligations whose mapping exists but whose evidence has not been collected yet.
 
 **If not:** fix Playwright installation, configuration, or test enumeration first. Do not treat an empty or failed inventory as proof that no tests exist. If a test does not fit, the suggestion report explains what is missing.
 

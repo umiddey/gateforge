@@ -17,6 +17,7 @@ export * from './adapters.js';
 export * from './supervised-run.js';
 export * from './trusted-config.js';
 export * from './runner-env.js';
+export * from './runner-file-scope.js';
 export * from './surface-doctor.js';
 export * from './playwright-runner-adapter.js';
 export * from './pytest-runner-adapter.js';
