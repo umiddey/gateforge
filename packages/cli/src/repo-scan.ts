@@ -11,6 +11,12 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
+// Git-ignore scope for the heuristic walk (owner decision D5): content
+// in a gitignored tree (a built report bundle, a local cache) is not
+// what the repository is made of, so it must not decide what `init`
+// recommends — a dirty working copy then recommends exactly what a
+// clean clone of the same commit does.
+import { gitIgnoredPaths, type GitIgnoredScope } from './git-ignored.js';
 
 /**
  * Directories never descended into (dependency, build, VCS output).
@@ -309,7 +315,7 @@ const JS_OR_TS = /\.(js|jsx|mjs|cjs|ts|tsx)$/;
  */
 export function scanRepo(cwd: string): RepoScan {
   const collected: string[] = [];
-  collectFiles(cwd, cwd, collected);
+  collectFiles(cwd, cwd, collected, gitIgnoredPaths(cwd));
   // Detection reads every collected file; the ORDER decides only which
   // file a signal is QUOTED from. Application code comes first, so the
   // printed evidence names a file the owner edits rather than one that
@@ -506,9 +512,15 @@ export function renderScanBlock(
 
 /**
  * Recursively collects repo-relative file paths, skipping ignored
- * directories. Fail-open: unreadable directories contribute nothing.
+ * directories and every path this run's Git-ignore scope excludes.
+ * Fail-open: unreadable directories contribute nothing.
  */
-function collectFiles(root: string, dir: string, out: string[]): void {
+function collectFiles(
+  root: string,
+  dir: string,
+  out: string[],
+  gitIgnored: GitIgnoredScope,
+): void {
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -523,6 +535,8 @@ function collectFiles(root: string, dir: string, out: string[]): void {
     // Gateforge's own state and must stay readable on a re-run.
     if (entry.startsWith('.') && !SCANNED_HIDDEN_DIRS.has(entry)) continue;
     const absolute = join(dir, entry);
+    const relativePath = relative(root, absolute).split('\\').join('/');
+    if (gitIgnored.skipsDirectory(relativePath)) continue;
     let stat: ReturnType<typeof statSync>;
     try {
       stat = statSync(absolute);
@@ -530,9 +544,11 @@ function collectFiles(root: string, dir: string, out: string[]): void {
       continue;
     }
     if (stat.isDirectory()) {
-      collectFiles(root, absolute, out);
+      collectFiles(root, absolute, out, gitIgnored);
+    } else if (gitIgnored.skipsFile(relativePath)) {
+      continue;
     } else if (stat.isFile()) {
-      out.push(relative(root, absolute).split('\\').join('/'));
+      out.push(relativePath);
     }
   }
 }

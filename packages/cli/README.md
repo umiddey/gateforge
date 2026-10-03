@@ -827,6 +827,7 @@ Every configured plugin runs over the same expanded include path list
 (`project.paths.include` minus `exclude`; `.git` and `node_modules` are
 never scanned):
 
+
 - **subprocess** (GPP/3): `command` argv is spawned via
   `@gate-forge/plugin-protocol`'s `PluginSession` — pinned handshake, one
   lock-step `discover`, shutdown handshake, fail-closed on any protocol
@@ -840,6 +841,20 @@ never scanned):
 The plugin's `discover` receives repo-relative file paths; in-process
 plugins resolve them against the process working directory, which for a
 CLI run is the repo root.
+
+**Gitignored files are not scanned.** Untracked files Git ignores —
+anything a `.gitignore` at any depth, or `.git/info/exclude`, excludes —
+never enter the detector input list, so a dirty working copy (a built
+`playwright-report/`, a cache tree, local output) produces exactly the
+scan a clean clone of the same commit does. TRACKED files are always
+scanned, even when an ignore pattern matches them: Git's own semantics.
+The user's global excludes file is deliberately not consulted, so the
+same repository scans identically on every machine; only repository
+state decides. Outside a Git work tree (or without `git` on `PATH`)
+nothing is skipped. The evidence digest still hashes configured scan
+inputs even when Git ignores them, so an edit to an ignored file still
+invalidates old evidence — the digest is a deliberate superset of the
+scan, never a subset.
 
 ## Endpoint plane rules (`.gateforge/planes.json`)
 

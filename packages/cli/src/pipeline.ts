@@ -55,7 +55,8 @@ import { staticAdapterFieldsFromSource } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
 import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.js';
 import { clockFromConfig } from './clock.js';
-import { expandIncludePaths, type ExpandError } from './glob.js';
+import { expandScanPaths, type ExpandError } from './glob.js';
+import { gitIgnoredPaths } from './git-ignored.js';
 import { runPlugins } from './plugins.js';
 import type { CacheControl, CacheCounts } from './run-cache.js';
 import { compileEndpointContribution, type EndpointInventory } from './endpoint-compiler.js';
@@ -367,15 +368,20 @@ function firstIssueText(
 export async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
   const { cwd, env, config, provider, stateDir } = options;
   const clock = clockFromConfig(config);
+  // Git-ignore scope (owner decision D5): ONE query per run, shared by
+  // every enumeration below, so the detector input list and the
+  // classifier's requested paths describe the same repository.
+  const gitIgnored = gitIgnoredPaths(cwd);
   // FAIL-CLOSED coverage (red-team F3): every unreadable path the walk
   // hits is collected and becomes a graph finding below — files may exist
   // behind unreadable directories, and they must not vanish from both the
   // requested and scanned sets.
   const expandErrors: ExpandError[] = [];
-  const paths = expandIncludePaths(
+  const paths = expandScanPaths(
     config.project.paths.include,
     config.project.paths.exclude,
     cwd,
+    gitIgnored,
     expandErrors,
   );
   const pipelineStartedAtMs = performance.now();
@@ -500,10 +506,11 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       // detector discovery scans. Project exclusions remove files from the
       // requested scope, while included files remain subject to the
       // classifier's fail-closed coverage checks.
-      requestedPaths: expandIncludePaths(
+      requestedPaths: expandScanPaths(
         policyDocParsed.data.scanRoots,
         config.project.paths.exclude,
         cwd,
+        gitIgnored,
       ),
       scannedPaths,
       coverage,
