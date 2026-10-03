@@ -52,7 +52,12 @@ export interface AuthDetector {
 
 /** Options for {@link createAuthDetector}. */
 export interface AuthDetectorOptions {
-  /** Repo root for repo-relative `source` paths (default: `process.cwd()`). */
+  /**
+   * Repo root for repo-relative `source` paths (default: `process.cwd()`
+   * AT DISCOVER TIME — the default export is created at module import, so a
+   * factory-time capture would pin the loader's cwd and read the user's
+   * worktree instead of the gated candidate checkout).
+   */
   root?: string;
 }
 
@@ -510,12 +515,19 @@ function endpointToResource(root: string, ep: Endpoint): Resource {
  *   AuthDetector: the pinned `{ discover(paths) }` module.
  */
 export function createAuthDetector(options: AuthDetectorOptions = {}): AuthDetector {
-  const root = options.root ?? process.cwd();
   return {
     discover(paths) {
       if (paths.length === 0) {
         return { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       }
+      // The repo root is resolved at DISCOVER time unless the caller pinned
+      // one explicitly: the default export of this pack is created at module
+      // import (the CLI imports it at startup), and `gateforge check --staged`
+      // moves the process cwd to the staged candidate checkout before
+      // discovery runs. A root captured at factory time would pin the
+      // loader's cwd and read the user's worktree bytes instead of the
+      // gated ones.
+      const root = options.root ?? process.cwd();
       const files = resolveInputs(paths);
       const endpoints: Endpoint[] = [];
       const scanned: string[] = [];

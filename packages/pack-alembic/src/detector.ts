@@ -40,7 +40,11 @@ export function pythonEnvironment(extra: readonly string[] = []): NodeJS.Process
 
 /** Options for createAlembicDetector. */
 export interface AlembicDetectorOptions {
-  /** Repo root directory. */
+  /**
+   * Repo root directory (default: `process.cwd()` AT DISCOVER TIME — the
+   * default export is created at module import, so a factory-time capture
+   * would pin the loader's cwd).
+   */
   cwd?: string;
   /** Subprocess command. */
   command?: readonly string[];
@@ -69,10 +73,14 @@ export interface AlembicDetector {
 export function createAlembicDetector(options: AlembicDetectorOptions = {}): AlembicDetector {
   const command = options.command ?? DEFAULT_COMMAND;
   const env = options.env ?? pythonEnvironment();
-  const cwd = options.cwd ?? process.cwd();
   const pluginId = options.pluginId ?? PACK_PLUGIN_ID;
   const pluginVersion = options.pluginVersion ?? PACK_VERSION;
-
+  // The repo root is resolved at DISCOVER time unless the caller pinned one
+  // explicitly: the default export of this pack is created at module import
+  // (the CLI imports it at startup), and `gateforge check --staged` moves the
+  // process cwd to the staged candidate checkout before discovery runs. A
+  // root captured at factory time would pin the loader's cwd and read the
+  // user's worktree bytes instead of the gated ones.
   return {
     async discover(paths: readonly string[]): Promise<DiscoveryOutcome> {
       if (paths.length === 0) {
@@ -87,7 +95,7 @@ export function createAlembicDetector(options: AlembicDetectorOptions = {}): Ale
         command: [...command],
         pluginId,
         pluginVersion,
-        cwd,
+        cwd: options.cwd ?? process.cwd(),
         env,
         timeouts: { handshakeMs: 10_000, requestMs: 30_000, shutdownMs: 10_000 },
       });

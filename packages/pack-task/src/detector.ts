@@ -94,7 +94,11 @@ export interface TaskResourceAttributes {
 
 /** Options for {@link createTaskDetector}. */
 export interface TaskDetectorOptions {
-  /** Override the repo root used for relative path computation. */
+  /**
+   * Override the repo root used for relative path computation (default:
+   * `process.cwd()` AT DISCOVER TIME — the default export is created at
+   * module import, so a factory-time capture would pin the loader's cwd).
+   */
   rootDir?: string;
 }
 
@@ -177,15 +181,22 @@ interface RawDetection {
  * pack is an instance with no overrides.
  *
  * Args:
- *   options: Optional `{ rootDir }` override (defaults to `process.cwd()`).
+ *   options: Optional `{ rootDir }` override (default: `process.cwd()` AT
+ *     DISCOVER TIME — the default export is created at module import, so a
+ *     factory-time capture would pin the loader's cwd).
  *
  * Returns:
  *   TaskDetector: A `{ discover(paths) }` callable.
  */
 export function createTaskDetector(options: TaskDetectorOptions = {}): TaskDetector {
-  const rootDir = options.rootDir ?? process.cwd();
-
   async function discover(paths: string[]): Promise<DiscoveryOutcome> {
+    // Resolved per call, not at factory time: `gateforge check --staged`
+    // moves the process cwd to the staged candidate checkout before
+    // discovery runs, and this pack's default export is created at module
+    // import (the CLI imports it at startup). An explicit `rootDir` still
+    // wins.
+    const rootDir = options.rootDir ?? process.cwd();
+
     const files = await collectFiles(rootDir, paths);
     const detections: RawDetection[] = [];
     const findings: Finding[] = [];

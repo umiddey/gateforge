@@ -395,14 +395,24 @@ describe('fastapi detector config reader (.gateforge/fastapi.json)', () => {
     }
   });
 
-  it('a malformed config fails the factory closed (no scan with partial trust)', () => {
+  it('a malformed config fails the discover closed (no scan with partial trust)', async () => {
+    // The config document is read from the root in force at DISCOVER time
+    // (the default export is created at module import, so a factory-time
+    // read would grade the loader's config instead of the gated
+    // candidate's) — the fail-closed guarantee therefore lands on the
+    // discover call rather than on the factory.
     const dir = mkdtempSync(join(tmpdir(), 'gateforge-fastapi-config-'));
     try {
       const path = join(dir, 'fastapi.json');
       writeFileSync(path, '{ "importRoots": [".."] }', 'utf8');
-      expect(() =>
-        createFastapiDetector({ env: pythonEnv(), cwd: FIXTURE_ROOT, importRootsConfigPath: path }),
-      ).toThrow(/repo-root-relative directory/);
+      const detector = createFastapiDetector({
+        env: pythonEnv(),
+        cwd: FIXTURE_ROOT,
+        importRootsConfigPath: path,
+      });
+      await expect(detector.discover([...REGISTRY_FIXTURES])).rejects.toThrow(
+        /repo-root-relative directory/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

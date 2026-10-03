@@ -39,7 +39,11 @@ export interface ValidationDetector {
 
 /** Options for {@link createValidationDetector}. */
 export interface ValidationDetectorOptions {
-  /** Repo root for repo-relative `source` paths (default: `process.cwd()`). */
+  /**
+   * Repo root for repo-relative `source` paths (default: `process.cwd()` AT
+   * DISCOVER TIME — the default export is created at module import, so a
+   * factory-time capture would pin the loader's cwd).
+   */
   root?: string;
 }
 
@@ -208,11 +212,16 @@ function toResource(root: string, s: DetectedSchema): Resource {
 }
 
 export function createValidationDetector(options: ValidationDetectorOptions = {}): ValidationDetector {
-  const root = options.root ?? process.cwd();
   return {
     discover(paths) {
       const out: DiscoveryOutcome = { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       if (paths.length === 0) return out;
+      // Resolved per call, not at factory time: `gateforge check --staged`
+      // moves the process cwd to the staged candidate checkout before
+      // discovery runs, and this pack's default export is created at module
+      // import (the CLI imports it at startup). An explicit `root` still
+      // wins.
+      const root = options.root ?? process.cwd();
       const scanned: string[] = [];
       for (const rawPath of paths) {
         const abs = isAbsolute(rawPath) ? rawPath : resolve(root, rawPath);
