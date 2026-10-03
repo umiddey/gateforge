@@ -8,7 +8,71 @@
 # Fail the workflow so release automation cannot report a false green.
 #
 # Every package must have its npm Trusted Publisher configured before tagging.
+#
+# Bytecode preflight: publishing straight from a working tree where the Python
+# detectors have run shipped every `python/**/__pycache__/*.pyc` into the
+# tarballs (0.8.0 did, in four packages). Every manifest that ships a `python`
+# directory now ends its `files` list with the negations `!**/__pycache__`,
+# `!**/*.pyc` and `!**/*.pyo`, and the preflight below refuses the whole
+# release — before a single package is published — when a packed file list
+# still names bytecode, printing the package and the path. Release through the
+# tag workflow (.github/workflows/publish.yml) or from the `.tgz` files a
+# `npm pack --dry-run --json --workspaces` just verified; a manual
+# `npm publish` from a used working tree is not a release path.
 set -euo pipefail
+
+# Packed file lists of every workspace package, one "<package>: <path>" line
+# per Python bytecode entry. Exit 3: bytecode found. Exit 1: the list could not
+# be read (npm failed, printed no JSON, or packed no package). Both refuse.
+pack_bytecode_offenders() {
+  npm pack --dry-run --json --workspaces | node -e '
+const chunks = [];
+process.stdin.on("data", (chunk) => chunks.push(chunk));
+process.stdin.on("end", () => {
+  let entries;
+  try {
+    entries = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (err) {
+    console.error(`npm pack --dry-run --json printed no JSON: ${err.message}`);
+    process.exit(1);
+  }
+  if (!Array.isArray(entries) || entries.length === 0) {
+    console.error("npm pack --dry-run --json packed no workspace package — run it from the repository root");
+    process.exit(1);
+  }
+  const offenders = [];
+  for (const entry of entries) {
+    const name = typeof entry.name === "string" ? entry.name : "unknown package";
+    for (const file of entry.files ?? []) {
+      const path = typeof file.path === "string" ? file.path : "";
+      if (/(^|\/)__pycache__(\/|$)/.test(path) || /\.(pyc|pyo)$/.test(path)) {
+        offenders.push(`${name}: ${path}`);
+      }
+    }
+  }
+  if (offenders.length > 0) {
+    console.log(offenders.join("\n"));
+    process.exit(3);
+  }
+});
+'
+}
+
+preflight_log=$(mktemp -d)
+trap 'rm -rf "$preflight_log"' EXIT
+bytecode_status=0
+bytecode_offenders=$(pack_bytecode_offenders 2>"$preflight_log/npm.err") || bytecode_status=$?
+if (( bytecode_status == 3 )); then
+  echo "::error::refusing to publish: Python bytecode would ship in these tarballs"
+  while IFS= read -r offender; do echo "       $offender"; done <<< "$bytecode_offenders"
+  echo "       fix: end that package's files list with !**/__pycache__, !**/*.pyc and !**/*.pyo, delete the cache, then re-run"
+  exit 1
+elif (( bytecode_status != 0 )); then
+  echo "::error::refusing to publish: the packed file list could not be verified"
+  sed 's/^/       /' "$preflight_log/npm.err"
+  exit 1
+fi
+echo "::notice::tarball preflight: no Python bytecode in any workspace package"
 published=0; skipped=0; failed=0
 for dir in packages/*/; do
   name=$(node -p "require('./${dir}package.json').name")

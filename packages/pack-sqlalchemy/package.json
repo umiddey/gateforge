@@ -17,7 +17,10 @@
     "README.md",
     "dist",
     "examples",
-    "python"
+    "python",
+    "!**/__pycache__",
+    "!**/*.pyc",
+    "!**/*.pyo"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
