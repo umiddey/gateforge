@@ -1090,8 +1090,11 @@ function resolveCacheExclusionsForInit(
  * here always means "these routes serve a model whose plane IS this".
  *
  * A non-interactive run proposes nothing and writes nothing: it prints
- * the folders and the exact `gateforge classify plane` command for each,
- * which is the same owner-reviewed path used for a folder rule later.
+ * the folders and the runnable `gateforge classify plane` shape for each,
+ * with the plane and the reason LEFT AS PLACEHOLDERS — printing a concrete
+ * plane would be inferring it for the owner, which is exactly what D1
+ * forbids, and an agent that copies the line would apply a wrong plane to
+ * a folder whose models init inferred as `master`.
  *
  * Args:
  *   cwd: absolute repository root.
@@ -1108,7 +1111,7 @@ async function askRouteFolderPlanes(cwd: string, io: Io): Promise<PlaneConfigRul
     writeLine(
       io.stdout,
       `warning: route plane discovery failed (${cause instanceof Error ? cause.message : String(cause)}); ` +
-        'answer the route folders with `gateforge classify plane <folder> <plane> --reason "<why>" --confirm` — init continues',
+        'answer the route folders with `gateforge classify plane <folder> <tenant|master|global> --reason "<why>" --confirm` — init continues',
     );
     return [];
   }
@@ -1129,7 +1132,7 @@ async function askRouteFolderPlanes(cwd: string, io: Io): Promise<PlaneConfigRul
       );
       writeLine(
         io.stdout,
-        `    gateforge classify plane ${proposal.folder} tenant --reason 'routes in this folder serve tenant data' --confirm`,
+        `    gateforge classify plane ${proposal.folder} <tenant|master|global> --reason '<why the ROUTES in this folder serve that data>' --confirm`,
       );
     }
     return answers;

@@ -50,7 +50,7 @@ interface PlanesFile {
 }
 
 describe('init --planes names the route folders it cannot infer (D1)', () => {
-  it('prints one runnable command per unresolved route folder and writes no route rule', async () => {
+  it('prints one runnable command SHAPE per unresolved route folder, with no plane chosen', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles({ 'app/models.py': MODELS, 'app/main.py': ROUTES });
       const { code, stdout, stderr } = await runCli(repo, [
@@ -62,10 +62,27 @@ describe('init --planes names the route folders it cannot infer (D1)', () => {
       ]);
       expect(code, `${stdout}\n${stderr}`).toBe(0);
 
-      // The folder is NAMED, with the exact owner-reviewed command.
+      // The folder is NAMED, with the exact owner-reviewed command shape
+      // — and with the plane LEFT AS A PLACEHOLDER. Printing a concrete
+      // plane infers it for the owner (D1), and an agent that copies the
+      // line would apply a wrong plane to a folder whose models init
+      // itself inferred as `master`.
       expect(stdout).toContain('route folders with no answered plane');
       expect(stdout).toMatch(/^ {2}app \(\d+ route\(s\)/m);
-      expect(stdout).toContain('gateforge classify plane app tenant --reason');
+      expect(stdout).toContain(
+        "gateforge classify plane app <tenant|master|global> --reason '<why the ROUTES in this folder serve that data>' --confirm",
+      );
+      // No printed classify command may carry a concrete plane word: an
+      // agent copying any of them must still have to decide.
+      const classifyLines = stdout
+        .split('\n')
+        .filter((line) => line.includes('gateforge classify plane'));
+      expect(classifyLines.length).toBeGreaterThan(0);
+      for (const line of classifyLines) {
+        expect(line, `a printed command must not choose a plane: ${line}`).not.toMatch(
+          /classify plane \S+ (tenant|master|global) /,
+        );
+      }
 
       // Nothing is inferred from the linked model: `orders` has no
       // resolved plane, so there is no hint to show.
