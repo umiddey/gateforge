@@ -19,5 +19,8 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     testTimeout: 20_000,
+    // Verifier-keyring isolation: the suite must never read the developer's
+    // real `~/.config/gateforge/verifier-keyring.json` (see the file).
+    setupFiles: ['test/setup-verifier-isolation.ts'],
   },
 });

@@ -17,7 +17,7 @@
  * - non-strict behavior is unchanged (old receipts without the field
  *   stay verifiable when no pin is provisioned).
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -35,7 +35,6 @@ import {
   TRUSTED_CONFIG_ENV,
   WEAKENED_POLICY_NEXT_ACTION,
 } from '../src/trusted-policy.js';
-import { VERIFIER_KEY_ENV, VERIFIER_KEY_FILE_ENV } from '../src/commands/common.js';
 
 const VERIFIER_KEY = 'trusted-policy-suite-verifier-key';
 
@@ -44,24 +43,6 @@ const NO_PIN: Record<string, string | undefined> = {
   [APPROVED_POLICY_DIGEST_ENV]: undefined,
   [TRUSTED_CONFIG_ENV]: undefined,
 };
-
-/**
- * An empty XDG/HOME config directory inside the fixture repo: it makes the
- * default owner key-ring path (`<config home>/gateforge/verifier-keyring.json`)
- * resolve to a file that does not exist, whatever the developer machine has
- * provisioned. Created inside the repo so the fixture cleans it up.
- *
- * Args:
- *   repo: the fixture repository.
- *
- * Returns:
- *   string: the absolute path of the empty config home.
- */
-function emptyConfigHome(repo: TempRepo): string {
-  const path = join(repo.root, '.empty-config-home');
-  mkdirSync(path, { recursive: true });
-  return path;
-}
 
 /**
  * Minimal fixture repository (zero obligations — the gate decision is
@@ -790,19 +771,6 @@ describe('test-gates binds the approved policy revision (orchestrator stitch)', 
       const result = await runCli(repo, ['test-gates', '--changed'], {
         ...NO_PIN,
         [APPROVED_POLICY_DIGEST_ENV]: pin,
-        // Hermetic: a real `gateforge key create` leaves a key ring at
-        // `$XDG_CONFIG_HOME|$HOME/.config/gateforge/verifier-keyring.json`
-        // (see `defaultVerifierKeyringPath`), and `resolveVerifierKeyring`
-        // signs with that file whenever the env key is absent. Point the
-        // default path at an empty directory so "no verifier key is
-        // provisioned" holds on every machine; the assertions below are
-        // unchanged.
-        [VERIFIER_KEY_ENV]: undefined,
-        [VERIFIER_KEY_FILE_ENV]: undefined,
-        XDG_CONFIG_HOME: emptyConfigHome(repo),
-        // `XDG_CONFIG_HOME` takes precedence over `$HOME/.config` in
-        // `defaultVerifierKeyringPath`, so this alone makes the fallback
-        // key file absent; `HOME` is left untouched for everything else.
       });
       // No verifier key is provisioned, so the supervisor surface cannot
       // be used and the run fails for THAT reason — the pin check itself
