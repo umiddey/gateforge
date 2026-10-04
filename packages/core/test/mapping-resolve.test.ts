@@ -808,7 +808,9 @@ describe('mappingSuggestions — token boundaries (0.9.2 adoption fix)', () => {
     expect(first?.score ?? 0).toBeGreaterThan(0);
     const why = first?.why.join(' ') ?? '';
     expect(why).toContain("resource token 'notifications' matches the test title path");
-    expect(why).toContain("title mentions the obligation's route segment 'notifications'");
+    // One word, one signal: the resource-token match already counted
+    // 'notifications', so the route segment of the same name adds nothing.
+    expect(why).not.toContain("title mentions the obligation's route segment 'notifications'");
   });
 
   it('never matches a token inside a longer word (no `read` in `reference`/`unread`)', () => {
@@ -881,7 +883,8 @@ describe('mappingSuggestions — tag text is not a title word (0.9.2 follow-up)'
     expect(first?.score ?? 0).toBeGreaterThan(0);
     const why = first?.why.join(' ') ?? '';
     expect(why).toContain("resource token 'notifications' matches the test title path");
-    expect(why).toContain("title mentions the obligation's route segment 'notifications'");
+    // One word, one signal (see above).
+    expect(why).not.toContain("title mentions the obligation's route segment 'notifications'");
   });
 });
 
@@ -990,6 +993,100 @@ describe('mappingSuggestions — eligibility, not just ranking (0.9.2 follow-up)
     expect(suggestion?.missingEvidence).toContain('only mocked candidates');
     // No `tests mark` next action for a mocked candidate.
     expect(suggestion?.nextAction).not.toContain('mark the existing test');
+    expect(suggestion?.nextAction).toContain('Overlay: write');
+  });
+});
+
+describe('mappingSuggestions — candidates must be distinctive (0.9.2 follow-up)', () => {
+  const OBLIGATION =
+    'tenant.http-patch-api-v1-notifications-param-read-68ff3585:http:request-observed';
+  const HINTS = new Map([[OBLIGATION, ['PATCH /api/v1/notifications/{notification_id}/read']]]);
+
+  /** A real e2e test whose only match is the operation word `read`. */
+  function readOnlyRow(logicalKey: string, file: string, title: string): TestCatalogEntry {
+    return row({
+      logicalKey,
+      file,
+      titlePath: [title],
+      title,
+      sourceLocation: { file, line: 4, col: 0 },
+      inferredKind: 'browser-e2e',
+    });
+  }
+
+  const ERP = 'playwright:-:tests/e2e/real/erp_token.spec.js:tenant-plane ERP token cannot read the platform tier API';
+  const ACCOUNTS_UI =
+    'playwright:chromium:tests/e2e/real/accounts_ui.spec.js:read tenant.accounts through UI';
+  const BILLING_UI =
+    'playwright:chromium:tests/e2e/real/billing_ui.spec.js:read tenant.billing_documents through UI';
+  const DASHBOARD =
+    'vitest:-:frontend/src/components/dashboard/__tests__/Dashboard.test.jsx:Dashboard (TanStack migration)>marks all notifications read via the mutation';
+  const NOTIFICATIONS =
+    'playwright:-:tests/e2e/real/notifications.spec.js:notifications mark one as read';
+
+  function suggestionsFor(entries: TestCatalogEntry[]) {
+    const ranked = catalog(entries);
+    const suggestion = mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [OBLIGATION] }),
+      ),
+      routeHints: HINTS,
+    })[0];
+    return { candidates: suggestion?.candidates ?? [], suggestion };
+  }
+
+  const realRows = (): TestCatalogEntry[] => [
+    readOnlyRow(ERP, 'tests/e2e/real/erp_token.spec.js', 'tenant-plane ERP token cannot read the platform tier API'),
+    readOnlyRow(ACCOUNTS_UI, 'tests/e2e/real/accounts_ui.spec.js', 'read tenant.accounts through UI'),
+    readOnlyRow(BILLING_UI, 'tests/e2e/real/billing_ui.spec.js', 'read tenant.billing_documents through UI'),
+    row({
+      logicalKey: DASHBOARD,
+      runner: 'vitest',
+      file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx',
+      titlePath: [
+        'Dashboard (TanStack migration)',
+        'marks all notifications read via the mutation',
+      ],
+      title: 'marks all notifications read via the mutation',
+      sourceLocation: { file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx', line: 8, col: 0 },
+      inferredKind: 'unit',
+      suppressionSignals: [
+        {
+          kind: 'mock',
+          detail: 'the api client is mocked for the jsdom render',
+          location: { file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx', line: 3, col: 0 },
+        },
+      ],
+    }),
+  ];
+
+  it('offers only the test with a distinctive match, never an operation word or a unit suite', () => {
+    // `read` is the CONTRACT's operation and a route segment, not this
+    // route's resource: an obligation for `…/notifications/…/read` is not
+    // satisfied by "read tenant.accounts through UI". A unit suite can
+    // never witness it either.
+    const { candidates, suggestion } = suggestionsFor([
+      ...realRows(),
+      row({
+        logicalKey: NOTIFICATIONS,
+        file: 'tests/e2e/real/notifications.spec.js',
+        titlePath: ['notifications mark one as read'],
+        title: 'notifications mark one as read',
+        sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 5, col: 0 },
+        inferredKind: 'browser-e2e',
+      }),
+    ]);
+    expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([NOTIFICATIONS]);
+    expect(candidates[0]?.why.join(' ')).toContain("resource token 'notifications'");
+    expect(suggestion?.newTestNeeded).toBe(false);
+  });
+
+  it('reports no candidate and a new test when nothing distinctive matches', () => {
+    const { candidates, suggestion } = suggestionsFor(realRows());
+    expect(candidates).toEqual([]);
+    expect(suggestion?.newTestNeeded).toBe(true);
     expect(suggestion?.nextAction).toContain('Overlay: write');
   });
 });

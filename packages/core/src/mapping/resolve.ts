@@ -731,7 +731,9 @@ function resourceTokens(resourceId: string): string[] {
   return resourceId
     .split(/[.\-_]/)
     .map((token) => token.toLowerCase())
-    .filter((token) => token.length > 2 && !isStructuralResourceToken(token));
+    .filter(
+      (token) => token.length > 2 && !isStructuralResourceToken(token) && OPERATION_WORDS[token] !== true,
+    );
 }
 
 
@@ -833,16 +835,28 @@ function candidateEvidence(
   const operationWords = OPERATION_TITLE_WORDS[operationOf(obligationId)] ?? [];
   const routeSegments = routeSegmentsOf(routes);
 
+  // One word counts once: the first (strongest) signal for it is the only
+  // one, so a resource token that is also a route segment never scores
+  // twice, and an operation word is never mistaken for a resource name.
+  const counted = new Set<string>();
+  let distinctive = false;
   for (const token of tokens) {
+    if (counted.has(token)) continue;
     if (tagTokens.includes(token)) {
+      counted.add(token);
+      distinctive = true;
       score += CANDIDATE_SCORE['explicitTag'] ?? 0;
       why.push(`explicit tag names this obligation's resource '${token}'`);
       continue;
     }
     if (words.includes(token)) {
+      counted.add(token);
+      distinctive = true;
       score += CANDIDATE_SCORE['titleResourceToken'] ?? 0;
       why.push(`resource token '${token}' matches the test title path`);
     } else if (fileWords.includes(token)) {
+      counted.add(token);
+      distinctive = true;
       score += CANDIDATE_SCORE['fileResourceToken'] ?? 0;
       why.push(`resource token '${token}' matches the test file '${row.file}'`);
     } else if (
@@ -850,20 +864,28 @@ function candidateEvidence(
         signal.label.toLowerCase().split(/[^a-z0-9]+/).includes(token),
       )
     ) {
+      counted.add(token);
+      distinctive = true;
       score += CANDIDATE_SCORE['categoryToken'] ?? 0;
       why.push(`resource token '${token}' matches a category label`);
     }
   }
   const operation = operationOf(obligationId);
   if (operation.length > 2 && operationWords.some((word) => words.includes(word))) {
+    counted.add(operation);
     score += CANDIDATE_SCORE['titleOperationToken'] ?? 0;
     why.push(`title names the obligation's operation '${operation}'`);
   }
   for (const segment of routeSegments) {
+    if (counted.has(segment)) continue;
     if (words.includes(segment)) {
+      counted.add(segment);
+      if (OPERATION_WORDS[segment] !== true) distinctive = true;
       score += CANDIDATE_SCORE['titleRouteSegment'] ?? 0;
       why.push(`title mentions the obligation's route segment '${segment}'`);
     } else if (fileWords.includes(segment)) {
+      counted.add(segment);
+      if (OPERATION_WORDS[segment] !== true) distinctive = true;
       score += CANDIDATE_SCORE['fileRouteSegment'] ?? 0;
       why.push(`test file mentions the obligation's route segment '${segment}'`);
     }
@@ -876,8 +898,39 @@ function candidateEvidence(
     score += CANDIDATE_SCORE['mockedSuppression'] ?? 0;
     why.push('mocks the system under test (weaker evidence)');
   }
-  return { score, why };
+  // An unmocked folder, an operation word or a mock signal alone never makes
+  // a candidate: there must be at least one DISTINCTIVE match — a resource
+  // token or a route segment that is not an operation word.
+  return distinctive ? { score, why } : { score: 0, why: [] };
 }
+
+/**
+ * Every word the operation table uses. These name an OPERATION, never a
+ * resource: `tenant.accounts:…:read` says what the obligation DOES, so a
+ * title that merely says "read tenant.accounts through UI" is evidence
+ * about no resource in particular. They are never resource tokens, and a
+ * row that matches nothing else is not a candidate at all.
+ */
+const OPERATION_WORDS: Readonly<Record<string, true>> = Object.freeze(
+  Object.fromEntries(
+    Object.values(OPERATION_TITLE_WORDS)
+      .flat()
+      .map((word): [string, true] => [word, true]),
+  ),
+);
+
+/**
+ * Contract families whose proof is an OBSERVED-E2E suite test (the Observe
+ * channel): a `unit` suite drives no app and witnesses nothing, so such a
+ * row can never be the answer for them. Other families keep today's
+ * behaviour — the catalog kind is evidence about the CHANNEL, and mapping
+ * every contract onto it would be a second classification.
+ */
+const OBSERVED_E2E_CONTRACT_FAMILIES: Readonly<Record<string, true>> = Object.freeze({
+  persistence: true,
+  crud: true,
+  http: true,
+});
 
 /**
  * Deterministic token inference (plan Phase 3 item 2): the RESOURCE-NAME
@@ -895,12 +948,17 @@ function inferredCandidates(
   routes: readonly string[],
 ): InferredCandidate[] {
   const candidates: InferredCandidate[] = [];
+  const contractFamily = (obligationId.split(':')[1] ?? '').toLowerCase();
+  const observedE2e = OBSERVED_E2E_CONTRACT_FAMILIES[contractFamily] === true;
   for (const row of catalog.entries) {
     // ELIGIBILITY before ranking: a `static-only` row is a test-shaped file
     // no runner enumerated (a Vitest jsdom suite inside a
     // Playwright-configured repository, say). It can never produce the
     // witnessed evidence a mapping promises, so it is never offered.
     if (row.reconciliation === 'static-only') continue;
+    // A `unit` suite drives no app: for an observed-e2e contract it can
+    // never be the test that witnesses the claim.
+    if (observedE2e && row.inferredKind === 'unit') continue;
     const evidence = candidateEvidence(obligationId, row, routes);
     if (evidence.why.length === 0) continue;
     candidates.push({ row, why: evidence.why, score: evidence.score });
