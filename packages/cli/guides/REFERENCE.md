@@ -1582,13 +1582,32 @@ artifacts automatically creates auditable testing responsibilities.
 
 Blocked agents run `gateforge next` (or `gateforge next --json`): exactly
 one blocking next action (`next`/`cause`/`why`/`do`), never a dump. Do the
-single `do:` line and stop. New proof tests go in `tests/e2e/gateforge/`
+single `do:` line and stop. New proof goes in `tests/e2e/gateforge/`
 (overlay, engine-driven fixture — wizard creates via surface v2 steps);
 existing suite-driven browser tests prove persistence and transport via the
-Observe channel once mapped `--kind observed-e2e`. Never rewrite existing
-`tests/e2e/**` journeys, never `tests mark` as proof, never edit policies
-or waivers to self-approve. `GATEFORGE.md` (written by `gateforge init`)
-carries the full loop contract.
+Observe channel once mapped `--kind observed-e2e` — but ONLY when the test's
+`page` comes from Gateforge's own test object, because that fixture is what
+routes the test's app traffic through the supervisor's session observation
+proxy. A test that takes `page` from plain `@playwright/test` reaches the app
+directly, the witness observes nothing, and the claims finalize missing while
+the test passes. When the suite has one shared fixture file, rebase it on
+Gateforge's fixture and change nothing else in the suite:
+
+```js
+// CommonJS suite (Node >= 20.19 / >= 22.12 for require)
+const { test: baseTest, expect } = require('@gate-forge/pack-playwright/fixture');
+```
+
+```ts
+// ESM suite
+import { test as baseTest, expect } from '@gate-forge/pack-playwright/fixture';
+```
+
+Rebasing the shared base is not rewriting a journey: the journeys' own steps,
+assertions and fixtures stay as they are, and only the `test` object they
+extend changes. Never rewrite existing `tests/e2e/**` journeys, never
+`tests mark` as proof, never edit policies or waivers to self-approve.
+`GATEFORGE.md` (written by `gateforge init`) carries the full loop contract.
 
 ## Fix a failing test without a full run
 
