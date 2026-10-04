@@ -128,6 +128,19 @@ whenever the repository already had code:
 gateforge adopt
 ```
 
+Then commit the installation **through the hook**:
+
+```sh
+git add -A && git commit -m "adopt the gate"
+```
+
+The generated pre-commit hook runs `gateforge check --staged --require-e2e`. The first adoption commit passes it **without a bypass**: the repository has no gate at HEAD, so the check judges that commit in adoption mode — it demands a sealed receipt for the obligations this commit newly claims (a `--scope changed` run over the same staged candidate is accepted) and leaves pre-existing debt as `adopt` baselined it. There is nothing to configure: adoption mode is computed from HEAD, and once the gate exists every later commit is judged in full.
+
+```sh
+gateforge test-gates --changed --scope changed   # seal the receipt the hook will read
+git add -A && git commit -m "adopt the gate"    # the hook runs check --staged; no --no-verify
+```
+
 It records today's blocking findings as forgiven debt, in
 `.gateforge/baselines/obligations.json` plus a dated receipt in
 `.gateforge/baselines/adoption.json`, and then wires the blocking gate.

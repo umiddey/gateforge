@@ -215,6 +215,7 @@ import {
   type ScopedObligationRef,
 } from '../receipts.js';
 import { resealChainBlocking, retainedCarriedEvidence } from '../reseal-chain.js';
+import { evaluateAdoptionCommit } from '../adoption-mode.js';
 import { changeBaseTextReader, mergeRequestScopePreflight, resolveProvider, textReaderAtRevision } from '../providers.js';
 import {
   computeEvaluationScope,
@@ -1325,6 +1326,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     policyInputs: [],
     policyInputsOnly: false,
   };
+  // F2 adoption mode: computed from the BASE revision (HEAD for the
+  // staged diff), never declared — no flag, no config key. It only moves
+  // WHICH obligations must be proven (the ones this commit newly claims);
+  // it never relaxes `CHANGE_UNMAPPED` and never forgives an obligation.
+  let adoptionCommit = false;
   let mismatchBlocking: BlockingEntry[] = [];
   let scopeDiscoveryTimings: DiscoveryTimings | undefined;
   if (scopeAwareRun) {
@@ -1383,6 +1389,17 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       fixedChangedFiles === undefined
         ? changeBaseTextReader(providerIdentity, io.cwd, io.env) ?? undefined
         : options.fixedBaseText;
+    // The adoption verdict rides the SAME base reader the policy-input
+    // classifier uses: HEAD for the staged diff, the merge/CI base for the
+    // platform diffs. Condition 3 (the owner-approved digest) is checked
+    // by the receipt gate below, which reaches its coverage decision only
+    // after that pin has passed.
+    adoptionCommit = evaluateAdoptionCommit({
+      baseText: baseText ?? null,
+      configPath: '.gateforge.yml',
+      candidateEnforcement: config.enforcement !== undefined && Object.keys(config.enforcement).length > 0,
+      changedFiles: pipeline.changedFiles,
+    }).adoptionCommit;
     const ownedInputs = gateforgeOwnedInputs(io.cwd, pipeline.changedFiles, config, baseText);
     // A path this change DELETED that no configured runner's own
     // test-file selection ever claimed. Nothing collected it, so removing
@@ -1748,8 +1765,19 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // obligation for an unscoped or expanded run (a slice receipt cannot
   // silently certify a whole-repo evaluation). Carried as id +
   // pin-#2 fingerprint, the exact identity a changed-scope receipt seals.
+  // ADOPTION MODE (F2 §4): the commit that wires the gate always expands
+  // the scope, yet the only affordable proof of a large repository is a
+  // changed-slice receipt. An adoption commit therefore demands coverage
+  // of the obligations this change set NEWLY CLAIMS — the same
+  // join-aware slice a narrowed run demands — while every obligation it
+  // does not touch stays unproven debt (`adopt` baselines it, and the
+  // report still names it). Nothing else moves: a policy-input pin
+  // mismatch, a receipt bound to another candidate tree, a
+  // `CHANGE_UNMAPPED` file and an uncovered newly claimed obligation are
+  // all refused exactly as before.
+  //
   const coverageChangedFiles =
-    diffScoped && scopeDecision.mode === 'changed' ? scopeDecision.changedFiles : null;
+    diffScoped && (scopeDecision.mode === 'changed' || adoptionCommit) ? scopeDecision.changedFiles : null;
   const requiredCoverage = (): ScopedObligationRef[] => {
     const sources = sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog);
     return pipeline.policy.obligations

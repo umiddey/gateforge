@@ -504,7 +504,9 @@ Two details in that command are load-bearing. It names the engine's OWN `cli.js`
 gateforge test-gates --changed --scope changed --result-only
 ```
 
-For an authoritative slice, run `gateforge test-gates --changed --scope changed` without `--result-only`. `gateforge test-gates --changed` alone runs the full relevant mapped suite. Then run `gateforge check --changed --require-e2e` on the same inputs.
+For an authoritative slice, run `gateforge test-gates --changed --scope changed` without `--result-only`. `gateforge test-gates --changed` alone runs the full relevant mapped suite. Then verify the COMMIT with the command the generated hook runs: `gateforge check --staged --require-e2e`. It grades the exact staged bytes, and it accepts the scoped receipt when the receipt covers the obligations this commit newly claims.
+
+**The first commit that wires the gate.** A repository with no gate at HEAD is judged in **adoption mode**: `check --staged` demands proof of the obligations THIS commit newly claims instead of every obligation in the repository, so a `--scope changed` receipt for the same staged candidate is accepted and the adoption commit is committable without a bypass. Nothing else moves — an unmapped changed file still blocks, a policy-input pin mismatch still blocks, a receipt bound to another candidate tree is still refused, and every obligation the commit does not touch stays unproven debt that `gateforge adopt` baselines. The mode is computed from HEAD, never configured: there is no flag and no config key, and once a gate exists at HEAD it can never apply again. Outside adoption mode a commit that touches a gate-defining input (`package.json`, a lockfile, `.gateforge.yml`, a runner config) expands the evaluation to every obligation and a scoped receipt is refused with `EVIDENCE_SCOPE_INCOMPLETE` — the behaviour every commit after adoption keeps.
 
 A changed file can affect obligations that have no test at all. Those
 still block the slice, one blocker each, with the reason:

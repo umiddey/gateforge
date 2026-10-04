@@ -16,7 +16,7 @@
  *   witness records (domain `gateforge.receipt.v1`).
  */
 import { randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
@@ -57,7 +57,7 @@ import { QUARANTINE_DIR } from '@gate-forge/core';
 import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';
-import { normalizeRepoModule } from './input-snapshot.js';
+import { normalizeRepoModule, PACK_CONFIGS } from './input-snapshot.js';
 import type { GateforgeConfig } from '@gate-forge/core';
 import type { ProjectScope, RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
@@ -129,6 +129,16 @@ export function trustedPolicyDigestEntries(
     waiverFiles: readonly string[];
     quarantineFiles?: readonly string[];
     pluginModules: readonly string[];
+    /**
+     * Repo-relative files that exist on disk and must belong to the
+     * approved revision: the pack configs (a candidate that narrows
+     * `clientScanRoots` deletes obligations) and the generated gate
+     * wiring under `.gateforge/hooks/` + `.gateforge/ci/`. A file that
+     * does not exist is NOT listed and contributes NO entry and NO
+     * absence marker, so a repository with neither keeps a
+     * byte-identical digest.
+     */
+    pinnedFiles?: readonly string[];
   },
 ): TrustedPolicyEntry[] {
   const entry = (name: string, path: string, required: boolean): TrustedPolicyEntry => {
@@ -203,6 +213,18 @@ export function trustedPolicyDigestEntries(
   // they live in `.gateforge.yml`, which is already hashed below. The
   // bytes an approval pins are the same bytes; the trust property is
   // unchanged, only the entry list is shorter.
+  //
+  // The pack configs and the generated gate wiring ARE hashed: both are
+  // classified as owner-owned policy inputs, which exempts them from
+  // product attribution ONLY while the approved revision binds their
+  // bytes. A candidate that narrows `clientScanRoots` deletes
+  // obligations, and a candidate that deletes its own hook must not be
+  // able to re-enter adoption mode by removing the wiring. Only files
+  // that EXIST are listed (the caller filters), so an absent one adds
+  // nothing at all — no entry, no absence marker.
+  const pinnedEntries = (configPaths.pinnedFiles ?? [])
+    .map((path) => entry(path, path, true))
+    .sort((left, right) => left.name.localeCompare(right.name));
   return [
     entry('.gateforge.yml', configPaths.config, true),
     entry(configPaths.policies, configPaths.policies, true),
@@ -214,6 +236,7 @@ export function trustedPolicyDigestEntries(
     ...waiverEntries,
     ...quarantineEntries,
     ...pluginEntries,
+    ...pinnedEntries,
   ];
 }
 
@@ -290,6 +313,13 @@ export function trustedPolicyDigestEntriesForConfig(
     const normalized = normalizeRepoModule(module);
     if (normalized !== null) pluginModules.push(normalized);
   }
+  // Present-only: a repository that ships no pack config and no
+  // generated wiring contributes NOTHING here, so its digest is exactly
+  // what it was before these inputs were pinned.
+  const pinnedFiles = [
+    ...PACK_CONFIGS.filter((relative) => existsSync(join(cwd, ...relative.split('/')))),
+    ...generatedWiringFiles(cwd),
+  ];
   return trustedPolicyDigestEntries(cwd, {
     config: '.gateforge.yml',
     policies: config.policies,
@@ -301,7 +331,48 @@ export function trustedPolicyDigestEntriesForConfig(
     waiverFiles: [...new Set(waiverFiles)].sort(),
     quarantineFiles: [...new Set(quarantineFiles)].sort(),
     pluginModules: [...new Set(pluginModules)].sort(),
+    pinnedFiles: [...new Set(pinnedFiles)].sort(),
   });
+}
+
+/** The generated gate wiring whose bytes belong to the approved revision. */
+const GENERATED_WIRING_DIRS: readonly string[] = ['.gateforge/hooks', '.gateforge/ci'];
+
+/**
+ * Every file under the generated gate wiring directories
+ * (`.gateforge/hooks/`, `.gateforge/ci/`) that exists right now.
+ *
+ * Those directories are Gateforge-owned policy inputs: deleting the
+ * generated pre-commit hook is a policy-revision change, so its bytes
+ * belong to the owner's approved digest exactly like an adapter's do.
+ * An absent directory contributes nothing — no marker — which keeps a
+ * repository that never ran `init --blocking` byte-identical.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *
+ * Returns:
+ *   string[]: repo-relative posix paths, sorted by the caller.
+ */
+function generatedWiringFiles(cwd: string): string[] {
+  const files: string[] = [];
+  for (const dir of GENERATED_WIRING_DIRS) {
+    const walk = (relative: string): void => {
+      let items: Dirent[];
+      try {
+        items = readdirSync(join(cwd, ...relative.split('/')), { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const item of items) {
+        const child = `${relative}/${item.name}`;
+        if (item.isFile()) files.push(child);
+        else if (item.isDirectory()) walk(child);
+      }
+    };
+    walk(dir);
+  }
+  return files;
 }
 
 /**
