@@ -159,11 +159,13 @@ import {
   type GateReceipt,
   type JsonValue,
   type ObligationVerdict,
+  type RuntimeConfig,
 } from '@gate-forge/core';
 import {
   discoverTestCatalog,
   findPlaywrightConfig,
   scanTestFiles,
+  TestDiscoveryError,
   untrustedEnv,
   type DiscoverOptions,
   type DiscoveryTimings,
@@ -171,7 +173,7 @@ import {
 } from '@gate-forge/pack-playwright';
 import { parseArgs, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
-import { UsageError } from '../errors.js';
+import { printFailure, UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
@@ -722,6 +724,7 @@ async function stagedCheckCommand(
   let checkoutDir: string;
   let runtimeReuseDigest: string | null = null;
   let runtimeReuseMounts: RuntimeReuseMount[] = [];
+  let runtimeDoc: RuntimeConfig | null = null;
   try {
     checkoutDir = materializeStagedCandidate(io.cwd, io.env, frozen);
     // Empty directories are invisible to Git trees — checkout-index cannot
@@ -823,7 +826,7 @@ async function stagedCheckCommand(
         return 0;
       }
     }
-    const runtimeDoc = loadRuntimeConfigAt(checkoutDir, checkoutConfig.runtime);
+    runtimeDoc = loadRuntimeConfigAt(checkoutDir, checkoutConfig.runtime);
     if (runtimeDoc !== null) {
       // R1-17: runtime.yml is a trusted-policy input hashed into
       // the candidate digest, so an owner pin that matched the
@@ -896,6 +899,17 @@ async function stagedCheckCommand(
     if (error instanceof StagedCandidateBlockError) {
       return renderStagedBlock(io, error.causeCode, error.message, error.nextAction);
     }
+    // Staged discovery hint (0.9.1): the candidate
+    // checkout holds TRACKED bytes only, so a test-
+    // discovery run that cannot find its dependencies
+    // fails with the raw runner error and no pointer —
+    // unless the runtime document already declares the
+    // dependency directories to link.
+    if (isStagedDiscoveryFailure(error) && !runtimeDeclaresReuse(runtimeDoc)) {
+      printFailure(io, error);
+      writeLine(io.stderr, STAGED_DISCOVERY_HINT);
+      return 2;
+    }
     throw error;
   } finally {
     if (process.cwd() !== previousCwd) process.chdir(previousCwd);
@@ -922,6 +936,41 @@ function renderStagedBlock(io: Io, cause: CauseCode, detail: string, nextAction:
   writeLine(io.stdout, `detail: ${detail}`);
   writeLine(io.stdout, `next action: ${nextAction}`);
   return 1;
+}
+
+/**
+ * The staged-checkout dependency hint (0.9.1):
+ * appended to a test-discovery failure inside the
+ * staged candidate when the runtime document declares
+ * no `prepare.reuse` roots.
+ */
+export const STAGED_DISCOVERY_HINT =
+  'hint: the staged candidate checkout holds tracked files only — declare your dependency directories ' +
+  'in .gateforge/runtime.yml (prepare: { reuse: [node_modules] }), see REFERENCE "Staged runtime"';
+
+/**
+ * Whether the error is a test-discovery failure inside
+ * the staged candidate: the pack's typed discovery
+ * error, or the usage error the CLI maps it to (its
+ * message names the playwright invocation that could
+ * not enumerate the candidate's tests).
+ */
+export function isStagedDiscoveryFailure(error: unknown): boolean {
+  if (error instanceof TestDiscoveryError) return true;
+  if (error instanceof UsageError) {
+    return /playwright --list|playwright CLI not found/.test(error.message);
+  }
+  return false;
+}
+
+/**
+ * Whether the candidate's runtime document declares at
+ * least one `prepare.reuse` dependency directory — the
+ * sanctioned bridge from the user repository into the
+ * staged checkout.
+ */
+export function runtimeDeclaresReuse(runtimeDoc: RuntimeConfig | null): boolean {
+  return (runtimeDoc?.prepare?.reuse ?? []).length > 0;
 }
 
 /**
