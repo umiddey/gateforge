@@ -2238,7 +2238,14 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
         writeLine(io.stdout, `verified: ${outcome.detail}`);
         break;
       case 'framework':
-        writeLine(io.stdout, `framework-managed pre-commit hook detected: wiring through .pre-commit-config.yaml`);
+        if (outcome.hookPath !== null && !existsSync(outcome.hookPath)) {
+          writeLine(
+            io.stdout,
+            'pre-commit framework config found: gateforge-check added to .pre-commit-config.yaml — run `pre-commit install` to activate the gate',
+          );
+        } else {
+          writeLine(io.stdout, `framework-managed pre-commit hook detected: wiring through .pre-commit-config.yaml`);
+        }
         break;
       case 'conflict':
       case 'incomplete':
