@@ -896,6 +896,11 @@ function inferredCandidates(
 ): InferredCandidate[] {
   const candidates: InferredCandidate[] = [];
   for (const row of catalog.entries) {
+    // ELIGIBILITY before ranking: a `static-only` row is a test-shaped file
+    // no runner enumerated (a Vitest jsdom suite inside a
+    // Playwright-configured repository, say). It can never produce the
+    // witnessed evidence a mapping promises, so it is never offered.
+    if (row.reconciliation === 'static-only') continue;
     const evidence = candidateEvidence(obligationId, row, routes);
     if (evidence.why.length === 0) continue;
     candidates.push({ row, why: evidence.why, score: evidence.score });
@@ -1118,6 +1123,7 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
       continue;
     }
     if (declared.length > 0) continue; // declared + clean: the gap is execution, not mapping
+    const mockedKeys = new Set<string>();
     const candidates = rankCandidates(
       bindings.map((binding) => {
         const row = rowsByKey.get(binding.logicalKey);
@@ -1126,6 +1132,9 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
           binding.origin === 'inferred' || binding.origin === 'prior-run'
             ? (binding.reason ?? binding.origin)
             : `bound by native annotation (${binding.logicalKey})`;
+        if (row?.suppressionSignals.some((signal) => signal.kind === 'mock') === true) {
+          mockedKeys.add(binding.logicalKey);
+        }
         const evidence =
           row === undefined
             ? { score: 0, why: [] as string[] }
@@ -1138,16 +1147,24 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
         };
       }),
     );
+    // A mocked candidate can never witness the claim, so when every
+    // candidate mocks the system under test the obligation is not
+    // satisfiable by reuse: a NEW test is needed. The mocked rows stay
+    // listed as context, and no `tests mark` is offered for them.
+    const unwitnessable = candidates.filter((candidate) => mockedKeys.has(candidate.logicalKey));
+    const onlyMocked = candidates.length > 0 && unwitnessable.length === candidates.length;
     suggestions.push({
       obligationId,
       cause: 'TEST_MAPPING_MISSING',
       candidates,
-      missingEvidence:
-        candidates.length > 0
+      missingEvidence: onlyMocked
+        ? 'a new test — only mocked candidates: every existing candidate mocks the system under ' +
+          'test, so none can witness this claim (they are listed as context)'
+        : candidates.length > 0
           ? 'a DECLARED mapping and witnessed evidence for this change (a mapping declares intent; it supplies no test result)'
           : 'a declared mapping to any existing test — no candidate survived resolution',
-      nextAction: reuseNextAction(obligationId, candidates[0]),
-      newTestNeeded: candidates.length === 0,
+      nextAction: reuseNextAction(obligationId, onlyMocked ? undefined : candidates[0]),
+      newTestNeeded: onlyMocked || candidates.length === 0,
     });
   }
   return suggestions.sort(

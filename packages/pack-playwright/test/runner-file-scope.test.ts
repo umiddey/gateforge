@@ -12,7 +12,7 @@
  * project (no browsers launched, no network).
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,11 @@ import {
   vitestFileScopes,
   type RunnerFileScope,
 } from '../src/discovery/index.js';
+import {
+  PROJECT_GRAPH_PATH_ENV,
+  ProjectGraphReporter,
+  type ProjectGraphDocument,
+} from '../src/reporter/project-graph-reporter.js';
 
 /** The gateforge monorepo root (for playwright module resolution). */
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -382,5 +387,45 @@ describe('discovery — a runner’s own file scope decides the row', () => {
     expect(
       catalog.runnerSummaries.find((summary) => summary.runner === 'playwright')?.detail,
     ).toContain('claimed by no runner');
+  });
+});
+
+describe('the project-graph reporter carries the IMPLICIT project selection', () => {
+  it('records a project-less config selection under the ids placeholder', () => {
+    // A config with a top-level `testMatch` and no `projects` array gets
+    // the runner's implicit project, which the reporter used to skip: no
+    // testFileScope reached the catalog, so a static row outside the
+    // runner's own selection still looked like the runner's test.
+    const dir = mkdtempSync(join(tmpdir(), 'gateforge-graph-'));
+    tempDirs.push(dir);
+    const graphPath = join(dir, 'graph.json');
+    process.env[PROJECT_GRAPH_PATH_ENV] = graphPath;
+    new ProjectGraphReporter().onConfigure({
+      projects: [
+        { name: '', testDir: dir, testMatch: ['tests/e2e/**/*.spec.js'], testIgnore: [] },
+      ],
+    } as never);
+    delete process.env[PROJECT_GRAPH_PATH_ENV];
+
+    const implicit = JSON.parse(readFileSync(graphPath, 'utf8')) as ProjectGraphDocument;
+    expect(implicit.testFileScope).toEqual([
+      { name: '-', testDir: dir, testMatch: ['tests/e2e/**/*.spec.js'], testIgnore: [] },
+    ]);
+    // The implicit project adds no node to the dependency graph: it is not
+    // a plannable project, only a selection to honor.
+    expect(implicit.projectDependencies).toEqual({});
+
+    const namedPath = join(dir, 'graph-named.json');
+    process.env[PROJECT_GRAPH_PATH_ENV] = namedPath;
+    new ProjectGraphReporter().onConfigure({
+      projects: [
+        { name: 'chromium', testDir: dir, testMatch: ['**/*.spec.js'], testIgnore: ['**/skip/**'] },
+      ],
+    } as never);
+    delete process.env[PROJECT_GRAPH_PATH_ENV];
+    const named = JSON.parse(readFileSync(namedPath, 'utf8')) as ProjectGraphDocument;
+    expect(named.testFileScope).toEqual([
+      { name: 'chromium', testDir: dir, testMatch: ['**/*.spec.js'], testIgnore: ['**/skip/**'] },
+    ]);
   });
 });

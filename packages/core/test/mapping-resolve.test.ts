@@ -914,3 +914,82 @@ describe('resolveTestMappings — determinism', () => {
     expect(JSON.stringify(reversed)).toBe(JSON.stringify(forward));
   });
 });
+
+describe('mappingSuggestions — eligibility, not just ranking (0.9.2 follow-up)', () => {
+  const OBLIGATION =
+    'tenant.http-patch-api-v1-notifications-param-read-68ff3585:http:request-observed';
+  const HINTS = new Map([[OBLIGATION, ['PATCH /api/v1/notifications/{notification_id}/read']]]);
+
+  function suggestionsFor(entries: TestCatalogEntry[]) {
+    const ranked = catalog(entries);
+    const suggestion = mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [OBLIGATION] }),
+      ),
+      routeHints: HINTS,
+    })[0];
+    return { candidates: suggestion?.candidates ?? [], suggestion };
+  }
+
+  it('never offers a row the runner did not enumerate (static-only)', () => {
+    // A Vitest jsdom test is not a Playwright test: `tests discover`
+    // records it as `[reconciliation-static-only]`, and it can never
+    // produce the witnessed evidence a mark would promise.
+    const { candidates, suggestion } = suggestionsFor([
+      row({
+        logicalKey: 'playwright:-:frontend/src/components/dashboard/__tests__/Dashboard.test.jsx:Dashboard (TanStack migration)>marks all notifications read via the mutation',
+        file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx',
+        titlePath: [
+          'Dashboard (TanStack migration)',
+          'marks all notifications read via the mutation',
+        ],
+        title: 'marks all notifications read via the mutation',
+        sourceLocation: { file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx', line: 8, col: 0 },
+        project: null,
+        reconciliation: 'static-only',
+      }),
+      row({
+        logicalKey: 'playwright:-:tests/e2e/real/notifications.spec.js:notifications mark one as read',
+        file: 'tests/e2e/real/notifications.spec.js',
+        titlePath: ['notifications mark one as read'],
+        title: 'notifications mark one as read',
+        sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 5, col: 0 },
+      }),
+    ]);
+    expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([
+      'playwright:-:tests/e2e/real/notifications.spec.js:notifications mark one as read',
+    ]);
+    expect(suggestion?.newTestNeeded).toBe(false);
+  });
+
+  it('asks for a NEW test when every candidate mocks the system under test', () => {
+    // A mocked candidate can never witness the claim, so listing it as
+    // the reuse answer (and printing a `tests mark` for it) is a dead end.
+    const { candidates, suggestion } = suggestionsFor([
+      row({
+        logicalKey: 'playwright:-:tests/e2e/real/notifications.spec.js:notifications mark one as read (mocked)',
+        file: 'tests/e2e/real/notifications.spec.js',
+        titlePath: ['notifications mark one as read (mocked)'],
+        title: 'notifications mark one as read (mocked)',
+        sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 5, col: 0 },
+        suppressionSignals: [
+          {
+            kind: 'mock',
+            detail: 'the api client is mocked for the jsdom render',
+            location: { file: 'tests/e2e/real/notifications.spec.js', line: 3, col: 0 },
+          },
+        ],
+      }),
+    ]);
+    // Still listed, as context.
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.why.join(' ')).toContain('mocks the system under test');
+    expect(suggestion?.newTestNeeded).toBe(true);
+    expect(suggestion?.missingEvidence).toContain('only mocked candidates');
+    // No `tests mark` next action for a mocked candidate.
+    expect(suggestion?.nextAction).not.toContain('mark the existing test');
+    expect(suggestion?.nextAction).toContain('Overlay: write');
+  });
+});
