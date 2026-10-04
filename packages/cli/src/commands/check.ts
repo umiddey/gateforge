@@ -212,7 +212,7 @@ import {
   type ScopedObligationRef,
 } from '../receipts.js';
 import { resealChainBlocking, retainedCarriedEvidence } from '../reseal-chain.js';
-import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
+import { changeBaseTextReader, mergeRequestScopePreflight, resolveProvider } from '../providers.js';
 import {
   computeEvaluationScope,
   detectStagedWorkingTreeMismatches,
@@ -1275,7 +1275,21 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     // classified here (check owns the candidate checkout; `scope.ts` stays
     // pure) so they never become unmapped product changes and their change
     // set can be recognized as product-behavior-neutral.
-    const ownedInputs = gateforgeOwnedInputs(io.cwd, pipeline.changedFiles, config);
+    // 0.9.1: the base-text reader reads a file at the base revision the
+    // provider diffs against (HEAD for the staged diff, the merge/CI base
+    // for the platform diffs), so the `.gitignore` engine-state block
+    // `init` appends is recognized as wiring. Staged-candidate runs (a
+    // frozen index) get NO reader: the isolated checkout's HEAD is the
+    // staged tree, not the base, so no base text can be resolved there
+    // and `.gitignore` keeps its unmapped treatment (fail closed).
+    const ownedInputs = gateforgeOwnedInputs(
+      io.cwd,
+      pipeline.changedFiles,
+      config,
+      fixedChangedFiles === undefined
+        ? changeBaseTextReader(providerIdentity, io.cwd, io.env) ?? undefined
+        : undefined,
+    );
     scopeDecision = computeEvaluationScope({
       config,
       changedFiles: pipeline.changedFiles,

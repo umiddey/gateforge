@@ -213,3 +213,90 @@ export function mergeRequestScopePreflight(
     'or run with --scope full — the auto scope would have checked 0 changed files'
   );
 }
+
+/**
+ * Resolves the base revision of the change set a provider
+ * diffs against — the revision the staged index (or the
+ * working tree) is compared with: HEAD for the staged diff,
+ * the merge base for the GitHub PR provider, the CI
+ * merge-request base for GitLab.
+ *
+ * Args:
+ *   provider: the resolved provider identity.
+ *   cwd: repository root.
+ *   env: process environment.
+ *
+ * Returns:
+ *   string | null: the 40-hex base revision, or null when
+ *   it cannot be resolved (a repository without commits, or
+ *   a platform provider without its base commit).
+ */
+export function changeBaseRevision(
+  provider: ChangedProvider,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  switch (provider) {
+    case 'local-staged': {
+      const head = spawnSync('git', [...GIT_FLAGS, 'rev-parse', '--verify', 'HEAD'], {
+        cwd,
+        env,
+        encoding: 'utf8',
+      });
+      const sha = (head.stdout ?? '').trim();
+      return head.status === 0 && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+    }
+    case 'github-pr': {
+      const baseRef = env['GITHUB_BASE_REF']?.trim() ?? '';
+      if (baseRef.length === 0 || baseRef.startsWith('-') || /[\s\0]/.test(baseRef)) {
+        return null;
+      }
+      const mergeBase = spawnSync('git', [...GIT_FLAGS, 'merge-base', 'HEAD', baseRef], {
+        cwd,
+        env,
+        encoding: 'utf8',
+      });
+      const sha = (mergeBase.stdout ?? '').trim();
+      return mergeBase.status === 0 && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+    }
+    case 'gitlab-mr': {
+      const sha = env['CI_MERGE_REQUEST_DIFF_BASE_SHA']?.trim() ?? '';
+      return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+    }
+    case 'all-files':
+      return null;
+  }
+}
+
+/**
+ * Reads repository files at the base revision of the change
+ * set a provider diffs against — the text a policy-input
+ * classifier compares the working-tree candidate with.
+ *
+ * Args:
+ *   provider: the resolved provider identity.
+ *   cwd: repository root.
+ *   env: process environment.
+ *
+ * Returns:
+ *   ((path: string) => string | null) | null: the reader,
+ *   or null when the base revision cannot be resolved (then
+ *   no file has a base text to compare against).
+ */
+export function changeBaseTextReader(
+  provider: ChangedProvider,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): ((path: string) => string | null) | null {
+  const revision = changeBaseRevision(provider, cwd, env);
+  if (revision === null) return null;
+  return (path: string): string | null => {
+    const blob = spawnSync('git', [...GIT_FLAGS, 'show', `${revision}:${path}`], {
+      cwd,
+      env,
+      encoding: 'utf8',
+    });
+    if (blob.status !== 0) return null;
+    return blob.stdout ?? '';
+  };
+}
