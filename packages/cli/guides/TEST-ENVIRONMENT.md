@@ -37,6 +37,42 @@ Export those values before `gateforge run` or `test-gates`. Only listed names re
 
 Engine `GATEFORGE_*` names and process-loader controls (`NODE_OPTIONS`, `NODE_PATH`, `LD_*`, `DYLD_*`, `PYTHONPATH`, `PYTHONHOME`, `BASH_ENV`, `ENV`) are refused even if listed. No list means no additional variables are forwarded. Supervised test-gates refuses these names with usage error 2 before its harness setup, plugin pipeline, or native test enumeration.
 
+## Point the suite at the origin Gateforge routes
+
+**Rule:** Make the origin your suite loads the SAME origin
+`GATEFORGE_APP_BASE_URL` names, and make sure the suite's own base-URL
+variable actually reaches the test process — one of these two, never
+neither:
+
+- the suite's base URL variable is listed in `runtime.yml`
+  `envAllowlist` (`E2E_BASE_URL`, `TEST_API_URL`, … — whatever your
+  helpers read), or
+- the suite reads no variable of its own and uses
+  `GATEFORGE_APP_BASE_URL` directly.
+
+**Why:** A witnessed run only rewrites requests to `GATEFORGE_APP_BASE_URL`
+onto the supervisor's session observation proxy. When the tests load some
+other origin — `http://localhost:13001` while Gateforge was pointed at
+`http://localhost:13101` — nothing is routed, the witness observes nothing,
+and every `observed-e2e` transport claim finalizes as missing while the test
+itself passes. A missing variable fails the same way, only more quietly: the
+suite falls back to its own default and Gateforge never learns about it.
+
+The zero-traffic note names the origin the page really requested when it can:
+
+```
+observe 'tenant.accounts:http:request-observed': no HTTP exchange passed
+through this session's observation proxy before finalize …; this test's page
+requested 'http://localhost:13001', which the fixture did not route: it
+rewrites only GATEFORGE_APP_BASE_URL ('http://localhost:13101') onto this
+session's proxy — set GATEFORGE_APP_BASE_URL to the origin your suite uses, or
+add your suite's base-URL variable to envAllowlist in runtime.yml so it
+reaches the test process
+```
+
+That sentence is a diagnostic: it names the cause, it decides nothing. A
+claim that stays missing stays missing.
+
 ## Create login state against the app
 
 **Rule:** Mint the Playwright login state by connecting directly to the app, not through the witness proxy. Reuse one session file instead of repeatedly logging in. Set `GATEFORGE_SESSION_STATE` to that file for the supervised run.
