@@ -61,7 +61,7 @@ what evidence identity means — so the cutover is loud.
 
    ```sh
    git add -A .gateforge .gateforge.yml
-   gateforge enforcement pin --env-file ~/.config/<repo>.gateforge.env --confirm
+   gateforge enforcement pin --pin-file ~/.config/<repo>.gateforge.env --confirm
    ```
 
    The command digests the STAGED bytes — the ones the commit gate digests —

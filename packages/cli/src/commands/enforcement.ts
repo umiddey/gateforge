@@ -108,10 +108,16 @@ import {
 
 export const ENFORCEMENT_USAGE =
   'usage: gateforge enforcement doctor [--json] [--strict-preflight]\n' +
-  '       gateforge enforcement pin --env-file <path> [--confirm]';
+  '       gateforge enforcement pin --pin-file <path> [--confirm]';
 
-/** The `enforcement pin` usage line (its own command, its own flags). */
-export const ENFORCEMENT_PIN_USAGE = 'usage: gateforge enforcement pin --env-file <path> [--confirm]';
+/**
+ * The `enforcement pin` usage line. The flag is `--pin-file`, NOT
+ * `--env-file`: Node parses `--env-file <path>` (and
+ * `--env-file-if-exists <path>`) out of argv itself, even after the script
+ * path — it would read the file (exit 9 on a missing one) and never reach
+ * the CLI. A flag Node owns cannot carry the pin.
+ */
+export const ENFORCEMENT_PIN_USAGE = 'usage: gateforge enforcement pin --pin-file <path> [--confirm]';
 
 /** Matches an existing approved-policy digest assignment in any shell form. */
 const PIN_ASSIGNMENT = /^\s*(?:export\s+)?GATEFORGE_APPROVED_POLICY_DIGEST\s*=/;
@@ -1492,7 +1498,7 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     driftDetail =
       `policy inputs changed since HEAD: ${boundedList(stagedPolicy.changedSinceHead)} — ` +
       'the commit gate digests the STAGED bytes, so the approved digest has to be re-pinned for them ' +
-      '(gateforge enforcement pin --env-file <path> outside the repo)';
+      '(gateforge enforcement pin --pin-file <path> outside the repo)';
   }
   checks.push({ id: 'policy-inputs-vs-HEAD', status: driftStatus, detail: driftDetail });
 
@@ -1514,7 +1520,7 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
       approvedStatus = 'warn';
       approvedDetail =
         `approved policy digest: absent — provision it outside the candidate (${APPROVED_POLICY_DIGEST_ENV}, ` +
-        'or gateforge enforcement pin --env-file <path>)';
+        'or gateforge enforcement pin --pin-file <path>)';
     } else if (resolution.digest === stagedPolicy.digest) {
       approvedStatus = 'ok';
       approvedDetail = `approved policy digest: matches staged (${resolution.digest})`;
@@ -1526,7 +1532,7 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
           : `changed inputs: ${boundedList(stagedPolicy.changedSinceHead)}`;
       approvedDetail =
         `approved policy digest: does NOT match staged (${cause}) — ` +
-        're-pin with gateforge enforcement pin --env-file <path> outside the repo';
+        're-pin with gateforge enforcement pin --pin-file <path> outside the repo';
     }
   }
   checks.push({ id: 'approved-digest', status: approvedStatus, detail: approvedDetail });
@@ -1667,7 +1673,7 @@ export async function enforcementCommand(io: Io, argv: readonly string[]): Promi
 }
 
 /**
- * Runs `gateforge enforcement pin --env-file <path> [--confirm]`: writes
+ * Runs `gateforge enforcement pin --pin-file <path> [--confirm]`: writes
  * the approved policy digest of the STAGED candidate into an env file
  * OUTSIDE the repository. The digest is the one the commit gate computes
  * (`check --staged` over the same frozen index), so the pin can never
@@ -1693,20 +1699,20 @@ async function enforcementPinCommand(
   options: Record<string, unknown>,
   positionals: readonly string[],
 ): Promise<number> {
-  rejectUnknownFlags(options, ['env-file', 'confirm'], ENFORCEMENT_PIN_USAGE);
+  rejectUnknownFlags(options, ['pin-file', 'confirm'], ENFORCEMENT_PIN_USAGE);
   if (positionals.length > 0) {
     throw new UsageError(`enforcement pin: unexpected argument '${positionals[0] ?? ''}' (${ENFORCEMENT_PIN_USAGE})`);
   }
-  const rawEnvFile = options['env-file'];
-  if (typeof rawEnvFile !== 'string' || rawEnvFile.length === 0) {
-    throw new UsageError(`enforcement pin: --env-file <path> is required (${ENFORCEMENT_PIN_USAGE})`);
+  const rawPinFile = options['pin-file'];
+  if (typeof rawPinFile !== 'string' || rawPinFile.length === 0) {
+    throw new UsageError(`enforcement pin: --pin-file <path> is required (${ENFORCEMENT_PIN_USAGE})`);
   }
-  const envFile = resolve(io.cwd, rawEnvFile);
+  const envFile = resolve(io.cwd, rawPinFile);
   const repoRoot = resolve(probe(io.cwd, io.env, ['rev-parse', '--show-toplevel']) ?? io.cwd);
   const insideRepo = relative(repoRoot, envFile);
   if (insideRepo === '' || (!insideRepo.startsWith('..') && !isAbsolute(insideRepo))) {
     throw new UsageError(
-      `enforcement pin: --env-file '${rawEnvFile}' is inside the repository; the approved policy digest must ` +
+      `enforcement pin: --pin-file '${rawPinFile}' is inside the repository; the approved policy digest must ` +
         'live OUTSIDE the candidate (e.g. ~/.config/<repo>.gateforge.env) — a candidate-controlled file cannot approve policy',
     );
   }
@@ -1742,11 +1748,11 @@ async function enforcementPinCommand(
     const stats = lstatSync(envFile);
     if (stats.isSymbolicLink()) {
       throw new UsageError(
-        `enforcement pin: '${rawEnvFile}' is a symlink; the pin must be a plain file outside the candidate (fail closed)`,
+        `enforcement pin: '${rawPinFile}' is a symlink; the pin must be a plain file outside the candidate (fail closed)`,
       );
     }
     if (!stats.isFile()) {
-      throw new UsageError(`enforcement pin: '${rawEnvFile}' is not a regular file (fail closed)`);
+      throw new UsageError(`enforcement pin: '${rawPinFile}' is not a regular file (fail closed)`);
     }
   } else {
     mkdirSync(dirname(envFile), { recursive: true, mode: 0o700 });
