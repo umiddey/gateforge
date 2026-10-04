@@ -30,6 +30,7 @@ including tarball installs: [Quickstart](guides/QUICKSTART.md).
 - [Quickstart](guides/QUICKSTART.md)
 - [Test environment](guides/TEST-ENVIRONMENT.md)
 - [Upgrade from 0.8 to 0.9](guides/UPGRADE-0.8-to-0.9.md)
+- [Upgrade from 0.9 to 0.10](guides/UPGRADE-0.9-to-0.10.md)
 - [Upgrade from 0.7 to 0.8](guides/UPGRADE-0.7-to-0.8.md)
 - [Upgrade from 0.6 to 0.7](guides/UPGRADE-0.6-to-0.7.md)
 - [Runners other than Playwright](guides/RUNNER-NEUTRAL-EVIDENCE.md)

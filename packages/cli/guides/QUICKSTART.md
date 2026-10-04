@@ -102,8 +102,8 @@ It writes:
 It also creates `.gateforge/adapters/` and `.gateforge/waivers/`, and adds
 `.gateforge/test-gates/` (Gateforge's own run state: catalog, caches,
 receipts, history) to `.gitignore` so `git add -A` never stages it. It
-preserves existing files. A chosen documentation exclusion adds
-`.gateforge/docs-exclusions.yml`.
+preserves existing files. A chosen documentation exclusion is added to
+`.gateforge.yml` under `evidence.exclude.docs`.
 
 **You should see:** a scan summary, recommended packages, the goal summary
 with its `undo:` lines, and a `skeleton ready` message.

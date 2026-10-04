@@ -17,6 +17,7 @@ obligation, and which evidence is missing or invalid.
 - [Enable behavior cases (QUICKSTART §8a)](packages/cli/guides/QUICKSTART.md#8a-enable-behavior-cases) — what `init` finds, and the printed steps from a detected pack to a green gate
 - [Test environment](packages/cli/guides/TEST-ENVIRONMENT.md)
 - [Upgrade from 0.8 to 0.9](packages/cli/guides/UPGRADE-0.8-to-0.9.md)
+- [Upgrade from 0.9 to 0.10](packages/cli/guides/UPGRADE-0.9-to-0.10.md)
 - [Upgrade from 0.7 to 0.8](packages/cli/guides/UPGRADE-0.7-to-0.8.md)
 - [Upgrade from 0.6 to 0.7](packages/cli/guides/UPGRADE-0.6-to-0.7.md)
 - [Reference — commands, enforcement, protocols, configuration](packages/cli/guides/REFERENCE.md)

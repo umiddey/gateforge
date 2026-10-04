@@ -9,7 +9,8 @@ first commands; the guides cover the walks:
 [Quickstart](QUICKSTART.md), [Connect your project](CONNECT-YOUR-PROJECT.md),
 [Test environment](TEST-ENVIRONMENT.md),
 [Runners other than Playwright](RUNNER-NEUTRAL-EVIDENCE.md),
-[Upgrade from 0.8 to 0.9](UPGRADE-0.8-to-0.9.md).
+[Upgrade from 0.8 to 0.9](UPGRADE-0.8-to-0.9.md),
+[Upgrade from 0.9 to 0.10](UPGRADE-0.9-to-0.10.md).
 
 ## Contents
 
@@ -42,6 +43,7 @@ first commands; the guides cover the walks:
 | Command | Purpose | Exit codes |
 | --- | --- | --- |
 | `gateforge init [--preset light\|normal\|strict] [--explain-presets] [--languages <comma,list>] [--plugins <comma,list>] [--accept-recommended] [--no-scan] [--proof overlay\|observe] [--blocking] [--no-blocking] [--pre-commit] [--no-pre-commit] [--ci] [--no-ci] [--planes] [--no-planes] [--strict-e2e] [--docs-exclude <folder,...>] [--docs-exclude-file <path>] [--confirm-doc-exclusions]` | Scan the repo (heuristics, no network), print the recommended install (plugins, persistence policy, transport-only HTTP policy for consumed endpoints, overlay proof), and write the standard Gateforge scaffold. Idempotent — never overwrites existing files unless `--confirm-doc-exclusions` approves an exclusion update. It also appends Gateforge's own engine state (`.gateforge/test-gates/`) to `.gitignore`, and on a repository that already has code it names `gateforge adopt` as the way through the debt the first commit will meet. `pack-task` is opt-in only (`--plugins`); `--proof observe` skips the overlay scaffold and prints the observe wiring checklist instead. Default language: `python`. `--preset` applies one goal in one step (`light` -> `mode: warn`, no hooks; `normal` -> `mode: changed` + pre-commit hook + CI job; `strict` -> `mode: strict` + staged gate + pre-push receipt check + CI job) and prints what it wrote plus `undo:` lines for created and in-place-changed files; `--explain-presets` prints that mapping and writes nothing. In a terminal init asks the same question instead; with no terminal and no `--preset` it writes `light` only and says so on one line with the `--preset` flag that changes it. The negative forms (`--no-blocking`, `--no-pre-commit`, `--no-ci`, `--no-planes`) answer the matching question without a prompt. A preset never writes a waiver, an adopted baseline or a plane rule, and an existing `.gateforge.yml` is never rewritten. `--strict-e2e` writes the `enforcement` block and refuses unavailable required proof channels. | 0/1/2 |
+| `gateforge migrate [--confirm]` | Move owner declarations out of their own files and into `.gateforge.yml`. Today that is the evidence exclusions: `.gateforge/docs-exclusions.yml` and `.gateforge/cache-exclusions.yml` become `evidence.exclude.docs` and `evidence.exclude.cache`. Preview by default — it prints the exact `.gateforge.yml` diff and the files it would delete, writes nothing, exits 0; `--confirm` writes the block as TEXT (your YAML is never re-serialized), deletes the old files, and ends with `policy inputs changed: re-pin the approved digest (gateforge enforcement doctor)`. It validates the old files with the loader rules, refuses an `evidence:`/`exclude:`/`docs` form it cannot extend safely by name, and is idempotent (`nothing to migrate`, exit 0). Every other command refuses a repository that still carries an old file, naming this one. | 0/2 |
 
 
 
@@ -629,12 +631,17 @@ and `--require-e2e` blocks — it never downgrades to a weaker pass.
 Gateforge hashes all inputs and all candidate files. On a terminal, the first
 `gateforge init` asks for documentation-only folders to exclude. Automation can
 use `gateforge init --docs-exclude docs,handbook`; a non-interactive run with no
-option keeps the default. Gateforge writes the approved declaration to
-`.gateforge/docs-exclusions.yml` and prints the candidate trusted-policy digest
-to approve through the protected `GATEFORGE_APPROVED_POLICY_DIGEST` setting.
-Gate checks refuse to use the exclusions until that external pin matches. A
-later change to the exclusion declaration changes the digest; use
-`--confirm-doc-exclusions` when `init` changes an existing approval.
+option keeps the default. Gateforge writes the approved declaration into
+`.gateforge.yml`, under `evidence.exclude.docs`, and prints the candidate
+trusted-policy digest to approve through the protected
+`GATEFORGE_APPROVED_POLICY_DIGEST` setting. Gate checks refuse to use the
+exclusions until that external pin matches. A later change to the declaration
+changes the digest; use `--confirm-doc-exclusions` when `init` changes an
+existing approval. The declaration is inserted as text, so the rest of your
+`.gateforge.yml` (comments, key order, quoting) is preserved byte for byte.
+Before 0.10 this list lived in its own `.gateforge/docs-exclusions.yml`; a
+repository that still carries that file is refused by name until
+`gateforge migrate --confirm` moves it.
 
 The project states these folders do not affect the product or its tests.
 Gateforge does not prove this. If application or test code reads an excluded
@@ -658,10 +665,13 @@ reduced guarantee still apply.
 default, Python bytecode remains part of candidate and input identity. To
 exclude only exact generated cache files, run
 `gateforge init --cache-exclude src/__pycache__/module.cpython-313.pyc`.
-The command writes `.gateforge/cache-exclusions.yml` and prints the trusted
-policy digest to approve outside the repository. A matching protected
+The command writes the list into `.gateforge.yml` under
+`evidence.exclude.cache` and prints the trusted policy digest to approve
+outside the repository. A matching protected
 `GATEFORGE_APPROVED_POLICY_DIGEST` pin is REQUIRED before a gate uses the
-list; changing an existing list requires `--confirm-cache-exclusions`.
+list; changing an existing list requires `--confirm-cache-exclusions`. Before
+0.10 this list lived in `.gateforge/cache-exclusions.yml`, and
+`gateforge migrate --confirm` moves it.
 Only exact `.pyc` or `.pyo` files directly under `__pycache__` are allowed;
 globs, symlinks, configured inputs, and other file types fail closed. Reports
 show the exact files, pin status, and reduced trust guarantee. This is an

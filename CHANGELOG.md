@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.10.0
+
+### Upgrading from 0.9.x
+
+One configuration change: the evidence-exclusion declarations `.gateforge/docs-exclusions.yml` and `.gateforge/cache-exclusions.yml` are removed, and their lists now live in `.gateforge.yml` under `evidence.exclude.docs` and `evidence.exclude.cache`. While either old file is present EVERY command refuses, naming the file and `gateforge migrate` — there is no dual read, because silently ignoring a declaration would silently change what evidence identity means. Run `gateforge migrate`, read the preview, then `gateforge migrate --confirm`, re-approve the policy digest (`gateforge enforcement doctor` prints it), and commit `.gateforge.yml` on its own. Steps, what does not change, and the refusals you may hit: `packages/cli/guides/UPGRADE-0.9-to-0.10.md`.
+
+### Changed
+
+- Evidence exclusions are declared in `.gateforge.yml` under `evidence.exclude` (`docs`: documentation folders; `cache`: exact Python bytecode paths) instead of two standalone declaration files. The key is deliberately NOT named after `project.paths.exclude`: that one is scan scope (what the detector reads), this one is evidence identity (what the gate stops binding). The loaders keep their signatures, every validation rule and refusal is unchanged, and `loadDocsExclusions` / `loadCacheExclusions` return exactly the lists they returned before the move. The key lives in `.gateforge.yml`, so it is inside the trusted policy digest exactly like the removed files were.
+- The trusted-policy digest and the input snapshot no longer carry the two declaration files as separate entries. Their bytes are inside `.gateforge.yml`, which both already hashed, so the bytes an owner approval pins are the same bytes; the digest value changes once, when the declaration moves.
+- `gateforge init --docs-exclude` / `--cache-exclude` (with `--confirm-doc-exclusions` / `--confirm-cache-exclusions` for a change to an existing list) now splice the declaration into `.gateforge.yml` as TEXT instead of writing a separate document, so a comments/key-order/quoting-preserving edit with the same discipline `classify delete` uses for `deleteRules`. The result is re-parsed against the pinned schema, and a document the release cannot read back is refused rather than written.
+- A repository carrying a pre-0.10 exclusion declaration now fails closed with `found .gateforge/docs-exclusions.yml: since 0.10 evidence exclusions live in .gateforge.yml under evidence.exclude — run \`gateforge migrate\`` instead of silently dropping the list.
+
+### Added
+
+- `gateforge migrate [--confirm]`: moves owner declarations out of their own files into `.gateforge.yml`. Preview by default (exact diff of `.gateforge.yml` plus the files that would be deleted, nothing written, exit 0); `--confirm` writes the `evidence.exclude` block as text, deletes the old files, and prints `policy inputs changed: re-pin the approved digest (gateforge enforcement doctor)`. Both old files are validated with the existing loader rules; an `evidence:` / `exclude:` / `docs` shape the writer cannot extend safely is refused by name and nothing is written. Idempotent: nothing to migrate prints `nothing to migrate` and exits 0. One step registry (detect + preview + apply), so later owner-file consolidations only add a step.
+- Config key `evidence.exclude.docs` / `evidence.exclude.cache` in `.gateforge.yml`: strict objects, arrays of non-empty strings; unknown keys and empty strings fail the config load like every other key.
+- `packages/cli/guides/UPGRADE-0.9-to-0.10.md`.
+
+### Removed
+
+- `.gateforge/docs-exclusions.yml` and `.gateforge/cache-exclusions.yml` as declaration sources (and their standalone trusted-digest and input-snapshot entries).
+
 ## 0.9.1
 
 ### Fixed
