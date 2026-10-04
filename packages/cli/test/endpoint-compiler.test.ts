@@ -1226,6 +1226,11 @@ describe('endpoint plane config channel (.gateforge/planes.json, plan phase 5)',
       expect(decision?.classification).toBeNull();
       const contradiction = decision?.blocks.find((block) => block.code === 'PLANE_CONTRADICTION');
       expect(contradiction?.detail).toContain('master, tenant');
+      // A business-linked contradiction carries no probe hint:
+      // the answer is a plane decision, not a probe rule.
+      expect(contradiction?.detail).not.toContain(
+        'health/readiness probes are global on their own',
+      );
       expect(contradiction?.locations.map((location) => location.file).sort()).toEqual([
         'backend/api/v1/accounts.py',
         'backend/models/accounts.py',
@@ -1250,7 +1255,16 @@ describe('endpoint plane config channel (.gateforge/planes.json, plan phase 5)',
       const result = classifyCompiled(compiled, null, []);
       const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
       expect(decision?.classification).toBeNull();
-      expect(decision?.blocks.some((block) => block.code === 'PLANE_CONTRADICTION')).toBe(true);
+      const contradiction = decision?.blocks.find(
+        (block) => block.code === 'PLANE_CONTRADICTION',
+      );
+      // The contradiction includes the mirrored operational
+      // `global` assertion: the detail says probes are global on
+      // their own and names the router file to answer for.
+      expect(contradiction?.detail).toContain(
+        'health/readiness probes are global on their own',
+      );
+      expect(contradiction?.detail).toContain('backend/api/ops/health.py');
     });
 
     withTempRepo({}, (repo) => {

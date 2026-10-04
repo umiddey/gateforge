@@ -1088,6 +1088,17 @@ function classifyOne(
       ),
     ]);
   } else {
+    // The mirrored operational `global` assertion: the endpoint
+    // compiler mirrors the operational rule's `global` for a
+    // health-operations probe when a config rule contradicts it
+    // (source `gateforge.endpoint-compiler:operational`). The
+    // contradiction is then answerable by the probe rule itself,
+    // so the detail says so and names where to answer.
+    const operationalMirror = planeSignals.find(
+      (s) =>
+        s.assertion === 'global' &&
+        s.source === 'gateforge.endpoint-compiler:operational',
+    );
     return blocked(resource, [
       {
         code: 'PLANE_CONTRADICTION',
@@ -1096,7 +1107,10 @@ function classifyOne(
         detail:
           `resource '${resource.name}' has ${planeCandidates.size} conflicting plane assertions ` +
           `(${[...planeCandidates].sort(compareStrings).join(', ')}); ` +
-          'add or remove plane evidence until one plane remains',
+          'add or remove plane evidence until one plane remains' +
+          (operationalMirror !== undefined
+            ? ` — health/readiness probes are global on their own: answer global for '${operationalMirror.location.file}' if none of its routes serves business data, or move the probes to their own router file`
+            : ''),
         locations: sortLocations(planeSignals.map((s) => s.location)),
       },
     ]);
