@@ -405,6 +405,13 @@ Candidates are RANKED by the evidence the catalog row itself carries, not
 listed alphabetically: an explicit `@crud(...)` tag, a resource token in the
 title path or the file, the obligation's operation word, a route segment from
 the run's route inventory, a `real/` (unmocked) folder, minus a mock signal.
+Tokens are matched WHOLE-WORD (title path words; file path segments split on
+`/ . _ -`), never inside a longer word, and a generated resource id
+contributes only its NAME: the plane (`tenant`), the transport (`http`), the
+method (`get`), route furniture (`api`, `v1`) and the trailing id hash
+identify no resource, so `@crud(tenant.accounts:create)` is never evidence for
+`tenant.http-get-api-v1-notifications-…`.
+
 Every weight is additive and printed as a `why:` line, so the order explains
 itself — the score is never a bare number. Ties break on the logical key, so
 the list is deterministic. The text surface prints the top five and says how

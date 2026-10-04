@@ -11,6 +11,7 @@ import {
   CAUSE_NEXT_ACTIONS,
   mappingGradingClaims,
   mappingSuggestions,
+  type SuggestionCandidate,
   resolveTestMappings,
   type PriorRunHint,
   type ResolvedMappings,
@@ -736,6 +737,86 @@ describe('mappingSuggestions — evidence ranking (0.9.0 adoption fix)', () => {
     });
     expect(suggestions[0]?.newTestNeeded).toBe(true);
     expect(suggestions[0]?.nextAction).toBe(CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING']);
+  });
+});
+
+describe('mappingSuggestions — token boundaries (0.9.2 adoption fix)', () => {
+  /**
+   * A generated endpoint obligation: the plane, the `http-` prefix, the
+   * method word, the `api`/`v1` route furniture and the trailing id hash
+   * are resource STRUCTURE, not the resource's name. Only
+   * `notifications` may be matched against a test.
+   */
+  const NOTIFICATION_OBLIGATION =
+    'tenant.http-get-api-v1-notifications-27cb390c:http:request-observed';
+  /** A test tagged with ANOTHER resource's plane-qualified identity. */
+  const MATRIX_KEY =
+    'playwright:chromium:tests/e2e/account_matrix.spec.js:ACCOUNT matrix';
+  /** The test that actually exercises the route. */
+  const NOTIFICATION_KEY =
+    'playwright:chromium:tests/e2e/real/notifications.spec.js:notifications list shows unread items';
+  /** A test naming the resource only as a PREFIX of a longer word. */
+  const NEAR_MISS_KEY =
+    'playwright:chromium:tests/e2e/notification_center.spec.js:supersedes the notification center';
+
+  const ranked = catalog([
+    row({
+      logicalKey: MATRIX_KEY,
+      file: 'tests/e2e/account_matrix.spec.js',
+      titlePath: ['ACCOUNT matrix', '@crud(tenant.accounts:create)', 'the reference admin is findable'],
+      title: 'the reference admin is findable',
+      sourceLocation: { file: 'tests/e2e/account_matrix.spec.js', line: 9, col: 0 },
+    }),
+    row({
+      logicalKey: NOTIFICATION_KEY,
+      file: 'tests/e2e/real/notifications.spec.js',
+      titlePath: ['notifications list shows unread items'],
+      title: 'notifications list shows unread items',
+      sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 4, col: 0 },
+    }),
+    row({
+      logicalKey: NEAR_MISS_KEY,
+      file: 'tests/e2e/notification_center.spec.js',
+      titlePath: ['supersedes the notification center'],
+      title: 'supersedes the notification center',
+      sourceLocation: { file: 'tests/e2e/notification_center.spec.js', line: 2, col: 0 },
+    }),
+  ]);
+
+  const suggestionsFor = (): SuggestionCandidate[] =>
+    mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [NOTIFICATION_OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [NOTIFICATION_OBLIGATION] }),
+      ),
+      routeHints: new Map([[NOTIFICATION_OBLIGATION, ['GET /api/v1/notifications']]]),
+    })[0]?.candidates ?? [];
+
+  it("scores 0 a tag that names another resource's plane, not this obligation's", () => {
+    // `@crud(tenant.accounts:create)` names the PLANE of every tenant
+    // obligation, so the plane token `tenant` scored +100 "explicit tag"
+    // for every one of them — the account matrix ranked first for a
+    // notifications route it never touches.
+    expect(MATRIX_KEY < NOTIFICATION_KEY).toBe(true);
+    expect(suggestionsFor().map((candidate) => candidate.logicalKey)).toEqual([NOTIFICATION_KEY]);
+  });
+
+  it('keeps the real test ranked with its resource-token and route-segment reasons', () => {
+    const [first] = suggestionsFor();
+    expect(first?.logicalKey).toBe(NOTIFICATION_KEY);
+    expect(first?.score ?? 0).toBeGreaterThan(0);
+    const why = first?.why.join(' ') ?? '';
+    expect(why).toContain("resource token 'notifications' matches the test title path");
+    expect(why).toContain("title mentions the obligation's route segment 'notifications'");
+  });
+
+  it('never matches a token inside a longer word (no `read` in `reference`/`unread`)', () => {
+    // `notification` is not `notifications`, and `reference`/`unread` do
+    // not contain a standalone word any token can name.
+    const candidates = suggestionsFor();
+    expect(candidates.map((candidate) => candidate.logicalKey)).not.toContain(NEAR_MISS_KEY);
+    expect(candidates.every((candidate) => !candidate.why.join(' ').includes('read'))).toBe(true);
   });
 });
 

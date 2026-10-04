@@ -682,6 +682,53 @@ const ROUTE_FILLER_SEGMENTS: Readonly<Record<string, true>> = Object.freeze({
 });
 
 /**
+ * Plane qualifiers qualify EVERY resource in the plane, so they identify
+ * no resource at all: `@crud(tenant.accounts:create)` must never rank a
+ * candidate for `tenant.http-get-api-v1-notifications-…`.
+ */
+const PLANE_NAME_TOKENS: Readonly<Record<string, true>> = Object.freeze({
+  tenant: true,
+  master: true,
+  global: true,
+});
+
+/** HTTP verbs a generated `http-<method>-…` endpoint name spells out. */
+const HTTP_METHOD_TOKENS: Readonly<Record<string, true>> = Object.freeze({
+  get: true,
+  post: true,
+  put: true,
+  patch: true,
+  delete: true,
+  head: true,
+  options: true,
+});
+
+/**
+ * Whether one resource-id token names the RESOURCE or only the structure
+ * around it: the plane, the transport, the method, route furniture, a
+ * version segment, or the generated id-hash suffix. Only real names may
+ * be matched against a test title or file.
+ */
+function isStructuralResourceToken(token: string): boolean {
+  if (PLANE_NAME_TOKENS[token] === true) return true;
+  if (HTTP_METHOD_TOKENS[token] === true) return true;
+  if (ROUTE_FILLER_SEGMENTS[token] === true) return true;
+  if (/^v\d+$/.test(token)) return true;
+  // A generated id suffix (`…-27cb390c`). At least one digit is required so
+  // real hex-looking words (`decade`, `facade`) stay resource names.
+  return /^[0-9a-f]{6,}$/.test(token) && /\d/.test(token);
+}
+
+/** The matchable resource-name tokens of one resource id. */
+function resourceTokens(resourceId: string): string[] {
+  return resourceId
+    .split(/[.\-_]/)
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length > 2 && !isStructuralResourceToken(token));
+}
+
+
+/**
  * The route segments of one obligation's hints worth matching against a
  * test's title/file: no path parameters, no version or filler segments.
  */
@@ -731,7 +778,10 @@ function explicitTagTokens(titlePath: readonly string[]): string[] {
 
 /**
  * Scores ONE catalog row against one obligation by the evidence the row
- * carries, and explains every contributing signal in plain words.
+ * carries, and explains every contributing signal in plain words. Every
+ * match is WHOLE-WORD (title path words; file path segments split on
+ * `/ . _ -`), never a substring: a token hidden inside a longer word
+ * (`read` in `reference`) is not evidence about anything.
  *
  * Args:
  *   obligationId: the obligation the row is a candidate for.
@@ -747,15 +797,13 @@ function candidateEvidence(
   routes: readonly string[],
 ): { score: number; why: string[] } {
   const resourceId = obligationId.slice(0, Math.max(0, obligationId.indexOf(':')));
-  const tokens = resourceId
-    .split(/[.\-_]/)
-    .map((token) => token.toLowerCase())
-    .filter((token) => token.length > 2);
+  const tokens = resourceTokens(resourceId);
   const why: string[] = [];
   let score = 0;
-  const file = row.file.toLowerCase();
-  const title = row.titlePath.join('>').toLowerCase();
+  // Whole-word matching, never substrings: `read` is not inside
+  // `reference`, and `notifications` is not inside `notification`.
   const words = titleWords(row.titlePath);
+  const fileWords = row.file.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 0);
   const tagTokens = explicitTagTokens(row.titlePath);
   const operationWords = OPERATION_TITLE_WORDS[operationOf(obligationId)] ?? [];
   const routeSegments = routeSegmentsOf(routes);
@@ -766,13 +814,17 @@ function candidateEvidence(
       why.push(`explicit tag names this obligation's resource '${token}'`);
       continue;
     }
-    if (title.includes(token)) {
+    if (words.includes(token)) {
       score += CANDIDATE_SCORE['titleResourceToken'] ?? 0;
       why.push(`resource token '${token}' matches the test title path`);
-    } else if (file.includes(token)) {
+    } else if (fileWords.includes(token)) {
       score += CANDIDATE_SCORE['fileResourceToken'] ?? 0;
       why.push(`resource token '${token}' matches the test file '${row.file}'`);
-    } else if (row.categorySignals.some((signal) => signal.label.toLowerCase().includes(token))) {
+    } else if (
+      row.categorySignals.some((signal) =>
+        signal.label.toLowerCase().split(/[^a-z0-9]+/).includes(token),
+      )
+    ) {
       score += CANDIDATE_SCORE['categoryToken'] ?? 0;
       why.push(`resource token '${token}' matches a category label`);
     }
@@ -783,10 +835,10 @@ function candidateEvidence(
     why.push(`title names the obligation's operation '${operation}'`);
   }
   for (const segment of routeSegments) {
-    if (title.includes(segment)) {
+    if (words.includes(segment)) {
       score += CANDIDATE_SCORE['titleRouteSegment'] ?? 0;
       why.push(`title mentions the obligation's route segment '${segment}'`);
-    } else if (file.includes(segment)) {
+    } else if (fileWords.includes(segment)) {
       score += CANDIDATE_SCORE['fileRouteSegment'] ?? 0;
       why.push(`test file mentions the obligation's route segment '${segment}'`);
     }
@@ -803,11 +855,13 @@ function candidateEvidence(
 }
 
 /**
- * Deterministic token inference (plan Phase 3 item 2): obligation
- * resource-id tokens (`tenant.accounts` → `tenant`, `accounts`) matched
- * against catalog rows' files, title paths, and category labels, plus the
- * obligation's operation and route hints. Candidates are ordered by
- * evidence score (strongest first), then by logical key for stability.
+ * Deterministic token inference (plan Phase 3 item 2): the RESOURCE-NAME
+ * tokens of the obligation's resource id (`tenant.accounts` → `accounts`;
+ * the plane, transport, method, route furniture, and id hash are structure,
+ * not names) matched WHOLE-WORD against catalog rows' files, title paths,
+ * and category labels, plus the obligation's operation and route hints.
+ * Candidates are ordered by evidence score (strongest first), then by
+ * logical key for stability.
  * Signals feed SUGGESTIONS only — an inference never writes a mapping (§5.3).
  */
 function inferredCandidates(
