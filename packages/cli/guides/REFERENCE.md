@@ -426,6 +426,14 @@ resource part (the text before `:` in `@crud(tenant.accounts:read)`, minus the
 plane) counts as a resource name, and the tag text itself is stripped before
 the title is read as prose — the `:read` in that tag never matches a `…/read`
 route segment.
+For an `http:*` obligation that operation must also FIT the route's method —
+`GET`/`HEAD` read, `POST` create, `PUT`/`PATCH` update, `DELETE` delete. A tag
+declaring `create` says the test creates the resource, which is no evidence
+that it reads `GET /api/v2/accounts`, so it scores nothing there; with no
+other evidence the row is not a candidate and the verdict is `unverified`,
+never a `no` that would send the owner to mark a create test as the proof of
+a read. A non-transport obligation has no route method to fit, so its tags
+stay judged on the resource alone.
 
 Every weight is additive and printed as a `why:` line, so the order explains
 itself — the score is never a bare number. Ties break on the logical key, so
@@ -766,7 +774,7 @@ else):
 | Namespace | Status |
 | --- | --- |
 | `persistence:create\|read\|update\|delete` | AVAILABLE — engine-observed same-entity persistence reads with the exact-value echo requirement (`EVIDENCE_VALUE_MISMATCH` on a mismatched echo, even when the status was 2xx) |
-| `http:request-observed`, `http:response-status-ok` | AVAILABLE — transport semantics only: a witness-observed exchange plus a provenance-verified claimed `ui.action` anchor from the declaring test |
+| `http:request-observed`, `http:response-status-ok` | AVAILABLE — engine browser, or the Observe channel for tests mapped `observed-e2e` (an exchange the witness proxied in the test's own session; test attribution is suite-claimed). The engine path grades FIRST and its verdict is final: a `satisfied` grade keeps its own record ids, and an `invalid` one (a witnessed exchange of a different endpoint, a non-2xx response) is an engine-found error no second channel may mask. The Observe channel is consulted only when the engine path found nothing |
 | `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; explicit selection remains blocking `missing` with `VERIFIER_UNSUPPORTED` |
 | `crud:*` (UI-semantic) | FAIL-CLOSED — the tested suite owns the browser; use `persistence:*` |
 | `http:effect-verified`, `http:read-result-verified` | AVAILABLE (behavior-case channel) — graded across the approved required cases with witness-issued `behavior.case` records; needs a compiled `behaviorPolicy` requirement set |
@@ -1576,8 +1584,8 @@ Blocked agents run `gateforge next` (or `gateforge next --json`): exactly
 one blocking next action (`next`/`cause`/`why`/`do`), never a dump. Do the
 single `do:` line and stop. New proof tests go in `tests/e2e/gateforge/`
 (overlay, engine-driven fixture — wizard creates via surface v2 steps);
-existing suite-driven browser tests prove persistence via the Observe
-channel once mapped `--kind observed-e2e`. Never rewrite existing
+existing suite-driven browser tests prove persistence and transport via the
+Observe channel once mapped `--kind observed-e2e`. Never rewrite existing
 `tests/e2e/**` journeys, never `tests mark` as proof, never edit policies
 or waivers to self-approve. `GATEFORGE.md` (written by `gateforge init`)
 carries the full loop contract.
