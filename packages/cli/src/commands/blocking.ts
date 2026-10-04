@@ -519,7 +519,61 @@ function isTracked(cwd: string, relativePath: string): boolean {
   }).status === 0;
 }
 
-/** Appends the gateforge-check hook to .pre-commit-config.yaml (idempotent). */
+/**
+ * Re-indents the gateforge-check block so its items nest under a
+ * `repos:` sequence whose items sit at `indent` spaces. The block
+ * is written for an item indent of 2; every item line shifts by
+ * (indent - 2), and the comment line is kept at the same indent
+ * as the item.
+ */
+function reindentPreCommitBlock(indent: number): string[] {
+  const shift = indent - 2;
+  return PRE_COMMIT_BLOCK.trimEnd().split('\n').map((line, index) => {
+    if (index === 0) return `${' '.repeat(indent)}${line}`;
+    const leading = line.length - line.trimStart().length;
+    return `${' '.repeat(Math.max(0, leading + shift))}${line.trimStart()}`;
+  });
+}
+
+/**
+ * Builds the new .pre-commit-config.yaml body with the
+ * gateforge-check block inserted as the FIRST item of the
+ * top-level block-style `repos:` sequence. Returns null when the
+ * file has no such sequence — no `repos:` line at all, a
+ * flow-style `repos: []`, or no sequence item under the key — so
+ * the caller falls back to appending the block at the end.
+ *
+ * The block lands directly after the `repos:` line, so any comment
+ * that belonged to the first item stays attached to it.
+ */
+function prependPreCommitBlockToRepos(current: string): string | null {
+  const lines = current.split('\n');
+  const reposIndex = lines.findIndex((line) => /^repos:\s*(#.*)?$/.test(line));
+  if (reposIndex < 0) return null;
+  let itemIndex = -1;
+  for (let i = reposIndex + 1; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+    itemIndex = i;
+    break;
+  }
+  const item = itemIndex < 0 ? '' : (lines[itemIndex] ?? '');
+  const itemMatch = /^(\s*)- /.exec(item);
+  if (itemMatch === null) return null;
+  lines.splice(reposIndex + 1, 0, ...reindentPreCommitBlock((itemMatch[1] ?? '').length));
+  return lines.join('\n');
+}
+
+/**
+ * Adds the gateforge-check hook to .pre-commit-config.yaml
+ * (idempotent). When the file already has a block-style `repos:`
+ * sequence, the hook block is inserted as its FIRST item — above
+ * the repository's own hooks, so a file-mutating hook can never
+ * run before the gate and invalidate its receipt. Only when no
+ * such sequence exists (no `repos:` line, or a flow-style
+ * `repos: []`) is the block appended at the end instead, with a
+ * note telling the owner to move the entry to the top by hand.
+ */
 export function appendPreCommitHook(io: Io): void {
   const path = join(io.cwd, '.pre-commit-config.yaml');
   if (existsSync(path)) {
@@ -529,21 +583,35 @@ export function appendPreCommitHook(io: Io): void {
       writeLine(io.stdout, `exists, leaving untouched: ${path} (gateforge-check)`);
       return;
     }
-    writeFileSync(path, `${current.endsWith('\n') ? current : current + '\n'}${PRE_COMMIT_BLOCK}`);
-    // The file belongs to the OWNER and this run appended one block to
-    // it, so the ledger records it as MODIFIED: `rm -rf` would throw
-    // their hooks away, `git restore` puts the file back exactly.
-    recordInitPath(io, io.cwd, path, 'modified');
-    // One line, one action: the file belongs to the OWNER, so the line
-    // says so and carries the exact way back. The command is printed
-    // only where it really works — `git restore` needs a tracked file,
-    // and an untracked config has nothing to restore.
+    // The file belongs to the OWNER and this run edits it, so the
+    // ledger records it as MODIFIED: `rm -rf` would throw their
+    // hooks away, `git restore` puts the file back exactly.
+    // One line, one action: the file belongs to the OWNER, so the
+    // line says so and carries the exact way back. The command is
+    // printed only where it really works — `git restore` needs a
+    // tracked file, and an untracked config has nothing to restore.
     const undo = isTracked(io.cwd, '.pre-commit-config.yaml')
       ? 'undo: git restore -- .pre-commit-config.yaml'
       : 'undo: delete the appended gateforge-check entry from .pre-commit-config.yaml (the file is not tracked by git, so there is nothing to restore)';
+    const inserted = prependPreCommitBlockToRepos(current);
+    if (inserted !== null) {
+      writeFileSync(path, inserted);
+      recordInitPath(io, io.cwd, path, 'modified');
+      writeLine(
+        io.stdout,
+        `updated: ${path} (gateforge-check hook added as the first hook) — your repo's own hook file: ${undo}`,
+      );
+      return;
+    }
+    writeFileSync(path, `${current.endsWith('\n') ? current : current + '\n'}${PRE_COMMIT_BLOCK}`);
+    recordInitPath(io, io.cwd, path, 'modified');
     writeLine(
       io.stdout,
       `updated: ${path} (gateforge-check hook appended) — your repo's own hook file: ${undo}`,
+    );
+    writeLine(
+      io.stdout,
+      'note: could not place gateforge-check first in .pre-commit-config.yaml — move its entry to the top of repos: yourself',
     );
     return;
   }

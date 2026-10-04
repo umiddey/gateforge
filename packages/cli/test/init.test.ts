@@ -284,6 +284,109 @@ describe('gateforge init', () => {
     });
   });
 
+  it('--blocking places gateforge-check FIRST in an existing block-style repos: list', async () => {
+    await withTempRepo({}, async (repo) => {
+      const existing = [
+        'repos:',
+        '  - repo: local',
+        '    hooks:',
+        '      - id: lint',
+        '        name: lint',
+        '        entry: true',
+        '        language: system',
+        '  - repo: https://github.com/pre-commit/pre-commit-hooks',
+        '    hooks:',
+        '      - id: trailing-whitespace',
+        '',
+      ].join('\n');
+      writeFileSync(repo.path('.pre-commit-config.yaml'), existing);
+      const result = await runCli(repo, ['init', '--blocking']);
+      expect(result.code).toBe(0);
+      const precommit = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8');
+      // The gateforge-check entry precedes the repo's own first
+      // item, so a file-mutating hook can never run before the gate.
+      expect(precommit.indexOf('id: gateforge-check')).toBeLessThan(precommit.indexOf('id: lint'));
+      expect(result.stdout).toContain('gateforge-check hook added as the first hook');
+      // is the FIRST repo entry with every original item kept in order.
+      const parsed = parseYaml(precommit) as {
+        repos: { repo: string; hooks: { id: string }[] }[];
+      };
+      expect(parsed.repos[0]?.hooks[0]?.id).toBe('gateforge-check');
+      expect(parsed.repos[1]?.hooks[0]?.id).toBe('lint');
+      expect(parsed.repos[2]?.hooks[0]?.id).toBe('trailing-whitespace');
+    });
+  });
+
+  it('--blocking places gateforge-check FIRST when existing items sit at indent 0', async () => {
+    await withTempRepo({}, async (repo) => {
+      const existing = [
+        'repos:',
+        '- repo: local',
+        '  hooks:',
+        '    - id: lint',
+        '      entry: true',
+        '      language: system',
+        '',
+      ].join('\n');
+      writeFileSync(repo.path('.pre-commit-config.yaml'), existing);
+      const result = await runCli(repo, ['init', '--blocking']);
+      expect(result.code).toBe(0);
+      const precommit = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8');
+      // The re-indented block must keep the config loadable — a
+      // mis-indented insert bricks every commit in the consumer repo.
+      expect(() => parseYaml(precommit)).not.toThrow();
+      const parsed = parseYaml(precommit) as { repos: { hooks: { id: string }[] }[] };
+      expect(parsed.repos[0]?.hooks[0]?.id).toBe('gateforge-check');
+      expect(parsed.repos[1]?.hooks[0]?.id).toBe('lint');
+    });
+  });
+
+  it('--blocking leaves top-level keys before repos: untouched', async () => {
+    await withTempRepo({}, async (repo) => {
+      const existing = [
+        'default_stages: [commit]',
+        'exclude: ^vendor/',
+        'repos:',
+        '  - repo: local',
+        '    hooks:',
+        '      - id: lint',
+        '        name: lint',
+        '        entry: true',
+        '        language: system',
+        '',
+      ].join('\n');
+      writeFileSync(repo.path('.pre-commit-config.yaml'), existing);
+      const result = await runCli(repo, ['init', '--blocking']);
+      expect(result.code).toBe(0);
+      const precommit = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8');
+      const parsed = parseYaml(precommit) as {
+        default_stages: string[];
+        exclude: string;
+        repos: { hooks: { id: string }[] }[];
+      };
+      expect(parsed.default_stages).toEqual(['commit']);
+      expect(parsed.exclude).toBe('^vendor/');
+      expect(parsed.repos[0]?.hooks[0]?.id).toBe('gateforge-check');
+      // The original top-level lines keep their exact text and position.
+      const lines = precommit.split('\n');
+      expect(lines[0]).toBe('default_stages: [commit]');
+      expect(lines[1]).toBe('exclude: ^vendor/');
+    });
+  });
+
+  it('--blocking appends with a note when the config has no block-style repos: list', async () => {
+    await withTempRepo({}, async (repo) => {
+      writeFileSync(repo.path('.pre-commit-config.yaml'), 'repos: []\n');
+      const result = await runCli(repo, ['init', '--blocking']);
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain('gateforge-check hook appended');
+      expect(result.stdout).toContain(
+        'note: could not place gateforge-check first in .pre-commit-config.yaml — move its entry to the top of repos: yourself',
+      );
+      expect(readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8')).toContain('gateforge-check');
+    });
+  });
+
   it('--blocking selects the repository-pinned CLI before an unrelated global CLI', async () => {
     await withTempRepo({}, async (repo) => {
       const result = await runCli(repo, ['init', '--blocking']);

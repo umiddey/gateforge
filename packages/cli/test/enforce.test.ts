@@ -207,8 +207,13 @@ describe('gateforge enforce', () => {
         .split('\n')
         .find((entry) => entry.startsWith('updated: ') && entry.includes('.pre-commit-config.yaml'));
       expect(line).toBeDefined();
-      expect(line).toContain('gateforge-check hook appended');
+      expect(line).toContain('gateforge-check hook added as the first hook');
       expect(line).toContain('undo: git restore -- .pre-commit-config.yaml');
+      // The gateforge-check entry is now the FIRST item, above the
+      // repo's own lint hook.
+      const precommit = readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8');
+      expect(precommit.indexOf('id: gateforge-check')).toBeLessThan(precommit.indexOf('id: lint'));
+      expect(() => parseYaml(precommit)).not.toThrow();
       const restore = spawnSync('git', ['restore', '--', '.pre-commit-config.yaml'], { cwd: repo.root, encoding: 'utf8' });
       expect(restore.status).toBe(0);
       expect(readFileSync(repo.path('.pre-commit-config.yaml'), 'utf8')).toBe(existing);
