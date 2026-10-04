@@ -69,8 +69,27 @@ export const SUPERVISED_INVOCATION = 'test-gates --changed';
 /** Schema-valid placeholder mac used only to validate the draft body before signing. */
 const RECEIPT_MAC_PLACEHOLDER = '0'.repeat(64);
 
+/** One named input of the trusted policy digest. */
+export interface TrustedPolicyEntry {
+  /** Stable digest entry name (a marker label for a synthetic absence/empty directory). */
+  name: string;
+  /**
+   * The repo-relative document the bytes came from, or null for a
+   * synthetic marker entry (an absent optional document or an empty/
+   * missing adapters directory contributes a marker, not a file).
+   */
+  path: string | null;
+  /** The exact effective bytes hashed for this entry (empty for markers). */
+  bytes: string;
+}
+
+/** A synthetic digest entry: no document, fixed empty bytes. */
+function marker(name: string): TrustedPolicyEntry {
+  return { name, path: null, bytes: '' };
+}
+
 /**
- * Computes the trusted policy/config revision digest (ADR 0005 D6) over
+ * Builds the NAMED trusted policy/config digest inputs (ADR 0005 D6) of
  * the trusted-revision-owned documents of the repository: `.gateforge.yml`,
  * the policies and classification-policy documents, the mapping
  * sidecar when present, the EXECUTABLE evidence adapters (`.mjs` modules
@@ -89,14 +108,15 @@ const RECEIPT_MAC_PLACEHOLDER = '0'.repeat(64);
  *     dir, waivers dir, and the repo-relative plugin module specifiers.
  *
  * Returns:
- *   string: 64-char lowercase hex trusted policy digest.
+ *   TrustedPolicyEntry[]: the entries in digest order — name, source
+ *     path (null for a synthetic marker), and the hashed bytes.
  *
  * Throws:
  *   UsageError: when a REQUIRED trusted document exists but cannot be
  *     read (fail closed — an unreadable trusted revision is never
  *     hashed as empty).
  */
-export function computeTrustedPolicyDigest(
+export function trustedPolicyDigestEntries(
   cwd: string,
   configPaths: {
     config: string;
@@ -110,17 +130,17 @@ export function computeTrustedPolicyDigest(
     quarantineFiles?: readonly string[];
     pluginModules: readonly string[];
   },
-): string {
-  const entry = (name: string, path: string, required: boolean): { name: string; bytes: string } => {
+): TrustedPolicyEntry[] {
+  const entry = (name: string, path: string, required: boolean): TrustedPolicyEntry => {
     const absolute = join(cwd, ...path.split('/'));
     if (!existsSync(absolute)) {
       if (required) {
         throw new UsageError(`trusted policy document '${path}' vanished mid-run — refusing to seal (fail closed)`);
       }
-      return { name, bytes: '' };
+      return { name, path, bytes: '' };
     }
     try {
-      return { name, bytes: readFileSync(absolute, 'utf8') };
+      return { name, path, bytes: readFileSync(absolute, 'utf8') };
     } catch (error) {
       throw new UsageError(`cannot read trusted policy document '${path}': ${(error as Error).message}`);
     }
@@ -134,13 +154,13 @@ export function computeTrustedPolicyDigest(
   // is an explicit marker (same convention as the input snapshot), and
   // every waiver file is hashed (waiver edits are gate-defining).
   const adapterDir = join(cwd, ...configPaths.adaptersDir.split('/'));
-  const adapterEntries: Array<{ name: string; bytes: string }> = [];
+  const adapterEntries: TrustedPolicyEntry[] = [];
   try {
     const names = readdirSync(adapterDir)
       .filter((name) => name.endsWith('.mjs'))
       .sort();
     if (names.length === 0) {
-      adapterEntries.push({ name: `${configPaths.adaptersDir}/(no .mjs adapters)`, bytes: '' });
+      adapterEntries.push(marker(`${configPaths.adaptersDir}/(no .mjs adapters)`));
     }
     for (const name of names) {
       const relative = `${configPaths.adaptersDir}/${name}`;
@@ -152,7 +172,7 @@ export function computeTrustedPolicyDigest(
         `trusted policy digest cannot read the adapters dir '${configPaths.adaptersDir}': ${(error as Error).message}`,
       );
     }
-    adapterEntries.push({ name: `${configPaths.adaptersDir}/(missing adapters dir)`, bytes: '' });
+    adapterEntries.push(marker(`${configPaths.adaptersDir}/(missing adapters dir)`));
   }
   const waiverEntries = configPaths.waiverFiles
     .map((path) => entry(path, path, true))
@@ -169,7 +189,7 @@ export function computeTrustedPolicyDigest(
   const pluginEntries = configPaths.pluginModules.map((module) => entry(module, module, true));
   const behaviorEntry =
     configPaths.behaviorPolicy === undefined || configPaths.behaviorPolicy === null
-      ? { name: '.gateforge/behavior.yml (absent)', bytes: '' }
+      ? marker('.gateforge/behavior.yml (absent)')
       : entry(configPaths.behaviorPolicy, configPaths.behaviorPolicy, true);
   // The staged-runtime document is security-sensitive (plan 2026-09-21):
   // its commands start processes and its reuse list sanctions the only
@@ -177,13 +197,13 @@ export function computeTrustedPolicyDigest(
   // own runtime commands is a policy-revision change.
   const runtimeEntry =
     configPaths.runtimePolicy === undefined || configPaths.runtimePolicy === null
-      ? { name: '.gateforge/runtime.yml (absent)', bytes: '' }
+      ? marker('.gateforge/runtime.yml (absent)')
       : entry(configPaths.runtimePolicy, configPaths.runtimePolicy, true);
   // Evidence exclusions contribute NO entry of their own since 0.10:
   // they live in `.gateforge.yml`, which is already hashed below. The
   // bytes an approval pins are the same bytes; the trust property is
   // unchanged, only the entry list is shorter.
-  return trustedPolicyDigest([
+  return [
     entry('.gateforge.yml', configPaths.config, true),
     entry(configPaths.policies, configPaths.policies, true),
     entry(configPaths.classificationPolicy, configPaths.classificationPolicy, true),
@@ -194,25 +214,48 @@ export function computeTrustedPolicyDigest(
     ...waiverEntries,
     ...quarantineEntries,
     ...pluginEntries,
-  ]);
+  ];
 }
 
+/**
+ * Computes the trusted policy/config revision digest over the entry list
+ * {@link trustedPolicyDigestEntries} yields. ONE function yields the named
+ * entries; the digest is computed FROM them, so a surface that has to name
+ * the inputs (the enforcement doctor's `policy-inputs-vs-HEAD` row) reads the
+ * very list this digest hashes — there is no second list to drift.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *   configPaths: the resolved repo-relative config paths (see
+ *     {@link trustedPolicyDigestEntries}).
+ *
+ * Returns:
+ *   string: 64-char lowercase hex trusted policy digest.
+ */
+export function computeTrustedPolicyDigest(
+  cwd: string,
+  configPaths: Parameters<typeof trustedPolicyDigestEntries>[1],
+): string {
+  return trustedPolicyDigest(trustedPolicyDigestEntries(cwd, configPaths));
+}
 
 /**
- * Builds the trusted-policy digest directly from a loaded config (the
- * common CLI shape): resolves the executable-input paths (adapters dir,
- * waiver files, local in-process plugin modules) and delegates to
- * {@link computeTrustedPolicyDigest}. All gate surfaces call this so the
- * digest is identical everywhere (check, broker, test-gates, doctor).
+ * Builds the NAMED trusted policy digest inputs directly from a loaded
+ * config (the common CLI shape): resolves the executable-input paths
+ * (adapters dir, waiver files, local in-process plugin modules) and
+ * delegates to {@link trustedPolicyDigestEntries}.
  *
  * Args:
  *   cwd: absolute repo root.
  *   config: the loaded gateforge config (paths + plugin declarations).
  *
  * Returns:
- *   string: 64-char lowercase hex trusted policy digest.
+ *   TrustedPolicyEntry[]: the entries in digest order.
  */
-export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfig): string {
+export function trustedPolicyDigestEntriesForConfig(
+  cwd: string,
+  config: GateforgeConfig,
+): TrustedPolicyEntry[] {
   const waiverFiles: string[] = [];
   const waiversDir = join(cwd, ...config.waivers.split('/'));
   try {
@@ -247,7 +290,7 @@ export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfi
     const normalized = normalizeRepoModule(module);
     if (normalized !== null) pluginModules.push(normalized);
   }
-  return computeTrustedPolicyDigest(cwd, {
+  return trustedPolicyDigestEntries(cwd, {
     config: '.gateforge.yml',
     policies: config.policies,
     classificationPolicy: config.classificationPolicy,
@@ -259,6 +302,23 @@ export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfi
     quarantineFiles: [...new Set(quarantineFiles)].sort(),
     pluginModules: [...new Set(pluginModules)].sort(),
   });
+}
+
+/**
+ * Builds the trusted-policy digest directly from a loaded config (the
+ * common CLI shape). All gate surfaces call this so the digest is
+ * identical everywhere (check, broker, test-gates, doctor) and so the
+ * digest is always computed FROM the entry list this module yields.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *   config: the loaded gateforge config (paths + plugin declarations).
+ *
+ * Returns:
+ *   string: 64-char lowercase hex trusted policy digest.
+ */
+export function trustedPolicyDigestForConfig(cwd: string, config: GateforgeConfig): string {
+  return trustedPolicyDigest(trustedPolicyDigestEntriesForConfig(cwd, config));
 }
 
 /**
