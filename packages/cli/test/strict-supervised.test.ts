@@ -1567,7 +1567,6 @@ policies:
       installStrictFixture(repo);
       repo.writeFiles({
         'docs/guide.md': '# approved staged guide: version 1\n',
-        '.gateforge.yml': `${GATEFORGE_YML}\nevidence:\n  exclude:\n    docs:\n      - docs\n`,
       });
       // The explicit mapping is tracked BEFORE the base commit, so the
       // frozen candidate carries it and the owner pin (computed below)
@@ -1576,14 +1575,16 @@ policies:
       // Candidate-owned application + staged-runtime declaration (both
       // tracked → both materialized into the checkout; runtime.yml is
       // hashed into the trusted policy digest the pin covers). The
-      // fixture config gains ONLY the runtime declaration — the shared
-      // fixture keeps its exact bytes for the other legs.
+      // fixture config gains ONLY the runtime declaration on top of the
+      // evidence exclusions above — the shared fixture keeps its exact
+      // bytes for the other legs, and .gateforge.yml is written ONCE so a
+      // later write cannot drop the evidence block.
       repo.writeFiles({
         '.gitignore': 'node_modules\n',
         'app/server.js': appServer,
         'app/lib/app.js': `${appLib}${marker('base')}`,
         'app/package.json': `${JSON.stringify({ type: 'module' }, null, 2)}\n`,
-        '.gateforge.yml': `${GATEFORGE_YML}runtime: .gateforge/runtime.yml\n`,
+        '.gateforge.yml': `${GATEFORGE_YML}runtime: .gateforge/runtime.yml\nevidence:\n  exclude:\n    docs:\n      - docs\n`,
         '.gateforge/runtime.yml': `schemaVersion: 1
 prepare:
   reuse:
