@@ -502,5 +502,23 @@ describe('staged-runtime supervision', () => {
       expect(message).toContain("violates its schema at 'services.0.");
       expect(message).toContain('fingerprint');
     });
+
+    it('carries the owner-declared run bounds (whole-run cap and stall bound)', () => {
+      const root = tempDir();
+      writeFileSync(
+        join(root, 'runtime.yml'),
+        ['schemaVersion: 1', 'executionTimeoutSeconds: 3600', 'stallTimeoutSeconds: 900'].join('\n'),
+        'utf8',
+      );
+      const document = loadRuntimeConfigAt(root, 'runtime.yml');
+      expect(document?.executionTimeoutSeconds).toBe(3600);
+      expect(document?.stallTimeoutSeconds).toBe(900);
+    });
+
+    it('a fractional or out-of-range stall bound is a typed schema violation', () => {
+      const root = tempDir();
+      writeFileSync(join(root, 'runtime.yml'), ['schemaVersion: 1', 'stallTimeoutSeconds: 90.5'].join('\n'), 'utf8');
+      expect(load(root, 'runtime.yml')).toThrow(/stallTimeoutSeconds/);
+    });
   });
 });

@@ -220,6 +220,8 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
       runToken: undefined,
       runTimeoutMs:
         runtimeDoc?.executionTimeoutSeconds !== undefined ? runtimeDoc.executionTimeoutSeconds * 1_000 : undefined,
+      stallTimeoutMs:
+        runtimeDoc?.stallTimeoutSeconds !== undefined ? runtimeDoc.stallTimeoutSeconds * 1_000 : undefined,
       scope: scope === 'staged' ? 'changed' : 'full',
       fixedChangedFiles: frozen.changedPaths,
       fixedCandidateTreeId: candidateTreeId,

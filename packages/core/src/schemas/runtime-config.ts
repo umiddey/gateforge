@@ -229,6 +229,13 @@ export const RuntimeConfigSchema = z
     envAllowlist: z.array(z.string().min(1)).optional(),
     /** Whole-run execution budget handed to the supervised gate. */
     executionTimeoutSeconds: z.number().int().min(1).max(3600).optional(),
+    /**
+     * Stall bound handed to the supervised gate: the run is killed when
+     * no test has FINISHED for this many seconds. The safety net that
+     * replaced the undeclared 30-minute whole-run cap — a silent suite
+     * dies here, a merely slow one does not.
+     */
+    stallTimeoutSeconds: z.number().int().min(1).max(3600).optional(),
   })
   .strict()
   .superRefine((runtime, ctx) => {

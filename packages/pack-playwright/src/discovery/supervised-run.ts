@@ -54,8 +54,38 @@ import { synthesizeTrustedConfig, trustedReporterEntry, type ProjectScope } from
 
 import { freezeProjectScopes, type FreezeControl } from './prepare-barrier.js';
 
-/** Default whole-run wall-clock bound for one supervised playwright run. */
+/**
+ * Default whole-run wall-clock bound for a runner adapter that
+ * publishes NO per-test completion signal (pytest / vitest / cypress).
+ *
+ * The Playwright supervised run does NOT use this: its default is no
+ * whole-run cap at all (see {@link SupervisedRunOptions.timeoutMs}),
+ * because a cap nobody declared killed real multi-hour suites. Those
+ * adapters cannot report progress, so a stall bound would never fire
+ * for them and this stands as their whole-run bound.
+ */
 export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Default stall bound: no test has FINISHED for this long → the run is
+ * killed and fails closed. This is the safety net that replaces the
+ * undeclared whole-run cap — a silent suite dies, a slow one does not.
+ */
+export const DEFAULT_STALL_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * The per-test completion signal ONE supervised run publishes.
+ *
+ * The run installs {@link RunActivity.onTestFinished} before it spawns
+ * and clears it after the child exits. The supervisor already receives
+ * one per-test completion event (the one the CI progress stream
+ * consumes); this hands that same event to the run's stall watchdog so
+ * a second signal is never built.
+ */
+export interface RunActivity {
+  /** Title of the test that just finished; absent until the run installs it. */
+  onTestFinished?: (title: string) => void;
+}
 
 /** The runner-outcomes document the gateforge reporter writes. */
 export interface RunnerOutcomesDocument {
@@ -87,8 +117,29 @@ export interface SupervisedRunOptions {
    * supervisor appends (it replaces the whole invocation).
    */
   command?: readonly string[];
-  /** Whole-run wall-clock bound (default {@link DEFAULT_RUN_TIMEOUT_MS}). */
+  /**
+   * Whole-run wall-clock bound — an OPERATOR bound, never a default.
+   *
+   * Absent (the default) means NO whole-run cap: a 1101-test suite that
+   * needs two hours is not a failure, and a cap nobody declared killed
+   * it. One applies only from `runtime.yml executionTimeoutSeconds` or
+   * `--run-timeout-min`. The bound that remains by default is the
+   * STALL bound ({@link SupervisedRunOptions.stallTimeoutMs}).
+   */
   timeoutMs?: number;
+  /**
+   * Stall bound in milliseconds: kill the run when no test has FINISHED
+   * for this long (default {@link DEFAULT_STALL_TIMEOUT_MS}). Reported
+   * as an incomplete run, never a pass.
+   */
+  stallTimeoutMs?: number;
+  /**
+   * The parent-side per-test completion sink (see {@link RunActivity}).
+   * Omit it and the run still applies its stall bound, it simply never
+   * sees a completion — so nothing reports progress and the bound
+   * measures from the start.
+   */
+  activity?: RunActivity;
   /**
    * Repo root — the candidate root, the identity root, and the trusted
    * testDir. It is NOT the child's cwd: the child runs from the
@@ -442,35 +493,81 @@ export async function executeSupervisedPlaywright(
   let stdout = '';
   let stderr = '';
   let timedOut = false;
+  // The stall watchdog (F4): a real suite finishes tests for hours, so
+  // the default bound is not "the whole run" but "the silence since the
+  // last FINISHED test". It rides the run's own per-test completion
+  // signal — the same event the CI progress stream consumes — so there
+  // is exactly one signal in a supervised run.
+  const stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+  const expectedTests = selection.logicalKeys.length;
+  let finishedTests = 0;
+  let lastFinishedTitle: string | null = null;
+  let stallDetail: string | null = null;
+  const stallMessage = (): string =>
+    `stalled: no test finished for ${stallBoundLabel(stallTimeoutMs)} ` +
+    `(last finished: ${lastFinishedTitle ?? 'none'}, ${String(finishedTests)}/${String(expectedTests)})`;
   // Diagnostic pass-through (display only): the runner's own output never
   // authorizes anything, but a failed supervised run is undebuggable
   // without seeing WHY the tests failed. Opt-in via environment so the
   // default gate output stays pure.
   const echoRunnerOutput = process.env['GATEFORGE_DEBUG_RUNNER'] === '1';
-  const outcome = await new Promise<{ code: number | null; timedOut: boolean; error: Error | null }>(
-    (settle) => {
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGKILL');
-      }, options.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS);
-      child.stdout?.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString('utf8');
-        if (echoRunnerOutput) process.stderr.write(chunk);
-      });
-      child.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString('utf8');
-        if (echoRunnerOutput) process.stderr.write(chunk);
-      });
-      child.once('error', (error) => {
-        clearTimeout(timer);
-        settle({ code: null, timedOut: false, error });
-      });
-      child.once('exit', (code) => {
-        clearTimeout(timer);
-        settle({ code, timedOut, error: null });
-      });
-    },
-  );
+  const outcome = await new Promise<{
+    code: number | null;
+    timedOut: boolean;
+    error: Error | null;
+  }>((settle) => {
+    // The whole-run cap exists ONLY when the operator declared one
+    // (`--run-timeout-min`, `runtime.yml executionTimeoutSeconds`). A
+    // default cap is not a safety net: it kills the long suites it was
+    // invented to protect.
+    const totalTimer =
+      options.timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            child.kill('SIGKILL');
+          }, options.timeoutMs);
+    let stallTimer = setTimeout(() => {
+      stallDetail = stallMessage();
+      child.kill('SIGKILL');
+    }, stallTimeoutMs);
+    // Installed for the run's lifetime, so the supervisor's own
+    // per-test events reach the watchdog and NOTHING else has to build a
+    // second completion signal.
+    const activity = options.activity;
+    if (activity !== undefined) {
+      activity.onTestFinished = (title: string): void => {
+        finishedTests += 1;
+        lastFinishedTitle = title;
+        clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+          stallDetail = stallMessage();
+          child.kill('SIGKILL');
+        }, stallTimeoutMs);
+      };
+    }
+    const stopTimers = (): void => {
+      clearTimeout(totalTimer);
+      clearTimeout(stallTimer);
+      if (activity !== undefined) activity.onTestFinished = undefined;
+    };
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+      if (echoRunnerOutput) process.stderr.write(chunk);
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+      if (echoRunnerOutput) process.stderr.write(chunk);
+    });
+    child.once('error', (error) => {
+      stopTimers();
+      settle({ code: null, timedOut: false, error });
+    });
+    child.once('exit', (code) => {
+      stopTimers();
+      settle({ code, timedOut, error: null });
+    });
+  });
   // The pinned trusted config must still be the file the runner executed.
   // A swap during the run (the runner child can address the state dir
   // through the config path the CLI itself passed) is an integrity
@@ -496,9 +593,12 @@ export async function executeSupervisedPlaywright(
   if (outcome.timedOut) {
     return incomplete(
       outcome.code,
-      `supervised run exceeded its ${String(options.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS)}ms bound and was killed — ` +
+      `supervised run exceeded its ${String(options.timeoutMs ?? 0)}ms bound and was killed — ` +
         'an incomplete run never reports success',
     );
+  }
+  if (stallDetail !== null) {
+    return incomplete(outcome.code, stallDetail);
   }
   const document = readOutcomesDocument(outcomesPath);
   if (document === null) {
@@ -509,6 +609,26 @@ export async function executeSupervisedPlaywright(
     );
   }
   return parseOutcomesDocument(document, outcome.code);
+}
+
+/**
+ * Resolves one repo-relative `file:line[:column]` location against the
+ * repo root. The runner child runs from the native config directory, so
+ * a location left repo-relative would be filtered from the wrong base;
+ * an absolute argument targets the very same file either way. An
+ * already-absolute value (or one without a line) passes through the
+ * resolver unchanged.
+
+/**
+ * How a stall bound reads in a message: whole minutes say minutes (the
+ * owner's unit in `runtime.yml stallTimeoutSeconds` and in the default),
+ * anything else says what it actually is. Never a rounded lie — an
+ * operator reading `stalled` must see the bound that fired.
+ */
+function stallBoundLabel(stallTimeoutMs: number): string {
+  if (stallTimeoutMs % 60_000 === 0) return `${String(stallTimeoutMs / 60_000)} min`;
+  if (stallTimeoutMs >= 1_000) return `${String(stallTimeoutMs / 1_000)}s`;
+  return `${String(stallTimeoutMs)}ms`;
 }
 
 /**

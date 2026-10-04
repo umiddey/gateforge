@@ -171,6 +171,7 @@ import {
   type RunnerEnumeration,
   type RunnerExecuteRequest,
   type RunnerTestIdentity,
+  type RunActivity,
 } from '@gate-forge/pack-playwright';
 import { parseArgs, repeatableStringFlag, stringFlag } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
@@ -457,6 +458,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
         runToken: stringFlag(options, 'run-token'),
         runTimeoutMs:
           parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')) ?? runtimeRunTimeoutMs(io.cwd),
+        stallTimeoutMs: runtimeStallTimeoutMs(io.cwd),
         progress: progressFlag,
         scope,
         resultOnly,
@@ -541,18 +543,42 @@ export function parseRunTimeoutMin(raw: string | undefined): number | undefined 
  * directly, the same document was ignored and every run died at the
  * 30-minute default — the owner's own runtime document did not apply to
  * the owner's own command. An explicit `--run-timeout-min` still wins, and
- * a document that cannot be read declares nothing: the default bound
- * stands and no run loses its bound.
+ * a document that cannot be read declares nothing: no whole-run cap applies,
+ * and the stall bound (see {@link runtimeStallTimeoutMs}) is the only backstop.
  *
  * Args:
  *   cwd: absolute repository root.
  *
  * Returns:
- *   number | undefined: milliseconds, or undefined for the default bound.
+ *   number | undefined: milliseconds, or undefined when no cap is declared.
  */
 function runtimeRunTimeoutMs(cwd: string): number | undefined {
   try {
     const seconds = loadRuntimeConfigAt(cwd, loadConfigAt(cwd).runtime)?.executionTimeoutSeconds;
+    return seconds === undefined ? undefined : seconds * 1_000;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The stall bound the OWNER declared in the staged runtime document, in
+ * milliseconds, or undefined when the document declares none.
+ *
+ * `runtime.yml`'s `stallTimeoutSeconds` is the owner's own answer to
+ * "how long may my suite go without finishing a test". The engine
+ * default stands when the document says nothing, and a document that
+ * cannot be read declares nothing.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *
+ * Returns:
+ *   number | undefined: milliseconds, or undefined for the engine default.
+ */
+function runtimeStallTimeoutMs(cwd: string): number | undefined {
+  try {
+    const seconds = loadRuntimeConfigAt(cwd, loadConfigAt(cwd).runtime)?.stallTimeoutSeconds;
     return seconds === undefined ? undefined : seconds * 1_000;
   } catch {
     return undefined;
@@ -904,8 +930,19 @@ export interface SupervisedOptions {
   witnessUrl: string | undefined;
   /** External witness run token. */
   runToken: string | undefined;
-  /** Whole-run wall-clock bound ms (undefined = 30-minute default). */
+  /**
+   * Whole-run wall-clock bound ms. Undefined = NO whole-run cap: the
+   * bound is the operator's to declare (`--run-timeout-min` or
+   * `runtime.yml executionTimeoutSeconds`), never a default that kills
+   * the long suites it was meant to protect.
+   */
   runTimeoutMs: number | undefined;
+  /**
+   * Stall bound ms: the run is killed when no test has FINISHED for this
+   * long. Undefined resolves from `runtime.yml stallTimeoutSeconds` and
+   * then the engine default (15 min) inside the supervised path.
+   */
+  stallTimeoutMs?: number;
   /**
    * `--progress` target (additive): `stderr`, `file:<path>`, `off`, or
    * undefined for the `run.progress` config key and then the CI-aware
@@ -993,6 +1030,14 @@ const CHAOS_DEFAULT_MAX_DELAY_MS = 400;
 
 /** The hard ceiling on a configured bound (a chaos run is a finding tool). */
 const CHAOS_MAX_DELAY_CEILING_MS = 5_000;
+
+/**
+ * How long the generated freeze controller waits for a valid release
+ * when the run declared no whole-run budget. A wait, not a run bound:
+ * the controller's own handshake must stay finite whatever the suite's
+ * budget is, and the ceiling below already caps it at this value.
+ */
+const FREEZE_RELEASE_WAIT_MS = 900_000;
 
 /**
  * Validates `--chaos <seed>` against the same authority contract as
@@ -2369,6 +2414,11 @@ async function runSupervisedTestGatesInner(
   declaredRunnerEnvNames: readonly string[] | undefined,
 ): Promise<number> {
   const { out, format, witnessUrl, runTimeoutMs } = options;
+  // The stall bound: the caller's value wins (the CLI entry resolved it
+  // from `runtime.yml`), the document is re-read for an in-process
+  // caller that has no value of its own (the commit hook), and the
+  // engine default stands when neither declares one.
+  const stallTimeoutMs = options.stallTimeoutMs ?? runtimeStallTimeoutMs(io.cwd);
   const runtimeReuseDigest = options.runtimeReuseDigest;
   const runtimeReuseMounts = options.runtimeReuseMounts ?? [];
   const config = loadConfigAt(io.cwd);
@@ -4087,7 +4137,10 @@ async function runSupervisedTestGatesInner(
           // worker exists — the only honest baseline a body worker's
           // inherited preparation environment can be projected back to.
           baseEnv: supervisedRunnerChildEnv(suiteEnv, io.cwd),
-          timeoutMs: Math.min(Math.max(runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS, 120_000), 900_000),
+          // The freeze controller's own wait for a release. Independent of
+          // the run's own bounds: it must stay finite, and its ceiling is
+          // the release wait, not the whole-run budget.
+          timeoutMs: Math.min(Math.max(runTimeoutMs ?? FREEZE_RELEASE_WAIT_MS, 120_000), 900_000),
         });
   // The identity the freeze accepted, written by the handler below and
   // read once when this run seals. It is read through a NAMED accessor
@@ -4109,6 +4162,11 @@ async function runSupervisedTestGatesInner(
   // declared, so the project that reads the saved session is handed it
   // while the setup project keeps running unauthenticated. An operator's
   // GATEFORGE_SESSION_STATE still outranks both (above).
+  // The per-test completion sink the supervised run fills in before it
+  // spawns. The drain below feeds it from the SAME event the `--progress`
+  // stream consumes, so the stall watchdog and the progress stream share
+  // one signal instead of two.
+  const runActivity: RunActivity = {};
   const adapter = runnerName === 'playwright'
     ? new PlaywrightAdapter({
         config,
@@ -4134,10 +4192,12 @@ async function runSupervisedTestGatesInner(
                   prerequisiteProjects: freezePlan.prerequisiteProjects,
                 },
               }),
-          // Operator-provided whole-run bound for multi-hour suites (default
-          // 30 minutes stands when absent — same expected set and
-          // completeness rules either way).
+          // Operator-declared whole-run bound: absent, NO cap applies
+          // (same expected set and completeness rules either way — only
+          // the kill timer moves). The stall bound is the default backstop.
           ...(runTimeoutMs !== undefined ? { timeoutMs: runTimeoutMs } : {}),
+          ...(stallTimeoutMs !== undefined ? { stallTimeoutMs } : {}),
+          activity: runActivity,
         },
       })
     : null;
@@ -4436,6 +4496,9 @@ async function runSupervisedTestGatesInner(
       // A worker-side end carries no outcome (the runner's reporter
       // still owes it): counting it would report a test twice.
       if (event.outcome === undefined) return;
+      // The stall watchdog rides THIS event — the run's own per-test
+      // completion signal — exactly as the progress stream below does.
+      runActivity.onTestFinished?.(title);
       progress.endTest({
         logicalKey: `${event.file ?? ''}#${event.titlePath.join('>')}`,
         title,
@@ -4535,6 +4598,10 @@ async function runSupervisedTestGatesInner(
         logicalKeys: selection.logicalKeys,
         stateDir,
         runId: manifest.runId,
+        // These adapters publish NO per-test completion signal, so no
+        // stall bound can be honoured for them; the whole-run bound stays
+        // (operator's value, else the documented default). The Playwright
+        // path above is the one with the stall watchdog.
         timeoutMs: runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
         cwd: io.cwd,
         mode: selection.mode,
