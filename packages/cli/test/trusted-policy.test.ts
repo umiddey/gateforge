@@ -142,6 +142,10 @@ describe('assertApprovedPolicy (the single-call integration point)', () => {
     if (!result.ok) {
       expect(result.cause).toBe('ENFORCEMENT_UNTRUSTED');
       expect(result.detail).toContain('does not match the owner-approved revision');
+      // Both FULL 64-hex digests appear — the owner sees
+      // exactly which revision the candidate computed vs
+      // the approved one.
+      expect(result.detail).toContain(`(candidate ${weakened}, approved ${candidate})`);
       expect(result.nextAction).toBe(WEAKENED_POLICY_NEXT_ACTION);
       expect(result.nextAction).toContain('classifiers/exclusions/waivers/baselines/coverage');
       expect(result.nextAction).toContain('approve and repin the revision, then rerun');
@@ -306,6 +310,7 @@ describe('check --require-e2e binds the approved policy revision (CLI)', () => {
     await inStrictRepo(async (repo) => {
       const pin = candidatePolicyDigest(repo);
       weakenCandidatePolicy(repo);
+      const weakened = candidatePolicyDigest(repo);
       const { code, report } = await runRequireE2E(repo, {
         ...NO_PIN,
         [APPROVED_POLICY_DIGEST_ENV]: pin,
@@ -316,6 +321,10 @@ describe('check --require-e2e binds the approved policy revision (CLI)', () => {
       expect(entry, 'policy-ownership blocking entry present').toBeTruthy();
       expect(entry?.cause).toBe('ENFORCEMENT_UNTRUSTED');
       expect(entry?.detail).toContain('candidate policy digest does not match the owner-approved revision');
+      // Both FULL 64-hex digests appear so the owner sees
+      // exactly which revision the candidate computed vs the
+      // approved one (the staged gate's candidate vs the pin).
+      expect(entry?.detail).toContain(`(candidate ${weakened}, approved ${pin})`);
       expect(entry?.nextAction).toBe(WEAKENED_POLICY_NEXT_ACTION);
     });
   });

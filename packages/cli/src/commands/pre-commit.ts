@@ -15,7 +15,7 @@ import { CAUSE_NEXT_ACTIONS, ExecutionResultSchema } from '@gate-forge/core';
 import { parseArgs, stringFlag } from '../args.js';
 import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
-import { UsageError } from '../errors.js';
+import { printFailure, UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import {
@@ -41,7 +41,12 @@ import {
 import { readLastFullRunSummary, readStateDocument, resolveStateDir } from '../state.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
-import { runCheckGate } from './check.js';
+import {
+  isStagedDiscoveryFailure,
+  runCheckGate,
+  runtimeDeclaresReuse,
+  STAGED_DISCOVERY_HINT,
+} from './check.js';
 import { runSupervisedTestGates } from './test-gates.js';
 import { evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import { loadDocsExclusions } from '../docs-exclusions.js';
@@ -227,23 +232,40 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
       }
     }
 
-    const checkCode =
-      runCode === 0
-        ? await runCheckGate(candidateIo, {
-            diffScoped: scope === 'staged',
-            requireE2E: true,
-            format: 'text',
-            fixedChangedFiles: frozen.changedPaths,
-            // The identity of the bytes the supervised run actually tested
-            // inside THIS isolated checkout. It is never copied back to the
-            // user workspace, and it never authorizes a different tree.
-            fixedCandidateTreeId: preparedTreeId ?? candidateTreeId ?? null,
-            runtimeReuseDigest,
-      runtimeReuseMounts,
-      runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
-      verifierKeyring,
-          })
-        : runCode;
+    let checkCode: number;
+    if (runCode !== 0) {
+      checkCode = runCode;
+    } else {
+      try {
+        checkCode = await runCheckGate(candidateIo, {
+          diffScoped: scope === 'staged',
+          requireE2E: true,
+          format: 'text',
+          fixedChangedFiles: frozen.changedPaths,
+          // The identity of the bytes the supervised run actually tested
+          // inside THIS isolated checkout. It is never copied back to the
+          // user workspace, and it never authorizes a different tree.
+          fixedCandidateTreeId: preparedTreeId ?? candidateTreeId ?? null,
+          runtimeReuseDigest,
+          runtimeReuseMounts,
+          runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
+          verifierKeyring,
+        });
+      } catch (error) {
+        // Staged discovery hint (0.9.1): the candidate
+        // checkout holds TRACKED bytes only, so a test-
+        // discovery run that cannot find its dependencies
+        // fails with the raw runner error and no pointer —
+        // unless the runtime document already declares the
+        // dependency directories to link.
+        if (isStagedDiscoveryFailure(error) && !runtimeDeclaresReuse(runtimeDoc)) {
+          printFailure(io, error);
+          writeLine(io.stderr, STAGED_DISCOVERY_HINT);
+          return 2;
+        }
+        throw error;
+      }
+    }
 
     copyStateIfPresent(checkoutDir, io.cwd);
     const recheck = recheckStagedCandidate(io.cwd, io.env, frozen);

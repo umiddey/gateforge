@@ -266,7 +266,7 @@ export function assertApprovedPolicy(candidateDigest: string, input: ApprovedPol
     return {
       ok: false,
       cause: 'ENFORCEMENT_UNTRUSTED',
-      detail: `candidate policy digest does not match the owner-approved revision: ${weakening.reason}`,
+      detail: `candidate policy digest does not match the owner-approved revision: ${weakening.reason} (candidate ${candidateDigest}, approved ${input.approved})`,
       nextAction: WEAKENED_POLICY_NEXT_ACTION,
     };
   }

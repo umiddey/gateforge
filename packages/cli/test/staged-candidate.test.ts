@@ -398,4 +398,74 @@ describe('check --staged gates the exact staged candidate (CLI)', () => {
         "or pin GATEFORGE_APPROVED_POLICY_DIGEST to this candidate's digest (runtime.yml is part of it)",
       );
     }));
+
+  /**
+   * Files that make the staged gate run test DISCOVERY in
+   * the candidate: a valid mapping sidecar (discovery runs
+   * when one exists) plus a playwright config that requires
+   * a package no checkout can resolve — the candidate holds
+   * tracked files only, so its dependencies are absent
+   * unless the runtime document declares reuse roots.
+   */
+  function discoveryBreakingFiles(): Record<string, string> {
+    return {
+      '.gateforge/test-map.yml': [
+        'schemaVersion: 1',
+        'tests:',
+        '  - key: playwright:tests/example.spec.ts:example',
+        '    selector:',
+        '      runner: playwright',
+        '      file: tests/example.spec.ts',
+        '      titlePath: [example]',
+        '    claims: [tenant.accounts:persistence:read]',
+        '    reason: declares the fixture obligation for staged discovery',
+        '',
+      ].join('\n'),
+      'playwright.config.mjs': [
+        "import 'gateforge-staged-discovery-missing-package';",
+        'export default {};',
+        '',
+      ].join('\n'),
+    };
+  }
+
+  it('appends the staged-checkout dependency hint when discovery fails without prepare.reuse', () =>
+    withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles(discoveryBreakingFiles());
+      repo.stage();
+      const result = await runCli(repo, ['check', '--staged']);
+      // The discovery failure itself: a usage error (exit 2)
+      // naming the playwright enumeration that never reached
+      // its reporter.
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('produced no readable reporter JSON');
+      // …plus the one-line hint naming the runtime
+      // declaration that bridges the candidate's missing
+      // dependencies.
+      expect(result.stderr).toContain('hint: the staged candidate checkout holds tracked files only');
+      expect(result.stderr).toContain('prepare: { reuse: [node_modules] }');
+      expect(result.stderr).toContain('REFERENCE "Staged runtime"');
+    }));
+
+  it('prints no staged-checkout hint when the runtime document declares reuse', () =>
+    withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': `${readFileSync(repo.path('.gateforge.yml'), 'utf8')}runtime: .gateforge/runtime.yml\n`,
+        '.gateforge/runtime.yml': 'schemaVersion: 1\nprepare:\n  reuse: [node_modules]\n',
+        'node_modules/.keep': 'reused dependency placeholder\n',
+        ...discoveryBreakingFiles(),
+      });
+      repo.stage();
+      repo.commit('base with declared reuse');
+      const result = await runCli(repo, ['check', '--staged']);
+      // The discovery failure is unchanged (exit 2)…
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('produced no readable reporter JSON');
+      // …but the reuse declaration is the sanctioned
+      // dependency bridge, so no staged-checkout hint is
+      // appended.
+      expect(result.stderr).not.toContain('hint: the staged candidate checkout');
+    }));
 });

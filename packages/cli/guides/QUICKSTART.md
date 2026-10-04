@@ -12,7 +12,8 @@ You need Node.js 20 or newer and an existing Playwright suite that can run again
 
 - Answer the plane questions with `gateforge classify plane <folder> <tenant|master|global> --reason "<why>" --confirm` (run `gateforge init --planes` once first to create the owner-reviewed `.gateforge/planes.json`).
 - Adopt comes after the plane answers because a plane answer changes a resource's identity, so the debt set `adopt` records would not match the repository if it were captured before the answer.
-- Pin the owner-approved policy digest LAST, right before the first strict commit: read the full value from `gateforge enforcement doctor` and set it as `GATEFORGE_APPROVED_POLICY_DIGEST`. It changes whenever a policy input changes — `.gateforge.yml`, the policies, the classification policy, `planes.json`, adapters, `runtime.yml`, waivers, hooks — so re-pin after every such edit.
+- Declare the dependency directories the staged commit gate may link (`prepare: { reuse: [node_modules] }` in `.gateforge/runtime.yml`): the gate runs on a checkout of the staged files only.
+- Pin the owner-approved policy digest LAST, right before the first strict commit: read the full value from `gateforge enforcement doctor` and set it as `GATEFORGE_APPROVED_POLICY_DIGEST`. It changes whenever a policy input changes — `.gateforge.yml`, the policies, the classification policy, `planes.json`, adapters, `runtime.yml`, waivers, hooks — so re-pin after every such edit. Stage every policy file first (`git add`) — the commit gate digests the staged bytes, and `enforcement doctor` warns when they differ from the working tree.
 
 ## 1. Install the CLI and the packs you use
 

@@ -21,7 +21,8 @@ ONE next action.
 
   An infrastructure route that serves no business data (health, metrics): answer the plane of the database it runs against, or — when the file is not part of the product — exclude it with `project.paths.exclude` in `.gateforge.yml`.
 - **`gateforge adopt` comes after the plane answers** because a plane answer changes a resource's identity, so the debt set `adopt` records would not match the repository if it were captured before the answer.
-- **Pin the owner-approved policy digest LAST**, right before the first strict commit: read the full value from `gateforge enforcement doctor` and set it as `GATEFORGE_APPROVED_POLICY_DIGEST`. It changes whenever a policy input changes — `.gateforge.yml`, the policies, the classification policy, `planes.json`, adapters, `runtime.yml`, waivers, hooks — so re-pin after every such edit.
+- **Declare the dependency directories the staged commit gate may link** (`prepare: { reuse: [node_modules] }` in `.gateforge/runtime.yml`): the gate runs on a checkout of the staged files only.
+- **Pin the owner-approved policy digest LAST**, right before the first strict commit: read the full value from `gateforge enforcement doctor` and set it as `GATEFORGE_APPROVED_POLICY_DIGEST`. It changes whenever a policy input changes — `.gateforge.yml`, the policies, the classification policy, `planes.json`, adapters, `runtime.yml`, waivers, hooks — so re-pin after every such edit. Stage every policy file first (`git add`) — the commit gate digests the staged bytes, and `enforcement doctor` warns when they differ from the working tree.
 
 ## 1. What you need
 

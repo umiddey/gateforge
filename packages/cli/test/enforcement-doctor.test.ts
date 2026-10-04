@@ -65,6 +65,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'managed-guarantee',
         'observer',
         'playwright-projects',
+        'policy-inputs-staged',
         'runner',
         'server-protection',
         'snapshot',
@@ -351,6 +352,40 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(policy.detail).toContain(digest);
       expect(policy.detail).toContain('matches the candidate policy revision');
       expect(policy.detail).not.toContain('owner: pin this revision');
+    });
+  });
+
+  it('warns when a policy input differs between the staged index and the working tree', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.stage();
+      // An unstaged edit to a policy input: the commit gate
+      // digests the STAGED bytes while the digest doctor prints
+      // above is computed from the WORKING TREE — pinning it would
+      // pin the wrong revision.
+      repo.writeFiles({
+        '.gateforge.yml': `${readFileSync(repo.path('.gateforge.yml'), 'utf8')}# unstaged policy edit\n`,
+      });
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json']);
+      expect(result.code).toBe(0);
+      const policy = checkById(parseDoctor(result.stdout), 'policy-inputs-staged');
+      expect(policy.status).toBe('warn');
+      expect(policy.detail).toContain('policy inputs differ between the staged index and the working tree');
+      expect(policy.detail).toContain('.gateforge.yml');
+      expect(policy.detail).toContain('the commit gate digests the STAGED bytes');
+      expect(policy.detail).toContain('stage them (git add) before pinning the digest printed here');
+    });
+  });
+
+  it('reports policy inputs fully staged when the index matches the working tree', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.stage();
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json']);
+      expect(result.code).toBe(0);
+      const policy = checkById(parseDoctor(result.stdout), 'policy-inputs-staged');
+      expect(policy.status).toBe('ok');
+      expect(policy.detail).toContain('policy inputs are fully staged');
     });
   });
 });

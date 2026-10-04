@@ -36,10 +36,13 @@ import {
 import { spawnSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { BehaviorPolicySchema } from '@gate-forge/core';
+import { BehaviorPolicySchema, QUARANTINE_DIR } from '@gate-forge/core';
 import type { GateforgeConfig } from '@gate-forge/core';
 import { parse as parseYaml } from 'yaml';
 import { auditAdapters } from '../adapter-audit.js';
+import { CACHE_EXCLUSIONS_PATH } from '../cache-exclusions.js';
+import { DOCS_EXCLUSIONS_PATH } from '../docs-exclusions.js';
+import { normalizeRepoModule } from '../input-snapshot.js';
 import {
   allCapabilities,
   canonicalJson,
@@ -138,6 +141,57 @@ function probe(cwd: string, env: NodeJS.ProcessEnv, args: readonly string[]): st
   const result = spawnSync('git', [...args], { cwd, env, encoding: 'utf8' });
   if (result.error !== undefined || result.status !== 0) return null;
   return (result.stdout ?? '').trim();
+}
+
+/**
+ * The trusted policy inputs the commit gate digests — the same
+ * documents `trustedPolicyDigestForConfig` hashes: the config,
+ * the policy/classification/behavior/runtime documents, the
+ * owner exclusion declarations, the mapping sidecar, the
+ * adapters and waivers directories, the quarantine directory,
+ * and every repo-relative in-process plugin module. Directories
+ * are named whole: `git status` reports every changed file
+ * below them.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   config: the loaded gateforge config.
+ *
+ * Returns:
+ *   string[]: deduplicated repo-relative posix paths.
+ */
+function policyInputPaths(cwd: string, config: GateforgeConfig): string[] {
+  const paths = new Set<string>([
+    '.gateforge.yml',
+    config.policies,
+    config.classificationPolicy,
+    TEST_MAP_RELATIVE,
+    config.adapters,
+    config.waivers,
+    QUARANTINE_DIR,
+  ]);
+  if (config.behaviorPolicy !== undefined) paths.add(config.behaviorPolicy);
+  if (config.runtime !== undefined) paths.add(config.runtime);
+  if (existsSync(join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/')))) paths.add(DOCS_EXCLUSIONS_PATH);
+  if (existsSync(join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/')))) paths.add(CACHE_EXCLUSIONS_PATH);
+  for (const plugin of config.plugins) {
+    const module = plugin.module;
+    if (typeof module !== 'string') continue;
+    if (!module.startsWith('./') && !module.startsWith('../')) continue;
+    const normalized = normalizeRepoModule(module);
+    if (normalized !== null) paths.add(normalized);
+  }
+  return [...paths];
+}
+
+/**
+ * One `git status --porcelain` line → its path (a rename keeps
+ * the NEW name; the two status letters are dropped).
+ */
+function porcelainPath(line: string): string {
+  const rest = line.slice(2);
+  const arrow = rest.indexOf(' -> ');
+  return (arrow >= 0 ? rest.slice(0, arrow) : rest).trim();
 }
 
 /**
@@ -1250,6 +1304,49 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     }
   }
   checks.push({ id: 'trusted-binary-policy', status: policyStatus, detail: policyDetail });
+
+  // 4b. Staged policy inputs. The commit gate digests the STAGED
+  // bytes of the trusted policy inputs while the digest printed
+  // above is computed from the WORKING TREE — an unstaged edit or
+  // an untracked policy input makes the value the owner pins
+  // wrong without any warning, so the doctor compares the two
+  // trees over exactly the digested inputs.
+  let policyStagedStatus: DoctorStatus;
+  let policyStagedDetail: string;
+  if (!configOk) {
+    policyStagedStatus = 'warn';
+    policyStagedDetail = 'policy input staging state not evaluated (config failed to load)';
+  } else {
+    const stagedConfig = loadConfigAt(io.cwd);
+    const listing = probe(io.cwd, io.env, [
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '--',
+      ...policyInputPaths(io.cwd, stagedConfig),
+    ]);
+    if (listing === null) {
+      policyStagedStatus = 'warn';
+      policyStagedDetail = 'policy input staging state unknown (no usable Git inventory)';
+    } else {
+      const changed = listing
+        .split('\n')
+        .filter((line) => line.length > 1 && line[1] !== ' ')
+        .map((line) => porcelainPath(line));
+      if (changed.length === 0) {
+        policyStagedStatus = 'ok';
+        policyStagedDetail = 'policy inputs are fully staged';
+      } else {
+        policyStagedStatus = 'warn';
+        const shown = changed.slice(0, 5).join(', ');
+        const rest = changed.length > 5 ? ` and ${String(changed.length - 5)} more` : '';
+        policyStagedDetail =
+          `policy inputs differ between the staged index and the working tree: ${shown}${rest} — ` +
+          'the commit gate digests the STAGED bytes; stage them (git add) before pinning the digest printed here';
+      }
+    }
+  }
+  checks.push({ id: 'policy-inputs-staged', status: policyStagedStatus, detail: policyStagedDetail });
 
   // 5. Snapshot mode (inventory availability decides evidence binding).
   const inventory = probe(io.cwd, io.env, ['ls-files', '--stage', '-z']);
