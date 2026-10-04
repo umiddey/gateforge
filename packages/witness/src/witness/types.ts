@@ -190,10 +190,18 @@ export interface ObserveFinalizedObligation {
   obligationId: string;
   /** The issued witnessed record id. */
   recordId: string;
-  /** The CRUD operation the binding proved. */
-  operation: 'create' | 'read' | 'update' | 'delete';
-  /** The witness-resolved entity id (scalar or column-keyed object). */
-  entityId: unknown;
+  /**
+   * The CRUD operation the observe binding proved. Absent on an
+   * `http.observed` record (plan 0.9.2 item D): the transport contracts
+   * carry no CRUD binding — the engine, not the witness, decides which
+   * endpoint an observed exchange attributes to.
+   */
+  operation?: 'create' | 'read' | 'update' | 'delete';
+  /**
+   * The witness-resolved entity id (scalar or column-keyed object).
+   * Absent on an `http.observed` record, which resolves no entity.
+   */
+  entityId?: unknown;
 }
 
 /** `POST /observe/finalize` response. */

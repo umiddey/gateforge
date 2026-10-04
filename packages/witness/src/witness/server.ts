@@ -168,9 +168,11 @@ import {
 import { canonicalOf } from '../json.js';
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
+  HTTP_OBSERVED_KIND,
   KNOWN_RECORD_KINDS,
   LOOPBACK_HOSTNAME,
   OBSERVED_KIND,
+  OBSERVED_EXCHANGES_CAP,
   PERSISTENCE_KIND,
   RUN_HEADER,
   VERIFIER_HEADER,
@@ -5136,7 +5138,14 @@ async function handleObserveFinalize(
   sendJson(res, 200, response);
 }
 
-/** Resolves one observe-declared claim (record or typed note, never throws). */
+/**
+ * Resolves one observe-declared claim (record or typed note, never
+ * throws). `persistence:*` claims resolve against the session's own
+ * proxied traffic PLUS independent adapter reads; the transport
+ * contracts resolve against the session's own proxied traffic alone
+ * (see {@link finalizeHttpObserveClaim}); anything else the channel
+ * cannot prove is a typed note.
+ */
 async function finalizeObserveClaim(
   state: WitnessState,
   session: TestSession,
@@ -5144,9 +5153,13 @@ async function finalizeObserveClaim(
 ): Promise<{ record: ObserveFinalizedObligation } | { note: string }> {
   const note = (detail: string): { note: string } => ({ note: `observe '${claimId}': ${detail}` });
   const resourceId = resourceIdOfObligation(claimId);
-  const operation = observeOperation(claimId.slice(resourceId.length + 1));
+  const contract = claimId.slice(resourceId.length + 1);
+  const operation = observeOperation(contract);
   if (operation === null) {
-    return note('the Observe channel proves persistence:* contracts only — this claim stays blocking');
+    if (OBSERVED_TRANSPORT_CONTRACTS.includes(contract)) {
+      return finalizeHttpObserveClaim(state, session, claimId);
+    }
+    return note(`the Observe channel proves persistence:* and ${OBSERVED_TRANSPORT_CONTRACTS.join(' / ')} only — this claim stays blocking`);
   }
   let adapterName: string;
   let adapter: EvidenceAdapter;
@@ -5332,6 +5345,98 @@ async function finalizeObserveClaim(
   return {
     record: { obligationId: claimId, recordId: issued.recordId, operation, entityId: read.entityId },
   };
+}
+
+/**
+ * The transport contracts the Observe channel serves (plan 0.9.2 item
+ * D). `http:frontend-request-observed` is deliberately absent and
+ * always will be: it needs independent browser attribution the session
+ * proxy origin never carries. `http:effect-verified` /
+ * `http:read-result-verified` are absent because they need
+ * engine-owned state-scope observations, not a transport exchange.
+ */
+const OBSERVED_TRANSPORT_CONTRACTS: readonly string[] = [
+  'http:request-observed',
+  'http:response-status-ok',
+];
+
+/**
+ * Resolves ONE `http:request-observed` / `http:response-status-ok`
+ * claim into a witnessed `http.observed` record carrying the exchanges
+ * the witness proxied for THIS session (plan 0.9.2 item D).
+ *
+ * What travels is exactly what the session's own observation proxy saw,
+ * in observation order, deduplicated by `(method, url, status)` and
+ * capped at {@link OBSERVED_EXCHANGES_CAP} — a record over the cap
+ * says so with `truncated: true`. The witness does NOT decide whether
+ * an exchange matches the obligation's endpoint: core grades every
+ * exchange through the SAME matcher the `http.request` path uses, so
+ * there is exactly one endpoint resolver in the product.
+ *
+ * The bind watermark (plan §11.4) applies exactly as it does for
+ * persistence: an exchange that completed before the trusted context
+ * bound predates this invocation and never travels. A session that
+ * proxied nothing gets a typed `missing-traffic` note and NO record —
+ * an empty record would grade as "the witness observed nothing that
+ * attributes", which is the same block for a different reason.
+ *
+ * Args:
+ *   state: the witness state (proxy observation log + ledger).
+ *   session: the OPEN-or-released session being finalized.
+ *   claimId: the transport obligation id the record is issued under.
+ *
+ * Returns:
+ *   `{record}` with the issued record id, or a typed `{note}`.
+ */
+function finalizeHttpObserveClaim(
+  state: WitnessState,
+  session: TestSession,
+  claimId: string,
+): { record: ObserveFinalizedObligation } | { note: string } {
+  const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
+  const seen: Record<string, true> = Object.create(null) as Record<string, true>;
+  const exchanges: Array<{ method: string; url: string; status: number }> = [];
+  let truncated = false;
+  for (const exchange of state.observed) {
+    if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
+    const key = `${exchange.method} ${exchange.path} ${String(exchange.status)}`;
+    if (key in seen) continue;
+    seen[key] = true;
+    if (exchanges.length >= OBSERVED_EXCHANGES_CAP) {
+      truncated = true;
+      continue;
+    }
+    exchanges.push({ method: exchange.method, url: exchange.path, status: exchange.status });
+  }
+  if (exchanges.length === 0) {
+    return {
+      note:
+        `observe '${claimId}': no HTTP exchange passed through this session's observation proxy ` +
+        'before finalize — drive the endpoint through the session proxy prefix before claiming ' +
+        'the obligation',
+    };
+  }
+  // The record binds runId/claimId/testId and rides the same ledger
+  // attestation MAC as every witnessed record: the contents are
+  // witness-produced (proxy capture), so `engine-observed` origin and
+  // witnessed trust. The suite drove the browser, so the record is
+  // stamped `channel: 'observe'` — the exact discriminant core admits
+  // alongside persistence, never the engine-browser channel.
+  const issued = issueRecord(
+    state,
+    claimId,
+    HTTP_OBSERVED_KIND,
+    session.testId,
+    {
+      channel: OBSERVE_CHANNEL,
+      sessionId: session.sessionId,
+      exchanges,
+      ...(truncated ? { truncated: true } : {}),
+    },
+    'engine-observed',
+  );
+  session.activity += 1;
+  return { record: { obligationId: claimId, recordId: issued.recordId } };
 }
 
 /**
