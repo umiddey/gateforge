@@ -2,7 +2,6 @@
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type * as PlaywrightTest from 'playwright/test';
 import { ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
 import { localPlaywrightCliCandidates } from '../runner-resolution.js';
@@ -35,12 +34,16 @@ if (cli !== undefined) {
     consumer = readRunner(cached.exports, entry);
   } else if (childContext) {
     // Only engine-created runner children may load a previously unloaded consumer module.
-    // Import/shape errors propagate: a broken selected runner never falls back to a second copy.
-    consumer = readRunner(await import(pathToFileURL(entry).href), entry);
+    // Load/shape errors propagate: a broken selected runner never falls back to a second copy.
+    consumer = readRunner(requireFrom(entry), entry);
   }
 }
 
-// Static import cannot work: loading the fallback unconditionally would introduce a second runner.
-const runner = consumer ?? readRunner(await import('playwright/test'), 'pack Playwright');
+// Synchronously, and never with a static import: loading the fallback
+// unconditionally would introduce a second runner, and a top-level await
+// here would make this ESM entry unloadable from a CommonJS suite
+// (`require(...)` -> ERR_REQUIRE_ASYNC_MODULE). `playwright/test` is
+// CommonJS, so a plain require lands on the SAME instance the CLI uses.
+const runner = consumer ?? readRunner(createRequire(import.meta.url)('playwright/test'), 'pack Playwright');
 export const test: typeof PlaywrightTest.test = runner.test;
 export const expect: typeof PlaywrightTest.expect = runner.expect;

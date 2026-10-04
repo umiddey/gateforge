@@ -25,6 +25,7 @@
     },
     "./fixture": {
       "types": "./dist/fixture/fixture.d.ts",
+      "require": "./dist/fixture/fixture.js",
       "import": "./dist/fixture/fixture.js"
     },
     "./vitest": {

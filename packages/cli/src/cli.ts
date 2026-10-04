@@ -51,6 +51,10 @@ commands:
   adopt                                   adopt enforcement: seed the baseline from current debt (the one bulk-add) + wire the gate
   discover [--json]                      run detectors and dump the resource graph
   classify [--json] [--write-snapshot P] inspect effective classifications + typed blocks
+  classify plane <src> <plane> --reason T [--confirm]
+                                          declare the data plane for a file, folder, or glob (preview without --confirm)
+  classify delete <src> <hard|archive> [--archive-field k=v]... --reason T [--confirm]
+                                          declare how removal manifests for a file, folder, or glob
   explain <resourceId> [--json]          full signal/rule/obligation trace for one resource
   tests discover [--json] [--pytest]     inventory existing tests into the run-state catalog
   tests suggest [--changed] [--json]     suggest existing tests for uncovered obligations (inspection, never a gate)

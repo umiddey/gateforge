@@ -91,6 +91,21 @@ credential never reaches a record, the run state, a log or a report. The
 full argument is in `packages/cli/guides/TEST-ENVIRONMENT.md`. Without a
 registration the read is byte-identical to today's behavior.
 
+## Per-session origin diagnostics
+
+The fixture routes only `GATEFORGE_APP_BASE_URL` onto the session proxy. A
+suite that loads some other origin — its own base URL, often one that never
+reached the test process because it was missing from `envAllowlist` — routes
+nothing, the witness observes nothing, and every `observed-e2e` claim
+finalizes as missing while the tests pass. The fixture reports those
+unrouted same-host/loopback origins through the session-authenticated
+`POST /sessions/page-origins`, and the zero-traffic note quotes them.
+
+Its authority is *a sentence in a note*. It is kept in witness memory for the
+session, dropped with it, and mints no record: no verdict, no report and no
+run state can depend on it. A suite that reports a lie about its own page only
+makes its own failure message wrong.
+
 ## The operator's fixture/actor provider
 
 A declared behavior case names a `fixture` recipe and an `actor`. The witness

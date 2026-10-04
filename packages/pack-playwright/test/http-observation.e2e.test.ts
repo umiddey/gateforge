@@ -19,6 +19,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createRequire } from 'node:module';
+import type { Page } from 'playwright/test';
 import { evaluateObligation, recordIdOf } from '@gate-forge/core';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
 import { RUN_HEADER } from '../src/constants.js';
@@ -28,7 +30,20 @@ import {
   openSupervisorSession,
   type SupervisorSession,
 } from './helpers.js';
-import { routePageThroughSessionProxy } from '../src/fixture/fixture.js';
+
+// The routing helper deliberately arrives through a CommonJS `require` of
+// the fixture entry (plan 0.9.2 finding E): this is the load path every
+// existing CommonJS suite takes, and it is the one that used to fail
+// outright (no `require` condition + a top-level await in the entry).
+const { routePageThroughSessionProxy } = createRequire(import.meta.url)(
+  './fixture-cjs-base.cjs',
+) as {
+  routePageThroughSessionProxy: (
+    page: Page,
+    appBaseURL: string,
+    sessionProxyURL: string,
+  ) => Promise<void>;
+};
 
 const RUN_ID = '2b4a6c80-1e3d-4f5a-8b7c-9d0e1f2a3b4c';
 const TOKEN = 'browser-observation-run-token';

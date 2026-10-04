@@ -22,6 +22,7 @@ first commands; the guides cover the walks:
 - [Enforcement](#enforcement)
 - [Contract capabilities](#contract-capabilities)
 - [Configuration](#configuration)
+- [Classification policy (`.gateforge/classification-policy.yml`)](#classification-policy-gateforgeclassification-policyyml)
 - [Plugin invocation](#plugin-invocation)
 - [Endpoint plane rules (`.gateforge/planes.json`)](#endpoint-plane-rules-gateforgeplanesjson)
 - [Endpoint capability rules (`.gateforge/endpoints.json`)](#endpoint-capability-rules-gateforgeendpointsjson)
@@ -50,12 +51,13 @@ first commands; the guides cover the walks:
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking` and route-specific `guidance` when relevant). For an endpoint with no plane, ask which boundary owns its data and show the owner-reviewed choices; internality remains owner-only. Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. `classify plane` previews or explicitly appends an owner-reviewed endpoint plane rule to the existing `.gateforge/planes.json`; snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
+| `gateforge classify delete <file\|folder\|glob> <hard\|archive> [--archive-field <key=value>]... --reason <text> [--confirm]` | Preview (default) or explicitly append one owner delete-semantics rule to `.gateforge/classification-policy.yml`: how removal manifests for every model whose source file matches the pattern. `archive` requires at least one `--archive-field` (the owner-owned archived state the run grades removal against); `hard` refuses the flag. The preview writes nothing, prints the exact diff, and quotes the policy-pin consequence; `--confirm` appends the rule at TEXT level — the key at the end of the document when absent, a new `- match:` item at the end of the block when present — so every byte the owner wrote survives (comments, key order, flow sequences), and the resulting document is validated against the pinned schema. A `deleteRules` the command cannot extend safely (flow style, or a value that is not a list of rules) is refused by name. An existing rule for the same source is reported, never shadowed. Declaring is an evidence contract, not an override: contradicting detector evidence still blocks. | 0/2 |
 | `gateforge explain <resourceId\|path> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. A repo-relative PATH is also a target: when no resource matches it, the command prints what the file is and what governs it (Gateforge policy input, declared gate input, owner-declared documentation folder, known source of a resource, or an unclassified change) with the steps that attribute it — this is the answer an unmapped `CHANGE_UNMAPPED` file needs. An unknown target stays unknown (exit 1). | 0/1/2 |
 | `gateforge tests discover [--json] [--pytest]` | Inventory existing tests into the derived run-state catalog: static analysis reconciled with native Playwright enumeration (`--list`). Unresolved wrappers, parse errors, and inventory gaps are DATA (never an empty catalog — failed native enumeration is exit 2). `--pytest` additionally collects the configured diagnostic suites' node ids (`--collect-only`). Playwright enumeration runs ONE config (a repo-root config wins; otherwise the alphabetically first config one directory deep), and when the repo holds more than one the runner line names every config, the one used, why, and the ones NOT inventoried. `inventoryComplete=false` means a reconciliation gap (an enumerated-vs-static mismatch, an unresolved case, or a not-inventoried extra config), not a partial success. | 0/2 |
-| `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`). Candidates are RANKED by the evidence their catalog row carries (explicit tag, resource token in title/file, operation word, route segment, unmocked folder, minus mocks) with the matching reason printed as `why:`; the text surface prints the top five and names how many it hid, `--json` carries every candidate with its `rank` and `score`. With a candidate present the next action is to MARK it `observed-e2e` and run it under the witness — the overlay instruction belongs to `newTestNeeded: true`. When Playwright reports load errors and enumerates no tests, report one `TEST_INVENTORY_INCOMPLETE` with the error count and first error instead of stale-mapping fan-out; the action is to install the missing dependency and rerun Gateforge. An inspection surface, NOT a gate: exit 0 even with blocking problems. | 0/2 |
+| `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`). Candidates are RANKED by the evidence their catalog row carries (explicit tag, resource token in title/file, operation word, route segment, unmocked folder, minus mocks) with the matching reason printed as `why:`; the text surface prints the top five and names how many it hid, `--json` carries every candidate with its `rank` and `score`. The reuse verdict `newTestNeeded` has THREE honest values: `no` (the `#1` candidate is an unmocked e2e row more than one signal supports), `yes` (no candidate survived resolution, or every candidate mocks the system under test) and `unverified` (a candidate exists but one signal carries it — confirm the request with `gateforge explain <obligation>` before marking). The next action follows it: MARK the candidate and run it under the witness when the verdict is `no`, write the overlay when it is `yes`. When Playwright reports load errors and enumerates no tests, report one `TEST_INVENTORY_INCOMPLETE` with the error count and first error instead of stale-mapping fan-out; the action is to install the missing dependency and rerun Gateforge. An inspection surface, NOT a gate: exit 0 even with blocking problems. | 0/2 |
 | `gateforge tests mark --test <key> --kind <kind> [--category <c>]... --obligation <id>... --reason "<text>"` | Declare an existing test in `.gateforge/test-map.yml` (see the test-reuse workflow below). Validates against the CURRENT catalog and obligation registry, writes atomically and idempotently, prints the exact diff. Never edits test files, never adds waivers, refuses contradictions. | 0/2 |
 | `gateforge tests sync [--json]` | AST-only scan of test annotations; updates generated `source: annotation` entries in `.gateforge/test-map.yml` and leaves handwritten entries unchanged. Reports unresolved helpers with source locations; does not run tests. | 0/1/2 |
-| `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, `New test needed`. | 0/2 (unknown key → 2) |
+| `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, and the same three-state reuse verdict `New test needed` (`no` / `yes` / `unverified`) `tests suggest` prints — built from the SAME route evidence, so the two surfaces never disagree about one test. | 0/2 (unknown key → 2) |
 | `gateforge tests diagnose [--suite <name>] [--json]` | Run the configured pytest diagnostic suites once per suite, isolated (own process, `GATEFORGE_*` stripped, finite timeout). Advisory: exit 0 completed run (≥1 pass, no unexpected failures), 1 test failures, 2 unavailable/incomplete (collection error, timeout, missing interpreter, interruption, zero tests, or only skipped/xfail). Never E2E proof. | 0/1/2 |
 | `gateforge obligations [--json]` | Evaluate policies against the automatically classified graph and dump obligations, blocking entries, and claim assessments. | 0/1/2 |
 | `gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--timing] [--no-cache] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--timing` appends per-step wall-clock timings (detectors, test collection, TS scan, planning, total) — an additive report key in json and one line in text, never an input to any verdict. Detector and pytest-collection results are cached under the excluded run-state dir. Detector keys include plugin config, executable module/script bytes, Python import environment, inputs, interpreter packages, and Gateforge engine version; pytest keys include all Python/config file bytes, collector argv/environment, interpreter identity, and engine version. Unchanged successful pytest collections reuse their node ids; any changed Python byte recollects. Any uncertainty runs fresh. The report carries additive `cache: {hits, misses}` counts. `--no-cache` (or `GATEFORGE_NO_CACHE=1`, or a CI environment) disables cache reads and writes. | 0 clean/waived, 1 unresolved, 2 config/usage error |
@@ -397,10 +399,18 @@ tests:
   witnessed evidence for this change grades `EVIDENCE_NOT_COLLECTED` —
   blocking.
 
-`tests suggest` emits `newTestNeeded: true` only when no suitable existing
-candidate survives resolution. An unsupported proof channel produces a
-capability task (`VERIFIER_UNSUPPORTED`), never a request to generate more
-tests.
+`tests suggest` emits a THREE-STATE reuse verdict, never a boolean:
+`no` when the `#1` candidate is an unmocked e2e row that more than ONE
+signal supports (an explicit tag naming this resource, or a resource-token
+match together with a file that names the route); `yes` when no candidate
+survived resolution or every candidate mocks the system under test; and
+`unverified` when a candidate exists but ONE signal carries it — a name in
+common is not proof the test drives that request, so the next action is
+the check (`new test needed: unverified — check that a candidate really
+sends <METHOD> <route> before marking (gateforge explain <obligation>)`),
+never a ready-made `tests mark` command. An unsupported proof channel
+produces a capability task (`VERIFIER_UNSUPPORTED`), never a request to
+generate more tests.
 
 ### Ranked candidates
 
@@ -408,6 +418,26 @@ Candidates are RANKED by the evidence the catalog row itself carries, not
 listed alphabetically: an explicit `@crud(...)` tag, a resource token in the
 title path or the file, the obligation's operation word, a route segment from
 the run's route inventory, a `real/` (unmocked) folder, minus a mock signal.
+Tokens are matched WHOLE-WORD (title path words; file path segments split on
+`/ . _ -`), never inside a longer word, and a generated resource id
+contributes only its NAME: the plane (`tenant`), the transport (`http`), the
+method (`get`), route furniture (`api`, `v1`), the `param` marker that stands
+in for a `{route_param}`, and the trailing id hash identify no resource, so
+`@crud(tenant.accounts:create)` is never evidence for
+`tenant.http-get-api-v1-notifications-…`. A tag is a DECLARATION: only its
+resource part (the text before `:` in `@crud(tenant.accounts:read)`, minus the
+plane) counts as a resource name, and the tag text itself is stripped before
+the title is read as prose — the `:read` in that tag never matches a `…/read`
+route segment.
+For an `http:*` obligation that operation must also FIT the route's method —
+`GET`/`HEAD` read, `POST` create, `PUT`/`PATCH` update, `DELETE` delete. A tag
+declaring `create` says the test creates the resource, which is no evidence
+that it reads `GET /api/v2/accounts`, so it scores nothing there; with no
+other evidence the row is not a candidate and the verdict is `unverified`,
+never a `no` that would send the owner to mark a create test as the proof of
+a read. A non-transport obligation has no route method to fit, so its tags
+stay judged on the resource alone.
+
 Every weight is additive and printed as a `why:` line, so the order explains
 itself — the score is never a bare number. Ties break on the logical key, so
 the list is deterministic. The text surface prints the top five and says how
@@ -434,12 +464,14 @@ that line.
 
 ### One instruction, not two
 
-When a candidate exists, the suggestion's next action is to MARK that
-existing test `observed-e2e` and run it under the witness
-(`gateforge tests mark --test <key> --kind observed-e2e --obligation <id>
---reason "…"` then `gateforge test-gates --changed`). The overlay
-instruction — write `tests/e2e/gateforge/<resource>.<op>.spec.js` — belongs
-to `newTestNeeded: true`, i.e. no existing test fits. A suggestion block
+When a candidate exists and its verdict is `no`, the suggestion's next
+action is to MARK that existing test `observed-e2e` and run it under the
+witness (`gateforge tests mark --test <key> --kind observed-e2e
+--obligation <id> --reason "…"` then `gateforge test-gates --changed`).
+The overlay instruction — write
+`tests/e2e/gateforge/<resource>.<op>.spec.js` — belongs to
+`newTestNeeded: yes`, i.e. no existing test fits; an `unverified` verdict
+asks you to confirm the candidate's request first. A suggestion block
 never tells you to write a new overlay test and, in the same breath, to
 reuse the test it just listed.
 
@@ -770,7 +802,7 @@ else):
 | Namespace | Status |
 | --- | --- |
 | `persistence:create\|read\|update\|delete` | AVAILABLE — engine-observed same-entity persistence reads with the exact-value echo requirement (`EVIDENCE_VALUE_MISMATCH` on a mismatched echo, even when the status was 2xx) |
-| `http:request-observed`, `http:response-status-ok` | AVAILABLE — transport semantics only: a witness-observed exchange plus a provenance-verified claimed `ui.action` anchor from the declaring test |
+| `http:request-observed`, `http:response-status-ok` | AVAILABLE — engine browser, or the Observe channel for tests mapped `observed-e2e` (an exchange the witness proxied in the test's own session; test attribution is suite-claimed). The engine path grades FIRST and its verdict is final: a `satisfied` grade keeps its own record ids, and an `invalid` one (a witnessed exchange of a different endpoint, a non-2xx response) is an engine-found error no second channel may mask. The Observe channel is consulted only when the engine path found nothing |
 | `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; explicit selection remains blocking `missing` with `VERIFIER_UNSUPPORTED` |
 | `crud:*` (UI-semantic) | FAIL-CLOSED — the tested suite owns the browser; use `persistence:*` |
 | `http:effect-verified`, `http:read-result-verified` | AVAILABLE (behavior-case channel) — graded across the approved required cases with witness-issued `behavior.case` records; needs a compiled `behaviorPolicy` requirement set |
@@ -871,6 +903,77 @@ Enforcement-relevant sections:
   `playwright` (the default when the key is absent), `pytest`, `vitest` or
   `cypress`. `check`, `next`, `tests`, `test-gates`, `doctor` and `init`
   all follow it. See `guides/RUNNER-NEUTRAL-EVIDENCE.md`.
+
+## Classification policy (`.gateforge/classification-policy.yml`)
+
+The repository-wide deterministic classification inputs. `gateforge init`
+scaffolds the file; every key is an OWNER answer, and the file
+participates in the trusted-policy digest, so changing it re-approves any
+approved policy pin before strict gates run.
+
+| Key | What it decides | Shape |
+| --- | --- | --- |
+| `scanRoots` | the files a closed-world proof must cover | repo-root-relative globs |
+| `trustedInternalEntryPoints` | which entry-point categories certify internality | category + patterns + detector |
+| `internalRules` | organization rules for internal resources | `resourceName` / `resourceKind` patterns |
+| `lifecycleRules` | operations that structurally do not exist, for one EXACT resource | exact `<plane>.<resource>` + `disable` |
+| `deleteRules` | how removal manifests, per source glob | `match` glob + `semantics` (+ `archiveFields`) |
+| `coverage` | which detector must examine which files before a proof counts | capability + detector + globs (+ `exhaustive`) |
+| `declarations` | the declaration syntax detectors may emit | source strings |
+| `volatileFields` | bookkeeping columns that never satisfy an update | column names |
+
+Unknown keys, an unknown value, and two rules answering the same target
+are refused (exit 2, fail closed) — the document is an input, never a
+place to smuggle intent past the schema.
+
+### Owner-declared delete semantics (`deleteRules`)
+
+Delete semantics are proven, never guessed. A detector that reads the
+model's own declaration can prove `hard` or `archive`; when nothing
+proves them, the resource stays `unclassified` and blocks with
+`DELETE_SEMANTICS_UNRESOLVED` (no obligations accrue, and `gateforge
+explain <resource>` names the resource and its source file). `lifecycleRules`
+can DISABLE delete for one exact resource; declaring semantics is the
+other half of the answer, and it needs a pattern because one declaration
+usually covers a whole model tree.
+
+```yaml
+deleteRules:
+  - match: 'backend/models/session/**'
+    semantics: hard
+    reason: 'Sessions are removed the moment the tenant logs out.'
+  - match: 'backend/models/invoice/**'
+    semantics: archive
+    archiveFields:
+      status: archived
+    reason: 'Invoices are retained for the audit window.'
+```
+
+- `match` is a repo-root-relative glob over the SOURCE FILE of the
+  resources it declares for — the same glob engine `.gateforge/planes.json`
+  uses. It must stay inside the repository.
+- `semantics` is `hard` or `archive`. `archive` REQUIRES non-empty
+  `archiveFields`: the owner-owned archived state (e.g.
+  `{status: archived}`) the engine grades removal against. `hard` must not
+  carry the key — a permanent removal has no archived state.
+- `reason` is required and is shown with the rule in traces.
+
+Write it with the command, which previews without `--confirm` and writes
+with it (folder answers become `match: '<folder>/**'`):
+
+```sh
+gateforge classify delete backend/models/invoice archive \
+  --archive-field status=archived \
+  --reason 'Invoices are retained for the audit window.' --confirm
+```
+
+Declaring semantics is an evidence CONTRACT, not an override: the rule
+contributes the same delete-semantics / archive-state evidence a detector
+would. Detector evidence that disagrees therefore still blocks — the
+conflicting-semantics detail names the owner declaration — and nothing is
+ever silently overridden. A resolved decision names the rule it used
+(`DELETE_SEMANTICS_OWNER_RULE(<match>)` in the trace), and a resource
+outside every `match` is exactly as it was.
 
 ## Plugin invocation
 
@@ -1507,13 +1610,32 @@ artifacts automatically creates auditable testing responsibilities.
 
 Blocked agents run `gateforge next` (or `gateforge next --json`): exactly
 one blocking next action (`next`/`cause`/`why`/`do`), never a dump. Do the
-single `do:` line and stop. New proof tests go in `tests/e2e/gateforge/`
+single `do:` line and stop. New proof goes in `tests/e2e/gateforge/`
 (overlay, engine-driven fixture — wizard creates via surface v2 steps);
-existing suite-driven browser tests prove persistence via the Observe
-channel once mapped `--kind observed-e2e`. Never rewrite existing
-`tests/e2e/**` journeys, never `tests mark` as proof, never edit policies
-or waivers to self-approve. `GATEFORGE.md` (written by `gateforge init`)
-carries the full loop contract.
+existing suite-driven browser tests prove persistence and transport via the
+Observe channel once mapped `--kind observed-e2e` — but ONLY when the test's
+`page` comes from Gateforge's own test object, because that fixture is what
+routes the test's app traffic through the supervisor's session observation
+proxy. A test that takes `page` from plain `@playwright/test` reaches the app
+directly, the witness observes nothing, and the claims finalize missing while
+the test passes. When the suite has one shared fixture file, rebase it on
+Gateforge's fixture and change nothing else in the suite:
+
+```js
+// CommonJS suite (Node >= 20.19 / >= 22.12 for require)
+const { test: baseTest, expect } = require('@gate-forge/pack-playwright/fixture');
+```
+
+```ts
+// ESM suite
+import { test as baseTest, expect } from '@gate-forge/pack-playwright/fixture';
+```
+
+Rebasing the shared base is not rewriting a journey: the journeys' own steps,
+assertions and fixtures stay as they are, and only the `test` object they
+extend changes. Never rewrite existing `tests/e2e/**` journeys, never
+`tests mark` as proof, never edit policies or waivers to self-approve.
+`GATEFORGE.md` (written by `gateforge init`) carries the full loop contract.
 
 ## Fix a failing test without a full run
 

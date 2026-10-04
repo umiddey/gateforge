@@ -165,6 +165,7 @@ export const RULES = {
   lifecycleDefault: 'LIFECYCLE_DEFAULT_ENABLED',
   deleteProvenHard: 'DELETE_SEMANTICS_PROVEN_HARD',
   deleteProvenArchive: 'DELETE_SEMANTICS_PROVEN_ARCHIVE',
+  deleteOwnerRule: 'DELETE_SEMANTICS_OWNER_RULE',
   planeEvidence: 'PLANE_DETECTOR_EVIDENCE',
   lifecycleEndpointHttp: 'LIFECYCLE_ENDPOINT_HTTP',
   identityEvidence: 'IDENTITY_DETECTOR_EVIDENCE',
@@ -179,6 +180,8 @@ const OPERATIONS = ['create', 'read', 'update', 'delete'] as const;
 const LIFECYCLE_POLICY_SOURCE = 'gateforge.policy:lifecycleRules';
 /** Stable provenance prefix for lifecycle suppressions derived by the engine. */
 const LIFECYCLE_DERIVATION_SOURCE = 'gateforge.core:lifecycleDerivation';
+/** Stable source name for owner delete-semantics authority minted by the host. */
+const DELETE_POLICY_SOURCE = 'gateforge.policy:deleteRules';
 
 /** Location sorter (codepoint, then line, then col). */
 /** Locations sorted deterministically and DEDUPLICATED: a location is a
@@ -1479,18 +1482,49 @@ function classifyOne(
 
   // -- Delete semantics ------------------------------------------------------
   if (lifecycle.delete) {
-    const semanticsSignals = signals.filter(
-      (s) =>
-        s.dimension === 'delete-semantics' &&
-        (s.assertion === 'hard' || s.assertion === 'archive'),
-    );
-    const archiveStateSignals = signals.filter(
-      (s) =>
-        s.dimension === 'archive-state' &&
-        typeof s.assertion === 'object' &&
-        !Array.isArray(s.assertion) &&
-        Object.keys(s.assertion as Record<string, unknown>).length > 0,
-    );
+    // Owner-declared semantics (classification-policy `deleteRules`,
+    // matched over the resource's SOURCE FILE with the same glob engine
+    // the plane rules use). Declaring is an evidence CONTRACT, not an
+    // override: a rule contributes ordinary delete-semantics /
+    // archive-state signals, so contradicting detector evidence still
+    // lands on the conflicting-semantics block and is never silently
+    // overridden.
+    const ownerSemantics: ClassificationSignal[] = [];
+    const ownerArchiveState: ClassificationSignal[] = [];
+    for (const rule of ctx.policy.deleteRules ?? []) {
+      if (!globMatch(resource.source, rule.match)) continue;
+      rules.push(`${RULES.deleteOwnerRule}(${rule.match})`);
+      const provenance = {
+        schemaVersion: 1 as const,
+        target: { resourceId: `${plane}.${resource.name}`, resourceName: resource.name },
+        basis: 'organization-policy' as const,
+        source: `${DELETE_POLICY_SOURCE}:${rule.match}`,
+        location: resource.location,
+        detector: { id: 'gateforge.core', version: '1' },
+      };
+      ownerSemantics.push({ ...provenance, dimension: 'delete-semantics', assertion: rule.semantics });
+      if (rule.semantics === 'archive' && rule.archiveFields !== undefined) {
+        ownerArchiveState.push({ ...provenance, dimension: 'archive-state', assertion: rule.archiveFields });
+      }
+    }
+    const semanticsSignals = [
+      ...signals.filter(
+        (s) =>
+          s.dimension === 'delete-semantics' &&
+          (s.assertion === 'hard' || s.assertion === 'archive'),
+      ),
+      ...ownerSemantics,
+    ];
+    const archiveStateSignals = [
+      ...signals.filter(
+        (s) =>
+          s.dimension === 'archive-state' &&
+          typeof s.assertion === 'object' &&
+          !Array.isArray(s.assertion) &&
+          Object.keys(s.assertion as Record<string, unknown>).length > 0,
+      ),
+      ...ownerArchiveState,
+    ];
     const semanticsValues = new Set<string>();
     for (const signal of semanticsSignals) semanticsValues.add(signal.assertion as string);
     if (semanticsValues.size === 1) {
@@ -1549,16 +1583,23 @@ function classifyOne(
           resource,
           plane,
           'delete is enabled but its semantics are unresolved: prove a hard delete, ' +
-            'prove archive semantics with owner-owned archive state, or close-world-disable delete',
+            'prove archive semantics with owner-owned archive state, declare them with ' +
+            '`gateforge classify delete <file|folder|glob> <hard|archive> --reason "<why>" --confirm`, ' +
+            'or close-world-disable delete',
         ),
       );
     } else {
+      // An owner declaration never wins by being newer or louder: when it
+      // disagrees with the detector, the contradiction is named — rule
+      // patterns included — and stays the owner's to resolve.
+      const declared = [...new Set(ownerSemantics.map((s) => s.source))].sort(compareStrings);
       blocks.push(
         deleteSemanticsBlock(
           resource,
           plane,
-          'conflicting delete-semantics evidence (both hard and archive asserted); ' +
-            'the semantics are never guessed',
+          'conflicting delete-semantics evidence (both hard and archive asserted' +
+            (declared.length > 0 ? `, including the owner declaration ${declared.join(', ')}` : '') +
+            '); the semantics are never guessed',
         ),
       );
     }

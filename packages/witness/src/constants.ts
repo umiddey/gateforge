@@ -43,6 +43,25 @@ export const PERSISTENCE_KIND = 'persistence.entity';
  * persistence kind) and never engine-driven.
  */
 export const OBSERVED_KIND = 'persistence.observed';
+
+/**
+ * Observe-channel transport kind (plan 0.9.2 item D): issued ONLY by
+ * the witness's observe finalize for a `http:request-observed` /
+ * `http:response-status-ok` claim the supervisor registered
+ * observed-e2e, carrying the declaring session's own proxied exchanges.
+ * Never suite-submittable (`/records` accepts only `ui.action` /
+ * `ui.visible-result`). Mirrors `HTTP_OBSERVED_KIND` in
+ * `@gate-forge/core`'s `verdict/pack-verifiers.ts` — keep in lockstep.
+ */
+export const HTTP_OBSERVED_KIND = 'http.observed';
+
+/**
+ * Upper bound on the exchanges one `http.observed` record carries. A
+ * session that drove more gets the first CAP exchanges in observation
+ * order plus `truncated: true` in the payload: the cap can only hide
+ * an exchange (fail-closed), never invent one.
+ */
+export const OBSERVED_EXCHANGES_CAP = 500;
 export const KNOWN_RECORD_KINDS: readonly string[] = [
   UI_ACTION_KIND,
   UI_VISIBLE_RESULT_KIND,

@@ -372,6 +372,55 @@ npx gateforge tests mark --test <key> --kind browser-e2e \
 Marking a test never satisfies an obligation; it only says which existing
 test is *about* it. New proof goes in `tests/e2e/gateforge/`.
 
+### 6a. Base an existing suite on Gateforge's fixture
+
+An `observed-e2e` test proves transport and persistence through the witness
+ONLY when its `page` comes from Gateforge's test object: that fixture is what
+routes the test's app traffic through the supervisor's session observation
+proxy. A test that takes `page` from plain `@playwright/test` reaches the app
+directly, the witness observes nothing, and its claims finalize with "no HTTP
+exchange passed through this session's observation proxy" — while the test
+itself passes.
+
+When the suite has one shared fixture file, that is a one-line rebase and
+nothing else in the suite changes:
+
+```js
+// CommonJS suite — the shape most existing Playwright suites have.
+// `require` needs Node >= 20.19 / >= 22.12.
+const { test: baseTest, expect } = require('@gate-forge/pack-playwright/fixture');
+```
+
+```ts
+// ESM suite
+import { test as baseTest, expect } from '@gate-forge/pack-playwright/fixture';
+```
+
+Keep the suite's own journeys, steps, assertions and fixtures; change only
+which `test` object they extend. Under a witnessed run, every test then runs
+under a supervisor-issued session whose traffic the witness can observe.
+
+### 6b. Point the suite at the origin Gateforge routes
+
+Rebasing the fixture is only half of it. The fixture rewrites requests to
+`GATEFORGE_APP_BASE_URL` onto the supervisor's session observation proxy — and
+only those. A suite whose own base URL differs (`E2E_BASE_URL` resolving to
+`http://localhost:13001` while Gateforge runs at `http://localhost:13101`, or a
+variable that never reaches the test process at all because it is not in
+`envAllowlist`) sends every request past the witness, and its `observed-e2e`
+claims finalize with "no HTTP exchange passed through this session's
+observation proxy" while the tests pass.
+
+So, for the suite you just rebased:
+
+- list its base-URL variable in `runtime.yml` `envAllowlist` (see
+  `TEST-ENVIRONMENT.md`), or have the helpers read `GATEFORGE_APP_BASE_URL`;
+- and make that origin the one the tests actually load.
+
+When the origins disagree, the witness's zero-traffic note now names both —
+the origin the page really requested and the one Gateforge routes — instead of
+guessing at the fixture page alone.
+
 ## 7. First run
 
 ```bash

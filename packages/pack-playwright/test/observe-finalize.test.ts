@@ -297,6 +297,14 @@ describe('observe finalize (create)', () => {
       const empty = await finalize(fixture.witness.url, session.sessionId);
       expect(empty.body['finalized']).toEqual([]);
       expect(JSON.stringify(empty.body['notes'])).toContain('no POST /api/accounts exchange');
+      // The cause, not just the symptom: a page outside Gateforge's fixture
+      // never reaches the session proxy, and the test still passes (E2).
+      expect(JSON.stringify(empty.body['notes'])).toContain(
+        "this test's page is not Gateforge's fixture page",
+      );
+      expect(JSON.stringify(empty.body['notes'])).toContain(
+        '@gate-forge/pack-playwright/fixture',
+      );
       // Direct-to-target traffic bypasses every session channel: invisible.
       await proxyExchange(fixture.target.url, 'POST', '/api/accounts', JSON.stringify({ first_name: 'X', last_name: 'Y' }));
       const bypassed = await finalize(fixture.witness.url, session.sessionId);
@@ -470,11 +478,11 @@ describe('observe finalize (update / read / delete)', () => {
 });
 
 describe('observe finalize (gates)', () => {
-  it('skips undeclared claims and non-persistence contracts with typed notes', async () => {
+  it('skips undeclared claims and contracts the Observe channel cannot prove, with typed notes', async () => {
     const fixture = await startFixturedWitness();
     try {
-      const HTTP_CLAIM = 'tenant.accounts:http:request-observed';
-      await declare(fixture.witness.url, [CREATE_CLAIM, HTTP_CLAIM]);
+      const AUTH_CLAIM = 'tenant.accounts:auth:role-denied';
+      await declare(fixture.witness.url, [CREATE_CLAIM, AUTH_CLAIM]);
       // UPDATE is bound on the adapter but never declared: skipped
       // silently. CREATE is declared but saw no POST: a typed note.
       const session = await openClaimedSession(fixture.witness.url, [CREATE_CLAIM, UPDATE_CLAIM]);
@@ -484,11 +492,14 @@ describe('observe finalize (gates)', () => {
       expect(done.body['notes']).toHaveLength(1);
       expect(JSON.stringify(done.body['notes'])).toContain('no POST /api/accounts exchange');
       await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
-      // A declared non-persistence contract is noted, never proven.
-      const session2 = await openClaimedSession(fixture.witness.url, [HTTP_CLAIM], `${TEST_ID}-http`);
+      // A declared contract the Observe channel proves nothing at all is
+      // noted, never proven. The transport contracts DO have a channel
+      // now (plan 0.9.2 item D) and are covered by their own block below.
+      const session2 = await openClaimedSession(fixture.witness.url, [AUTH_CLAIM], `${TEST_ID}-auth`);
       const done2 = await finalize(fixture.witness.url, session2.sessionId);
       expect(done2.body['finalized']).toEqual([]);
-      expect(JSON.stringify(done2.body['notes'])).toContain('persistence:* contracts only');
+      expect(JSON.stringify(done2.body['notes'])).toContain('http:request-observed');
+      expect(JSON.stringify(done2.body['notes'])).toContain('persistence:*');
       await closeSupervisorSession(fixture.witness.url, TOKEN, session2.sessionId, 'passed', VERIFIER_KEY);
     } finally {
       await fixture.witness.stop();
@@ -548,6 +559,157 @@ describe('observe finalize (gates)', () => {
     } finally {
       await bare.witness.stop();
       await bare.target.stop();
+    }
+  });
+});
+
+/**
+ * Plan 0.9.2 item D, witness side: the observe finalize also serves the
+ * transport contracts. For a claim the SUPERVISOR registered
+ * observed-e2e it stamps ONE `http.observed` record carrying the
+ * session's own proxied exchanges (deduped, capped), and the engine
+ * grades them through the same endpoint matcher the `http.request`
+ * path uses. I2 pins the declaration gate; I5 pins which exchanges
+ * travel.
+ */
+describe('observe finalize (transport obligations)', () => {
+  const HTTP_CLAIM = 'tenant.accounts:http:request-observed';
+  const HTTP_STATUS_CLAIM = 'tenant.accounts:http:response-status-ok';
+
+  /** The witnessed `http.observed` records the finalize issued. */
+  async function observedRecords(url: string): Promise<Array<Record<string, unknown>>> {
+    return (await ledgerRecords(url)).filter((entry) => entry['kind'] === 'http.observed');
+  }
+
+  it('stamps one http.observed record per claim carrying the session\'s deduped, normalized exchanges', async () => {
+    const fixture = await startFixturedWitness();
+    try {
+      expect((await declare(fixture.witness.url, [HTTP_CLAIM, HTTP_STATUS_CLAIM])).status).toBe(200);
+      const session = await openClaimedSession(fixture.witness.url, [HTTP_CLAIM, HTTP_STATUS_CLAIM]);
+      const proxyUrl = session.proxyUrl as string;
+      await proxyExchange(proxyUrl, 'GET', '/api/accounts');
+      await proxyExchange(proxyUrl, 'GET', '/api/accounts/acc-1');
+      // The same exchange twice, and the same path with a query string:
+      // deduplicated by (method, url, status) after normalization.
+      await proxyExchange(proxyUrl, 'GET', '/api/accounts/acc-1');
+      await proxyExchange(proxyUrl, 'GET', '/api/accounts?shape=summary');
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.status).toBe(200);
+      expect(done.body['notes']).toEqual([]);
+      const finalized = done.body['finalized'] as Array<Record<string, unknown>>;
+      expect(finalized.map((entry) => entry['obligationId']).sort()).toEqual([HTTP_CLAIM, HTTP_STATUS_CLAIM]);
+      const observed = await observedRecords(fixture.witness.url);
+      expect(observed).toHaveLength(2);
+      for (const entry of observed) {
+        expect(entry['trust']).toBe('witnessed');
+        expect(entry['origin']).toBe('engine-observed');
+        expect(entry['testId']).toBe(TEST_ID);
+        // Provenance recomputes from the record's own contents (pin #7).
+        expect(
+          recordIdOf({
+            runId: entry['runId'] as string,
+            obligationId: entry['obligationId'] as string,
+            kind: entry['kind'] as string,
+            testId: entry['testId'] as string,
+            origin: entry['origin'] as 'engine-observed',
+            payload: entry['payload'],
+          }),
+        ).toBe(entry['recordId']);
+      }
+      const payload = observed[0]?.['payload'] as Record<string, unknown>;
+      expect(payload['channel']).toBe('observe');
+      expect(payload['sessionId']).toBe(session.sessionId);
+      expect(payload['truncated']).toBeUndefined();
+      expect(payload['exchanges']).toEqual([
+        { method: 'GET', url: '/api/accounts', status: 200 },
+        { method: 'GET', url: '/api/accounts/acc-1', status: 200 },
+      ]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('I2: a claim the supervisor did not register observed-e2e never gets a record', async () => {
+    const fixture = await startFixturedWitness();
+    try {
+      await declare(fixture.witness.url, [HTTP_CLAIM]);
+      const session = await openClaimedSession(fixture.witness.url, [HTTP_CLAIM, HTTP_STATUS_CLAIM]);
+      await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts');
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      const finalized = done.body['finalized'] as Array<Record<string, unknown>>;
+      expect(finalized).toHaveLength(1);
+      expect(finalized[0]?.['obligationId']).toBe(HTTP_CLAIM);
+      // The undeclared claim is skipped silently, exactly like an
+      // undeclared persistence claim: never a record, never a note.
+      expect(done.body['notes']).toEqual([]);
+      const observed = await observedRecords(fixture.witness.url);
+      expect(observed.map((entry) => entry['obligationId'])).toEqual([HTTP_CLAIM]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('I5: only this session\'s proxied exchanges travel, and a released session still finalizes', async () => {
+    const fixture = await startFixturedWitness();
+    try {
+      await declare(fixture.witness.url, [HTTP_CLAIM]);
+      const other = await openClaimedSession(fixture.witness.url, [HTTP_CLAIM], `${TEST_ID}-other`, 1);
+      await proxyExchange(other.proxyUrl as string, 'GET', '/api/accounts/acc-1');
+      const session = await openClaimedSession(fixture.witness.url, [HTTP_CLAIM]);
+      await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts');
+      // The release only unbinds the worker slot and kills the proxy:
+      // the traffic it did observe is exactly what an open session holds,
+      // so the drain can still finalize before it closes the session.
+      const released = await post(
+        fixture.witness.url,
+        '/sessions/release',
+        { sessionId: session.sessionId },
+        supervisorHeaders(),
+      );
+      expect(released.status).toBe(200);
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['notes']).toEqual([]);
+      const observed = await observedRecords(fixture.witness.url);
+      expect(observed).toHaveLength(1);
+      const payload = observed[0]?.['payload'] as Record<string, unknown>;
+      expect(payload['exchanges']).toEqual([{ method: 'GET', url: '/api/accounts', status: 200 }]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, other.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+
+  it('notes missing traffic instead of stamping a record with no exchanges', async () => {
+    const fixture = await startFixturedWitness();
+    try {
+      await declare(fixture.witness.url, [HTTP_CLAIM]);
+      const other = await openClaimedSession(fixture.witness.url, [HTTP_CLAIM], `${TEST_ID}-other`, 1);
+      const session = await openClaimedSession(fixture.witness.url, [HTTP_CLAIM]);
+      // Another session's channel, and traffic bypassing every proxy.
+      await proxyExchange(other.proxyUrl as string, 'GET', '/api/accounts');
+      await proxyExchange(fixture.target.url, 'GET', '/api/accounts');
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.body['finalized']).toEqual([]);
+      expect(JSON.stringify(done.body['notes'])).toContain('no HTTP exchange');
+      // Same cause sentence on the transport path (E2).
+      expect(JSON.stringify(done.body['notes'])).toContain(
+        "this test's page is not Gateforge's fixture page",
+      );
+      expect(JSON.stringify(done.body['notes'])).toContain(
+        '@gate-forge/pack-playwright/fixture',
+      );
+      expect(await observedRecords(fixture.witness.url)).toEqual([]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, other.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
     }
   });
 });

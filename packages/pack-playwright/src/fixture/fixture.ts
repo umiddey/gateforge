@@ -29,15 +29,25 @@ import { WitnessClient } from './witness-client.js';
  * Routes browser requests for the configured app origin through the
  * supervisor-issued session proxy, preserving the app URL and path.
  *
+ * Every OTHER origin the page requests is continued untouched — that is
+ * what a third-party asset needs. When such an origin is on the app's
+ * own host (or loopback) it is also a silent ORIGIN MISMATCH: the page
+ * is talking to an app origin Gateforge never configured, so nothing it
+ * fetches can reach the session proxy. `onUnroutedOrigin` reports those
+ * origins so the witness's zero-traffic note can name the real cause
+ * (plan 0.9.2 item F). It is diagnostic text: no record, no verdict.
+ *
  * Args:
  *   page: Playwright page used by the current test.
  *   appBaseURL: shared observation-proxy origin from the operator.
  *   sessionProxyURL: dedicated observation-proxy origin for this test.
+ *   onUnroutedOrigin: optional sink for unrouted same-host origins.
  */
 export async function routePageThroughSessionProxy(
   page: Page,
   appBaseURL: string,
   sessionProxyURL: string,
+  onUnroutedOrigin?: (origin: string) => void,
 ): Promise<void> {
   const appOrigin = new URL(appBaseURL);
   const sessionOrigin = new URL(sessionProxyURL);
@@ -53,12 +63,96 @@ export async function routePageThroughSessionProxy(
   await page.route('**/*', async (route) => {
     const requestURL = new URL(route.request().url());
     if (requestURL.origin !== appOrigin.origin) {
+      if (onUnroutedOrigin !== undefined && isAppHostOrigin(requestURL, appOrigin)) {
+        onUnroutedOrigin(requestURL.origin);
+      }
       await route.continue();
       return;
     }
     requestURL.host = sessionOrigin.host;
     await route.continue({ url: requestURL.href });
   });
+}
+
+/**
+ * Whether an unrouted origin is a plausible app origin at all: the app
+ * base's own host, or loopback (where every local deployment lives). A
+ * CDN or an analytics host is not a mismatch and is never reported.
+ */
+function isAppHostOrigin(url: URL, appOrigin: URL): boolean {
+  return url.hostname === appOrigin.hostname || isLoopbackHostname(url.hostname);
+}
+
+/** Loopback in the three forms a browser URL can carry it. */
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '::1' || hostname === '[::1]' || /^127\./.test(hostname);
+}
+
+/** Distinct origins one session reports (see the witness-side cap). */
+const UNROUTED_ORIGIN_CAP = 5;
+
+/**
+ * The diagnostic sink the page fixture hands to
+ * {@link routePageThroughSessionProxy}: it hands each distinct unrouted
+ * origin to the witness for THIS session, which quotes it in the
+ * zero-traffic note.
+ *
+ * It can never affect the run: reports are fire-and-forget (a page load
+ * never waits on the witness) and a failed one is dropped — the claim
+ * blocks either way, and the only thing lost is the hint.
+ */
+export interface UnroutedOriginReporter {
+  /** The sink to pass as `onUnroutedOrigin`. */
+  report(origin: string): void;
+  /** The distinct origins this reporter has accepted, in first-seen order. */
+  readonly origins: readonly string[];
+  /** Resolves once every report sent so far has settled. */
+  settled(): Promise<void>;
+}
+
+/**
+ * Builds the session's origin reporter.
+ *
+ * Args:
+ *   witness: the session's witness client.
+ *   session: the session the report belongs to (its own, never another's).
+ *   appBaseURL: the base URL the fixture routes — the origin the page
+ *     was supposed to load.
+ *
+ * Returns:
+ *   UnroutedOriginReporter: the bounded, non-blocking reporter.
+ */
+export function createUnroutedOriginReporter(options: {
+  witness: WitnessClient;
+  session: { sessionId: string; sessionToken: string };
+  appBaseURL: string;
+}): UnroutedOriginReporter {
+  const appBaseUrl = new URL(options.appBaseURL).origin;
+  const origins: string[] = [];
+  const inFlight = new Set<Promise<unknown>>();
+  return {
+    origins,
+    report(origin: string): void {
+      if (origin === appBaseUrl || origins.includes(origin)) return;
+      if (origins.length >= UNROUTED_ORIGIN_CAP) return;
+      origins.push(origin);
+      // Diagnostic only: the witness may refuse (a sealed session, a
+      // malformed origin) and the page must never learn about it.
+      const sent = options.witness
+        .reportSessionPageOrigins({
+          sessionId: options.session.sessionId,
+          sessionToken: options.session.sessionToken,
+          appBaseUrl,
+          origins: [origin],
+        })
+        .catch(() => undefined);
+      inFlight.add(sent);
+      void sent.then(() => inFlight.delete(sent));
+    },
+    async settled(): Promise<void> {
+      while (inFlight.size > 0) await Promise.all([...inFlight]);
+    },
+  };
 }
 
 /** Fixture map this pack adds to every test. */
@@ -104,7 +198,17 @@ export const test = base.extend<EvidenceFixtures>({
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
     }
     if (session.proxyUrl !== null) {
-      await routePageThroughSessionProxy(page, appBaseURL, session.proxyUrl);
+      // The reporter rides along so a page that loads ANOTHER origin
+      // (a suite base URL Gateforge was never told about) reaches the
+      // witness as a name, not as silence.
+      const reporter = createUnroutedOriginReporter({ witness, session, appBaseURL });
+      await routePageThroughSessionProxy(page, appBaseURL, session.proxyUrl, reporter.report);
+      try {
+        await use(page);
+      } finally {
+        await reporter.settled();
+      }
+      return;
     }
     await use(page);
   },

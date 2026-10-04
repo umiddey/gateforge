@@ -171,6 +171,116 @@ export function sortLifecycleRules(rules: readonly LifecycleRule[]): LifecycleRu
 }
 
 /**
+ * How removal manifests for the resources an owner rule matches. Only
+ * these two exist: the engine never invents a third, and never picks
+ * between them on its own.
+ */
+export const DeleteSemanticsSchema = z.enum(['hard', 'archive']);
+
+/** Inferred delete-semantics union. */
+export type DeleteSemantics = z.infer<typeof DeleteSemanticsSchema>;
+
+/**
+ * A repo-root-relative glob over the SOURCE FILE of the resources the
+ * rule declares semantics for. A glob (not one exact id) is safe here
+ * because declaring semantics is an evidence CONTRACT, never a
+ * suppression: it can only resolve DELETE_SEMANTICS_UNRESOLVED, never
+ * remove an obligation on its own (contradicting detector evidence still
+ * blocks).
+ */
+const DeleteRuleMatchSchema = z
+  .string()
+  .min(1, 'match must not be empty')
+  .refine((value) => value === value.trim(), {
+    message: 'match must not have leading or trailing whitespace',
+  })
+  .refine((value) => !value.includes('\\'), {
+    message: 'match must use posix "/" separators',
+  })
+  .refine((value) => !value.startsWith('/'), {
+    message: 'match must be repo-relative, never absolute',
+  })
+  .refine((value) => !value.split('/').includes('..'), {
+    message: 'match must not escape the repository',
+  });
+
+/** The owner-owned archived field values an archive rule declares. */
+const ArchiveFieldsSchema = z.record(z.string().min(1), z.union([z.string(), z.number(), z.boolean()]));
+
+/** One owner-declared delete-semantics rule over a source glob. */
+export const DeleteRuleSchema = z
+  .object({
+    /** Repo-root-relative glob over the matched resources' source file. */
+    match: DeleteRuleMatchSchema,
+    /** How removal manifests for every resource this rule matches. */
+    semantics: DeleteSemanticsSchema,
+    /**
+     * Required, and never empty, when `semantics` is `archive`: the
+     * owner-owned archived state (e.g. `{status: archived}`) the engine
+     * grades removal against. `hard` removal has no archived state and
+     * must not carry the key.
+     */
+    archiveFields: ArchiveFieldsSchema.optional(),
+    /** Owner explanation rendered in classifier traces and diagnostics. */
+    reason: z
+      .string()
+      .min(1, 'reason must not be empty')
+      .refine((value) => value === value.trim(), {
+        message: 'reason must not have leading or trailing whitespace',
+      })
+      .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+        message: 'reason must not contain control characters',
+      }),
+  })
+  .strict()
+  .superRefine((rule, ctx) => {
+    if (rule.semantics === 'archive' && Object.keys(rule.archiveFields ?? {}).length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['archiveFields'],
+        message:
+          "delete rule semantics is 'archive': 'archiveFields' must declare the owner-owned " +
+          'archived state (e.g. {status: archived}); removal is never guessed',
+      });
+    }
+    if (rule.semantics === 'hard' && rule.archiveFields !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['archiveFields'],
+        message:
+          "delete rule semantics is 'hard': a permanent removal has no archived state, so " +
+          "'archiveFields' must be absent",
+      });
+    }
+  });
+
+/** Inferred delete-rule shape. */
+export type DeleteRule = z.infer<typeof DeleteRuleSchema>;
+
+/** Delete rules with duplicate match patterns rejected as ambiguous. */
+export const DeleteRulesSchema = z
+  .array(DeleteRuleSchema)
+  .superRefine((rules, ctx) => {
+    const seen = new Map<string, number>();
+    for (let index = 0; index < rules.length; index += 1) {
+      const match = rules[index]?.match;
+      if (match === undefined) continue;
+      const first = seen.get(match);
+      if (first !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [index, 'match'],
+          message:
+            `duplicate delete rule for '${match}' (already declared at index ${first}); ` +
+            'one source pattern must have one unambiguous semantics',
+        });
+      } else {
+        seen.set(match, index);
+      }
+    }
+  });
+
+/**
  * One coverage requirement (red-team round 3): the named detector must
  * report examining every applicable file for a scan to count as COMPLETE.
  * Coverage is per-detector by capability — never a flattened union
@@ -231,6 +341,13 @@ export const ClassificationPolicySchema = z
     internalRules: z.array(InternalRuleSchema),
     /** Exact owner lifecycle disables; suppressive effects require scan proof. */
     lifecycleRules: LifecycleRulesSchema.optional(),
+    /**
+     * Owner-declared delete semantics (hard|archive) per source glob.
+     * Declaring semantics ADDS an evidence contract — it can resolve
+     * DELETE_SEMANTICS_UNRESOLVED, never remove an obligation: detector
+     * evidence that disagrees still blocks as a contradiction.
+     */
+    deleteRules: DeleteRulesSchema.optional(),
     /**
      * Coverage requirements for COMPLETE-scan proofs (ADR 0003 D4). A
      * closed-world attestation holds only when every rule's detector is

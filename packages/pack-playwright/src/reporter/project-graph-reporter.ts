@@ -43,6 +43,14 @@ import { writeFileSync } from 'node:fs';
 /** Environment variable naming the graph document to write. */
 export const PROJECT_GRAPH_PATH_ENV = 'PLAYWRIGHT_GATEFORGE_PROJECT_GRAPH_FILE';
 
+/**
+ * The placeholder project name for the runner's IMPLICIT project — the one
+ * a config with no `projects` array resolves to, reported with an empty
+ * name. It is the same placeholder the enumerated test ids carry, so a
+ * project-less configuration joins cleanly.
+ */
+export const IMPLICIT_PROJECT_NAME = '-';
+
 /** A runner test-file selection value: a glob string or a RegExp. */
 type SelectionValue = string | RegExp;
 
@@ -156,14 +164,24 @@ export class ProjectGraphReporter {
     const projectStorageStates = Object.create(null) as Record<string, string>;
     const testFileScope: ProjectTestFileScope[] = [];
     for (const project of config.projects ?? []) {
-      if (typeof project.name !== 'string' || project.name.length === 0) continue;
-      projectDependencies[project.name] = [
+      // A config with no `projects` array (or a declared one without a
+      // name) resolves to the runner's IMPLICIT project, reported with an
+      // empty name. Its resolved selection is real: skipping it left the
+      // catalog with no scope at all, so every statically found file
+      // looked like this runner's own test. The placeholder is the one the
+      // test ids already use for such rows. An implicit project is NOT a
+      // plannable project, so it adds no node to the dependency graph.
+      const named = typeof project.name === 'string' && project.name.length > 0;
+      const name = named ? (project.name as string) : IMPLICIT_PROJECT_NAME;
+      if (named) {
+        projectDependencies[name] = [
         ...new Set(
           (project.dependencies ?? []).filter(
             (name): name is string => typeof name === 'string' && name.length > 0,
           ),
         ),
-      ].sort();
+        ].sort();
+      }
       // Only a plain path string crosses. An inline `{cookies, origins}`
       // document is a value this boundary does not carry, and a
       // function-valued state is consumer code, not data. Every STRING
@@ -172,7 +190,7 @@ export class ProjectGraphReporter {
       // silently-dropped declaration that would run logged out.
       const storageState = project.use?.storageState;
       if (typeof storageState === 'string') {
-        projectStorageStates[project.name] = storageState;
+        projectStorageStates[name] = storageState;
       }
       // The runner's own file selection. Only plain globs and RegExps
       // cross; a function-valued selector is consumer CODE, and a
@@ -182,7 +200,7 @@ export class ProjectGraphReporter {
       const testMatch = selectionGlobs(project.testMatch);
       const testIgnore = selectionGlobs(project.testIgnore);
       if (typeof testDir === 'string' && testDir.length > 0 && testMatch !== null && testIgnore !== null) {
-        testFileScope.push({ name: project.name, testDir, testMatch, testIgnore });
+        testFileScope.push({ name, testDir, testMatch, testIgnore });
       }
     }
     const document: ProjectGraphDocument = {

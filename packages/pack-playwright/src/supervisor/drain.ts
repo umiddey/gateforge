@@ -361,8 +361,11 @@ const releaseReachedWaiters = (): void => {
       const result = await client.finalizeObserve({ sessionId: slot.sessionId });
       for (const done of result.finalized) {
         console.warn(
-          `[gateforge] observe finalized '${done.obligationId}' (${done.operation}, entity ` +
-            `${JSON.stringify(done.entityId) ?? '?'}) for test '${slot.testId}'`,
+          `[gateforge] observe finalized '${done.obligationId}' (${
+            done.operation === undefined
+              ? 'transport'
+              : `${done.operation}, entity ${JSON.stringify(done.entityId) ?? '?'}`
+          }) for test '${slot.testId}'`,
         );
       }
       for (const note of result.notes) {

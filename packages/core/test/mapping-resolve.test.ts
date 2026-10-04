@@ -11,6 +11,7 @@ import {
   CAUSE_NEXT_ACTIONS,
   mappingGradingClaims,
   mappingSuggestions,
+  type SuggestionCandidate,
   resolveTestMappings,
   type PriorRunHint,
   type ResolvedMappings,
@@ -553,7 +554,7 @@ describe('mappingGradingClaims — projection', () => {
 });
 
 describe('mappingSuggestions — reuse ordering', () => {
-  it('reports TEST_MAPPING_MISSING with inference candidates and newTestNeeded=false', () => {
+  it('reports TEST_MAPPING_MISSING with inference candidates and newTestNeeded=unverified', () => {
     const resolution = resolveTestMappings(resolveInput());
     const suggestions = mappingSuggestions({
       catalog: resolveInput().catalog,
@@ -563,13 +564,16 @@ describe('mappingSuggestions — reuse ordering', () => {
     expect(suggestions).toHaveLength(2);
     const missing = suggestions.find((suggestion) => suggestion.obligationId === OBLIGATION);
     expect(missing?.cause).toBe('TEST_MAPPING_MISSING');
-    expect(missing?.newTestNeeded).toBe(false);
+    // ONE signal carries this candidate — the title's resource token — and
+    // the run offers no route to check it against, so nothing here proves
+    // the test drives the request. `unverified` is the honest answer.
+    expect(missing?.newTestNeeded).toBe('unverified');
     expect(missing?.candidates[0]?.logicalKey).toBe(KEY);
     expect(missing?.candidates[0]?.why.join(' ')).toContain("resource token 'accounts'");
     // orders: nothing matches 'orders' → genuinely uncovered
     const orders = suggestions.find((suggestion) => suggestion.obligationId === OTHER_OBLIGATION);
     expect(orders?.candidates).toEqual([]);
-    expect(orders?.newTestNeeded).toBe(true);
+    expect(orders?.newTestNeeded).toBe('yes');
   });
 
   it('guides suite-driven browser candidates to observed-e2e and fixture tests to the overlay path', () => {
@@ -615,7 +619,7 @@ describe('mappingSuggestions — reuse ordering', () => {
     });
     expect(suggestions).toHaveLength(1);
     expect(suggestions[0]?.cause).toBe('TEST_MAPPING_STALE');
-    expect(suggestions[0]?.newTestNeeded).toBe(true);
+    expect(suggestions[0]?.newTestNeeded).toBe('yes');
   });
 
   it('reports TEST_MAPPING_AMBIGUOUS first in reuse order, with no candidates', () => {
@@ -642,7 +646,7 @@ describe('mappingSuggestions — reuse ordering', () => {
     expect(suggestions).toHaveLength(1);
     expect(suggestions[0]?.cause).toBe('TEST_MAPPING_AMBIGUOUS');
     expect(suggestions[0]?.nextAction).toBe('Correct the exact mapping');
-    expect(suggestions[0]?.newTestNeeded).toBe(false);
+    expect(suggestions[0]?.newTestNeeded).toBe('no');
   });
 
   it('produces no suggestion for an obligation with a clean declared mapping', () => {
@@ -734,8 +738,232 @@ describe('mappingSuggestions — evidence ranking (0.9.0 adoption fix)', () => {
       obligationIds: [OBLIGATION],
       resolution,
     });
-    expect(suggestions[0]?.newTestNeeded).toBe(true);
+    expect(suggestions[0]?.newTestNeeded).toBe('yes');
     expect(suggestions[0]?.nextAction).toBe(CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING']);
+  });
+});
+
+describe('mappingSuggestions — token boundaries (0.9.2 adoption fix)', () => {
+  /**
+   * A generated endpoint obligation: the plane, the `http-` prefix, the
+   * method word, the `api`/`v1` route furniture and the trailing id hash
+   * are resource STRUCTURE, not the resource's name. Only
+   * `notifications` may be matched against a test.
+   */
+  const NOTIFICATION_OBLIGATION =
+    'tenant.http-get-api-v1-notifications-27cb390c:http:request-observed';
+  /** A test tagged with ANOTHER resource's plane-qualified identity. */
+  const MATRIX_KEY =
+    'playwright:chromium:tests/e2e/account_matrix.spec.js:ACCOUNT matrix';
+  /** The test that actually exercises the route. */
+  const NOTIFICATION_KEY =
+    'playwright:chromium:tests/e2e/real/notifications.spec.js:notifications list shows unread items';
+  /** A test naming the resource only as a PREFIX of a longer word. */
+  const NEAR_MISS_KEY =
+    'playwright:chromium:tests/e2e/notification_center.spec.js:supersedes the notification center';
+
+  const ranked = catalog([
+    row({
+      logicalKey: MATRIX_KEY,
+      file: 'tests/e2e/account_matrix.spec.js',
+      titlePath: ['ACCOUNT matrix', '@crud(tenant.accounts:create)', 'the reference admin is findable'],
+      title: 'the reference admin is findable',
+      sourceLocation: { file: 'tests/e2e/account_matrix.spec.js', line: 9, col: 0 },
+    }),
+    row({
+      logicalKey: NOTIFICATION_KEY,
+      file: 'tests/e2e/real/notifications.spec.js',
+      titlePath: ['notifications list shows unread items'],
+      title: 'notifications list shows unread items',
+      sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 4, col: 0 },
+    }),
+    row({
+      logicalKey: NEAR_MISS_KEY,
+      file: 'tests/e2e/notification_center.spec.js',
+      titlePath: ['supersedes the notification center'],
+      title: 'supersedes the notification center',
+      sourceLocation: { file: 'tests/e2e/notification_center.spec.js', line: 2, col: 0 },
+    }),
+  ]);
+
+  const suggestionsFor = (): SuggestionCandidate[] =>
+    mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [NOTIFICATION_OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [NOTIFICATION_OBLIGATION] }),
+      ),
+      routeHints: new Map([[NOTIFICATION_OBLIGATION, ['GET /api/v1/notifications']]]),
+    })[0]?.candidates ?? [];
+
+  it("scores 0 a tag that names another resource's plane, not this obligation's", () => {
+    // `@crud(tenant.accounts:create)` names the PLANE of every tenant
+    // obligation, so the plane token `tenant` scored +100 "explicit tag"
+    // for every one of them — the account matrix ranked first for a
+    // notifications route it never touches.
+    expect(MATRIX_KEY < NOTIFICATION_KEY).toBe(true);
+    expect(suggestionsFor().map((candidate) => candidate.logicalKey)).toEqual([NOTIFICATION_KEY]);
+  });
+
+  it('keeps the real test ranked by its one distinctive signal', () => {
+    const [first] = suggestionsFor();
+    expect(first?.logicalKey).toBe(NOTIFICATION_KEY);
+    expect(first?.score ?? 0).toBeGreaterThan(0);
+    const why = first?.why.join(' ') ?? '';
+    expect(why).toContain("resource token 'notifications' matches the test title path");
+    // One word, one signal: the resource-token match already counted
+    // 'notifications', so the route segment of the same name adds nothing.
+    expect(why).not.toContain("title mentions the obligation's route segment 'notifications'");
+  });
+
+  it('never matches a token inside a longer word (no `read` in `reference`/`unread`)', () => {
+    // `notification` is not `notifications`, and `reference`/`unread` do
+    // not contain a standalone word any token can name.
+    const candidates = suggestionsFor();
+    expect(candidates.map((candidate) => candidate.logicalKey)).not.toContain(NEAR_MISS_KEY);
+
+    expect(candidates.every((candidate) => !candidate.why.join(' ').includes('read'))).toBe(true);
+  });
+});
+
+describe('mappingSuggestions — tag text is not a title word (0.9.2 follow-up)', () => {
+  /**
+   * The real adoption case: a generated endpoint resource whose name
+   * carries the route's literal `read` segment and the `param` marker
+   * that stands in for `{notification_id}`.
+   */
+  const OBLIGATION =
+    'tenant.http-patch-api-v1-notifications-param-read-68ff3585:http:request-observed';
+  /**
+   * A test tagged for a DIFFERENT resource. Its file is NOT in a `real/`
+   * folder, so nothing but name/tag/route evidence could ever score it.
+   */
+  const ACCOUNT_KEY =
+    'playwright:chromium:tests/e2e/account_crud.spec.js:ACCOUNT-CRUD @real-e2e @p1>happy — @crud(tenant.accounts:read) the accounts directory renders and the reference admin is findable';
+  /** The test that actually drives the route. */
+  const NOTIFICATION_KEY =
+    'playwright:chromium:tests/e2e/real/notifications.spec.js:notifications mark one as read';
+
+  const ranked = catalog([
+    row({
+      logicalKey: ACCOUNT_KEY,
+      file: 'tests/e2e/account_crud.spec.js',
+      titlePath: [
+        'ACCOUNT-CRUD @real-e2e @p1',
+        'happy — @crud(tenant.accounts:read) the accounts directory renders and the reference admin is findable',
+      ],
+      title: 'the accounts directory renders and the reference admin is findable',
+      sourceLocation: { file: 'tests/e2e/account_crud.spec.js', line: 12, col: 0 },
+    }),
+    row({
+      logicalKey: NOTIFICATION_KEY,
+      file: 'tests/e2e/real/notifications.spec.js',
+      titlePath: ['notifications mark one as read'],
+      title: 'notifications mark one as read',
+      sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 5, col: 0 },
+    }),
+  ]);
+
+  const suggestionsFor = (): SuggestionCandidate[] =>
+    mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [OBLIGATION] }),
+      ),
+      routeHints: new Map([[OBLIGATION, ['PATCH /api/v1/notifications/{notification_id}/read']]]),
+    })[0]?.candidates ?? [];
+
+  it('scores 0 a tag that only repeats the route segment, never a candidate', () => {
+    // `@crud(tenant.accounts:read)` names another resource: the part after
+    // `:` is an OPERATION, not a resource name, and tag text is not prose —
+    // neither may answer "which test exercises PATCH .../read".
+    expect(suggestionsFor().map((candidate) => candidate.logicalKey)).toEqual([NOTIFICATION_KEY]);
+  });
+
+  it('keeps the real test ranked by its one distinctive signal', () => {
+    const [first] = suggestionsFor();
+    expect(first?.score ?? 0).toBeGreaterThan(0);
+    const why = first?.why.join(' ') ?? '';
+    expect(why).toContain("resource token 'notifications' matches the test title path");
+    // One word, one signal (see above).
+    expect(why).not.toContain("title mentions the obligation's route segment 'notifications'");
+  });
+});
+
+/**
+ * Plan 0.9.2 item (i): an explicit tag counts for an `http:*`
+ * obligation only when the operation it DECLARES fits the route's
+ * method. `@crud(tenant.accounts:create)` says the test CREATES an
+ * account; it is no evidence that the test reads
+ * `GET /api/v2/accounts`, and answering `new test needed: no` from it
+ * sent an owner to mark a create test as the proof of a read.
+ */
+describe('mappingSuggestions — an explicit tag must fit the route method (0.9.2 item i)', () => {
+  const HTTP_OBLIGATION = 'tenant.accounts:http:request-observed';
+  const ROUTE = 'GET /api/v2/accounts';
+
+  /**
+   * A test whose title and file never name the resource, so the ONLY
+   * thing that could make it a candidate is its `@crud(...)` tag.
+   */
+  const tagged = (operation: string): TestCatalogEntry =>
+    row({
+      logicalKey: `playwright:chromium:tests/e2e/real/admin.spec.js:the reference admin is findable (${operation})`,
+      file: 'tests/e2e/real/admin.spec.js',
+      titlePath: [`@crud(tenant.accounts:${operation})`, 'the reference admin is findable'],
+      title: 'the reference admin is findable',
+      sourceLocation: { file: 'tests/e2e/real/admin.spec.js', line: 6, col: 0 },
+    });
+
+  /** The suggestion for the transport obligation, with no mapping present. */
+  const suggestionFor = (entries: TestCatalogEntry[]) => {
+    const entries0 = catalog(entries);
+    return mappingSuggestions({
+      catalog: entries0,
+      obligationIds: [HTTP_OBLIGATION],
+      resolution: resolveTestMappings(resolveInput({ catalog: entries0, obligationIds: [HTTP_OBLIGATION] })),
+      routeHints: new Map([[HTTP_OBLIGATION, [ROUTE]]]),
+    })[0];
+  };
+
+  it('gives no credit to `@crud(tenant.accounts:create)` for a GET route', () => {
+    // Before the gate this answered `new test needed: no` — "mark this
+    // create test as the proof of a read". With the tag carrying no
+    // evidence the honest verdict is the three-state `unverified`: a
+    // candidate exists and NOTHING HERE PROVES IT.
+    const suggestion = suggestionFor([tagged('create')]);
+    expect(suggestion?.newTestNeeded).not.toBe('no');
+    expect(suggestion?.newTestNeeded).toBe('unverified');
+    // The tag scores nothing here. (The resolver's own route-blind
+    // inference still names the row as a candidate — it has no route
+    // hints to fit the method against — but it contributes no score and
+    // it settles nothing.)
+    expect(suggestion?.candidates?.[0]?.score ?? 0).toBe(0);
+  });
+
+  it('still credits the tag whose operation fits the method', () => {
+    // GET reads: `:read` fits, and the positive case must not regress
+    // with the gate above.
+    const suggestion = suggestionFor([tagged('read')]);
+    expect(suggestion?.newTestNeeded).toBe('no');
+    expect(suggestion?.candidates?.[0]?.why.join(' ')).toContain(
+      "explicit tag names this obligation's resource 'accounts'",
+    );
+  });
+
+  it('leaves a non-transport obligation judged on the resource alone', () => {
+    // `:persistence:read` has no route method to fit: the tag's resource
+    // part is still the evidence it always was.
+    const entries0 = catalog([tagged('create')]);
+    const persistence = 'tenant.accounts:persistence:read';
+    const suggestion = mappingSuggestions({
+      catalog: entries0,
+      obligationIds: [persistence],
+      resolution: resolveTestMappings(resolveInput({ catalog: entries0, obligationIds: [persistence] })),
+      routeHints: new Map(),
+    })[0];
+    expect(suggestion?.newTestNeeded).toBe('no');
   });
 });
 
@@ -766,5 +994,268 @@ describe('resolveTestMappings — determinism', () => {
       }),
     );
     expect(JSON.stringify(reversed)).toBe(JSON.stringify(forward));
+  });
+});
+
+describe('mappingSuggestions — eligibility, not just ranking (0.9.2 follow-up)', () => {
+  const OBLIGATION =
+    'tenant.http-patch-api-v1-notifications-param-read-68ff3585:http:request-observed';
+  const HINTS = new Map([[OBLIGATION, ['PATCH /api/v1/notifications/{notification_id}/read']]]);
+
+  function suggestionsFor(entries: TestCatalogEntry[]) {
+    const ranked = catalog(entries);
+    const suggestion = mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [OBLIGATION] }),
+      ),
+      routeHints: HINTS,
+    })[0];
+    return { candidates: suggestion?.candidates ?? [], suggestion };
+  }
+
+  it('never offers a row the runner did not enumerate (static-only)', () => {
+    // A Vitest jsdom test is not a Playwright test: `tests discover`
+    // records it as `[reconciliation-static-only]`, and it can never
+    // produce the witnessed evidence a mark would promise.
+    const { candidates, suggestion } = suggestionsFor([
+      row({
+        logicalKey: 'playwright:-:frontend/src/components/dashboard/__tests__/Dashboard.test.jsx:Dashboard (TanStack migration)>marks all notifications read via the mutation',
+        file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx',
+        titlePath: [
+          'Dashboard (TanStack migration)',
+          'marks all notifications read via the mutation',
+        ],
+        title: 'marks all notifications read via the mutation',
+        sourceLocation: { file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx', line: 8, col: 0 },
+        project: null,
+        reconciliation: 'static-only',
+      }),
+      row({
+        logicalKey: 'playwright:-:tests/e2e/real/notifications.spec.js:notifications mark one as read',
+        file: 'tests/e2e/real/notifications.spec.js',
+        titlePath: ['notifications mark one as read'],
+        title: 'notifications mark one as read',
+        sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 5, col: 0 },
+      }),
+    ]);
+    expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([
+      'playwright:-:tests/e2e/real/notifications.spec.js:notifications mark one as read',
+    ]);
+    // The surviving row is a real e2e spec whose title names the resource
+    // and whose FILE names the route: two signals, so reuse is settled.
+    expect(suggestion?.newTestNeeded).toBe('no');
+  });
+
+  it('asks for a NEW test when every candidate mocks the system under test', () => {
+    // A mocked candidate can never witness the claim, so listing it as
+    // the reuse answer (and printing a `tests mark` for it) is a dead end.
+    const { candidates, suggestion } = suggestionsFor([
+      row({
+        logicalKey: 'playwright:-:tests/e2e/real/notifications.spec.js:notifications mark one as read (mocked)',
+        file: 'tests/e2e/real/notifications.spec.js',
+        titlePath: ['notifications mark one as read (mocked)'],
+        title: 'notifications mark one as read (mocked)',
+        sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 5, col: 0 },
+        suppressionSignals: [
+          {
+            kind: 'mock',
+            detail: 'the api client is mocked for the jsdom render',
+            location: { file: 'tests/e2e/real/notifications.spec.js', line: 3, col: 0 },
+          },
+        ],
+      }),
+    ]);
+    // Still listed, as context.
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.why.join(' ')).toContain('mocks the system under test');
+    expect(suggestion?.newTestNeeded).toBe('yes');
+    expect(suggestion?.missingEvidence).toContain('only mocked candidates');
+    // No `tests mark` next action for a mocked candidate.
+    expect(suggestion?.nextAction).not.toContain('mark the existing test');
+    expect(suggestion?.nextAction).toContain('Overlay: write');
+  });
+
+  it('asks for a NEW test when the only candidate mocks via a file-scope helper (0.9.2)', () => {
+    // The real-world shape: `page.route` lives in a helper the test
+    // CALLS, so the body-scoped scan saw nothing and the spec was offered
+    // as reusable proof. The file-level fact and the `mocked/` folder
+    // rule now give this row the mock signal it always had.
+    const { candidates, suggestion } = suggestionsFor([
+      row({
+        logicalKey: 'playwright:-:tests/e2e/mocked/notification_foundation.spec.js:notifications foundation lists the inbox',
+        file: 'tests/e2e/mocked/notification_foundation.spec.js',
+        titlePath: ['notifications foundation lists the inbox'],
+        title: 'notifications foundation lists the inbox',
+        sourceLocation: { file: 'tests/e2e/mocked/notification_foundation.spec.js', line: 10, col: 0 },
+        inferredKind: 'browser-e2e',
+        suppressionSignals: [
+          {
+            kind: 'mock',
+            detail:
+              'network interception (page.route/context.route/route.fulfill) somewhere in the test file — a shared helper every test calls intercepts for all of them',
+            location: { file: 'tests/e2e/mocked/notification_foundation.spec.js', line: 3, col: 2 },
+          },
+        ],
+      }),
+    ]);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.why.join(' ')).toContain('mocks the system under test');
+    expect(suggestion?.newTestNeeded).toBe('yes');
+    expect(suggestion?.missingEvidence).toContain('only mocked candidates');
+    expect(suggestion?.nextAction).not.toContain('mark the existing test');
+    expect(suggestion?.nextAction).toContain('Overlay: write');
+  });
+});
+
+describe('mappingSuggestions — candidates must be distinctive (0.9.2 follow-up)', () => {
+  const OBLIGATION =
+    'tenant.http-patch-api-v1-notifications-param-read-68ff3585:http:request-observed';
+  const HINTS = new Map([[OBLIGATION, ['PATCH /api/v1/notifications/{notification_id}/read']]]);
+
+  /** A real e2e test whose only match is the operation word `read`. */
+  function readOnlyRow(logicalKey: string, file: string, title: string): TestCatalogEntry {
+    return row({
+      logicalKey,
+      file,
+      titlePath: [title],
+      title,
+      sourceLocation: { file, line: 4, col: 0 },
+      inferredKind: 'browser-e2e',
+    });
+  }
+
+  const ERP = 'playwright:-:tests/e2e/real/erp_token.spec.js:tenant-plane ERP token cannot read the platform tier API';
+  const ACCOUNTS_UI =
+    'playwright:chromium:tests/e2e/real/accounts_ui.spec.js:read tenant.accounts through UI';
+  const BILLING_UI =
+    'playwright:chromium:tests/e2e/real/billing_ui.spec.js:read tenant.billing_documents through UI';
+  const DASHBOARD =
+    'vitest:-:frontend/src/components/dashboard/__tests__/Dashboard.test.jsx:Dashboard (TanStack migration)>marks all notifications read via the mutation';
+  const NOTIFICATIONS =
+    'playwright:-:tests/e2e/real/notifications.spec.js:notifications mark one as read';
+
+  function suggestionsFor(entries: TestCatalogEntry[]) {
+    const ranked = catalog(entries);
+    const suggestion = mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [OBLIGATION] }),
+      ),
+      routeHints: HINTS,
+    })[0];
+    return { candidates: suggestion?.candidates ?? [], suggestion };
+  }
+
+  const realRows = (): TestCatalogEntry[] => [
+    readOnlyRow(ERP, 'tests/e2e/real/erp_token.spec.js', 'tenant-plane ERP token cannot read the platform tier API'),
+    readOnlyRow(ACCOUNTS_UI, 'tests/e2e/real/accounts_ui.spec.js', 'read tenant.accounts through UI'),
+    readOnlyRow(BILLING_UI, 'tests/e2e/real/billing_ui.spec.js', 'read tenant.billing_documents through UI'),
+    row({
+      logicalKey: DASHBOARD,
+      runner: 'vitest',
+      file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx',
+      titlePath: [
+        'Dashboard (TanStack migration)',
+        'marks all notifications read via the mutation',
+      ],
+      title: 'marks all notifications read via the mutation',
+      sourceLocation: { file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx', line: 8, col: 0 },
+      inferredKind: 'unit',
+      suppressionSignals: [
+        {
+          kind: 'mock',
+          detail: 'the api client is mocked for the jsdom render',
+          location: { file: 'frontend/src/components/dashboard/__tests__/Dashboard.test.jsx', line: 3, col: 0 },
+        },
+      ],
+    }),
+  ];
+
+  it('offers only the test with a distinctive match, never an operation word or a unit suite', () => {
+    // `read` is the CONTRACT's operation and a route segment, not this
+    // route's resource: an obligation for `…/notifications/…/read` is not
+    // satisfied by "read tenant.accounts through UI". A unit suite can
+    // never witness it either.
+    const { candidates, suggestion } = suggestionsFor([
+      ...realRows(),
+      row({
+        logicalKey: NOTIFICATIONS,
+        file: 'tests/e2e/real/notifications.spec.js',
+        titlePath: ['notifications mark one as read'],
+        title: 'notifications mark one as read',
+        sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 5, col: 0 },
+        inferredKind: 'browser-e2e',
+      }),
+    ]);
+    expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([NOTIFICATIONS]);
+    expect(candidates[0]?.why.join(' ')).toContain("resource token 'notifications'");
+    expect(suggestion?.newTestNeeded).toBe('no');
+  });
+
+  it('reports no candidate and a new test when nothing distinctive matches', () => {
+    const { candidates, suggestion } = suggestionsFor(realRows());
+    expect(candidates).toEqual([]);
+    expect(suggestion?.newTestNeeded).toBe('yes');
+    expect(suggestion?.nextAction).toContain('Overlay: write');
+  });
+
+  /** The admin login request these two candidates could answer for. */
+  const LOGIN_OBLIGATION = 'master.http-post-admin-auth-login-4e84d21a:http:request-observed';
+  const LOGIN_HINTS = new Map([[LOGIN_OBLIGATION, ['POST /admin/auth/login']]]);
+  const AUTH_RBAC =
+    'playwright:-:tests/e2e/real/auth_rbac_and_token_refresh.spec.js:' +
+    'AUTH-TOKEN-PORTALS @real-e2e @p0>permission — an anonymous visit to the admin plane redirects to login';
+  const ADMIN_LOGIN =
+    'playwright:-:tests/e2e/real/admin_login.spec.js:' +
+    'admin login with valid credentials reaches the admin dashboard';
+
+  /** The same construction as {@link suggestionsFor}, for the login route. */
+  function loginSuggestionsFor(entries: TestCatalogEntry[]) {
+    const ranked = catalog(entries);
+    const suggestion = mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [LOGIN_OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [LOGIN_OBLIGATION] }),
+      ),
+      routeHints: LOGIN_HINTS,
+    })[0];
+    return { candidates: suggestion?.candidates ?? [], suggestion };
+  }
+
+  it('reports reuse as unverified while ONE signal carries the candidate', () => {
+    // The title names the resource and the file shares exactly ONE route
+    // word (`auth`). That is not proof the spec posts to
+    // `/admin/auth/login`, so the verdict is the third state and the next
+    // action is the check — never a `tests mark` command to run.
+    const { candidates, suggestion } = loginSuggestionsFor([
+      readOnlyRow(
+        AUTH_RBAC,
+        'tests/e2e/real/auth_rbac_and_token_refresh.spec.js',
+        'AUTH-TOKEN-PORTALS @real-e2e @p0>permission — an anonymous visit to the admin plane redirects to login',
+      ),
+    ]);
+    expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([AUTH_RBAC]);
+    expect(suggestion?.newTestNeeded).toBe('unverified');
+    expect(suggestion?.nextAction).toContain('POST /admin/auth/login');
+    expect(suggestion?.nextAction).not.toContain('tests mark');
+  });
+
+  it('reports reuse as proven when the file itself names the route', () => {
+    // `admin_login.spec.js` IS the `POST /admin/auth/login` route: the
+    // title names the resource and the file names two of the route's
+    // segments, so no confirmation is owed before marking.
+    const { candidates, suggestion } = loginSuggestionsFor([
+      readOnlyRow(
+        ADMIN_LOGIN,
+        'tests/e2e/real/admin_login.spec.js',
+        'admin login with valid credentials reaches the admin dashboard',
+      ),
+    ]);
+    expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([ADMIN_LOGIN]);
+    expect(suggestion?.newTestNeeded).toBe('no');
   });
 });

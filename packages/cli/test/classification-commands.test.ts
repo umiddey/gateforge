@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { installFixture, runCli, withTempRepo } from './helpers.js';
+import { parse as parseYaml } from 'yaml';
+import { CLASSIFICATION_POLICY_YML, installFixture, runCli, withTempRepo } from './helpers.js';
+import { classificationPolicyTemplate } from '../src/commands/init.js';
 
 describe('automatic classification commands', () => {
   it('classify emits deterministic effective decisions and a derived snapshot', async () => {
@@ -235,6 +237,141 @@ describe('automatic classification commands', () => {
       });
     });
   });
+
+  it('previews an owner delete-semantics rule and writes it only with --confirm', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const policyPath = '.gateforge/classification-policy.yml';
+      repo.writeFiles({
+        [policyPath]: `# Owner-reviewed policy: comments must survive every rewrite.\n${CLASSIFICATION_POLICY_YML}`,
+      });
+      const before = readFileSync(repo.path(policyPath), 'utf8');
+      const args = ['classify', 'delete', 'src', 'hard', '--reason', 'Rows in this model tree are removed permanently.'];
+
+      const preview = await runCli(repo, args);
+      expect(preview.code).toBe(0);
+      expect(preview.stdout).toContain('src/**');
+      expect(preview.stdout).toContain('semantics: hard');
+      expect(preview.stdout).toContain('rerun this command with --confirm');
+      // A preview writes nothing at all.
+      expect(readFileSync(repo.path(policyPath), 'utf8')).toBe(before);
+
+      const confirmed = await runCli(repo, [...args, '--confirm']);
+      expect(confirmed.code).toBe(0);
+      const written = readFileSync(repo.path(policyPath), 'utf8');
+      expect(written).toContain('Owner-reviewed policy: comments must survive every rewrite.');
+      expect(parseYaml(written).deleteRules).toEqual([
+        {
+          match: 'src/**',
+          semantics: 'hard',
+          reason: 'Rows in this model tree are removed permanently.',
+        },
+      ]);
+    });
+  });
+
+  it('refuses archive without an owner archive field, then writes the declared fields', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const policyPath = '.gateforge/classification-policy.yml';
+      const before = readFileSync(repo.path(policyPath), 'utf8');
+
+      const refused = await runCli(repo, [
+        'classify',
+        'delete',
+        'src/accounts.txt',
+        'archive',
+        '--reason',
+        'Account rows are archived, never removed.',
+      ]);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain('--archive-field');
+      expect(readFileSync(repo.path(policyPath), 'utf8')).toBe(before);
+
+      const confirmed = await runCli(repo, [
+        'classify',
+        'delete',
+        'src/accounts.txt',
+        'archive',
+        '--archive-field',
+        'status=archived',
+        '--archive-field',
+        'archived_by=system',
+        '--reason',
+        'Account rows are archived, never removed.',
+        '--confirm',
+      ]);
+      expect(confirmed.code).toBe(0);
+      expect(parseYaml(readFileSync(repo.path(policyPath), 'utf8')).deleteRules).toEqual([
+        {
+          match: 'src/accounts.txt',
+          semantics: 'archive',
+          archiveFields: { status: 'archived', archived_by: 'system' },
+          reason: 'Account rows are archived, never removed.',
+        },
+      ]);
+    });
+  });
+
+  it('appends the rule as TEXT: the owner-reviewed bytes never change', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const policyPath = '.gateforge/classification-policy.yml';
+      // The EXACT document `gateforge init` writes, loaded from the template
+      // itself: re-serializing it reflowed `patterns: [...]` and moved the
+      // comment block, which is a change the owner never made.
+      const original = classificationPolicyTemplate(
+        ['python'],
+        ['gateforge.pack-fastapi', 'gateforge.pack-sqlalchemy'],
+      );
+      repo.writeFiles({ [policyPath]: original });
+      const args = ['classify', 'delete', 'src', 'hard', '--reason', 'Rows in this model tree are removed permanently.'];
+
+      const preview = await runCli(repo, args);
+      expect(preview.code).toBe(0);
+      const added = preview.stdout.split('\n').filter((line) => line.startsWith('+') && !line.startsWith('+++'));
+      const removed = preview.stdout.split('\n').filter((line) => line.startsWith('-') && !line.startsWith('---'));
+      expect(added).toHaveLength(4);
+      expect(removed).toEqual([]);
+      expect(readFileSync(repo.path(policyPath), 'utf8')).toBe(original);
+
+      const confirmed = await runCli(repo, [...args, '--confirm']);
+      expect(confirmed.code).toBe(0);
+      const afterFirst = readFileSync(repo.path(policyPath), 'utf8');
+      expect(afterFirst.startsWith(original)).toBe(true);
+      expect(afterFirst).toContain("patterns: ['**/workers/**', '**/jobs/**']");
+
+      const second = await runCli(repo, [
+        'classify',
+        'delete',
+        'src/accounts.txt',
+        'archive',
+        '--archive-field',
+        'status=archived',
+        '--reason',
+        'Account rows are archived, never removed.',
+        '--confirm',
+      ]);
+      expect(second.code).toBe(0);
+      const afterSecond = readFileSync(repo.path(policyPath), 'utf8');
+      expect(afterSecond.startsWith(original)).toBe(true);
+      expect(afterSecond.match(/^deleteRules:/gm)).toHaveLength(1);
+      expect(parseYaml(afterSecond).deleteRules).toEqual([
+        {
+          match: 'src/**',
+          semantics: 'hard',
+          reason: 'Rows in this model tree are removed permanently.',
+        },
+        {
+          match: 'src/accounts.txt',
+          semantics: 'archive',
+          archiveFields: { status: 'archived' },
+          reason: 'Account rows are archived, never removed.',
+        },
+      ]);
+    });
+  });
+
   it('explain exposes the decision trace and generated obligation', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);

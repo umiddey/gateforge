@@ -42,6 +42,46 @@ describe('gateforge init', () => {
     });
   });
 
+  it('names the pack install once at the CLI version, and stays silent when the packs are declared', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'backend/api/v1/accounts.py': 'from fastapi import FastAPI\n',
+        'backend/models/account.py': 'from sqlalchemy.orm import DeclarativeBase\n\n\nclass Base(DeclarativeBase):\n    pass\n',
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code).toBe(0);
+      // Exactly ONE line, naming every recommended pack at the CLI's own
+      // version — the guide tells the owner to add them as direct
+      // dependencies, and init used to write the config without saying so.
+      const lines = stdout.split('\n').filter((line) => line.includes('npm i -D @gate-forge/'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(`@gate-forge/pack-fastapi@${VERSION}`);
+      expect(lines[0]).toContain(`@gate-forge/pack-sqlalchemy@${VERSION}`);
+    });
+
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'backend/api/v1/accounts.py': 'from fastapi import FastAPI\n',
+        'package.json': `${JSON.stringify(
+          {
+            name: 'fixture-app',
+            private: true,
+            devDependencies: {
+              '@gate-forge/pack-fastapi': '^0.9.0',
+              '@gate-forge/pack-sqlalchemy': '^0.9.0',
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code).toBe(0);
+      // Already declared (at any version): nothing to install, nothing said.
+      expect(stdout).not.toContain('npm i -D @gate-forge/');
+    });
+  });
+
   it('records explicit owner docs exclusions and keeps the declaration idempotent', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles({ 'docs/guide.md': '# Owner-only assertion\n' });
@@ -1003,6 +1043,13 @@ const QUEUE_OBSERVER_YML = `queueObserver:
  * — a repository that already has code meets debt on its first commit.
  * The assertion stays byte-exact: a drift in ANY default surface line
  * still fails here.
+ *
+ * UPDATED (0.9.2, item C): the run now prints ONE line naming the install
+ * the written config expects — `npm i -D @gate-forge/pack-http@<cli
+ * version>` — directly after the scaffolded files. init decides which
+ * packs to enable and the setup guide requires them as direct
+ * dependencies, so init is the only place that knows the exact list;
+ * the install itself is never run for the owner.
  */
 /**
  * The one line a HEADLESS init prints about how unmatched by-id routes are
@@ -1016,7 +1063,9 @@ const UNMATCHED_ROUTES_INIT_NOTE =
 
 const QUEUE_REPO_INIT_OUTPUT_WITHOUT_OBSERVER = "no terminal: writing the light preset (report everything, block nothing) — a human must choose the goal: re-run with --preset <light|normal|strict> (in a terminal, `gateforge init` asks)\nscan:\n  languages: javascript\n  signals: (none)\nrecommended:\n  plugins: gateforge.pack-http\n  why: gateforge.pack-http — no repository signal — the javascript default set\n  policy: persistence:* on user-facing tables; transport-only HTTP on consumed endpoints\n  proof: overlay (tests/e2e/gateforge/)\nskipped:\n  gateforge.pack-task — no semantic verifier (VERIFIER_UNSUPPORTED)\n  http:frontend-request-observed — not provable yet: no independent browser channel\n  coveragePolicy / strictE2E — owner opt-in\ntip: re-run with --plugins <comma,list> to add detectors (entries already in .gateforge.yml are kept; nothing else in the file changes)\n" +
   UNMATCHED_ROUTES_INIT_NOTE +
-  "tip: non-interactive init keeps full evidence identity; use --docs-exclude <folder,...> (or --docs-exclude-file <path>, one folder per line) to opt in\ncreated: <REPO>/.gateforge.yml\ncreated: <REPO>/.gateforge/policies.yml\ncreated: <REPO>/.gateforge/classification-policy.yml\ncreated: <REPO>/.gateforge/baselines/obligations.json\ncreated: <REPO>/GATEFORGE.md\ncreated: <REPO>/tests/e2e/gateforge/README.md\ncreated: <REPO>/.gitignore (gateforge engine state ignored: .gateforge/test-gates/ — without this, `git add -A` stages the run cache and the gate blocks on its own files)\nwrote mode: warn (strict — block everything / changed — block only what this change touches / warn — block nothing)\nwrote no hooks: nothing blocks your commits — read the report instead\nundo: rm -rf .gateforge.yml .gateforge/policies.yml .gateforge/classification-policy.yml .gateforge/baselines/obligations.json GATEFORGE.md tests/e2e/gateforge/README.md .gitignore\nthis repository already had code, so `gateforge check` reports what discovery finds today, and today's findings block the first commit:\n  gateforge adopt — records today's blocking findings as forgiven debt, in a baseline plus a dated, count-annotated receipt, then wires the blocking gate.\n  it is shrink-only from here: it never forgives new work. Resolve debt and run `gateforge baseline update` to shrink the recorded set; new unproven work keeps blocking.\n  with strictE2E enabled, an adopted E2E obligation still blocks with ENFORCEMENT_UNTRUSTED as soon as a change touches it — baselined is not proof.\nskeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines\n";
+  "tip: non-interactive init keeps full evidence identity; use --docs-exclude <folder,...> (or --docs-exclude-file <path>, one folder per line) to opt in\ncreated: <REPO>/.gateforge.yml\ncreated: <REPO>/.gateforge/policies.yml\ncreated: <REPO>/.gateforge/classification-policy.yml\ncreated: <REPO>/.gateforge/baselines/obligations.json\ncreated: <REPO>/GATEFORGE.md\ncreated: <REPO>/tests/e2e/gateforge/README.md\n" +
+  `install the enabled packs as direct dependencies (same version as the CLI): npm i -D @gate-forge/pack-http@${VERSION}\n` +
+  "created: <REPO>/.gitignore (gateforge engine state ignored: .gateforge/test-gates/ — without this, `git add -A` stages the run cache and the gate blocks on its own files)\nwrote mode: warn (strict — block everything / changed — block only what this change touches / warn — block nothing)\nwrote no hooks: nothing blocks your commits — read the report instead\nundo: rm -rf .gateforge.yml .gateforge/policies.yml .gateforge/classification-policy.yml .gateforge/baselines/obligations.json GATEFORGE.md tests/e2e/gateforge/README.md .gitignore\nthis repository already had code, so `gateforge check` reports what discovery finds today, and today's findings block the first commit:\n  gateforge adopt — records today's blocking findings as forgiven debt, in a baseline plus a dated, count-annotated receipt, then wires the blocking gate.\n  it is shrink-only from here: it never forgives new work. Resolve debt and run `gateforge baseline update` to shrink the recorded set; new unproven work keeps blocking.\n  with strictE2E enabled, an adopted E2E obligation still blocks with ENFORCEMENT_UNTRUSTED as soon as a change touches it — baselined is not proof.\nskeleton ready: .gateforge/adapters, .gateforge/waivers, .gateforge/baselines\n";
 
 describe('gateforge init: the task behavior pack is offered only with a queueObserver', () => {
   it('without a queueObserver, init output is byte-identical to the pre-change output', async () => {

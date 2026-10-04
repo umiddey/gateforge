@@ -313,6 +313,91 @@ describe('conservative defaults', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Checklist: owner-declared delete semantics (classification-policy deleteRules)
+// ---------------------------------------------------------------------------
+
+describe('owner-declared delete semantics', () => {
+  /** The owner answer: every model in this tree is removed permanently. */
+  const hardPolicy = policy({
+    deleteRules: [
+      {
+        match: 'backend/models/**',
+        semantics: 'hard',
+        reason: 'Rows in this model tree are removed permanently.',
+      },
+    ],
+  });
+
+  it('proves hard delete for every resource whose source file matches the rule', () => {
+    const result = classify({
+      resources: [resource()],
+      signals: structuralSignals(),
+      policy: hardPolicy,
+      adapters: ['accounts'],
+      scan: EMPTY_SCAN,
+    });
+    const entry = decision(result);
+    expect(entry.blocks.map((block) => block.code)).toEqual([]);
+    expect(entry.classification?.lifecycle.deleteSemantics).toBe('hard');
+    // The trace names the rule that answered, not an anonymous signal.
+    expect(entry.classification?.rules.join('\n')).toContain(
+      'DELETE_SEMANTICS_OWNER_RULE(backend/models/**)',
+    );
+  });
+
+  it('carries the owner-declared archived state for an archive rule', () => {
+    const result = classify({
+      resources: [resource()],
+      signals: structuralSignals(),
+      policy: policy({
+        deleteRules: [
+          {
+            match: 'backend/models/**',
+            semantics: 'archive',
+            archiveFields: { status: 'archived' },
+            reason: 'Rows in this model tree are archived, never removed.',
+          },
+        ],
+      }),
+      adapters: ['accounts'],
+      scan: EMPTY_SCAN,
+    });
+    const entry = decision(result);
+    expect(entry.blocks).toEqual([]);
+    expect(entry.classification?.lifecycle.deleteSemantics).toBe('archive');
+    expect(entry.classification?.lifecycle.archiveFields).toEqual({ status: 'archived' });
+  });
+
+  it('never silently overrides contradicting detector evidence', () => {
+    const result = classify({
+      resources: [resource()],
+      signals: [...structuralSignals(), signal({ dimension: 'delete-semantics', assertion: 'archive' })],
+      policy: hardPolicy,
+      adapters: ['accounts'],
+      scan: EMPTY_SCAN,
+    });
+    const entry = decision(result);
+    expect(entry.blocks.map((block) => block.code)).toEqual(['DELETE_SEMANTICS_UNRESOLVED']);
+    expect(entry.blocks[0]?.detail).toContain('conflicting delete-semantics evidence');
+    expect(entry.classification).toBeNull();
+  });
+
+  it('leaves a resource outside the rule glob exactly as it was', () => {
+    const serviceLocation = { file: 'backend/services/accounts.py', line: 3, col: 0 };
+    const result = classify({
+      resources: [resource({ source: 'backend/services/accounts.py', location: serviceLocation })],
+      signals: structuralSignals(),
+      policy: hardPolicy,
+      adapters: ['accounts'],
+      scan: EMPTY_SCAN,
+    });
+    const entry = decision(result);
+    expect(entry.blocks.map((block) => block.code)).toEqual(['DELETE_SEMANTICS_UNRESOLVED']);
+    expect(entry.classification).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Checklist: internality certificate and contradictions
 // ---------------------------------------------------------------------------
 
