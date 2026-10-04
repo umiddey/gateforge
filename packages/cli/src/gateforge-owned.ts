@@ -107,18 +107,6 @@ const ENGINE_DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The depth-one dotenv documents a repository may keep in `.gateforge/`
- * to configure its staged runtime (`e2e.env` and `.env` itself).
- * Recognized ONLY directly under `.gateforge/` — an `.env` anywhere else
- * in a repository is the product's or the operator's own configuration,
- * and no engine document rule ever reaches it.
- */
-const ENGINE_ENV_DOCUMENT_BASENAMES: ReadonlySet<string> = new Set([
-  '.env',
-  'e2e.env',
-]);
-
-/**
  * Owner-owned files that carry a Gateforge-managed block, with the markers
  * that prove the block is still wired. A file whose marker is gone is not a
  * policy input anymore — that is exactly the E17 self-authorization case.
@@ -245,18 +233,6 @@ export function gateforgeOwnedInput(file: string, config: GateforgeConfig): Gate
     ENGINE_DOCUMENT_EXTENSIONS.has(extensionOf(segments[1] ?? ''))
   ) {
     return { path: posix, kind: 'policy' };
-  }
-  // The depth-one dotenv a repository keeps to configure its staged
-  // runtime. `init` wires the gate; the owner's own environment values
-  // live here, so this is governed by the owner-approved policy digest
-  // like every other runtime input — never by a product obligation, and
-  // never a scope-expansion reason.
-  if (
-    segments.length === 2 &&
-    segments[0] === '.gateforge' &&
-    ENGINE_ENV_DOCUMENT_BASENAMES.has(segments[1] ?? '')
-  ) {
-    return { path: posix, kind: 'runtime-policy' };
   }
   return null;
 }

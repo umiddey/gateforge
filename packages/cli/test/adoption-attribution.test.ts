@@ -6,10 +6,10 @@
  * Four independent seams, each tested where its decision is made:
  * - `runnerConfigPaths` — every config the runner can be pointed at, not
  *   only the one that resolved;
- * - `runtimeDeclaredPaths` — the scripts, compose overrides and env files
+ * - `runtimeDeclaredInputs` — the scripts, compose overrides and env files
  *   `runtime.yml` NAMES, and nothing it does not;
- * - `gateforgeOwnedInput` — the depth-one dotenv a repository keeps to
- *   configure its staged runtime;
+ * - the input snapshot — a runtime input binds the receipt's identity;
+ * - `gateforgeOwnedInput` — and, deliberately, what it must NOT claim;
  * - `computeEvaluationScope` — the import graph, not a folder name, and
  *   the honest reading of a deletion no runner ever collected.
  *
@@ -20,11 +20,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { loadConfig, parseConfig, withTempRepo } from '@gate-forge/core';
-import { installFixture } from './helpers.js';
-import { gateforgeOwnedInput } from '../src/gateforge-owned.js';
+import { configYml, currentInputDigest, installFixture } from './helpers.js';
 import { computeEvaluationScope } from '../src/scope.js';
+import { collectDeclaredInputs } from '../src/input-snapshot.js';
 import type { GateforgeConfig } from '@gate-forge/core';
-import { runnerConfigPaths, runtimeDeclaredPaths } from '../src/test-infrastructure.js';
+import { gateforgeOwnedInput } from '../src/gateforge-owned.js';
+import { runnerConfigPaths, runtimeDeclaredInputs } from '../src/test-infrastructure.js';
 
 /** Writes a file tree (repo-relative posix keys) into a temp directory. */
 function writeTree(root: string, files: Record<string, string>): void {
@@ -121,7 +122,7 @@ describe('runtime-declared inputs: what `runtime.yml` NAMES, and only that', () 
         'docker-compose.prod.yml': 'services: {}\n',
         'scripts/other/thing.sh': '#!/usr/bin/env bash\n',
       });
-      const paths = runtimeDeclaredPaths(root, runtimeConfig());
+      const paths = runtimeDeclaredInputs(root, runtimeConfig());
       expect(paths).toEqual(
         expect.arrayContaining(['scripts/e2e/run.sh', 'docker-compose.e2e.yml', '.gateforge/e2e.env']),
       );
@@ -138,22 +139,69 @@ describe('runtime-declared inputs: what `runtime.yml` NAMES, and only that', () 
     const root = makeRoot();
     try {
       writeTree(root, { 'scripts/e2e/run.sh': '#!/usr/bin/env bash\n' });
-      expect(runtimeDeclaredPaths(root, runtimeConfig())).toEqual([]);
+      expect(runtimeDeclaredInputs(root, runtimeConfig())).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 });
 
-describe('Gateforge-owned runtime documents', () => {
-  it('classifies the depth-one dotenv a repository configures its run with', () => {
+describe('the depth-one dotenv is a RUNTIME input, never an owner-pinned one', () => {
+  it('is not classified as a Gateforge-owned policy input', () => {
     const config = runtimeConfig();
-    expect(gateforgeOwnedInput('.gateforge/e2e.env', config)?.kind).toBe('runtime-policy');
-    expect(gateforgeOwnedInput('.gateforge/.env', config)?.kind).toBe('runtime-policy');
-    // An `.env` anywhere else is the repository's own configuration and
-    // no engine document rule reaches it.
-    expect(gateforgeOwnedInput('app/e2e.env', config)).toBeNull();
-    expect(gateforgeOwnedInput('app/.env', config)).toBeNull();
+    // It is NOT in the owner-approved policy digest and NOT a policy
+    // input: a port changes far too often to justify a re-pin. Calling it
+    // one would make it unpinned, unsnapshotted and invisible — a free
+    // pass, not attribution.
+    expect(gateforgeOwnedInput('.gateforge/e2e.env', config)).toBeNull();
+    expect(gateforgeOwnedInput('.gateforge/.env', config)).toBeNull();
+  });
+
+  it('expands the scope when it changes, because the run reads it', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const config = loadConfig(`${repo.root}/.gateforge.yml`);
+      const decision = computeEvaluationScope({
+        config,
+        changedFiles: ['.gateforge/e2e.env'],
+        runtimeInputs: ['.gateforge/e2e.env'],
+        strictE2E: true,
+      });
+      expect(decision.mode).toBe('all');
+      expect(decision.expandedBecause).toEqual(['.gateforge/e2e.env']);
+      expect(decision.unmappedFiles).toEqual([]);
+    });
+  });
+
+  it('joins the input snapshot, so changing it changes the receipt identity', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ '.gateforge.yml': `runtime: .gateforge/runtime.yml\n${configYml()}` });
+      repo.writeFiles({
+        '.gateforge/runtime.yml': ['schemaVersion: 1', 'env_files:', '  - .gateforge/e2e.env', ''].join('\n'),
+        '.gateforge/e2e.env': 'E2E_PROFILE=ci\n',
+      });
+      const config = loadConfig(`${repo.root}/.gateforge.yml`);
+      expect(collectDeclaredInputs(repo.root, config)).toContain('.gateforge/e2e.env');
+      const before = await currentInputDigest(repo);
+      repo.writeFiles({ '.gateforge/e2e.env': 'E2E_PROFILE=headed\n' });
+      // The receipt must bind the bytes the run actually read.
+      expect(await currentInputDigest(repo)).not.toBe(before);
+    });
+  });
+
+  it('records a declared env file that does not exist yet as an absence', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({ '.gateforge.yml': `runtime: .gateforge/runtime.yml\n${configYml()}` });
+      repo.writeFiles({
+        '.gateforge/runtime.yml': ['schemaVersion: 1', 'env_files:', '  - .gateforge/e2e.env', ''].join('\n'),
+      });
+      const config = loadConfig(`${repo.root}/.gateforge.yml`);
+      // Creating it later must change the receipt's identity, so the
+      // missing state is declared rather than silently absent.
+      expect(collectDeclaredInputs(repo.root, config)).toContain('absent:.gateforge/e2e.env');
+    });
   });
 });
 
@@ -211,9 +259,8 @@ describe('scope: the first adoption commit\'s whole file set', () => {
         testFiles: ['tests/e2e/real/accounts.spec.ts'],
         runnerConfigs: ['playwright.config.ts', 'playwright.config.e2e.ts'],
         testInfrastructureFiles: ['tests/e2e/support/fixtures.ts'],
-        runtimeInputs: ['scripts/e2e/run.sh', 'docker-compose.e2e.yml'],
+        runtimeInputs: ['scripts/e2e/run.sh', 'docker-compose.e2e.yml', '.gateforge/e2e.env'],
         mappingSidecar: true,
-        policyInputs: ['.gateforge/e2e.env'],
         strictE2E: true,
       });
       // Every expansion input is named, so the message a reader gets says
@@ -230,12 +277,13 @@ describe('scope: the first adoption commit\'s whole file set', () => {
           'test-infra:tests/e2e/support/fixtures.ts',
           'scripts/e2e/run.sh',
           'docker-compose.e2e.yml',
+          '.gateforge/e2e.env',
         ]),
       );
-      // The engine-owned runtime document is governed by the policy
-      // digest: neither unmapped nor an expansion reason.
-      expect(decision.expandedBecause).not.toContain('.gateforge/e2e.env');
-      expect(decision.policyInputs).toEqual(['.gateforge/e2e.env']);
+      // The dotenv is a runtime input: attributable and scope-expanding,
+      // because the supervised run reads it. It is NOT an owner-pinned
+      // policy document, so it must not be excused the way one is.
+      expect(decision.policyInputs).toEqual([]);
       // Only the documentation edit stays unmapped — the one refusal the
       // engine owns by design (a mixed docs+code commit is never
       // docs-only).

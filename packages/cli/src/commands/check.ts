@@ -184,7 +184,7 @@ import { singletonPerTenantAdvisories } from '../singleton-guidance.js';
 import { responseFieldAdvisories } from '../response-field-guidance.js';
 import { unmatchedRouteBannerLines } from '../unmatched-routes.js';
 import { annotationMapSyncAdvisories, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
-import { runnerConfigPaths, runtimeDeclaredPaths } from '../test-infrastructure.js';
+import { runnerConfigPaths, runtimeDeclaredInputs } from '../test-infrastructure.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
   collectInputFiles,
@@ -1335,7 +1335,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     // sidecar.
     const sidecar = loadOptionalTestMap(io.cwd);
     const runnerConfigs = runnerConfigPaths(io.cwd, config.runner);
-    const runtimeInputs = runtimeDeclaredPaths(io.cwd, config);
+    const runtimeInputs = runtimeDeclaredInputs(io.cwd, config);
     let testFiles: string[] = [];
     let testInfrastructureFiles: string[] = [];
     let fileVerdict: ((file: string) => 'claimed' | 'disclaimed' | 'unclaimed') | undefined;

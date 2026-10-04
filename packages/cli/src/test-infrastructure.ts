@@ -22,10 +22,11 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
-import type { GateforgeConfig, RuntimeConfig } from '@gate-forge/core';
+import { RuntimeConfigSchema, type GateforgeConfig, type RuntimeConfig } from '@gate-forge/core';
 import { findPlaywrightConfig } from '@gate-forge/pack-playwright';
+import { parse as parseYaml } from 'yaml';
 
-import { loadRuntimeConfigAt } from './runtime.js';
+
 
 /**
  * A Playwright configuration at the repository root, including the
@@ -197,13 +198,44 @@ function runtimeArgvLists(runtime: {
 }
 
 /**
- * Every repository file the staged runtime document names as a command
- * argument or an env file: the repo's own `scripts/e2e/*` runners, the
- * compose overrides it starts, the `.env` files it loads.
+ * Parses the staged runtime document, or null when the repository
+ * declares none, the file is absent, or it does not validate.
  *
- * A runtime document that cannot be read declares nothing (fail closed on
- * attribution, never on the gate): an unreadable `runtime.yml` leaves
- * those files `CHANGE_UNMAPPED` exactly as before.
+ * Reads the document directly rather than through `runtime.ts`: this
+ * module is imported by the input snapshot, and `runtime.ts` reaches
+ * back into the snapshot through `state.ts`. A leaf reader keeps the
+ * dependency graph acyclic, and attribution wants a plain "no document,
+ * no declarations" answer anyway.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *   config: the loaded configuration (its `runtime` key names the doc).
+ *
+ * Returns:
+ *   RuntimeConfig | null: the validated document, or null.
+ */
+function readRuntimeDocument(cwd: string, config: GateforgeConfig): RuntimeConfig | null {
+  if (config.runtime === undefined) return null;
+  let document: unknown;
+  try {
+    document = parseYaml(readFileSync(join(cwd, ...config.runtime.split('/')), 'utf8'));
+  } catch {
+    return null;
+  }
+  const runtime = RuntimeConfigSchema.safeParse(document);
+  return runtime.success ? runtime.data : null;
+}
+
+/**
+ * Every path the staged runtime document NAMES — a command argument or an
+ * `env_files` entry — whether or not the file exists yet.
+ *
+ * These are RUNTIME INPUTS, not owner-pinned policy: a stack script, a
+ * compose override and the `.env` the run loads decide what runs and what
+ * the suite sees. They expand the evaluation scope and they join the input
+ * snapshot, so a change to any of them changes the receipt's identity.
+ * They are deliberately NOT part of the owner-approved policy digest: a
+ * port or a base URL changes far too often to justify a re-pin.
  *
  * Args:
  *   cwd: absolute repo root.
@@ -212,15 +244,8 @@ function runtimeArgvLists(runtime: {
  * Returns:
  *   string[]: normalized repo-relative posix paths, sorted.
  */
-export function runtimeDeclaredPaths(cwd: string, config: GateforgeConfig): string[] {
-  let runtime: RuntimeConfig | null;
-  try {
-    runtime = loadRuntimeConfigAt(cwd, config.runtime);
-  } catch {
-    // A declared-but-unreadable runtime document is its own gate's
-    // finding. Attribution declares nothing rather than guessing.
-    return [];
-  }
+export function runtimeDeclaredInputs(cwd: string, config: GateforgeConfig): string[] {
+  const runtime = readRuntimeDocument(cwd, config);
   if (runtime === null) return [];
   const found = new Set<string>();
   for (const argv of runtimeArgvLists(runtime)) {
@@ -230,8 +255,7 @@ export function runtimeDeclaredPaths(cwd: string, config: GateforgeConfig): stri
     }
   }
   for (const envFile of runtime.env_files ?? []) {
-    const resolved = existingRepoFile(cwd, envFile);
-    if (resolved !== null) found.add(resolved);
+    found.add(envFile.split('\\').join('/'));
   }
   return [...found].sort();
 }

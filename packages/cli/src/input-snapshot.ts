@@ -50,6 +50,7 @@ import {
   type HttpRouteCandidate,
   type Obligation,
 } from '@gate-forge/core';
+import { runtimeDeclaredInputs } from './test-infrastructure.js';
 import { UsageError } from './errors.js';
 import { expandIncludePaths } from './glob.js';
 import { isEngineGeneratedStatePath } from './state-artifacts.js';
@@ -586,6 +587,17 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
   // is part of `.gateforge.yml`, already listed above.
   for (const candidate of explicitFiles) {
     if (candidate.length > 0) paths.add(candidate);
+  }
+
+  // The files the staged runtime document NAMES — a `scripts/e2e/*` runner,
+  // a compose override, an `.env` the run loads. They are RUNTIME inputs,
+  // deliberately NOT owner-pinned policy: a port or a base URL changes too
+  // often to justify a re-pin, so they bind the receipt through THIS
+  // snapshot instead. A declared file that does not exist is an explicit
+  // absence marker, never a silent gap — creating it later must change
+  // the receipt's identity.
+  for (const declared of runtimeDeclaredInputs(cwd, config)) {
+    paths.add(existsSync(join(cwd, ...declared.split('/'))) ? declared : `absent:${declared}`);
   }
 
   // Adapter modules (top-level .mjs, as the pipeline loads them) plus
