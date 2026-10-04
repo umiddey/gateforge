@@ -1106,6 +1106,49 @@ export interface SessionIdentityResponse {
   seat: string;
 }
 
+/**
+ * What one OPEN session's fixture page REPORTED about the origins its
+ * browser requested without the session proxy (plan 0.9.2 item F).
+ *
+ * This is DIAGNOSTIC TEXT and nothing else: the witness renders it into
+ * the zero-traffic note a finalize already emits, mints no record from
+ * it, and grades no verdict from it. A suite that lies here only makes
+ * its own failure message wrong.
+ */
+export interface SessionPageOriginReport {
+  /**
+   * The origin the fixture was configured with — the `GATEFORGE_APP_BASE_URL`
+   * it read, i.e. the only origin it rewrites onto the session proxy.
+   */
+  readonly appBaseUrl: string;
+  /**
+   * Distinct origins the page requested that the fixture did NOT route,
+   * in first-seen order, capped (see the handler). Loopback and same-host
+   * origins only — a third-party asset is not a mismatch.
+   */
+  readonly origins: readonly string[];
+}
+
+/** `POST /sessions/page-origins` request (session-authenticated). */
+export interface SessionPageOriginRequest {
+  /** The session the report belongs to (its own, never another's). */
+  sessionId: string;
+  /** The session's witness-issued secret; authorizes this call alone. */
+  sessionToken: string;
+  /** The origin the fixture routes onto the session proxy. */
+  appBaseUrl: string;
+  /** The origins this call observed since the last one (may grow a set). */
+  origins: string[];
+}
+
+/**
+ * `POST /sessions/page-origins` response: the report was kept in witness
+ * memory for this session. It echoes nothing — nothing here is evidence.
+ */
+export interface SessionPageOriginResponse {
+  recorded: true;
+}
+
 /** The transport handed to `read` (GET-only, engine-mediated). */
 export interface AdapterContext {
   /**

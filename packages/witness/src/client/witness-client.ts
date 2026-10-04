@@ -29,6 +29,8 @@ import type {
   SessionCredential,
   SessionIdentityRequest,
   SessionIdentityResponse,
+  SessionPageOriginRequest,
+  SessionPageOriginResponse,
   SessionResolveRequest,
   SessionResolveResponse,
 } from '../witness/types.js';
@@ -176,6 +178,24 @@ export class WitnessClient {
    */
   async registerSessionIdentity(request: SessionIdentityRequest): Promise<SessionIdentityResponse> {
     return this.request<SessionIdentityResponse>('/sessions/identity', request);
+  }
+
+  /**
+   * POST /sessions/page-origins (plan 0.9.2 item F): reports the origins
+   * this test's page requested that the fixture did NOT route onto the
+   * session proxy, so the zero-traffic note can name the real cause (a
+   * suite base URL that differs from GATEFORGE_APP_BASE_URL) instead of
+   * only blaming the fixture page.
+   *
+   * It is DIAGNOSTIC TEXT: the witness keeps it in memory for this
+   * session, mints no record from it, and grades nothing on it. Session
+   * authenticated, so it can only ever report for the session the caller
+   * is running under.
+   */
+  async reportSessionPageOrigins(
+    request: SessionPageOriginRequest,
+  ): Promise<SessionPageOriginResponse> {
+    return this.request<SessionPageOriginResponse>('/sessions/page-origins', request);
   }
 
   /**

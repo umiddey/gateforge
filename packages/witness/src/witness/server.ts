@@ -77,6 +77,14 @@
  *   every read, and a wrong tenant makes the row unfound (fail closed).
  *   Without a registration the adapter reads through the process-global
  *   witness environment seat, exactly as before.
+ * - `POST /sessions/page-origins` — SESSION-AUTHENTICATED: the running
+ *   fixture reports the origins its page requested that the routing
+ *   helper did NOT rewrite onto the session proxy (`{sessionId,
+ *   sessionToken, appBaseUrl, origins}`). DIAGNOSTIC TEXT and nothing
+ *   else: kept in witness memory for the session, dropped with it, and
+ *   read by exactly one consumer — the zero-traffic note, which names the
+ *   mismatched origin and both fixes instead of guessing. It mints no
+ *   record and grades no verdict.
  * - `POST /sessions/intervals/{open,close}` — the fixture marks a
  *   witness-recorded observation interval per UI action (start/end ticks
  *   from the witness's monotonic clock). Proxy exchanges observed
@@ -241,6 +249,7 @@ import type {
   SessionCloseRequest,
   SessionIdentity,
   SessionOpenRequest,
+  SessionPageOriginReport,
   SessionReleaseRequest,
   SessionResolveRequest,
   TestSession,
@@ -590,6 +599,18 @@ interface WitnessState {
    * consulted for a read that belongs to another session.
    */
   sessionIdentities: Map<string, SessionIdentity>;
+  /**
+   * Per-session ORIGIN DIAGNOSTICS (plan 0.9.2 item F), keyed by
+   * sessionId: what one session's fixture page reported about the
+   * origins it did not route onto the session proxy.
+   *
+   * Witness MEMORY only and never evidence: the zero-traffic note quotes
+   * it, nothing stamps it, no verdict reads it. Dropped with its session
+   * (close, release), exactly like the identity beside it — the same
+   * session-authenticated fixture→witness channel, never a second trust
+   * path.
+   */
+  sessionPageOrigins: Map<string, SessionPageOriginReport>;
   /**
    * Trusted run context bound via `POST /run-context` (plan §11.4): the
    * frozen `{runId, invocationId, inputDigest}` the witness attests.
@@ -1439,6 +1460,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     sessions: new Map(),
     workerSessions: new Map(),
     sessionIdentities: new Map(),
+    sessionPageOrigins: new Map(),
     // The engine browser is OPTIONAL here and required only by the
     // ENGINE-BROWSER proof channel: this package is runner-neutral and
     // must not assume a browser is installed. A witness started without
@@ -2291,6 +2313,10 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/sessions/identity') {
       await handleSessionIdentity(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/page-origins') {
+      await handleSessionPageOrigins(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
     if (req.method === 'POST' && path === '/sessions/intervals/open') {
@@ -3658,6 +3684,7 @@ async function handleSessionClose(
     // never be consumed by a later call.
     state.observeSnapshots.delete(sessionId);
     state.sessionIdentities.delete(sessionId);
+    state.sessionPageOrigins.delete(sessionId);
     sendJson(res, 200, { sealed: true as const });
     return;
   }
@@ -3675,6 +3702,7 @@ async function handleSessionClose(
     // The registered identity dies with the session: a later read has no
     // credential of this session's to inherit, ever.
     state.sessionIdentities.delete(session.sessionId);
+    state.sessionPageOrigins.delete(session.sessionId);
     // The dedicated channel dies with the session: nothing can observe
     // (or submit) through it afterwards. The engine browser context dies
     // too — a sealed session's pages are never driven again.
@@ -3743,6 +3771,97 @@ async function handleSessionIdentity(
   }
   state.sessionIdentities.set(session.sessionId, { seat, values: Object.freeze(credential) });
   sendJson(res, 200, { registered: true as const, seat });
+}
+
+/**
+ * `POST /sessions/page-origins` — SESSION-AUTHENTICATED (plan 0.9.2
+ * item F): the running fixture reports the origins its page requested
+ * that the routing helper did NOT rewrite onto the session proxy.
+ *
+ * This rides the SAME channel, authentication and lifecycle as the
+ * identity beside it — session-authenticated, witness memory, dropped
+ * with the session — so it is not a second trust path. What differs is
+ * what it may do: NOTHING. It mints no record, grades nothing, and never
+ * reaches the run state, a log or a report. Its only consumer is the
+ * zero-traffic note a finalize already emits, which names the mismatched
+ * origin and both fixes instead of guessing.
+ *
+ * Refusals mirror the identity handler: a foreign credential → 403, a
+ * sealed or released session → 409, and a malformed origin → 400, so a
+ * half-parsed origin can never reach the note.
+ */
+async function handleSessionPageOrigins(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (!isPlainObject(body)) {
+    throw new HttpError(400, 'page origin report body must be an object');
+  }
+  // Authenticated as the session it names: a caller can only report for
+  // the session whose secret it presents.
+  const session = requireOpenSession(state, body);
+  const appBaseUrl = parseOrigin(body['appBaseUrl'], 'the app base URL the fixture routes');
+  const reported = body['origins'];
+  if (!Array.isArray(reported) || reported.length === 0) {
+    throw new HttpError(400, 'page origin report requires at least one origin');
+  }
+  const origins = reported.map((origin) => parseOrigin(origin, 'each reported origin'));
+  const previous = state.sessionPageOrigins.get(session.sessionId);
+  // One bounded set per session: a page can request a mismatched origin
+  // thousands of times, and the note only ever needs the first few.
+  const merged: string[] = [];
+  for (const origin of [...(previous?.origins ?? []), ...origins]) {
+    if (origin === appBaseUrl || merged.includes(origin)) continue;
+    if (merged.length >= PAGE_ORIGIN_REPORT_CAP) break;
+    merged.push(origin);
+  }
+  state.sessionPageOrigins.set(session.sessionId, {
+    appBaseUrl,
+    origins: Object.freeze(merged),
+  });
+  sendJson(res, 200, { recorded: true as const });
+}
+
+/**
+ * One reported origin, parsed and reduced to its origin form. A value
+ * that is not an absolute http(s) URL is refused rather than repaired:
+ * the note quotes origins, and a repaired one would name a host the
+ * suite never asked for.
+ */
+function parseOrigin(value: unknown, what: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new HttpError(400, `${what} must be a non-empty origin string`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new HttpError(400, `${what} '${value}' is not an absolute URL`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new HttpError(400, `${what} '${value}' must be an http(s) URL`);
+  }
+  return parsed.origin;
+}
+
+/**
+ * The origin-mismatch sentence the zero-traffic note appends, or '' when
+ * the session reported nothing (or the session is not open enough to
+ * carry a report). DIAGNOSTIC TEXT: it quotes what the fixture observed
+ * and the base URL it was configured with, and it decides nothing — the
+ * claim still blocks exactly as it did before the sentence existed.
+ */
+function pageOriginNote(state: WitnessState, session: TestSession): string {
+  const report = state.sessionPageOrigins.get(session.sessionId);
+  if (report === undefined || report.origins.length === 0) return '';
+  const named = report.origins.map((origin) => `'${origin}'`).join(', ');
+  return (
+    `this test's page requested ${named}, which the fixture did not route: it rewrites only ` +
+    `GATEFORGE_APP_BASE_URL ('${report.appBaseUrl}') onto this session's proxy — set ` +
+    'GATEFORGE_APP_BASE_URL to the origin your suite uses, or add your suite\'s base-URL variable ' +
+    'to envAllowlist in runtime.yml so it reaches the test process'
+  );
 }
 
 /**
@@ -5156,6 +5275,25 @@ const FIXTURE_PAGE_CAUSE =
   'its traffic passes through the session proxy';
 
 /**
+ * How many distinct unrouted origins one session keeps (plan 0.9.2
+ * item F). A broken run can name hundreds; the note needs the first few
+ * to name the cause, and a bounded set can never grow the witness's
+ * memory with a page's traffic.
+ */
+const PAGE_ORIGIN_REPORT_CAP = 5;
+
+/**
+ * The cause clause a zero-traffic note ends with, chosen by what the
+ * session actually reported: an origin mismatch is a SPECIFIED cause and
+ * supersedes the generic fixture-page guess (a report can only exist when
+ * the fixture page ran, so the guess it replaces is already refuted).
+ */
+function zeroTrafficCause(state: WitnessState, session: TestSession): string {
+  const reported = pageOriginNote(state, session);
+  return reported === '' ? FIXTURE_PAGE_CAUSE : reported;
+}
+
+/**
  * Resolves one observe-declared claim (record or typed note, never
  * throws). `persistence:*` claims resolve against the session's own
  * proxied traffic PLUS independent adapter reads; the transport
@@ -5220,7 +5358,7 @@ async function finalizeObserveClaim(
     return note(
       `no ${binding.method} ${binding.path} exchange (2xx) for this session through the observation ` +
         `proxy — drive traffic through the session proxy prefix before claiming the obligation; ` +
-        FIXTURE_PAGE_CAUSE,
+        zeroTrafficCause(state, session),
     );
   }
   if (matches.length > 1) {
@@ -5431,7 +5569,7 @@ function finalizeHttpObserveClaim(
       note:
         `observe '${claimId}': no HTTP exchange passed through this session's observation proxy ` +
         'before finalize — drive the endpoint through the session proxy prefix before claiming ' +
-        `the obligation; ${FIXTURE_PAGE_CAUSE}`,
+        `the obligation; ${zeroTrafficCause(state, session)}`,
     };
   }
   // The record binds runId/claimId/testId and rides the same ledger
