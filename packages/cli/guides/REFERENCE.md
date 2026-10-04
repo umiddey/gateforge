@@ -21,6 +21,7 @@ first commands; the guides cover the walks:
 - [Enforcement](#enforcement)
 - [Contract capabilities](#contract-capabilities)
 - [Configuration](#configuration)
+- [Classification policy (`.gateforge/classification-policy.yml`)](#classification-policy-gateforgeclassification-policyyml)
 - [Plugin invocation](#plugin-invocation)
 - [Endpoint plane rules (`.gateforge/planes.json`)](#endpoint-plane-rules-gateforgeplanesjson)
 - [Endpoint capability rules (`.gateforge/endpoints.json`)](#endpoint-capability-rules-gateforgeendpointsjson)
@@ -48,6 +49,7 @@ first commands; the guides cover the walks:
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking` and route-specific `guidance` when relevant). For an endpoint with no plane, ask which boundary owns its data and show the owner-reviewed choices; internality remains owner-only. Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. `classify plane` previews or explicitly appends an owner-reviewed endpoint plane rule to the existing `.gateforge/planes.json`; snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
+| `gateforge classify delete <file\|folder\|glob> <hard\|archive> [--archive-field <key=value>]... --reason <text> [--confirm]` | Preview (default) or explicitly append one owner delete-semantics rule to `.gateforge/classification-policy.yml`: how removal manifests for every model whose source file matches the pattern. `archive` requires at least one `--archive-field` (the owner-owned archived state the run grades removal against); `hard` refuses the flag. The preview writes nothing, prints the exact diff, and quotes the policy-pin consequence; `--confirm` writes it through the YAML document API, so comments and key order survive. An existing rule for the same source is reported, never shadowed. Declaring is an evidence contract, not an override: contradicting detector evidence still blocks. | 0/2 |
 | `gateforge explain <resourceId\|path> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. A repo-relative PATH is also a target: when no resource matches it, the command prints what the file is and what governs it (Gateforge policy input, declared gate input, owner-declared documentation folder, known source of a resource, or an unclassified change) with the steps that attribute it — this is the answer an unmapped `CHANGE_UNMAPPED` file needs. An unknown target stays unknown (exit 1). | 0/1/2 |
 | `gateforge tests discover [--json] [--pytest]` | Inventory existing tests into the derived run-state catalog: static analysis reconciled with native Playwright enumeration (`--list`). Unresolved wrappers, parse errors, and inventory gaps are DATA (never an empty catalog — failed native enumeration is exit 2). `--pytest` additionally collects the configured diagnostic suites' node ids (`--collect-only`). Playwright enumeration runs ONE config (a repo-root config wins; otherwise the alphabetically first config one directory deep), and when the repo holds more than one the runner line names every config, the one used, why, and the ones NOT inventoried. `inventoryComplete=false` means a reconciliation gap (an enumerated-vs-static mismatch, an unresolved case, or a not-inventoried extra config), not a partial success. | 0/2 |
 | `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`). Candidates are RANKED by the evidence their catalog row carries (explicit tag, resource token in title/file, operation word, route segment, unmocked folder, minus mocks) with the matching reason printed as `why:`; the text surface prints the top five and names how many it hid, `--json` carries every candidate with its `rank` and `score`. With a candidate present the next action is to MARK it `observed-e2e` and run it under the witness — the overlay instruction belongs to `newTestNeeded: true`. When Playwright reports load errors and enumerates no tests, report one `TEST_INVENTORY_INCOMPLETE` with the error count and first error instead of stale-mapping fan-out; the action is to install the missing dependency and rerun Gateforge. An inspection surface, NOT a gate: exit 0 even with blocking problems. | 0/2 |
@@ -850,6 +852,77 @@ Enforcement-relevant sections:
   `playwright` (the default when the key is absent), `pytest`, `vitest` or
   `cypress`. `check`, `next`, `tests`, `test-gates`, `doctor` and `init`
   all follow it. See `guides/RUNNER-NEUTRAL-EVIDENCE.md`.
+
+## Classification policy (`.gateforge/classification-policy.yml`)
+
+The repository-wide deterministic classification inputs. `gateforge init`
+scaffolds the file; every key is an OWNER answer, and the file
+participates in the trusted-policy digest, so changing it re-approves any
+approved policy pin before strict gates run.
+
+| Key | What it decides | Shape |
+| --- | --- | --- |
+| `scanRoots` | the files a closed-world proof must cover | repo-root-relative globs |
+| `trustedInternalEntryPoints` | which entry-point categories certify internality | category + patterns + detector |
+| `internalRules` | organization rules for internal resources | `resourceName` / `resourceKind` patterns |
+| `lifecycleRules` | operations that structurally do not exist, for one EXACT resource | exact `<plane>.<resource>` + `disable` |
+| `deleteRules` | how removal manifests, per source glob | `match` glob + `semantics` (+ `archiveFields`) |
+| `coverage` | which detector must examine which files before a proof counts | capability + detector + globs (+ `exhaustive`) |
+| `declarations` | the declaration syntax detectors may emit | source strings |
+| `volatileFields` | bookkeeping columns that never satisfy an update | column names |
+
+Unknown keys, an unknown value, and two rules answering the same target
+are refused (exit 2, fail closed) — the document is an input, never a
+place to smuggle intent past the schema.
+
+### Owner-declared delete semantics (`deleteRules`)
+
+Delete semantics are proven, never guessed. A detector that reads the
+model's own declaration can prove `hard` or `archive`; when nothing
+proves them, the resource stays `unclassified` and blocks with
+`DELETE_SEMANTICS_UNRESOLVED` (no obligations accrue, and `gateforge
+explain <resource>` names the resource and its source file). `lifecycleRules`
+can DISABLE delete for one exact resource; declaring semantics is the
+other half of the answer, and it needs a pattern because one declaration
+usually covers a whole model tree.
+
+```yaml
+deleteRules:
+  - match: 'backend/models/session/**'
+    semantics: hard
+    reason: 'Sessions are removed the moment the tenant logs out.'
+  - match: 'backend/models/invoice/**'
+    semantics: archive
+    archiveFields:
+      status: archived
+    reason: 'Invoices are retained for the audit window.'
+```
+
+- `match` is a repo-root-relative glob over the SOURCE FILE of the
+  resources it declares for — the same glob engine `.gateforge/planes.json`
+  uses. It must stay inside the repository.
+- `semantics` is `hard` or `archive`. `archive` REQUIRES non-empty
+  `archiveFields`: the owner-owned archived state (e.g.
+  `{status: archived}`) the engine grades removal against. `hard` must not
+  carry the key — a permanent removal has no archived state.
+- `reason` is required and is shown with the rule in traces.
+
+Write it with the command, which previews without `--confirm` and writes
+with it (folder answers become `match: '<folder>/**'`):
+
+```sh
+gateforge classify delete backend/models/invoice archive \
+  --archive-field status=archived \
+  --reason 'Invoices are retained for the audit window.' --confirm
+```
+
+Declaring semantics is an evidence CONTRACT, not an override: the rule
+contributes the same delete-semantics / archive-state evidence a detector
+would. Detector evidence that disagrees therefore still blocks — the
+conflicting-semantics detail names the owner declaration — and nothing is
+ever silently overridden. A resolved decision names the rule it used
+(`DELETE_SEMANTICS_OWNER_RULE(<match>)` in the trace), and a resource
+outside every `match` is exactly as it was.
 
 ## Plugin invocation
 

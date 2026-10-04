@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.2
+
+### Fixed
+
+- `gateforge tests suggest` no longer ranks a candidate on a substring. Resource tokens are matched WHOLE-WORD (title path words; file path segments split on `/ . _ -`), and a generated resource id contributes only its NAME: the plane (`tenant`), the transport (`http`), the method (`get`), route furniture (`api`, `v1`) and the trailing id hash are structure, not names. A test tagged `@crud(tenant.accounts:create)` therefore scored +100 "explicit tag" for EVERY tenant obligation — the account matrix outranked the real test for a `notifications` route it never touches — and `read` matched inside `reference`/`unread`. Weights, ordering, tie-breaks and the printed `why:` lines are unchanged; only false matches are gone.
+
+### Added
+
+- **Owner-declared delete semantics.** `.gateforge/classification-policy.yml` accepts `deleteRules: [{match: <source glob>, semantics: hard|archive, archiveFields?, reason}]`, matched against a resource's source file with the same glob engine `.gateforge/planes.json` uses. `archive` requires non-empty `archiveFields` (the owner-owned archived state the run grades removal against); `hard` must not carry one; unknown keys and two rules for the same pattern are refused. A matching rule contributes the same delete-semantics / archive-state evidence a detector would, so it can resolve `DELETE_SEMANTICS_UNRESOLVED` and nothing else — contradicting detector evidence still blocks, now naming the owner declaration, and the trace records `DELETE_SEMANTICS_OWNER_RULE(<match>)`. A resource outside every `match` is unchanged. This is the answer 186 unresolved resources had no way to give: `lifecycleRules` could only DISABLE delete, per exact resource.
+- `gateforge classify delete <file|folder|glob> <hard|archive> [--archive-field <key=value>]... --reason "<why>" [--confirm]` writes those rules: a preview without `--confirm` (nothing is written, the exact diff and the policy-pin consequence are printed), the rule with it. Folder answers become `match: '<folder>/**'`. `archive` refuses without `--archive-field`; `hard` refuses the flag; an existing rule for the same source is reported, never shadowed. The rule is appended through the YAML document API, so the owner's comments and key order survive, and the rewritten policy is validated against the pinned schema before it is printed or written.
+- `gateforge init` now names the install the config it just wrote expects: after the scaffold, ONE line lists every enabled bundled detector pack that `package.json` does not already declare, at the CLI's own version (`npm i -D @gate-forge/pack-sqlalchemy@<cli version> …`). Nothing is printed when they are all declared. npm is never run — the owner decides when the install happens. REFERENCE gains a classification-policy section (all owner keys, then `deleteRules`), and QUICKSTART explains the `DELETE_SEMANTICS_UNRESOLVED` answer next to the plane answer it follows.
+
 ## 0.9.1
 
 ### Fixed

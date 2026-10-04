@@ -33,6 +33,12 @@ npm i -D \
 
 Use the project-local `gateforge` binary from your npm script or add `node_modules/.bin` to your shell `PATH`. If the scan recommends other packs, add only the ones your code uses, at the same version. A mismatched Gateforge package contract can stop the CLI with exit code 2 and `GATEFORGE_PACKAGE_INCOMPATIBLE`.
 
+`gateforge init` prints that same command for you: after it writes the
+config it names — in ONE line — every detector pack it enabled that your
+`package.json` does not already declare, at the CLI's own version. Run
+that line (init never runs npm for you), and commit the install on its own
+before committing the setup files.
+
 **Installing from tarballs** (a release that is not on the registry yet): install every `.tgz` of that release in ONE command. The CLI depends on shared packages and packs that are not in the list above, and npm resolves them from the files only when they are all in the same install; a partial set makes npm look for the rest on the registry and fail with `E404`.
 
 ```sh
@@ -299,6 +305,33 @@ gateforge classify plane 'app/routes' tenant \
 Then run `gateforge next` again: the same block must not reappear. A route
 that is genuinely internal is the other answer, and it stays owner-only (an
 `internalRules` entry in `.gateforge/classification-policy.yml`).
+
+The second owner question is what removal MEANS. Delete semantics are
+proven, never guessed: a model that declares nothing keeps its resource
+`unclassified` and blocks with `DELETE_SEMANTICS_UNRESOLVED` (nothing on
+it accrues, and `gateforge explain <resource>` names it). You answer with
+`hard` (the row is removed) or `archive` (the row stays, with your own
+archived state):
+
+```sh
+gateforge classify delete 'backend/models' hard \
+  --reason 'Rows in this model tree are removed permanently.' --confirm
+```
+
+Like `classify plane` it previews without `--confirm`, and it takes one
+file, one FOLDER (written as `match: 'backend/models/**'`), or one glob —
+one reviewed rule per model tree, not per model. `archive` refuses to run
+without the archived field values the run grades removal against:
+
+```sh
+gateforge classify delete 'backend/models/invoice' archive \
+  --archive-field status=archived --archive-field archived_by=system \
+  --reason 'Invoices are archived, never removed.' --confirm
+```
+
+Your declaration is an evidence contract, not an override: if a detector
+reads the model and disagrees with your rule, the run blocks and names
+both instead of picking one. Then run `gateforge next` again.
 
 To verify a specific commit tree (for example, the tip of a pushed ref)
 instead of the current worktree or index:
