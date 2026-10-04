@@ -5139,6 +5139,23 @@ async function handleObserveFinalize(
 }
 
 /**
+ * What every zero-traffic Observe note says about the LIKELY cause
+ * (plan 0.9.2 finding E).
+ *
+ * A session that proxied nothing is nearly always a suite whose `page`
+ * never came from Gateforge's fixture: that fixture is what rewrites
+ * the app origin onto the supervisor's session proxy
+ * (`routePageThroughSessionProxy`), so a page built on plain
+ * Playwright talks straight to the app and the witness never sees the
+ * traffic. The test still passes — which is exactly why this note has
+ * to name the cause instead of only restating "no traffic".
+ */
+const FIXTURE_PAGE_CAUSE =
+  "the most likely cause is that this test's page is not Gateforge's fixture page — " +
+  'base the suite shared fixture on @gate-forge/pack-playwright/fixture (test/expect), so ' +
+  'its traffic passes through the session proxy';
+
+/**
  * Resolves one observe-declared claim (record or typed note, never
  * throws). `persistence:*` claims resolve against the session's own
  * proxied traffic PLUS independent adapter reads; the transport
@@ -5202,7 +5219,8 @@ async function finalizeObserveClaim(
   if (matches.length === 0) {
     return note(
       `no ${binding.method} ${binding.path} exchange (2xx) for this session through the observation ` +
-        'proxy — drive traffic through the session proxy prefix before claiming the obligation',
+        `proxy — drive traffic through the session proxy prefix before claiming the obligation; ` +
+        FIXTURE_PAGE_CAUSE,
     );
   }
   if (matches.length > 1) {
@@ -5413,7 +5431,7 @@ function finalizeHttpObserveClaim(
       note:
         `observe '${claimId}': no HTTP exchange passed through this session's observation proxy ` +
         'before finalize — drive the endpoint through the session proxy prefix before claiming ' +
-        'the obligation',
+        `the obligation; ${FIXTURE_PAGE_CAUSE}`,
     };
   }
   // The record binds runId/claimId/testId and rides the same ledger

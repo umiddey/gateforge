@@ -297,6 +297,14 @@ describe('observe finalize (create)', () => {
       const empty = await finalize(fixture.witness.url, session.sessionId);
       expect(empty.body['finalized']).toEqual([]);
       expect(JSON.stringify(empty.body['notes'])).toContain('no POST /api/accounts exchange');
+      // The cause, not just the symptom: a page outside Gateforge's fixture
+      // never reaches the session proxy, and the test still passes (E2).
+      expect(JSON.stringify(empty.body['notes'])).toContain(
+        "this test's page is not Gateforge's fixture page",
+      );
+      expect(JSON.stringify(empty.body['notes'])).toContain(
+        '@gate-forge/pack-playwright/fixture',
+      );
       // Direct-to-target traffic bypasses every session channel: invisible.
       await proxyExchange(fixture.target.url, 'POST', '/api/accounts', JSON.stringify({ first_name: 'X', last_name: 'Y' }));
       const bypassed = await finalize(fixture.witness.url, session.sessionId);
@@ -689,6 +697,13 @@ describe('observe finalize (transport obligations)', () => {
       const done = await finalize(fixture.witness.url, session.sessionId);
       expect(done.body['finalized']).toEqual([]);
       expect(JSON.stringify(done.body['notes'])).toContain('no HTTP exchange');
+      // Same cause sentence on the transport path (E2).
+      expect(JSON.stringify(done.body['notes'])).toContain(
+        "this test's page is not Gateforge's fixture page",
+      );
+      expect(JSON.stringify(done.body['notes'])).toContain(
+        '@gate-forge/pack-playwright/fixture',
+      );
       expect(await observedRecords(fixture.witness.url)).toEqual([]);
       await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
       await closeSupervisorSession(fixture.witness.url, TOKEN, other.sessionId, 'passed', VERIFIER_KEY);
