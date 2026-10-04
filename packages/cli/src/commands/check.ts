@@ -243,7 +243,7 @@ import {
 import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERSION } from './common.js';
 import { resolveVerifierKeyring, type VerifierKeyring } from '../verifier-keys.js';
 import { renderEndpointInventory } from '../endpoint-report.js';
-import { computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
+import { candidateTreeCoversCommit, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
 import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
 import { CACHE_EXCLUSIONS_GUARANTEE, loadCacheExclusions } from '../cache-exclusions.js';
 import { engineIdentity, reportEngineLine } from '../engine-identity.js';
@@ -688,6 +688,60 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
 }
 
 /**
+ * The candidate tree id `check --staged` binds a sealed receipt to.
+ *
+ * The frozen index tree is what the commit will contain, but a receipt is
+ * sealed over the WORKSPACE its run tested, and a candidate tree carries
+ * that workspace's untracked and gitignored bytes as well — that is what
+ * makes it a candidate, and it is why `candidateTreeCoversCommit` treats
+ * CONTAINMENT of the committed bytes, not equality with the commit tree,
+ * as the property a gate relies on. String equality between a workspace
+ * tree and the index tree can therefore never hold in a repository whose
+ * run writes into its own worktree (`node_modules/`, a blob report, a
+ * storage state), so a receipt sealed over a fully staged worktree could
+ * not satisfy the gate at all.
+ *
+ * What the gate actually needs is that every staged byte was among the
+ * tested bytes: when the sealed tree carries every staged path with the
+ * SAME mode and blob, the sealed tree IS the candidate, and binding the
+ * receipt to it says exactly what containment means. Nothing is relaxed
+ * — the receipt's authenticated input digest must still equal the digest
+ * this checkout computes, every staged path must be present in the sealed
+ * tree, and an unreadable receipt, an unreadable tree listing or a single
+ * differing byte falls back to the frozen index tree, which is the
+ * previous (stricter) test.
+ *
+ * Args:
+ *   gitDir: the USER repository's git dir — the sealed candidate tree
+ *     objects were written there by the run that sealed the receipt.
+ *   env: process environment.
+ *   stateDir: the USER run-state directory holding the sealed receipt.
+ *   frozen: the frozen candidate (staged index or candidate commit).
+ *   docsExclusions: owner-approved documentation folders (never sealed).
+ *   cacheExclusions: exact approved Python bytecode files (never sealed).
+ *
+ * Returns:
+ *   string: the sealed tree id when it provably covers the candidate,
+ *     otherwise the frozen candidate's own tree id.
+ */
+function boundCandidateTreeId(
+  gitDir: string | null,
+  env: NodeJS.ProcessEnv,
+  stateDir: string,
+  frozen: StagedCandidate,
+  docsExclusions: readonly string[],
+  cacheExclusions: readonly string[],
+): string {
+  if (gitDir === null) return frozen.treeId;
+  const parsed = GateReceiptSchema.safeParse(readStateDocument(stateDir, 'receipt.json'));
+  const sealed = parsed.success ? parsed.data.candidateTreeId : null;
+  if (sealed === null || sealed === undefined || sealed === frozen.treeId) return frozen.treeId;
+  return candidateTreeCoversCommit(gitDir, env, sealed, frozen.treeId, docsExclusions, cacheExclusions)
+    ? sealed
+    : frozen.treeId;
+}
+
+/**
  * The `--staged` gate (plan 2026-09-13 Phase 5 items 3–4): gate the EXACT
  * staged candidate. The candidate is frozen (tree id + parents + change
  * set), materialized into an isolated scratch checkout, and the regular
@@ -756,6 +810,8 @@ async function stagedCheckCommand(
   let runtimeReuseDigest: string | null = null;
   let runtimeReuseMounts: RuntimeReuseMount[] = [];
   let runtimeDoc: RuntimeConfig | null = null;
+  let docsExclusions: readonly string[] = [];
+  let cacheExclusions: readonly string[] = [];
   try {
     checkoutDir = materializeStagedCandidate(io.cwd, io.env, frozen);
     // Empty directories are invisible to Git trees — checkout-index cannot
@@ -770,8 +826,8 @@ async function stagedCheckCommand(
     // mirrored, and only for a STAGED index (a candidate commit tree is
     // gated on its own contents, never on the worktree around it).
     const checkoutConfig = loadConfigAt(checkoutDir);
-    const docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
-    const cacheExclusions = loadCacheExclusions(checkoutDir, checkoutConfig);
+    docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
+    cacheExclusions = loadCacheExclusions(checkoutDir, checkoutConfig);
     mirrorEmptyConfigDirs(io.cwd, checkoutDir, checkoutConfig, {
       fromStagedIndex: options.candidateCommitSha === undefined,
     });
@@ -904,7 +960,14 @@ async function stagedCheckCommand(
       format: options.format,
       approvedPolicyDigest: options.approvedPolicyDigest,
       verifierKeyring: options.verifierKeyring,
-      fixedCandidateTreeId: frozen.treeId,
+      fixedCandidateTreeId: boundCandidateTreeId(
+        resolveGitDir(io.cwd, io.env),
+        io.env,
+        userState,
+        frozen,
+        docsExclusions,
+        cacheExclusions,
+      ),
       ...(options.diffScoped
         ? {
             fixedChangedFiles: frozen.changedPaths,

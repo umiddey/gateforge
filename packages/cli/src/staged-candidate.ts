@@ -14,8 +14,11 @@
  *   into a scratch directory (NUL-delimited plumbing throughout — spaces,
  *   newlines, renames, and deletions in filenames are handled by Git, not
  *   by string splitting). The checkout is then turned into a throwaway Git
- *   repository (`git init` + `git add -A`) so the regular gate pipeline
- *   (config, snapshot, state dir) runs against the staged bytes unchanged.
+ *   repository (`git init`, the frozen index copied in, then `git add
+ *   -A`) so the regular gate pipeline (config, snapshot, state dir) runs
+ *   against the staged bytes unchanged: a tracked path the candidate's own
+ *   `.gitignore` also matches stays tracked there exactly as it is in the
+ *   user's index.
  * - NO CONCEALED CONVENIENCE: this module never stages, stashes, resets,
  *   commits, or otherwise modifies the user's worktree or index.
  * - RECHECK: immediately before a result may authorize the candidate, the
@@ -29,7 +32,7 @@
  *   (conflicting) index entries remain typed blocks. Partial staging is
  *   FINE — the gate evaluates exactly what is staged.
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -501,6 +504,18 @@ export function freezeCommitCandidate(
  * against the staged bytes unchanged. The user's worktree/index/refs are
  * never modified.
  *
+ * The scratch repository's index STARTS AS THE FROZEN INDEX and is then
+ * extended with `git add -A`. A fresh `git add -A` alone would re-apply
+ * the candidate's own `.gitignore` rules to bytes the repository TRACKS,
+ * and a file that is tracked while an ignore rule also matches it (added
+ * before the rule, or force-added) would silently vanish from the
+ * candidate's inventory: the staged identity would then be missing a
+ * tracked byte the worktree identity keeps, and no receipt sealed over a
+ * fully staged candidate could ever match it. Seeding the frozen index
+ * makes the tracked set the staged set BY CONSTRUCTION, while `add -A`
+ * still picks up the untracked, non-ignored bytes the prepared runtime
+ * adds (mirrored empty config dirs, prepared artifacts).
+ *
  * Args:
  *   cwd: absolute repository root the tree objects live in.
  *   env: process environment.
@@ -529,15 +544,21 @@ export function materializeStagedCandidate(cwd: string, env: NodeJS.ProcessEnv, 
   delete childEnv['GIT_DIR'];
   delete childEnv['GIT_WORK_TREE'];
   delete childEnv['GIT_INDEX_FILE'];
-  for (const args of [['init', '-q'], ['add', '-A']]) {
-    const result = spawnSync('git', args, { cwd: checkoutDir, env: childEnv, encoding: 'buffer' });
+  const prepare = (args: readonly string[]): void => {
+    const result = spawnSync('git', [...args], { cwd: checkoutDir, env: childEnv, encoding: 'buffer' });
     if (result.error !== undefined || result.status !== 0) {
       throw new UsageError(
         `staged candidate: preparing the isolated checkout failed (git ${args.join(' ')}, ` +
           `exit ${result.status ?? -1}): ${(result.stderr ?? Buffer.alloc(0)).toString('utf8').trim()}`,
       );
     }
-  }
+  };
+  prepare(['init', '-q']);
+  // The frozen index IS the tracked set. Seeding it before `add -A`
+  // keeps every staged path tracked in the scratch repository whatever
+  // the candidate's own `.gitignore` says about it.
+  copyFileSync(indexPath, join(checkoutDir, '.git', 'index'));
+  prepare(['add', '-A']);
   frozen.checkoutDir = checkoutDir;
   return checkoutDir;
 }

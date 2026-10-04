@@ -728,8 +728,9 @@ What it changes:
   owner WAIVER is never forgiveness: strict E2E re-grades it either way.)
 
 What is still refused in adoption mode, unchanged: a policy-input pin
-mismatch; a sealed receipt whose candidate tree id differs from the evaluated
-one; a `CHANGE_UNMAPPED` file; an obligation the change newly claims with no
+mismatch; a sealed receipt that does not cover the staged bytes (see
+"The candidate tree a sealed receipt is bound to" below); a
+`CHANGE_UNMAPPED` file; an obligation the change newly claims with no
 mapping or no sealed evidence; and any commit after the first one. Adoption
 mode moves WHICH obligations must be proven, never WHO may approve the
 policy.
@@ -753,6 +754,28 @@ wiring re-pins ONCE, after upgrading —
 <path outside the repository> --confirm`. A repository with NO pack config
 keeps a byte-identical digest: an absent config adds no digest entry and no
 absence marker.
+
+### The candidate tree a sealed receipt is bound to
+
+A candidate tree is the raw-ingested workspace a run tested, so it also
+carries that workspace's untracked and gitignored bytes — `node_modules/`, a
+blob report, a Playwright storage state. `check --staged` therefore binds a
+sealed receipt by CONTAINMENT, not by string equality: the receipt is
+accepted when the sealed candidate tree carries every path of the frozen
+index tree with the SAME mode and blob, and refused when a single staged
+byte is missing or differs. Two shapes therefore work, and neither is a
+weakened commitment:
+
+- a receipt sealed INSIDE a staged checkout (`gateforge pre-commit`), whose
+  candidate tree is the prepared checkout itself;
+- a receipt sealed in the WORKSPACE (`gateforge test-gates --changed`)
+  while every tracked byte is staged — its candidate tree is a superset of
+  the index tree, and the input digest (which must still equal the digest
+  the checkout computes) pins the rest.
+
+An unreadable receipt, an unreadable tree listing, or any difference falls
+back to the previous, stricter test: the receipt's candidate tree id must
+equal the frozen index tree.
 
 **Receipts (the strict saved-state gate).** `check --require-e2e` accepts
 only an authenticated gate receipt sealed by a COMPLETE supervised run for
