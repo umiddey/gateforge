@@ -212,6 +212,32 @@ security-sensitive: its bytes are hashed into the trusted policy digest and
 the authenticated input snapshot, so a candidate that edits its own runtime
 commands cannot approve the edit in the same commit.
 
+ONE document, TWO independent key groups that may coexist:
+`schemaVersion`, `prepare`, `health`, `services`, `envAllowlist`,
+and `executionTimeoutSeconds` are read by the staged/supervised
+runtime — `check --staged` and `test-gates` (see
+`packages/cli/src/runtime.ts`), where `check --staged` reads
+`prepare` (its `command`, `reuse`, `timeoutSeconds`, and
+`preflight` sub-keys) — while `env_files`, `reset`, `seed`,
+`services_up`, `healthcheck`, and `services_down` are the
+`gateforge run` recipe (see `packages/cli/src/run-recipe.ts`),
+which also reads `prepare` (its `commands`, `runTimeoutSeconds`,
+and `runRetries` sub-keys). Neither group requires the other: a
+document may carry both, one, or none of the staged keys. Minimal
+combined example:
+
+```yaml
+schemaVersion: 1
+prepare:
+  command: npm ci --offline           # staged runtime (check --staged / test-gates)
+  commands: [['npm', 'run', 'build']] # gateforge run recipe step
+envAllowlist: [DATABASE_URL]
+executionTimeoutSeconds: 1800
+env_files: [.gateforge/test.env]
+reset: { commands: [['./scripts/reset-db.sh']] }
+services_up: { commands: [['./scripts/start-stack.sh']] }
+```
+
 ```yaml
 schemaVersion: 1
 prepare:
@@ -1383,10 +1409,15 @@ expected context, every witnessed record demotes to claimed-tier
 - Staged candidates containing symlinks or submodules (and unmerged index
   entries) are typed blocks in `check --staged` and `broker commit` —
   explicit, never fallbacks; support is not implemented.
-- A Playwright config with NO named project yields native rows with an
-  empty project name, which the strict catalog schema rejects as an
-  internal error (exit 2) instead of a typed row. The documented consumer
-  shape uses named projects; a typed empty-project row is open work.
+- A Playwright config with NO named project: `tests discover` prints an
+  error line naming the config and the fix
+  (`projects: [{ name: 'chromium' }]`) and still writes the catalog, and
+  `enforcement doctor` fails the `playwright-projects` row — `test-gates`
+  needs a named project.
+- Gateforge reads the FIRST of `playwright.config.{ts,mts,cts,js,mjs,cjs}`
+  at the repository root; a suffixed config such as
+  `playwright.config.e2e.js` is not read — rename it to
+  `playwright.config.js` if it is the suite to prove.
 - Run-state hygiene is enforced, not forgiven: a committed run-state
   directory (it overlaps source inputs) or config include globs that omit
   the spec directories produce fail-closed diagnostics — gitignore
@@ -1657,6 +1688,21 @@ healthcheck:
 services_down:
   commands: [['./scripts/stop-stack.sh']]
 ```
+
+The recipe shares `.gateforge/runtime.yml` with the
+staged/supervised runtime: it is ONE document with TWO
+independent key groups that may coexist. `env_files`, `reset`,
+`seed`, `services_up`, `healthcheck`, and `services_down` are
+read only by `gateforge run` (see
+`packages/cli/src/run-recipe.ts`, which also reads `prepare`
+— its `commands`, `runTimeoutSeconds`, and `runRetries`
+sub-keys), while `schemaVersion`, `prepare`, `health`,
+`services`, `envAllowlist`, and `executionTimeoutSeconds`
+belong to the staged/supervised runtime (`check --staged` and
+`test-gates`; see `packages/cli/src/runtime.ts`, where
+`check --staged` reads `prepare`'s `command`, `reuse`,
+`timeoutSeconds`, and `preflight` sub-keys). Both groups may
+live in the same document; neither enables the other.
 
 An unknown key, a malformed step, or an inline value in `env_files` is a
 plain error with exit 2 — Gateforge never runs a half-understood recipe. See

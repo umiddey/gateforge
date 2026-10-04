@@ -4,7 +4,7 @@ The gateforge command-line interface: initialize a project, discover
 resources and classification signals, inspect automatic decisions, reuse a
 repository's existing tests, evaluate obligations, run the supervised E2E
 gate, enforce the exact staged candidate, and maintain baselines.
-**0.9.0 vs. published 0.8.0:** `check --staged` reads the staged bytes, the scan skips untracked gitignored files (receipt identity unchanged), Gateforge's own setup files are policy inputs so the setup commit passes with the policy digest pinned, test-directory models stay out of the graph, per-tenant singletons are tagged only on an exact configured scope, `init` asks one plane question per route folder, `classify plane` takes a folder, `--docs-exclude-file`, `init --behavior`, `explain <path>`, ranked and capped `tests suggest`, `FASTAPI_ROUTER_UNMOUNTED` / `HTTP_METHOD_DYNAMIC` / `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED` / folded FastAPI prefixes, and no `.pyc` in a published tarball. Upgrading: [UPGRADE-0.8-to-0.9](guides/UPGRADE-0.8-to-0.9.md).
+**0.9.1:** `init --blocking` and `enforce` now insert the `gateforge-check` entry as the FIRST item of an existing `.pre-commit-config.yaml` `repos:` list, so file-mutating hooks cannot run before the gate. See [CHANGELOG.md](../CHANGELOG.md) for the 0.9.1 fixes. **0.9.0 vs. published 0.8.0:** `check --staged` reads the staged bytes, the scan skips untracked gitignored files (receipt identity unchanged), Gateforge's own setup files are policy inputs so the setup commit passes with the policy digest pinned, test-directory models stay out of the graph, per-tenant singletons are tagged only on an exact configured scope, `init` asks one plane question per route folder, `classify plane` takes a folder, `--docs-exclude-file`, `init --behavior`, `explain <path>`, ranked and capped `tests suggest`, `FASTAPI_ROUTER_UNMOUNTED` / `HTTP_METHOD_DYNAMIC` / `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED` / folded FastAPI prefixes, and no `.pyc` in a published tarball. Upgrading: [UPGRADE-0.8-to-0.9](guides/UPGRADE-0.8-to-0.9.md).
 
 **0.8.0 vs. published 0.7.1:** one-command local proof (`gateforge run`), witnessed single tests (`--test`), test-only re-seal, owner-chosen strictness and quarantine, a strict run preflight in the doctor, CI progress stream and witnessed CI templates, adapter kit and scaffold, an engine-owned queue observer for `task` cases, timing chaos and twin path coverage. Upgrading: [UPGRADE-0.7-to-0.8](guides/UPGRADE-0.7-to-0.8.md).
 
@@ -115,10 +115,15 @@ run), `2` config/usage error. `tests diagnose` has its own advisory contract
 - Staged candidates containing symlinks or submodules (and unmerged index
   entries) are typed blocks in `check --staged` and `broker commit` —
   explicit, never fallbacks; support is not implemented.
-- A Playwright config with NO named project yields native rows with an
-  empty project name, which the strict catalog schema rejects as an
-  internal error (exit 2) instead of a typed row; a typed empty-project
-  row is open work.
+- A Playwright config with NO named project: `tests discover` prints an
+  error line naming the config and the fix
+  (`projects: [{ name: 'chromium' }]`) and still writes the catalog, and
+  `enforcement doctor` fails the `playwright-projects` row — `test-gates`
+  needs a named project.
+- Gateforge reads the FIRST of `playwright.config.{ts,mts,cts,js,mjs,cjs}`
+  at the repository root; a suffixed config such as
+  `playwright.config.e2e.js` is not read — rename it to
+  `playwright.config.js` if it is the suite to prove.
 - Run-state hygiene is enforced, not forgiven: a committed run-state
   directory or include globs that omit the spec directories fail closed —
   gitignore `.gateforge/test-gates/` and include the spec globs.

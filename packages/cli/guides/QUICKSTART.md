@@ -22,11 +22,11 @@ Example for a React frontend, FastAPI backend, and SQLAlchemy data layer:
 
 ```sh
 npm i -D \
-  @gate-forge/cli@0.9.0 \
-  @gate-forge/pack-playwright@0.9.0 \
-  @gate-forge/pack-http@0.9.0 \
-  @gate-forge/pack-fastapi@0.9.0 \
-  @gate-forge/pack-sqlalchemy@0.9.0
+  @gate-forge/cli@0.9.1 \
+  @gate-forge/pack-playwright@0.9.1 \
+  @gate-forge/pack-http@0.9.1 \
+  @gate-forge/pack-fastapi@0.9.1 \
+  @gate-forge/pack-sqlalchemy@0.9.1
 ```
 
 Use the project-local `gateforge` binary from your npm script or add `node_modules/.bin` to your shell `PATH`. If the scan recommends other packs, add only the ones your code uses, at the same version. A mismatched Gateforge package contract can stop the CLI with exit code 2 and `GATEFORGE_PACKAGE_INCOMPATIBLE`.
@@ -41,7 +41,7 @@ This installs every pack of the release; the scan still recommends the ones your
 
 **You should see:** npm installs the packages without a Gateforge compatibility error.
 
-**If not:** align every direct `@gate-forge/*` package to `0.9.0`, then install again. Do not work around the compatibility error.
+**If not:** align every direct `@gate-forge/*` package to `0.9.1`, then install again. Do not work around the compatibility error.
 
 ## 2. Pick a goal
 
@@ -392,7 +392,7 @@ the registry. To gate a release that is not on the registry yet (a local
 regenerate:
 
 ```sh
-GATEFORGE_CI_ENGINE_SOURCE=vendor/gate-forge-cli-0.9.0.tgz \
+GATEFORGE_CI_ENGINE_SOURCE=vendor/gate-forge-cli-0.9.1.tgz \
   gateforge enforce --ci github
 ```
 
@@ -403,12 +403,14 @@ GitLab template needs no variable: it installs the repository's own declared
 `@gate-forge/cli` dependency.
 
 If your repository already had a `.pre-commit-config.yaml`, the wiring
-appends to it and says so on one line, with the exact way back
+inserts the `gateforge-check` entry as the FIRST item of the `repos:`
+list and says so on one line, with the exact way back
 (`undo: git restore -- .pre-commit-config.yaml`). Check that line before
-you commit. Then put the `gateforge-check` entry FIRST: hooks that rewrite
-files must not run after the gate, or they invalidate its receipt —
-`enforcement doctor` reports those hooks as `hook-mutation` and names
-those files.
+you commit — hooks that rewrite files must not run before the gate, or
+they invalidate its receipt; `enforcement doctor` reports such hooks as
+`hook-mutation` and names those files. (A config with no block-style
+`repos:` list — e.g. `repos: []` — is appended as before, with a note
+to move the entry to the top yourself.)
 
 **You should see:** `installed:`, `updated:`, `verified:`, or a framework-managed hook message, followed by `blocking gate wired`.
 
