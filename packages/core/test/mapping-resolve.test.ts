@@ -802,7 +802,7 @@ describe('mappingSuggestions — token boundaries (0.9.2 adoption fix)', () => {
     expect(suggestionsFor().map((candidate) => candidate.logicalKey)).toEqual([NOTIFICATION_KEY]);
   });
 
-  it('keeps the real test ranked with its resource-token and route-segment reasons', () => {
+  it('keeps the real test ranked by its one distinctive signal', () => {
     const [first] = suggestionsFor();
     expect(first?.logicalKey).toBe(NOTIFICATION_KEY);
     expect(first?.score ?? 0).toBeGreaterThan(0);
@@ -878,7 +878,7 @@ describe('mappingSuggestions — tag text is not a title word (0.9.2 follow-up)'
     expect(suggestionsFor().map((candidate) => candidate.logicalKey)).toEqual([NOTIFICATION_KEY]);
   });
 
-  it('keeps the real test ranked with its resource-token and route-segment reasons', () => {
+  it('keeps the real test ranked by its one distinctive signal', () => {
     const [first] = suggestionsFor();
     expect(first?.score ?? 0).toBeGreaterThan(0);
     const why = first?.why.join(' ') ?? '';
