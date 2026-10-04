@@ -1325,6 +1325,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     unmappedFiles: [],
     policyInputs: [],
     policyInputsOnly: false,
+    productBehaviorNeutral: false,
   };
   // F2 adoption mode: computed from the BASE revision (HEAD for the
   // staged diff), never declared — no flag, no config key. It only moves
@@ -1481,6 +1482,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           unmappedFiles: scopeDecision.unmappedFiles,
           policyInputs: scopeDecision.policyInputs,
           policyInputsOnly: scopeDecision.policyInputsOnly,
+          productBehaviorNeutral: scopeDecision.productBehaviorNeutral,
         };
         mismatchBlocking = [
           ...mismatchBlocking,
@@ -1510,9 +1512,27 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // policy revision that governs those files: a mismatching pin still blocks
   // on its own, and with no pin today's reporting stays (adopted debt is
   // re-graded as blocking). An owner waiver is never forgiveness here.
+  //
+  // 0.10.2 (F2, `F2-DESIGN.md` §5 + §9): the commit that WIRES the gate is
+  // never policy-inputs-only — it brings the manifest, the runner
+  // configuration, the mapping sidecar and the specs, every one of them
+  // gate-defining or test infrastructure — so the 0.9.0 condition could
+  // never hold for exactly the commit adoption mode exists to serve, and
+  // adopted debt was re-graded blocking on the first commit of every
+  // repository. The forgiveness therefore ALSO holds when the change set is
+  // product-behaviour-NEUTRAL, read from the same attribution that produced
+  // the scope decision (every changed file is a policy input, a
+  // gate-defining input, a catalog test file, test infrastructure, a
+  // runtime-declared input or docs, and NO discovered resource's source is
+  // in the set), AND this candidate IS an adoption commit (computed from
+  // the base revision, never declared), AND the owner pin is enforced on
+  // exactly the same `evaluateApprovedPolicy(...).status === 'enforced'`
+  // condition. One product source in the change set denies the neutrality,
+  // so the strict re-grade returns. Nothing else moves.
   const adoptedBaselineSurvivesStrictE2E =
     diffScoped &&
-    scopeDecision.policyInputsOnly &&
+    (scopeDecision.policyInputsOnly ||
+      (adoptionCommit && scopeDecision.productBehaviorNeutral)) &&
     evaluateApprovedPolicy(
       docsApprovalResolution ??
         resolveApprovedPolicyDigest({

@@ -298,6 +298,32 @@ Contract highlights:
   needs installed dependencies blocks honestly instead of silently reusing
   the worktree's environment.
 
+### Whole-run budget and the stall bound
+
+By default there is NO whole-run cap. The engine used to kill any supervised
+run at 30 minutes of wall clock — a bound nobody declared, and it killed a real
+1 101-test Playwright suite that needs two hours while every test was still
+passing. A whole-run budget applies only when the operator declares one:
+
+- `runtime.yml executionTimeoutSeconds` — the owner's own budget, honoured by
+  the command it is written for (`check --staged` and `test-gates`);
+- `--run-timeout-min <n>` — the flag still wins over the document.
+
+What the engine keeps is a STALL bound: if no test has FINISHED for
+`runtime.yml stallTimeoutSeconds` (new key, 1–3600, default 15 minutes) the run
+is killed and fails closed with
+`stalled: no test finished for 15 min (last finished: <title>, <k>/<n>)`. It
+rides the same per-test completion signal the `--progress` stream already
+consumes, so a run carries one completion signal, not two. A suite that keeps
+finishing tests is never killed, however long it takes.
+
+**Playwright only, and here is why.** A stall bound needs a stream of per-test
+completions; today only the Playwright pack reads one. The pytest, Vitest,
+Cypress and other supervisors keep their historical 30-minute whole-run
+default until they can report completions the same way — on those runners an
+over-long run still dies at 30 minutes, and `executionTimeoutSeconds` (or
+`--run-timeout-min`) is how you raise it.
+
 ## Harness and run history
 
 The optional `.gateforge.yml` `harness` section declares `up`, `reset`,
@@ -662,6 +688,71 @@ to blocking. Everything Gateforge does not own (your source, tests, runner
 config, manifests, ignore controls, documentation you did not exclude) keeps
 today's treatment, including the scope expansion that makes a policy change
 re-check the whole repository.
+
+### Adoption mode: the first commit that wires the gate
+
+The commit that introduces the gate always touches gate-defining inputs — the
+manifest, `.gateforge.yml`, the runner configuration, the mapping sidecar and
+the specs — so the evaluation expands to EVERY obligation in the repository,
+while the only affordable proof of a large repository is
+`test-gates --changed --scope changed`. Before 0.10.2 the hook refused that
+receipt as a scope mismatch, so the first commit of every adopting repository
+had to be committed with `--no-verify`.
+
+A commit is judged in **adoption mode** when, and only when:
+
+1. HEAD has NO gate — no `enforcement` block in its `.gateforge.yml`, and no
+   generated `.gateforge/hooks/gateforge-check.mjs`; and
+2. the candidate DOES wire one (it introduces `.gateforge/hooks/` /
+   `.gateforge/ci/` wiring, or turns `enforcement` on); and
+3. the candidate's trusted policy digest matches your owner-approved pin.
+
+Condition 1 is monotone and one-shot: once a gate exists at HEAD it can never
+hold again, so no later commit can re-enter adoption mode. The mode is
+COMPUTED from the base revision — there is no flag, no config key and no
+environment variable a candidate could set.
+
+What it changes:
+
+- **Which obligations must be proven.** A sealed `--scope changed` receipt for
+  the SAME staged candidate tree is accepted; only the obligations whose
+  source files this change set touches must be inside the receipt's
+  `coveredFingerprints`. Every obligation the commit does not touch stays
+  unproven debt, recorded by `gateforge adopt` and still named in the report.
+- **Adopted debt survives the strict-E2E re-grade** when the change set is
+  product-behaviour-neutral — every changed file is a policy input, a
+  gate-defining input, a catalog test file, test infrastructure, a
+  runtime-declared input or `docs/**.md`, and NO discovered resource's source
+  is in it — and your pin is enforced. One changed product source in the same
+  commit denies it, and the debt is re-graded blocking exactly as before. (An
+  owner WAIVER is never forgiveness: strict E2E re-grades it either way.)
+
+What is still refused in adoption mode, unchanged: a policy-input pin
+mismatch; a sealed receipt whose candidate tree id differs from the evaluated
+one; a `CHANGE_UNMAPPED` file; an obligation the change newly claims with no
+mapping or no sealed evidence; and any commit after the first one. Adoption
+mode moves WHICH obligations must be proven, never WHO may approve the
+policy.
+
+### The pack configs and the generated wiring are owner-pinned
+
+`.gateforge/planes.json`, `.gateforge/endpoints.json`,
+`.gateforge/http-clients.json` and `.gateforge/fastapi.json` are owner-owned
+policy inputs: they are classified as such, so they are never unmapped product
+changes and never expand the evaluation scope — but that exemption is only
+honest while your approved digest binds their bytes. Before 0.10.2 nothing
+bound them, so a candidate could narrow `clientScanRoots` (deleting
+obligations) in the same commit and the pin still matched. Their bytes are now
+inside the approved policy digest, and so are the generated `.gateforge/hooks/`
+and `.gateforge/ci/` wiring, for the same reason: deleting the generated hook
+is a policy-revision change, not a way back into adoption mode.
+
+**Upgrading:** a repository that ships a pack config or the generated gate
+wiring re-pins ONCE, after upgrading —
+`git add -A .gateforge .gateforge.yml && gateforge enforcement pin --pin-file
+<path outside the repository> --confirm`. A repository with NO pack config
+keeps a byte-identical digest: an absent config adds no digest entry and no
+absence marker.
 
 **Receipts (the strict saved-state gate).** `check --require-e2e` accepts
 only an authenticated gate receipt sealed by a COMPLETE supervised run for

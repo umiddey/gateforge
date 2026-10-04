@@ -74,6 +74,21 @@ export interface ScopeDecision {
    * runner-config, manifest or ignore-control file is in the set.
    */
   policyInputsOnly: boolean;
+  /**
+   * 0.10.2: true when EVERY changed file is attributed to a
+   * product-behaviour-neutral kind — a Gateforge-owned policy input, a
+   * gate-defining input (manifest, lockfile, ignore control, pack config,
+   * policy document, adapter/waiver record, plugin module), the mapping
+   * sidecar, a runner configuration, a runtime-declared input, a catalog
+   * test file, a file the catalog's own tests import (test
+   * infrastructure), or a `docs/**.md` file — and NO product resource
+   * source is in the set. Such a change set cannot alter product
+   * behaviour; `check` uses it, together with the adoption-commit
+   * verdict, to decide that the adopted baseline survives the strict-E2E
+   * re-grade on the commit that wires the gate. False as soon as one
+   * file is unclassified or is a discovered resource's source.
+   */
+  productBehaviorNeutral: boolean;
 }
 
 /**
@@ -237,6 +252,10 @@ export function computeEvaluationScope(input: {
   // 0.9.0 D2: the Gateforge-owned policy inputs of this change set, classified
   // by the caller (it owns the candidate checkout; this module stays pure).
   const policyInputs = new Set((input.policyInputs ?? []).map(normalizeRepoPath));
+  // 0.10.2: the changed files attributed to a product-behaviour-neutral
+  // kind. Marked in the SAME loop that classifies them, so the neutral
+  // answer can never disagree with the attribution it reads.
+  const neutralFiles = new Set<string>();
   const policyInputFiles = new Set<string>();
   // Docs-only exemption candidates: `docs/**.md` files. The exemption
   // applies ONLY when the whole changed set is such files (checked after
@@ -245,44 +264,62 @@ export function computeEvaluationScope(input: {
   const isDocsOnly = (file: string): boolean =>
     file.startsWith('docs/') && file.endsWith('.md');
   for (const file of changed) {
-    if (policyInputs.has(file)) policyInputFiles.add(file);
+    // Each branch below is one attribution of the file. The branches
+    // marked neutral are the kinds that cannot carry product behaviour;
+    // `knownSources` (a discovered resource's own source) and the
+    // unclassified fall-through are deliberately NOT among them.
+    if (policyInputs.has(file)) {
+      policyInputFiles.add(file);
+      neutralFiles.add(file);
+    }
     const reason = matchGateDefiningInput(file, gate);
     if (reason !== null) {
       reasons.add(reason);
+      neutralFiles.add(file);
       continue;
     }
     if (input.mappingSidecar === true && file === TEST_MAP_SIDECAR) {
       reasons.add(TEST_MAP_SIDECAR);
+      neutralFiles.add(file);
       continue;
     }
     if (runnerConfigs.has(file)) {
       reasons.add(file);
+      neutralFiles.add(file);
       continue;
     }
     if (runtimeInputs.has(file)) {
       reasons.add(file);
+      neutralFiles.add(file);
       continue;
     }
     if (testFiles.has(file)) {
       reasons.add(`test:${file}`);
+      neutralFiles.add(file);
       continue;
     }
     if ([...testDirs].some((dir) => underDir(file, dir))) {
       reasons.add(`test-infra:${file.split('/').slice(0, -1).join('/')}`);
+      neutralFiles.add(file);
       continue;
     }
     if (importedByTests.has(file)) {
       reasons.add(`test-infra:${file}`);
+      neutralFiles.add(file);
       continue;
     }
     // A file this change removed that no runner's own selection ever
     // claimed: nothing collected it, so deleting it removes no test and
     // no behaviour. It neither expands the scope nor blocks as unmapped
-    // — the one honest reading of a deletion the runner never saw.
+    // — the one honest reading of a deletion the runner never saw. It is
+    // NOT counted neutral: nothing classifies what the file was.
     if (removedUnclaimed.has(file)) continue;
+    // A discovered resource's own source is product behaviour by
+    // definition: it is never neutral.
     if (knownSources.has(file)) continue;
     if (isDocsOnly(file)) {
       docsOnlyFiles.add(file);
+      neutralFiles.add(file);
       continue;
     }
     // 0.9.0 D2: a Gateforge-owned policy input (config, policy documents,
@@ -303,11 +340,13 @@ export function computeEvaluationScope(input: {
   }
   // Mixed docs+code change: the docs files keep their unknown-change
   // treatment (the exemption is denied — candidate-controlled suppression
-  // must stay impossible), so they join the unmapped set under strict mode.
+  // must stay impossible), so they join the unmapped set under strict mode
+  // and stop counting as neutral along with it.
   if (docsOnlyFiles.size > 0 && docsOnlyFiles.size < changed.length && strictE2E) {
     for (const file of docsOnlyFiles) {
       reasons.add(`unclassified:${file}`);
       unmappedFiles.add(file);
+      neutralFiles.delete(file);
     }
   }
   const expandedBecause = [...reasons].sort();
@@ -316,6 +355,7 @@ export function computeEvaluationScope(input: {
     unmappedFiles: [...unmappedFiles].sort(),
     policyInputs: [...policyInputFiles].sort(),
     policyInputsOnly: changed.length > 0 && policyInputFiles.size === changed.length,
+    productBehaviorNeutral: changed.length > 0 && neutralFiles.size === changed.length,
   };
   return expandedBecause.length > 0
     ? { mode: 'all', changedFiles: changed, ...decision }
