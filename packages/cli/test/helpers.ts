@@ -173,10 +173,17 @@ export function configYml(options: {
   const fixedAt = options.clockMode === 'system' ? '' : `  fixedAt: '${FIXED_AT}'\n`;
   const clockBlock =
     options.clockMode === 'system' ? '  mode: system\n' : `  mode: fixed\n${fixedAt}`;
-  const evidenceBlock =
+  // The `.gateforge.yml` TEXT is hashed into the input digest, so a
+  // fixture that declares no exclusions must emit BYTE-IDENTICAL config
+  // bytes to a pre-`evidence` engine: an incidental blank line here moves
+  // the digest of every such fixture and breaks the golden that pins
+  // "the option absent is today's bytes". The section therefore carries
+  // its own leading newline and nothing else — absent means zero bytes,
+  // present means one correctly terminated block.
+  const evidenceSection =
     options.evidence === undefined
       ? ''
-      : [
+      : `\n${[
           'evidence:',
           '  exclude:',
           ...(['docs', 'cache'] as const).flatMap((key) => {
@@ -187,7 +194,7 @@ export function configYml(options: {
               ...values.map((value) => `      - ${JSON.stringify(value)}`),
             ];
           }),
-        ].join('\n') + '\n';
+        ].join('\n')}`;
   return `\
 schemaVersion: 1
 project:
@@ -196,8 +203,7 @@ project:
     include: ${include}
     exclude: []
 plugins:
-${plugins}
-${evidenceBlock}
+${plugins}${evidenceSection}
 policies: .gateforge/policies.yml
 classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
