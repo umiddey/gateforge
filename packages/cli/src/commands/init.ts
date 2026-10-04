@@ -15,6 +15,7 @@
  * classification file to fill in. Effective classifications are computed
  * from detector signals on every run.
  */
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
@@ -1522,6 +1523,53 @@ function ignoreEngineState(io: Io, cwd: string): void {
   );
 }
 
+/** The dependency files whose uncommitted state the install note names. */
+const INSTALL_MANIFEST_FILES: readonly string[] = [
+  'package.json',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lockb',
+  'bun.lock',
+];
+
+/** The one line an init run prints while the install is uncommitted. */
+const INSTALL_COMMIT_NOTE =
+  'note: commit the Gateforge install (package.json and lockfile) on its own BEFORE committing the setup files — a setup commit that also changes dependencies is a product change, and under strictE2E it re-grades the adopted E2E debt as blocking. Commit it now, before the commit gate is wired.';
+
+/**
+ * Prints the install-commit note when the install itself (the
+ * dependency change that brought Gateforge into the repository)
+ * is still uncommitted: the setup commit must stay
+ * product-behavior-neutral, so the install belongs in its own
+ * commit BEFORE the setup files are committed.
+ *
+ * Args:
+ *   io: process context.
+ *
+ * Returns:
+ *   void: a non-repository, a repository without commits, or a
+ *   clean install prints nothing; the run always proceeds
+ *   exactly as before (never refuses, never changes the exit
+ *   code).
+ */
+function noteUncommittedInstall(io: Io): void {
+  const head = spawnSync('git', ['rev-parse', '--verify', '-q', 'HEAD'], {
+    cwd: io.cwd,
+    env: io.env,
+    encoding: 'utf8',
+  });
+  if (head.status !== 0) return;
+  const status = spawnSync(
+    'git',
+    ['status', '--porcelain', '--', ...INSTALL_MANIFEST_FILES],
+    { cwd: io.cwd, env: io.env, encoding: 'utf8' },
+  );
+  if (status.status !== 0 || (status.stdout ?? '').trim().length === 0) return;
+  writeLine(io.stdout, INSTALL_COMMIT_NOTE);
+}
+
 /**
  * Runs `gateforge init` in the io cwd.
  *
@@ -1644,6 +1692,12 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   if (typeof options['strict-e2e'] !== 'boolean' && options['strict-e2e'] !== undefined) {
     throw new UsageError("flag '--strict-e2e' must be a boolean flag");
   }
+  // The install-commit note (0.9.1): the dependency change that
+  // brought Gateforge in belongs in its own commit BEFORE the
+  // setup files — a setup commit that also changes dependencies
+  // is a product change. Printed at the START of the run; never
+  // refuses and never changes the exit code.
+  noteUncommittedInstall(io);
   // Goal resolution (plan Phase 1/2): --preset wins, then the one goal
   // question in a terminal, then light with a loud note. A run that
   // already carries explicit enforcement flags has chosen for itself, so

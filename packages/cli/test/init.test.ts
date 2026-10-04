@@ -1092,3 +1092,36 @@ describe('gateforge init: the task behavior pack is offered only with a queueObs
     });
   });
 });
+
+describe('gateforge init: the install-commit note', () => {
+  it('prints the note when the install (package.json) is uncommitted', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.commitFiles({ 'README.md': '# repo\n' }, 'base');
+      // The install itself is not committed yet.
+      repo.writeFiles({ 'package.json': '{"name":"repo"}\n' });
+      const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
+      expect(code, stdout).toBe(0);
+      expect(stdout).toContain(
+        'note: commit the Gateforge install (package.json and lockfile) on its own BEFORE committing the setup files',
+      );
+    });
+  });
+
+  it('prints no note when the install is committed', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.commitFiles({ 'package.json': '{"name":"repo"}\n' }, 'base');
+      const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
+      expect(code, stdout).toBe(0);
+      expect(stdout).not.toContain('note: commit the Gateforge install');
+    });
+  });
+
+  it('prints no note in a repository without commits', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({ 'package.json': '{"name":"repo"}\n' });
+      const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
+      expect(code, stdout).toBe(0);
+      expect(stdout).not.toContain('note: commit the Gateforge install');
+    });
+  });
+});
