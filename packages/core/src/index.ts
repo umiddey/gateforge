@@ -687,6 +687,9 @@ export type { ClassificationSignal, SignalTarget, SignalDimension, SignalBasis, 
  */
 export {
   ClassificationPolicySchema,
+  DeleteRuleSchema,
+  DeleteRulesSchema,
+  DeleteSemanticsSchema,
   InternalEntryPointCategorySchema,
   InternalRuleSchema,
   InternalRuleMatchSchema,
@@ -699,6 +702,8 @@ export {
 /** Inferred classification-policy type. */
 export type {
   ClassificationPolicy,
+  DeleteRule,
+  DeleteSemantics,
   InternalEntryPointCategory,
   InternalRule,
   InternalRuleMatch,
