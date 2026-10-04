@@ -816,7 +816,72 @@ describe('mappingSuggestions — token boundaries (0.9.2 adoption fix)', () => {
     // not contain a standalone word any token can name.
     const candidates = suggestionsFor();
     expect(candidates.map((candidate) => candidate.logicalKey)).not.toContain(NEAR_MISS_KEY);
+
     expect(candidates.every((candidate) => !candidate.why.join(' ').includes('read'))).toBe(true);
+  });
+});
+
+describe('mappingSuggestions — tag text is not a title word (0.9.2 follow-up)', () => {
+  /**
+   * The real adoption case: a generated endpoint resource whose name
+   * carries the route's literal `read` segment and the `param` marker
+   * that stands in for `{notification_id}`.
+   */
+  const OBLIGATION =
+    'tenant.http-patch-api-v1-notifications-param-read-68ff3585:http:request-observed';
+  /**
+   * A test tagged for a DIFFERENT resource. Its file is NOT in a `real/`
+   * folder, so nothing but name/tag/route evidence could ever score it.
+   */
+  const ACCOUNT_KEY =
+    'playwright:chromium:tests/e2e/account_crud.spec.js:ACCOUNT-CRUD @real-e2e @p1>happy — @crud(tenant.accounts:read) the accounts directory renders and the reference admin is findable';
+  /** The test that actually drives the route. */
+  const NOTIFICATION_KEY =
+    'playwright:chromium:tests/e2e/real/notifications.spec.js:notifications mark one as read';
+
+  const ranked = catalog([
+    row({
+      logicalKey: ACCOUNT_KEY,
+      file: 'tests/e2e/account_crud.spec.js',
+      titlePath: [
+        'ACCOUNT-CRUD @real-e2e @p1',
+        'happy — @crud(tenant.accounts:read) the accounts directory renders and the reference admin is findable',
+      ],
+      title: 'the accounts directory renders and the reference admin is findable',
+      sourceLocation: { file: 'tests/e2e/account_crud.spec.js', line: 12, col: 0 },
+    }),
+    row({
+      logicalKey: NOTIFICATION_KEY,
+      file: 'tests/e2e/real/notifications.spec.js',
+      titlePath: ['notifications mark one as read'],
+      title: 'notifications mark one as read',
+      sourceLocation: { file: 'tests/e2e/real/notifications.spec.js', line: 5, col: 0 },
+    }),
+  ]);
+
+  const suggestionsFor = (): SuggestionCandidate[] =>
+    mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [OBLIGATION] }),
+      ),
+      routeHints: new Map([[OBLIGATION, ['PATCH /api/v1/notifications/{notification_id}/read']]]),
+    })[0]?.candidates ?? [];
+
+  it('scores 0 a tag that only repeats the route segment, never a candidate', () => {
+    // `@crud(tenant.accounts:read)` names another resource: the part after
+    // `:` is an OPERATION, not a resource name, and tag text is not prose —
+    // neither may answer "which test exercises PATCH .../read".
+    expect(suggestionsFor().map((candidate) => candidate.logicalKey)).toEqual([NOTIFICATION_KEY]);
+  });
+
+  it('keeps the real test ranked with its resource-token and route-segment reasons', () => {
+    const [first] = suggestionsFor();
+    expect(first?.score ?? 0).toBeGreaterThan(0);
+    const why = first?.why.join(' ') ?? '';
+    expect(why).toContain("resource token 'notifications' matches the test title path");
+    expect(why).toContain("title mentions the obligation's route segment 'notifications'");
   });
 });
 

@@ -706,11 +706,13 @@ const HTTP_METHOD_TOKENS: Readonly<Record<string, true>> = Object.freeze({
 /**
  * Whether one resource-id token names the RESOURCE or only the structure
  * around it: the plane, the transport, the method, route furniture, a
- * version segment, or the generated id-hash suffix. Only real names may
+ * version segment, the generated `param` marker that stands in for a
+ * `{route_param}`, or the generated id-hash suffix. Only real names may
  * be matched against a test title or file.
  */
 function isStructuralResourceToken(token: string): boolean {
   if (PLANE_NAME_TOKENS[token] === true) return true;
+  if (GENERATED_ID_TOKENS[token] === true) return true;
   if (HTTP_METHOD_TOKENS[token] === true) return true;
   if (ROUTE_FILLER_SEGMENTS[token] === true) return true;
   if (/^v\d+$/.test(token)) return true;
@@ -718,6 +720,11 @@ function isStructuralResourceToken(token: string): boolean {
   // real hex-looking words (`decade`, `facade`) stay resource names.
   return /^[0-9a-f]{6,}$/.test(token) && /\d/.test(token);
 }
+
+/** The marker a generated id carries for each `{param}` in the route. */
+const GENERATED_ID_TOKENS: Readonly<Record<string, true>> = Object.freeze({
+  param: true,
+});
 
 /** The matchable resource-name tokens of one resource id. */
 function resourceTokens(resourceId: string): string[] {
@@ -763,13 +770,29 @@ function titleWords(titlePath: readonly string[]): string[] {
     .filter((word) => word.length > 2);
 }
 
-/** The resource token an explicit `@crud(<resource>)`/`@gateforge(<…>)` tag names. */
+/** A parenthesised `@tag(...)` in a title: declaration text, not prose. */
+const TITLE_TAG_PATTERN = /@[A-Za-z][A-Za-z0-9_-]*\([^)]*\)/g;
+
+/** The title path with every `@tag(...)` removed (used for word matching). */
+function proseTitlePath(titlePath: readonly string[]): string[] {
+  return titlePath.map((segment) => segment.replace(TITLE_TAG_PATTERN, ' '));
+}
+
+/**
+ * The resource names an explicit `@crud(tenant.accounts:read)` /
+ * `@gateforge(<…>)` tag declares. Only the RESOURCE part counts: the text
+ * before `:` (everything after it names an operation, not a resource), and
+ * a plane qualifier names no resource of its own. An `@op(...)` tag is not
+ * a resource declaration at all and never contributes.
+ */
 function explicitTagTokens(titlePath: readonly string[]): string[] {
   const tokens: string[] = [];
   for (const segment of titlePath) {
-    for (const match of segment.matchAll(/@(?:crud|gateforge|resource|op)\(([^)]*)\)/g)) {
-      for (const token of (match[1] ?? '').split(/[^A-Za-z0-9]+/)) {
-        if (token.length > 2) tokens.push(token.toLowerCase());
+    for (const match of segment.matchAll(/@(?:crud|gateforge|resource)\(([^)]*)\)/g)) {
+      const target = (match[1] ?? '').split(':')[0] ?? '';
+      for (const token of target.split(/[^A-Za-z0-9]+/)) {
+        const name = token.toLowerCase();
+        if (name.length > 2 && PLANE_NAME_TOKENS[name] !== true) tokens.push(name);
       }
     }
   }
@@ -801,8 +824,10 @@ function candidateEvidence(
   const why: string[] = [];
   let score = 0;
   // Whole-word matching, never substrings: `read` is not inside
-  // `reference`, and `notifications` is not inside `notification`.
-  const words = titleWords(row.titlePath);
+  // `reference`, and `notifications` is not inside `notification`. A
+  // `@crud(...)` tag is a DECLARATION, so its text is stripped before the
+  // title is read as prose (tag matching stays a separate, explicit path).
+  const words = titleWords(proseTitlePath(row.titlePath));
   const fileWords = row.file.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 0);
   const tagTokens = explicitTagTokens(row.titlePath);
   const operationWords = OPERATION_TITLE_WORDS[operationOf(obligationId)] ?? [];

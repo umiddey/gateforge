@@ -410,9 +410,14 @@ the run's route inventory, a `real/` (unmocked) folder, minus a mock signal.
 Tokens are matched WHOLE-WORD (title path words; file path segments split on
 `/ . _ -`), never inside a longer word, and a generated resource id
 contributes only its NAME: the plane (`tenant`), the transport (`http`), the
-method (`get`), route furniture (`api`, `v1`) and the trailing id hash
-identify no resource, so `@crud(tenant.accounts:create)` is never evidence for
-`tenant.http-get-api-v1-notifications-…`.
+method (`get`), route furniture (`api`, `v1`), the `param` marker that stands
+in for a `{route_param}`, and the trailing id hash identify no resource, so
+`@crud(tenant.accounts:create)` is never evidence for
+`tenant.http-get-api-v1-notifications-…`. A tag is a DECLARATION: only its
+resource part (the text before `:` in `@crud(tenant.accounts:read)`, minus the
+plane) counts as a resource name, and the tag text itself is stripped before
+the title is read as prose — the `:read` in that tag never matches a `…/read`
+route segment.
 
 Every weight is additive and printed as a `why:` line, so the order explains
 itself — the score is never a bare number. Ties break on the logical key, so
