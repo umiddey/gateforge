@@ -29,6 +29,7 @@ import { explainCommand } from './commands/explain.js';
 import { testsCommand } from './commands/tests.js';
 import { adaptersCommand } from './commands/adapters.js';
 import { runCommand } from './commands/run.js';
+import { migrateCommand } from './commands/migrate.js';
 
 import { enforcementCommand } from './commands/enforcement.js';
 import { brokerCommand } from './broker.js';
@@ -93,6 +94,8 @@ commands:
                                          .gateforge/runtime.yml recipe (reset/seed/up/health), the supervised
                                          test-gates, check --require-e2e, and the recipe's teardown — one line
                                          per step, exit code = the first failing step's own code
+  migrate [--confirm]                      move owner declarations into .gateforge.yml (evidence.exclude.docs|cache);
+                                         preview by default, idempotent, re-pin reminder on write
   --version                              print the version
   --help                                 show this help
 
@@ -170,6 +173,8 @@ export async function main(
       return runWithExitCodes(io, () => Promise.resolve(baselineCommand(io, rest)));
     case 'waive':
       return runWithExitCodes(io, () => waiveCommand(io, rest));
+    case 'migrate':
+      return runWithExitCodes(io, () => Promise.resolve(migrateCommand(io, rest)));
     case 'quarantine':
       return runWithExitCodes(io, () => quarantineCommand(io, rest));
     default:
