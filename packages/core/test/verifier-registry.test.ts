@@ -851,6 +851,15 @@ describe('transport Observe channel (plan 0.9.2 item D)', () => {
     return { verdict: outcome.verdict, reason: outcome.reason, recordIds: outcome.recordIds };
   }
 
+  /**
+   * The GRADE alone: a blocking outcome still lists the evidence it
+   * read, so comparing record ids across two different evidence sets
+   * says nothing about whether the grading changed.
+   */
+  function grading(outcome: { verdict: string; reason: string | null }) {
+    return { verdict: outcome.verdict, reason: outcome.reason };
+  }
+
   const anchor = record(transportObligation.id, {
     kind: 'ui.action',
     origin: 'suite-submitted',
@@ -878,27 +887,92 @@ describe('transport Observe channel (plan 0.9.2 item D)', () => {
 
   const MATCHING = [{ method: 'GET', url: '/accounts/456', status: 200 }];
 
-  it('I6: the engine-browser anchor path stays preferred over the Observe channel', () => {
+  it('I6 (a): a satisfied engine path is returned verbatim, observe record present or not', () => {
     const request = record(transportObligation.id, {
       kind: 'http.request',
       payload: { method: 'GET', url: '/accounts/123', status: 200 },
     });
+    const engineOnly = complete(httpOutcome(transportObligation, [anchor, request]));
+    expect(engineOnly.verdict).toBe('satisfied');
+    expect(engineOnly.recordIds).toContain(String(anchor['recordId']));
+    expect(engineOnly.recordIds).toContain(String(request['recordId']));
+    // An observe record changes nothing — not the verdict, not the ids.
     const observed = observedRecord(transportObligation.id, { exchanges: MATCHING });
-    const outcome = httpOutcome(transportObligation, [anchor, request, observed]);
-    expect(outcome.verdict).toBe('satisfied');
-    expect(outcome.recordIds).toContain(String(anchor['recordId']));
-    expect(outcome.recordIds).toContain(String(request['recordId']));
-    expect(outcome.recordIds).not.toContain(String(observed['recordId']));
+    expect(complete(httpOutcome(transportObligation, [anchor, request, observed]))).toEqual(engineOnly);
+    expect(engineOnly.recordIds).not.toContain(String(observed['recordId']));
   });
 
-  it('I6: the Observe channel discharges the same obligation once the anchor path does not satisfy', () => {
+  it('I6 (b): an engine-found ERROR is final — a matching observe record never masks it', () => {
+    // The engine observed the request and the response was not 2xx. The
+    // Observe channel carries a 200 for the same endpoint, and it must
+    // not turn a witness-observed failure into a pass.
+    const statusAnchor = record(statusObligation.id, {
+      kind: 'ui.action',
+      origin: 'suite-submitted',
+      trust: 'claimed',
+      payload: { operation: 'read', entityId: 'acc-1' },
+    });
+    const failing = record(statusObligation.id, {
+      kind: 'http.request',
+      payload: { method: 'GET', url: '/accounts/123', status: 500 },
+    });
+    const matching = observedRecord(statusObligation.id, { exchanges: MATCHING });
+    const engineOnly = grading(httpOutcome(statusObligation, [statusAnchor, failing]));
+    expect(engineOnly.verdict).toBe('invalid');
+    expect(grading(httpOutcome(statusObligation, [statusAnchor, failing, matching]))).toEqual(engineOnly);
+    expect(engineOnly.reason).toContain('2xx');
+
+    // The same rule for a wrong-endpoint exchange, not only a status.
+    const wrongRoute = record(transportObligation.id, {
+      kind: 'http.request',
+      payload: { method: 'GET', url: '/health', status: 200 },
+    });
+    const mismatchOnly = grading(httpOutcome(transportObligation, [anchor, wrongRoute]));
+    expect(mismatchOnly.verdict).toBe('invalid');
+    expect(
+      grading(
+        httpOutcome(transportObligation, [
+          anchor,
+          wrongRoute,
+          observedRecord(transportObligation.id, { exchanges: MATCHING }),
+        ]),
+      ),
+    ).toEqual(mismatchOnly);
+  });
+
+  it('I6 (c): the Observe channel discharges the obligation when the engine path is missing', () => {
     // A suite-driven test mapped observed-e2e has no engine-owned
     // `http.request` record and may declare no UI action at all: the
     // Observe channel exists exactly so this claim is not unsatisfiable.
     const observed = observedRecord(transportObligation.id, { exchanges: MATCHING });
-    const outcome = httpOutcome(transportObligation, [observed]);
-    expect(outcome.verdict).toBe('satisfied');
-    expect(outcome.recordIds).toEqual([String(observed['recordId'])]);
+    expect(httpOutcome(transportObligation, [observed]).verdict).toBe('satisfied');
+    expect(complete(httpOutcome(transportObligation, [observed])).recordIds).toEqual([
+      String(observed['recordId']),
+    ]);
+  });
+
+  it('I6 (d): an engine-only claim grades the same whatever the observe records are', () => {
+    // The channel that says nothing cannot reword the channel that did:
+    // with no admissible `http.observed` record the anchor outcome is
+    // returned verbatim, exactly as before this channel existed.
+    const missingOnly = complete(httpOutcome(transportObligation, [anchor]));
+    expect(missingOnly.verdict).toBe('missing');
+    expect(missingOnly.reason).toContain('witness observed no matching HTTP exchange');
+    expect(
+      grading(
+        httpOutcome(transportObligation, [
+          anchor,
+          // A suite-asserted record, and a witnessed one stamped with
+          // another channel: neither is admissible anywhere.
+          observedRecord(
+            transportObligation.id,
+            { exchanges: MATCHING },
+            { origin: 'suite-submitted', trust: 'claimed' },
+          ),
+          observedRecord(transportObligation.id, { exchanges: MATCHING, channel: 'server' }),
+        ]),
+      ),
+    ).toEqual(grading(missingOnly));
   });
 
   it('I4: the Observe channel runs the SAME endpoint matcher as the anchor path', () => {

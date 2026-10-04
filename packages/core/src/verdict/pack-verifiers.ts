@@ -29,17 +29,18 @@
  * test attribution is suite-claimed, never independently verified.
  *
  * Both transport contracts accept a SECOND channel (plan 0.9.2 item D):
- * the OBSERVE channel. When the engine-browser anchor path does not
- * satisfy, a witnessed `http.observed` record stamped `channel:
- * 'observe'` — carrying the exchanges the witness proxied for THIS
- * session, minted only for claims the supervisor registered
- * `observed-e2e` — grades through the SAME
+ * the OBSERVE channel. ONLY when the engine-browser anchor path comes
+ * back `missing` is a witnessed `http.observed` record stamped
+ * `channel: 'observe'` consulted — carrying the exchanges the witness
+ * proxied for THIS session, minted only for claims the supervisor
+ * registered `observed-e2e`. It grades through the SAME
  * {@link gradeObservedExchange} matcher, so a normal suite-driven test
  * mapped `observed-e2e` can discharge the obligation without any second
- * endpoint resolver. The anchor path stays preferred (I6), admission is
- * trust- AND channel-gated exactly as for persistence (I3), and
- * `http:frontend-request-observed` still grades blocking before any of
- * this runs (I1).
+ * endpoint resolver. An anchor-path `invalid` is final (I6): an
+ * engine-found error is never masked by a second channel's match.
+ * Admission is trust- AND channel-gated exactly as for persistence
+ * (I3), and `http:frontend-request-observed` still grades blocking
+ * before any of this runs (I1).
  *
  * Domain namespaces (`auth:*`, `task:*`, `validation:*`, `webhook:*`,
  * `workflow:*`): their approved contract vocabularies are available only
@@ -907,14 +908,23 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
  * exchange in the bound run; test attribution is suite-claimed on both.
  *
  * Channel order (plan 0.9.2 item D, invariants I4/I6): the engine
- * browser anchor path grades FIRST and is preferred unchanged; the
- * Observe channel is consulted only when the anchor path did not
- * satisfy, which is what lets a normal suite-driven test mapped
- * `observed-e2e` discharge the same obligation without weakening what
- * the anchor path proves. When neither channel satisfies, the sharpest
- * reason wins — `invalid > missing`, then codepoint-smallest — across
- * BOTH channels, so a witnessed exchange of the wrong endpoint or a
- * non-2xx response is never reported as an absent anchor.
+ * browser anchor path grades FIRST and decides everything:
+ * - satisfied → returned verbatim, with the same record ids;
+ * - invalid → returned verbatim too. An engine-found ERROR (a
+ *   witnessed exchange of a different endpoint, a non-2xx response) is
+ *   FINAL: a second channel's match never masks it. When the engine
+ *   observed the traffic and it was wrong, no other evidence may make
+ *   the claim pass.
+ * - missing → and only then is the Observe channel consulted, which is
+ *   what lets a normal suite-driven test mapped `observed-e2e` discharge
+ *   the same obligation without weakening what the engine path proves.
+ *
+ * When the anchor path is missing and the Observe channel does not
+ * satisfy either, the sharpest reason wins — `invalid > missing`, then
+ * codepoint-smallest — so a witnessed exchange of the wrong endpoint is
+ * never reported as an absent anchor. With no admissible Observe
+ * record the anchor outcome is returned BYTE-IDENTICAL: the channel
+ * that said nothing cannot reword the channel that did.
  *
  * Args:
  *   input: the claim plus its attributed evidence and obligation.
@@ -925,25 +935,15 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
  */
 function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
   const anchored = gradeAnchoredTransport(input);
-  if (anchored.status === 'satisfied') return anchored;
+  if (anchored.status !== 'missing') return anchored;
   const observed = gradeObservedTransport(input);
-  if (observed !== null && observed.status === 'satisfied') return observed;
-
-  const blocking = [anchored, observed].filter(
-    (outcome): outcome is { status: 'invalid' | 'missing'; reason: string } =>
-      outcome !== null && typeof outcome.reason === 'string',
-  );
-  const invalid = blocking
-    .filter((outcome) => outcome.status === 'invalid')
-    .map((outcome) => outcome.reason)
-    .sort(compareStrings);
-  if (invalid.length > 0) return { status: 'invalid', reason: invalid[0] as string };
-  const missing = blocking
-    .filter((outcome) => outcome.status === 'missing')
-    .map((outcome) => outcome.reason)
-    .sort(compareStrings);
-  if (missing.length > 0) return { status: 'missing', reason: missing[0] as string };
-  return anchored;
+  if (observed === null) return anchored;
+  if (observed.status === 'satisfied') return observed;
+  if (observed.status === 'invalid') return observed;
+  return {
+    status: 'missing',
+    reason: [anchored.reason, observed.reason].sort(compareStrings)[0] as string,
+  };
 }
 
 /** Grades the HTTP namespace: exact dispatch, frontend fail-closed, shared transport path. */
