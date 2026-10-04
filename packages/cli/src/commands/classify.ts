@@ -15,14 +15,21 @@
  */
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { canonicalJson, globMatch, type JsonValue } from '@gate-forge/core';
+import {
+  canonicalJson,
+  ClassificationPolicySchema,
+  DeleteRulesSchema,
+  globMatch,
+  type DeleteRule,
+  type JsonValue,
+} from '@gate-forge/core';
 import {
   PLANES_CONFIG_PATH,
   parsePlanesConfigText,
   type SqlalchemyPlane,
 } from '@gate-forge/pack-sqlalchemy';
-import { stringify as stringifyYaml } from 'yaml';
-import { parseArgs, stringFlag } from '../args.js';
+import { parseDocument, parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { parseArgs, repeatableStringFlag, stringFlag } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { runPipeline, resolveRepoPath } from '../pipeline.js';
@@ -32,9 +39,12 @@ import { UsageError } from '../errors.js';
 
 export const CLASSIFY_USAGE =
   'usage: gateforge classify [--json] [--write-snapshot <path>] | gateforge classify plane <file|folder|glob> <tenant|master|global> ' +
-  '--reason <text> [--confirm]';
+  '--reason <text> [--confirm] | gateforge classify delete <file|folder|glob> <hard|archive> ' +
+  '[--archive-field <key=value>]... --reason <text> [--confirm]';
 export const CLASSIFY_PLANE_USAGE =
   'usage: gateforge classify plane <file|folder|glob> <tenant|master|global> --reason <text> [--confirm]';
+export const CLASSIFY_DELETE_USAGE =
+  'usage: gateforge classify delete <file|folder|glob> <hard|archive> [--archive-field <key=value>]... --reason <text> [--confirm]';
 
 /** Renders the text form of one classification pass. */
 function describeResult(io: Io, pipeline: Awaited<ReturnType<typeof runPipeline>>): void {
@@ -115,12 +125,12 @@ function describeResult(io: Io, pipeline: Awaited<ReturnType<typeof runPipeline>
  * Splits config text into comparable lines without a synthetic trailing row.
  *
  * Args:
- *   text: plane config content.
+ *   text: reviewed classification input content.
  *
  * Returns:
  *   string[]: config lines with line endings removed.
  */
-function planeConfigLines(text: string): string[] {
+function configLines(text: string): string[] {
   if (text.length === 0) return [];
   const result = text.replace(/\r\n/g, '\n').split('\n');
   if (result[result.length - 1] === '') result.pop();
@@ -128,7 +138,7 @@ function planeConfigLines(text: string): string[] {
 }
 
 /**
- * Formats an exact line-level diff between plane config contents.
+ * Formats an exact line-level diff between classification-input contents.
  *
  * Args:
  *   path: repo-relative config path.
@@ -138,9 +148,9 @@ function planeConfigLines(text: string): string[] {
  * Returns:
  *   string: a unified diff showing every changed line.
  */
-function planeConfigDiff(path: string, before: string, after: string): string {
-  const oldLines = planeConfigLines(before);
-  const newLines = planeConfigLines(after);
+function configDiff(path: string, before: string, after: string): string {
+  const oldLines = configLines(before);
+  const newLines = configLines(after);
   let prefix = 0;
   while (
     prefix < oldLines.length &&
@@ -185,6 +195,7 @@ function planeConfigDiff(path: string, before: string, after: string): string {
  * Args:
  *   source: The raw `<file|folder|glob>` argument.
  *   cwd: Absolute repository root (used to recognize an existing folder).
+ *   usage: The calling subcommand's usage line (the refusal quotes it).
  *
  * Returns:
  *   { match: string; label: string }: the rule's `match` pattern and the
@@ -195,7 +206,7 @@ function planeConfigDiff(path: string, before: string, after: string): string {
  *   UsageError: The source is not one repo-relative file path, folder, or
  *     glob.
  */
-function resolvePlaneMatch(source: string, cwd: string): { match: string; label: string } {
+function resolveSourceMatch(source: string, cwd: string, usage: string): { match: string; label: string } {
   const segments = source.split('/');
   const malformed =
     source.length === 0 ||
@@ -207,7 +218,7 @@ function resolvePlaneMatch(source: string, cwd: string): { match: string; label:
     segments.includes('');
   if (malformed) {
     throw new UsageError(
-      `classify plane source must be one repo-relative file path, folder, or glob (${CLASSIFY_PLANE_USAGE})`,
+      `classify source must be one repo-relative file path, folder, or glob (${usage})`,
     );
   }
   // A glob is the owner's own pattern: validated as repo-relative here and
@@ -244,7 +255,7 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
   const source = positionals[1] as string;
   const planeValue = positionals[2] as string;
   const reason = stringFlag(options, 'reason');
-  const { match, label } = resolvePlaneMatch(source, io.cwd);
+  const { match, label } = resolveSourceMatch(source, io.cwd, CLASSIFY_PLANE_USAGE);
   if (!['tenant', 'master', 'global'].includes(planeValue)) {
     throw new UsageError(`classify plane requires tenant, master, or global (${CLASSIFY_PLANE_USAGE})`);
   }
@@ -295,7 +306,7 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
 
   const rule = { match, plane: planeValue as SqlalchemyPlane, reason: reason.trim() };
   const after = `${JSON.stringify({ rules: [...current.rules, rule] }, null, 2)}\n`;
-  writeLine(io.stdout, planeConfigDiff(PLANES_CONFIG_PATH, before, after));
+  writeLine(io.stdout, configDiff(PLANES_CONFIG_PATH, before, after));
   writeLine(io.stdout, `${PLANES_CONFIG_PATH} is an owner-reviewed classification input.`);
   writeLine(
     io.stdout,
@@ -307,6 +318,136 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
   }
   writeFileSync(path, after, 'utf8');
   writeLine(io.stdout, `updated ${PLANES_CONFIG_PATH}`);
+  return 0;
+}
+
+/**
+ * Previews or explicitly appends one owner delete-semantics rule to the
+ * classification policy.
+ *
+ * Declaring semantics is an evidence CONTRACT, not a suppression: the rule
+ * can only resolve DELETE_SEMANTICS_UNRESOLVED for the resources whose
+ * source file it matches. Detector evidence that disagrees still blocks,
+ * so this command can never quietly change what a run grades.
+ *
+ * Args:
+ *   io: process context.
+ *   argv: arguments after `classify`.
+ *
+ * Returns:
+ *   Promise<number>: zero for a preview or write, two for invalid input.
+ */
+async function classifyDeleteCommand(io: Io, argv: readonly string[]): Promise<number> {
+  const { options, positionals } = parseArgs(argv);
+  if (options['help'] === true) {
+    writeLine(io.stdout, CLASSIFY_DELETE_USAGE);
+    return 0;
+  }
+  rejectUnknownFlags(options, ['help', 'reason', 'confirm', 'archive-field'], CLASSIFY_DELETE_USAGE);
+  if (positionals.length !== 3 || positionals[0] !== 'delete') {
+    throw new UsageError(CLASSIFY_DELETE_USAGE);
+  }
+  const source = positionals[1] as string;
+  const semantics = positionals[2] as string;
+  if (semantics !== 'hard' && semantics !== 'archive') {
+    throw new UsageError(`classify delete requires hard or archive (${CLASSIFY_DELETE_USAGE})`);
+  }
+  const reason = stringFlag(options, 'reason');
+  if (reason === undefined || reason.trim().length === 0) {
+    throw new UsageError(`classify delete requires --reason (${CLASSIFY_DELETE_USAGE})`);
+  }
+  const archiveFields: Record<string, string> = {};
+  for (const entry of repeatableStringFlag(options, 'archive-field') ?? []) {
+    const separator = entry.indexOf('=');
+    const key = separator === -1 ? '' : entry.slice(0, separator).trim();
+    const value = separator === -1 ? '' : entry.slice(separator + 1).trim();
+    if (key.length === 0 || value.length === 0) {
+      throw new UsageError(
+        `--archive-field must be key=value with both parts set (${CLASSIFY_DELETE_USAGE})`,
+      );
+    }
+    archiveFields[key] = value;
+  }
+  const archiveFieldCount = Object.keys(archiveFields).length;
+  if (semantics === 'archive' && archiveFieldCount === 0) {
+    throw new UsageError(
+      `classify delete archive needs the owner-owned archived state the run grades removal against: ` +
+        `pass --archive-field <key=value> at least once (${CLASSIFY_DELETE_USAGE})`,
+    );
+  }
+  if (semantics === 'hard' && archiveFieldCount > 0) {
+    throw new UsageError(
+      `classify delete hard removes the row: --archive-field applies to archive semantics only ` +
+        `(${CLASSIFY_DELETE_USAGE})`,
+    );
+  }
+
+  const { match, label } = resolveSourceMatch(source, io.cwd, CLASSIFY_DELETE_USAGE);
+  const policyPath = loadConfigAt(io.cwd).classificationPolicy;
+  const path = resolveRepoPath(io.cwd, policyPath);
+  if (!existsSync(path)) {
+    throw new UsageError(
+      `classify delete updates only an existing owner-reviewed '${policyPath}'; add the reviewed file before using this command`,
+    );
+  }
+  const before = readFileSync(path, 'utf8');
+  // The YAML document API (not a re-serialization) keeps the owner's
+  // comments and key order byte for byte.
+  const document = parseDocument(before);
+  const existing = document.get('deleteRules');
+  const parsed = DeleteRulesSchema.safeParse(existing === undefined || existing === null ? [] : existing);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new UsageError(
+      `'${policyPath}' carries a deleteRules block this command cannot read ` +
+        `(${issue?.path.join('.') ?? 'deleteRules'}: ${issue?.message ?? 'invalid rule'})`,
+    );
+  }
+  const current: DeleteRule[] = parsed.data;
+  const declared = current.find((rule) => rule.match === match);
+  if (declared !== undefined) {
+    const declaredFields = declared.archiveFields ?? {};
+    const same =
+      declared.semantics === semantics &&
+      Object.keys(declaredFields).length === archiveFieldCount &&
+      Object.entries(archiveFields).every(([key, value]) => declaredFields[key] === value);
+    if (same) {
+      writeLine(io.stdout, `${label} already declares ${semantics} delete semantics in ${policyPath}; no change`);
+      return 0;
+    }
+    throw new UsageError(
+      `classify delete will not add a second rule for '${label}'; edit the existing owner-reviewed rule in '${policyPath}':\n` +
+        `  rule with match '${match}' declares semantics '${declared.semantics}'; change its \`semantics\` key to '${semantics}'` +
+        ' (and its `reason` to your own words), or narrow this command to another source',
+    );
+  }
+
+  const rule: DeleteRule = {
+    match,
+    semantics,
+    ...(archiveFieldCount > 0 ? { archiveFields } : {}),
+    reason: reason.trim(),
+  };
+  document.set('deleteRules', [...current, rule]);
+  const after = document.toString();
+  const validated = ClassificationPolicySchema.safeParse(parseYaml(after));
+  if (!validated.success) {
+    throw new UsageError(
+      `refusing to write a '${policyPath}' this release cannot read back: ${validated.error.issues[0]?.message ?? 'invalid policy'}`,
+    );
+  }
+  writeLine(io.stdout, configDiff(policyPath, before, after));
+  writeLine(io.stdout, `${policyPath} is an owner-reviewed classification input.`);
+  writeLine(
+    io.stdout,
+    'If an approved policy pin is in use, this changes the trusted-policy digest and must be re-approved before strict gates run.',
+  );
+  if (options['confirm'] !== true) {
+    writeLine(io.stdout, 'dry run only; rerun this command with --confirm to write the rule');
+    return 0;
+  }
+  writeFileSync(path, after, 'utf8');
+  writeLine(io.stdout, `updated ${policyPath}`);
   return 0;
 }
 
@@ -325,6 +466,7 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
 export async function classifyCommand(io: Io, argv: readonly string[]): Promise<number> {
   const { options, positionals } = parseArgs(argv);
   if (positionals[0] === 'plane') return classifyPlaneCommand(io, argv);
+  if (positionals[0] === 'delete') return classifyDeleteCommand(io, argv);
   if (options['help'] === true) {
     writeLine(io.stdout, CLASSIFY_USAGE);
     return 0;
