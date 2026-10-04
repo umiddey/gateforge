@@ -8,3 +8,7 @@ __pycache__/
 # Internal research + work-log trees: private-only, never published
 spikes/
 docs/
+
+# Pack-time copy of the root CHANGELOG (scripts/copy-changelog.mjs): the
+# tracked root CHANGELOG.md stays the single source of truth.
+packages/cli/CHANGELOG.md

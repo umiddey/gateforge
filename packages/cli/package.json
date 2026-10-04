@@ -20,6 +20,7 @@
     }
   },
   "files": [
+    "CHANGELOG.md",
     "bin",
     "dist",
     "guides"
@@ -27,7 +28,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prebuild": "npm run build -w @gate-forge/core && npm run build -w @gate-forge/plugin-protocol",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "node ../../scripts/copy-changelog.mjs",
     "test": "vitest run"
   },
   "dependencies": {
