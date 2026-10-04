@@ -28,6 +28,19 @@
  * exchange proves only that the witness observed an HTTP exchange —
  * test attribution is suite-claimed, never independently verified.
  *
+ * Both transport contracts accept a SECOND channel (plan 0.9.2 item D):
+ * the OBSERVE channel. When the engine-browser anchor path does not
+ * satisfy, a witnessed `http.observed` record stamped `channel:
+ * 'observe'` — carrying the exchanges the witness proxied for THIS
+ * session, minted only for claims the supervisor registered
+ * `observed-e2e` — grades through the SAME
+ * {@link gradeObservedExchange} matcher, so a normal suite-driven test
+ * mapped `observed-e2e` can discharge the obligation without any second
+ * endpoint resolver. The anchor path stays preferred (I6), admission is
+ * trust- AND channel-gated exactly as for persistence (I3), and
+ * `http:frontend-request-observed` still grades blocking before any of
+ * this runs (I1).
+ *
  * Domain namespaces (`auth:*`, `task:*`, `validation:*`, `webhook:*`,
  * `workflow:*`): their approved contract vocabularies are available only
  * through the required-case aggregation. A genuine engine-issued,
@@ -63,6 +76,22 @@ import {
 /** Record kinds the witness and suites exchange. */
 const UI_ACTION_KIND = 'ui.action';
 const HTTP_REQUEST_KIND = 'http.request';
+
+/**
+ * Observe-channel transport kind: issued ONLY by the witness's
+ * observe finalize (the declaring session's own proxied exchanges).
+ * Mirrors `HTTP_OBSERVED_KIND` in `@gate-forge/pack-playwright`'s
+ * constants.ts — keep the two in lockstep, exactly as
+ * `OBSERVED_RECORD_KIND` mirrors the witness's `OBSERVED_KIND`.
+ */
+const HTTP_OBSERVED_KIND = 'http.observed';
+
+/**
+ * Payload discriminant the witness stamps on every observe-finalized
+ * record. Mirrors `OBSERVE_CHANNEL` in `@gate-forge/pack-playwright`
+ * (and `evaluate.ts`'s local constant) — keep the three in lockstep.
+ */
+const OBSERVE_CHANNEL = 'observe';
 
 /**
  * The only HTTP contracts the verifier knows (plan §7): a namespace
@@ -520,11 +549,146 @@ type TransportRecordGrade =
   | { status: 'missing'; reason: string };
 
 /**
+ * ONE observed HTTP exchange, stripped of the record that carried it:
+ * the same three facts an `http.request` payload holds, and the same
+ * ones an Observe-channel `http.observed` record's `exchanges` entries
+ * hold. Grading them HERE is what keeps both evidence channels on ONE
+ * matcher — there is no second endpoint resolver that could drift from
+ * the first.
+ */
+interface ObservedExchangeFacts {
+  method: unknown;
+  url: unknown;
+  status: unknown;
+}
+
+/** One exchange's grade: ok, or the typed reason it blocks with. */
+type ExchangeGrade =
+  | { ok: true }
+  | { ok: false; status: 'invalid'; reason: string }
+  | { ok: false; status: 'missing'; reason: string };
+
+/**
+ * Grades ONE observed HTTP exchange against the obligation's endpoint
+ * (plan §9/§10): the observed path must be interpretable, the COMPLETE
+ * route inventory must attribute it to EXACTLY the obligation's own
+ * endpoint, and `http:response-status-ok` additionally requires a 2xx.
+ * The single matcher for both the engine-browser (`http.request`) and
+ * the Observe channel (`http.observed`).
+ *
+ * Args:
+ *   facts: the exchange's method, url and observed status.
+ *   input: the claim plus its obligation (for ids/contract/status rule).
+ *   subject: how the exchange's source is named in reasons — e.g.
+ *     ``witnessed 'http.request' record 'r-1'`` on the anchor path, and
+ *     ``observe-channel exchange in witnessed 'http.observed' record
+ *     'r-1'`` on the Observe path.
+ *   inventoryBlock: the precomputed inventory reason, or null when usable.
+ *   candidates: the usable route inventory (ignored when inventoryBlock
+ *     is set).
+ *
+ * Returns:
+ *   ExchangeGrade: ok only for a uniquely attributed exchange (plus a
+ *   2xx for the status contract).
+ */
+function gradeObservedExchange(
+  facts: ObservedExchangeFacts,
+  input: ClaimEvidenceInput,
+  subject: string,
+  inventoryBlock: string | null,
+  candidates: readonly HttpRouteCandidate[],
+): ExchangeGrade {
+  if (typeof facts.method !== 'string' || typeof facts.url !== 'string') {
+    return {
+      ok: false,
+      status: 'invalid',
+      reason: `'${input.obligation.id}': ${subject} carries no method/url pair`,
+    };
+  }
+  if (inventoryBlock !== null) {
+    return { ok: false, status: 'missing', reason: inventoryBlock };
+  }
+  const observedMethod = facts.method;
+  const interpreted = interpretObservedPath(facts.url);
+  if (interpreted.ok === false) {
+    return {
+      ok: false,
+      status: 'invalid',
+      reason:
+        `'${input.obligation.id}': ${subject} carries a noncanonical observed path: ` +
+        `${interpreted.reason}`,
+    };
+  }
+  // Identity match (plan §9, D2 — fail closed, no any-endpoint
+  // fallback): the witnessed observation must attribute to EXACTLY the
+  // obligation's endpoint within the host-derived COMPLETE route
+  // inventory. Missing/incomplete context blocks satisfaction: without
+  // every applicable `http.endpoint` resource a literal-vs-parameter
+  // overlap (or an unconsumed sibling) could silently steal credit.
+  const resolution = resolveHttpRoute(
+    observedMethod,
+    interpreted.path,
+    candidates,
+    input.obligation.resourceId,
+  );
+  if (resolution.status === 'incomplete') {
+    return {
+      ok: false,
+      status: 'missing',
+      reason: `'${input.obligation.id}': ${resolution.reason}`,
+    };
+  }
+  if (resolution.status === 'nomatch') {
+    return {
+      ok: false,
+      status: 'invalid',
+      reason: `'${input.obligation.id}': ${subject} ${resolution.reason}`,
+    };
+  }
+  if (resolution.status === 'ambiguous') {
+    return {
+      ok: false,
+      status: 'invalid',
+      reason:
+        `'${input.obligation.id}': ambiguous route attribution: observed ` +
+        `${observedMethod.toUpperCase()} ${interpreted.path} matches ${resolution.candidates.length} ` +
+        `distinct routes [${resolution.candidates.join('; ')}]; the transport status is known ` +
+        'but handler attribution is not, so no endpoint-specific claim passes until ' +
+        'engine-owned handler proof resolves the overlap',
+    };
+  }
+  if (resolution.status === 'mismatch') {
+    return {
+      ok: false,
+      status: 'invalid',
+      reason:
+        `'${input.obligation.id}': ${subject} observed ${observedMethod.toUpperCase()} ` +
+        `${interpreted.path} uniquely matches route ${candidateIdentityText(resolution.matched)} ` +
+        `but the obligation requires endpoint '${input.obligation.resourceId}'; evidence from ` +
+        'a different endpoint can never satisfy it',
+    };
+  }
+  if (input.obligation.contract === 'http:response-status-ok') {
+    const status = facts.status;
+    if (typeof status !== 'number' || !Number.isInteger(status) || status < 200 || status > 299) {
+      return {
+        ok: false,
+        status: 'invalid',
+        reason:
+          `'${input.obligation.id}': observed status ` +
+          `'${String(status)}' is not a 2xx response`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
  * Grades ONE `http.request` record independently for origin, trust,
- * provenance, payload, route identity, and required status (plan §10
- * step 3). Never returns from the outer verifier; the caller
- * aggregates every grade. All reason wordings are verbatim from the
- * single-record grader.
+ * provenance and payload (plan §10 step 3), then hands its
+ * method/url/status to the shared {@link gradeObservedExchange}. Never
+ * returns from the outer verifier; the caller aggregates every grade.
+ * All reason wordings are verbatim from the single-exchange grader.
  *
  * Args:
  *   record: the lenient record view to grade.
@@ -564,106 +728,35 @@ function gradeTransportRecord(
     };
   }
   const payload = payloadOf(record);
-  if (payload === null || typeof payload['method'] !== 'string' || typeof payload['url'] !== 'string') {
+  const subject = `witnessed '${HTTP_REQUEST_KIND}' record '${label}'`;
+  if (payload === null) {
     return {
       status: 'invalid',
-      reason:
-        `'${input.obligation.id}': witnessed '${HTTP_REQUEST_KIND}' record ` +
-        `'${label}' carries no method/url pair`,
+      reason: `'${input.obligation.id}': ${subject} carries no method/url pair`,
     };
   }
-  if (inventoryBlock !== null) {
-    return { status: 'missing', reason: inventoryBlock };
-  }
-  const observedMethod = payload['method'];
-  const interpreted = interpretObservedPath(payload['url']);
-  if (interpreted.ok === false) {
-    return {
-      status: 'invalid',
-      reason:
-        `'${input.obligation.id}': witnessed '${HTTP_REQUEST_KIND}' record ` +
-        `'${label}' carries a noncanonical observed path: ` +
-        `${interpreted.reason}`,
-    };
-  }
-  // Identity match (plan §9, D2 — fail closed, no any-endpoint
-  // fallback): the witnessed observation must attribute to EXACTLY the
-  // obligation's endpoint within the host-derived COMPLETE route
-  // inventory. Missing/incomplete context blocks satisfaction: without
-  // every applicable `http.endpoint` resource a literal-vs-parameter
-  // overlap (or an unconsumed sibling) could silently steal credit.
-  const resolution = resolveHttpRoute(
-    observedMethod,
-    interpreted.path,
+  const exchange = gradeObservedExchange(
+    { method: payload['method'], url: payload['url'], status: payload['status'] },
+    input,
+    subject,
+    inventoryBlock,
     candidates,
-    input.obligation.resourceId,
   );
-  if (resolution.status === 'incomplete') {
-    return {
-      status: 'missing',
-      reason: `'${input.obligation.id}': ${resolution.reason}`,
-    };
-  }
-  if (resolution.status === 'nomatch') {
-    return {
-      status: 'invalid',
-      reason:
-        `'${input.obligation.id}': witnessed '${HTTP_REQUEST_KIND}' record ` +
-        `'${label}' ${resolution.reason}`,
-    };
-  }
-  if (resolution.status === 'ambiguous') {
-    return {
-      status: 'invalid',
-      reason:
-        `'${input.obligation.id}': ambiguous route attribution: observed ` +
-        `${observedMethod.toUpperCase()} ${interpreted.path} matches ${resolution.candidates.length} ` +
-        `distinct routes [${resolution.candidates.join('; ')}]; the transport status is known ` +
-        'but handler attribution is not, so no endpoint-specific claim passes until ' +
-        'engine-owned handler proof resolves the overlap',
-    };
-  }
-  if (resolution.status === 'mismatch') {
-    return {
-      status: 'invalid',
-      reason:
-        `'${input.obligation.id}': witnessed '${HTTP_REQUEST_KIND}' record ` +
-        `'${label}' observed ${observedMethod.toUpperCase()} ` +
-        `${interpreted.path} uniquely matches route ${candidateIdentityText(resolution.matched)} ` +
-        `but the obligation requires endpoint '${input.obligation.resourceId}'; evidence from ` +
-        'a different endpoint can never satisfy it',
-    };
-  }
-  if (input.obligation.contract === 'http:response-status-ok') {
-    const status = payload['status'];
-    if (typeof status !== 'number' || !Number.isInteger(status) || status < 200 || status > 299) {
-      return {
-        status: 'invalid',
-        reason:
-          `'${input.obligation.id}': observed status ` +
-          `'${String(status)}' is not a 2xx response`,
-      };
-    }
-  }
-  return { status: 'satisfied', recordId: label };
+  if (exchange.ok) return { status: 'satisfied', recordId: label };
+  return exchange;
 }
 
 /**
- * Grades the explicit transport contracts (`http:request-observed`,
- * `http:response-status-ok`): one shared path, no divergent verifier.
- * Proves only that the witness observed an HTTP exchange in the bound
- * run; test attribution is suite-claimed.
- *
- * Deterministic aggregation (plan §10 steps 1-8): the exact contract
- * and the suite anchor are validated once (codepoint-smallest anchor
- * when several qualify); the route inventory is scanned once; then
- * EVERY `http.request` record is graded independently with NO early
- * return on the first bad record. `satisfied > invalid > missing`
- * decides; ≥1 satisfying record selects the codepoint-smallest
- * record id joined with the anchor — identical for every input
- * permutation. Otherwise the codepoint-smallest invalid reason wins,
- * else the smallest missing reason. Untrusted records never satisfy;
- * status-ok still means ≥1 eligible 2xx (no new success rule).
+ * The ANCHOR channel of the transport grader: the historical rule,
+ * byte-identical. The suite anchor is validated once (codepoint-smallest
+ * anchor when several qualify); the route inventory is scanned once;
+ * then EVERY `http.request` record is graded independently with NO
+ * early return on the first bad record. `satisfied > invalid > missing`
+ * decides; ≥1 satisfying record selects the codepoint-smallest record
+ * id joined with the anchor — identical for every input permutation.
+ * Otherwise the codepoint-smallest invalid reason wins, else the
+ * smallest missing reason. Untrusted records never satisfy; status-ok
+ * still means ≥1 eligible 2xx (no new success rule).
  *
  * Args:
  *   input: the claim plus its attributed evidence and obligation.
@@ -672,7 +765,7 @@ function gradeTransportRecord(
  *   ClaimOutcome: satisfied only for a witnessed engine-observed
  *   exchange matching the endpoint shape (plus 2xx for status-ok).
  */
-function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
+function gradeAnchoredTransport(input: ClaimEvidenceInput): ClaimOutcome {
   const anchor = selectTransportAnchor(input);
   if (anchor.ok === false) return anchor.outcome;
 
@@ -710,6 +803,147 @@ function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
   }
   const reason = missingReasons.sort(compareStrings)[0] as string;
   return { status: 'missing', reason };
+}
+
+/**
+ * The OBSERVE channel of the transport grader: the exchanges the
+ * witness proxied for THIS test session, stamped into one witnessed
+ * `http.observed` record by the observe finalize. Admission mirrors the
+ * persistence Observe channel exactly: `trust === 'witnessed'` AND the
+ * `channel: 'observe'` stamp (both witness-issued, both covered by the
+ * ledger MAC) — a suite-asserted or untrusted `http.observed` record is
+ * admissible NOWHERE. Only obligations the supervisor registered
+ * `observed-e2e` ever carry such a record, so the gate lives in the
+ * witness's declarations, not here.
+ *
+ * Returns null — the channel says NOTHING, so the anchor outcome stands
+ * verbatim — when no record qualifies (the persistence channel's
+ * `observeFailure === null` rule: an absent channel never rewords an
+ * absent anchor).
+ *
+ * Args:
+ *   input: the claim plus its attributed evidence and obligation.
+ *
+ * Returns:
+ *   ClaimOutcome | null: satisfied with the record id carrying a
+ *   matching exchange, the sharpest typed reason otherwise, or null
+ *   when no witnessed Observe-channel record is present at all.
+ */
+function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null {
+  const records = input.evidence.filter(
+    (entry) =>
+      entry.trust === 'witnessed' &&
+      typeof entry.record.kind === 'string' &&
+      entry.record.kind === HTTP_OBSERVED_KIND &&
+      payloadOf(entry.record)?.['channel'] === OBSERVE_CHANNEL,
+  );
+  if (records.length === 0) return null;
+
+  const inventoryBlock = transportInventoryBlock(input);
+  const candidates = (input.httpRoutes ?? []) as readonly HttpRouteCandidate[];
+  const satisfied: string[] = [];
+  const invalidReasons: string[] = [];
+  const missingReasons: string[] = [];
+  for (const entry of records) {
+    const label = String(entry.record.recordId);
+    const subject = `observe-channel exchange in witnessed '${HTTP_OBSERVED_KIND}' record '${label}'`;
+    const payload = payloadOf(entry.record);
+    const exchanges = payload?.['exchanges'];
+    if (!Array.isArray(exchanges)) {
+      invalidReasons.push(
+        `'${input.obligation.id}': ${subject} carries no exchanges list — the witness records ` +
+          "only the session's own proxied exchanges, and this one names none",
+      );
+      continue;
+    }
+    if (exchanges.length === 0) {
+      invalidReasons.push(
+        `'${input.obligation.id}': ${subject} carries an EMPTY exchanges list; a session that ` +
+          'proxied no HTTP exchange gets a typed missing-traffic note instead of a record',
+      );
+      continue;
+    }
+    let invalid: string | null = null;
+    let missing: string | null = null;
+    let matchedHere = false;
+    for (const raw of exchanges) {
+      const facts =
+        typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+          ? { method: raw['method'], url: raw['url'], status: raw['status'] }
+          : { method: undefined, url: undefined, status: undefined };
+      const grade = gradeObservedExchange(facts, input, subject, inventoryBlock, candidates);
+      if (grade.ok) {
+        matchedHere = true;
+        break;
+      }
+      if (grade.status === 'invalid') {
+        if (invalid === null) invalid = grade.reason;
+      } else if (missing === null) {
+        missing = grade.reason;
+      }
+    }
+    if (matchedHere) satisfied.push(label);
+    else if (invalid !== null) invalidReasons.push(invalid);
+    else if (missing !== null) missingReasons.push(missing);
+  }
+  if (satisfied.length > 0) {
+    // ONE selected id, codepoint-smallest exactly as the anchor path
+    // does: the result never depends on the input order.
+    return {
+      status: 'satisfied',
+      recordIds: [sortedUniqueIds(satisfied)[0] as string],
+    };
+  }
+  if (invalidReasons.length > 0) {
+    return { status: 'invalid', reason: invalidReasons.sort(compareStrings)[0] as string };
+  }
+  return { status: 'missing', reason: missingReasons.sort(compareStrings)[0] as string };
+}
+
+/**
+ * Grades the explicit transport contracts (`http:request-observed`,
+ * `http:response-status-ok`): ONE matcher, two evidence channels, no
+ * divergent verifier. Proves only that the witness observed an HTTP
+ * exchange in the bound run; test attribution is suite-claimed on both.
+ *
+ * Channel order (plan 0.9.2 item D, invariants I4/I6): the engine
+ * browser anchor path grades FIRST and is preferred unchanged; the
+ * Observe channel is consulted only when the anchor path did not
+ * satisfy, which is what lets a normal suite-driven test mapped
+ * `observed-e2e` discharge the same obligation without weakening what
+ * the anchor path proves. When neither channel satisfies, the sharpest
+ * reason wins — `invalid > missing`, then codepoint-smallest — across
+ * BOTH channels, so a witnessed exchange of the wrong endpoint or a
+ * non-2xx response is never reported as an absent anchor.
+ *
+ * Args:
+ *   input: the claim plus its attributed evidence and obligation.
+ *
+ * Returns:
+ *   ClaimOutcome: satisfied only for a witnessed exchange matching the
+ *   endpoint shape (plus 2xx for status-ok), on either channel.
+ */
+function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
+  const anchored = gradeAnchoredTransport(input);
+  if (anchored.status === 'satisfied') return anchored;
+  const observed = gradeObservedTransport(input);
+  if (observed !== null && observed.status === 'satisfied') return observed;
+
+  const blocking = [anchored, observed].filter(
+    (outcome): outcome is { status: 'invalid' | 'missing'; reason: string } =>
+      outcome !== null && typeof outcome.reason === 'string',
+  );
+  const invalid = blocking
+    .filter((outcome) => outcome.status === 'invalid')
+    .map((outcome) => outcome.reason)
+    .sort(compareStrings);
+  if (invalid.length > 0) return { status: 'invalid', reason: invalid[0] as string };
+  const missing = blocking
+    .filter((outcome) => outcome.status === 'missing')
+    .map((outcome) => outcome.reason)
+    .sort(compareStrings);
+  if (missing.length > 0) return { status: 'missing', reason: missing[0] as string };
+  return anchored;
 }
 
 /** Grades the HTTP namespace: exact dispatch, frontend fail-closed, shared transport path. */
