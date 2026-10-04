@@ -714,6 +714,122 @@ describe('observe finalize (transport obligations)', () => {
   });
 });
 
+/**
+ * A transport record must depend on what the session PROXIED, never on
+ * the order the claim loop happens to walk the claims in. The default
+ * generated policy puts `http:request-observed` /
+ * `http:response-status-ok` on consumed endpoints alongside the CRUD
+ * `persistence:*` obligations, and a session routinely claims both
+ * kinds — while the persistence branch consumes its matched exchange
+ * single-use out of the shared log (`state.observed.splice`). A claim
+ * finalized after that consumption sees an empty log and finalizes
+ * with "no HTTP exchange passed through this session's observation
+ * proxy": a false negative that blames the fixture page for a request
+ * that demonstrably traversed the proxy.
+ *
+ * The witness sorts a session's claims at open (deterministic claim
+ * identity), so the order that matters is which obligation id sorts
+ * first — hence a transport obligation on a resource id that sorts
+ * AFTER the persistence claim's resource, and the mirror case where it
+ * sorts before. Both must produce the same record.
+ */
+describe('observe finalize (transport records are order-independent)', () => {
+  /** Sorts after `tenant.accounts`, so its claim walks after the create. */
+  const LATE_HTTP_CLAIM = 'tenant.orders:http:request-observed';
+  /** Sorts before `tenant.accounts`, so its claim walks before the create. */
+  const EARLY_HTTP_CLAIM = 'tenant.admins:http:request-observed';
+  const EXPECTED_EXCHANGE = [{ method: 'POST', url: '/api/accounts', status: 200 }];
+
+  /** What one claim set produced, reduced to order-free facts. */
+  async function runWithClaims(claims: string[]): Promise<{
+    notes: string[];
+    finalizedIds: string[];
+    exchanges: unknown;
+    persistenceRecords: number;
+  }> {
+    const fixture = await startFixturedWitness();
+    try {
+      expect((await declare(fixture.witness.url, claims)).status).toBe(200);
+      const session = await openClaimedSession(fixture.witness.url, claims);
+      await proxyExchange(
+        session.proxyUrl as string,
+        'POST',
+        '/api/accounts',
+        JSON.stringify({ first_name: 'A', last_name: 'B' }),
+      );
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      expect(done.status).toBe(200);
+      const records = await ledgerRecords(fixture.witness.url);
+      const transport = records.find((entry) => entry['kind'] === 'http.observed');
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+      return {
+        notes: done.body['notes'] as string[],
+        finalizedIds: (done.body['finalized'] as Array<Record<string, unknown>>)
+          .map((entry) => entry['obligationId'] as string)
+          .sort(),
+        exchanges: (transport?.['payload'] as Record<string, unknown> | undefined)?.['exchanges'],
+        persistenceRecords: records.filter((entry) => entry['kind'] === 'persistence.observed').length,
+      };
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  }
+
+  it('stamps the same http.observed payload whichever claim the loop walks first', async () => {
+    // The transport claim finalizes AFTER the create consumed the one
+    // exchange, and the transport claim finalizes BEFORE it.
+    const afterPersistence = await runWithClaims([CREATE_CLAIM, LATE_HTTP_CLAIM]);
+    const beforePersistence = await runWithClaims([EARLY_HTTP_CLAIM, CREATE_CLAIM]);
+    for (const result of [afterPersistence, beforePersistence]) {
+      // Both claims proven: the transport record carries the exchange
+      // AND the persistence claim still resolves.
+      expect(result.notes).toEqual([]);
+      expect(result.finalizedIds).toHaveLength(2);
+      expect(result.persistenceRecords).toBe(1);
+      expect(result.exchanges).toEqual(EXPECTED_EXCHANGE);
+    }
+    // Byte-identical what-travels, claim-walk order notwithstanding.
+    // (`sessionId` differs per run: the one payload field order cannot
+    // fix.)
+    expect(beforePersistence.exchanges).toEqual(afterPersistence.exchanges);
+  });
+
+  it('still credits only ONE persistence claim with one exchange, transport claim aside', async () => {
+    const fixture = await startFixturedWitness({
+      read: WRAPPED_COLLECTION_READ,
+      ordersCollection: { rowsKey: 'accounts', idKey: 'id' },
+    });
+    const claims = [READ_CLAIM, ORDERS_READ_CLAIM, LATE_HTTP_CLAIM];
+    try {
+      expect((await declare(fixture.witness.url, claims)).status).toBe(200);
+      const session = await openClaimedSession(fixture.witness.url, claims);
+      await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts');
+      const done = await finalize(fixture.witness.url, session.sessionId);
+      // Persistence keeps its single-use splice: the second persistence
+      // claim finds the exchange already consumed.
+      expect(
+        (done.body['finalized'] as Array<Record<string, unknown>>).map((entry) => entry['obligationId']).sort(),
+      ).toEqual([READ_CLAIM, LATE_HTTP_CLAIM]);
+      expect(String((done.body['notes'] as string[])[0])).toContain(
+        'no GET /api/accounts exchange (2xx) for this session',
+      );
+      const records = await ledgerRecords(fixture.witness.url);
+      expect(records.filter((entry) => entry['kind'] === 'persistence.observed')).toHaveLength(1);
+      // The transport record still carries the exchange the persistence
+      // claim consumed — the snapshot predates the consumption.
+      const transport = records.find((entry) => entry['kind'] === 'http.observed');
+      expect((transport?.['payload'] as Record<string, unknown>)['exchanges']).toEqual([
+        { method: 'GET', url: '/api/accounts', status: 200 },
+      ]);
+      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
+    } finally {
+      await fixture.witness.stop();
+      await fixture.target.stop();
+    }
+  });
+});
+
 describe('observe finalize (concurrent observed creates)', () => {
   /**
    * Two sessions whose before-snapshots both predate BOTH creates: each
