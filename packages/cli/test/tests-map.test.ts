@@ -91,7 +91,7 @@ interface SuggestJson {
     obligationId: string;
     cause: string;
     candidates: Array<{ logicalKey: string; file: string; why: string[]; overlaps: string[]; score: number; rank: number }>;
-    newTestNeeded: boolean;
+    newTestNeeded: 'no' | 'yes' | 'unverified';
   }>;
 }
 
@@ -441,7 +441,9 @@ describe('gateforge tests suggest', () => {
         (suggestion) => suggestion.obligationId === OBLIGATION_ACCOUNTS,
       );
       expect(missing?.cause).toBe('TEST_MAPPING_MISSING');
-      expect(missing?.newTestNeeded).toBe(false); // the delete journey is a candidate
+      // The delete journey IS a candidate, but ONE signal carries it, so
+      // reuse reads `unverified` — not a settled "no new test needed".
+      expect(missing?.newTestNeeded).toBe('unverified');
       expect(missing?.candidates.some((candidate) => candidate.logicalKey === DELETE_KEY)).toBe(true);
 
       // Mark the existing journey — the mapping suggestion resolves.

@@ -52,10 +52,10 @@ first commands; the guides cover the walks:
 | `gateforge classify delete <file\|folder\|glob> <hard\|archive> [--archive-field <key=value>]... --reason <text> [--confirm]` | Preview (default) or explicitly append one owner delete-semantics rule to `.gateforge/classification-policy.yml`: how removal manifests for every model whose source file matches the pattern. `archive` requires at least one `--archive-field` (the owner-owned archived state the run grades removal against); `hard` refuses the flag. The preview writes nothing, prints the exact diff, and quotes the policy-pin consequence; `--confirm` appends the rule at TEXT level — the key at the end of the document when absent, a new `- match:` item at the end of the block when present — so every byte the owner wrote survives (comments, key order, flow sequences), and the resulting document is validated against the pinned schema. A `deleteRules` the command cannot extend safely (flow style, or a value that is not a list of rules) is refused by name. An existing rule for the same source is reported, never shadowed. Declaring is an evidence contract, not an override: contradicting detector evidence still blocks. | 0/2 |
 | `gateforge explain <resourceId\|path> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. A repo-relative PATH is also a target: when no resource matches it, the command prints what the file is and what governs it (Gateforge policy input, declared gate input, owner-declared documentation folder, known source of a resource, or an unclassified change) with the steps that attribute it — this is the answer an unmapped `CHANGE_UNMAPPED` file needs. An unknown target stays unknown (exit 1). | 0/1/2 |
 | `gateforge tests discover [--json] [--pytest]` | Inventory existing tests into the derived run-state catalog: static analysis reconciled with native Playwright enumeration (`--list`). Unresolved wrappers, parse errors, and inventory gaps are DATA (never an empty catalog — failed native enumeration is exit 2). `--pytest` additionally collects the configured diagnostic suites' node ids (`--collect-only`). Playwright enumeration runs ONE config (a repo-root config wins; otherwise the alphabetically first config one directory deep), and when the repo holds more than one the runner line names every config, the one used, why, and the ones NOT inventoried. `inventoryComplete=false` means a reconciliation gap (an enumerated-vs-static mismatch, an unresolved case, or a not-inventoried extra config), not a partial success. | 0/2 |
-| `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`). Candidates are RANKED by the evidence their catalog row carries (explicit tag, resource token in title/file, operation word, route segment, unmocked folder, minus mocks) with the matching reason printed as `why:`; the text surface prints the top five and names how many it hid, `--json` carries every candidate with its `rank` and `score`. With a candidate present the next action is to MARK it `observed-e2e` and run it under the witness — the overlay instruction belongs to `newTestNeeded: true`. When Playwright reports load errors and enumerates no tests, report one `TEST_INVENTORY_INCOMPLETE` with the error count and first error instead of stale-mapping fan-out; the action is to install the missing dependency and rerun Gateforge. An inspection surface, NOT a gate: exit 0 even with blocking problems. | 0/2 |
+| `gateforge tests suggest [--changed] [--json]` | Resolve mappings for the run's obligations and produce reuse-ordered existing-test candidates with typed causes (`TEST_MAPPING_MISSING` / `TEST_KIND_UNKNOWN` / `TEST_MAPPING_AMBIGUOUS` / `TEST_MAPPING_STALE`). Candidates are RANKED by the evidence their catalog row carries (explicit tag, resource token in title/file, operation word, route segment, unmocked folder, minus mocks) with the matching reason printed as `why:`; the text surface prints the top five and names how many it hid, `--json` carries every candidate with its `rank` and `score`. The reuse verdict `newTestNeeded` has THREE honest values: `no` (the `#1` candidate is an unmocked e2e row more than one signal supports), `yes` (no candidate survived resolution, or every candidate mocks the system under test) and `unverified` (a candidate exists but one signal carries it — confirm the request with `gateforge explain <obligation>` before marking). The next action follows it: MARK the candidate and run it under the witness when the verdict is `no`, write the overlay when it is `yes`. When Playwright reports load errors and enumerates no tests, report one `TEST_INVENTORY_INCOMPLETE` with the error count and first error instead of stale-mapping fan-out; the action is to install the missing dependency and rerun Gateforge. An inspection surface, NOT a gate: exit 0 even with blocking problems. | 0/2 |
 | `gateforge tests mark --test <key> --kind <kind> [--category <c>]... --obligation <id>... --reason "<text>"` | Declare an existing test in `.gateforge/test-map.yml` (see the test-reuse workflow below). Validates against the CURRENT catalog and obligation registry, writes atomically and idempotently, prints the exact diff. Never edits test files, never adds waivers, refuses contradictions. | 0/2 |
 | `gateforge tests sync [--json]` | AST-only scan of test annotations; updates generated `source: annotation` entries in `.gateforge/test-map.yml` and leaves handwritten entries unchanged. Reports unresolved helpers with source locations; does not run tests. | 0/1/2 |
-| `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, `New test needed`. | 0/2 (unknown key → 2) |
+| `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, and the same three-state reuse verdict `New test needed` (`no` / `yes` / `unverified`) `tests suggest` prints — built from the SAME route evidence, so the two surfaces never disagree about one test. | 0/2 (unknown key → 2) |
 | `gateforge tests diagnose [--suite <name>] [--json]` | Run the configured pytest diagnostic suites once per suite, isolated (own process, `GATEFORGE_*` stripped, finite timeout). Advisory: exit 0 completed run (≥1 pass, no unexpected failures), 1 test failures, 2 unavailable/incomplete (collection error, timeout, missing interpreter, interruption, zero tests, or only skipped/xfail). Never E2E proof. | 0/1/2 |
 | `gateforge obligations [--json]` | Evaluate policies against the automatically classified graph and dump obligations, blocking entries, and claim assessments. | 0/1/2 |
 | `gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--timing] [--no-cache] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--timing` appends per-step wall-clock timings (detectors, test collection, TS scan, planning, total) — an additive report key in json and one line in text, never an input to any verdict. Detector and pytest-collection results are cached under the excluded run-state dir. Detector keys include plugin config, executable module/script bytes, Python import environment, inputs, interpreter packages, and Gateforge engine version; pytest keys include all Python/config file bytes, collector argv/environment, interpreter identity, and engine version. Unchanged successful pytest collections reuse their node ids; any changed Python byte recollects. Any uncertainty runs fresh. The report carries additive `cache: {hits, misses}` counts. `--no-cache` (or `GATEFORGE_NO_CACHE=1`, or a CI environment) disables cache reads and writes. | 0 clean/waived, 1 unresolved, 2 config/usage error |
@@ -396,10 +396,18 @@ tests:
   witnessed evidence for this change grades `EVIDENCE_NOT_COLLECTED` —
   blocking.
 
-`tests suggest` emits `newTestNeeded: true` only when no suitable existing
-candidate survives resolution. An unsupported proof channel produces a
-capability task (`VERIFIER_UNSUPPORTED`), never a request to generate more
-tests.
+`tests suggest` emits a THREE-STATE reuse verdict, never a boolean:
+`no` when the `#1` candidate is an unmocked e2e row that more than ONE
+signal supports (an explicit tag naming this resource, or a resource-token
+match together with a file that names the route); `yes` when no candidate
+survived resolution or every candidate mocks the system under test; and
+`unverified` when a candidate exists but ONE signal carries it — a name in
+common is not proof the test drives that request, so the next action is
+the check (`new test needed: unverified — check that a candidate really
+sends <METHOD> <route> before marking (gateforge explain <obligation>)`),
+never a ready-made `tests mark` command. An unsupported proof channel
+produces a capability task (`VERIFIER_UNSUPPORTED`), never a request to
+generate more tests.
 
 ### Ranked candidates
 
@@ -445,12 +453,14 @@ that line.
 
 ### One instruction, not two
 
-When a candidate exists, the suggestion's next action is to MARK that
-existing test `observed-e2e` and run it under the witness
-(`gateforge tests mark --test <key> --kind observed-e2e --obligation <id>
---reason "…"` then `gateforge test-gates --changed`). The overlay
-instruction — write `tests/e2e/gateforge/<resource>.<op>.spec.js` — belongs
-to `newTestNeeded: true`, i.e. no existing test fits. A suggestion block
+When a candidate exists and its verdict is `no`, the suggestion's next
+action is to MARK that existing test `observed-e2e` and run it under the
+witness (`gateforge tests mark --test <key> --kind observed-e2e
+--obligation <id> --reason "…"` then `gateforge test-gates --changed`).
+The overlay instruction — write
+`tests/e2e/gateforge/<resource>.<op>.spec.js` — belongs to
+`newTestNeeded: yes`, i.e. no existing test fits; an `unverified` verdict
+asks you to confirm the candidate's request first. A suggestion block
 never tells you to write a new overlay test and, in the same breath, to
 reuse the test it just listed.
 

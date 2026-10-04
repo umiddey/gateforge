@@ -44,6 +44,7 @@ import {
   type GateforgeConfig,
   type JsonValue,
   type Obligation,
+  type ResourceGraph,
   type ResolvedMappings,
   type TestCatalog,
   type TestCatalogEntry,
@@ -384,9 +385,47 @@ interface SuggestionJson {
   }>;
   missingEvidence: string;
   nextAction: string;
-  newTestNeeded: boolean;
+  /**
+   * The reuse verdict: `no` (reuse proven), `yes` (nothing reusable),
+   * or `unverified` (a candidate exists but ONE signal carries it —
+   * confirm the request before marking).
+   */
+  newTestNeeded: 'no' | 'yes' | 'unverified';
   /** Required behavior case slugs with no declared test mapping (empty without a behavior catalog). */
   unmappedCases: string[];
+}
+
+/**
+ * Route hints per obligation (`GET /api/v1/accounts`, …) — the SAME
+ * evidence for every surface that reports a reuse verdict. They rank
+ * candidates by route evidence AND decide whether the top candidate is
+ * `no` or `unverified`, so building them once keeps `tests suggest` and
+ * `tests explain` from disagreeing about the same test.
+ *
+ * Args:
+ *   graph: the classified resource graph.
+ *   obligations: the run's obligations.
+ *
+ * Returns:
+ *   Map<string, string[]>: obligation id → its routes; absent when the
+ *   run knows no route for that resource (never a different rule).
+ */
+function routeHintsByObligation(
+  graph: ResourceGraph,
+  obligations: readonly Obligation[],
+): Map<string, string[]> {
+  const routesByResource = new Map<string, string[]>();
+  for (const route of httpRoutesView(graph)) {
+    const hints = routesByResource.get(route.resourceId) ?? [];
+    hints.push(`${route.method} ${route.canonicalPath}`);
+    routesByResource.set(route.resourceId, hints);
+  }
+  const byObligation = new Map<string, string[]>();
+  for (const obligation of obligations) {
+    const routes = routesByResource.get(obligation.resourceId);
+    if (routes !== undefined) byObligation.set(obligation.id, [...routes]);
+  }
+  return byObligation;
 }
 
 /** Implements `tests suggest [--changed]`. */
@@ -433,20 +472,7 @@ async function suggestSubcommand(
     );
   }
 
-  // Route hints rank candidates by route evidence ("this test talks to
-  // the obligation's route"). They only ADD a ranking signal; without
-  // them the same candidates come back in token order.
-  const routesByResource = new Map<string, string[]>();
-  for (const route of httpRoutesView(pipeline.graph)) {
-    const hints = routesByResource.get(route.resourceId) ?? [];
-    hints.push(`${route.method} ${route.canonicalPath}`);
-    routesByResource.set(route.resourceId, hints);
-  }
-  const routeHints = new Map<string, string[]>();
-  for (const obligation of pipeline.policy.obligations) {
-    const hints = routesByResource.get(obligation.resourceId);
-    if (hints !== undefined) routeHints.set(obligation.id, [...hints]);
-  }
+  const routeHints = routeHintsByObligation(pipeline.graph, pipeline.policy.obligations);
 
   // A COMPLETE enumeration failure of the CONFIGURED runner hides the
   // suggestions (an empty inventory would read as "no candidates"
@@ -562,7 +588,17 @@ async function suggestSubcommand(
     writeLine(io.stdout, `[${suggestion.cause}] ${suggestion.obligationId}`);
     writeLine(io.stdout, `  missing evidence: ${suggestion.missingEvidence}`);
     writeLine(io.stdout, `  next action: ${suggestion.nextAction}`);
-    writeLine(io.stdout, `  new test needed: ${suggestion.newTestNeeded ? 'yes' : 'no'}`);
+    // The third state names the CHECK, not a verdict: `unverified` means a
+    // candidate exists but one signal carries it, so the owner must
+    // confirm the request before marking it.
+    const routeHint = routeHints.get(suggestion.obligationId)?.[0] ?? 'the request this obligation describes';
+    writeLine(
+      io.stdout,
+      suggestion.newTestNeeded === 'unverified'
+        ? `  new test needed: unverified — check that a candidate really sends ${routeHint} before marking ` +
+            `(gateforge explain ${suggestion.obligationId})`
+        : `  new test needed: ${suggestion.newTestNeeded}`,
+    );
     const unmapped = unmappedCaseSlugs(suggestion.obligationId);
     if (unmapped.length > 0) {
       writeLine(io.stdout, `  unmapped cases: ${unmapped.join(', ')} (map with tests mark --case, then prove with witnessed execution)`);
@@ -938,7 +974,14 @@ async function explainSubcommand(
     );
   }
 
-  const report = explainReport(testKey, entry, mapped, pipeline.policy.obligations, pipeline.behaviorCatalog);
+  const report = explainReport(
+    testKey,
+    entry,
+    mapped,
+    pipeline.policy.obligations,
+    routeHintsByObligation(pipeline.graph, pipeline.policy.obligations),
+    pipeline.behaviorCatalog,
+  );
   if (asJson) {
     writeLine(io.stdout, canonicalJson(report as unknown as JsonValue));
     return 0;
@@ -990,6 +1033,7 @@ function explainReport(
     nativeClaims: Claim[];
   },
   obligations: readonly Obligation[],
+  routeHints: ReadonlyMap<string, readonly string[]>,
   behaviorCatalog?: import('@gate-forge/core').BehaviorCatalog | null,
 ): ExplainReport {
   const registry = new Set(obligations.map((obligation) => obligation.id));
@@ -1008,13 +1052,15 @@ function explainReport(
       ...bindings.map((entry_) => entry_.obligationId),
     ]),
   ].sort(compareStrings);
-  // `new test needed` comes from the resolver's own suggestion rule for
-  // each obligation (candidates empty after resolution ⇒ true).
+  // `new test needed` is the resolver's own three-state REUSE verdict for
+  // each obligation. It needs the SAME route evidence `tests suggest`
+  // uses, or a candidate would read `unverified` here and `no` there.
   const suggestions = new Map(
     mappingSuggestions({
       catalog: mapped.catalog,
       obligationIds: obligationIds.filter((id) => registry.has(id)),
       resolution: mapped.resolution,
+      routeHints,
     }).map((suggestion) => [suggestion.obligationId, suggestion]),
   );
 
@@ -1074,14 +1120,12 @@ function explainReport(
         ? 'run tests suggest to find candidate existing tests; mark the test if it covers this obligation'
         : 'correct the claim — the obligation id is not in the current registry';
     }
-    const suggestionNewTest = suggestions.get(obligationId)?.newTestNeeded === true;
+    const verdict = suggestions.get(obligationId)?.newTestNeeded;
     const newTestNeeded = !inRegistry
       ? 'unknown (the obligation id is not in the current registry)'
       : sidecarDeclares || nativeDeclares
         ? 'no'
-        : suggestionNewTest
-          ? 'yes'
-          : 'no';
+        : (verdict ?? 'unverified');
     return {
       requirement: inRegistry ? obligationId : `${obligationId} (not in the current registry)`,
       mapping,

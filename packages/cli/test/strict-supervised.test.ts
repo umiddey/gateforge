@@ -944,20 +944,22 @@ describe('strict supervised gate (test-gates --changed + receipt + check)', () =
           }
 
           // The suggestion surface orders REUSE first: every obligation is
-          // TEST_MAPPING_MISSING, the existing journeys are candidates, and
-          // no new test is recommended.
+          // TEST_MAPPING_MISSING and the existing journeys are candidates.
+          // Their reuse reads `unverified`: a candidate matched on ONE
+          // signal, so the check — not a settled reuse claim — is the next
+          // action.
           const suggested = await runSupervisedCli(repo, ['tests', 'suggest', '--json'], env);
           expect(suggested.code, `suggest stdout:\n${suggested.stdout}\nstderr:\n${suggested.stderr}`).toBe(0);
           const suggestions = JSON.parse(suggested.stdout).suggestions as Array<{
             obligationId: string;
             cause: string;
-            newTestNeeded: boolean;
+            newTestNeeded: 'no' | 'yes' | 'unverified';
             candidates: Array<{ file: string }>;
           }>;
           for (const journey of JOURNEYS) {
             const row = suggestions.find((entry) => entry.obligationId === journey.obligation);
             expect(row?.cause).toBe('TEST_MAPPING_MISSING');
-            expect(row?.newTestNeeded).toBe(false);
+            expect(row?.newTestNeeded).toBe('unverified');
             expect(row?.candidates.some((candidate) => candidate.file === 'specs/journeys.spec.js')).toBe(true);
           }
 
@@ -1145,12 +1147,12 @@ policies:
           const suggestions = JSON.parse(suggested.stdout).suggestions as Array<{
             obligationId: string;
             cause: string;
-            newTestNeeded: boolean;
+            newTestNeeded: 'no' | 'yes' | 'unverified';
             candidates: unknown[];
           }>;
           const gap = suggestions.find((entry) => entry.obligationId === 'tenant.accounts:crud:read');
           expect(gap?.cause).toBe('TEST_MAPPING_MISSING');
-          expect(gap?.newTestNeeded).toBe(true);
+          expect(gap?.newTestNeeded).toBe('yes');
 
           // (b) The strict gate blocks EVEN THOUGH every existing journey
           // passes: a green suite without the behavior's proof is not a

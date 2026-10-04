@@ -801,6 +801,37 @@ function explicitTagTokens(titlePath: readonly string[]): string[] {
   return tokens;
 }
 
+/** One candidate's evidence score, its reasons, and the reuse inputs. */
+interface CandidateEvidence {
+  score: number;
+  why: string[];
+  /** The verdict inputs the reuse decision reads (never re-derived). */
+  verdict: {
+    /** An explicit `@crud(…)`/`@gateforge(…)`/`@resource(…)` named the resource. */
+    explicitTag: boolean;
+    /** A resource-NAME token matched the title, the file or a category. */
+    resourceToken: boolean;
+    /**
+     * The FILE PATH names the obligation's route: at least
+     * `min(2, segments)` of the route's non-operation segments appear in
+     * it. A route is a PATH — one shared word (`auth`) is a coincidence,
+     * while a file named `admin_login.spec.js` for `/admin/auth/login`
+     * is that route. A route with fewer than two meaningful segments
+     * needs only its own segment.
+     */
+    fileNamesRoute: boolean;
+  };
+}
+
+/** Whether one catalog row's file path names the obligation's route. */
+function fileNamesRoute(fileWords: readonly string[], routeSegments: readonly string[]): boolean {
+  const meaningful = routeSegments.filter((segment) => OPERATION_WORDS[segment] !== true);
+  if (meaningful.length === 0) return false;
+  const needed = Math.min(2, meaningful.length);
+  const named = meaningful.filter((segment) => fileWords.includes(segment)).length;
+  return named >= needed;
+}
+
 /**
  * Scores ONE catalog row against one obligation by the evidence the row
  * carries, and explains every contributing signal in plain words. Every
@@ -814,13 +845,14 @@ function explicitTagTokens(titlePath: readonly string[]): string[] {
  *   routes: the obligation's route hints (e.g. `GET /api/v2/accounts`).
  *
  * Returns:
- *   {score, why}: the additive evidence score and its human reasons.
+ *   CandidateEvidence: the additive score, its human reasons, and the
+ *   boolean inputs the reuse verdict reads.
  */
 function candidateEvidence(
   obligationId: string,
   row: TestCatalogEntry,
   routes: readonly string[],
-): { score: number; why: string[] } {
+): CandidateEvidence {
   const resourceId = obligationId.slice(0, Math.max(0, obligationId.indexOf(':')));
   const tokens = resourceTokens(resourceId);
   const why: string[] = [];
@@ -840,11 +872,14 @@ function candidateEvidence(
   // twice, and an operation word is never mistaken for a resource name.
   const counted = new Set<string>();
   let distinctive = false;
+  let explicitTag = false;
+  let resourceToken = false;
   for (const token of tokens) {
     if (counted.has(token)) continue;
     if (tagTokens.includes(token)) {
       counted.add(token);
       distinctive = true;
+      explicitTag = true;
       score += CANDIDATE_SCORE['explicitTag'] ?? 0;
       why.push(`explicit tag names this obligation's resource '${token}'`);
       continue;
@@ -852,11 +887,13 @@ function candidateEvidence(
     if (words.includes(token)) {
       counted.add(token);
       distinctive = true;
+      resourceToken = true;
       score += CANDIDATE_SCORE['titleResourceToken'] ?? 0;
       why.push(`resource token '${token}' matches the test title path`);
     } else if (fileWords.includes(token)) {
       counted.add(token);
       distinctive = true;
+      resourceToken = true;
       score += CANDIDATE_SCORE['fileResourceToken'] ?? 0;
       why.push(`resource token '${token}' matches the test file '${row.file}'`);
     } else if (
@@ -866,6 +903,7 @@ function candidateEvidence(
     ) {
       counted.add(token);
       distinctive = true;
+      resourceToken = true;
       score += CANDIDATE_SCORE['categoryToken'] ?? 0;
       why.push(`resource token '${token}' matches a category label`);
     }
@@ -901,7 +939,8 @@ function candidateEvidence(
   // An unmocked folder, an operation word or a mock signal alone never makes
   // a candidate: there must be at least one DISTINCTIVE match — a resource
   // token or a route segment that is not an operation word.
-  return distinctive ? { score, why } : { score: 0, why: [] };
+  const verdict = { explicitTag, resourceToken, fileNamesRoute: fileNamesRoute(fileWords, routeSegments) };
+  return distinctive ? { score, why, verdict } : { score: 0, why: [], verdict };
 }
 
 /**
@@ -1001,8 +1040,19 @@ export interface MappingSuggestion {
   missingEvidence: string;
   /** The plan §5.4 next action for the cause. */
   nextAction: string;
-  /** True ONLY when no candidate exists after resolution. */
-  newTestNeeded: boolean;
+  /**
+   * The REUSE verdict — a question with three honest answers, not a
+   * boolean:
+   * - `no`: the #1 candidate can be reused and the evidence says so (an
+   *   explicit tag names this resource, or the row's file names the
+   *   route);
+   * - `yes`: nothing can be reused — no candidate survived resolution,
+   *   or every candidate mocks the system under test;
+   * - `unverified`: a candidate exists but ONE signal carries it, so
+   *   reuse may well be right and nothing here proves it. The owner must
+   *   confirm the request really is sent before marking.
+   */
+  newTestNeeded: 'no' | 'yes' | 'unverified';
 }
 
 /** Inputs of {@link mappingSuggestions}. */
@@ -1078,6 +1128,78 @@ function reuseNextAction(obligationId: string, candidate: SuggestionCandidate | 
 }
 
 /**
+ * The next action when reuse is PLAUSIBLE but unproven: confirm the
+ * request first, and only then mark. This never prints a ready-to-run
+ * `tests mark` command — handing the owner a command to run is exactly
+ * the advice that was wrong when the single-signal candidate looked
+ * settled.
+ *
+ * Args:
+ *   obligationId: the obligation the suggestion is about.
+ *   candidate: the top-ranked candidate.
+ *   route: the request the candidate must really send.
+ *
+ * Returns:
+ *   string: the confirmation-first next action.
+ */
+function unverifiedNextAction(
+  obligationId: string,
+  candidate: SuggestionCandidate | undefined,
+  route: string,
+): string {
+  const where =
+    candidate === undefined
+      ? ''
+      : ` Read ${candidate.file} and check that it really sends it.`;
+  return (
+    `check that the candidate really sends ${route} before marking it — ` +
+    `run \`gateforge explain ${obligationId}\` to see the obligation.${where} ` +
+    'A shared name is not proof; mark only once the request is in there.'
+  );
+}
+
+/**
+ * The REUSE verdict for one obligation's candidate list.
+ *
+ * `yes` when nothing can be reused: no candidate survived resolution, or
+ * every candidate mocks the system under test (a mock can never witness
+ * the claim, so it is not a reuse answer at all).
+ *
+ * `no` only when the #1 candidate is an unmocked e2e row AND the evidence
+ * is more than one signal — an explicit tag that NAMES this resource, or
+ * a resource-token match together with the file naming the route. One
+ * shared word is a coincidence; a file named `admin_login.spec.js` for
+ * `POST /admin/auth/login` is that route.
+ *
+ * Anything else is `unverified`: a candidate exists, reuse may well be
+ * right, and NOTHING HERE PROVES IT. That is the honest answer, and it
+ * is why it is a third state instead of a `false` that reads as "reuse
+ * is settled".
+ *
+ * Args:
+ *   candidates: the ranked candidate list (empty when none survived).
+ *   mockedKeys: logical keys whose rows mock the system under test.
+ *   verdictOf: the evidence verdict for a candidate's logical key.
+ *
+ * Returns:
+ *   'yes' | 'no' | 'unverified': the reuse verdict.
+ */
+function reuseVerdict(
+  candidates: readonly SuggestionCandidate[],
+  mockedKeys: ReadonlySet<string>,
+  verdictOf: (logicalKey: string) => CandidateEvidence['verdict'] | undefined,
+): 'yes' | 'no' | 'unverified' {
+  if (candidates.length === 0) return 'yes';
+  if (candidates.every((candidate) => mockedKeys.has(candidate.logicalKey))) return 'yes';
+  const top = candidates[0];
+  if (top === undefined || mockedKeys.has(top.logicalKey)) return 'unverified';
+  const verdict = verdictOf(top.logicalKey);
+  if (verdict === undefined) return 'unverified';
+  if (verdict.explicitTag) return 'no';
+  return verdict.resourceToken && verdict.fileNamesRoute ? 'no' : 'unverified';
+}
+
+/**
  * Scores, orders, and numbers one obligation's candidate rows: evidence
  * score first (strongest match ranks #1), logical key second for
  * determinism. Every candidate carries its score and rank so the JSON
@@ -1100,7 +1222,8 @@ function rankCandidates(
  * Produces per-obligation reuse suggestions ordered by reuse (plan
  * Phase 3 item 6). Obligations with a clean DECLARED mapping produce no
  * suggestion (their remaining gap is executed proof, not mapping).
- * `newTestNeeded` is true only when no candidate exists after resolution.
+ * `newTestNeeded` is a three-state REUSE verdict, not a boolean — see
+ * {@link MappingSuggestion.newTestNeeded}.
  *
  * Args:
  *   input: catalog, scoped obligation ids, and the resolution.
@@ -1123,7 +1246,9 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
         candidates: [],
         missingEvidence: 'a safe, unambiguous declaration (the current declaration conflicts with itself or the catalog)',
         nextAction: CAUSE_NEXT_ACTIONS['TEST_MAPPING_AMBIGUOUS'],
-        newTestNeeded: false,
+        // A declaration exists and conflicts with itself: the gap is a
+        // repair, never a new test.
+        newTestNeeded: 'no',
       });
       continue;
     }
@@ -1148,7 +1273,7 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
         candidates,
         missingEvidence: `an up-to-date declaration (the current one is stale: ${stale.detail})`,
         nextAction: CAUSE_NEXT_ACTIONS['TEST_MAPPING_STALE'],
-        newTestNeeded: candidates.length === 0,
+        newTestNeeded: candidates.length === 0 ? 'yes' : 'no',
       });
       continue;
     }
@@ -1176,12 +1301,14 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
         ),
         missingEvidence: 'a declared kind for the connected test (code analysis could not classify it)',
         nextAction: CAUSE_NEXT_ACTIONS['TEST_KIND_UNKNOWN'],
-        newTestNeeded: false,
+        // A test is already declared; only its kind is missing.
+        newTestNeeded: 'no',
       });
       continue;
     }
     if (declared.length > 0) continue; // declared + clean: the gap is execution, not mapping
     const mockedKeys = new Set<string>();
+    const verdicts = new Map<string, CandidateEvidence['verdict']>();
     const candidates = rankCandidates(
       bindings.map((binding) => {
         const row = rowsByKey.get(binding.logicalKey);
@@ -1195,8 +1322,9 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
         }
         const evidence =
           row === undefined
-            ? { score: 0, why: [] as string[] }
+            ? { score: 0, why: [] as string[], verdict: undefined }
             : candidateEvidence(obligationId, row, input.routeHints?.get(obligationId) ?? []);
+        if (evidence.verdict !== undefined) verdicts.set(binding.logicalKey, evidence.verdict);
         return {
           logicalKey: binding.logicalKey,
           file: binding.instances[0]?.file ?? '',
@@ -1209,20 +1337,30 @@ export function mappingSuggestions(input: MappingSuggestionsInput): MappingSugge
     // candidate mocks the system under test the obligation is not
     // satisfiable by reuse: a NEW test is needed. The mocked rows stay
     // listed as context, and no `tests mark` is offered for them.
-    const unwitnessable = candidates.filter((candidate) => mockedKeys.has(candidate.logicalKey));
-    const onlyMocked = candidates.length > 0 && unwitnessable.length === candidates.length;
+    const onlyMocked = candidates.length > 0 && candidates.every((candidate) => mockedKeys.has(candidate.logicalKey));
+    const verdict = reuseVerdict(candidates, mockedKeys, (key) => verdicts.get(key));
+    // The request the candidate must REALLY send before a mark is honest:
+    // the obligation's own route hint, never a guess.
+    const route = input.routeHints?.get(obligationId)?.[0] ?? 'the request this obligation describes';
     suggestions.push({
       obligationId,
       cause: 'TEST_MAPPING_MISSING',
       candidates,
-      missingEvidence: onlyMocked
-        ? 'a new test — only mocked candidates: every existing candidate mocks the system under ' +
-          'test, so none can witness this claim (they are listed as context)'
-        : candidates.length > 0
-          ? 'a DECLARED mapping and witnessed evidence for this change (a mapping declares intent; it supplies no test result)'
-          : 'a declared mapping to any existing test — no candidate survived resolution',
-      nextAction: reuseNextAction(obligationId, onlyMocked ? undefined : candidates[0]),
-      newTestNeeded: onlyMocked || candidates.length === 0,
+      missingEvidence:
+        verdict === 'unverified'
+          ? `CONFIRMATION that the candidate really sends ${route} — it matched on ONE signal, ` +
+            'and a name in common is not proof the test drives that route'
+          : onlyMocked
+            ? 'a new test — only mocked candidates: every existing candidate mocks the system under ' +
+              'test, so none can witness this claim (they are listed as context)'
+            : candidates.length > 0
+              ? 'a DECLARED mapping and witnessed evidence for this change (a mapping declares intent; it supplies no test result)'
+              : 'a declared mapping to any existing test — no candidate survived resolution',
+      nextAction:
+        verdict === 'unverified'
+          ? unverifiedNextAction(obligationId, candidates[0], route)
+          : reuseNextAction(obligationId, onlyMocked ? undefined : candidates[0]),
+      newTestNeeded: verdict,
     });
   }
   return suggestions.sort(

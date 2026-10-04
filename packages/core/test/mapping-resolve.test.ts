@@ -554,7 +554,7 @@ describe('mappingGradingClaims — projection', () => {
 });
 
 describe('mappingSuggestions — reuse ordering', () => {
-  it('reports TEST_MAPPING_MISSING with inference candidates and newTestNeeded=false', () => {
+  it('reports TEST_MAPPING_MISSING with inference candidates and newTestNeeded=unverified', () => {
     const resolution = resolveTestMappings(resolveInput());
     const suggestions = mappingSuggestions({
       catalog: resolveInput().catalog,
@@ -564,13 +564,16 @@ describe('mappingSuggestions — reuse ordering', () => {
     expect(suggestions).toHaveLength(2);
     const missing = suggestions.find((suggestion) => suggestion.obligationId === OBLIGATION);
     expect(missing?.cause).toBe('TEST_MAPPING_MISSING');
-    expect(missing?.newTestNeeded).toBe(false);
+    // ONE signal carries this candidate — the title's resource token — and
+    // the run offers no route to check it against, so nothing here proves
+    // the test drives the request. `unverified` is the honest answer.
+    expect(missing?.newTestNeeded).toBe('unverified');
     expect(missing?.candidates[0]?.logicalKey).toBe(KEY);
     expect(missing?.candidates[0]?.why.join(' ')).toContain("resource token 'accounts'");
     // orders: nothing matches 'orders' → genuinely uncovered
     const orders = suggestions.find((suggestion) => suggestion.obligationId === OTHER_OBLIGATION);
     expect(orders?.candidates).toEqual([]);
-    expect(orders?.newTestNeeded).toBe(true);
+    expect(orders?.newTestNeeded).toBe('yes');
   });
 
   it('guides suite-driven browser candidates to observed-e2e and fixture tests to the overlay path', () => {
@@ -616,7 +619,7 @@ describe('mappingSuggestions — reuse ordering', () => {
     });
     expect(suggestions).toHaveLength(1);
     expect(suggestions[0]?.cause).toBe('TEST_MAPPING_STALE');
-    expect(suggestions[0]?.newTestNeeded).toBe(true);
+    expect(suggestions[0]?.newTestNeeded).toBe('yes');
   });
 
   it('reports TEST_MAPPING_AMBIGUOUS first in reuse order, with no candidates', () => {
@@ -643,7 +646,7 @@ describe('mappingSuggestions — reuse ordering', () => {
     expect(suggestions).toHaveLength(1);
     expect(suggestions[0]?.cause).toBe('TEST_MAPPING_AMBIGUOUS');
     expect(suggestions[0]?.nextAction).toBe('Correct the exact mapping');
-    expect(suggestions[0]?.newTestNeeded).toBe(false);
+    expect(suggestions[0]?.newTestNeeded).toBe('no');
   });
 
   it('produces no suggestion for an obligation with a clean declared mapping', () => {
@@ -735,7 +738,7 @@ describe('mappingSuggestions — evidence ranking (0.9.0 adoption fix)', () => {
       obligationIds: [OBLIGATION],
       resolution,
     });
-    expect(suggestions[0]?.newTestNeeded).toBe(true);
+    expect(suggestions[0]?.newTestNeeded).toBe('yes');
     expect(suggestions[0]?.nextAction).toBe(CAUSE_NEXT_ACTIONS['TEST_MAPPING_MISSING']);
   });
 });
@@ -964,7 +967,9 @@ describe('mappingSuggestions — eligibility, not just ranking (0.9.2 follow-up)
     expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([
       'playwright:-:tests/e2e/real/notifications.spec.js:notifications mark one as read',
     ]);
-    expect(suggestion?.newTestNeeded).toBe(false);
+    // The surviving row is a real e2e spec whose title names the resource
+    // and whose FILE names the route: two signals, so reuse is settled.
+    expect(suggestion?.newTestNeeded).toBe('no');
   });
 
   it('asks for a NEW test when every candidate mocks the system under test', () => {
@@ -989,7 +994,7 @@ describe('mappingSuggestions — eligibility, not just ranking (0.9.2 follow-up)
     // Still listed, as context.
     expect(candidates).toHaveLength(1);
     expect(candidates[0]?.why.join(' ')).toContain('mocks the system under test');
-    expect(suggestion?.newTestNeeded).toBe(true);
+    expect(suggestion?.newTestNeeded).toBe('yes');
     expect(suggestion?.missingEvidence).toContain('only mocked candidates');
     // No `tests mark` next action for a mocked candidate.
     expect(suggestion?.nextAction).not.toContain('mark the existing test');
@@ -1021,7 +1026,7 @@ describe('mappingSuggestions — eligibility, not just ranking (0.9.2 follow-up)
     ]);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]?.why.join(' ')).toContain('mocks the system under test');
-    expect(suggestion?.newTestNeeded).toBe(true);
+    expect(suggestion?.newTestNeeded).toBe('yes');
     expect(suggestion?.missingEvidence).toContain('only mocked candidates');
     expect(suggestion?.nextAction).not.toContain('mark the existing test');
     expect(suggestion?.nextAction).toContain('Overlay: write');
@@ -1111,13 +1116,70 @@ describe('mappingSuggestions — candidates must be distinctive (0.9.2 follow-up
     ]);
     expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([NOTIFICATIONS]);
     expect(candidates[0]?.why.join(' ')).toContain("resource token 'notifications'");
-    expect(suggestion?.newTestNeeded).toBe(false);
+    expect(suggestion?.newTestNeeded).toBe('no');
   });
 
   it('reports no candidate and a new test when nothing distinctive matches', () => {
     const { candidates, suggestion } = suggestionsFor(realRows());
     expect(candidates).toEqual([]);
-    expect(suggestion?.newTestNeeded).toBe(true);
+    expect(suggestion?.newTestNeeded).toBe('yes');
     expect(suggestion?.nextAction).toContain('Overlay: write');
+  });
+
+  /** The admin login request these two candidates could answer for. */
+  const LOGIN_OBLIGATION = 'master.http-post-admin-auth-login-4e84d21a:http:request-observed';
+  const LOGIN_HINTS = new Map([[LOGIN_OBLIGATION, ['POST /admin/auth/login']]]);
+  const AUTH_RBAC =
+    'playwright:-:tests/e2e/real/auth_rbac_and_token_refresh.spec.js:' +
+    'AUTH-TOKEN-PORTALS @real-e2e @p0>permission — an anonymous visit to the admin plane redirects to login';
+  const ADMIN_LOGIN =
+    'playwright:-:tests/e2e/real/admin_login.spec.js:' +
+    'admin login with valid credentials reaches the admin dashboard';
+
+  /** The same construction as {@link suggestionsFor}, for the login route. */
+  function loginSuggestionsFor(entries: TestCatalogEntry[]) {
+    const ranked = catalog(entries);
+    const suggestion = mappingSuggestions({
+      catalog: ranked,
+      obligationIds: [LOGIN_OBLIGATION],
+      resolution: resolveTestMappings(
+        resolveInput({ catalog: ranked, obligationIds: [LOGIN_OBLIGATION] }),
+      ),
+      routeHints: LOGIN_HINTS,
+    })[0];
+    return { candidates: suggestion?.candidates ?? [], suggestion };
+  }
+
+  it('reports reuse as unverified while ONE signal carries the candidate', () => {
+    // The title names the resource and the file shares exactly ONE route
+    // word (`auth`). That is not proof the spec posts to
+    // `/admin/auth/login`, so the verdict is the third state and the next
+    // action is the check — never a `tests mark` command to run.
+    const { candidates, suggestion } = loginSuggestionsFor([
+      readOnlyRow(
+        AUTH_RBAC,
+        'tests/e2e/real/auth_rbac_and_token_refresh.spec.js',
+        'AUTH-TOKEN-PORTALS @real-e2e @p0>permission — an anonymous visit to the admin plane redirects to login',
+      ),
+    ]);
+    expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([AUTH_RBAC]);
+    expect(suggestion?.newTestNeeded).toBe('unverified');
+    expect(suggestion?.nextAction).toContain('POST /admin/auth/login');
+    expect(suggestion?.nextAction).not.toContain('tests mark');
+  });
+
+  it('reports reuse as proven when the file itself names the route', () => {
+    // `admin_login.spec.js` IS the `POST /admin/auth/login` route: the
+    // title names the resource and the file names two of the route's
+    // segments, so no confirmation is owed before marking.
+    const { candidates, suggestion } = loginSuggestionsFor([
+      readOnlyRow(
+        ADMIN_LOGIN,
+        'tests/e2e/real/admin_login.spec.js',
+        'admin login with valid credentials reaches the admin dashboard',
+      ),
+    ]);
+    expect(candidates.map((candidate) => candidate.logicalKey)).toEqual([ADMIN_LOGIN]);
+    expect(suggestion?.newTestNeeded).toBe('no');
   });
 });
