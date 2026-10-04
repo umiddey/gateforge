@@ -53,7 +53,7 @@ import type { Io } from '../io.js';
 import { recordInitPath, writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { languageDefaultPlugins, recommendPlugins, renderScanBlock, scanRepo, type RepoScan } from '../repo-scan.js';
-import { rejectUnknownFlags } from './common.js';
+import { rejectUnknownFlags, VERSION } from './common.js';
 import { expandScanPaths, type ExpandError } from '../glob.js';
 import { gitIgnoredPaths } from '../git-ignored.js';
 import { inferPlanesConfig } from '../planes-inference.js';
@@ -196,6 +196,50 @@ function pluginsTemplate(pluginIds: readonly string[]): string {
         `  - id: ${id}\n    version: '${BUNDLED_PLUGIN_VERSIONS[id]}'\n    transport: in-process\n    module: '${BUNDLED_PLUGIN_MODULES[id]}'`,
     )
     .join('\n');
+}
+
+/**
+ * The ONE line that tells the owner how to install the enabled bundled
+ * packs, or null when there is nothing left to install.
+ *
+ * init writes `plugins:` entries for packs that are only resolvable from
+ * the repository's own `node_modules`, and the setup guide asks for them
+ * as direct dependencies AT THE CLI'S OWN VERSION — so init, which
+ * decided which packs to enable, is the only place that knows the exact
+ * list. It never runs npm: the owner decides when the install happens
+ * (and commits it on its own, before the setup files).
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   pluginIds: the bundled plugin ids init enabled.
+ *
+ * Returns:
+ *   string | null: the install line, or null when every enabled pack is
+ *     already declared (or nothing bundled was enabled).
+ */
+function packInstallLine(cwd: string, pluginIds: readonly string[]): string | null {
+  const manifestPath = join(cwd, 'package.json');
+  const declared = new Set<string>();
+  if (existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+      };
+      for (const section of [manifest.dependencies, manifest.devDependencies]) {
+        for (const name of Object.keys(section ?? {})) declared.add(name);
+      }
+    } catch {
+      // An unreadable manifest is not init's to fix; the line still names
+      // exactly what the config now expects the owner to install.
+    }
+  }
+  const missing = pluginIds
+    .map((id) => BUNDLED_PLUGIN_MODULES[id])
+    .filter((moduleName): moduleName is string => moduleName !== undefined && !declared.has(moduleName));
+  if (missing.length === 0) return null;
+  const targets = missing.map((moduleName) => `${moduleName}@${VERSION}`).join(' ');
+  return `install the enabled packs as direct dependencies (same version as the CLI): npm i -D ${targets}`;
 }
 
 /**
@@ -2107,6 +2151,10 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     recordInitPath(io, cwd, target.path, 'created');
     writeLine(io.stdout, `created: ${target.path}`);
   }
+  // The config is written: name the install it now expects (once, and only
+  // for packs this repository has not declared yet). The owner runs it.
+  const installLine = packInstallLine(cwd, pluginIds);
+  if (installLine !== null) writeLine(io.stdout, installLine);
   // Engine-owned state is never a product change: without this the
   // first `git add -A` stages the run cache the gate just wrote, and the
   // gate then blocks on its own files.
