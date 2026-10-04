@@ -34,6 +34,7 @@ import {
   assertRuntimeReuseOwnerApproval,
   freezeStagedCandidate,
   materializeStagedCandidate,
+  mirrorEmptyConfigDirs,
   recheckStagedCandidate,
   releaseStagedCandidate,
   StagedCandidateBlockError,
@@ -126,6 +127,13 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     const checkoutConfig = loadConfigAt(checkoutDir);
     const docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
     const cacheExclusions = loadCacheExclusions(checkoutDir, checkoutConfig);
+    // Same mirroring `check --staged` applies, and for the same reason:
+    // this surface digests the staged checkout (line below) and seals
+    // receipts from the input snapshot it computes in that checkout, so
+    // a worktree with EMPTY `.gateforge/adapters/` / `.gateforge/waivers/`
+    // must not be digested here as the MISSING-directory revision the
+    // commit gate rejects. The candidate is always the staged index here.
+    mirrorEmptyConfigDirs(io.cwd, checkoutDir, checkoutConfig, { fromStagedIndex: true });
     // The runtime document contains executable commands. Evaluate the same
     // owner-approved policy gate used by supervised runs BEFORE any prepare
     // or service command can start in the staged checkout.

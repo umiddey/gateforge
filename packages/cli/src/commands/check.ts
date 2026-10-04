@@ -129,7 +129,7 @@ async function adapterAdvisories(
  * annotations are compared with generated sidecar entries but are not direct
  * check bindings; raw `claims.json` is never a declaration source.
  */
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -194,7 +194,7 @@ import {
   type InputSnapshot,
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
-import { runPipeline, resolveRepoPath, sourcesByResourceId, type PipelineResult } from '../pipeline.js';
+import { runPipeline, sourcesByResourceId, type PipelineResult } from '../pipeline.js';
 import {
   digestPytestInputs,
   interpreterIdentity,
@@ -225,6 +225,7 @@ import {
   freezeCommitCandidate,
   freezeStagedCandidate,
   materializeStagedCandidate,
+  mirrorEmptyConfigDirs,
   recheckStagedCandidate,
   releaseStagedCandidate,
   StagedCandidateBlockError,
@@ -758,20 +759,20 @@ async function stagedCheckCommand(
     // Empty directories are invisible to Git trees — checkout-index cannot
     // create them — yet the input snapshot distinguishes an EMPTY optional
     // config directory (adapters/waivers) from a MISSING one through
-    // explicit absence markers. Mirror the user repo's directory presence
-    // so a receipt sealed in the worktree verifies against the candidate
-    // checkout of the SAME bytes (the bytes themselves stay exactly the
-    // staged tree; only the marker-relevant empty dirs are mirrored).
+    // explicit absence markers, and so does the trusted-policy digest entry
+    // list. `mirrorEmptyConfigDirs` is the ONE implementation of that
+    // mirroring, shared with every other surface that digests or snapshots
+    // the staged checkout (`enforcement pin`, doctor, the pre-commit gate),
+    // so all of them compute the same digest for the same bytes. The bytes
+    // stay exactly the staged tree; only the marker-relevant empty dirs are
+    // mirrored, and only for a STAGED index (a candidate commit tree is
+    // gated on its own contents, never on the worktree around it).
     const checkoutConfig = loadConfigAt(checkoutDir);
     const docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
     const cacheExclusions = loadCacheExclusions(checkoutDir, checkoutConfig);
-    for (const dir of [checkoutConfig.adapters, checkoutConfig.waivers]) {
-      const userDir = resolveRepoPath(io.cwd, dir);
-      const checkoutPath = resolveRepoPath(checkoutDir, dir);
-      if (options.candidateCommitSha === undefined && existsSync(userDir) && !existsSync(checkoutPath)) {
-        mkdirSync(checkoutPath, { recursive: true });
-      }
-    }
+    mirrorEmptyConfigDirs(io.cwd, checkoutDir, checkoutConfig, {
+      fromStagedIndex: options.candidateCommitSha === undefined,
+    });
     // The candidate's own staged-runtime document prepares ITS checkout
     // (dependency reuse + tracked preparation command) — discovery reads
     // installed tooling from the candidate, never the worktree. The

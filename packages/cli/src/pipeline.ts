@@ -58,6 +58,7 @@ import { clockFromConfig } from './clock.js';
 import { expandScanPaths, type ExpandError } from './glob.js';
 import { gitIgnoredPaths } from './git-ignored.js';
 import { runPlugins } from './plugins.js';
+import { resolveRepoPath } from './repo-path.js';
 import type { CacheControl, CacheCounts } from './run-cache.js';
 import { compileEndpointContribution, type EndpointInventory } from './endpoint-compiler.js';
 import {
@@ -274,14 +275,14 @@ export function loadAdapterNames(cwd: string, dir: string): string[] {
     .sort(compareStrings);
 }
 
-/** Resolves a repo-root-relative config path against the cwd. */
-export function resolveRepoPath(cwd: string, repoRelative: string): string {
-  const normalized = repoRelative.split('\\').join('/');
-  if (normalized.startsWith('/')) {
-    throw new UsageError(`config path '${repoRelative}' must be repo-root-relative, not absolute`);
-  }
-  return join(cwd, ...normalized.split('/'));
-}
+/**
+ * Resolves a repo-root-relative config path against the cwd.
+ *
+ * The implementation lives in `./repo-path.js` so the low-level
+ * staged-candidate machinery can use it without importing this heavy
+ * module; re-exported here so every existing import path is unchanged.
+ */
+export { resolveRepoPath } from './repo-path.js';
 
 /**
  * Finds known model update fields omitted from statically declared adapter
