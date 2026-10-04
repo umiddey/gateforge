@@ -50,7 +50,11 @@ diagnostics:
  * whose runner resolves through a node_modules link to the engine's
  * pinned playwright (no network, no npx).
  */
-function installConsumer(repo: TempRepo, configExtra = ''): void {
+function installConsumer(
+  repo: TempRepo,
+  configExtra = '',
+  playwrightConfig = PW_CONFIG,
+): void {
   repo.writeFiles({
     '.gateforge.yml': `\
 schemaVersion: 1
@@ -83,7 +87,7 @@ ${configExtra}`,
     'plugin.mjs':
       'export default { discover: () => ({ resources: [], unresolved: [], findings: [], classificationSignals: [], scannedPaths: [] }) };\n',
     'package.json': '{ "type": "module", "private": true }\n',
-    'playwright.config.js': PW_CONFIG,
+    'playwright.config.js': playwrightConfig,
     'e2e/accounts.spec.js': ACCOUNTS_SPEC,
   });
   const nm = join(repo.root, 'node_modules');
@@ -303,6 +307,28 @@ describe('gateforge tests discover', () => {
         (summary) => summary.runner === 'pytest' && summary.name === 'backend-pytest',
       );
       expect(collectedSummary?.status).toBe('discovered');
+    });
+  });
+
+  it('prints an error-level stderr line for a playwright config with no named project', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo, '', "export default { testDir: 'e2e' };\n");
+      const result = await runCli(repo, ['tests', 'discover']);
+      expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
+      expect(result.stderr).toContain('error: ');
+      expect(result.stderr).toContain(
+        "playwright config playwright.config.js declares no named project; test-gates " +
+          "need one — add projects: [{ name: 'chromium' }] (behaviour-neutral)",
+      );
+    });
+  });
+
+  it('prints no unnamed-project line when the config declares a named project', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      const result = await runCli(repo, ['tests', 'discover']);
+      expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
+      expect(result.stderr).not.toContain('declares no named project');
     });
   });
 

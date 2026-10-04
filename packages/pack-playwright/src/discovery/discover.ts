@@ -54,7 +54,9 @@ import { CypressRunnerAdapter } from './cypress-runner-adapter.js';
 import { VitestRunnerAdapter } from './vitest-runner-adapter.js';
 import type { RunnerTestIdentity } from '@gate-forge/witness/adapter';
 import {
+  declaresNoNamedProject,
   fileDigest,
+  findPlaywrightConfig,
   listNativePlaywrightTests,
   reconciliationKey,
   type NativeInstance,
@@ -140,6 +142,14 @@ export interface DiscoverResult {
   /** Static registration sites guarded by Gateforge environment state. */
   registrationWarnings: StaticRegistrationWarning[];
   /**
+   * Playwright config problems the native enumeration PROVED
+   * (never guessed): today, a config that declares no named
+   * project — test-gates join catalog rows to planned
+   * projects by name, so an unnamed config breaks the join.
+   * Each entry is a complete diagnostic line.
+   */
+  configWarnings: string[];
+  /**
    * Coarse per-step wall-clock timings (`check --timing`): static scan,
    * native list, pytest collection, and
    * the whole discovery in milliseconds. Observability only.
@@ -157,6 +167,26 @@ export interface DiscoveryTimings {
   pytestCollectMs: number;
   /** Total `discoverTestCatalog` duration including all steps above. */
   totalMs: number;
+}
+
+/**
+ * The diagnostic for a playwright config that declares no
+ * named project: test-gates join catalog rows to planned
+ * projects by name, so an unnamed config breaks the join.
+ * Behaviour-neutral — discovery still works; the gates
+ * cannot attribute rows to projects.
+ *
+ * Args:
+ *   configPath: repo-relative path of the config discovery used.
+ *
+ * Returns:
+ *   string: the complete diagnostic line.
+ */
+export function unnamedProjectConfigWarning(configPath: string): string {
+  return (
+    `playwright config ${configPath} declares no named project; test-gates ` +
+    "need one — add projects: [{ name: 'chromium' }] (behaviour-neutral)"
+  );
 }
 
 /**
@@ -206,6 +236,16 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
     timeoutMs: options.playwrightTimeoutMs,
   });
   const nativeListMs = performance.now() - nativeStartedAtMs;
+  // A playwright config with no named project breaks the
+  // per-project identity join test-gates depend on. This is
+  // the enumeration's own answer — the config is untrusted
+  // code, so only the runner can say which projects it
+  // declares — surfaced as a config warning, never a guess.
+  const configWarnings: string[] = [];
+  if (declaresNoNamedProject(native.projectNames)) {
+    const configPath = findPlaywrightConfig(cwd);
+    if (configPath !== null) configWarnings.push(unnamedProjectConfigWarning(configPath));
+  }
 
   // The CONFIGURED runner's own selection, and every other runner's, so a
   // static-only file can be attributed to the runner that actually collects
@@ -307,6 +347,7 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
         ? { projectStorageStates: native.projectStorageStates }
         : {}),
       registrationWarnings: scan.registrationWarnings,
+      configWarnings,
       timings: {
         scanMs,
         nativeListMs,

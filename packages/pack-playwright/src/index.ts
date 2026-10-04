@@ -182,6 +182,8 @@ export {
   discoverTestCatalog,
   inferTestKind,
   listNativePlaywrightTests,
+  declaresNoNamedProject,
+  unnamedProjectConfigWarning,
   findPlaywrightConfig,
   findPlaywrightConfigs,
   PLAYWRIGHT_CONFIG_NAMES,

@@ -302,6 +302,14 @@ async function discoverSubcommand(
   const discovered = await runDiscovery(io.cwd, config, stateDir, options['pytest'] === true);
   const { catalog, json } = discovered;
 
+  // Config problems the native enumeration PROVED (e.g. a playwright
+  // config that declares no named project): stderr, never stdout —
+  // the catalog document stays parseable — and never a non-zero
+  // exit: discovery itself succeeded (behaviour-neutral).
+  for (const warning of discovered.configWarnings) {
+    writeLine(io.stderr, `error: ${warning}`);
+  }
+
   if (asJson) {
     writeLine(io.stdout, json);
     writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests discover');
