@@ -69,18 +69,18 @@ import {
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import {
   DOCS_EXCLUSIONS_GUARANTEE,
-  DOCS_EXCLUSIONS_PATH,
+  DOCS_EXCLUSIONS_SOURCE,
   loadDocsExclusions,
-  renderDocsExclusions,
   validateRequestedDocsFolders,
 } from '../docs-exclusions.js';
 import {
   CACHE_EXCLUSIONS_GUARANTEE,
-  CACHE_EXCLUSIONS_PATH,
+  CACHE_EXCLUSIONS_SOURCE,
   loadCacheExclusions,
-  renderCacheExclusions,
   validateRequestedCacheFiles,
 } from '../cache-exclusions.js';
+import { setEvidenceExclude, declaresEvidenceExclude } from '../evidence-config-text.js';
+import { legacyExclusionPathsPresent, rejectLegacyExclusions } from '../legacy-exclusion-paths.js';
 import {
   ENGINE_STATE_IGNORE_COMMENT,
   ENGINE_STATE_IGNORE_ENTRIES,
@@ -1190,7 +1190,7 @@ async function resolveDocsExclusionsForInit(
     const requested = [...new Set(declared)];
     if (current.length > 0 && JSON.stringify(requested) !== JSON.stringify(current) && !confirmUpdate) {
       throw new UsageError(
-        `init: changing ${DOCS_EXCLUSIONS_PATH} needs explicit owner review; repeat with --confirm-doc-exclusions`,
+        `init: changing ${DOCS_EXCLUSIONS_SOURCE} needs explicit owner review; repeat with --confirm-doc-exclusions`,
       );
     }
     if (current.length === 0 && requested.length === 0 && confirmUpdate) {
@@ -1249,7 +1249,8 @@ function resolveCacheExclusionsForInit(
   config: ReturnType<typeof loadConfig>,
 ): { files: string[]; changed: boolean } {
   const current = loadCacheExclusions(io.cwd, config);
-  const declarationExists = existsSync(join(io.cwd, ...CACHE_EXCLUSIONS_PATH.split('/')));
+  const configPath = join(io.cwd, '.gateforge.yml');
+  const declarationExists = existsSync(configPath) && declaresEvidenceExclude(readFileSync(configPath, 'utf8'), 'cache');
   const requestedValue = stringFlag(options, 'cache-exclude');
   const confirmUpdate = options['confirm-cache-exclusions'] === true;
   if (
@@ -1272,7 +1273,7 @@ function resolveCacheExclusionsForInit(
   const changed = JSON.stringify(requested) !== JSON.stringify(current);
   if (declarationExists && changed && !confirmUpdate) {
     throw new UsageError(
-      `init: changing ${CACHE_EXCLUSIONS_PATH} needs explicit owner review; repeat with --confirm-cache-exclusions`,
+      `init: changing ${CACHE_EXCLUSIONS_SOURCE} needs explicit owner review; repeat with --confirm-cache-exclusions`,
     );
   }
   if (declarationExists && !changed && confirmUpdate) {
@@ -1821,6 +1822,9 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   };
   const generatedDraftConfig = (): ReturnType<typeof loadConfig> =>
     parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });
+  // A pre-0.10 exclusion declaration is never silently ignored, not even
+  // by init: the owner is told to migrate instead of losing the list.
+  if (legacyExclusionPathsPresent(cwd).length > 0) rejectLegacyExclusions(cwd);
   let draftConfig: ReturnType<typeof loadConfig>;
   if (existsSync(join(cwd, '.gateforge.yml'))) {
     try {
@@ -1831,8 +1835,6 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       if (
         docsChoiceRequested ||
         cacheChoiceRequested ||
-        existsSync(join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/'))) ||
-        existsSync(join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/'))) ||
         (process.stdin.isTTY === true && process.stdout.isTTY === true)
       ) {
         throw error;
@@ -1924,42 +1926,6 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     }
     targets[existing] = target;
   };
-  if (docsExclusionChoice.changed) {
-    const exclusionPath = join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/'));
-    const exclusionText = renderDocsExclusions(docsExclusionChoice.folders);
-    pushTarget({
-      path: exclusionPath,
-      label: 'owner-declared documentation exclusions',
-      write: () => {
-        const temporaryPath = join(gateforgeDir, `.docs-exclusions-${randomUUID()}.tmp`);
-        try {
-          writeFileSync(temporaryPath, exclusionText, { flag: 'wx', encoding: 'utf8' });
-          renameSync(temporaryPath, exclusionPath);
-        } catch (error) {
-          if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
-          throw error;
-        }
-      },
-    });
-  }
-  if (cacheExclusionChoice.changed) {
-    const exclusionPath = join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/'));
-    const exclusionText = renderCacheExclusions(cacheExclusionChoice.files);
-    pushTarget({
-      path: exclusionPath,
-      label: 'owner-declared Python bytecode exclusions',
-      write: () => {
-        const temporaryPath = join(gateforgeDir, `.cache-exclusions-${randomUUID()}.tmp`);
-        try {
-          writeFileSync(temporaryPath, exclusionText, { flag: 'wx', encoding: 'utf8' });
-          renameSync(temporaryPath, exclusionPath);
-        } catch (error) {
-          if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
-          throw error;
-        }
-      },
-    });
-  }
 
   mkdirSync(join(gateforgeDir, 'adapters'), { recursive: true });
   mkdirSync(join(gateforgeDir, 'waivers'), { recursive: true });
@@ -2088,17 +2054,9 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     }
   }
 
+  const configExistedBefore = existsSync(join(cwd, '.gateforge.yml'));
   for (const target of targets) {
     if (existsSync(target.path)) {
-      if (
-        (target.label === 'owner-declared documentation exclusions' && docsExclusionChoice.changed) ||
-        (target.label === 'owner-declared Python bytecode exclusions' && cacheExclusionChoice.changed)
-      ) {
-        target.write();
-        recordInitPath(io, cwd, target.path, 'modified');
-        writeLine(io.stdout, `updated: ${target.path}`);
-        continue;
-      }
       recordInitPath(io, cwd, target.path, 'preserved');
       writeLine(io.stdout, `exists, leaving untouched: ${target.path}`);
       continue;
@@ -2106,6 +2064,33 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     target.write();
     recordInitPath(io, cwd, target.path, 'created');
     writeLine(io.stdout, `created: ${target.path}`);
+  }
+  // Evidence exclusions live in `.gateforge.yml` (0.10.0), so they are
+  // written AFTER the scaffold loop: the config is on disk by now (the
+  // loop created it or preserved the owner's), and the declaration is
+  // spliced into that exact text — comments, key order and quoting stay
+  // byte for byte, and only the `evidence.exclude` block is new.
+  if (docsExclusionChoice.changed || cacheExclusionChoice.changed) {
+    const configPath = join(cwd, '.gateforge.yml');
+    const before = readFileSync(configPath, 'utf8');
+    const after = setEvidenceExclude(
+      before,
+      {
+        ...(docsExclusionChoice.changed ? { docs: docsExclusionChoice.folders } : {}),
+        ...(cacheExclusionChoice.changed ? { cache: cacheExclusionChoice.files } : {}),
+      },
+      '.gateforge.yml',
+    );
+    const temporaryPath = join(gateforgeDir, `.evidence-exclusions-${randomUUID()}.tmp`);
+    try {
+      writeFileSync(temporaryPath, after, { flag: 'wx', encoding: 'utf8' });
+      renameSync(temporaryPath, configPath);
+    } catch (error) {
+      if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+      throw error;
+    }
+    recordInitPath(io, cwd, configPath, configExistedBefore ? 'modified' : 'created');
+    writeLine(io.stdout, `${configExistedBefore ? 'updated' : 'created'}: ${configPath} (evidence.exclude)`);
   }
   // Engine-owned state is never a product change: without this the
   // first `git add -A` stages the run cache the gate just wrote, and the

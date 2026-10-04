@@ -582,12 +582,8 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
           ...(config.alembic.seed === undefined ? [] : [config.alembic.seed.path]),
         ]),
   ];
-  if (existsSync(join(cwd, '.gateforge/docs-exclusions.yml'))) {
-    explicitFiles.push('.gateforge/docs-exclusions.yml');
-  }
-  if (existsSync(join(cwd, '.gateforge/cache-exclusions.yml'))) {
-    explicitFiles.push('.gateforge/cache-exclusions.yml');
-  }
+  // Evidence exclusions add no explicit input since 0.10: the declaration
+  // is part of `.gateforge.yml`, already listed above.
   for (const candidate of explicitFiles) {
     if (candidate.length > 0) paths.add(candidate);
   }

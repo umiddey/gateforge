@@ -794,9 +794,10 @@ describe('strict supervised gate (test-gates --changed + receipt + check)', () =
           rmSync(repo.path(unsafeDocumentationPath));
         }
 
-        const approvedDeclarationPath = repo.path('.gateforge/docs-exclusions.yml');
-        const approvedDeclaration = readFileSync(approvedDeclarationPath, 'utf8');
-        repo.writeFiles({ '.gateforge/docs-exclusions.yml': `${approvedDeclaration}# approval changed\n` });
+        // Since 0.10 the declaration's bytes ARE `.gateforge.yml`'s, so an
+        // approval-revision edit is a one-line change to the config itself.
+        const approvedConfig = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+        repo.writeFiles({ '.gateforge.yml': `${approvedConfig}# approval changed\n` });
         const approvalDriftCheck = await runSupervisedCli(
           repo,
           ['check', '--changed', '--require-e2e', '--format', 'json'],
@@ -805,7 +806,7 @@ describe('strict supervised gate (test-gates --changed + receipt + check)', () =
         expect(approvalDriftCheck.code).toBe(1);
         expect(approvalDriftCheck.stdout).toContain('ENFORCEMENT_UNTRUSTED');
         expect(approvalDriftCheck.stdout).toContain('"approvalStatus":"mismatch"');
-        repo.writeFiles({ '.gateforge/docs-exclusions.yml': approvedDeclaration });
+        repo.writeFiles({ '.gateforge.yml': approvedConfig });
         const approvalRestoredCheck = await runSupervisedCli(
           repo,
           ['check', '--changed', '--require-e2e', '--format', 'json'],
@@ -1566,7 +1567,7 @@ policies:
       installStrictFixture(repo);
       repo.writeFiles({
         'docs/guide.md': '# approved staged guide: version 1\n',
-        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+        '.gateforge.yml': `${GATEFORGE_YML}\nevidence:\n  exclude:\n    docs:\n      - docs\n`,
       });
       // The explicit mapping is tracked BEFORE the base commit, so the
       // frozen candidate carries it and the owner pin (computed below)
@@ -1794,7 +1795,7 @@ prepare:
       installStrictFixture(repo);
       repo.writeFiles({
         '.gitignore': 'node_modules\ntest-results\nplaywright-report\n.playwright\n.gateforge/test-gates\ngenerated/__pycache__/\n',
-        '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - \"${cacheFile}\"\n`,
+        '.gateforge.yml': `${GATEFORGE_YML}\nevidence:\n  exclude:\n    cache:\n      - ${cacheFile}\n`,
         [cacheFile]: 'first-bytecode\n',
       });
       repo.git(['add', '-A']);

@@ -1,4 +1,4 @@
-/** Owner-declared Python bytecode exclusion validation. */
+/** Owner-declared Python bytecode exclusion validation (`evidence.exclude.cache`). */
 import { symlinkSync, unlinkSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo } from '@gate-forge/core';
@@ -10,11 +10,8 @@ describe('Python bytecode exclusions', () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       const valid = 'src/pkg/__pycache__/account.cpython-313.pyc';
-      repo.writeFiles({
-        '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - "${valid}"\n`,
-      });
-      const config = loadConfig(repo.path('.gateforge.yml'));
-      expect(loadCacheExclusions(repo.root, config)).toEqual([valid]);
+      repo.writeFiles({ '.gateforge.yml': configYml({ evidence: { cache: [valid] } }) });
+      expect(loadCacheExclusions(repo.root, loadConfig(repo.path('.gateforge.yml')))).toEqual([valid]);
 
       for (const invalid of [
         '../src/__pycache__/account.pyc',
@@ -22,9 +19,8 @@ describe('Python bytecode exclusions', () => {
         'src/__pycache__/account.py',
         'src/__pycache__/nested/account.pyc',
       ]) {
-        repo.writeFiles({
-          '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - "${invalid}"\n`,
-        });
+        repo.writeFiles({ '.gateforge.yml': configYml({ evidence: { cache: [invalid] } }) });
+        const config = loadConfig(repo.path('.gateforge.yml'));
         expect(() => loadCacheExclusions(repo.root, config)).toThrow(/exact repo-relative|must not contain|must name/);
       }
     });
@@ -37,7 +33,7 @@ describe('Python bytecode exclusions', () => {
       repo.writeFiles({
         'src/accounts.txt': 'source fixture.table\n',
         [cacheFile]: 'bytecode\n',
-        '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - "${cacheFile}"\n`,
+        '.gateforge.yml': configYml({ evidence: { cache: [cacheFile] } }),
       });
       const config = loadConfig(repo.path('.gateforge.yml'));
       unlinkSync(repo.path(cacheFile));
@@ -46,7 +42,9 @@ describe('Python bytecode exclusions', () => {
 
       unlinkSync(repo.path(cacheFile));
       repo.writeFiles({ [cacheFile]: 'bytecode\n' });
-      repo.writeFiles({ '.gateforge.yml': configYml({ include: `['${cacheFile}']` }) });
+      repo.writeFiles({
+        '.gateforge.yml': configYml({ include: `['${cacheFile}']`, evidence: { cache: [cacheFile] } }),
+      });
       const configuredInput = loadConfig(repo.path('.gateforge.yml'));
       expect(() => loadCacheExclusions(repo.root, configuredInput)).toThrow(/cannot exclude configured scan or gate input/);
     });
@@ -56,11 +54,17 @@ describe('Python bytecode exclusions', () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       const cacheFile = 'src/__pycache__/account.cpython-313.pyc';
-      repo.writeFiles({
-        '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - "${cacheFile}"\n`,
-      });
+      repo.writeFiles({ '.gateforge.yml': configYml({ evidence: { cache: [cacheFile] } }) });
       const config = loadConfig(repo.path('.gateforge.yml'));
       expect(loadCacheExclusions(repo.root, config)).toEqual([cacheFile]);
+    });
+  });
+
+  it('declares nothing when the config carries no evidence exclusions', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const config = loadConfig(repo.path('.gateforge.yml'));
+      expect(loadCacheExclusions(repo.root, config)).toEqual([]);
     });
   });
 });

@@ -5,6 +5,7 @@
 import { join } from 'node:path';
 import { loadConfig, type GateforgeConfig } from '@gate-forge/core';
 import { UsageError } from '../errors.js';
+import { rejectLegacyExclusions } from '../legacy-exclusion-paths.js';
 
 /**
  * Tool version stamped into SARIF `tool.driver.version` (pin #10) and
@@ -56,7 +57,11 @@ export function parseRunFormat(value: string): ReportFormat {
 }
 
 /**
- * Loads `.gateforge.yml` from the io cwd (fail-closed via core).
+ * Loads `.gateforge.yml` from the io cwd (fail closed via core).
+ *
+ * Refuses a repository that still carries a pre-0.10 evidence-exclusion
+ * declaration: reading it would silently drop the owner's exclusions,
+ * so EVERY command that loads config stops and names `gateforge migrate`.
  *
  * Args:
  *   cwd: repo root.
@@ -64,8 +69,10 @@ export function parseRunFormat(value: string): ReportFormat {
  * Returns:
  *   GateforgeConfig: validated config.
  * @throws GateforgeConfigError (config error, exit 2) on any problem.
+ * @throws UsageError when a pre-0.10 exclusion declaration is present.
  */
 export function loadConfigAt(cwd: string): GateforgeConfig {
+  rejectLegacyExclusions(cwd);
   return loadConfig(join(cwd, '.gateforge.yml'));
 }
 

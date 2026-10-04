@@ -160,6 +160,8 @@ export function configYml(options: {
   plugins?: string;
   provider?: string;
   clockMode?: 'fixed' | 'system';
+  /** Owner-declared evidence exclusions (0.10.0 `evidence.exclude`). */
+  evidence?: { docs?: readonly string[]; cache?: readonly string[] };
 } = {}): string {
   const include = options.include ?? "['src/**/*.txt']";
   const plugins =
@@ -171,6 +173,21 @@ export function configYml(options: {
   const fixedAt = options.clockMode === 'system' ? '' : `  fixedAt: '${FIXED_AT}'\n`;
   const clockBlock =
     options.clockMode === 'system' ? '  mode: system\n' : `  mode: fixed\n${fixedAt}`;
+  const evidenceBlock =
+    options.evidence === undefined
+      ? ''
+      : [
+          'evidence:',
+          '  exclude:',
+          ...(['docs', 'cache'] as const).flatMap((key) => {
+            const values = options.evidence?.[key];
+            if (values === undefined) return [];
+            return [
+              `    ${key}: ${values.length === 0 ? '[]' : ''}`.trimEnd(),
+              ...values.map((value) => `      - ${JSON.stringify(value)}`),
+            ];
+          }),
+        ].join('\n') + '\n';
   return `\
 schemaVersion: 1
 project:
@@ -180,6 +197,7 @@ project:
     exclude: []
 plugins:
 ${plugins}
+${evidenceBlock}
 policies: .gateforge/policies.yml
 classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters

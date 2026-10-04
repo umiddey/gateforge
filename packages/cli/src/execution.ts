@@ -58,8 +58,6 @@ import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';
 import { normalizeRepoModule } from './input-snapshot.js';
-import { DOCS_EXCLUSIONS_PATH } from './docs-exclusions.js';
-import { CACHE_EXCLUSIONS_PATH } from './cache-exclusions.js';
 import type { GateforgeConfig } from '@gate-forge/core';
 import type { ProjectScope, RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
@@ -181,20 +179,16 @@ export function computeTrustedPolicyDigest(
     configPaths.runtimePolicy === undefined || configPaths.runtimePolicy === null
       ? { name: '.gateforge/runtime.yml (absent)', bytes: '' }
       : entry(configPaths.runtimePolicy, configPaths.runtimePolicy, true);
-  const docsExclusionsEntry = existsSync(join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/')))
-    ? [entry(DOCS_EXCLUSIONS_PATH, DOCS_EXCLUSIONS_PATH, true)]
-    : [];
-  const cacheExclusionsEntry = existsSync(join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/')))
-    ? [entry(CACHE_EXCLUSIONS_PATH, CACHE_EXCLUSIONS_PATH, true)]
-    : [];
+  // Evidence exclusions contribute NO entry of their own since 0.10:
+  // they live in `.gateforge.yml`, which is already hashed below. The
+  // bytes an approval pins are the same bytes; the trust property is
+  // unchanged, only the entry list is shorter.
   return trustedPolicyDigest([
     entry('.gateforge.yml', configPaths.config, true),
     entry(configPaths.policies, configPaths.policies, true),
     entry(configPaths.classificationPolicy, configPaths.classificationPolicy, true),
     behaviorEntry,
     runtimeEntry,
-    ...docsExclusionsEntry,
-    ...cacheExclusionsEntry,
     entry('.gateforge/test-map.yml', configPaths.sidecar, false),
     ...adapterEntries,
     ...waiverEntries,

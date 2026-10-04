@@ -243,9 +243,8 @@ describe('gateforge check', () => {
         installFixture(repo);
         const marker = join(markerDir, 'detector-ran');
         repo.writeFiles({
-          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gateforge.yml': `${configYml({ evidence: { docs: ['docs'] } })}\nenforcement:\n  receiptStage: pre-push\n`,
           '.gitignore': '.gateforge/test-gates/\n',
-          '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - "docs"\n',
           'docs/architecture.md': '# Architecture notes\n',
           'plugin.mjs':
             `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
@@ -293,9 +292,8 @@ describe('gateforge check', () => {
         installFixture(repo);
         const marker = join(markerDir, 'detector-ran');
         repo.writeFiles({
-          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gateforge.yml': `${configYml({ evidence: { docs: ['docs'] } })}\nenforcement:\n  receiptStage: pre-push\n`,
           '.gitignore': '.gateforge/test-gates/\n',
-          '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - "docs"\n',
           'docs/architecture.md': '# Architecture notes\n',
           'plugin.mjs':
             `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +
@@ -345,9 +343,8 @@ describe('gateforge check', () => {
         installFixture(repo);
         const marker = join(markerDir, 'detector-ran');
         repo.writeFiles({
-          '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+          '.gateforge.yml': `${configYml({ evidence: { docs: ['docs'] } })}\nenforcement:\n  receiptStage: pre-push\n`,
           '.gitignore': '.gateforge/test-gates/\n',
-          '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - "docs"\n',
           'docs/architecture.md': '# Architecture notes\n',
           'plugin.mjs':
             `${PLUGIN_SOURCE}\nimport { writeFileSync } from 'node:fs';\n` +

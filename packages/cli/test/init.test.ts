@@ -47,8 +47,8 @@ describe('gateforge init', () => {
       repo.writeFiles({ 'docs/guide.md': '# Owner-only assertion\n' });
       const first = await runCli(repo, ['init', '--no-scan', '--docs-exclude', 'docs']);
       expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(0);
-      const approval = readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8');
-      expect(approval).toContain('schemaVersion: 1');
+      const approval = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      expect(approval).toContain('evidence:');
       expect(approval).toContain('- "docs"');
       expect(first.stdout).toContain('owner-declared documentation folders: docs');
       expect(first.stdout).toContain('app/test read can make old evidence look valid');
@@ -57,9 +57,9 @@ describe('gateforge init', () => {
 
       const second = await runCli(repo, ['init', '--no-scan']);
       expect(second.code, `${second.stdout}\n${second.stderr}`).toBe(0);
-      expect(readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8')).toBe(approval);
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toBe(approval);
       expect(second.stdout).toContain('owner-declared documentation folders: docs');
-      expect(second.stdout).not.toContain(`updated: ${repo.path('.gateforge/docs-exclusions.yml')}`);
+      expect(second.stdout).not.toContain(`${repo.path('.gateforge.yml')} (evidence.exclude)`);
     });
   });
   it('records exact Python bytecode exclusions and requires confirmation to change them', async () => {
@@ -70,8 +70,8 @@ describe('gateforge init', () => {
 
       const first = await runCli(repo, ['init', '--no-scan', '--cache-exclude', firstFile]);
       expect(first.code, `${first.stdout}\n${first.stderr}`).toBe(0);
-      const declaration = readFileSync(repo.path('.gateforge/cache-exclusions.yml'), 'utf8');
-      expect(declaration).toContain('schemaVersion: 1');
+      const declaration = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      expect(declaration).toContain('cache:');
       expect(declaration).toContain(`- "${firstFile}"`);
       expect(first.stdout).toContain(`owner-declared Python bytecode files: ${firstFile}`);
       expect(first.stdout).toContain('candidate policy digest to approve outside the repository:');
@@ -80,7 +80,7 @@ describe('gateforge init', () => {
       const refused = await runCli(repo, ['init', '--no-scan', '--cache-exclude', `${firstFile},${secondFile}`]);
       expect(refused.code).toBe(2);
       expect(refused.stderr).toContain('needs explicit owner review');
-      expect(readFileSync(repo.path('.gateforge/cache-exclusions.yml'), 'utf8')).toBe(declaration);
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toBe(declaration);
 
       const approved = await runCli(repo, [
         'init',
@@ -90,7 +90,7 @@ describe('gateforge init', () => {
         '--confirm-cache-exclusions',
       ]);
       expect(approved.code, `${approved.stdout}\n${approved.stderr}`).toBe(0);
-      expect(readFileSync(repo.path('.gateforge/cache-exclusions.yml'), 'utf8')).toContain(`- "${secondFile}"`);
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toContain(`- "${secondFile}"`);
       expect(approved.stdout).toContain('updated:');
     });
   });
@@ -114,7 +114,7 @@ describe('gateforge init', () => {
       ]);
 
       expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
-      expect(readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8')).toContain('- "docs"');
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toContain('- "docs"');
     });
   });
 
@@ -158,12 +158,12 @@ describe('gateforge init', () => {
       repo.writeFiles({ 'docs/guide.md': '# Guide\n', 'handbook/index.md': '# Handbook\n' });
       const first = await runCli(repo, ['init', '--no-scan', '--docs-exclude', 'docs']);
       expect(first.code).toBe(0);
-      const original = readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8');
+      const original = readFileSync(repo.path('.gateforge.yml'), 'utf8');
 
       const refused = await runCli(repo, ['init', '--no-scan', '--docs-exclude', 'docs,handbook']);
       expect(refused.code).toBe(2);
       expect(refused.stderr).toContain('needs explicit owner review');
-      expect(readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8')).toBe(original);
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toBe(original);
 
       const approved = await runCli(repo, [
         'init',
@@ -173,7 +173,7 @@ describe('gateforge init', () => {
         '--confirm-doc-exclusions',
       ]);
       expect(approved.code, `${approved.stdout}\n${approved.stderr}`).toBe(0);
-      expect(readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8')).toContain('- "handbook"');
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toContain('- "handbook"');
       expect(approved.stdout).toContain('updated:');
     });
   });

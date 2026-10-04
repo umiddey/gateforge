@@ -14,7 +14,7 @@
  *   because nothing about product behavior is unaccounted for;
  * - its integrity stays governed by the owner-approved policy digest exactly
  *   as it is today — `computeTrustedPolicyDigest` hashes the config, policy,
- *   classification, behavior, runtime, exclusion-declaration, mapping-sidecar,
+ *   classification, behavior, runtime, mapping-sidecar,
  *   adapter, waiver, quarantine and repo-local plugin bytes, so a candidate
  *   that changes any of them changes the approved revision and a pin mismatch
  *   still blocks;
@@ -38,8 +38,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GateforgeConfig } from '@gate-forge/core';
-import { CACHE_EXCLUSIONS_PATH } from './cache-exclusions.js';
-import { DOCS_EXCLUSIONS_PATH } from './docs-exclusions.js';
 import { PACK_CONFIGS, normalizeRepoModule } from './input-snapshot.js';
 import { DEFAULT_STATE_DIR } from './state.js';
 
@@ -127,7 +125,6 @@ export type GateforgeOwnedInputKind =
   | 'classification-policy'
   | 'behavior-policy'
   | 'runtime-policy'
-  | 'exclusion-declaration'
   | 'mapping-sidecar'
   | 'pack-config'
   | 'adapter'
@@ -189,9 +186,6 @@ export function gateforgeOwnedInput(file: string, config: GateforgeConfig): Gate
     return { path: GATEFORGE_ENGINE_REFERENCE_PATH, kind: 'engine-reference' };
   }
   if (posix === GATEFORGE_TEST_MAP_PATH) return { path: GATEFORGE_TEST_MAP_PATH, kind: 'mapping-sidecar' };
-  if (posix === DOCS_EXCLUSIONS_PATH || posix === CACHE_EXCLUSIONS_PATH) {
-    return { path: posix, kind: 'exclusion-declaration' };
-  }
   for (const packConfig of PACK_CONFIGS) {
     if (posix === packConfig) return { path: packConfig, kind: 'pack-config' };
   }
@@ -227,9 +221,11 @@ export function gateforgeOwnedInput(file: string, config: GateforgeConfig): Gate
   for (const dir of GATEFORGE_OWNED_DIRS) {
     if (underDir(posix, dir)) return { path: dir, kind: dir === '.gateforge/quarantine' ? 'quarantine' : 'wiring' };
   }
-  // Engine documents directly under `.gateforge/` (`docs-exclusions.yml`,
-  // `runtime.yml`, a custom policies document, …). Depth one only, and only
-  // document types — `.gateforge/<anything>.py` is not a policy input.
+  // Engine documents directly under `.gateforge/` (`runtime.yml`, a custom
+  // policies document, …). Depth one only, and only document types —
+  // `.gateforge/<anything>.py` is not a policy input. (The 0.9 evidence
+  // exclusion declarations were here too; they are refused by name since
+  // 0.10 and migrate into `.gateforge.yml`.)
   const segments = posix.split('/');
   if (
     segments.length === 2 &&

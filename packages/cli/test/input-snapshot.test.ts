@@ -28,7 +28,7 @@ import { computeCandidateTreeId, resolveGitDir } from '../src/candidate-tree.js'
 import { loadDocsExclusions } from '../src/docs-exclusions.js';
 import { loadCacheExclusions } from '../src/cache-exclusions.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
-import { FIXED_AT, installFixture } from './helpers.js';
+import { FIXED_AT, configYml, installFixture } from './helpers.js';
 
 /** Loads the fixture config from an absolute path. */
 function fixtureConfig(repo: TempRepo): ReturnType<typeof loadConfig> {
@@ -135,7 +135,7 @@ describe('input snapshot (§11.2)', () => {
       installFixture(repo);
       repo.writeFiles({
         'docs/guide.md': '# Owner-approved guide\n',
-        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+        '.gateforge.yml': configYml({ evidence: { docs: ['docs'] } }),
       });
       repo.stage();
       repo.commit('approved documentation folder');
@@ -163,7 +163,10 @@ describe('input snapshot (§11.2)', () => {
         beforeTree,
       );
 
-      repo.writeFiles({ '.gateforge/docs-exclusions.yml': '# approval revision changed\nschemaVersion: 1\nfolders:\n  - docs\n' });
+      // The declaration's bytes now live in `.gateforge.yml`, which the
+      // snapshot already hashes: a comment-only edit still moves both
+      // identities, exactly like an approval-revision edit did.
+      repo.writeFiles({ '.gateforge.yml': `# owner approval revision changed\n${configYml({ evidence: { docs: ['docs'] } })}` });
       expect(computeInputSnapshot({ cwd: repo.root, config, stateDir, docsExclusions: exclusions }).inputDigest).not.toBe(
         beforeInput,
       );
@@ -180,7 +183,7 @@ describe('input snapshot (§11.2)', () => {
       repo.writeFiles({
         '.gitignore': 'src/__pycache__/\n',
         [cacheFile]: 'first-bytecode\n',
-        '.gateforge/cache-exclusions.yml': `schemaVersion: 1\nfiles:\n  - \"${cacheFile}\"\n`,
+        '.gateforge.yml': configYml({ evidence: { cache: [cacheFile] } }),
       });
       const config = fixtureConfig(repo);
       const exclusions = loadCacheExclusions(repo.root, config);
@@ -221,7 +224,7 @@ describe('input snapshot (§11.2)', () => {
       ).toBe(approvedTree);
       expect(trustedPolicyDigestForConfig(repo.root, config)).toBe(approvedPolicyDigest);
       repo.writeFiles({
-        '.gateforge/cache-exclusions.yml': `# owner approval revision\nschemaVersion: 1\nfiles:\n  - \"${cacheFile}\"\n`,
+        '.gateforge.yml': `# owner approval revision\n${configYml({ evidence: { cache: [cacheFile] } })}`,
       });
       expect(trustedPolicyDigestForConfig(repo.root, config)).not.toBe(approvedPolicyDigest);
     });
@@ -229,23 +232,21 @@ describe('input snapshot (§11.2)', () => {
   it('rejects exclusions that overlap source, gate inputs, or symlinks', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
-      const config = fixtureConfig(repo);
       repo.writeFiles({
         'docs/readme.md': '# Guide\n',
         'docs/run.js': 'export const unsafe = true;\n',
-        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+        '.gateforge.yml': configYml({ evidence: { docs: ['docs'] } }),
       });
+      let config = fixtureConfig(repo);
       expect(() => loadDocsExclusions(repo.root, config)).toThrow(/cannot exclude executable or gate input 'docs\/run.js'/);
 
       unlinkSync(join(repo.root, 'docs/run.js'));
-      repo.writeFiles({
-        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - src\n',
-      });
+      repo.writeFiles({ '.gateforge.yml': configYml({ evidence: { docs: ['src'] } }) });
+      config = fixtureConfig(repo);
       expect(() => loadDocsExclusions(repo.root, config)).toThrow(/cannot exclude executable or gate input 'src\//);
 
-      repo.writeFiles({
-        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
-      });
+      repo.writeFiles({ '.gateforge.yml': configYml({ evidence: { docs: ['docs'] } }) });
+      config = fixtureConfig(repo);
       symlinkSync(join(repo.root, 'src/accounts.txt'), join(repo.root, 'docs/current.txt'));
       expect(() => loadDocsExclusions(repo.root, config)).toThrow(/rejects symlink 'docs\/current.txt'/);
 
@@ -265,7 +266,6 @@ describe('input snapshot (§11.2)', () => {
   it('accepts data and document formats inside a declared documentation folder', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
-      const config = fixtureConfig(repo);
       repo.writeFiles({
         'docs/readme.md': '# Guide\n',
         'docs/schema.json': '{"type":"object"}\n',
@@ -273,8 +273,9 @@ describe('input snapshot (§11.2)', () => {
         'docs/values.yml': 'key: value\n',
         'docs/rows.csv': 'name,role\n',
         'docs/page.html': '<!doctype html>\n<title>Guide</title>\n',
-        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+        '.gateforge.yml': configYml({ evidence: { docs: ['docs'] } }),
       });
+      const config = fixtureConfig(repo);
       const exclusions = loadDocsExclusions(repo.root, config);
       expect(exclusions).toEqual(['docs']);
 
@@ -294,12 +295,12 @@ describe('input snapshot (§11.2)', () => {
   it('still refuses manifests, execution configs, lockfiles and source in a declared documentation folder', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
-      const config = fixtureConfig(repo);
       repo.writeFiles({
         'docs/readme.md': '# Guide\n',
         'docs/values.yaml': 'key: value\n',
-        '.gateforge/docs-exclusions.yml': 'schemaVersion: 1\nfolders:\n  - docs\n',
+        '.gateforge.yml': configYml({ evidence: { docs: ['docs'] } }),
       });
+      const config = fixtureConfig(repo);
       expect(loadDocsExclusions(repo.root, config)).toEqual(['docs']);
 
       const refused = [

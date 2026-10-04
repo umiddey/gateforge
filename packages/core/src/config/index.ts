@@ -415,6 +415,31 @@ export const GateforgeConfigSchema = z
           .strict(),
       })
       .strict(),
+    /**
+     * Evidence-identity exclusions (plan 2026-10-04 §2, 0.10.0). Files
+     * the owner asserts cannot affect evidence identity. Deliberately
+     * NOT named after `project.paths.exclude` (scan scope): this key
+     * says WHAT it affects. `docs` names documentation folders, `cache`
+     * names exact Python bytecode files; both keep the loader's
+     * filesystem, symlink and configured-input refusals. The key lives
+     * in `.gateforge.yml`, so it is inside the trusted policy digest —
+     * an agent cannot widen the exclusion list without the owner
+     * repinning the policy revision, exactly like the 0.9 standalone
+     * declaration files were. ABSENT = nothing leaves evidence identity.
+     */
+    evidence: z
+      .object({
+        exclude: z
+          .object({
+            /** Repo-relative documentation folders (was `.gateforge/docs-exclusions.yml`). */
+            docs: z.array(z.string().min(1)).optional(),
+            /** Exact repo-relative `.pyc`/`.pyo` paths (was `.gateforge/cache-exclusions.yml`). */
+            cache: z.array(z.string().min(1)).optional(),
+          })
+          .strict(),
+      })
+      .strict()
+      .optional(),
     /** Plugin set: subprocess (GPP/3) and in-process detectors. */
     plugins: z.array(ConfigPluginSchema),
     /** Path to the policies YAML document. */

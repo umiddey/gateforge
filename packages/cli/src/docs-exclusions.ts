@@ -1,17 +1,20 @@
 /**
  * Owner-declared documentation folders that may leave evidence identity.
- * The declaration is trusted only when the matching trusted-policy digest
- * is provisioned outside the candidate repository.
+ * The declaration lives in `.gateforge.yml` under `evidence.exclude.docs`
+ * (0.10.0) and is trusted only when the matching trusted-policy digest is
+ * provisioned outside the candidate repository.
  */
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
+import { join, resolve } from 'node:path';
 import type { GateforgeConfig } from '@gate-forge/core';
 import { GIT_SCOPE_CONTROL_BASENAMES, MANIFEST_NAMES, PACK_CONFIGS, collectDeclaredInputs } from './input-snapshot.js';
 import { UsageError } from './errors.js';
+import { LEGACY_DOCS_EXCLUSIONS_PATH, rejectLegacyExclusions } from './legacy-exclusion-paths.js';
 
-/** Repo-relative owner declaration path. */
-export const DOCS_EXCLUSIONS_PATH = '.gateforge/docs-exclusions.yml';
+/** Where the declaration is read from, named in refusals and digests. */
+export const DOCS_EXCLUSIONS_SOURCE = '.gateforge.yml (evidence.exclude.docs)';
+
 
 /** The reduced guarantee shown in successful reports. */
 export const DOCS_EXCLUSIONS_GUARANTEE =
@@ -59,39 +62,77 @@ const EXECUTION_CONFIG_NAMES = new Set([
   'pnpm-workspace.yaml', 'mix.exs', 'mix.lock', 'pubspec.yaml', 'pubspec.lock',
 ]);
 
-/** Loads and validates the optional owner-declared documentation folders. */
+/**
+ * Loads and validates the owner-declared documentation folders from
+ * `.gateforge.yml` (`evidence.exclude.docs`).
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   config: validated Gateforge configuration.
+ *
+ * Returns:
+ *   string[]: canonical, sorted folders; empty when undeclared.
+ *
+ * Throws:
+ *   UsageError: a pre-0.10 declaration file, or any refusal below.
+ */
 export function loadDocsExclusions(cwd: string, config: GateforgeConfig): string[] {
-  const absolute = join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/'));
+  rejectLegacyExclusions(cwd);
+  const folders = config.evidence?.exclude?.docs ?? [];
+  if (folders.length === 0) return [];
+  return validateDocsExclusionFolders(cwd, folders, config, true);
+}
+
+/**
+ * Reads the REMOVED 0.9 declaration file — for `gateforge migrate` only.
+ * Same symlink, shape and validation rules as the 0.9 loader, so a
+ * migrated repository gets exactly the list it had before.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   config: validated Gateforge configuration.
+ *
+ * Returns:
+ *   string[]: canonical, sorted folders; empty when the file is absent.
+ *
+ * Throws:
+ *   UsageError: an unreadable, malformed or unsafe declaration.
+ */
+export function readLegacyDocsExclusions(cwd: string, config: GateforgeConfig): string[] {
+  const absolute = join(cwd, ...LEGACY_DOCS_EXCLUSIONS_PATH.split('/'));
   if (!existsSync(absolute)) return [];
-  inspectPathComponents(cwd, DOCS_EXCLUSIONS_PATH, true);
+  inspectPathComponents(cwd, LEGACY_DOCS_EXCLUSIONS_PATH, true);
   let stat;
   try {
     stat = lstatSync(absolute);
   } catch (error) {
-    throw new UsageError(`cannot inspect ${DOCS_EXCLUSIONS_PATH}: ${(error as Error).message}`);
+    throw new UsageError(`cannot inspect ${LEGACY_DOCS_EXCLUSIONS_PATH}: ${(error as Error).message}`);
   }
   if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw new UsageError(`${DOCS_EXCLUSIONS_PATH} must be a regular file, not a symlink or directory`);
+    throw new UsageError(`${LEGACY_DOCS_EXCLUSIONS_PATH} must be a regular file, not a symlink or directory`);
   }
   let document: unknown;
   try {
     document = parseYaml(readFileSync(absolute, 'utf8'));
   } catch (error) {
-    throw new UsageError(`${DOCS_EXCLUSIONS_PATH} is not valid YAML: ${(error as Error).message}`);
+    throw new UsageError(`${LEGACY_DOCS_EXCLUSIONS_PATH} is not valid YAML: ${(error as Error).message}`);
   }
+  if (typeof document !== 'object' || document === null || Array.isArray(document)) {
+    throw new UsageError(`${LEGACY_DOCS_EXCLUSIONS_PATH} must contain only schemaVersion: 1 and a folders list`);
+  }
+  const raw: unknown = 'folders' in document ? document.folders : null;
+  const listed = Array.isArray(raw) ? raw : [];
+  const folders = listed.filter((folder): folder is string => typeof folder === 'string');
   if (
-    typeof document !== 'object' || document === null || Array.isArray(document) ||
-    Object.keys(document).some((key) => key !== 'schemaVersion' && key !== 'folders') ||
-    (document as Record<string, unknown>)['schemaVersion'] !== 1 ||
-    !Array.isArray((document as Record<string, unknown>)['folders'])
+    !Array.isArray(raw) ||
+    folders.length !== listed.length ||
+    !('schemaVersion' in document) ||
+    document.schemaVersion !== 1 ||
+    Object.keys(document).some((key) => key !== 'schemaVersion' && key !== 'folders')
   ) {
-    throw new UsageError(`${DOCS_EXCLUSIONS_PATH} must contain only schemaVersion: 1 and a folders list`);
+    throw new UsageError(`${LEGACY_DOCS_EXCLUSIONS_PATH} must contain only schemaVersion: 1 and a folders list`);
   }
-  const folders = (document as { folders: unknown[] }).folders;
-  if (folders.some((folder) => typeof folder !== 'string')) {
-    throw new UsageError(`${DOCS_EXCLUSIONS_PATH} folders must contain repo-relative directories`);
-  }
-  return validateDocsExclusionFolders(cwd, folders as string[], config, true);
+  return validateDocsExclusionFolders(cwd, folders, config, true);
 }
 
 /** Validates an init request and returns canonical, sorted directory paths. */
@@ -241,11 +282,4 @@ function isAllowlistedDocumentationFile(basename: string): boolean {
     DOCUMENTATION_EXTENSIONS.has(extension) ||
     DOCS_FOLDER_DATA_EXTENSIONS[extension] === true
   );
-}
-
-/** Writes the owner declaration in a stable format. */
-export function renderDocsExclusions(folders: readonly string[]): string {
-  return folders.length === 0
-    ? 'schemaVersion: 1\nfolders: []\n'
-    : `schemaVersion: 1\nfolders:\n${folders.map((folder) => `  - ${JSON.stringify(folder)}`).join('\n')}\n`;
 }

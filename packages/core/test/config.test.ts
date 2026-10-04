@@ -143,6 +143,29 @@ clock:
     expect(config.behaviorPolicy).toBe('.gateforge/behavior.yml');
     expect(() => parseConfig({ ...validConfig, behaviorPolicy: '' })).toThrow(GateforgeConfigError);
   });
+  it('accepts evidence.exclude lists and rejects everything else', () => {
+    const config = parseConfig({
+      ...validConfig,
+      evidence: { exclude: { docs: ['docs'], cache: ['backend/__pycache__/x.cpython-312.pyc'] } },
+    });
+    expect(config.evidence?.exclude?.docs).toEqual(['docs']);
+    expect(config.evidence?.exclude?.cache).toEqual(['backend/__pycache__/x.cpython-312.pyc']);
+    // Either list may stand alone; ABSENT stays ABSENT.
+    expect(parseConfig({ ...validConfig, evidence: { exclude: { docs: [] } } }).evidence?.exclude?.cache).toBeUndefined();
+    expect(parseConfig(validConfig).evidence).toBeUndefined();
+    // Empty strings, wrong types, and unknown keys all fail the load.
+    expect(() => parseConfig({ ...validConfig, evidence: { exclude: { docs: [''] } } })).toThrow(GateforgeConfigError);
+    expect(() => parseConfig({ ...validConfig, evidence: { exclude: { docs: 'docs' } } })).toThrow(
+      GateforgeConfigError,
+    );
+    expect(() =>
+      parseConfig({ ...validConfig, evidence: { exclude: { folders: ['docs'] } } }),
+    ).toThrow(GateforgeConfigError);
+    expect(() => parseConfig({ ...validConfig, evidence: { includes: { docs: ['docs'] } } })).toThrow(
+      GateforgeConfigError,
+    );
+  });
+
 
   it('accepts an owner-declared tenant scope column list, and nothing else', () => {
     const config = parseConfig({ ...validConfig, tenancy: { scopeColumns: ['contractor_id'] } });

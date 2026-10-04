@@ -1,7 +1,8 @@
 /**
  * Owner-declared Python bytecode files that may leave evidence identity.
- * The declaration is trusted only when the matching trusted-policy digest
- * is provisioned outside the candidate repository.
+ * The declaration lives in `.gateforge.yml` under `evidence.exclude.cache`
+ * (0.10.0) and is trusted only when the matching trusted-policy digest is
+ * provisioned outside the candidate repository.
  */
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -9,17 +10,18 @@ import { parse as parseYaml } from 'yaml';
 import type { GateforgeConfig } from '@gate-forge/core';
 import { collectDeclaredInputs } from './input-snapshot.js';
 import { UsageError } from './errors.js';
+import { LEGACY_CACHE_EXCLUSIONS_PATH, rejectLegacyExclusions } from './legacy-exclusion-paths.js';
 
-/** Repo-relative owner declaration path. */
-export const CACHE_EXCLUSIONS_PATH = '.gateforge/cache-exclusions.yml';
-
+/** Where the declaration is read from, named in refusals and digests. */
+export const CACHE_EXCLUSIONS_SOURCE = '.gateforge.yml (evidence.exclude.cache)';
 /** The reduced guarantee shown in reports when bytecode is excluded. */
 export const CACHE_EXCLUSIONS_GUARANTEE =
   'owner assertion only: Gateforge does not prove excluded bytecode cannot affect runtime behavior; ' +
   'a changed bytecode file can make old evidence appear current';
 
 /**
- * Loads and validates the optional owner-declared Python bytecode files.
+ * Loads and validates the owner-declared Python bytecode files from
+ * `.gateforge.yml` (`evidence.exclude.cache`).
  *
  * Args:
  *   cwd: absolute repository root.
@@ -29,40 +31,65 @@ export const CACHE_EXCLUSIONS_GUARANTEE =
  *   string[]: sorted exact cache paths, or an empty list when undeclared.
  *
  * Throws:
- *   UsageError: malformed declarations, unsafe paths, or unreadable files.
+ *   UsageError: a pre-0.10 declaration file, or any refusal below.
  */
 export function loadCacheExclusions(cwd: string, config: GateforgeConfig): string[] {
-  const absolute = join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/'));
+  rejectLegacyExclusions(cwd);
+  const files = config.evidence?.exclude?.cache ?? [];
+  if (files.length === 0) return [];
+  return validateCacheFiles(cwd, files, config);
+}
+
+/**
+ * Reads the REMOVED 0.9 declaration file — for `gateforge migrate` only.
+ * Same symlink, shape and validation rules as the 0.9 loader, so a
+ * migrated repository gets exactly the list it had before.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   config: validated Gateforge configuration.
+ *
+ * Returns:
+ *   string[]: sorted exact cache paths, or an empty list when absent.
+ *
+ * Throws:
+ *   UsageError: an unreadable, malformed or unsafe declaration.
+ */
+export function readLegacyCacheExclusions(cwd: string, config: GateforgeConfig): string[] {
+  const absolute = join(cwd, ...LEGACY_CACHE_EXCLUSIONS_PATH.split('/'));
   if (!existsSync(absolute)) return [];
-  inspectCachePathComponents(cwd, CACHE_EXCLUSIONS_PATH, true, false);
+  inspectCachePathComponents(cwd, LEGACY_CACHE_EXCLUSIONS_PATH, true, false);
   let stat;
   try {
     stat = lstatSync(absolute);
   } catch (error) {
-    throw new UsageError(`cannot inspect ${CACHE_EXCLUSIONS_PATH}: ${(error as Error).message}`);
+    throw new UsageError(`cannot inspect ${LEGACY_CACHE_EXCLUSIONS_PATH}: ${(error as Error).message}`);
   }
   if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw new UsageError(`${CACHE_EXCLUSIONS_PATH} must be a regular file, not a symlink or directory`);
+    throw new UsageError(`${LEGACY_CACHE_EXCLUSIONS_PATH} must be a regular file, not a symlink or directory`);
   }
   let document: unknown;
   try {
     document = parseYaml(readFileSync(absolute, 'utf8'));
   } catch (error) {
-    throw new UsageError(`${CACHE_EXCLUSIONS_PATH} is not valid YAML: ${(error as Error).message}`);
+    throw new UsageError(`${LEGACY_CACHE_EXCLUSIONS_PATH} is not valid YAML: ${(error as Error).message}`);
   }
+  if (typeof document !== 'object' || document === null || Array.isArray(document)) {
+    throw new UsageError(`${LEGACY_CACHE_EXCLUSIONS_PATH} must contain only schemaVersion: 1 and a files list`);
+  }
+  const raw: unknown = 'files' in document ? document.files : null;
+  const listed = Array.isArray(raw) ? raw : [];
+  const files = listed.filter((file): file is string => typeof file === 'string');
   if (
-    typeof document !== 'object' || document === null || Array.isArray(document) ||
-    Object.keys(document).some((key) => key !== 'schemaVersion' && key !== 'files') ||
-    (document as Record<string, unknown>)['schemaVersion'] !== 1 ||
-    !Array.isArray((document as Record<string, unknown>)['files'])
+    !Array.isArray(raw) ||
+    files.length !== listed.length ||
+    !('schemaVersion' in document) ||
+    document.schemaVersion !== 1 ||
+    Object.keys(document).some((key) => key !== 'schemaVersion' && key !== 'files')
   ) {
-    throw new UsageError(`${CACHE_EXCLUSIONS_PATH} must contain only schemaVersion: 1 and a files list`);
+    throw new UsageError(`${LEGACY_CACHE_EXCLUSIONS_PATH} must contain only schemaVersion: 1 and a files list`);
   }
-  const files = (document as { files: unknown[] }).files;
-  if (files.some((file) => typeof file !== 'string')) {
-    throw new UsageError(`${CACHE_EXCLUSIONS_PATH} files must contain exact repo-relative Python bytecode paths`);
-  }
-  return validateCacheFiles(cwd, files as string[], config);
+  return validateCacheFiles(cwd, files, config);
 }
 
 /**
@@ -202,19 +229,4 @@ function inspectCachePathComponents(
       throw new UsageError(`Python bytecode exclusion '${path}' must not be executable`);
     }
   }
-}
-
-/**
- * Writes the owner declaration in a stable format.
- *
- * Args:
- *   files: validated cache paths.
- *
- * Returns:
- *   string: YAML declaration text.
- */
-export function renderCacheExclusions(files: readonly string[]): string {
-  return files.length === 0
-    ? 'schemaVersion: 1\nfiles: []\n'
-    : `schemaVersion: 1\nfiles:\n${files.map((file) => `  - ${JSON.stringify(file)}`).join('\n')}\n`;
 }

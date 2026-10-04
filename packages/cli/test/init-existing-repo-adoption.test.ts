@@ -281,8 +281,8 @@ describe('--docs-exclude-file is the comma list, one folder per line', () => {
         'docs-folders.txt',
       ]);
       expect(code, `${stdout}\n${stderr}`).toBe(0);
-      const declaration = readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8');
-      expect(declaration).toContain('schemaVersion: 1');
+      const declaration = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      expect(declaration).toContain('evidence:');
       expect(declaration).toContain('docs');
       expect(declaration).toContain('handbook');
       // The comment line in the list file is not a folder.
@@ -306,7 +306,7 @@ describe('--docs-exclude-file is the comma list, one folder per line', () => {
         'docs-folders.txt',
       ]);
       expect(code, `${stdout}\n${stderr}`).toBe(0);
-      const declaration = readFileSync(repo.path('.gateforge/docs-exclusions.yml'), 'utf8');
+      const declaration = readFileSync(repo.path('.gateforge.yml'), 'utf8');
       expect(declaration).toContain('docs');
       expect(declaration).toContain('handbook');
     });

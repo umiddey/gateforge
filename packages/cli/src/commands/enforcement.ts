@@ -40,8 +40,6 @@ import { BehaviorPolicySchema, QUARANTINE_DIR } from '@gate-forge/core';
 import type { GateforgeConfig } from '@gate-forge/core';
 import { parse as parseYaml } from 'yaml';
 import { auditAdapters } from '../adapter-audit.js';
-import { CACHE_EXCLUSIONS_PATH } from '../cache-exclusions.js';
-import { DOCS_EXCLUSIONS_PATH } from '../docs-exclusions.js';
 import { normalizeRepoModule } from '../input-snapshot.js';
 import {
   allCapabilities,
@@ -172,8 +170,6 @@ function policyInputPaths(cwd: string, config: GateforgeConfig): string[] {
   ]);
   if (config.behaviorPolicy !== undefined) paths.add(config.behaviorPolicy);
   if (config.runtime !== undefined) paths.add(config.runtime);
-  if (existsSync(join(cwd, ...DOCS_EXCLUSIONS_PATH.split('/')))) paths.add(DOCS_EXCLUSIONS_PATH);
-  if (existsSync(join(cwd, ...CACHE_EXCLUSIONS_PATH.split('/')))) paths.add(CACHE_EXCLUSIONS_PATH);
   for (const plugin of config.plugins) {
     const module = plugin.module;
     if (typeof module !== 'string') continue;
