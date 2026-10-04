@@ -55,6 +55,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(report.strictE2E).toBe(false);
       expect(report.checks.map((entry) => entry.id)).toEqual([
         'adapters',
+        'approved-digest',
         'behavior-profile',
         'ci',
         'config',
@@ -66,6 +67,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'observer',
         'playwright-projects',
         'policy-inputs-staged',
+        'policy-inputs-vs-HEAD',
         'runner',
         'server-protection',
         'snapshot',
@@ -386,6 +388,71 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       const policy = checkById(parseDoctor(result.stdout), 'policy-inputs-staged');
       expect(policy.status).toBe('ok');
       expect(policy.detail).toContain('policy inputs are fully staged');
+    });
+  });
+
+  it('names exactly the trusted policy inputs the staged index changes since HEAD', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.stage();
+      repo.commit('policy inputs');
+      // The digest the commit gate will compute over the STAGED bytes,
+      // captured for the committed revision before the edit.
+      const committed = trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root));
+      // A whitespace-only edit to ONE policy input still moves the
+      // digest, so it must be named (and named alone).
+      repo.writeFiles({
+        '.gateforge/policies.yml': `${readFileSync(repo.path('.gateforge/policies.yml'), 'utf8')}\n`,
+      });
+      repo.stage();
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        GATEFORGE_APPROVED_POLICY_DIGEST: committed,
+      });
+      expect(result.code).toBe(0);
+      const report = parseDoctor(result.stdout);
+      const drift = checkById(report, 'policy-inputs-vs-HEAD');
+      expect(drift.status).toBe('warn');
+      expect(drift.detail).toContain('policy inputs changed since HEAD: .gateforge/policies.yml');
+      expect(drift.detail).not.toContain('classification-policy.yml');
+      // The provisioned pin for the committed revision no longer matches
+      // what the commit gate digests — and the row says which input moved.
+      const approved = checkById(report, 'approved-digest');
+      expect(approved.status).toBe('warn');
+      expect(approved.detail).toContain(
+        'approved policy digest: does NOT match staged (changed inputs: .gateforge/policies.yml)',
+      );
+    });
+  });
+
+  it('reports the approved digest against the STAGED bytes: match, absent, stale', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.stage();
+      repo.commit('policy inputs');
+      const digest = trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root));
+      // Nothing staged differs from HEAD.
+      const clean = checkById(parseDoctor((await runCli(repo, ['enforcement', 'doctor', '--json'])).stdout), 'policy-inputs-vs-HEAD');
+      expect(clean.status).toBe('ok');
+      expect(clean.detail).toContain('no trusted policy input changed since HEAD');
+      const matched = checkById(
+        parseDoctor((await runCli(repo, ['enforcement', 'doctor', '--json'], { GATEFORGE_APPROVED_POLICY_DIGEST: digest })).stdout),
+        'approved-digest',
+      );
+      expect(matched.status).toBe('ok');
+      expect(matched.detail).toContain(`approved policy digest: matches staged (${digest})`);
+      const absent = checkById(
+        parseDoctor((await runCli(repo, ['enforcement', 'doctor', '--json'], { GATEFORGE_APPROVED_POLICY_DIGEST: undefined })).stdout),
+        'approved-digest',
+      );
+      expect(absent.status).toBe('warn');
+      expect(absent.detail).toContain('approved policy digest: absent');
+      const stale = checkById(
+        parseDoctor((await runCli(repo, ['enforcement', 'doctor', '--json'], { GATEFORGE_APPROVED_POLICY_DIGEST: 'f'.repeat(64) })).stdout),
+        'approved-digest',
+      );
+      expect(stale.status).toBe('warn');
+      expect(stale.detail).toContain('approved policy digest: does NOT match staged');
+      expect(stale.detail).toContain('no policy input changed in the staged index');
     });
   });
 });

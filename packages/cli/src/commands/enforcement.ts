@@ -36,7 +36,7 @@ import {
 import { spawnSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { BehaviorPolicySchema, QUARANTINE_DIR } from '@gate-forge/core';
+import { BehaviorPolicySchema, QUARANTINE_DIR, trustedPolicyDigest } from '@gate-forge/core';
 import type { GateforgeConfig } from '@gate-forge/core';
 import { parse as parseYaml } from 'yaml';
 import { auditAdapters } from '../adapter-audit.js';
@@ -50,12 +50,17 @@ import {
   type StrictnessMode,
 } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
-import { trustedPolicyDigestForConfig } from '../execution.js';
+import {
+  trustedPolicyDigestEntriesForConfig,
+  trustedPolicyDigestForConfig,
+  type TrustedPolicyEntry,
+} from '../execution.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import { findRunnerConfigPath, TEST_MAP_RELATIVE } from '../mapping.js';
 import { inspectCommitHook, isFrameworkManagedHookBody } from '../git-hooks.js';
+import { freezeStagedCandidate, materializeStagedCandidate, releaseStagedCandidate } from '../staged-candidate.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { resolveStateDir } from '../state.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
@@ -189,6 +194,93 @@ function porcelainPath(line: string): string {
   const arrow = rest.indexOf(' -> ');
   return (arrow >= 0 ? rest.slice(0, arrow) : rest).trim();
 }
+
+/**
+ * Joins path names for a diagnostic line: at most five, then a count.
+ * One shape for every path list the enforcement surfaces print, so a
+ * long list never turns a one-line diagnosis into a wall of text.
+ */
+function boundedList(paths: readonly string[]): string {
+  const shown = paths.slice(0, 5).join(', ');
+  return `${shown}${paths.length > 5 ? ` and ${String(paths.length - 5)} more` : ''}`;
+}
+
+/**
+ * The trusted policy inputs whose STAGED bytes differ from the working
+ * tree (staged≠HEAD edits, unstaged edits and untracked inputs). null
+ * when Git cannot answer (no usable inventory).
+ */
+function unstagedPolicyInputs(io: Io, config: GateforgeConfig): string[] | null {
+  const result = spawnSync(
+    'git',
+    ['status', '--porcelain', '--untracked-files=all', '--', ...policyInputPaths(io.cwd, config)],
+    { cwd: io.cwd, env: io.env, encoding: 'utf8' },
+  );
+  if (result.error !== undefined || result.status !== 0) return null;
+  // The RAW stdout, not `probe`: it trims, which would eat the leading
+  // status column of the first line and hide an unstaged policy input.
+  return result.stdout
+    .split('\n')
+    .filter((line) => line.length > 1 && line[1] !== ' ')
+    .map((line) => porcelainPath(line));
+}
+
+/** One document's bytes at a revision, or null when it is absent there. */
+function revisionBytes(cwd: string, env: NodeJS.ProcessEnv, revision: string, path: string): string | null {
+  const result = spawnSync('git', ['show', `${revision}:${path}`], { cwd, env, encoding: 'utf8' });
+  if (result.error !== undefined || result.status !== 0) return null;
+  return result.stdout ?? '';
+}
+
+/** The trusted policy state of the STAGED candidate (what the commit gate digests). */
+interface StagedPolicyState {
+  /** Trusted policy digest over the staged bytes — what `check --staged` computes. */
+  digest: string;
+  /** Digest entry names whose staged bytes differ from the HEAD revision. */
+  changedSinceHead: string[];
+  /** HEAD at freeze time, or null for an initial commit. */
+  headSha: string | null;
+}
+
+/**
+ * Computes the trusted policy state of the STAGED candidate through the
+ * REAL staged path: the index is frozen, the frozen tree is materialized
+ * into an isolated scratch checkout, and the digest is computed from the
+ * entry list of THAT checkout — the same functions, over the same bytes,
+ * `check --staged` runs. Each entry is then compared with its HEAD
+ * revision (presence AND bytes) so the surfaces can NAME the inputs that
+ * moved; a whitespace-only edit counts, because it moves the digest too.
+ */
+function stagedPolicyState(io: Io): StagedPolicyState {
+  // Nothing staged means there is no candidate to digest: say so with a
+  // stable message (a scratch-directory path would make the report move
+  // between two runs of an unchanged repository).
+  const staged = probe(io.cwd, io.env, ['ls-files', '--stage', '-z']);
+  if (staged === null || staged.length === 0) {
+    throw new UsageError('the staged index is empty — stage the policy inputs (git add) to evaluate them');
+  }
+  const frozen = freezeStagedCandidate(io.cwd, io.env);
+  try {
+    const checkoutDir = materializeStagedCandidate(io.cwd, io.env, frozen);
+    const checkoutConfig = loadConfigAt(checkoutDir);
+    const entries: TrustedPolicyEntry[] = trustedPolicyDigestEntriesForConfig(checkoutDir, checkoutConfig);
+    const changedSinceHead = entries.flatMap((entry) => {
+      if (entry.path === null) return [];
+      // An optional input that is absent in BOTH revisions is unchanged:
+      // compare presence first, bytes second (an absent entry hashes as
+      // empty bytes, exactly like an empty file would).
+      const stagedPresent = existsSync(join(checkoutDir, ...entry.path.split('/')));
+      const atHead =
+        frozen.headSha === null ? null : revisionBytes(io.cwd, io.env, frozen.headSha, entry.path);
+      const unchanged = atHead === null ? !stagedPresent : stagedPresent && atHead === entry.bytes;
+      return unchanged ? [] : [entry.name];
+    });
+    return { digest: trustedPolicyDigest(entries), changedSinceHead, headSha: frozen.headSha };
+  } finally {
+    releaseStagedCandidate(frozen);
+  }
+}
+
 
 /**
  * Hashes the files the input snapshot would see (tracked + untracked non-ignored).
@@ -1313,36 +1405,91 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     policyStagedStatus = 'warn';
     policyStagedDetail = 'policy input staging state not evaluated (config failed to load)';
   } else {
-    const stagedConfig = loadConfigAt(io.cwd);
-    const listing = probe(io.cwd, io.env, [
-      'status',
-      '--porcelain',
-      '--untracked-files=all',
-      '--',
-      ...policyInputPaths(io.cwd, stagedConfig),
-    ]);
-    if (listing === null) {
+    const changed = unstagedPolicyInputs(io, loadConfigAt(io.cwd));
+    if (changed === null) {
       policyStagedStatus = 'warn';
       policyStagedDetail = 'policy input staging state unknown (no usable Git inventory)';
+    } else if (changed.length === 0) {
+      policyStagedStatus = 'ok';
+      policyStagedDetail = 'policy inputs are fully staged';
     } else {
-      const changed = listing
-        .split('\n')
-        .filter((line) => line.length > 1 && line[1] !== ' ')
-        .map((line) => porcelainPath(line));
-      if (changed.length === 0) {
-        policyStagedStatus = 'ok';
-        policyStagedDetail = 'policy inputs are fully staged';
-      } else {
-        policyStagedStatus = 'warn';
-        const shown = changed.slice(0, 5).join(', ');
-        const rest = changed.length > 5 ? ` and ${String(changed.length - 5)} more` : '';
-        policyStagedDetail =
-          `policy inputs differ between the staged index and the working tree: ${shown}${rest} — ` +
-          'the commit gate digests the STAGED bytes; stage them (git add) before pinning the digest printed here';
-      }
+      policyStagedStatus = 'warn';
+      policyStagedDetail =
+        `policy inputs differ between the staged index and the working tree: ${boundedList(changed)} — ` +
+        'the commit gate digests the STAGED bytes; stage them (git add) before pinning the digest printed here';
     }
   }
   checks.push({ id: 'policy-inputs-staged', status: policyStagedStatus, detail: policyStagedDetail });
+
+  // 4c/4d. WHICH inputs moved, and does the provisioned pin still match
+  // what the commit gate will digest (plan 2026-10-04 W2): the pin is a
+  // single aggregate hash, so a mismatch alone never said WHICH input
+  // moved. Both rows read the same staged policy state — the entry list
+  // the digest is computed from — so the named inputs and the digest
+  // can never disagree.
+  let stagedPolicy: StagedPolicyState | null = null;
+  let stagedPolicyError = '';
+  try {
+    stagedPolicy = stagedPolicyState(io);
+  } catch (error) {
+    stagedPolicyError = (error as Error).message.split('\n')[0] ?? 'unknown error';
+  }
+  let driftStatus: DoctorStatus;
+  let driftDetail: string;
+  if (stagedPolicy === null) {
+    driftStatus = 'warn';
+    driftDetail = `staged policy inputs not evaluated (${stagedPolicyError})`;
+  } else if (stagedPolicy.changedSinceHead.length === 0) {
+    driftStatus = 'ok';
+    driftDetail = 'no trusted policy input changed since HEAD';
+  } else if (stagedPolicy.headSha === null) {
+    driftStatus = 'warn';
+    driftDetail =
+      `no HEAD commit yet — every policy input is new in this first commit: ${boundedList(stagedPolicy.changedSinceHead)} — ` +
+      're-pin once the revision is committed';
+  } else {
+    driftStatus = 'warn';
+    driftDetail =
+      `policy inputs changed since HEAD: ${boundedList(stagedPolicy.changedSinceHead)} — ` +
+      'the commit gate digests the STAGED bytes, so the approved digest has to be re-pinned for them ' +
+      '(gateforge enforcement pin --env-file <path> outside the repo)';
+  }
+  checks.push({ id: 'policy-inputs-vs-HEAD', status: driftStatus, detail: driftDetail });
+
+  let approvedStatus: DoctorStatus;
+  let approvedDetail: string;
+  if (!configOk || stagedPolicy === null) {
+    approvedStatus = 'warn';
+    approvedDetail = 'approved policy digest not compared against the staged inputs (they are unavailable)';
+  } else {
+    const resolution = resolveApprovedPolicyDigest({
+      env: io.env,
+      candidateCwd: io.cwd,
+      candidateConfig: loadConfigAt(io.cwd),
+    });
+    if (resolution.status !== 'ok') {
+      approvedStatus = 'warn';
+      approvedDetail = `approved policy digest: not usable — ${resolution.detail}`;
+    } else if (resolution.digest === null) {
+      approvedStatus = 'warn';
+      approvedDetail =
+        `approved policy digest: absent — provision it outside the candidate (${APPROVED_POLICY_DIGEST_ENV}, ` +
+        'or gateforge enforcement pin --env-file <path>)';
+    } else if (resolution.digest === stagedPolicy.digest) {
+      approvedStatus = 'ok';
+      approvedDetail = `approved policy digest: matches staged (${resolution.digest})`;
+    } else {
+      approvedStatus = 'warn';
+      const cause =
+        stagedPolicy.changedSinceHead.length === 0
+          ? 'no policy input changed in the staged index — the pin predates an already committed policy change'
+          : `changed inputs: ${boundedList(stagedPolicy.changedSinceHead)}`;
+      approvedDetail =
+        `approved policy digest: does NOT match staged (${cause}) — ` +
+        're-pin with gateforge enforcement pin --env-file <path> outside the repo';
+    }
+  }
+  checks.push({ id: 'approved-digest', status: approvedStatus, detail: approvedDetail });
 
   // 5. Snapshot mode (inventory availability decides evidence binding).
   const inventory = probe(io.cwd, io.env, ['ls-files', '--stage', '-z']);
