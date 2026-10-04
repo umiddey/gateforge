@@ -82,6 +82,8 @@ commands:
         --file PATH --confirm             key IDs are safe to log; key material is never printed
   enforcement doctor [--json]            honest enforcement diagnostics: hook activation, runner/observer readiness,
                                          trusted binary/policy ownership, snapshot mode, standard/managed boundary
+  enforcement pin --env-file PATH [--confirm]  write the STAGED revision's approved policy digest into an env file
+                                         OUTSIDE the repo (mode 0600); preview by default
   baseline update <fp...>                shrink the baseline to a strict subset (invariant 4)
   baseline diff <before> <after>         compare adopted obligations by ID without printing fingerprints
   waive <resourceId:contract>            write an expiring, owner-approved waiver for one obligation
