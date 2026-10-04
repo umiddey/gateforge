@@ -60,12 +60,24 @@ what evidence identity means — so the cutover is loud.
    a trusted policy input:
 
    ```sh
-   gateforge enforcement doctor   # names the current digest to set
+   git add -A .gateforge .gateforge.yml
+   gateforge enforcement pin --env-file ~/.config/<repo>.gateforge.env --confirm
    ```
 
-   Put that value in the protected `GATEFORGE_APPROVED_POLICY_DIGEST`
-   environment, exactly as before. **Without a matching pin, a repository that
-   uses exclusions still refuses to use them** — the guarantee did not weaken.
+   The command digests the STAGED bytes — the ones the commit gate digests —
+   and writes exactly the `GATEFORGE_APPROVED_POLICY_DIGEST=<hex>` line into
+   that env file, mode `0600`, leaving every other line alone. Without
+   `--confirm` it only prints the line. The env file must stay OUTSIDE the
+   repository, exactly like the protected variable it replaces; a path inside
+   the repository is refused, and so is a policy input that is not fully
+   staged (it names the file). Export the file for your shell or CI as before —
+   `GATEFORGE_TRUSTED_CONFIG`, a protected CI variable, or the file itself.
+   **Without a matching pin, a repository that uses exclusions still refuses to
+   use them** — the guarantee did not weaken.
+
+   To see WHAT moved instead of reading a digest: `gateforge enforcement doctor`
+   lists the inputs whose staged bytes differ from HEAD (`policy-inputs-vs-HEAD`)
+   and whether your provisioned pin still matches them (`approved-digest`).
 
 4. Commit the setup change on its own:
 
