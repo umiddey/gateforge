@@ -102,3 +102,11 @@
 | `CHANGE_UNMAPPED` on a file you believe is yours | Run `gateforge explain <path>`: it prints what the file is and what governs it (Gateforge policy input, declared gate input, owner-declared documentation folder, known source of a resource, or an unclassified change) and the steps that attribute it. |
 | `ENFORCEMENT_UNTRUSTED` on a setup-only commit | Pin (re-approve) the policy digest so the change set is provably product-behavior-neutral. Never reach for `--no-verify`. |
 | A `persistence:read` noted "above the 1048576-byte witness collection-read bound" or "above the 10000-row witness collection-read bound" | The list route serves more than the engine will read in one response. Declare paging on the adapter and prefer a by-id observe read for the claim; a bigger bound would only postpone this. |
+
+## 0.9.1: what a 0.9.0 user notices
+
+Three behavior changes, all refusals that replace a silent or misleading outcome:
+
+- `gateforge init` exits 2 on a preset/flag contradiction (the preset used to be silently dropped) and on a requested setting that differs from an existing `.gateforge.yml` value — `init` never rewrites an existing config, so set the key yourself.
+- `gateforge adopt` exits 2 while any blocking entry is plane-unresolved, naming the folders and the exact `gateforge classify plane <folder> <tenant|master|global> --confirm` answer: a plane answer changes resource identity, so debt adopted before the answer would not match the repository after it.
+- `gateforge enforcement doctor` prints the full 64-hex trusted policy digest instead of a 12-hex prefix, and when the approved digest is absent or mismatched it adds an `owner: pin this revision with GATEFORGE_APPROVED_POLICY_DIGEST=...` action line.

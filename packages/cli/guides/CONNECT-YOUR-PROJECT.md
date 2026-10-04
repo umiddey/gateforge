@@ -10,6 +10,19 @@ ONE next action.
 
 ---
 
+## The setup order
+
+`gateforge init` → answer the plane questions → `gateforge adopt` (only when the repository already has code) → adapters and runtime → pin the owner-approved policy digest → commit. Each step assumes the previous one ran.
+
+- **Answer the plane questions** with `gateforge classify plane <folder> <tenant|master|global> --reason "<why>" --confirm` (run `gateforge init --planes` once first to create the owner-reviewed `.gateforge/planes.json`). The three planes:
+  - **tenant** — the data of one customer or organisation, e.g. a per-customer database or rows scoped by a customer id.
+  - **master** — the platform's own administrative data, shared by the operator, e.g. the admin platform's database of customers and plans.
+  - **global** — reference data that is the same for everyone, e.g. currencies.
+
+  An infrastructure route that serves no business data (health, metrics): answer the plane of the database it runs against, or — when the file is not part of the product — exclude it with `project.paths.exclude` in `.gateforge.yml`.
+- **`gateforge adopt` comes after the plane answers** because a plane answer changes a resource's identity, so the debt set `adopt` records would not match the repository if it were captured before the answer.
+- **Pin the owner-approved policy digest LAST**, right before the first strict commit: read the full value from `gateforge enforcement doctor` and set it as `GATEFORGE_APPROVED_POLICY_DIGEST`. It changes whenever a policy input changes — `.gateforge.yml`, the policies, the classification policy, `planes.json`, adapters, `runtime.yml`, waivers, hooks — so re-pin after every such edit.
+
 ## 1. What you need
 
 | Your stack | Detector pack (installed by `init`) | Runner | What you write |

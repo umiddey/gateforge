@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.1
+
+### Fixed
+
+- A `gateforge init` flag that contradicts the named `--preset` now exits 2 before any file is written, naming the decided thing and the conflicting flag — the preset is no longer silently dropped. A flag the preset already implies is a no-op and the preset applies; without `--preset`, flags behave exactly as before.
+- `init` now exits 2 before writing anything when the run asks for a setting an existing `.gateforge.yml` already owns with a different value (a `--preset`'s strictness mode and `enforcement.strictE2E`, or the `--strict-e2e` / `--unmatched-routes` flags), one line per differing key: the current value, what you asked for, and the fact that `init` never rewrites an existing config — set the key in `.gateforge.yml` yourself. An absent key compares as its effective value, so only a real contradiction stops the run.
+- The Alembic opt-in block now finds `alembic.ini` at the repository root OR in a first-level subdirectory (the common `backend/` monorepo layout was invisible before), resolves `%(here)s` in `script_location` to the ini's own directory, and prints every path relative to the repository root. Root-level behavior is unchanged; `node_modules`, `.git` and test directories are pruned, and a root ini wins.
+- A Playwright config that declares no named project is now named as the problem it is: `tests discover` prints the diagnostic on stderr (discovery itself still succeeds and the catalog stays parseable), and `gateforge enforcement doctor` carries a failing `playwright-projects` row that names the config and the one-line fix — `add projects: [{ name: 'chromium' }]` — because test-gates join catalog rows to planned projects by name.
+- A `.pre-commit-config.yaml` with no installed framework hook is no longer reported as a working commit gate: `init` says to run `pre-commit install` to activate the gate, and `enforcement doctor` reports the commit gate as NOT active (a failing hook row) with the same action.
+- `gateforge adopt` now exits 2 before writing anything while any blocking entry is plane-unresolved, naming the count, up to three distinct source folders, and the exact answer (`gateforge classify plane <folder> <tenant|master|global> --confirm`). A plane answer changes a resource's identity, so debt adopted before the answer would not match the repository after it.
+- An app, router, or route declared under a `test/` or `tests/` directory no longer enters the product route graph: such files are still parsed and still reported in `scannedPaths` (coverage evidence stays honest), but a fixture that declares `app = FastAPI()` plus `@app.get('/probe')` no longer publishes `/probe` as a product route, and a fixture path can no longer collide with a real one. A file merely named `test_...` is unaffected.
+- `gateforge enforcement doctor` prints the full 64-hex trusted policy digest (text and `--json`) instead of a 12-hex prefix, and adds an `owner: pin this revision with GATEFORGE_APPROVED_POLICY_DIGEST=...` action line when the approved digest is absent or mismatched. The staged-gate no-pin `ENFORCEMENT_UNTRUSTED` block names `gateforge enforcement doctor` as where to read the value.
+- The first commit that introduces `.gateforge/runtime.yml` with `prepare.reuse` no longer deadlocks: the staged-gate flows (`check --staged`, pre-commit) approve the requested reuse roots when the candidate's trusted policy digest equals the resolved owner-approved digest — `runtime.yml` is a policy input covered by that pin. Without a matching pin the block stays, with its action extended to name the pin route.
+- When an attestation target never answers at all, the GF-13 mismatch text no longer blames a missing marker: it reports `target <baseUrl> is not reachable (<error>); start the app before the run (runtime.yml healthcheck)`, carrying the transport failure (error code/message, e.g. `ECONNREFUSED`). Still fail closed — both shapes stay mismatches; only the diagnostic is honest.
+
+### Changed
+
+- The release script publishes the workspace packages in root `package.json` workspaces order — dependencies first — and stops at the first failure, so a dependent (the CLI) is never published without its dependencies; re-running skips what is already on the registry. The tarball preflight reads npm 12's keyed-object `pack --json` output.
+
 ## 0.9.0
 
 ### Upgrading from 0.8.x

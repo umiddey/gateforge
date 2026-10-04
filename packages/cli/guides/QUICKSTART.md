@@ -6,6 +6,14 @@ This guide takes a project from install to a blocking gate. Gateforge does not c
 
 You need Node.js 20 or newer and an existing Playwright suite that can run against a disposable app.
 
+## The setup order
+
+`gateforge init` → answer the plane questions → `gateforge adopt` (only when the repository already has code) → adapters and runtime → pin the owner-approved policy digest → commit.
+
+- Answer the plane questions with `gateforge classify plane <folder> <tenant|master|global> --reason "<why>" --confirm` (run `gateforge init --planes` once first to create the owner-reviewed `.gateforge/planes.json`).
+- Adopt comes after the plane answers because a plane answer changes a resource's identity, so the debt set `adopt` records would not match the repository if it were captured before the answer.
+- Pin the owner-approved policy digest LAST, right before the first strict commit: read the full value from `gateforge enforcement doctor` and set it as `GATEFORGE_APPROVED_POLICY_DIGEST`. It changes whenever a policy input changes — `.gateforge.yml`, the policies, the classification policy, `planes.json`, adapters, `runtime.yml`, waivers, hooks — so re-pin after every such edit.
+
 ## 1. Install the CLI and the packs you use
 
 Install the CLI, Playwright pack, and only the detector packs that fit your app. Keep every direct `@gate-forge/*` package on the same release.
@@ -258,7 +266,15 @@ gateforge next
 Follow its `do:` line, then run the check again. See [Test environment](TEST-ENVIRONMENT.md) if the block is caused by setup or test state.
 
 The first real `next` on a FastAPI repository asks which data plane owns a
-route's records. That is an owner decision, so Gateforge explains the
+route's records. The three planes:
+
+- **tenant** — the data of one customer or organisation, e.g. a per-customer database or rows scoped by a customer id.
+- **master** — the platform's own administrative data, shared by the operator, e.g. the admin platform's database of customers and plans.
+- **global** — reference data that is the same for everyone, e.g. currencies.
+
+An infrastructure route that serves no business data (health, metrics): answer the plane of the database it runs against, or — when the file is not part of the product — exclude it with `project.paths.exclude` in `.gateforge.yml`.
+
+That is an owner decision, so Gateforge explains the
 question before asking it and prints one runnable command per answer. For
 `DELETE /items/{}` on tenant-scoped records, the answer is `tenant`:
 
