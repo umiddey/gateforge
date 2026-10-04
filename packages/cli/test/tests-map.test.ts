@@ -869,3 +869,68 @@ describe('gateforge tests sync', () => {
     });
   }, 120_000);
 });
+
+describe('tests mark / explain --test accepts both documented key forms', () => {
+  it("resolves the reconciliation key `<file>#<titlePath joined by '>'` and writes the logicalKey", async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      // The documented reconciliation key for a titlePath-scoped test…
+      const reconciliationKey = 'e2e/accounts.spec.js#Accounts>creates an account';
+      const marked = await runCli(repo, [
+        ...markArgv(OBLIGATION_ACCOUNTS, [], reconciliationKey),
+      ]);
+      expect(marked.code, marked.stderr).toBe(0);
+      // …resolves to the catalog row and is WRITTEN as that row's logicalKey,
+      // so the sidecar identity never depends on which form was typed.
+      const sidecar = parseYaml(readFileSync(repo.path('.gateforge/test-map.yml'), 'utf8')) as {
+        tests: Array<{ key: string; selector: { file: string; titlePath: string[] } }>;
+      };
+      expect(sidecar.tests).toHaveLength(1);
+      expect(sidecar.tests[0]?.key).toBe(CREATE_KEY);
+      expect(sidecar.tests[0]?.selector.file).toBe('e2e/accounts.spec.js');
+
+      // `explain` accepts the same reconciliation key and reports the same
+      // existing-test identity the logicalKey form reports.
+      const byReconciliation = await runCli(repo, ['tests', 'explain', '--test', reconciliationKey, '--json']);
+      expect(byReconciliation.code, byReconciliation.stderr).toBe(0);
+      const byLogicalKey = await runCli(repo, ['tests', 'explain', '--test', CREATE_KEY, '--json']);
+      expect(byLogicalKey.code, byLogicalKey.stderr).toBe(0);
+      expect(JSON.parse(byReconciliation.stdout)).toEqual(JSON.parse(byLogicalKey.stdout));
+    });
+  }, 120_000);
+
+  it('names the matching logicalKeys when one file+title runs under several projects', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      // Two named projects: the same file+title now yields TWO catalog rows,
+      // so the reconciliation key alone cannot pick one.
+      repo.writeFiles({
+        'playwright.config.js':
+          "export default { testDir: 'e2e', projects: [{ name: 'chromium' }, { name: 'webkit' }] };\n",
+      });
+      const ambiguous = await runCli(repo, [
+        ...markArgv(OBLIGATION_ACCOUNTS, [], 'e2e/accounts.spec.js#deletes an account'),
+      ]);
+      expect(ambiguous.code).toBe(2);
+      expect(ambiguous.stderr).toContain('playwright:chromium:e2e/accounts.spec.js:deletes an account');
+      expect(ambiguous.stderr).toContain('playwright:webkit:e2e/accounts.spec.js:deletes an account');
+      expect(existsSync(repo.path('.gateforge/test-map.yml'))).toBe(false);
+    });
+  }, 120_000);
+
+  it('names BOTH accepted forms (and the keys of the same file) when the key is unknown', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      const unknown = await runCli(repo, markArgv(OBLIGATION_ACCOUNTS, [], 'e2e/accounts.spec.js#ghost title'));
+      expect(unknown.code).toBe(2);
+      expect(unknown.stderr).toContain('unknown test key');
+      // Both documented forms are named, so the message cannot read as
+      // "this test is not in the catalog" when it is.
+      expect(unknown.stderr).toContain('logicalKey');
+      expect(unknown.stderr).toContain('<file>#<titlePath');
+      // The same file DOES have catalog rows: a few of their keys are listed.
+      expect(unknown.stderr).toContain(DELETE_KEY);
+      expect(unknown.stderr).toContain(CREATE_KEY);
+    });
+  }, 120_000);
+});

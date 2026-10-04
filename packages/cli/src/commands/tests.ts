@@ -637,6 +637,70 @@ async function suggestSubcommand(
 // tests mark (Phase 3)
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolves the `--test <key>` argument against the CURRENT catalog.
+ *
+ * Two forms are accepted, because BOTH are what the surfaces hand the
+ * owner: the catalog `logicalKey` (`tests discover`, `tests suggest`,
+ * `check`) and the reconciliation key `<file>#<titlePath joined by ''>`
+ * (REFERENCE.md, `execution.ts` sidecar bindings, the runner's own test
+ * events). Rejecting the documented form made a test that IS in the
+ * catalog read as unknown, and the "run `gateforge tests discover`"
+ * next action useless — the catalog was never the problem.
+ *
+ * Args:
+ *   catalog: the freshly discovered catalog.
+ *   requested: the raw `--test` value.
+ *
+ * Returns:
+ *   TestCatalogEntry: the ONE entry the key names.
+ * @throws UsageError naming the form, and for an ambiguous reconciliation
+ *   key every matching logical key (a file+title can run under several
+ *   runner projects, and only the logical key tells them apart).
+ */
+function resolveTestKey(catalog: TestCatalog, requested: string): TestCatalogEntry {
+  const byLogicalKey = catalog.entries.find((candidate) => candidate.logicalKey === requested);
+  if (byLogicalKey !== undefined) return byLogicalKey;
+  const byReconciliation = catalog.entries.filter(
+    (candidate) => `${candidate.file}#${candidate.titlePath.join('>')}` === requested,
+  );
+  if (byReconciliation.length === 1) {
+    const [only] = byReconciliation;
+    if (only !== undefined) return only;
+  }
+  if (byReconciliation.length > 1) {
+    throw new UsageError(
+      `test key '${requested}' matches ${String(byReconciliation.length)} tests ` +
+        `(the same file and title run under several runner projects) — pass the full logical key of the one you mean: ` +
+        `${byReconciliation.map((candidate) => candidate.logicalKey).sort(compareStrings).join(', ')}`,
+    );
+  }
+  throw new UsageError(unknownTestKeyMessage(catalog, requested));
+}
+
+/**
+ * The not-found diagnostic for `--test`: it names BOTH accepted forms
+ * (so the reader can see their own key was well-formed) and, when the
+ * file part of a reconciliation key does exist in the catalog, up to five
+ * of that file's real keys — the closest useful answer to "which one did
+ * I mean?".
+ */
+function unknownTestKeyMessage(catalog: TestCatalog, requested: string): string {
+  const base =
+    `unknown test key '${requested}' — not in the discovered catalog ` +
+    `(${String(catalog.entries.length)} entries; run gateforge tests discover --json). ` +
+    'Accepted forms: the catalog logicalKey (`playwright:chromium:e2e/accounts.spec.js:Accounts>creates an account`) ' +
+    "or the reconciliation key `<file>#<titlePath joined by '>'>` (`e2e/accounts.spec.js#Accounts>creates an account`)";
+  const separator = requested.indexOf('#');
+  if (separator <= 0) return base;
+  const file = requested.slice(0, separator);
+  const inFile = catalog.entries.filter((candidate) => candidate.file === file);
+  if (inFile.length === 0) return `${base}; no catalog entry is in '${file}'`;
+  const keys = inFile.map((candidate) => candidate.logicalKey).sort(compareStrings);
+  const shown = keys.slice(0, 5).join(', ');
+  return `${base}. Keys in '${file}': ${shown}${keys.length > 5 ? ` and ${String(keys.length - 5)} more` : ''}`;
+}
+
 /** Implements `tests mark --test … --kind … --obligation … --reason …`. */
 async function markSubcommand(
   io: Io,
@@ -685,14 +749,11 @@ async function markSubcommand(
     );
   }
   const discovered = await runDiscovery(io.cwd, config, stateDir, true);
-  const entry = discovered.catalog.entries.find((candidate) => candidate.logicalKey === testKey);
-  if (entry === undefined) {
-    throw new UsageError(
-      `unknown test key '${testKey}' — not in the discovered catalog ` +
-        `(${String(discovered.catalog.entries.length)} entries; run gateforge tests discover --json)`,
-    );
-  }
-  assertKindDeclarationAllowed(entry, validatedKind, testKey);
+  const entry = resolveTestKey(discovered.catalog, testKey);
+  // The sidecar stores the stable logicalKey whichever accepted form the
+  // owner typed, so a mapping's identity never depends on the input form.
+  const declaredKey = entry.logicalKey;
+  assertKindDeclarationAllowed(entry, validatedKind, declaredKey);
 
   const resolvedCaseIds: string[] = [];
   if (caseFlags.length > 0) {
@@ -723,12 +784,12 @@ async function markSubcommand(
     }
     if (entry.titlePath.length === 0) {
       throw new UsageError(
-        `cannot attach --case to whole-file test '${testKey}': case mapping requires a titlePath-scoped test, not a file wildcard`,
+        `cannot attach --case to whole-file test '${declaredKey}': case mapping requires a titlePath-scoped test, not a file wildcard`,
       );
     }
   }
   const newEntry: TestMapEntry = {
-    key: testKey,
+    key: declaredKey,
     selector: {
       runner: entry.runner,
       ...(entry.project !== null ? { project: entry.project } : {}),
@@ -742,7 +803,7 @@ async function markSubcommand(
     reason,
   };
   const previousMap = loadOptionalTestMap(io.cwd) ?? { schemaVersion: 1 as const, tests: [] };
-  const tests = previousMap.tests.filter((existing) => existing.key !== testKey);
+  const tests = previousMap.tests.filter((existing) => existing.key !== declaredKey);
   tests.push(newEntry);
   tests.sort((a, b) => compareStrings(a.key, b.key));
   const nextMap: TestMap = { schemaVersion: 1, tests };
@@ -759,7 +820,7 @@ async function markSubcommand(
         canonicalJson({ schemaVersion: 1, path, changed: false, entry: newEntry } as unknown as JsonValue),
       );
     } else {
-      writeLine(io.stdout, `mark: no changes — '${testKey}' is already declared exactly so in ${path}`);
+      writeLine(io.stdout, `mark: no changes — '${declaredKey}' is already declared exactly so in ${path}`);
     }
     return 0;
   }
@@ -965,17 +1026,12 @@ async function explainSubcommand(
     nativeErrors: discovered.nativeErrors,
     nativeInstances: discovered.nativeInstances,
   });
-  const entry = discovered.catalog.entries.find((candidate) => candidate.logicalKey === testKey);
-  if (entry === undefined) {
-    // Exit 2 for an unknown key (usage/config error, not a gate result).
-    throw new UsageError(
-      `unknown test key '${testKey}' — not in the discovered catalog ` +
-        `(${String(discovered.catalog.entries.length)} entries; run gateforge tests discover --json)`,
-    );
-  }
+  // Exit 2 for an unknown or ambiguous key (usage/config error, not a gate
+  // result), through the SAME resolver `tests mark` uses.
+  const entry = resolveTestKey(discovered.catalog, testKey);
 
   const report = explainReport(
-    testKey,
+    entry.logicalKey,
     entry,
     mapped,
     pipeline.policy.obligations,
