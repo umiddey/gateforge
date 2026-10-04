@@ -274,7 +274,7 @@ route's records. The three planes:
 - **master** — the platform's own administrative data, shared by the operator, e.g. the admin platform's database of customers and plans.
 - **global** — reference data that is the same for everyone, e.g. currencies.
 
-An infrastructure route that serves no business data (health, metrics): answer the plane of the database it runs against, or — when the file is not part of the product — exclude it with `project.paths.exclude` in `.gateforge.yml`.
+An infrastructure route that serves no business data (health, readiness, metrics): Gateforge already classifies health and readiness probes as `global` itself. Do not cover a file that holds such probes with a `tenant` or `master` rule — the two answers contradict (`PLANE_CONTRADICTION`). If no route in the folder serves business data (`gateforge explain <endpoint>` shows `linkedResource: <none>`), answer `global` for it; if business routes share one router file with the probes, move the probes to their own router file. A file that is not part of the product: exclude it with `project.paths.exclude` in `.gateforge.yml`.
 
 That is an owner decision, so Gateforge explains the
 question before asking it and prints one runnable command per answer. For
