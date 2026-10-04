@@ -12,6 +12,8 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { blockingEntryFingerprint } from '@gate-forge/core';
+import { CaptureStream, type Io } from '../src/index.js';
+import { ensureHookScript } from '../src/commands/blocking.js';
 import { VERSION } from '../src/commands/common.js';
 import {
   CLASSIFICATION_POLICY_YML,
@@ -25,6 +27,7 @@ import {
 
 const BASELINE_PATH = '.gateforge/baselines/obligations.json';
 const RECORD_PATH = '.gateforge/baselines/adoption.json';
+const HOOK_PATH = '.gateforge/hooks/gateforge-check.mjs';
 
 /** The fixture plugin, extended to emit one detector finding. */
 const FINDING_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
@@ -571,6 +574,78 @@ describe('gateforge adopt — the classification layer (two-layer adoption)', ()
       const bare = await runCli(repo, ['baseline', 'update', '--classification-blocked=']);
       expect(bare.code).toBe(2);
       expect(bare.stderr).toContain('no adoption record');
+    });
+  });
+});
+
+describe('gateforge adopt — keeps a generated hook\'s recorded gate args (no silent downgrade)', () => {
+  /**
+   * `init --preset strict` (mode staged) wires the commit hook
+   * with the STAGED gate — via the same helper `adopt` re-wires
+   * through (`ensureHookScript`, init.ts). Write it that way so
+   * the fixture holds exactly what a strict init produced.
+   */
+  const wireStagedHook = (repo: Parameters<Parameters<typeof withTempRepo>[1]>[0]): void => {
+    const io: Io = {
+      cwd: repo.root,
+      env: process.env,
+      stdout: new CaptureStream(),
+      stderr: new CaptureStream(),
+    };
+    ensureHookScript(io, null, ['check', '--staged']);
+  };
+
+  it('adopt preserves a strict init\'s staged gate instead of downgrading it to check --changed', async () => {
+    await withTempRepo({}, async (repo) => {
+      await installFindingFixture(repo);
+      wireStagedHook(repo);
+      expect(readFileSync(repo.path(HOOK_PATH), 'utf8')).toContain(
+        'const args = ["check","--staged"]',
+      );
+
+      const { code, stdout } = await runCli(repo, ['adopt']);
+      expect(code).toBe(0);
+
+      // The hook still judges the STAGED bytes — the commit gate
+      // a strict owner configured, not the working tree.
+      const hook = readFileSync(repo.path(HOOK_PATH), 'utf8');
+      expect(hook).toContain('const args = ["check","--staged"]');
+      expect(hook).not.toContain('["check","--changed"]');
+      // The wiring verified the recorded staged gate; it did NOT
+      // rewrite the hook with the changed-scoped default.
+      expect(stdout).toContain('verified: ');
+      expect(stdout).toContain('gateforge-check.mjs (check --staged)');
+      expect(stdout).not.toContain('(check --changed)');
+    });
+  });
+
+  it('a second adopt also preserves the staged gate (idempotent wiring)', async () => {
+    await withTempRepo({}, async (repo) => {
+      await installFindingFixture(repo);
+      wireStagedHook(repo);
+      expect((await runCli(repo, ['adopt'])).code).toBe(0);
+
+      const again = await runCli(repo, ['adopt']);
+      expect(again.code).toBe(0);
+      expect(readFileSync(repo.path(HOOK_PATH), 'utf8')).toContain(
+        'const args = ["check","--staged"]',
+      );
+      expect(again.stdout).not.toContain('(check --changed)');
+    });
+  });
+
+  it('a repo with no hook yet gets today\'s default changed-scoped gate', async () => {
+    await withTempRepo({}, async (repo) => {
+      await installFindingFixture(repo);
+      expect(existsSync(repo.path(HOOK_PATH))).toBe(false);
+
+      const { code, stdout } = await runCli(repo, ['adopt']);
+      expect(code).toBe(0);
+      expect(stdout).toContain('created: ');
+      expect(stdout).toContain('gateforge-check.mjs');
+      expect(readFileSync(repo.path(HOOK_PATH), 'utf8')).toContain(
+        'const args = ["check","--changed"]',
+      );
     });
   });
 });

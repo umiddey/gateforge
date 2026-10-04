@@ -61,7 +61,11 @@ import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { evaluateRun, obligationFingerprint } from '../evaluate.js';
 import { headSha, resolveRepoPath, runPipeline, sourcesByResourceId } from '../pipeline.js';
-import { engineRootFromInvocation, ensureBlockingWiring } from './blocking.js';
+import {
+  engineRootFromInvocation,
+  ensureBlockingWiring,
+  generatedHookGateArgs,
+} from './blocking.js';
 import { loadConfigAt } from './common.js';
 
 export const ADOPT_USAGE = 'usage: gateforge adopt';
@@ -149,7 +153,7 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
   // refuse the re-seed, exit 0.
   const existingRecord = loadAdoptionRecord(recordPath);
   if (existingRecord !== null) {
-    ensureBlockingWiring(io, engineRootFromInvocation());
+    ensureBlockingWiring(io, engineRootFromInvocation(), generatedHookGateArgs(io.cwd) ?? undefined);
     const adoptedClassifications = existingRecord.classificationBlocked?.length ?? 0;
     writeLine(
       io.stdout,
@@ -285,7 +289,7 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
   });
 
   // Step 3: enforcement wiring through the shared init --blocking path.
-  ensureBlockingWiring(io, engineRootFromInvocation());
+  ensureBlockingWiring(io, engineRootFromInvocation(), generatedHookGateArgs(io.cwd) ?? undefined);
 
   // The adoption report: counts, groups, wiring, and the standing rule.
   writeLine(io.stdout, `adopted as forgiven: ${reds.size}; already proven: ${proven}`);

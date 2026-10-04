@@ -449,6 +449,35 @@ export function writeEngineReference(io: Io, engineRoot: string | null): void {
     writeLine(io.stdout, `exists, leaving untouched: ${path}`);
   }
 }
+/**
+ * Reads the gate args an EXISTING generated hook script
+ * recorded at generation time — the `const args = [...]`
+ * line the template writes, which is the ONE thing that
+ * distinguishes a strict init's staged commit gate from the
+ * changed-scoped default. Returns null when the hook is
+ * absent, a foreign file, or its recorded args are
+ * unparsable — callers then fall back to their own default.
+ */
+export function generatedHookGateArgs(cwd: string): string[] | null {
+  const hookScript = join(cwd, '.gateforge', 'hooks', 'gateforge-check.mjs');
+  if (!existsSync(hookScript)) return null;
+  const body = readFileSync(hookScript, 'utf8');
+  if (!isGeneratedHookScript(body)) return null;
+  const match = /^const args = (.+);$/m.exec(body);
+  if (match === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(match[1] as string);
+    if (
+      !Array.isArray(parsed) ||
+      !parsed.every((arg) => typeof arg === 'string')
+    ) {
+      return null;
+    }
+    return parsed as string[];
+  } catch {
+    return null;
+  }
+}
 
 /** Ensures the check-gate hook script exists (executable).
  *
