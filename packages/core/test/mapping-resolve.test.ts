@@ -907,11 +907,14 @@ describe('mappingSuggestions — an explicit tag must fit the route method (0.9.
    * A test whose title and file never name the resource, so the ONLY
    * thing that could make it a candidate is its `@crud(...)` tag.
    */
-  const tagged = (operation: string): TestCatalogEntry =>
+  const tagged = (operation: string | null): TestCatalogEntry =>
     row({
-      logicalKey: `playwright:chromium:tests/e2e/real/admin.spec.js:the reference admin is findable (${operation})`,
+      logicalKey: `playwright:chromium:tests/e2e/real/admin.spec.js:the reference admin is findable (${operation ?? 'unqualified'})`,
       file: 'tests/e2e/real/admin.spec.js',
-      titlePath: [`@crud(tenant.accounts:${operation})`, 'the reference admin is findable'],
+      titlePath: [
+        `@crud(tenant.accounts${operation === null ? '' : `:${operation}`})`,
+        'the reference admin is findable',
+      ],
       title: 'the reference admin is findable',
       sourceLocation: { file: 'tests/e2e/real/admin.spec.js', line: 6, col: 0 },
     });
@@ -946,6 +949,19 @@ describe('mappingSuggestions — an explicit tag must fit the route method (0.9.
     // GET reads: `:read` fits, and the positive case must not regress
     // with the gate above.
     const suggestion = suggestionFor([tagged('read')]);
+    expect(suggestion?.newTestNeeded).toBe('no');
+    expect(suggestion?.candidates?.[0]?.why.join(' ')).toContain(
+      "explicit tag names this obligation's resource 'accounts'",
+    );
+  });
+
+  it('still credits a tag that declares NO operation on a transport obligation', () => {
+    // `@crud(tenant.accounts)` names the resource and stops there: it
+    // asserts the test exercises accounts, and says nothing about which
+    // verb. The route-method gate exists to stop `:create` answering a
+    // GET route, not to throw away a tag that never named an
+    // operation — so an operation-less tag keeps its full credit.
+    const suggestion = suggestionFor([tagged(null)]);
     expect(suggestion?.newTestNeeded).toBe('no');
     expect(suggestion?.candidates?.[0]?.why.join(' ')).toContain(
       "explicit tag names this obligation's resource 'accounts'",

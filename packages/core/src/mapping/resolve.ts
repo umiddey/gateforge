@@ -904,10 +904,13 @@ function candidateEvidence(
   const words = titleWords(proseTitlePath(row.titlePath));
   const fileWords = row.file.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 0);
   const tags = explicitTags(row.titlePath);
-  // A tag that declares an operation is evidence for a TRANSPORT
+  // A tag that DECLARES an operation is evidence for a TRANSPORT
   // obligation only when the operation fits the route's method; for
   // every other obligation (and for a route hint naming no known
-  // method) it is null and the resource part stands on its own.
+  // method) the operation is null and the resource part stands on its
+  // own. A tag that declares NO operation names the resource and
+  // stops there — it is never contradicted by the method, so it keeps
+  // its full credit on a transport obligation too.
   const requiredOperation = transportOperationOf(obligationId, routes);
   const operationWords = OPERATION_TITLE_WORDS[operationOf(obligationId)] ?? [];
   const routeSegments = routeSegmentsOf(routes);
@@ -925,7 +928,7 @@ function candidateEvidence(
       tags.some(
         (tag) =>
           tag.tokens.includes(token) &&
-          (requiredOperation === null || tag.operation === requiredOperation),
+          (requiredOperation === null || tag.operation === null || tag.operation === requiredOperation),
       )
     ) {
       counted.add(token);
