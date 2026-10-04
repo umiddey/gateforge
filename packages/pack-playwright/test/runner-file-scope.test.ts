@@ -83,6 +83,31 @@ const VITEST_CONFIG = [
   '',
 ].join('\n');
 
+/** Vitest's documented default `test.include`, as the source holds it. */
+const VITEST_DEFAULT_INCLUDE = ['**/*.{test,spec}.?(c|m)[jt]s?(x)'];
+
+/** Vitest's documented default `test.exclude`, as the source holds it. */
+const VITEST_DEFAULT_EXCLUDE = [
+  '**/node_modules/**',
+  '**/dist/**',
+  '**/cypress/**',
+  '**/.{idea,git,cache,output,temp}/**',
+  '**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build,eslint,prettier}.config.*',
+];
+
+/** The frontend config: the documented defaults-spread idiom. */
+const VITEST_DEFAULTS_CONFIG = [
+  "import { defineConfig, configDefaults } from 'vitest/config';",
+  '',
+  'export default defineConfig({',
+  '  test: {',
+  '    globals: true,',
+  "    exclude: [...configDefaults.exclude, '**/tests/e2e/**'],",
+  '  },',
+  '});',
+  '',
+].join('\n');
+
 /** A vitest suite that relies on the injected globals entirely. */
 const VITEST_SUITE = [
   "describe('widgets', () => {",
@@ -150,6 +175,99 @@ describe('vitest file scopes — read from the repository config, never executed
     });
     expect(vitestFileScopes(root)).toEqual([]);
   });
+
+  it('expands a spread of the vitest defaults the config imports', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'frontend/vitest.config.js': VITEST_DEFAULTS_CONFIG,
+      'frontend/src/a.test.js': VITEST_SUITE,
+      'frontend/tests/e2e/x.spec.js': VITEST_SUITE,
+    });
+    const scope = onlyScope(vitestFileScopes(root));
+    expect(scope.runner).toBe('vitest');
+    expect(scope.authoritative).toBe(true);
+    expect(scope.globals).toBe(true);
+    expect(scope.include).toEqual([...VITEST_DEFAULT_INCLUDE]);
+    expect(scope.exclude).toEqual([...VITEST_DEFAULT_EXCLUDE, '**/tests/e2e/**']);
+    expect(scopeSelectsFile(scope, root, 'frontend/src/a.test.js')).toBe(true);
+    expect(scopeSelectsFile(scope, root, 'frontend/tests/e2e/x.spec.js')).toBe(false);
+  });
+
+  it('reads a bare configDefaults selection without an array', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'frontend/vitest.config.js': [
+        "import { defineConfig, configDefaults } from 'vitest/config';",
+        '',
+        'export default defineConfig({',
+        '  test: {',
+        '    globals: true,',
+        '    include: configDefaults.include,',
+        '    exclude: configDefaults.exclude,',
+        '  },',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const scope = onlyScope(vitestFileScopes(root));
+    expect(scope.include).toEqual([...VITEST_DEFAULT_INCLUDE]);
+    expect(scope.exclude).toEqual([...VITEST_DEFAULT_EXCLUDE]);
+    expect(scopeSelectsFile(scope, root, 'frontend/src/a.test.js')).toBe(true);
+    // The bare defaults exclude nothing extra: an e2e spec
+    // stays selected until a config adds it beside the spread.
+    expect(scopeSelectsFile(scope, root, 'frontend/tests/e2e/x.spec.js')).toBe(true);
+  });
+
+  it('expands defaults imported by their own names', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'frontend/vitest.config.js': [
+        "import { defineConfig, defaultInclude, defaultExclude } from 'vitest/config';",
+        '',
+        'export default defineConfig({',
+        '  test: {',
+        '    globals: true,',
+        '    include: [...defaultInclude],',
+        "    exclude: [...defaultExclude, '**/tests/e2e/**'],",
+        '  },',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const scope = onlyScope(vitestFileScopes(root));
+    expect(scope.include).toEqual([...VITEST_DEFAULT_INCLUDE]);
+    expect(scope.exclude).toEqual([...VITEST_DEFAULT_EXCLUDE, '**/tests/e2e/**']);
+  });
+
+  it('claims nothing when configDefaults is a local, not imported from vitest', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'frontend/vitest.config.js': [
+        'const configDefaults = { exclude: [] };',
+        '',
+        'export default {',
+        "  test: { globals: true, exclude: [...configDefaults.exclude, '**/tests/e2e/**'] },",
+        '};',
+        '',
+      ].join('\n'),
+    });
+    expect(vitestFileScopes(root)).toEqual([]);
+  });
+
+  it('claims nothing when configDefaults comes from another module', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'frontend/vitest.config.js': [
+        "import { configDefaults } from './defaults.js';",
+        '',
+        'export default {',
+        "  test: { globals: true, exclude: [...configDefaults.exclude, '**/tests/e2e/**'] },",
+        '};',
+        '',
+      ].join('\n'),
+    });
+    expect(vitestFileScopes(root)).toEqual([]);
+  });
 });
 
 describe('discovery — a runner’s own file scope decides the row', () => {
@@ -209,6 +327,37 @@ describe('discovery — a runner’s own file scope decides the row', () => {
     // Import-less describe/it under `globals: true` are registrations.
     expect(catalog.unresolved.some((gap) => gap.code === 'unresolved-test-alias')).toBe(false);
     // The playwright inventory itself is complete again.
+    expect(catalog.inventoryComplete).toBe(true);
+  });
+
+  it('attributes a vitest suite to vitest when the config spreads the defaults', async () => {
+    const root = makeMixedProject({
+      'frontend/vitest.config.js': VITEST_DEFAULTS_CONFIG,
+      'frontend/src/a.test.js': VITEST_SUITE,
+    });
+    const { catalog } = await discoverTestCatalog({
+      cwd: root,
+      config: fixtureConfig(['tests/e2e/**/*.spec.js', 'frontend/src/**/*.test.js']),
+    });
+
+    const vitestRow = catalog.entries.find((entry) => entry.file === 'frontend/src/a.test.js');
+    expect(vitestRow?.runner).toBe('vitest');
+    expect(vitestRow?.titlePath).toEqual(['widgets', 'renders a widget']);
+    expect(vitestRow?.discoveryStatus).toBe('discovered');
+    expect(vitestRow?.reconciliation).toBe('unavailable');
+    expect(vitestRow?.weakSignals.some((signal) => signal.ruleId === 'runner-file-scope')).toBe(true);
+    // No playwright row for that file: the configured runner never
+    // collects it, so it is not one of its tests.
+    expect(
+      catalog.entries.some(
+        (entry) => entry.file === 'frontend/src/a.test.js' && entry.runner === 'playwright',
+      ),
+    ).toBe(false);
+
+    // Import-less describe/it under `globals: true` are registrations,
+    // so the spread config leaves no unresolved alias and the inventory
+    // can seal again.
+    expect(catalog.unresolved.some((gap) => gap.code === 'unresolved-test-alias')).toBe(false);
     expect(catalog.inventoryComplete).toBe(true);
   });
 

@@ -15,8 +15,12 @@
  *   `reporter/project-graph-reporter.ts`) — the runner's own words.
  * - Vitest: a bounded, AST-only read of the repository's own
  *   `vitest.config.*`/`vite.config.*` literal `test.include` /
- *   `test.exclude` / `test.globals` values. No consumer code runs and
- *   no expression is evaluated.
+ *   `test.exclude` / `test.globals` values. A spread of
+ *   vitest's own imported defaults (`...configDefaults.exclude`,
+ *   the idiom the vitest docs recommend) reads as those
+ *   defaults — but only when the name is imported from
+ *   `vitest/config` or `vitest` in the same file. No consumer
+ *   code runs and no expression is evaluated.
  *
  * Every scope is FAIL-OPEN: when a selection cannot be read faithfully
  * (a computed glob, a function-valued selector, a missing config), the
@@ -430,13 +434,125 @@ function literalBoolean(node: ts.Node | undefined): boolean | undefined {
   return undefined;
 }
 
-/** Reads a string or string-array literal, else undefined. */
-function literalStrings(node: ts.Node | undefined): readonly string[] | undefined {
+/**
+ * The vitest default selections a config file imports, keyed
+ * by the LOCAL name each import binds. Only names imported
+ * from `vitest/config` or `vitest` count: a same-named local
+ * or another module's export must NOT read as vitest's data.
+ */
+interface VitestDefaultImports {
+  /** Local names bound to vitest's `configDefaults` object. */
+  configDefaults: Set<string>;
+  /** Local names bound to vitest's default `test.include`. */
+  defaultInclude: Set<string>;
+  /** Local names bound to vitest's default `test.exclude`. */
+  defaultExclude: Set<string>;
+}
+
+/**
+ * Which vitest default selections the file imports by name,
+ * read from its import declarations only.
+ *
+ * Args:
+ *   parsed: the parsed config source file.
+ *
+ * Returns:
+ *   VitestDefaultImports: the local names bound to vitest's
+ *   own defaults; empty sets when the file imports none.
+ */
+function vitestDefaultImportsOf(parsed: ts.SourceFile): VitestDefaultImports {
+  const imported: VitestDefaultImports = {
+    configDefaults: new Set(),
+    defaultInclude: new Set(),
+    defaultExclude: new Set(),
+  };
+  for (const statement of parsed.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const specifier = statement.moduleSpecifier;
+    if (!ts.isStringLiteral(specifier)) continue;
+    // Only vitest's own entry points hand out its defaults.
+    if (specifier.text !== 'vitest/config' && specifier.text !== 'vitest') continue;
+    const named = statement.importClause?.namedBindings;
+    if (named === undefined || !ts.isNamedImports(named)) continue;
+    for (const binding of named.elements) {
+      const source = binding.propertyName?.text ?? binding.name.text;
+      if (source === 'configDefaults') imported.configDefaults.add(binding.name.text);
+      else if (source === 'defaultInclude') imported.defaultInclude.add(binding.name.text);
+      else if (source === 'defaultExclude') imported.defaultExclude.add(binding.name.text);
+    }
+  }
+  return imported;
+}
+
+/**
+ * The vitest default selection one expression names: a bare
+ * `configDefaults.include`, an imported `defaultExclude`, or
+ * the inner expression of a spread of either. Any other
+ * identifier or property is NOT data this boundary may use.
+ *
+ * Args:
+ *   node: the expression to read.
+ *   imported: the vitest defaults the file imports.
+ *
+ * Returns:
+ *   readonly string[] | undefined: the named default
+ *   selection, or undefined when the expression names none.
+ */
+function vitestDefaultSelection(
+  node: ts.Node,
+  imported: VitestDefaultImports,
+): readonly string[] | undefined {
+  // A default imported by its own name: `exclude: defaultExclude`.
+  if (ts.isIdentifier(node)) {
+    if (imported.defaultInclude.has(node.text)) return VITEST_DEFAULT_INCLUDE;
+    if (imported.defaultExclude.has(node.text)) return VITEST_DEFAULT_EXCLUDE;
+    return undefined;
+  }
+  // A member of the imported defaults object:
+  // `exclude: configDefaults.exclude`.
+  if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+    if (!imported.configDefaults.has(node.expression.text)) return undefined;
+    if (node.name.text === 'include') return VITEST_DEFAULT_INCLUDE;
+    if (node.name.text === 'exclude') return VITEST_DEFAULT_EXCLUDE;
+  }
+  return undefined;
+}
+
+/**
+ * Reads a vitest `include`/`exclude` selection as data:
+ * string literals, a spread of vitest's own defaults
+ * (`[...configDefaults.exclude, …]` — the idiom the
+ * vitest docs recommend), or a bare default
+ * (`configDefaults.exclude`). Any other element makes the
+ * selection computed, which reads as undefined (fail-open).
+ *
+ * Args:
+ *   node: the `include`/`exclude` initializer.
+ *   imported: the vitest defaults the file imports.
+ *
+ * Returns:
+ *   readonly string[] | undefined: the literal selection, or
+ *   undefined when it is computed.
+ */
+function selectionStrings(
+  node: ts.Node | undefined,
+  imported: VitestDefaultImports,
+): readonly string[] | undefined {
   if (node === undefined) return undefined;
+  const bare = vitestDefaultSelection(node, imported);
+  if (bare !== undefined) return bare;
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
   if (!ts.isArrayLiteralExpression(node)) return undefined;
   const values: string[] = [];
   for (const element of node.elements) {
+    // `...configDefaults.exclude` widens the selection with
+    // vitest's own defaults instead of replacing them.
+    if (ts.isSpreadElement(element)) {
+      const spread = vitestDefaultSelection(element.expression, imported);
+      if (spread === undefined) return undefined;
+      values.push(...spread);
+      continue;
+    }
     const value = literalString(element);
     if (value === undefined) return undefined;
     values.push(value);
@@ -559,6 +675,12 @@ function configObjectOf(parsed: ts.SourceFile): ts.ObjectLiteralExpression | nul
  * for a foreign runner, claiming nothing leaves the file with the
  * configured runner exactly as before, which is the fail-open answer.
  *
+ * The documented defaults idiom — `exclude` set to a spread
+ * of `configDefaults.exclude` beside extra string literals,
+ * with `configDefaults` imported from `vitest/config` — reads
+ * as vitest's own defaults widened by the literals beside it;
+ * a same-named local or a foreign module's export does NOT.
+ *
  * Args:
  *   absolute: absolute path of the config file.
  *
@@ -588,7 +710,8 @@ function vitestScopeOf(absolute: string): RunnerFileScope | null {
     globals: false,
     authoritative: true,
   };
-  const config = configObjectOf(ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true));
+  const parsed = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true);
+  const config = configObjectOf(parsed);
   const testNode = config === null ? undefined : propertyOf(config, 'test');
   if (testNode === undefined || !ts.isObjectLiteralExpression(testNode)) {
     // A config with no readable `test` block still runs vitest's
@@ -603,10 +726,11 @@ function vitestScopeOf(absolute: string): RunnerFileScope | null {
   const includeNode = propertyOf(testNode, 'include');
   const excludeNode = propertyOf(testNode, 'exclude');
   const globalsNode = propertyOf(testNode, 'globals');
+  const imported = vitestDefaultImportsOf(parsed);
   const include: readonly string[] | undefined =
-    includeNode === undefined ? [...VITEST_DEFAULT_INCLUDE] : literalStrings(includeNode);
+    includeNode === undefined ? [...VITEST_DEFAULT_INCLUDE] : selectionStrings(includeNode, imported);
   const exclude: readonly string[] | undefined =
-    excludeNode === undefined ? [...VITEST_DEFAULT_EXCLUDE] : literalStrings(excludeNode);
+    excludeNode === undefined ? [...VITEST_DEFAULT_EXCLUDE] : selectionStrings(excludeNode, imported);
   const globals = globalsNode === undefined ? false : literalBoolean(globalsNode);
   // A computed selection is not data this boundary may narrow on.
   if (include === undefined || exclude === undefined || globals === undefined) return null;
