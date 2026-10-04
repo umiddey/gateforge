@@ -143,6 +143,35 @@ _PRIMITIVE_ANNOTATIONS = {
 MAX_RESOLUTION_DEPTH = 8
 
 
+# Directory segments that mark test fixture surface (exact segment
+# match, case-insensitive). Files under such a directory are parsed
+# and reported in ``scannedPaths`` — the coverage evidence stays
+# honest — but they never reach the route graph: an app, router, or
+# route declared in a test fixture is not a product route, and a
+# fixture that happens to reuse a real route's path must not collide
+# with it. This mirrors ``packages/pack-sqlalchemy/src/test-paths.ts``
+# (and the pack-sqlalchemy python detector's identical rule) exactly;
+# the two must stay in step.
+TEST_PATH_SEGMENTS = ("tests", "test")
+
+
+def _is_test_path(relpath: str) -> bool:
+    """Whether a repo-relative path is test fixture surface.
+
+    Only DIRECTORY segments decide, so ``app/test_utils.py`` is not
+    test surface while ``tests/middleware/test_x.py`` is, and
+    ``contest/`` is not ``test``.
+
+    Args:
+        relpath: Repo-root-relative posix path.
+
+    Returns:
+        bool: True when any directory segment is ``test``/``tests``.
+    """
+    segments = relpath.replace("\\", "/").split("/")[:-1]
+    return any(segment.lower() in TEST_PATH_SEGMENTS for segment in segments)
+
+
 @dataclass
 class RouteDef:
     """One route decorator on one handler function."""
@@ -1724,6 +1753,8 @@ def scan(paths: list[str], root: Path | None = None, import_roots: list[str] | N
             findings.append(finding)
             continue
         scanned.append(relpath)
+        if _is_test_path(relpath):
+            continue
         indexes[relpath] = index
 
     resolver = _Resolver(indexes, roots)
