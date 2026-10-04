@@ -405,7 +405,7 @@ policies:
  * unconfigured detector fails every run closed, and task is opt-in —
  * its contracts grade only with a configured `queueObserver`.
  */
-function classificationPolicyTemplate(
+export function classificationPolicyTemplate(
   languages: readonly string[],
   pluginIds: readonly string[],
 ): string {

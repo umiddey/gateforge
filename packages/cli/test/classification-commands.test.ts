@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { CLASSIFICATION_POLICY_YML, installFixture, runCli, withTempRepo } from './helpers.js';
+import { classificationPolicyTemplate } from '../src/commands/init.js';
 
 describe('automatic classification commands', () => {
   it('classify emits deterministic effective decisions and a derived snapshot', async () => {
@@ -306,6 +307,65 @@ describe('automatic classification commands', () => {
           match: 'src/accounts.txt',
           semantics: 'archive',
           archiveFields: { status: 'archived', archived_by: 'system' },
+          reason: 'Account rows are archived, never removed.',
+        },
+      ]);
+    });
+  });
+
+  it('appends the rule as TEXT: the owner-reviewed bytes never change', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const policyPath = '.gateforge/classification-policy.yml';
+      // The EXACT document `gateforge init` writes, loaded from the template
+      // itself: re-serializing it reflowed `patterns: [...]` and moved the
+      // comment block, which is a change the owner never made.
+      const original = classificationPolicyTemplate(
+        ['python'],
+        ['gateforge.pack-fastapi', 'gateforge.pack-sqlalchemy'],
+      );
+      repo.writeFiles({ [policyPath]: original });
+      const args = ['classify', 'delete', 'src', 'hard', '--reason', 'Rows in this model tree are removed permanently.'];
+
+      const preview = await runCli(repo, args);
+      expect(preview.code).toBe(0);
+      const added = preview.stdout.split('\n').filter((line) => line.startsWith('+') && !line.startsWith('+++'));
+      const removed = preview.stdout.split('\n').filter((line) => line.startsWith('-') && !line.startsWith('---'));
+      expect(added).toHaveLength(4);
+      expect(removed).toEqual([]);
+      expect(readFileSync(repo.path(policyPath), 'utf8')).toBe(original);
+
+      const confirmed = await runCli(repo, [...args, '--confirm']);
+      expect(confirmed.code).toBe(0);
+      const afterFirst = readFileSync(repo.path(policyPath), 'utf8');
+      expect(afterFirst.startsWith(original)).toBe(true);
+      expect(afterFirst).toContain("patterns: ['**/workers/**', '**/jobs/**']");
+
+      const second = await runCli(repo, [
+        'classify',
+        'delete',
+        'src/accounts.txt',
+        'archive',
+        '--archive-field',
+        'status=archived',
+        '--reason',
+        'Account rows are archived, never removed.',
+        '--confirm',
+      ]);
+      expect(second.code).toBe(0);
+      const afterSecond = readFileSync(repo.path(policyPath), 'utf8');
+      expect(afterSecond.startsWith(original)).toBe(true);
+      expect(afterSecond.match(/^deleteRules:/gm)).toHaveLength(1);
+      expect(parseYaml(afterSecond).deleteRules).toEqual([
+        {
+          match: 'src/**',
+          semantics: 'hard',
+          reason: 'Rows in this model tree are removed permanently.',
+        },
+        {
+          match: 'src/accounts.txt',
+          semantics: 'archive',
+          archiveFields: { status: 'archived' },
           reason: 'Account rows are archived, never removed.',
         },
       ]);

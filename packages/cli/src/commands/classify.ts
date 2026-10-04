@@ -28,7 +28,7 @@ import {
   parsePlanesConfigText,
   type SqlalchemyPlane,
 } from '@gate-forge/pack-sqlalchemy';
-import { parseDocument, parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { parseArgs, repeatableStringFlag, stringFlag } from '../args.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
@@ -322,6 +322,104 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
 }
 
 /**
+ * Renders one rule as the lines a TEXT-LEVEL append adds. Values are
+ * JSON-quoted, which is valid YAML double-quoted syntax, so a glob, a
+ * reason with an apostrophe, and an empty-looking value all round-trip
+ * exactly as written.
+ *
+ * Args:
+ *   rule: the validated rule to render.
+ *   itemIndent: the indentation of the `- ` item marker.
+ *
+ * Returns:
+ *   string[]: the rendered lines, without a trailing newline.
+ */
+function renderDeleteRule(rule: DeleteRule, itemIndent: string): string[] {
+  const fieldIndent = `${itemIndent}  `;
+  const lines = [
+    `${itemIndent}- match: ${JSON.stringify(rule.match)}`,
+    `${fieldIndent}semantics: ${rule.semantics}`,
+  ];
+  if (rule.archiveFields !== undefined) {
+    lines.push(`${fieldIndent}archiveFields:`);
+    for (const [key, value] of Object.entries(rule.archiveFields)) {
+      lines.push(`${fieldIndent}  ${key}: ${JSON.stringify(value)}`);
+    }
+  }
+  lines.push(`${fieldIndent}reason: ${JSON.stringify(rule.reason)}`);
+  return lines;
+}
+
+/**
+ * Where a new rule line may be added: the end of the existing
+ * `deleteRules` block, or the end of the document when the key is absent.
+ *
+ * A reviewed classification input is appended to, never re-serialized,
+ * so this works on LINES. Anything it cannot extend without guessing —
+ * a flow-style `deleteRules: [...]`, or a key whose value is not a list
+ * of rules — is refused by name instead.
+ *
+ * Args:
+ *   lines: the document split on newlines (the caller joins it back).
+ *   policyPath: repo-relative path, named in the refusal.
+ *
+ * Returns:
+ *   {itemIndent: string; at: number}: the item indentation to match and
+ *     the line index the rule is spliced in at.
+ *
+ * Raises:
+ *   UsageError: the existing `deleteRules` cannot be extended safely.
+ */
+function deleteRuleInsertion(
+  lines: readonly string[],
+  policyPath: string,
+): { header: string[]; itemIndent: string; at: number; separator: string[] } {
+  const keyIndex = lines.findIndex((line) => /^deleteRules:/.test(line));
+  if (keyIndex === -1) {
+    // Absent key: append a new top-level block at the end. A file that ends
+    // inside an indented block sequence needs one blank line first, or the
+    // new key would be read as part of that sequence.
+    const last = lines[lines.length - 1] ?? '';
+    return {
+      header: ['deleteRules:'],
+      itemIndent: '  ',
+      at: last === '' ? lines.length - 1 : lines.length,
+      separator: last !== '' && /^\s/.test(last) ? [''] : [],
+    };
+  }
+  if ((lines[keyIndex] ?? '').slice('deleteRules:'.length).trim() !== '') {
+    throw new UsageError(
+      `'${policyPath}' declares deleteRules inline; this command only appends to a block list — ` +
+        'move the existing rules under a `deleteRules:` block and re-run',
+    );
+  }
+  let itemIndent = '';
+  let at = keyIndex + 1;
+  for (let index = keyIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (line.trim() === '') {
+      at = index + 1;
+      continue;
+    }
+    if (/^\S/.test(line)) break; // the next top-level key ends the block
+    const item = line.match(/^(\s*)-\s/);
+    if (item !== null) {
+      itemIndent = item[1] ?? '';
+      at = index + 1;
+      continue;
+    }
+    if (itemIndent === '' || !line.startsWith(`${itemIndent}  `)) {
+      throw new UsageError(
+        `'${policyPath}' has a deleteRules value that is not a list of rules; edit it by hand — ` +
+          'this command only appends `- match:` items to a deleteRules block',
+      );
+    }
+    at = index + 1;
+  }
+  return { header: [], itemIndent: itemIndent === '' ? '  ' : itemIndent, at, separator: [] };
+}
+
+/**
  * Previews or explicitly appends one owner delete-semantics rule to the
  * classification policy.
  *
@@ -391,11 +489,20 @@ async function classifyDeleteCommand(io: Io, argv: readonly string[]): Promise<n
     );
   }
   const before = readFileSync(path, 'utf8');
-  // The YAML document API (not a re-serialization) keeps the owner's
-  // comments and key order byte for byte.
-  const document = parseDocument(before);
-  const existing = document.get('deleteRules');
-  const parsed = DeleteRulesSchema.safeParse(existing === undefined || existing === null ? [] : existing);
+  // Read-only parse for the duplicate check. The WRITE below is text-level:
+  // re-serializing the document reflows the owner's flow sequences and
+  // re-indents their comments, and a reviewed classification input must
+  // never change bytes the owner did not ask for.
+  let existing: unknown = [];
+  try {
+    const document = parseYaml(before) as Record<string, unknown>;
+    existing = document['deleteRules'] ?? [];
+  } catch (cause) {
+    throw new UsageError(
+      `'${policyPath}' is not readable YAML (${cause instanceof Error ? cause.message : String(cause)}); fix it by hand`,
+    );
+  }
+  const parsed = DeleteRulesSchema.safeParse(existing);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     throw new UsageError(
@@ -428,8 +535,11 @@ async function classifyDeleteCommand(io: Io, argv: readonly string[]): Promise<n
     ...(archiveFieldCount > 0 ? { archiveFields } : {}),
     reason: reason.trim(),
   };
-  document.set('deleteRules', [...current, rule]);
-  const after = document.toString();
+  const lines = before.split('\n');
+  const insertion = deleteRuleInsertion(lines, policyPath);
+  lines.splice(insertion.at, 0, ...insertion.header, ...insertion.separator, ...renderDeleteRule(rule, insertion.itemIndent));
+  if (lines[lines.length - 1] !== '') lines.push('');
+  const after = lines.join('\n');
   const validated = ClassificationPolicySchema.safeParse(parseYaml(after));
   if (!validated.success) {
     throw new UsageError(
