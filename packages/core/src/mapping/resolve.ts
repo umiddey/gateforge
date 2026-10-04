@@ -781,24 +781,64 @@ function proseTitlePath(titlePath: readonly string[]): string[] {
 }
 
 /**
- * The resource names an explicit `@crud(tenant.accounts:read)` /
- * `@gateforge(<…>)` tag declares. Only the RESOURCE part counts: the text
- * before `:` (everything after it names an operation, not a resource), and
- * a plane qualifier names no resource of its own. An `@op(...)` tag is not
- * a resource declaration at all and never contributes.
+ * The CRUD operation each HTTP method exercises, for the fit check an
+ * explicit tag must pass before it counts for a transport obligation.
  */
-function explicitTagTokens(titlePath: readonly string[]): string[] {
-  const tokens: string[] = [];
+const HTTP_METHOD_OPERATIONS: Readonly<Record<string, string>> = Object.freeze({
+  GET: 'read',
+  HEAD: 'read',
+  POST: 'create',
+  PUT: 'update',
+  PATCH: 'update',
+  DELETE: 'delete',
+});
+
+/**
+ * The operation an `http:*` obligation's own route method exercises, or
+ * null when the obligation is not transport-shaped or its route hint
+ * names no known method. A tag that DECLARES an operation is evidence
+ * for an obligation only when the two agree: `@crud(…:create)` says the
+ * test creates the resource, which is no evidence that it reads
+ * `GET /api/v2/accounts` — and answering `new test needed: no` from it
+ * sent an owner to mark a create test as the proof of a read. A
+ * non-transport obligation has no route method to fit, so its tags stay
+ * judged on the resource alone.
+ */
+function transportOperationOf(obligationId: string, routes: readonly string[]): string | null {
+  if ((obligationId.split(':')[1] ?? '').toLowerCase() !== 'http') return null;
+  const method = (routes[0] ?? '').split(/\s+/)[0]?.toUpperCase() ?? '';
+  return HTTP_METHOD_OPERATIONS[method] ?? null;
+}
+
+/**
+ * The resource names an explicit `@crud(tenant.accounts:read)` /
+ * `@gateforge(<…>)` tag declares, and the operation it declares beside
+ * them. Only the RESOURCE part names a resource: the text before `:`
+ * (everything after it names an operation, not a resource), and a plane
+ * qualifier names no resource of its own. An `@op(...)` tag is not a
+ * resource declaration at all and never contributes.
+ */
+interface ExplicitTag {
+  /** The declared resource-NAME tokens (plane qualifiers dropped). */
+  tokens: string[];
+  /** The declared operation after the `:`, lowercased; null when none. */
+  operation: string | null;
+}
+
+function explicitTags(titlePath: readonly string[]): ExplicitTag[] {
+  const tags: ExplicitTag[] = [];
   for (const segment of titlePath) {
     for (const match of segment.matchAll(/@(?:crud|gateforge|resource)\(([^)]*)\)/g)) {
-      const target = (match[1] ?? '').split(':')[0] ?? '';
-      for (const token of target.split(/[^A-Za-z0-9]+/)) {
+      const parts = (match[1] ?? '').split(':');
+      const tokens: string[] = [];
+      for (const token of (parts[0] ?? '').split(/[^A-Za-z0-9]+/)) {
         const name = token.toLowerCase();
         if (name.length > 2 && PLANE_NAME_TOKENS[name] !== true) tokens.push(name);
       }
+      tags.push({ tokens, operation: (parts[1] ?? '').toLowerCase() || null });
     }
   }
-  return tokens;
+  return tags;
 }
 
 /** One candidate's evidence score, its reasons, and the reuse inputs. */
@@ -863,7 +903,12 @@ function candidateEvidence(
   // title is read as prose (tag matching stays a separate, explicit path).
   const words = titleWords(proseTitlePath(row.titlePath));
   const fileWords = row.file.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 0);
-  const tagTokens = explicitTagTokens(row.titlePath);
+  const tags = explicitTags(row.titlePath);
+  // A tag that declares an operation is evidence for a TRANSPORT
+  // obligation only when the operation fits the route's method; for
+  // every other obligation (and for a route hint naming no known
+  // method) it is null and the resource part stands on its own.
+  const requiredOperation = transportOperationOf(obligationId, routes);
   const operationWords = OPERATION_TITLE_WORDS[operationOf(obligationId)] ?? [];
   const routeSegments = routeSegmentsOf(routes);
 
@@ -876,7 +921,13 @@ function candidateEvidence(
   let resourceToken = false;
   for (const token of tokens) {
     if (counted.has(token)) continue;
-    if (tagTokens.includes(token)) {
+    if (
+      tags.some(
+        (tag) =>
+          tag.tokens.includes(token) &&
+          (requiredOperation === null || tag.operation === requiredOperation),
+      )
+    ) {
       counted.add(token);
       distinctive = true;
       explicitTag = true;

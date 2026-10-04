@@ -891,6 +891,82 @@ describe('mappingSuggestions — tag text is not a title word (0.9.2 follow-up)'
   });
 });
 
+/**
+ * Plan 0.9.2 item (i): an explicit tag counts for an `http:*`
+ * obligation only when the operation it DECLARES fits the route's
+ * method. `@crud(tenant.accounts:create)` says the test CREATES an
+ * account; it is no evidence that the test reads
+ * `GET /api/v2/accounts`, and answering `new test needed: no` from it
+ * sent an owner to mark a create test as the proof of a read.
+ */
+describe('mappingSuggestions — an explicit tag must fit the route method (0.9.2 item i)', () => {
+  const HTTP_OBLIGATION = 'tenant.accounts:http:request-observed';
+  const ROUTE = 'GET /api/v2/accounts';
+
+  /**
+   * A test whose title and file never name the resource, so the ONLY
+   * thing that could make it a candidate is its `@crud(...)` tag.
+   */
+  const tagged = (operation: string): TestCatalogEntry =>
+    row({
+      logicalKey: `playwright:chromium:tests/e2e/real/admin.spec.js:the reference admin is findable (${operation})`,
+      file: 'tests/e2e/real/admin.spec.js',
+      titlePath: [`@crud(tenant.accounts:${operation})`, 'the reference admin is findable'],
+      title: 'the reference admin is findable',
+      sourceLocation: { file: 'tests/e2e/real/admin.spec.js', line: 6, col: 0 },
+    });
+
+  /** The suggestion for the transport obligation, with no mapping present. */
+  const suggestionFor = (entries: TestCatalogEntry[]) => {
+    const entries0 = catalog(entries);
+    return mappingSuggestions({
+      catalog: entries0,
+      obligationIds: [HTTP_OBLIGATION],
+      resolution: resolveTestMappings(resolveInput({ catalog: entries0, obligationIds: [HTTP_OBLIGATION] })),
+      routeHints: new Map([[HTTP_OBLIGATION, [ROUTE]]]),
+    })[0];
+  };
+
+  it('gives no credit to `@crud(tenant.accounts:create)` for a GET route', () => {
+    // Before the gate this answered `new test needed: no` — "mark this
+    // create test as the proof of a read". With the tag carrying no
+    // evidence the honest verdict is the three-state `unverified`: a
+    // candidate exists and NOTHING HERE PROVES IT.
+    const suggestion = suggestionFor([tagged('create')]);
+    expect(suggestion?.newTestNeeded).not.toBe('no');
+    expect(suggestion?.newTestNeeded).toBe('unverified');
+    // The tag scores nothing here. (The resolver's own route-blind
+    // inference still names the row as a candidate — it has no route
+    // hints to fit the method against — but it contributes no score and
+    // it settles nothing.)
+    expect(suggestion?.candidates?.[0]?.score ?? 0).toBe(0);
+  });
+
+  it('still credits the tag whose operation fits the method', () => {
+    // GET reads: `:read` fits, and the positive case must not regress
+    // with the gate above.
+    const suggestion = suggestionFor([tagged('read')]);
+    expect(suggestion?.newTestNeeded).toBe('no');
+    expect(suggestion?.candidates?.[0]?.why.join(' ')).toContain(
+      "explicit tag names this obligation's resource 'accounts'",
+    );
+  });
+
+  it('leaves a non-transport obligation judged on the resource alone', () => {
+    // `:persistence:read` has no route method to fit: the tag's resource
+    // part is still the evidence it always was.
+    const entries0 = catalog([tagged('create')]);
+    const persistence = 'tenant.accounts:persistence:read';
+    const suggestion = mappingSuggestions({
+      catalog: entries0,
+      obligationIds: [persistence],
+      resolution: resolveTestMappings(resolveInput({ catalog: entries0, obligationIds: [persistence] })),
+      routeHints: new Map(),
+    })[0];
+    expect(suggestion?.newTestNeeded).toBe('no');
+  });
+});
+
 describe('resolveTestMappings — determinism', () => {
   it('shuffled inputs produce byte-identical output', () => {
     const rows = [
