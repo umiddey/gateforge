@@ -263,4 +263,60 @@ describe('Gateforge-owned policy inputs in the changed scope (real CLI)', () => 
       expect(run.code, output).not.toBe(0);
     });
   }, 240_000);
+
+  it('a staged setup commit with the .gitignore engine-state block passes the staged gate', async () => {
+    await withTempRepo({}, async (repo) => {
+      // The base revision's `.gitignore` carries none of
+      // Gateforge's block: `init` appends it as part of
+      // the setup commit, and the pre-commit hook gates
+      // exactly this commit via `check --staged`.
+      await installAndAdopt(repo, 'node_modules/\n');
+      const pin = stageSetupCommit(repo, {
+        '.gitignore': `node_modules/\n${IGNORE_BLOCK}`,
+      });
+
+      const run = await runCli(
+        repo,
+        ['check', '--staged', '--format', 'json'],
+        { GATEFORGE_APPROVED_POLICY_DIGEST: pin },
+      );
+      const report = JSON.parse(run.stdout) as Report;
+      const output = `${run.stdout}\n${run.stderr}`;
+
+      // The managed block is engine wiring in the staged
+      // flow too: no unmapped entry, and the adopted debt
+      // stays forgiven (the staged gate is the one the
+      // pre-commit hook runs on the setup commit).
+      expect(
+        report.blocking.filter((entry) => entry.cause === 'CHANGE_UNMAPPED'),
+        output,
+      ).toEqual([]);
+      expect(report.summary.baselinedObligations ?? 0).toBeGreaterThan(0);
+      expect(report.summary.neverWitnessedBaselinedObligations ?? 0).toBeGreaterThan(0);
+      expect(run.code, output).toBe(0);
+    });
+  }, 240_000);
+
+  it('a staged setup commit with a .gitignore line outside the managed block blocks', async () => {
+    await withTempRepo({}, async (repo) => {
+      await installAndAdopt(repo, 'node_modules/\n');
+      const pin = stageSetupCommit(repo, {
+        '.gitignore': `node_modules/\n${IGNORE_BLOCK}dist/\n`,
+      });
+
+      const run = await runCli(
+        repo,
+        ['check', '--staged', '--format', 'json'],
+        { GATEFORGE_APPROVED_POLICY_DIGEST: pin },
+      );
+      const output = `${run.stdout}\n${run.stderr}`;
+
+      // Fail closed: the staged flow cannot prove the
+      // non-managed line is wiring, so the adopted debt
+      // is re-graded and the setup commit blocks.
+      expect(output).toContain('ENFORCEMENT_UNTRUSTED');
+      expect(output).toContain(OBLIGATION_ORDERS);
+      expect(run.code, output).not.toBe(0);
+    });
+  }, 240_000);
 });

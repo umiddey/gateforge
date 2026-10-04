@@ -290,6 +290,33 @@ export function changeBaseTextReader(
 ): ((path: string) => string | null) | null {
   const revision = changeBaseRevision(provider, cwd, env);
   if (revision === null) return null;
+  return textReaderAtRevision(revision, cwd, env);
+}
+
+/**
+ * Reads repository files at one fixed revision — the
+ * text a policy-input classifier compares the
+ * working-tree candidate with. Used by the
+ * staged-candidate flow, whose base revision lives in
+ * the USER's repository (the isolated checkout has
+ * none of its objects): the caller resolves the
+ * revision THERE, before the process moves to the
+ * checkout.
+ *
+ * Args:
+ *   revision: a revision that exists in the
+ *     repository at `cwd` (the frozen base sha).
+ *   cwd: repository root that owns the revision's objects.
+ *   env: process environment.
+ *
+ * Returns:
+ *   (path: string) => string | null: the reader.
+ */
+export function textReaderAtRevision(
+  revision: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): (path: string) => string | null {
   return (path: string): string | null => {
     const blob = spawnSync('git', [...GIT_FLAGS, 'show', `${revision}:${path}`], {
       cwd,
