@@ -148,19 +148,34 @@ export interface EnvProbe {
   fingerprint: string | null;
   /** Attestation-scope marker value, or null. */
   scope: string | null;
+  /**
+   * Transport failure as a short diagnostic (the error's
+   * `code` when it carries one — e.g. `ECONNREFUSED` — else the
+   * wrapped `cause`'s code/message, else the message itself),
+   * or null when the target answered. A probe with a transport
+   * error presents no markers BY CONSTRUCTION — the target never
+   * answered — so the mismatch rule reports unreachability,
+   * never a missing marker (R1-19).
+   */
+  transportError?: string | null;
 }
 
 /**
  * Probes a target's env fingerprint: GET the base and read the marker
- * header. Any transport failure probes as `{fingerprint: null, scope:
- * null}` — absence is a mismatch, never a pass (fail closed).
+ * header. A transport failure (DNS, refused connection, timeout)
+ * probes as `{fingerprint: null, scope: null, transportError:
+ * <diagnostic>}` — the mismatch rule then says the target is
+ * UNREACHABLE, never that the marker is missing. Absence of the
+ * marker on a REACHED target is still a mismatch, never a pass
+ * (fail closed).
  *
  * Args:
  *   baseUrl: target base to probe.
  *   timeoutMs: per-request timeout.
  *
  * Returns:
- *   EnvProbe: observed markers (null when absent/unreachable).
+ *   EnvProbe: observed markers (null when absent) + the transport
+ *     error (null when the target answered).
  */
 export async function probeEnvFingerprint(
   baseUrl: string,
@@ -171,8 +186,8 @@ export async function probeEnvFingerprint(
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       // Pinned egress: attested hostnames connect to their
-      // startup-approved loopback IPs (Host preserved); unpinned names
-      // behave exactly as before.
+      // startup-approved loopback IPs (Host preserved); unpinned
+      // names behave exactly as before.
       const response = await pinnedGet(baseUrl, {
         timeoutMs,
         signal: controller.signal,
@@ -180,13 +195,53 @@ export async function probeEnvFingerprint(
       return {
         fingerprint: response.headers.get(ENV_FINGERPRINT_HEADER),
         scope: response.headers.get(ATTESTATION_SCOPE_HEADER),
+        transportError: null,
       };
     } finally {
       clearTimeout(timer);
     }
-  } catch {
-    return { fingerprint: null, scope: null };
+  } catch (error) {
+    return {
+      fingerprint: null,
+      scope: null,
+      transportError: describeTransportError(error),
+    };
   }
+}
+
+/**
+ * One transport failure as a short diagnostic: the error's
+ * `code` when it carries one (e.g. `ECONNREFUSED`), else the
+ * code/message of the error it wraps in `cause` (fetch wraps
+ * the underlying transport error), else the message itself.
+ */
+function describeTransportError(error: unknown): string {
+  const coded = (candidate: unknown): string | null => {
+    if (typeof candidate !== 'object' || candidate === null) return null;
+    const record = candidate as { code?: unknown; message?: unknown };
+    if (typeof record.code === 'string' && record.code.length > 0) {
+      return typeof record.message === 'string' && record.message.length > 0
+        ? `${record.code}: ${record.message}`
+        : record.code;
+    }
+    return null;
+  };
+  const messageOf = (candidate: unknown): string | null => {
+    if (typeof candidate !== 'object' || candidate === null) return null;
+    const message = (candidate as { message?: unknown }).message;
+    return typeof message === 'string' && message.length > 0 ? message : null;
+  };
+  const cause =
+    typeof error === 'object' && error !== null
+      ? (error as { cause?: unknown }).cause
+      : undefined;
+  return (
+    coded(error) ??
+    coded(cause) ??
+    messageOf(error) ??
+    messageOf(cause) ??
+    String(error)
+  );
 }
 
 /**
@@ -194,12 +249,15 @@ export async function probeEnvFingerprint(
  * base must present a marker EQUAL to the adapter's declared
  * environmentFingerprint, and (when the run pins one) that fingerprint
  * must equal the run's target fingerprint — the adapter may not read a
- * different environment than the UI under test.
+ * different environment than the UI under test. A target that never
+ * answered is unreachable (its transport error is reported), never
+ * marker-less (R1-19).
  *
  * Args:
  *   probe: observed markers at the adapter base.
  *   adapterFingerprint: the adapter's declared environmentFingerprint.
  *   targetFingerprint: the run's pinned fingerprint, or null when unset.
+ *   baseUrl: the probed adapter base, named in the diagnostics.
  *
  * Returns:
  *   string | null: mismatch description, or null when attested.
@@ -208,7 +266,12 @@ export function envFingerprintMismatch(
   probe: EnvProbe,
   adapterFingerprint: string,
   targetFingerprint: string | null,
+  baseUrl: string,
 ): string | null {
+  if (probe.transportError !== undefined && probe.transportError !== null) {
+    return `target ${baseUrl} is not reachable (${probe.transportError}); ` +
+      'start the app before the run (runtime.yml healthcheck)';
+  }
   if (probe.fingerprint === null) {
     return `adapter target presents no '${ENV_FINGERPRINT_HEADER}' marker; ` +
       'the environment is not attested (GF-13)';

@@ -6,9 +6,11 @@
  * agent-writable is reported as NOT active. Exit is 0 whenever the
  * doctor runs (diagnostic), `--json` is deterministic.
  */
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo } from '@gate-forge/core';
+import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { installFixture, runCli } from './helpers.js';
 import { installCommitHook } from '../src/git-hooks.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
@@ -62,6 +64,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'hook-mutation',
         'managed-guarantee',
         'observer',
+        'playwright-projects',
         'runner',
         'server-protection',
         'snapshot',
@@ -396,6 +399,100 @@ describe('enforcement doctor (determinism + text surface)', () => {
       expect(text.stdout).toContain('gateforge enforcement doctor');
       expect(text.stdout).toContain('[OK] config');
       expect(text.stdout).toContain('diagnostic only; exit 0 either way');
+    });
+  });
+});
+
+describe('enforcement doctor (playwright project naming)', () => {
+  /** The gateforge monorepo root (playwright module resolution). */
+  const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+
+  /** The consumer's playwright config (ESM; project pinned to chromium). */
+  const PW_CONFIG =
+    "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n";
+  /** A config with NO projects array — the runner's implicit project is unnamed. */
+  const PW_CONFIG_UNNAMED = "export default { testDir: 'e2e' };\n";
+
+  const ACCOUNTS_SPEC = [
+    "import { test } from 'playwright/test';",
+    'test.describe("Accounts", () => {',
+    "  test('creates an account', async ({ page }) => {",
+    '    await page.goto("/accounts");',
+    '  });',
+    '});',
+    '',
+  ].join('\n');
+
+  /**
+   * Links the engine's pinned playwright into the fixture repo so
+   * the enumeration resolves the consumer runner (no network, no npx).
+   */
+  function linkPlaywright(repo: TempRepo): void {
+    const nm = join(repo.root, 'node_modules');
+    mkdirSync(nm, { recursive: true });
+    for (const name of ['playwright', 'playwright-core']) {
+      symlinkSync(join(ROOT, 'node_modules', name), join(nm, name), 'dir');
+    }
+  }
+
+  /** A playwright-configured fixture repo with the given config. */
+  function installPlaywrightRepo(
+    repo: TempRepo,
+    playwrightConfig: string,
+  ): void {
+    installFixture(repo);
+    repo.writeFiles({
+      'package.json': '{ "type": "module", "private": true }\n',
+      'playwright.config.js': playwrightConfig,
+      'e2e/accounts.spec.js': ACCOUNTS_SPEC,
+    });
+    linkPlaywright(repo);
+  }
+
+  it('fails the playwright-projects row when the config declares no named project', async () => {
+    await withTempRepo({}, async (repo) => {
+      installPlaywrightRepo(repo, PW_CONFIG_UNNAMED);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json']);
+      expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
+      const report = parseDoctor(result.stdout);
+      const check = checkById(report, 'playwright-projects');
+      expect(check.status).toBe('fail');
+      expect(check.detail).toContain(
+        "playwright config playwright.config.js declares no named project",
+      );
+      expect(check.detail).toContain(
+        "add projects: [{ name: 'chromium' }] (behaviour-neutral)",
+      );
+      expect(report.ready).toBe(false);
+      // The text surface shows the same failing row.
+      const text = await runCli(repo, ['enforcement', 'doctor']);
+      expect(text.code).toBe(0);
+      expect(text.stdout).toContain('[FAIL] playwright-projects:');
+      expect(text.stdout).toContain('declares no named project');
+    });
+  });
+
+  it('reports the named projects when the config declares them', async () => {
+    await withTempRepo({}, async (repo) => {
+      installPlaywrightRepo(repo, PW_CONFIG);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json']);
+      expect(result.code).toBe(0);
+      const report = parseDoctor(result.stdout);
+      const check = checkById(report, 'playwright-projects');
+      expect(check.status).toBe('ok');
+      expect(check.detail).toContain('chromium');
+      expect(check.detail).not.toContain('declares no named project');
+    });
+  });
+
+  it('reports ok when no playwright config exists (non-playwright repos)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json']);
+      expect(result.code).toBe(0);
+      const check = checkById(parseDoctor(result.stdout), 'playwright-projects');
+      expect(check.status).toBe('ok');
+      expect(check.detail).toContain('no playwright config');
     });
   });
 });

@@ -1370,6 +1370,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
       probe,
       options.targetFingerprint,
       options.targetFingerprint,
+      targetBaseUrl,
     );
     if (mismatch !== null) {
       throw new AttestationError(
@@ -1795,7 +1796,7 @@ async function handleBrowserSurface(
   const pinned = state.options.targetFingerprint ?? null;
   if (pinned !== null) {
     const probe = await probeEnvFingerprint(trustedBase, state.options.requestTimeoutMs);
-    const mismatch = envFingerprintMismatch(probe, pinned, pinned);
+    const mismatch = envFingerprintMismatch(probe, pinned, pinned, trustedBase);
     if (mismatch !== null) {
       throw new HttpError(409, `engine browser subject rejected: ${mismatch}`);
     }
@@ -5698,6 +5699,7 @@ async function adapterReadContext(
     probe,
     adapter.environmentFingerprint,
     state.options.targetFingerprint ?? null,
+    baseUrl,
   );
   if (mismatch !== null) {
     throw new HttpError(

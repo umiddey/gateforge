@@ -72,7 +72,13 @@ import {
   type EngineIdentity,
 } from '../engine-identity.js';
 import { buildRunPreflight, findRunnerManifest, firstFailingCheck, type RunPreflightReport } from '../run-preflight.js';
-import { findPlaywrightConfig } from '@gate-forge/pack-playwright';
+import {
+  declaresNoNamedProject,
+  findPlaywrightConfig,
+  listNativePlaywrightTests,
+  unnamedProjectConfigWarning,
+  type NativeListResult,
+} from '@gate-forge/pack-playwright';
 import {
   browserBuildSummary,
   browserLaunchSummary,
@@ -894,6 +900,58 @@ function probeGitLabProtection(io: Io): { verified: boolean; detail: string } {
     return { verified: false, detail: 'server protection: not verified (GitLab returned an unreadable protection response)' };
   }
 }
+
+/**
+ * The playwright config's project naming, as the native
+ * enumeration read it (the config is untrusted code — only
+ * the runner can say which projects it declares). Test-gates
+ * join catalog rows to planned projects by name, so a config
+ * that declares no named project breaks the join (R1-5).
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *
+ * Returns:
+ *   Promise<{ status, detail }>: the playwright-projects doctor result.
+ */
+async function playwrightProjectNaming(
+  cwd: string,
+): Promise<{ status: DoctorStatus; detail: string }> {
+  let nativeList: NativeListResult;
+  try {
+    nativeList = await listNativePlaywrightTests({ cwd });
+  } catch (error) {
+    return {
+      status: 'warn',
+      detail: `playwright project naming could not be checked: ${(error as Error).message.split('\n')[0] ?? 'unknown'}`,
+    };
+  }
+  const configPath = findPlaywrightConfig(cwd);
+  const configLabel = configPath ?? '(unknown playwright config)';
+  if (nativeList.status === 'unavailable') {
+    return {
+      status: 'ok',
+      detail: 'no playwright config — not an error for non-playwright repos',
+    };
+  }
+  if (declaresNoNamedProject(nativeList.projectNames)) {
+    return { status: 'fail', detail: unnamedProjectConfigWarning(configLabel) };
+  }
+  if (nativeList.projectNames === undefined) {
+    return {
+      status: 'ok',
+      detail: `playwright config '${configLabel}' ran, but this playwright version reports no project names`,
+    };
+  }
+  const named = nativeList.projectNames
+    .filter((name) => name.length > 0)
+    .sort();
+  return {
+    status: 'ok',
+    detail: `playwright config '${configLabel}' declares named project(s): ${named.join(', ')}`,
+  };
+}
+
 /**
  * Builds the doctor report (all checks, honest statuses).
  *
@@ -1035,6 +1093,12 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
             'engine browser readiness was not checked: .gateforge.yml could not be loaded, so no engine-browser requirement is known',
         }),
   });
+
+  // 2c. The playwright config's project naming (R1-5): the
+  //     enumeration's own answer, so a config with no named
+  //     project — which breaks the per-project identity join
+  //     test-gates depend on — is a FAILING row with the fix.
+  checks.push({ id: 'playwright-projects', ...(await playwrightProjectNaming(io.cwd)) });
 
   // 3. Observer capability (Phase 0 capability registry; witness probe
   //    only when the caller wired GATEFORGE_WITNESS_URL).

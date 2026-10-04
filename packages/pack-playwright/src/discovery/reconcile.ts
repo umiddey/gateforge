@@ -117,6 +117,16 @@ export interface NativeListResult {
    * nothing".
    */
   testFileScope?: ProjectTestFileScope[];
+  /**
+   * The runner-resolved project NAMES, as the json reporter
+   * rebuilt `config.projects[]` (an unnamed project — the
+   * implicit one a config with no `projects` array gets, or a
+   * declared project without a `name` — reports ''). Absent
+   * when the report carried no `config.projects` section
+   * (an older reporter): absence never triggers the
+   * no-named-project verdict.
+   */
+  projectNames?: string[];
 }
 
 /**
@@ -332,7 +342,7 @@ interface ReporterSpec {
 }
 /** Minimal parsed JSON-reporter document shape. */
 interface ReporterDocument {
-  config?: { rootDir?: string };
+  config?: { rootDir?: string; projects?: Array<{ name?: string }> };
   suites?: ReporterSuite[];
   errors?: Array<{ message?: string }>;
 }
@@ -578,6 +588,14 @@ export async function listNativePlaywrightTests(options: {
         `${(outcome.stderr || outcome.stdout).slice(0, 400)}`,
     );
   }
+  // The runner-resolved project names: the json reporter rebuilds
+  // `config.projects[]` field by field, `name` included (verified
+  // against the pack's pinned playwright and a consumer's own). A
+  // config with no `projects` array gets ONE implicit project whose
+  // name is '' — the runner's own answer that the config declares
+  // no named project, which test-gates need for the per-project
+  // identity join (catalog rows key by project name).
+  const projectNames = document.config?.projects?.map((project) => project.name ?? '');
   // The runner reports files relative to ITS rootDir — the config
   // directory's rootDir when the document omits one. Resolve against the
   // CHILD's cwd (the config directory), then normalize to repo-relative:
@@ -707,6 +725,7 @@ export async function listNativePlaywrightTests(options: {
     ...(projectDependencies !== undefined ? { projectDependencies } : {}),
     ...(projectStorageStates !== undefined ? { projectStorageStates } : {}),
     ...(testFileScope !== undefined ? { testFileScope } : {}),
+    ...(projectNames !== undefined ? { projectNames } : {}),
   };
 }
 
@@ -856,4 +875,29 @@ export function fileDigest(cwd: string, file: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether the runner-resolved project names say the config the
+ * enumeration ran declares no named project: every reported
+ * project name is empty (a config with no `projects` array
+ * gets one implicit unnamed project; a declared project
+ * without a `name` reports ''). A report that carries no
+ * `config.projects` section (an older reporter) never
+ * triggers the verdict — absence of evidence is not evidence
+ * of absence.
+ *
+ * Args:
+ *   projectNames: the runner-resolved project names, or
+ *     undefined when the report carried none.
+ *
+ * Returns:
+ *   boolean: true when the runner positively reported projects
+ *     and none of them is named.
+ */
+export function declaresNoNamedProject(projectNames: string[] | undefined): boolean {
+  return (
+    projectNames !== undefined &&
+    projectNames.every((name) => name.length === 0)
+  );
 }
