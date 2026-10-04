@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.1
+
+### Fixed
+
+- `gateforge enforcement pin`, `gateforge check --staged` and `gateforge enforcement doctor` compute ONE policy digest for the same repository again. Git cannot carry an empty directory, so a materialized staged checkout is missing the worktree's empty `.gateforge/adapters/` and `.gateforge/waivers/` — exactly what `gateforge init` leaves behind — while the trusted-digest entry list tells an EMPTY optional config directory (`(no .mjs adapters)`) from a MISSING one (`(missing adapters dir)`). Only `check --staged` mirrored that presence: pin wrote one digest, doctor's `approved-digest` row compared the pin against the same wrong value and reported `matches staged`, and `check --staged` computed a third and blocked `ENFORCEMENT_UNTRUSTED` on the freshly written pin, so re-pinning looped forever. The mirroring now lives in ONE helper that every surface digesting or snapshotting the staged checkout calls: `check --staged`, `stagedPolicyState` behind pin and doctor, and the pre-commit gate.
+- `gateforge tests mark --test` and `gateforge tests explain --test` accept the documented reconciliation key `<file>#<titlePath joined by '>'` next to the catalog `logicalKey`. Only the `logicalKey` was matched, so a test that IS in the catalog was rejected with `not in the discovered catalog … run gateforge tests discover` — a message blaming the catalog for a key form the CLI never accepted. Both commands now resolve both forms through one resolver, the sidecar always stores the `logicalKey`, a key matching several runner projects is a usage error naming every matching `logicalKey`, and an unknown key names both accepted forms plus up to five real keys of the same file.
+- `@gate-forge/cli` ships the repository `CHANGELOG.md` in its npm tarball. npm never ships a changelog on its own and a `files` whitelist can only name files inside the package, so a user updating from npm saw LICENSE, README, bin, dist and guides and no release notes at all. The copy is made at pack time and gitignored, so the root changelog stays the single source of truth rather than becoming a second file to keep in sync.
+
 ## 0.10.0
 
 ### Upgrading from 0.9.x
