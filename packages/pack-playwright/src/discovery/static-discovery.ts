@@ -110,6 +110,13 @@ export interface StaticTestFacts {
   /** `vi.mock(...)` / `jest.mock(...)` anywhere in the file. */
   fileMockImport: Location | null;
   /**
+   * Network interception ANYWHERE in the file: a `<x>.route(...)` call
+   * (`page.route`, `context.route`, …) or a `route.fulfill(...)` call.
+   * A body-scoped scan (`pageRoute`) cannot see a file-scope helper that
+   * registers the interception and that every test merely calls.
+   */
+  fileRouteInterception: Location | null;
+  /**
    * Import of the gateforge evidence pack (`@gate-forge/pack-playwright`)
    * anywhere in the file. Lets inference tell fixture tests (which take
    * the `evidence` param and never drive the browser themselves) apart
@@ -1165,6 +1172,47 @@ function findModuleMock(source: ts.SourceFile, file: string): Location | null {
 }
 
 /**
+ * Whether the WHOLE file registers network interception: a `<x>.route(…)`
+ * call (`page.route`, `context.route`, …) or a `route.fulfill(…)` call.
+ *
+ * A body-scoped scan only sees interception written inside the test
+ * callback. Real suites hoist it into a file-scope helper every test
+ * merely calls (`await stubNotifications(page)`), and such a file mocks
+ * the app exactly as much as a body-level `page.route` does.
+ *
+ * Args:
+ *   source: the file's parsed source.
+ *   file: repo-relative posix path (for the returned location).
+ *
+ * Returns:
+ *   Location | null: the first interception call's location, or null.
+ */
+function findRouteInterception(source: ts.SourceFile, file: string): Location | null {
+  let found: Location | null = null;
+  const visit = (node: ts.Node): void => {
+    if (found !== null) return;
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const callee = node.expression;
+      // `<x>.route(…)` intercepts (page, context, any receiver).
+      if (callee.name.text === 'route' && ts.isIdentifier(callee.expression)) {
+        found = locationOf(file, source, node);
+        return;
+      }
+      // `route.fulfill(…)` answers an intercepted request with a canned
+      // body — a mock even when the `route(…)` registration itself lives
+      // in another file this spec imports.
+      if (callee.name.text === 'fulfill' && ts.isIdentifier(callee.expression)) {
+        found = locationOf(file, source, node);
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
+/**
  * Runs the bounded static scan over the configured globs. Every value is
  * derived from ASTs; the only I/O is reading candidate + import-target
  * files under {@link ScanBudget}.
@@ -1204,8 +1252,9 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     if (model === null) continue;
     const fileHttpClient = findHttpClientCall(model.source, model.source, file);
     const fileMock = findModuleMock(model.source, file);
+    const fileRoute = findRouteInterception(model.source, file);
     const gateforgeImport = findGateforgeFixtureImport(model.source, file);
-    scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, gateforgeImport);
+    scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, fileRoute, gateforgeImport);
   }
   state.result.registrationWarnings.sort(
     (a, b) =>
@@ -1245,6 +1294,7 @@ function scanFileForTests(
   model: FileModel,
   fileHttpClient: Location | null,
   fileMock: Location | null,
+  fileRoute: Location | null,
   gateforgeImport: Location | null,
 ): void {
   const { file, source } = model;
@@ -1422,6 +1472,7 @@ function scanFileForTests(
         location,
         fileHttpClient,
         fileMock,
+        fileRoute,
         gateforgeImport,
       });
       state.result.entries.push(entry);
@@ -1468,6 +1519,7 @@ function scanFileForTests(
           location: outerLocation,
           fileHttpClient,
           fileMock,
+          fileRoute,
           gateforgeImport,
         });
         state.result.entries.push(entry);
@@ -1768,6 +1820,7 @@ function buildEntry(input: {
   location: Location;
   fileHttpClient: Location | null;
   fileMock: Location | null;
+  fileRoute: Location | null;
   gateforgeImport: Location | null;
 }): StaticTestEntry {
   const { file, source, node, callback, titlePath, location } = input;
@@ -1798,6 +1851,7 @@ function buildEntry(input: {
       httpClientCall,
       fileHttpClientCall: input.fileHttpClient,
       fileMockImport: input.fileMock,
+      fileRouteInterception: input.fileRoute,
       gateforgeFixtureImport: input.gateforgeImport,
     },
     ...(annotations.claims.length > 0 ? { annotationClaims: annotations.claims } : {}),

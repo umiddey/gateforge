@@ -995,6 +995,37 @@ describe('mappingSuggestions — eligibility, not just ranking (0.9.2 follow-up)
     expect(suggestion?.nextAction).not.toContain('mark the existing test');
     expect(suggestion?.nextAction).toContain('Overlay: write');
   });
+
+  it('asks for a NEW test when the only candidate mocks via a file-scope helper (0.9.2)', () => {
+    // The real-world shape: `page.route` lives in a helper the test
+    // CALLS, so the body-scoped scan saw nothing and the spec was offered
+    // as reusable proof. The file-level fact and the `mocked/` folder
+    // rule now give this row the mock signal it always had.
+    const { candidates, suggestion } = suggestionsFor([
+      row({
+        logicalKey: 'playwright:-:tests/e2e/mocked/notification_foundation.spec.js:notifications foundation lists the inbox',
+        file: 'tests/e2e/mocked/notification_foundation.spec.js',
+        titlePath: ['notifications foundation lists the inbox'],
+        title: 'notifications foundation lists the inbox',
+        sourceLocation: { file: 'tests/e2e/mocked/notification_foundation.spec.js', line: 10, col: 0 },
+        inferredKind: 'browser-e2e',
+        suppressionSignals: [
+          {
+            kind: 'mock',
+            detail:
+              'network interception (page.route/context.route/route.fulfill) somewhere in the test file — a shared helper every test calls intercepts for all of them',
+            location: { file: 'tests/e2e/mocked/notification_foundation.spec.js', line: 3, col: 2 },
+          },
+        ],
+      }),
+    ]);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.why.join(' ')).toContain('mocks the system under test');
+    expect(suggestion?.newTestNeeded).toBe(true);
+    expect(suggestion?.missingEvidence).toContain('only mocked candidates');
+    expect(suggestion?.nextAction).not.toContain('mark the existing test');
+    expect(suggestion?.nextAction).toContain('Overlay: write');
+  });
 });
 
 describe('mappingSuggestions — candidates must be distinctive (0.9.2 follow-up)', () => {

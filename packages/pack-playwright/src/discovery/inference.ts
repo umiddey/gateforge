@@ -211,6 +211,30 @@ export function inferTestKind(input: InferenceFacts): InferenceResult {
     });
     rulesFired.push({ ruleId: 'mock-page-route', evidence: 'page.route call intercepts network', location: input.facts.pageRoute });
   }
+  if (input.facts.fileRouteInterception !== null) {
+    mockSignals.push({
+      kind: 'mock',
+      detail: 'network interception (page.route/context.route/route.fulfill) somewhere in the test file — a shared helper every test calls intercepts for all of them',
+      location: input.facts.fileRouteInterception,
+    });
+    rulesFired.push({
+      ruleId: 'mock-file-route-interception',
+      evidence: 'route interception anywhere in the file mocks the boundary for every test in it',
+      location: input.facts.fileRouteInterception,
+    });
+  }
+  if (isMockedFolderPath(input.file)) {
+    mockSignals.push({
+      kind: 'mock',
+      detail: "the spec lives in a 'mocked' folder",
+      location: weakLocation(input),
+    });
+    rulesFired.push({
+      ruleId: 'mock-folder-path',
+      evidence: "a mocked/mock/mocks folder segment declares the suite's intent to fake the boundary",
+      location: weakLocation(input),
+    });
+  }
   if (input.facts.fileMockImport !== null) {
     mockSignals.push({
       kind: 'mock',
@@ -237,6 +261,36 @@ export function inferTestKind(input: InferenceFacts): InferenceResult {
   }
 
   return { inferredKind, kindSignals, weakSignals, rulesFired, categorySignals, mockSignals };
+}
+
+/**
+ * Folder segments that declare, by placement, that a suite fakes the
+ * boundary. Exactly these three names: a segment merely CONTAINING
+ * `mock` (`mockery`, `mockUtils`) is a helper folder, not a declaration
+ * that the specs below it intercept the network.
+ */
+const MOCKED_FOLDER_SEGMENTS: Readonly<Record<string, true>> = Object.freeze({
+  mocked: true,
+  mock: true,
+  mocks: true,
+});
+
+/**
+ * Whether a spec file sits under a `mocked`/`mock`/`mocks` folder — the
+ * same `mock` signal a body-level `page.route` produces, so such a row
+ * can never be offered as proof that the real server answered.
+ *
+ * Args:
+ *   file: repo-relative posix path of the spec.
+ *
+ * Returns:
+ *   boolean: true when any directory segment is exactly a mocked name.
+ */
+export function isMockedFolderPath(file: string): boolean {
+  const segments = file.split('/');
+  // The last segment is the FILE name, never a folder: `mock.spec.js`
+  // is a spec called "mock", not a mocked folder.
+  return segments.slice(0, -1).some((segment) => MOCKED_FOLDER_SEGMENTS[segment.toLowerCase()] === true);
 }
 
 /** The location a strong rule's evidence points at. */

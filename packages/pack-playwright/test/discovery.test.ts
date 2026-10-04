@@ -27,6 +27,7 @@ import {
   pytestExecutionArgv,
   scanTestFiles,
   TestDiscoveryError,
+  type StaticTestEntry,
   untrustedEnv,
 } from '../src/discovery/index.js';
 import { AdapterCapabilityError } from '../src/discovery/adapters.js';
@@ -71,6 +72,22 @@ function fixtureConfig(include: string[]): GateforgeConfig {
     witness: { maxDurationSeconds: 5 },
     clock: { mode: 'fixed', fixedAt: '2026-01-01T00:00:00.000Z' },
   });
+}
+
+/**
+ * The one catalog row for a scanned file, or a thrown error naming the
+ * file: a missing row is a scan failure, never a silent `undefined` that
+ * would make the assertion below pass for the wrong reason.
+ */
+function rowFor(entries: readonly StaticTestEntry[], file: string): StaticTestEntry {
+  const entry = entries.find((candidate) => candidate.file === file);
+  if (entry === undefined) throw new Error(`no catalog row for ${file} (have: ${entries.map((e) => e.file).join(', ')})`);
+  return entry;
+}
+
+/** Runs inference over one scanned row exactly as the catalog builder does. */
+function inferenceOf(entry: StaticTestEntry) {
+  return inferTestKind({ file: entry.file, title: entry.title, titlePath: entry.titlePath, facts: entry.facts });
 }
 
 describe('static discovery', () => {
@@ -203,6 +220,73 @@ describe('static discovery', () => {
     expect(result.unresolved).toHaveLength(0);
     expect(result.entries.map((entry) => entry.title)).toEqual(['real test stays visible']);
     expect(result.entries[0]?.facts.pageRouteTargets).toEqual(['**/api/**']);
+  });
+
+  it('a file-scope route helper mocks every test in the file (0.9.2)', () => {
+    // The real-world shape the body-scoped scan missed: interception
+    // lives in a helper the tests CALL, so `page.route` never appears
+    // inside a test body.
+    const root = makeTempDir();
+    writeTree(root, {
+      'tests/e2e/mocked/notification_foundation.spec.js': [
+        "import { test } from 'playwright/test';",
+        'async function stubNotifications(page) {',
+        "  await page.route('**/api/v1/notifications*', async (route) => {",
+        "    await route.fulfill({ status: 200, body: '[]' });",
+        '  });',
+        '}',
+        "test('notification foundation lists the inbox', async ({ page }) => {",
+        '  await stubNotifications(page);',
+        '  await page.goto("/notifications");',
+        '});',
+        '',
+      ].join('\n'),
+      'tests/e2e/real/notification_foundation.spec.js': [
+        "import { test } from 'playwright/test';",
+        "test('notification foundation lists the inbox against the server', async ({ page }) => {",
+        '  await page.goto("/notifications");',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['tests/e2e/**/*.spec.js'], exclude: [] });
+    const mocked = rowFor(result.entries, 'tests/e2e/mocked/notification_foundation.spec.js');
+    const real = rowFor(result.entries, 'tests/e2e/real/notification_foundation.spec.js');
+    // The helper's interception is a FILE-level fact, so the row carries
+    // it even though the test body never calls `page.route` itself.
+    expect(mocked.facts.pageRoute).toBeNull();
+    expect(mocked.facts.fileRouteInterception).not.toBeNull();
+    expect(inferenceOf(mocked).mockSignals.some((signal) => signal.kind === 'mock')).toBe(true);
+    expect(inferenceOf(mocked).rulesFired.some((rule) => rule.ruleId === 'mock-file-route-interception')).toBe(true);
+    // A genuinely unmocked spec under `real/` carries none of it.
+    expect(real.facts.fileRouteInterception).toBeNull();
+    expect(inferenceOf(real).mockSignals.some((signal) => signal.kind === 'mock')).toBe(false);
+  });
+
+  it("a mocked/mock/mocks FOLDER segment mocks its specs (0.9.2)", () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'tests/e2e/mocks/plain_request.spec.js': [
+        "import { test } from 'playwright/test';",
+        "test('reads the plain page', async ({ page }) => {",
+        '  await page.goto("/");',
+        '});',
+        '',
+      ].join('\n'),
+      // `mockery` merely CONTAINS "mock": a helper folder, not a
+      // declaration that its specs intercept the network.
+      'tests/e2e/mockery/helper.spec.js': [
+        "import { test } from 'playwright/test';",
+        "test('uses a helper named mock', async ({ page }) => {",
+        '  await page.goto("/");',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['tests/e2e/**/*.spec.js'], exclude: [] });
+    const infer = (file: string) => inferenceOf(rowFor(result.entries, file));
+    expect(infer('tests/e2e/mocks/plain_request.spec.js').mockSignals.some((signal) => signal.kind === 'mock')).toBe(true);
+    expect(infer('tests/e2e/mockery/helper.spec.js').mockSignals.some((signal) => signal.kind === 'mock')).toBe(false);
   });
 
   it('merges duplicate unresolved rows (same file, same placeholder title) into one typed row', async () => {
@@ -570,6 +654,7 @@ describe('kind/category inference rules', () => {
     httpClientCall: null,
     fileHttpClientCall: null,
     fileMockImport: null,
+    fileRouteInterception: null,
     gateforgeFixtureImport: null,
   };
 

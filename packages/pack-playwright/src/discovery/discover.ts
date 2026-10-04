@@ -43,7 +43,7 @@ import {
   type TestCatalogEntry,
   type WeakSignal,
 } from '@gate-forge/core';
-import { inferTestKind } from './inference.js';
+import { inferTestKind, isMockedFolderPath } from './inference.js';
 import {
   collectPytestSuite,
   pytestCollectArgv,
@@ -1031,6 +1031,17 @@ function mockSignalsOf(staticEntry: StaticScanResult['entries'][number]) {
   const signals: Array<{ kind: 'mock'; detail: string; location: Location }> = [];
   if (staticEntry.facts.pageRoute !== null) {
     signals.push({ kind: 'mock', detail: 'page.route interception inside the test body', location: staticEntry.facts.pageRoute });
+  }
+  if (staticEntry.facts.fileRouteInterception !== null) {
+    signals.push({
+      kind: 'mock',
+      detail:
+        'network interception (page.route/context.route/route.fulfill) somewhere in the test file — a shared helper every test calls intercepts for all of them',
+      location: staticEntry.facts.fileRouteInterception,
+    });
+  }
+  if (isMockedFolderPath(staticEntry.file)) {
+    signals.push({ kind: 'mock', detail: "the spec lives in a 'mocked' folder", location: { file: staticEntry.file, line: 1, col: 0 } });
   }
   if (staticEntry.facts.fileMockImport !== null) {
     signals.push({ kind: 'mock', detail: 'vi.mock/jest.mock module mock in the test file', location: staticEntry.facts.fileMockImport });
