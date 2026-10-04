@@ -183,7 +183,8 @@ import { auditAdapters } from '../adapter-audit.js';
 import { singletonPerTenantAdvisories } from '../singleton-guidance.js';
 import { responseFieldAdvisories } from '../response-field-guidance.js';
 import { unmatchedRouteBannerLines } from '../unmatched-routes.js';
-import { annotationMapSyncAdvisories, findRunnerConfigPath, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
+import { annotationMapSyncAdvisories, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
+import { runnerConfigPaths, runtimeDeclaredPaths } from '../test-infrastructure.js';
 import type { MappedCoverage } from '@gate-forge/core';
 import {
   collectInputFiles,
@@ -1333,9 +1334,12 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     // without it keeps the exact historical behavior) or a mapping
     // sidecar.
     const sidecar = loadOptionalTestMap(io.cwd);
-    const runnerConfig = findRunnerConfigPath(io.cwd, config.runner);
+    const runnerConfigs = runnerConfigPaths(io.cwd, config.runner);
+    const runtimeInputs = runtimeDeclaredPaths(io.cwd, config);
     let testFiles: string[] = [];
-    if (runnerConfig !== null) {
+    let testInfrastructureFiles: string[] = [];
+    let fileVerdict: ((file: string) => 'claimed' | 'disclaimed' | 'unclaimed') | undefined;
+    if (runnerConfigs.length > 0) {
       try {
         const scopeDiscovery = await discoverTestCatalog({
           cwd: io.cwd,
@@ -1346,10 +1350,14 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         testFiles = scopeDiscovery.catalog.entries
           .filter((entry) => entry.runner === config.runner)
           .map((entry) => entry.file);
+        testInfrastructureFiles = scopeDiscovery.testInfrastructureFiles;
+        fileVerdict = scopeDiscovery.fileVerdict;
       } catch {
         // Discovery problems surface on their own gates; scope expansion
         // proceeds with the infrastructure signals it does have.
         testFiles = [];
+        testInfrastructureFiles = [];
+        fileVerdict = undefined;
       }
     }
     const knownSourceFiles = [
@@ -1371,19 +1379,34 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     // USER's repository BEFORE the process moved to the isolated checkout:
     // the checkout's HEAD is the staged tree, not the base, so the base
     // revision's objects are reachable only in the user's repository.
-    const ownedInputs = gateforgeOwnedInputs(
-      io.cwd,
-      pipeline.changedFiles,
-      config,
+    const baseText =
       fixedChangedFiles === undefined
         ? changeBaseTextReader(providerIdentity, io.cwd, io.env) ?? undefined
-        : options.fixedBaseText,
-    );
+        : options.fixedBaseText;
+    const ownedInputs = gateforgeOwnedInputs(io.cwd, pipeline.changedFiles, config, baseText);
+    // A path this change DELETED that no configured runner's own
+    // test-file selection ever claimed. Nothing collected it, so removing
+    // it removes no test and no behaviour: it neither expands the scope
+    // nor blocks as unmapped. Without a readable runner selection
+    // (`fileVerdict` absent) nothing is excused and every deletion keeps
+    // today's treatment.
+    const removedUnclaimedFiles =
+      fileVerdict === undefined || baseText === undefined
+        ? []
+        : pipeline.changedFiles.filter(
+            (file) =>
+              !existsSync(join(io.cwd, ...file.split('/'))) &&
+              baseText(file) !== null &&
+              fileVerdict(file) === 'disclaimed',
+          );
     scopeDecision = computeEvaluationScope({
       config,
       changedFiles: pipeline.changedFiles,
       testFiles,
-      runnerConfigs: runnerConfig === null ? [] : [runnerConfig],
+      runnerConfigs,
+      testInfrastructureFiles,
+      runtimeInputs,
+      removedUnclaimedFiles,
       mappingSidecar: sidecar !== null,
       knownSourceFiles,
       strictE2E: config.enforcement?.strictE2E === true,
@@ -1414,7 +1437,13 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           `Attributing '${file}' starts with \`gateforge explain ${file}\`, which prints what the file is ` +
           'and what governs it: map the detected resource, declare documentation folders with ' +
           '`gateforge init --docs-exclude <folders>`, or add the detection that owns the file. ' +
-          'Never weaken the policy.',
+          'Never weaken the policy.' +
+          // The docs-only exemption is engine-owned and applies only to a
+          // WHOLE documentation commit, so name the route that works
+          // rather than leaving the owner to guess at "mixed change".
+          (file.startsWith('docs/') && file.endsWith('.md')
+            ? ' A `docs/**.md` edit is exempt only when the WHOLE commit is documentation: commit it on its own, before or after this change.'
+            : ''),
       }));
     mismatchBlocking = [...mismatchBlocking, ...unmappedBlocking];
     // The local-staged provider lists index changes, but discovery reads

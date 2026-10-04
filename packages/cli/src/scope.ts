@@ -171,6 +171,29 @@ export function computeEvaluationScope(input: {
   knownSourceFiles?: readonly string[];
   strictE2E?: boolean;
   /**
+   * Files the suite's own catalog tests load by relative import
+   * (`tests/e2e/support/**`, `tests/e2e/fixtures/**`, any shared helper
+   * module) — the IMPORT GRAPH, not a folder name, so a random
+   * `support/` nothing imports gets no pass. They expand the scope like
+   * the tests that import them.
+   */
+  testInfrastructureFiles?: readonly string[];
+  /**
+   * Repository files the staged runtime document NAMES as a command
+   * argument or an env file (a `scripts/e2e/*` runner, a compose
+   * override, an `.env` it loads). They can change what runs, so they
+   * are gate-defining and expand the scope.
+   */
+  runtimeInputs?: readonly string[];
+  /**
+   * Changed paths that this change DELETED and that no configured
+   * runner's own test-file selection ever claimed. A deletion cannot
+   * introduce behaviour, and a file no runner collects is not a test
+   * file, so neither expands the scope nor becomes unmapped. A deletion
+   * of a file a runner DOES collect keeps every other rule.
+   */
+  removedUnclaimedFiles?: readonly string[];
+  /**
    * 0.9.0 D2: the changed paths already classified as Gateforge-owned policy
    * inputs by the caller (it owns the candidate checkout, this module stays
    * pure). They are never unmapped and they never expand the scope.
@@ -204,6 +227,9 @@ export function computeEvaluationScope(input: {
     if (dir.length > 0) testDirs.add(dir);
   }
   const runnerConfigs = new Set((input.runnerConfigs ?? []).map(normalizeRepoPath));
+  const importedByTests = new Set((input.testInfrastructureFiles ?? []).map(normalizeRepoPath));
+  const runtimeInputs = new Set((input.runtimeInputs ?? []).map(normalizeRepoPath));
+  const removedUnclaimed = new Set((input.removedUnclaimedFiles ?? []).map(normalizeRepoPath));
   const knownSources = new Set((input.knownSourceFiles ?? []).map(normalizeRepoPath));
   const strictE2E = input.strictE2E === true;
   const reasons = new Set<string>();
@@ -233,6 +259,10 @@ export function computeEvaluationScope(input: {
       reasons.add(file);
       continue;
     }
+    if (runtimeInputs.has(file)) {
+      reasons.add(file);
+      continue;
+    }
     if (testFiles.has(file)) {
       reasons.add(`test:${file}`);
       continue;
@@ -241,6 +271,15 @@ export function computeEvaluationScope(input: {
       reasons.add(`test-infra:${file.split('/').slice(0, -1).join('/')}`);
       continue;
     }
+    if (importedByTests.has(file)) {
+      reasons.add(`test-infra:${file}`);
+      continue;
+    }
+    // A file this change removed that no runner's own selection ever
+    // claimed: nothing collected it, so deleting it removes no test and
+    // no behaviour. It neither expands the scope nor blocks as unmapped
+    // — the one honest reading of a deletion the runner never saw.
+    if (removedUnclaimed.has(file)) continue;
     if (knownSources.has(file)) continue;
     if (isDocsOnly(file)) {
       docsOnlyFiles.add(file);

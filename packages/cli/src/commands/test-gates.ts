@@ -258,6 +258,7 @@ import { loadRuntimeConfigAt } from '../runtime.js';
 import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
 import { engineIdentity, reportEngineLine } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
+import { unstagedPolicyInputs } from './enforcement.js';
 import {
   clearGateReceipt,
   clearRunRecord,
@@ -454,7 +455,8 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
         format,
         witnessUrl,
         runToken: stringFlag(options, 'run-token'),
-        runTimeoutMs: parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')),
+        runTimeoutMs:
+          parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')) ?? runtimeRunTimeoutMs(io.cwd),
         progress: progressFlag,
         scope,
         resultOnly,
@@ -528,6 +530,33 @@ export function parseRunTimeoutMin(raw: string | undefined): number | undefined 
     throw new UsageError('test-gates: --run-timeout-min must be between 1 and 2880 minutes (48h)');
   }
   return minutes * 60_000;
+}
+
+/**
+ * The whole-run budget the OWNER declared in the staged runtime document,
+ * in milliseconds, or undefined when the document declares none.
+ *
+ * `runtime.yml`'s `executionTimeoutSeconds` is the owner's budget for a
+ * supervised run and the commit hook has always honoured it. Run
+ * directly, the same document was ignored and every run died at the
+ * 30-minute default — the owner's own runtime document did not apply to
+ * the owner's own command. An explicit `--run-timeout-min` still wins, and
+ * a document that cannot be read declares nothing: the default bound
+ * stands and no run loses its bound.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *
+ * Returns:
+ *   number | undefined: milliseconds, or undefined for the default bound.
+ */
+function runtimeRunTimeoutMs(cwd: string): number | undefined {
+  try {
+    const seconds = loadRuntimeConfigAt(cwd, loadConfigAt(cwd).runtime)?.executionTimeoutSeconds;
+    return seconds === undefined ? undefined : seconds * 1_000;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Options of the legacy (`--suite`) orchestration path. */
@@ -2606,6 +2635,29 @@ async function runSupervisedTestGatesInner(
     if (!options.resultOnly) clearGateReceipt(stateDir);
     writeLine(io.stderr, `test-gates: ${policyGate.cause}: ${policyGate.detail}`);
     writeLine(io.stderr, `next action: ${policyGate.nextAction}`);
+    // The two commands of one pipeline digest DIFFERENT trees: this one
+    // digests the working tree, `check --staged` digests the staged
+    // index. While a policy input is modified-but-unstaged they compute
+    // different digests, so the single owner-approved pin that satisfies
+    // the commit gate refuses HERE, and the remedy the commit gate prints
+    // (`test-gates --changed`) is the command this refusal blocks. Name
+    // the offending files and the remedy that actually clears it.
+    if (policyGate.cause === 'ENFORCEMENT_UNTRUSTED') {
+      const unstaged = unstagedPolicyInputs(io, config);
+      if (unstaged !== null && unstaged.length > 0) {
+        writeLine(
+          io.stderr,
+          'this run digests the WORKING TREE while `check --staged` digests the STAGED INDEX: ' +
+            'while a policy input is modified-but-unstaged the two compute different digests, so one ' +
+            `approved pin cannot satisfy both. Policy inputs differing between them: ${unstaged.join(', ')}`,
+        );
+        writeLine(
+          io.stderr,
+          'next action: stage them (`git add` the files above) and re-run, or commit or restore them — ' +
+            'then re-pin outside the repository if the approved revision changed',
+        );
+      }
+    }
     return 1;
   }
   // When the pin is provisioned and matches, the approved revision is

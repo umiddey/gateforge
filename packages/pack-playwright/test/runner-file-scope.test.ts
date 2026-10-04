@@ -388,6 +388,100 @@ describe('discovery — a runner’s own file scope decides the row', () => {
       catalog.runnerSummaries.find((summary) => summary.runner === 'playwright')?.detail,
     ).toContain('claimed by no runner');
   });
+
+  it('does not catalogue a spec the runner config EXCLUDES in testIgnore', async () => {
+    // A tracked duplicate spec folder the owner declared out of the
+    // suite. It is not a member of any suite, so it is not a gap in the
+    // suite's inventory — one such folder used to make the whole
+    // repository unsealable (105 `unresolved-test-alias` rows).
+    const root = makeMixedProject({
+      '.merge-review-main-variants/accounts.spec.js': [
+        "import { test } from 'playwright/test';",
+        "test('stale duplicate journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+    });
+    // The owner declares the folder out of the suite in the runner's own
+    // configuration — the declaration that says exactly this.
+    writeTree(root, {
+      'playwright.config.js': [
+        'export default {',
+        "  testDir: '.',",
+        "  testMatch: ['tests/e2e/**/*.spec.js'],",
+        "  testIgnore: ['**/.merge-review-main-variants/**'],",
+        "  projects: [{ name: 'chromium' }],",
+        '};',
+        '',
+      ].join('\n'),
+    });
+    const { catalog } = await discoverTestCatalog({
+      cwd: root,
+      config: fixtureConfig(['tests/e2e/**/*.spec.js', '.merge-review-main-variants/**/*.spec.js']),
+    });
+    expect(
+      catalog.entries.some((entry) => entry.file === '.merge-review-main-variants/accounts.spec.js'),
+    ).toBe(false);
+    expect(catalog.unresolved.some((gap) => gap.code === 'unresolved-test-alias')).toBe(false);
+    expect(catalog.inventoryComplete).toBe(true);
+  });
+
+  it('does not catalogue a spec outside every project testDir', async () => {
+    const root = makeMixedProject({
+      'legacy/old-flow.spec.js': [
+        "import { test } from 'playwright/test';",
+        "test('retired journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+    });
+    // The suite lives under `tests/e2e/`; nothing else is the runner's
+    // test tree, so a spec elsewhere is not a suite member to be missing.
+    writeTree(root, {
+      'playwright.config.js': [
+        'export default {',
+        "  testDir: 'tests/e2e',",
+        "  testMatch: ['**/*.spec.js'],",
+        "  projects: [{ name: 'chromium' }],",
+        '};',
+        '',
+      ].join('\n'),
+    });
+    const { catalog } = await discoverTestCatalog({
+      cwd: root,
+      config: fixtureConfig(['tests/e2e/**/*.spec.js', 'legacy/**/*.spec.js']),
+    });
+    expect(catalog.entries.some((entry) => entry.file === 'legacy/old-flow.spec.js')).toBe(false);
+    expect(catalog.inventoryComplete).toBe(true);
+  });
+
+  it('still blocks a misplaced spec INSIDE a testDir that no selection claims', async () => {
+    // The other half of the line: a file the owner did not exclude and
+    // did not place outside the test tree may simply be misplaced, and
+    // that stays a visible gap.
+    const root = makeMixedProject({
+      'tests/e2e/stray.spec.js': [
+        "import { test } from 'playwright/test';",
+        "test('misplaced journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+    });
+    writeTree(root, {
+      'playwright.config.js': [
+        'export default {',
+        "  testDir: '.',",
+        "  testMatch: ['tests/e2e/real/**/*.spec.js'],",
+        "  projects: [{ name: 'chromium' }],",
+        '};',
+        '',
+      ].join('\n'),
+    });
+    const { catalog } = await discoverTestCatalog({
+      cwd: root,
+      config: fixtureConfig(['tests/e2e/**/*.spec.js']),
+    });
+    const stray = catalog.entries.find((entry) => entry.file === 'tests/e2e/stray.spec.js');
+    expect(stray?.discoveryStatus).toBe('unresolved');
+    expect(catalog.inventoryComplete).toBe(false);
+  });
 });
 
 describe('the project-graph reporter carries the IMPLICIT project selection', () => {

@@ -73,10 +73,12 @@ import {
 } from './static-discovery.js';
 import {
   playwrightFileScopes,
+  runnerFileVerdict,
   runnerForFile,
   scopeSelectsFile,
   vitestFileScopes,
   type RunnerFileScope,
+  type RunnerFileVerdict,
 } from './runner-file-scope.js';
 
 /** Options for one discovery run. */
@@ -149,6 +151,23 @@ export interface DiscoverResult {
    * Each entry is a complete diagnostic line.
    */
   configWarnings: string[];
+  /**
+   * What the runners' own configuration says about any repo-relative
+   * file — the same three-state answer this run used to decide the
+   * catalog. Consumers ask it about files the catalog no longer holds
+   * (a deleted spec, a changed helper), so the answer stays available
+   * without re-running discovery.
+   */
+  fileVerdict: (file: string) => RunnerFileVerdict;
+  /**
+   * Files reachable from a CONFIGURED-runner catalog test file by
+   * relative import (transitively, bounded by the scan's traversal
+   * budget) — the helper/fixture modules the suite's own tests load,
+   * proven by the import graph rather than by a folder name. Empty when
+   * the scan's import budget cut resolution short: an incomplete graph
+   * must attribute nothing, never guess.
+   */
+  testInfrastructureFiles: string[];
   /**
    * Coarse per-step wall-clock timings (`check --timing`): static scan,
    * native list, pytest collection, and
@@ -348,6 +367,14 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
         : {}),
       registrationWarnings: scan.registrationWarnings,
       configWarnings,
+      fileVerdict: (file: string): RunnerFileVerdict =>
+        runnerFileVerdict(scopes.configured, scopes.other, cwd, file),
+      testInfrastructureFiles: [
+        ...importReachableFrom(
+          scan,
+          new Set(entries.filter((row) => row.runner === config.runner).map((row) => row.file)),
+        ),
+      ].sort(),
       timings: {
         scanMs,
         nativeListMs,
@@ -370,6 +397,40 @@ interface RunnerScopes {
   other: readonly RunnerFileScope[];
 }
 
+/**
+ * Every file the given roots reach by relative import, transitively,
+ * minus the roots themselves.
+ *
+ * FAIL-OPEN for attribution: when the scan's import traversal hit its
+ * budget the graph is incomplete, so the answer is the EMPTY set — a
+ * partial graph must attribute nothing rather than attribute most of a
+ * suite's helpers and guess at the rest.
+ *
+ * Args:
+ *   scan: the static scan whose import edges are read.
+ *   roots: the files to start from (the suite's own test files).
+ *
+ * Returns:
+ *   Set<string>: the reachable files, roots excluded.
+ */
+function importReachableFrom(scan: StaticScanResult, roots: ReadonlySet<string>): Set<string> {
+  if (scan.budgetExceeded) return new Set<string>();
+  const edges = new Map<string, readonly string[]>();
+  for (const row of scan.importsByFile) edges.set(row.file, row.imports);
+  const reached = new Set<string>();
+  const queue = [...roots];
+  while (queue.length > 0) {
+    const file = queue.pop() as string;
+    for (const target of edges.get(file) ?? []) {
+      if (reached.has(target)) continue;
+      reached.add(target);
+      queue.push(target);
+    }
+  }
+  for (const root of roots) reached.delete(root);
+  return reached;
+}
+
 /** Assembles catalog rows from the scan + native enumeration. */
 class CatalogBuilder {
   /** Static entries keyed by file#titlePath for matching. */
@@ -380,6 +441,8 @@ class CatalogBuilder {
   private readonly unclaimed = new Set<string>();
   /** Memoized file → owning runner (`''` ⇒ claimed by no runner). */
   private readonly owners = new Map<string, string>();
+  /** Memoized file → what the runners' own configuration says about it. */
+  private readonly verdicts = new Map<string, RunnerFileVerdict>();
   /**
    * The runner a static-only row carries when no other runner's own
    * selection claims its file: the CONFIGURED runner, whose enumeration
@@ -419,6 +482,24 @@ class CatalogBuilder {
       runnerForFile(this.runner, this.scopes.configured, this.scopes.other, this.cwd, file) ?? '';
     this.owners.set(file, owner);
     return owner;
+  }
+
+  /**
+   * What the runners' own configuration says about this file, beyond
+   * which runner owns it: a file no runner collects AND that the
+   * configured runner's configuration disclaims (an explicit
+   * `testIgnore`, or a path outside every authoritative project's
+   * `testDir`) is not a member of any suite, so it never becomes a
+   * catalog row and never makes the inventory incomplete. A file nothing
+   * claimed and nothing disclaimed is still a gap — a possibly misplaced
+   * test stays visible.
+   */
+  private verdictOf(file: string): RunnerFileVerdict {
+    const known = this.verdicts.get(file);
+    if (known !== undefined) return known;
+    const verdict = runnerFileVerdict(this.scopes.configured, this.scopes.other, this.cwd, file);
+    this.verdicts.set(file, verdict);
+    return verdict;
   }
 
   /** Records one file's attribution for the runner summary line. */
@@ -563,17 +644,27 @@ class CatalogBuilder {
       }
     }
 
+    // A file the runners' own configuration disclaims is not a member of
+    // any suite: the owner excluded it (or it sits outside every
+    // project's testDir), so it becomes no row at all — neither a case
+    // nor an unresolved gap. It stays visible in the runner summary.
+    const isMember = (file: string): boolean => this.verdictOf(file) !== 'disclaimed';
+
     for (const [key, staticEntry] of this.staticByKey) {
       if (matchedStaticKeys.has(key) || templateConsumed.has(key)) continue;
+      if (!isMember(staticEntry.file)) continue;
       rows.push(this.staticOnlyRow(staticEntry));
     }
 
     // Remaining unresolved static gaps become visible rows (never
     // omitted): unprovable shapes the runner did NOT enumerate (they
     // cannot execute) stay typed unresolved entries and block the
-    // inventory honestly.
+    // inventory honestly — unless the runner's own configuration
+    // disclaims their file, in which case they are not this suite's
+    // cases at all.
     for (const [key, gap] of [...gapsByKey.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
       if (enumeratedKeys.has(key)) continue;
+      if (!isMember(gap.file)) continue;
       const row = this.unresolvedRow(gap);
       const extras = gapExtras.get(key);
       if (extras !== undefined && row.unresolvedReason !== undefined) {

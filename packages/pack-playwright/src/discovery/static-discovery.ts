@@ -184,6 +184,14 @@ export interface StaticScanResult {
   registrationWarnings: StaticRegistrationWarning[];
   /** Repo-relative files that were parsed (seeded + traversed). */
   scannedFiles: string[];
+  /**
+   * Resolved RELATIVE import edges of every file the scan modeled: one
+   * row per modeled file with the repo-relative posix paths its own
+   * module-scope imports resolve to. This is the import graph, read from
+   * ASTs — a folder is test infrastructure because a catalog test imports
+   * it, never because of what the folder is called.
+   */
+  importsByFile: { file: string; imports: string[] }[];
   /** True when the import-traversal budget cut resolution short. */
   budgetExceeded: boolean;
 }
@@ -1234,6 +1242,7 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
       parseErrors: [],
       registrationWarnings: [],
       scannedFiles: [],
+      importsByFile: [],
       budgetExceeded: false,
     },
     models: new Map(),
@@ -1256,6 +1265,23 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     const gateforgeImport = findGateforgeFixtureImport(model.source, file);
     scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, fileRoute, gateforgeImport);
   }
+
+  // The import graph of everything the scan modeled. Every module-scope
+  // relative import was resolved to a repo-relative path while modeling
+  // (a broken one became its own `unresolved-import` row, never a
+  // dangling edge), so this is read from what the scan already proved.
+  state.result.importsByFile = [...state.models.values()]
+    .map((model) => ({
+      file: model.file,
+      imports: [
+        ...new Set(
+          [...model.bindings.values()]
+            .filter((binding) => binding.kind === 'import' && binding.target !== undefined)
+            .map((binding) => binding.target as string),
+        ),
+      ].sort(),
+    }))
+    .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   state.result.registrationWarnings.sort(
     (a, b) =>
       (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) ||

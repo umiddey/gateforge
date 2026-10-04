@@ -1,5 +1,17 @@
 # Changelog
 
+
+## Unreleased
+
+### Fixed
+
+- A repository's OWN test infrastructure is attributable under `enforcement.strictE2E`, so the first commit that wires the gate no longer reports every real file as `CHANGE_UNMAPPED`. Five independent gaps, all measured on a 2 055-test repository where the adoption commit produced 13 of them: **every** Playwright configuration at the repository root and every configuration a `package.json` script names is now a runner configuration (only the one that resolved was, so a dev-stack / headed / demo wrapper was structurally unattributable); a helper a catalog test IMPORTS is test infrastructure, by import graph rather than by folder name, so a `support/` folder nothing imports gets no free pass; the files `runtime.yml` NAMES (a `scripts/e2e/*` runner, a compose override, an `.env` it loads) are gate-defining, while an UNDECLARED stack file still blocks; and `.gateforge/e2e.env` / `.gateforge/.env` are Gateforge-owned runtime documents governed by the owner-approved policy digest. A `docs/**.md` edit in a MIXED commit stays blocked by design, and its message now names the route that works: commit the documentation on its own.
+- The static test catalog no longer turns a file the runner's OWN configuration disclaims into a blocking inventory gap. A spec matched by a project's `testIgnore`, or sitting outside every project's `testDir`, becomes no catalog row at all, so one folder of dead duplicate specs can no longer make a whole repository unsealable (`inventoryComplete: false` → `TEST_INVENTORY_INCOMPLETE` on every run). A file INSIDE a declared `testDir` that no selection claims is a possibly misplaced test and still blocks. Every scope read stays fail-open: a selection that cannot be read faithfully claims every file.
+- Deleting test files no runner ever collected is no longer reported as an unclassified product change. A deletion cannot introduce behaviour, and a file no runner collects is not a test file, so it neither expands the evaluation scope nor blocks. Deleting a file a runner DOES collect keeps every other rule.
+- `gateforge test-gates` honours the whole-run budget its own `runtime.yml` declares. `executionTimeoutSeconds` was read by the commit hook and ignored by the command it is written for, so a repository declaring 3600 s was killed at the 30-minute default. An explicit `--run-timeout-min` still wins; an unreadable runtime document keeps the default bound.
+- `gateforge test-gates` names the cause when its policy digest disagrees with the owner-approved pin. It digests the WORKING TREE while `check --staged` digests the STAGED INDEX, so while a policy input is modified-but-unstaged the two compute different digests and no single pin satisfies both — and the remedy the commit gate prints was the command this refusal blocked. The diagnostic now names the differing policy inputs and a remedy that clears it.
+- `gateforge enforcement pin` prints the command that loads the file it just wrote. Every command reads the pin once at process start, so a shell holding the previous digest read exactly like "my pin did not take".
+
 ## 0.10.1
 
 ### Fixed

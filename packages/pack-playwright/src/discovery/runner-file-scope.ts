@@ -61,6 +61,13 @@ export interface RunnerFileScope {
   note?: string;
 }
 
+/**
+ * What a runner's own configuration says about one file: it collects it
+ * (`claimed`), it explicitly does not (`disclaimed`), or nothing declared
+ * it either way (`unclaimed`).
+ */
+export type RunnerFileVerdict = 'claimed' | 'disclaimed' | 'unclaimed';
+
 /** Vitest's documented default `test.include`. */
 const VITEST_DEFAULT_INCLUDE: readonly string[] = ['**/*.{test,spec}.?(c|m)[jt]s?(x)'];
 
@@ -363,6 +370,59 @@ export function scopeSelectsFile(
     return false;
   }
   return !scope.exclude.some((glob) => globSelectsFile(glob, file));
+}
+
+/**
+ * What a runner's OWN configuration says about one file, in three
+ * states instead of two.
+ *
+ * - `claimed`: some runner's selection collects it.
+ * - `disclaimed`: no runner collects it AND the configured runner's own
+ *   configuration says so — an explicit `testIgnore` match, or a path
+ *   outside every authoritative project's `testDir`. The owner declared
+ *   this file out of the suite, so it is not a gap in the suite's
+ *   inventory.
+ * - `unclaimed`: no runner collects it and nothing declared that, so it
+ *   may be a misplaced test — a real gap that stays visible.
+ *
+ * Every scope is FAIL-OPEN as everywhere else in this module: a
+ * non-authoritative scope claims every file and disclaims nothing, so a
+ * selection that cannot be read faithfully never turns into silence.
+ *
+ * Args:
+ *   configuredScopes: the CONFIGURED runner's own selection.
+ *   otherScopes: every other runner's selection.
+ *   cwd: absolute repo root.
+ *   file: repo-relative posix path.
+ *
+ * Returns:
+ *   RunnerFileVerdict: the three-state answer.
+ */
+export function runnerFileVerdict(
+  configuredScopes: readonly RunnerFileScope[],
+  otherScopes: readonly RunnerFileScope[],
+  cwd: string,
+  file: string,
+): RunnerFileVerdict {
+  if (anyScopeSelectsFile(configuredScopes, cwd, file)) return 'claimed';
+  for (const scope of otherScopes) {
+    if (!scope.authoritative) continue;
+    if (scopeSelectsFile(scope, cwd, file)) return 'claimed';
+  }
+  const authoritative = configuredScopes.filter((scope) => scope.authoritative);
+  const inside = (scope: RunnerFileScope): boolean => {
+    const absolute = isAbsolute(file) ? file : resolve(cwd, file);
+    const relativePath = relative(scope.root, absolute).split('\\').join('/');
+    return relativePath !== '' && !relativePath.startsWith('../');
+  };
+  for (const scope of authoritative) {
+    if (!inside(scope)) continue;
+    const absolute = isAbsolute(file) ? file : resolve(cwd, file);
+    const relativePath = relative(scope.root, absolute).split('\\').join('/');
+    if (scope.exclude.some((glob) => globSelectsFile(glob, relativePath))) return 'disclaimed';
+  }
+  if (authoritative.length > 0 && !authoritative.some(inside)) return 'disclaimed';
+  return 'unclaimed';
 }
 
 /**

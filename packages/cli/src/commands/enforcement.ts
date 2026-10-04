@@ -229,10 +229,22 @@ function boundedList(paths: readonly string[]): string {
 
 /**
  * The trusted policy inputs whose STAGED bytes differ from the working
- * tree (staged≠HEAD edits, unstaged edits and untracked inputs). null
- * when Git cannot answer (no usable inventory).
+ * tree (staged≠HEAD edits, unstaged edits and untracked inputs).
+ *
+ * Exported because the same fact is the cause of the two-commands, two-
+ * trees digest problem: `test-gates` digests the working tree and
+ * `check --staged` the index, so these paths are exactly the ones that
+ * make one approved pin unable to satisfy both.
+ *
+ * Args:
+ *   io: process context (cwd + env for the Git call).
+ *   config: the loaded gateforge config (its policy-input paths).
+ *
+ * Returns:
+ *   string[] | null: the differing paths, or null when Git cannot answer
+ *   (no usable inventory).
  */
-function unstagedPolicyInputs(io: Io, config: GateforgeConfig): string[] | null {
+export function unstagedPolicyInputs(io: Io, config: GateforgeConfig): string[] | null {
   const result = spawnSync(
     'git',
     ['status', '--porcelain', '--untracked-files=all', '--', ...policyInputPaths(io.cwd, config)],
@@ -1775,6 +1787,12 @@ async function enforcementPinCommand(
   // world-readable. Force the mode on every write.
   chmodSync(envFile, 0o600);
   writeLine(io.stdout, `wrote ${line} to ${envFile} (mode 0600)`);
+  // Every command in the pipeline reads the pin file ONCE, at process
+  // start. A shell that already exported the previous digest therefore
+  // keeps comparing against the STALE value and reads exactly like "my
+  // pin did not take". Name the one command that loads the file the pin
+  // just wrote.
+  writeLine(io.stdout, `re-source it before the next command: set -a; . ${envFile}; set +a`);
   return 0;
 }
 
