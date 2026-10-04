@@ -24,6 +24,11 @@
  *    adoption stays fail-closed: `baseline update` remains
  *    subset-only (GF-07/08), new debt blocks, and both adopted layers
  *    are SHRINK-ONLY from here.
+ *    Adoption is plane-ordered (R1-9): while any blocking
+ *    entry is plane-unresolved the command exits 2 and
+ *    writes nothing — a plane answer changes the resource's
+ *    identity, so debt adopted before the answer would not
+ *    match after it.
  * 3. Applies the enforcement wiring through the shared `init --blocking`
  *    path (pre-commit hook block + CI template + engine reference),
  *    idempotent like every gateforge write.
@@ -94,7 +99,13 @@ project that already has code and therefore already has findings.
   hook block + CI template) through the same idempotent path as
   \`gateforge init --blocking\`.
 
-Exit codes: 0 adopted (or an idempotent no-op), 2 config/usage.`;
+  plane-ordered — adoption refuses (exit 2, nothing written) while
+  any blocking entry is plane-unresolved: a plane answer changes
+  the resource's identity, so debt adopted before the answer
+  would not match after it. Answer the planes first
+  (\`gateforge classify plane <folder> <tenant|master|global> --confirm\`).
+
+Exit codes: 0 adopted (or an idempotent no-op), 2 config/usage or a plane-unresolved resource (R1-9).`;
 
 /** Groups the adopted red set by source for the adoption report. */
 function groupReds(reds: ReadonlyMap<string, string>): string[] {
@@ -113,7 +124,8 @@ function groupReds(reds: ReadonlyMap<string, string>): string[] {
  *   argv: flags after the subcommand (none supported beyond --help).
  *
  * Returns:
- *   number: exit code — 0 adopted (or idempotent no-op), 2 config/usage.
+ *   number: exit code — 0 adopted (or idempotent no-op), 2 config/usage
+ *   or a plane-unresolved blocking entry (R1-9: nothing written).
  * @throws fail-closed errors (exit 2) from config/pipeline/baseline layers.
  */
 export async function adoptCommand(io: Io, argv: readonly string[]): Promise<number> {
@@ -176,6 +188,36 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
     changedFiles: null,
     baseline: null,
   });
+  // R1-9: adoption is plane-ordered. A plane-unresolved blocking
+  // entry names a resource whose identity is NOT yet decided — a
+  // plane answer changes it — so the red set captured now would
+  // not match the repository that exists after the answer. Refuse
+  // the whole command before any write: nothing is baselined,
+  // nothing is wired, and the owner gets the exact answer to
+  // give first.
+  const planeUnresolved = evaluated.blocking.filter((entry) =>
+    entry.detail.startsWith('[PLANE_UNRESOLVED]'),
+  );
+  if (planeUnresolved.length > 0) {
+    const folders = [
+      ...new Set(
+        planeUnresolved.map((entry) =>
+          entry.location === null ? null : dirname(entry.location.file),
+        ),
+      ),
+    ]
+      .filter((folder): folder is string => folder !== null)
+      .sort()
+      .slice(0, 3);
+    writeLine(
+      io.stderr,
+      `adopt: ${planeUnresolved.length} resources have no data plane yet` +
+        (folders.length > 0 ? ` (e.g. ${folders.join(', ')})` : '') +
+        '. Answer them first — gateforge classify plane <folder> <tenant|master|global> --confirm — then adopt. ' +
+        'Plane answers change resource identities, so debt adopted before them would not match afterwards.',
+    );
+    return 2;
+  }
   const reds = new Map<string, string>();
   // The classification layer (two-layer adoption): the resource ids of
   // the classification-blocked ([classification] entries with a derived

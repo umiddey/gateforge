@@ -3,15 +3,18 @@
  * sanctioned bulk-add. Adopt on a fixture repo with findings seeds the
  * baseline + wires the gate + exits 0; a second adopt is a no-op
  * success; `baseline update` stays subset-only after adoption; check
- * exits 0 post-adopt with the forgiveness loud; and every laundering-
- * shaped corner fails closed (unrecorded baseline forgives nothing,
- * record-without-baseline exits 2).
+ * exits 0 post-adopt with the forgiveness loud; adoption is
+ * plane-ordered (R1-9: a plane-unresolved resource refuses the whole
+ * command, exit 2, nothing written, until its plane is answered); and
+ * every laundering-shaped corner fails closed (unrecorded baseline
+ * forgives nothing, record-without-baseline exits 2).
  */
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { blockingEntryFingerprint } from '@gate-forge/core';
 import { VERSION } from '../src/commands/common.js';
 import {
+  CLASSIFICATION_POLICY_YML,
   FIXED_AT,
   PLUGIN_SOURCE,
   fixtureFingerprint,
@@ -30,12 +33,19 @@ const FINDING_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
 );
 
 /**
- * The fixture plugin, with every resource plane-signaled EXCEPT `legacy`
- * (and `orphos`, introduced post-adopt as the NEW blocked resource): a
- * resource with no plane evidence blocks classification — PLANE_UNRESOLVED,
- * fail-closed — and generates no obligations. Unlike the base fixture it
- * reports REAL line numbers, so a merge that moves a declaration shifts
- * the whole-entry fingerprints while the resource identity stays put.
+ * The fixture plugin for the classification-layer tests: `legacy`
+ * carries no identity evidence — IDENTITY_UNRESOLVED blocks
+ * classification, fail-closed, and generates no obligations —
+ * while its plane is resolved by the fixture's reviewed plane
+ * declaration (the marker in its own source file), so the
+ * classification layer can still adopt it: R1-9 refuses
+ * adoption while ANY resource is plane-unresolved. `orphos`,
+ * introduced post-adopt as the NEW blocked resource, carries no
+ * plane evidence at all and must keep blocking with
+ * PLANE_UNRESOLVED. Unlike the base fixture it reports REAL
+ * line numbers, so a merge that moves a declaration shifts the
+ * whole-entry fingerprints while the resource identity stays
+ * put.
  */
 const CLASSIFICATION_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
   "for (const line of text.split('\\n')) {",
@@ -48,6 +58,28 @@ const CLASSIFICATION_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
   .replace(
     "signal('plane', 'tenant');",
     "if (name !== 'legacy' && name !== 'orphos') signal('plane', 'tenant');",
+  )
+  .replace(
+    "signal('identity', ['id']);",
+    "if (name !== 'legacy') signal('identity', ['id']);",
+  );
+/**
+ * The fixture plugin with `legacy` carrying no plane evidence: the
+ * resource blocks classification with PLANE_UNRESOLVED and generates
+ * no obligations — the state R1-9 refuses to adopt from, because a
+ * plane answer changes the resource's identity.
+ */
+const PLANE_UNRESOLVED_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
+  "for (const line of text.split('\\n')) {",
+  "for (const [lineNo, line] of text.split('\\n').entries()) {",
+)
+  .replace(
+    'const location = { file: rel, line: 1, col: 0 };',
+    'const location = { file: rel, line: lineNo + 1, col: 0 };',
+  )
+  .replace(
+    "signal('plane', 'tenant');",
+    "if (name !== 'legacy') signal('plane', 'tenant');",
   );
 
 interface Report {
@@ -62,10 +94,39 @@ async function installClassificationFixture(
   installFixture(repo);
   repo.writeFiles({
     'plugin.mjs': CLASSIFICATION_PLUGIN_SOURCE,
-    'src/legacy.txt': 'legacy fixture.table\n',
+    // The reviewed plane declaration's marker: `legacy` resolves
+    // to the tenant plane through its own source file, so only
+    // its identity stays unresolved (R1-9 keeps adoption possible).
+    'src/legacy.txt': 'legacy fixture.table\n# gateforge:tenant-plane\n',
     '.gateforge/adapters/legacy.mjs': 'export default {};\n',
+    '.gateforge/classification-policy.yml': PLANE_DECLARED_POLICY_YML,
   });
 }
+
+async function installPlaneUnresolvedFixture(
+  repo: Parameters<Parameters<typeof withTempRepo>[1]>[0],
+): Promise<void> {
+  installFixture(repo);
+  repo.writeFiles({
+    'plugin.mjs': PLANE_UNRESOLVED_PLUGIN_SOURCE,
+    // No marker yet: `legacy` stays plane-unresolved until the
+    // test answers the plane by adding the declaration marker.
+    'src/legacy.txt': 'legacy fixture.table\n',
+    '.gateforge/adapters/legacy.mjs': 'export default {};\n',
+    '.gateforge/classification-policy.yml': PLANE_DECLARED_POLICY_YML,
+  });
+}
+/**
+ * The fixture classification policy plus one reviewed plane
+ * declaration: the owner-reviewed channel that resolves a
+ * table's plane from a marker in its own source file — the
+ * table-side answer of a plane rule (`gateforge classify plane`
+ * writes the route-side answer into `.gateforge/planes.json`).
+ */
+const PLANE_DECLARED_POLICY_YML = CLASSIFICATION_POLICY_YML.replace(
+  'declarations:\n  internality: gateforge:internal\n',
+  'declarations:\n  internality: gateforge:internal\n  plane.tenant: gateforge:tenant-plane\n',
+);
 
 /** The adoption receipt on disk. */
 function receipt(repo: Parameters<Parameters<typeof withTempRepo>[1]>[0]): Record<string, unknown> {
@@ -293,6 +354,46 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
       const help = await runCli(repo, ['adopt', '--help']);
       expect(help.code).toBe(0);
       expect(help.stdout).toContain('usage: gateforge adopt');
+    });
+  });
+});
+
+describe('gateforge adopt — plane-unresolved resources (R1-9)', () => {
+  it('exits 2 writing nothing while a resource has no data plane, then adopts once the plane is answered', async () => {
+    await withTempRepo({}, async (repo) => {
+      await installPlaneUnresolvedFixture(repo);
+      // Pre-adoption: `legacy` blocks classification —
+      // PLANE_UNRESOLVED, twice over (the typed entry and its
+      // definitional unclassified shadow).
+      const pre = await runCli(repo, ['check', '--format', 'json']);
+      expect(pre.code).toBe(1);
+      const preReport = JSON.parse(pre.stdout) as Report;
+      expect(preReport.blocking).toHaveLength(2);
+      expect(JSON.stringify(preReport.blocking)).toContain('PLANE_UNRESOLVED');
+
+      // R1-9: a plane answer changes the resource's identity, so
+      // the red set captured now would not match the repository
+      // that exists after the answer. The whole command refuses,
+      // exit 2, before any write.
+      const refused = await runCli(repo, ['adopt']);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain(
+        'adopt: 1 resources have no data plane yet (e.g. src). Answer them first — gateforge classify plane <folder> <tenant|master|global> --confirm — then adopt. Plane answers change resource identities, so debt adopted before them would not match afterwards.',
+      );
+      expect(existsSync(repo.path(BASELINE_PATH))).toBe(false);
+      expect(existsSync(repo.path(RECORD_PATH))).toBe(false);
+      expect(existsSync(repo.path('.pre-commit-config.yaml'))).toBe(false);
+
+      // The owner answers the plane — the reviewed declaration
+      // marker in the resource's own source file (the table-side
+      // answer of a plane rule) — and adoption proceeds.
+      repo.writeFiles({
+        'src/legacy.txt': 'legacy fixture.table\n# gateforge:tenant-plane\n',
+      });
+      const adopted = await runCli(repo, ['adopt']);
+      expect(adopted.code, adopted.stdout + adopted.stderr).toBe(0);
+      expect(existsSync(repo.path(BASELINE_PATH))).toBe(true);
+      expect(existsSync(repo.path(RECORD_PATH))).toBe(true);
     });
   });
 });

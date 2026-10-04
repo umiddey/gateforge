@@ -180,9 +180,17 @@ describe('init --preset', () => {
       expect(first.code).toBe(0);
       const before = readFileSync(repo.path('.gateforge.yml'), 'utf8');
       const second = await runCli(repo, ['init', '--no-scan', '--preset', 'strict']);
-      expect(second.code).toBe(0);
+      // R1-2: the strict preset asks for `mode: strict` and
+      // `enforcement.strictE2E: true`; the existing config has
+      // `mode: changed` and no strict E2E. init never rewrites
+      // an existing config, so the differing request exits 2
+      // before anything is written — the owner sets the keys.
+      expect(second.code).toBe(2);
+      expect(second.stderr).toContain('.gateforge.yml exists and has mode: changed');
+      expect(second.stderr).toContain('you asked for strict');
+      expect(second.stderr).toContain('.gateforge.yml exists and has enforcement.strictE2E: false');
+      expect(second.stderr).toContain('you asked for true');
       expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toBe(before);
-      expect(second.stdout).toContain('existing .gateforge.yml left untouched');
       expect(loadConfig(repo.path('.gateforge.yml')).mode).toBe('changed');
     });
   });
@@ -231,4 +239,118 @@ describe('init in a terminal (fake TTY)', () => {
       expect(stdout).not.toContain('preset ');
     });
   }, 120_000);
+});
+describe('init --preset with enforcement flags (R1-1)', () => {
+  it('a flag the preset already implies is a no-op and the preset applies', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stdout, stderr } = await runCli(repo, [
+        'init',
+        '--no-scan',
+        '--preset',
+        'strict',
+        '--blocking',
+        '--pre-commit',
+        '--ci',
+        '--strict-e2e',
+      ]);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      // The strict preset's config: strict mode + strict E2E.
+      expect(config.mode).toBe('strict');
+      expect(config.enforcement?.strictE2E).toBe(true);
+      // The strict wiring (blocking: both hooks) was applied.
+      expect(existsSync(repo.path('.git/hooks/pre-commit'))).toBe(true);
+      expect(existsSync(repo.path('.git/hooks/pre-push'))).toBe(true);
+      expect(stdout).toContain('preset strict:');
+    });
+  });
+
+  it('the normal preset applies with the flags it implies', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stdout, stderr } = await runCli(repo, [
+        'init',
+        '--no-scan',
+        '--preset',
+        'normal',
+        '--pre-commit',
+        '--ci',
+      ]);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.mode).toBe('changed');
+      expect(stdout).toContain('preset normal:');
+    });
+  });
+
+  it('a positive flag the preset does not wire contradicts it (light)', async () => {
+    await withTempRepo({}, async (repo) => {
+      for (const flag of ['--blocking', '--pre-commit', '--ci', '--strict-e2e']) {
+        const { code, stderr } = await runCli(repo, ['init', '--no-scan', '--preset', 'light', flag]);
+        expect(code, `${flag}: ${stderr}`).toBe(2);
+        expect(stderr, flag).toContain('--preset light already decides');
+        expect(stderr, flag).toContain(`--${flag.slice(2)} contradicts it — drop one of them`);
+        // Nothing was written: the contradiction is decided before any file.
+        expect(existsSync(repo.path('.gateforge.yml')), flag).toBe(false);
+      }
+    });
+  });
+
+  it('a positive flag the normal preset does not wire contradicts it', async () => {
+    await withTempRepo({}, async (repo) => {
+      for (const flag of ['--blocking', '--strict-e2e']) {
+        const { code, stderr } = await runCli(repo, ['init', '--no-scan', '--preset', 'normal', flag]);
+        expect(code, `${flag}: ${stderr}`).toBe(2);
+        expect(stderr, flag).toContain('--preset normal already decides');
+        expect(stderr, flag).toContain(`--${flag.slice(2)} contradicts it — drop one of them`);
+        expect(existsSync(repo.path('.gateforge.yml')), flag).toBe(false);
+      }
+    });
+  });
+
+  it('a --no-* flag contradicts a preset that wires the thing', async () => {
+    await withTempRepo({}, async (repo) => {
+      const cases: Array<[string, string]> = [
+        ['strict', '--no-blocking'],
+        ['strict', '--no-pre-commit'],
+        ['strict', '--no-ci'],
+        ['normal', '--no-pre-commit'],
+        ['normal', '--no-ci'],
+      ];
+      for (const [preset, flag] of cases) {
+        const { code, stderr } = await runCli(repo, ['init', '--no-scan', '--preset', preset, flag]);
+        expect(code, `${preset} ${flag}: ${stderr}`).toBe(2);
+        expect(stderr, `${preset} ${flag}`).toContain(`--preset ${preset} already decides`);
+        expect(stderr, `${preset} ${flag}`).toContain(`${flag} contradicts it — drop one of them`);
+        expect(existsSync(repo.path('.gateforge.yml')), `${preset} ${flag}`).toBe(false);
+      }
+    });
+  });
+
+  it('a --no-* flag for something the preset does not wire is a no-op', async () => {
+    await withTempRepo({}, async (repo) => {
+      // light wires nothing, so no negative flag can contradict it.
+      const { code, stdout, stderr } = await runCli(repo, [
+        'init',
+        '--no-scan',
+        '--preset',
+        'light',
+        '--no-blocking',
+        '--no-pre-commit',
+        '--no-ci',
+      ]);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+      expect(loadConfig(join(repo.root, '.gateforge.yml')).mode).toBe('warn');
+      expect(stdout).toContain('preset light:');
+    });
+  });
+
+  it('without a preset, enforcement flags behave exactly as today', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stdout, stderr } = await runCli(repo, ['init', '--no-scan', '--blocking']);
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+      // No preset ran: the config keeps today's shape (no `mode:` key).
+      expect(readFileSync(join(repo.root, '.gateforge.yml'), 'utf8')).not.toContain('\nmode: ');
+      expect(existsSync(repo.path('.git/hooks/pre-commit'))).toBe(true);
+    });
+  });
 });
