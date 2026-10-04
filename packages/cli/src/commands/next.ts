@@ -62,7 +62,7 @@ import {
   type SnapshotFileEntry,
 } from '../input-snapshot.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
-import { resolveProvider } from '../providers.js';
+import { changeBaseTextReader, resolveProvider } from '../providers.js';
 import { computeEvaluationScope, detectStagedWorkingTreeMismatches } from '../scope.js';
 import { httpRoutesView, resolveStateDir } from '../state.js';
 import { gateforgeOwnedInputs } from '../gateforge-owned.js';
@@ -1067,7 +1067,17 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       // not product changes: without this `next --changed` would keep
       // listing `.gateforge/*.yml`, `GATEFORGE.md` and the CI/pre-commit
       // wiring as CHANGE_UNMAPPED — the exact thing D2 removes.
-      policyInputs: [...gateforgeOwnedInputs(io.cwd, pipeline.changedFiles, config).keys()],
+      // 0.9.1: the base-text reader reads `.gitignore` at the base
+      // revision the provider diffs against, so the engine-state
+      // block `init` appends counts as wiring too.
+      policyInputs: [
+        ...gateforgeOwnedInputs(
+          io.cwd,
+          pipeline.changedFiles,
+          config,
+          changeBaseTextReader(providerIdentity, io.cwd, io.env) ?? undefined,
+        ).keys(),
+      ],
     });
     changedFiles = scopeDecision.mode === 'all' ? null : scopeDecision.changedFiles;
     const sidecarCoveredFiles = new Set((sidecar?.tests ?? []).map((entry) => entry.selector.file));

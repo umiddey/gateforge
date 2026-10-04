@@ -214,7 +214,7 @@ import {
   type ScopedObligationRef,
 } from '../receipts.js';
 import { resealChainBlocking, retainedCarriedEvidence } from '../reseal-chain.js';
-import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
+import { changeBaseTextReader, mergeRequestScopePreflight, resolveProvider, textReaderAtRevision } from '../providers.js';
 import {
   computeEvaluationScope,
   detectStagedWorkingTreeMismatches,
@@ -601,6 +601,17 @@ export interface CheckGateOptions {
   /** Emit per-step wall-clock timings in the report (additive only). */
   timing?: boolean;
   /**
+   * Phase 5 staged-candidate runs: the base-revision
+   * text reader for policy-input classification,
+   * resolved by the caller against the USER's
+   * repository BEFORE the process moves to the
+   * isolated checkout (the checkout has none of the
+   * base revision's objects, so the staged diff's
+   * base — HEAD, or the candidate commit's first
+   * parent — can only be read where it lives).
+   */
+  fixedBaseText?: (path: string) => string | null;
+  /**
    * Force a full scan: no detector or pytest
    * collection cache reads or writes. Also forced by
    * `GATEFORGE_NO_CACHE=1` and CI environments.
@@ -721,6 +732,23 @@ async function stagedCheckCommand(
     }
     throw error;
   }
+
+  // The base revision of the frozen change set lives in
+  // the USER's repository: the staged index was diffed
+  // against its HEAD (or the candidate commit against
+  // its first parent), and the isolated checkout the
+  // gate runs in has none of those objects. Resolve the
+  // base-revision text reader HERE, before the process
+  // moves to the checkout, so `.gitignore` policy-input
+  // classification compares the staged bytes against
+  // the exact base the frozen index was diffed against.
+  const fixedBaseText =
+    options.candidateCommitSha === undefined
+      ? changeBaseTextReader('local-staged', io.cwd, io.env)
+      : frozen.parentShas[0] === undefined
+        ? null
+        : textReaderAtRevision(frozen.parentShas[0], io.cwd, io.env);
+
   let checkoutDir: string;
   let runtimeReuseDigest: string | null = null;
   let runtimeReuseMounts: RuntimeReuseMount[] = [];
@@ -874,7 +902,17 @@ async function stagedCheckCommand(
       approvedPolicyDigest: options.approvedPolicyDigest,
       verifierKeyring: options.verifierKeyring,
       fixedCandidateTreeId: frozen.treeId,
-      ...(options.diffScoped ? { fixedChangedFiles: frozen.changedPaths } : {}),
+      ...(options.diffScoped
+        ? {
+            fixedChangedFiles: frozen.changedPaths,
+            // Resolved against the USER's repository BEFORE the
+            // chdir below: the base revision's objects live only
+            // there (the isolated checkout's HEAD is the staged
+            // tree), and the policy-input classifier needs the
+            // base text to recognize init's `.gitignore` block.
+            ...(fixedBaseText !== null ? { fixedBaseText } : {}),
+          }
+        : {}),
       runtimeReuseDigest,
       runtimeReuseMounts,
       runtimeReuseCheck: () => digestRuntimeReuseMounts(runtimeReuseMounts),
@@ -1324,7 +1362,22 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     // classified here (check owns the candidate checkout; `scope.ts` stays
     // pure) so they never become unmapped product changes and their change
     // set can be recognized as product-behavior-neutral.
-    const ownedInputs = gateforgeOwnedInputs(io.cwd, pipeline.changedFiles, config);
+    // 0.9.1: the base-text reader reads a file at the base revision the
+    // provider diffs against (HEAD for the staged diff, the merge/CI base
+    // for the platform diffs), so the `.gitignore` engine-state block
+    // `init` appends is recognized as wiring. Staged-candidate runs (a
+    // frozen index) take the reader the orchestrator resolved against the
+    // USER's repository BEFORE the process moved to the isolated checkout:
+    // the checkout's HEAD is the staged tree, not the base, so the base
+    // revision's objects are reachable only in the user's repository.
+    const ownedInputs = gateforgeOwnedInputs(
+      io.cwd,
+      pipeline.changedFiles,
+      config,
+      fixedChangedFiles === undefined
+        ? changeBaseTextReader(providerIdentity, io.cwd, io.env) ?? undefined
+        : options.fixedBaseText,
+    );
     scopeDecision = computeEvaluationScope({
       config,
       changedFiles: pipeline.changedFiles,

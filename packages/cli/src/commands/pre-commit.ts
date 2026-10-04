@@ -16,6 +16,7 @@ import { parseArgs, stringFlag } from '../args.js';
 import { computeCandidateTreeId, resolveGitDir } from '../candidate-tree.js';
 import { trustedPolicyDigestForConfig } from '../execution.js';
 import { printFailure, UsageError } from '../errors.js';
+import { changeBaseTextReader } from '../providers.js';
 import type { Io } from '../io.js';
 import { writeLine } from '../io.js';
 import {
@@ -79,6 +80,15 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
     if (error instanceof StagedCandidateBlockError) return renderCandidateBlock(io, error.message, error.nextAction);
     throw error;
   }
+
+  // The base revision of the frozen change set lives in the USER's
+  // repository (HEAD at freeze time): the isolated checkout the gate
+  // runs in has none of its objects, so the base-revision text reader
+  // for policy-input classification is resolved HERE, before the
+  // process moves to the checkout, so `.gitignore` classification
+  // compares the staged bytes against the exact base the frozen
+  // index was diffed against.
+  const fixedBaseText = changeBaseTextReader('local-staged', io.cwd, io.env);
 
   const previousCwd = process.cwd();
   let runtime: RunningRuntime | null = null;
@@ -242,6 +252,12 @@ export async function preCommitCommand(io: Io, argv: readonly string[]): Promise
           requireE2E: true,
           format: 'text',
           fixedChangedFiles: frozen.changedPaths,
+          // Resolved against the USER's repository BEFORE the
+          // chdir: the base revision's objects live only there
+          // (the isolated checkout's HEAD is the staged tree),
+          // and the policy-input classifier needs the base text
+          // to recognize init's `.gitignore` block.
+          ...(fixedBaseText !== null ? { fixedBaseText } : {}),
           // The identity of the bytes the supervised run actually tested
           // inside THIS isolated checkout. It is never copied back to the
           // user workspace, and it never authorizes a different tree.

@@ -10,6 +10,7 @@ You need Node.js 20 or newer and an existing Playwright suite that can run again
 
 `gateforge init` → answer the plane questions → `gateforge adopt` (only when the repository already has code) → adapters and runtime → pin the owner-approved policy digest → commit.
 
+- Install the CLI and packs, then commit the install (package.json + lockfile) on its own before `gateforge init` — no gate is wired yet. The setup commit must contain only Gateforge's own files (plus the `.gitignore` block init writes) to count as product-behavior-neutral; mixing in dependency or product changes makes it a normal gated change, which under strictE2E re-grades the adopted E2E debt as blocking. Commit product changes (for example a Playwright config rename) separately, after the setup commit.
 - Answer the plane questions with `gateforge classify plane <folder> <tenant|master|global> --reason "<why>" --confirm` (run `gateforge init --planes` once first to create the owner-reviewed `.gateforge/planes.json`).
 - Adopt comes after the plane answers because a plane answer changes a resource's identity, so the debt set `adopt` records would not match the repository if it were captured before the answer.
 - Declare the dependency directories the staged commit gate may link (`prepare: { reuse: [node_modules] }` in `.gateforge/runtime.yml`): the gate runs on a checkout of the staged files only.

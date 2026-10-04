@@ -25,12 +25,19 @@ import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
 import { configYml, installFixture, POLICIES_YML, runCli } from './helpers.js';
 import { ADAPTER, SPECS, STUB_CLI } from './reseal-e2e-fixture.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
+import {
+  ENGINE_STATE_IGNORE_COMMENT,
+  ENGINE_STATE_IGNORE_ENTRIES,
+} from '../src/gateforge-owned.js';
 
 /** The orders obligation: never claimed by any test — adopted debt. */
 const OBLIGATION_ORDERS = 'tenant.orders:persistence:read';
 
 /** A product file that no discovered resource claims (unmapped change). */
 const UNMAPPED_PRODUCT_FILE = 'src/orders/loyalty.js';
+
+/** The managed `.gitignore` block exactly as `init` appends it. */
+const IGNORE_BLOCK = `${ENGINE_STATE_IGNORE_COMMENT}\n${ENGINE_STATE_IGNORE_ENTRIES.join('\n')}\n`;
 
 /** The CI config with Gateforge's managed include still wired. */
 const CI_WITH_GATE = `stages: [gate]
@@ -76,8 +83,15 @@ interface Report {
   blocking: Array<{ name: string | null; cause?: string | null; nextAction?: string | null; detail: string }>;
 }
 
-/** Installs the two-resource strict-E2E repository and adopts its red set. */
-async function installAndAdopt(repo: TempRepo): Promise<void> {
+/**
+ * Installs the two-resource strict-E2E repository and adopts
+ * its red set. `baseIgnore` is the base revision's `.gitignore`
+ * (the default already carries the engine-state entry).
+ */
+async function installAndAdopt(
+  repo: TempRepo,
+  baseIgnore = '.gateforge/test-gates/\nnode_modules/\n',
+): Promise<void> {
   installFixture(repo);
   repo.writeFiles({
     ...SPECS,
@@ -86,7 +100,7 @@ async function installAndAdopt(repo: TempRepo): Promise<void> {
     '.gateforge.yml': `enforcement:\n  strictE2E: true\n${configYml()}`,
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
     'node_modules/playwright/cli.js': STUB_CLI,
-    '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
+    '.gitignore': baseIgnore,
   });
   repo.commitFiles({}, 'base');
   const adopted = await runCli(repo, ['adopt']);
@@ -194,6 +208,114 @@ describe('Gateforge-owned policy inputs in the changed scope (real CLI)', () => 
       // covers is governed by the pin, not by the change set's shape.
       expect(output).toContain('does not match the owner-approved revision');
       expect(output).toContain('ENFORCEMENT_UNTRUSTED');
+      expect(run.code, output).not.toBe(0);
+    });
+  }, 240_000);
+
+  it('a setup commit that also stages the .gitignore engine-state block stays product-behavior-neutral', async () => {
+    await withTempRepo({}, async (repo) => {
+      // The base revision's `.gitignore` carries none of
+      // Gateforge's block: `init` appends it as part of the
+      // setup commit, exactly like a real first setup.
+      await installAndAdopt(repo, 'node_modules/\n');
+      const pin = stageSetupCommit(repo, {
+        '.gitignore': `node_modules/\n${IGNORE_BLOCK}`,
+      });
+
+      const run = await runChangedCheck(repo, pin);
+      const report = JSON.parse(run.stdout) as Report;
+      const output = `${run.stdout}\n${run.stderr}`;
+
+      // The managed block is engine wiring, not a product
+      // change: no unmapped entry, and the adopted debt stays
+      // forgiven.
+      expect(
+        report.blocking.filter((entry) => entry.cause === 'CHANGE_UNMAPPED'),
+        output,
+      ).toEqual([]);
+      expect(report.summary.baselinedObligations ?? 0).toBeGreaterThan(0);
+      expect(report.summary.neverWitnessedBaselinedObligations ?? 0).toBeGreaterThan(0);
+      expect(run.code, output).toBe(0);
+    });
+  }, 240_000);
+
+  it('a .gitignore line outside the managed block re-grades the adopted debt', async () => {
+    await withTempRepo({}, async (repo) => {
+      await installAndAdopt(repo, 'node_modules/\n');
+      // `dist/` is the owner's own ignore wiring — not
+      // Gateforge's managed block — so the change set is not
+      // product-behavior-neutral. `.gitignore` keeps its
+      // gate-defining scope-control treatment (it expands the
+      // scope), exactly as it was before the ignore-wiring
+      // classification existed.
+      const pin = stageSetupCommit(repo, {
+        '.gitignore': `node_modules/\n${IGNORE_BLOCK}dist/\n`,
+      });
+
+      const run = await runChangedCheck(repo, pin);
+      const output = `${run.stdout}\n${run.stderr}`;
+
+      // The adopted debt is re-graded once product behavior
+      // can have changed: the setup commit blocks, the
+      // adopted obligation turns ENFORCEMENT_UNTRUSTED again.
+      expect(output).toContain('ENFORCEMENT_UNTRUSTED');
+      expect(output).toContain(OBLIGATION_ORDERS);
+      expect(run.code, output).not.toBe(0);
+    });
+  }, 240_000);
+
+  it('a staged setup commit with the .gitignore engine-state block passes the staged gate', async () => {
+    await withTempRepo({}, async (repo) => {
+      // The base revision's `.gitignore` carries none of
+      // Gateforge's block: `init` appends it as part of
+      // the setup commit, and the pre-commit hook gates
+      // exactly this commit via `check --staged`.
+      await installAndAdopt(repo, 'node_modules/\n');
+      const pin = stageSetupCommit(repo, {
+        '.gitignore': `node_modules/\n${IGNORE_BLOCK}`,
+      });
+
+      const run = await runCli(
+        repo,
+        ['check', '--staged', '--format', 'json'],
+        { GATEFORGE_APPROVED_POLICY_DIGEST: pin },
+      );
+      const report = JSON.parse(run.stdout) as Report;
+      const output = `${run.stdout}\n${run.stderr}`;
+
+      // The managed block is engine wiring in the staged
+      // flow too: no unmapped entry, and the adopted debt
+      // stays forgiven (the staged gate is the one the
+      // pre-commit hook runs on the setup commit).
+      expect(
+        report.blocking.filter((entry) => entry.cause === 'CHANGE_UNMAPPED'),
+        output,
+      ).toEqual([]);
+      expect(report.summary.baselinedObligations ?? 0).toBeGreaterThan(0);
+      expect(report.summary.neverWitnessedBaselinedObligations ?? 0).toBeGreaterThan(0);
+      expect(run.code, output).toBe(0);
+    });
+  }, 240_000);
+
+  it('a staged setup commit with a .gitignore line outside the managed block blocks', async () => {
+    await withTempRepo({}, async (repo) => {
+      await installAndAdopt(repo, 'node_modules/\n');
+      const pin = stageSetupCommit(repo, {
+        '.gitignore': `node_modules/\n${IGNORE_BLOCK}dist/\n`,
+      });
+
+      const run = await runCli(
+        repo,
+        ['check', '--staged', '--format', 'json'],
+        { GATEFORGE_APPROVED_POLICY_DIGEST: pin },
+      );
+      const output = `${run.stdout}\n${run.stderr}`;
+
+      // Fail closed: the staged flow cannot prove the
+      // non-managed line is wiring, so the adopted debt
+      // is re-graded and the setup commit blocks.
+      expect(output).toContain('ENFORCEMENT_UNTRUSTED');
+      expect(output).toContain(OBLIGATION_ORDERS);
       expect(run.code, output).not.toBe(0);
     });
   }, 240_000);
