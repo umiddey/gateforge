@@ -939,8 +939,12 @@ export interface SealExecutionResultInput {
    * digest, and every receipt binding it then name the SLICE that
    * actually ran, so a slice can never be mistaken for a whole-suite
    * seal.
+   * 0.10.2 adds `docs-only-slice`: the engine-owned docs-only slice, whose
+   * expected set is empty by decision. It is the only mode that lifts the
+   * zero-selection refusal, so the empty execution result it seals can
+   * never be confused with a run whose enumeration came back empty.
    */
-  mode?: 'full-relevant-suite' | 'mapped-selection' | 'named-selection';
+  mode?: 'full-relevant-suite' | 'mapped-selection' | 'named-selection' | 'docs-only-slice';
   /** Logical keys selected. */
   logicalKeys: readonly string[];
   /** The catalog the selection was planned from. */
@@ -1045,6 +1049,7 @@ export function sealExecutionResult(input: SealExecutionResultInput): SealedExec
       retriesDetected: input.envelope.retriesDetected === true,
       ...(input.envelope.retriesDetail !== undefined ? { retriesDetail: input.envelope.retriesDetail } : {}),
       ...(input.sessionTrace !== undefined ? { sessionTrace: input.sessionTrace } : {}),
+      selectionMode: selection.mode,
     },
   );
   const environmentIdentityDigest = environmentIdentity({
@@ -1168,9 +1173,19 @@ export interface IssueGateReceiptInput {
    * Pin-#2 fingerprints of the obligations a `changed`-scope receipt
    * covers (sorted, duplicate-free — normalized here). REQUIRED when
    * `scope` is `changed`, refused otherwise (a full receipt covers
-   * everything by definition and stays byte-compatible with v1).
+   * everything by definition and stays byte-compatible with v1), and
+   * empty only for the `docsOnly` slice below.
    */
   coveredObligationFingerprints?: readonly string[];
+  /**
+   * 0.10.2: this receipt seals the ENGINE-OWNED docs-only slice — the
+   * whole changed set was `docs/**.md`, so no obligation could arise from
+   * it and the slice carries ZERO records. It is the one `changed`-scope
+   * receipt whose covered set is empty, and the marking is what earns
+   * that: refused without `scope: 'changed'`, refused when it also names a
+   * covered obligation.
+   */
+  docsOnly?: boolean;
   /** Sealed execution-result digest. */
   executionResultDigest: string;
   /** Evidence attestation digest, or null when the run carried none. */
@@ -1229,9 +1244,25 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
   const covered: string[] | undefined = scoped
     ? [...new Set(input.coveredObligationFingerprints ?? [])].sort(compareStrings)
     : undefined;
-  if (scoped && (covered === undefined || covered.length === 0)) {
+  // 0.10.2: the docs-only slice is the one changed-scope receipt that
+  // covers nothing, and the `docsOnly` marking is what earns that. The two
+  // stand or fall together: a marking without `scope: 'changed'`, or a
+  // marking that also names a covered obligation, is refused rather than
+  // believed (the consumer recomputes the docs-only decision anyway).
+  const docsOnly = input.docsOnly === true;
+  if (docsOnly && !scoped) {
+    throw new UsageError(
+      'refusing to mark a full-scope gate receipt as the docs-only slice (fail closed)',
+    );
+  }
+  if (scoped && (covered === undefined || covered.length === 0) && !docsOnly) {
     throw new UsageError(
       'refusing to issue a changed-scope gate receipt without coveredObligationFingerprints (fail closed)',
+    );
+  }
+  if (docsOnly && covered !== undefined && covered.length > 0) {
+    throw new UsageError(
+      'refusing to issue a docs-only gate receipt that covers an obligation (fail closed)',
     );
   }
   if (!scoped && input.coveredObligationFingerprints !== undefined) {
@@ -1263,6 +1294,9 @@ export function issueGateReceipt(input: IssueGateReceiptInput): GateReceipt {
     ...(input.carriedFrom !== undefined ? { carriedFrom: input.carriedFrom } : {}),
     ...(input.parentReceiptDigest !== undefined ? { parentReceiptDigest: input.parentReceiptDigest } : {}),
     ...(scoped ? { scope: 'changed' as const, coveredObligationFingerprints: covered } : {}),
+    // The docs-only marking rides beside the scope/coverage pair, MAC-covered
+    // like every other field: a receipt cannot be relabelled after the fact.
+    ...(docsOnly ? { docsOnly: true as const } : {}),
     // Additive test-only re-seal bindings: present ONLY when this run
     // re-sealed from a verified parent, and MAC-covered like every other
     // field. CI recomputes all of them from the two sealed trees.

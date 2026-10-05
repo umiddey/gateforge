@@ -189,8 +189,13 @@ export const ExecutionResultSchema = z
          * suite, `mapped-selection` a diff-linked slice, and
          * `named-selection` a hand-picked `--test` list — which is only
          * ever reported (`--result-only`), never sealed into a receipt.
+         * 0.10.2: `docs-only-slice` is the ENGINE-OWNED docs-only slice
+         * (the whole changed set was `docs/**.md`): its expected set is
+         * empty because no obligation can arise from a Markdown file, not
+         * because enumeration failed. The zero-selection refusal below is
+         * lifted for exactly this mode and no other.
          */
-        mode: z.enum(['full-relevant-suite', 'mapped-selection', 'named-selection']),
+        mode: z.enum(['full-relevant-suite', 'mapped-selection', 'named-selection', 'docs-only-slice']),
         /** Exact logical keys the run was expected to cover (sorted). */
         logicalKeys: z.array(z.string().min(1)),
       })
@@ -327,7 +332,7 @@ export function executionResultDigestOf(result: ExecutionResult): string {
  */
 export function selectionDigestOf(selection: {
   runner: string;
-  mode: 'full-relevant-suite' | 'mapped-selection' | 'named-selection';
+  mode: 'full-relevant-suite' | 'mapped-selection' | 'named-selection' | 'docs-only-slice';
   logicalKeys: readonly string[];
 }): string {
   return sha256Canonical({

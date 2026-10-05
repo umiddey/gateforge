@@ -303,7 +303,7 @@ import {
 } from '../run-reliability.js';
 import { pruneRunHistory, recordRunHistory } from '../history.js';
 import { ProgressStream, resolveProgressTarget, type ProgressOutcome, type ProgressTarget } from '../progress.js';
-import { writeRunScopeView, writeTestFailures } from '../state.js';
+import { writeRunScopeView, writeStateFile, writeTestFailures } from '../state.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
@@ -3586,6 +3586,174 @@ async function runSupervisedTestGatesInner(
       }
     }
     if (!options.resultOnly) clearGateReceipt(stateDir);
+    // 0.10.2 — the docs-only slice seals a receipt over ZERO records.
+    //
+    // The scope decision computed above is the engine-owned exemption: the
+    // WHOLE changed set is `docs/**.md`, so no obligation can arise from it
+    // and no test can prove anything about it. Refusing here (today's
+    // behaviour) left the commit unblockable — no receipt, so the previous
+    // run's durable attestation stayed stale and the very next check
+    // refused the commit for it.
+    //
+    // The receipt binds the CURRENT input digest, candidate tree and
+    // trusted policy digest exactly as any receipt, and covers NOTHING:
+    // a later product change has a different input digest (so this receipt
+    // is stale) and its own obligations (so nothing here could cover them
+    // even if it were current). The empty evidence set is also written out,
+    // replacing the previous run's records: a slice that executed no test
+    // witnessed no record, and leaving the old ledger beside a new receipt
+    // would read as evidence this run never produced.
+    //
+    // Every condition below is CHECKED, never assumed: an unusable digest,
+    // a candidate tree that moved under the run, a missing verifier key, an
+    // incomplete inventory or discovery, a diagnostics suite, a planned
+    // re-seal, or any other blocking entry all fall through to today's
+    // refusal below, byte-for-byte.
+    const docsOnlySlice =
+      !options.resultOnly &&
+      namedTestIds === null &&
+      catalog !== null &&
+      catalog.inventoryComplete &&
+      discoveryError === null &&
+      reSealPlan === null &&
+      scopeDecision !== null &&
+      scopeDecision.docsOnly &&
+      scopeDecision.mode === 'changed' &&
+      scopeDecision.expandedBecause.length === 0 &&
+      scopeDecision.unmappedFiles.length === 0 &&
+      scopeBlockers.length === 0 &&
+      mappingBlockers.length === 0 &&
+      inventoryBlocking.length === 0 &&
+      pipeline.policy.blocking.length === 0 &&
+      (config.diagnostics?.suites.length ?? 0) === 0 &&
+      expectedDigest !== null &&
+      frozenTreeId !== null &&
+      witnessVerifierKey !== undefined;
+    const docsOnlyGitDir = docsOnlySlice ? resolveGitDir(io.cwd, io.env) : null;
+    const docsOnlyTree =
+      docsOnlyGitDir === null
+        ? null
+        : computeCandidateTreeSnapshot(
+            docsOnlyGitDir,
+            io.cwd,
+            io.env,
+            stateDir,
+            'record',
+            runtimeReuseMounts,
+            docsExclusions,
+            cacheExclusions,
+          );
+    // `catalog` is re-checked here so its non-null type reaches the seal
+    // body; `docsOnlySlice` already requires it.
+    if (
+      docsOnlySlice &&
+      catalog !== null &&
+      docsOnlyTree !== null &&
+      docsOnlyTree.treeId === frozenTreeId &&
+      expectedDigest !== null
+    ) {
+      const docsOnlySelection = { ...selection, mode: 'docs-only-slice' as const, logicalKeys: [] };
+      const docsOnlyExecution = sealExecutionResult({
+        runId: pipeline.manifest.runId,
+        invocationId,
+        inputDigest: expectedDigest,
+        trustedPolicyDigest: trustedPolicy,
+        runner: runnerName,
+        mode: docsOnlySelection.mode,
+        logicalKeys: docsOnlySelection.logicalKeys,
+        catalog,
+        plannedRows: [],
+        envelope: {
+          processExit: null,
+          complete: true,
+          outcomes: [],
+          // No runner was spawned, so there is no setup or teardown that
+          // could fail — and `planned`/`outcomes` below stay empty, so no
+          // reader can mistake this for an executed test.
+          fixtureOutcome: 'passed',
+          shards: null,
+          retriesDetected: false,
+        },
+        outcomesDoc: null,
+        startedAt: pipeline.now,
+        finishedAt: pipeline.now,
+      });
+      writeManifest(stateDir, pipeline.manifest);
+      if (inputSnapshot !== null) writeInputSnapshot(stateDir, inputSnapshot);
+      writeExecutionResult(stateDir, docsOnlyExecution.result);
+      writeStateFile(stateDir, 'records.json', []);
+      writeStateFile(stateDir, 'claims.json', []);
+      const docsOnlyReceipt = issueGateReceipt({
+        verifierKey: witnessVerifierKey,
+        ...(verifierKeyring === null ? {} : { verifierKeyId: verifierKeyring.active.keyId }),
+        runId: pipeline.manifest.runId,
+        invocationId,
+        inputDigest: expectedDigest,
+        gitSha: pipeline.manifest.gitSha,
+        parentSha: frozenParentSha,
+        trustedPolicyDigest: trustedPolicy,
+        approvedPolicyDigest,
+        ...(config.enforcement?.receiptStage === undefined
+          ? {}
+          : { receiptStage: config.enforcement.receiptStage }),
+        engine: engineIdentity(),
+        invocation: SUPERVISED_INVOCATION,
+        selectionDigest: selectionDigestOf(docsOnlySelection),
+        catalogDigest,
+        scope: 'changed',
+        docsOnly: true,
+        executionResultDigest: docsOnlyExecution.digest,
+        evidenceAttestationDigest: null,
+        candidateTreeId: frozenTreeId,
+        behaviorCatalogDigest: behaviorBindings.behaviorCatalogDigest,
+        requiredCaseSetDigest: behaviorBindings.requiredCaseSetDigest,
+        caseExecutionDigest: executedBehaviorCaseDigest(
+          stateDir,
+          pipeline.manifest.runId,
+          pipeline.behaviorCatalog,
+          [],
+        ),
+        engineBundleDigest: engineBundleDigestOf(VERSION, trustedPolicy),
+        executionBoundaryDigest,
+        targetArtifactDigest: targetArtifactDigestOf(frozenTreeId),
+        verdictSummary: { total: 0, satisfied: 0, waived: 0, blocking: 0 },
+        issuedAt: pipeline.now,
+      });
+      writeGateReceipt(stateDir, docsOnlyReceipt);
+      // A receipt supersedes the run record of the same run, and this seal
+      // is not a re-seal, so it leaves no parent chain behind: the next
+      // re-seal must start from a receipt whose evidence it can verify.
+      clearRunRecord(stateDir);
+      clearResealChain(stateDir);
+      writeCandidateTreeEntries(stateDir, docsOnlyTree.entries);
+      const docsOnlyReport = canonicalJson({
+        schemaVersion: 1,
+        docsOnlySlice: true,
+        receiptId: docsOnlyReceipt.receiptId,
+        candidateTreeId: frozenTreeId,
+        inputDigest: expectedDigest,
+        scope: 'changed',
+        changedFiles: [...providerChangedFiles],
+        coveredObligations: 0,
+        testsPerformedThisInvocation: 0,
+        summary: docsOnlyReceipt.verdictSummary,
+        evidenceState: 'docs-only-no-records',
+        engine: { ...engineIdentity() },
+      });
+      writeReport(stateDir, docsOnlyReport);
+      writeLine(
+        io.stdout,
+        format === 'json'
+          ? docsOnlyReport
+          : `receipt ${docsOnlyReceipt.receiptId} sealed for the docs-only slice; 0 tests run; ` +
+              `no obligation arises from ${providerChangedFiles.join(', ')}`,
+      );
+      writeLine(
+        io.stderr,
+        `receipt ${docsOnlyReceipt.receiptId} sealed (docs-only slice, 0 records, inputs bound)`,
+      );
+      return 0;
+    }
     const emptySliceBlocking: BlockingEntry[] =
       inventoryBlocking.length > 0
         ? // A failed/incomplete discovery already explains the block.

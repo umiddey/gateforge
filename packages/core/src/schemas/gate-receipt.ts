@@ -131,9 +131,26 @@ export const GateReceiptSchema = z
      * fingerprint) cannot let an old receipt claim a reshaped obligation.
      * A `full` receipt must NOT carry the field (it covers everything by
      * definition); a `changed` receipt must (an empty slice seals
-     * nothing and is refused at planning, never receipted).
+     * nothing and is refused at planning, never receipted) — except the
+     * `docsOnly` slice below, a changed-scope receipt whose covered set
+     * is empty BY CONSTRUCTION.
      */
     coveredObligationFingerprints: z.array(FingerprintHexSchema).optional(),
+    /**
+     * ADDITIVE v1 field, `scope: 'changed'` receipts ONLY: this receipt
+     * seals the ENGINE-OWNED docs-only slice — the WHOLE changed set was
+     * Markdown under `docs/`, so no obligation could arise from it and the
+     * slice carries ZERO records. Such a receipt therefore covers NO
+     * obligation: its `coveredObligationFingerprints` is empty, and a
+     * consumer demands that identity for every obligation a later change
+     * produces, so the next product change still needs its own evidence.
+     *
+     * Absent on every other seal. It is MAC-covered like every other
+     * field, so the marking cannot be added after the fact; and a
+     * consumer RECOMPUTES the docs-only decision from its own changed set
+     * rather than believing this claim.
+     */
+    docsOnly: z.literal(true).optional(),
     /** Normalized invocation that produced the receipt (e.g. `test-gates --changed`). */
     invocation: z.string().min(1),
     /** 64-hex selection digest (the expected test set, fixed pre-run). */
@@ -383,8 +400,31 @@ export const GateReceiptSchema = z
     // for changed-scope receipts, and a changed-scope receipt without one
     // would claim authority over an unnamed slice. Ordering/duplication
     // are enforced so the canonical signed bytes are deterministic.
+    // The docs-only slice is the ONE changed-scope receipt that names no
+    // covered obligation: its whole changed set was `docs/**.md`, so none
+    // could arise from it. The marking is what earns that exemption, so
+    // the two stand or fall together in both directions.
+    if (receipt.docsOnly !== undefined && receipt.scope !== 'changed') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['docsOnly'],
+        message: "only a 'changed'-scope receipt may seal the docs-only slice",
+      });
+    }
     if (receipt.scope === 'changed') {
       const covered = receipt.coveredObligationFingerprints;
+      if (receipt.docsOnly !== undefined) {
+        // The docs-only slice covers nothing, so it must not also claim a
+        // covered obligation: a receipt naming both contradicts itself.
+        if (covered !== undefined && covered.length > 0) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['coveredObligationFingerprints'],
+            message: 'a docs-only receipt covers no obligation, so it must not name one',
+          });
+        }
+        return;
+      }
       if (covered === undefined || covered.length === 0) {
         ctx.addIssue({
           code: 'custom',

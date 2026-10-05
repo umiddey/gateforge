@@ -669,6 +669,24 @@ check:
   policy digest, so a weakened candidate fails closed until a separate
   trusted update is accepted.
 
+**A change that is only `docs/**.md` is the engine's own.** No obligation
+can arise from a Markdown file, so a commit whose WHOLE changed set is
+`docs/**.md` is exempt from the unclassified-change handling — never
+candidate-configurable, and denied the moment one non-docs file joins the
+commit (a mixed change keeps the docs files as unknown changes, exactly as
+before). Since no obligation arises from it, the slice has nothing to prove,
+and `test-gates --changed --scope changed` seals a receipt for the current
+candidate with ZERO records: `scope: changed`, an empty covered set, and a
+`docs-only-slice` execution result naming an expected set that is empty by
+decision. It is bound to the same input digest, candidate tree and trusted
+policy digest as any other receipt, so `check --staged` finds a current one.
+It proves nothing — the commit gate recomputes the docs-only decision from
+its own changed set rather than believing the receipt's claim, the empty
+covered set satisfies no obligation, and the next product change has a
+different input digest and needs its own run. This is separate from
+`--docs-exclude` below, which is an owner assertion about input hashing and
+is never required or implied by it.
+
 **Developer and CI tooling is owner-declared.** A `scripts/e2e/run.sh`
 only `package.json` scripts name, or a custom reporter the runner
 configuration NAMES but no test imports, is test infrastructure by

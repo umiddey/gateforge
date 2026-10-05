@@ -140,6 +140,15 @@ export interface SupervisionEnvelopeInput {
    *   set, regardless of what the runner-reported outcomes claim.
    */
   sessionTrace?: readonly TracedTest[] | null;
+  /**
+   * 0.10.2: the selection mode this run sealed. `docs-only-slice` is the
+   * engine-owned case whose expected set is empty BY DECISION (the whole
+   * changed set was `docs/**.md`, so no obligation can arise from it), not
+   * because enumeration failed — it is the only value that lifts the
+   * zero-selection refusal below. Absent reads as an ordinary run, so
+   * every pre-existing caller is unchanged.
+   */
+  selectionMode?: 'full-relevant-suite' | 'mapped-selection' | 'named-selection' | 'docs-only-slice';
 }
 
 /** One typed supervision finding (plan §5.4 run rows). */
@@ -190,7 +199,11 @@ export function superviseExecution(
 
   // Zero selected tests is never a clean run (plan Phase 4 acceptance:
   // "no-tests case"). Nothing executed means nothing is proven.
-  if (planned.length === 0) {
+  // 0.10.2: the ONE exception is the engine-owned docs-only slice, whose
+  // expected set is empty because the engine decided no obligation can
+  // arise from the change — not because enumeration found nothing. Every
+  // other zero selection still refuses: an empty run proves nothing.
+  if (planned.length === 0 && envelope.selectionMode !== 'docs-only-slice') {
     findings.push({
       cause: 'TEST_NOT_EXECUTED',
       detail:

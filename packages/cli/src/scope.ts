@@ -90,6 +90,20 @@ export interface ScopeDecision {
    * file is unclassified or is a discovered resource's source.
    */
   productBehaviorNeutral: boolean;
+  /**
+   * 0.10.2: true when the WHOLE changed set is Markdown under `docs/`
+   * (`docs/**.md`) — the engine-owned docs-only exemption, decided in
+   * the SAME loop that attributes each file so it can never disagree
+   * with the attribution it reads. False as soon as one non-docs file
+   * is in the set (a mixed change is never docs-only) and false for an
+   * empty change set.
+   *
+   * This is the one decision that also reaches EVIDENCE: a docs-only
+   * slice can seal a receipt over zero records, because no obligation
+   * can arise from a Markdown file. Nothing about the docs-exclude
+   * mechanism is involved, and nothing here relaxes a product change.
+   */
+  docsOnly: boolean;
 }
 
 /**
@@ -374,6 +388,11 @@ export function computeEvaluationScope(input: {
     policyInputs: [...policyInputFiles].sort(),
     policyInputsOnly: changed.length > 0 && policyInputFiles.size === changed.length,
     productBehaviorNeutral: changed.length > 0 && neutralFiles.size === changed.length,
+    // Read off the SAME `docsOnlyFiles` set the mixed-change denial above
+    // uses, so the two can never disagree: `docsOnly` is exactly "every
+    // changed file was classified as `docs/**.md`" — false for a mixed
+    // change and false for an empty change set.
+    docsOnly: changed.length > 0 && docsOnlyFiles.size === changed.length,
   };
   return expandedBecause.length > 0
     ? { mode: 'all', changedFiles: changed, ...decision }

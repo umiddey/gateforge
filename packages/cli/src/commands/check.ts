@@ -1418,6 +1418,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     policyInputs: [],
     policyInputsOnly: false,
     productBehaviorNeutral: false,
+    docsOnly: false,
   };
   // F2 adoption mode: computed from the BASE revision (HEAD for the
   // staged diff), never declared — no flag, no config key. It only moves
@@ -1575,6 +1576,9 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           policyInputs: scopeDecision.policyInputs,
           policyInputsOnly: scopeDecision.policyInputsOnly,
           productBehaviorNeutral: scopeDecision.productBehaviorNeutral,
+          // A worktree that diverges from the index is not the candidate,
+          // so it can never be certified as the docs-only slice either.
+          docsOnly: false,
         };
         mismatchBlocking = [
           ...mismatchBlocking,
@@ -2025,6 +2029,29 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
                 },
               ];
             }
+          }
+          // 0.10.2: a `docsOnly` receipt is a CLAIM, exactly like the
+          // re-seal's `changeClass`: it says this candidate's WHOLE changed
+          // set was `docs/**.md`. The consumer recomputes that decision from
+          // its OWN scope computation rather than believing it, so a marking
+          // that does not match the staged change set is refused. A matching
+          // one covers nothing — `scopedReceiptCoverageBlocking` below still
+          // demands a fingerprint for every obligation this change produces.
+          if (receiptBlocking.length === 0 && load.receipt.docsOnly === true && !scopeDecision.docsOnly) {
+            receiptBlocking = [
+              {
+                kind: 'finding',
+                resourceId: null,
+                name: null,
+                detail:
+                  `require-e2e: the receipt claims the engine-owned docs-only slice, but this change set is not ` +
+                  `docs-only (changed files: ${scopeDecision.changedFiles.length > 0 ? scopeDecision.changedFiles.join(', ') : '<none>'}) ` +
+                  '— the claim is a stale slice, not this candidate (fail closed)',
+                location: null,
+                cause: 'EVIDENCE_STALE',
+                nextAction: CAUSE_NEXT_ACTIONS.EVIDENCE_STALE,
+              },
+            ];
           }
           if (receiptBlocking.length === 0) {
             // Scope consumption (Goal 2): full receipts pass unchanged; a
