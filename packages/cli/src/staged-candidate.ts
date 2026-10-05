@@ -46,7 +46,6 @@ import {
   type GateforgeConfig,
 } from '@gate-forge/core';
 import { UsageError } from './errors.js';
-import { resolveRepoPath } from './repo-path.js';
 
 /** The verify argument a generated hook accepts to prove activation. */
 export const HOOK_VERIFY_ARG = '--gateforge-verify';
@@ -561,57 +560,6 @@ export function materializeStagedCandidate(cwd: string, env: NodeJS.ProcessEnv, 
   prepare(['add', '-A']);
   frozen.checkoutDir = checkoutDir;
   return checkoutDir;
-}
-
-/**
- * Mirrors the WORKTREE's optional config directories into the
- * materialized candidate checkout so every surface that digests (or
- * snapshots) the staged checkout sees ONE repository shape.
- *
- * Empty directories are invisible to a Git tree: `checkout-index`
- * cannot create `.gateforge/adapters/` or `.gateforge/waivers/` when
- * they carry no tracked file — which is exactly what `gateforge init`
- * leaves behind. Yet both the trusted-policy digest entry list
- * (`<dir>/(no .mjs adapters)` vs `<dir>/(missing adapters dir)`) and
- * the input snapshot distinguish an EMPTY optional config directory
- * from a MISSING one. A surface that digests the checkout WITHOUT this
- * mirroring computes a different digest than the staged commit gate,
- * so a freshly written pin is rejected and re-pinning never converges.
- * The mirroring is therefore part of materialization's contract: the
- * bytes stay exactly the staged tree, and only the presence of the
- * marker-relevant EMPTY directories is mirrored.
- *
- * Args:
- *   cwd: absolute repository root the worktree lives in.
- *   checkoutDir: absolute path of the materialized candidate checkout.
- *   config: the config loaded FROM the checkout (its `adapters` /
- *     `waivers` are repo-relative and identical to the worktree's).
- *   options.fromStagedIndex: true when the candidate is the frozen
- *     STAGED index, whose owner-visible shape is the worktree's. False
- *     for a candidate COMMIT tree, where the worktree's untracked
- *     empty directories are not part of the revision under test and
- *     must never leak into its digest.
- *
- * Returns:
- *   string[]: the repo-relative directories actually created.
- */
-export function mirrorEmptyConfigDirs(
-  cwd: string,
-  checkoutDir: string,
-  config: GateforgeConfig,
-  options: { fromStagedIndex: boolean },
-): string[] {
-  if (!options.fromStagedIndex) return [];
-  const created: string[] = [];
-  for (const dir of [config.adapters, config.waivers]) {
-    const worktreePath = resolveRepoPath(cwd, dir);
-    const checkoutPath = resolveRepoPath(checkoutDir, dir);
-    if (existsSync(worktreePath) && !existsSync(checkoutPath)) {
-      mkdirSync(checkoutPath, { recursive: true });
-      created.push(dir);
-    }
-  }
-  return created;
 }
 
 /**

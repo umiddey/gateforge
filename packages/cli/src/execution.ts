@@ -165,12 +165,20 @@ export function trustedPolicyDigestEntries(
   // every waiver file is hashed (waiver edits are gate-defining).
   const adapterDir = join(cwd, ...configPaths.adaptersDir.split('/'));
   const adapterEntries: TrustedPolicyEntry[] = [];
+  // An EMPTY optional config directory is digested exactly like an ABSENT
+  // one: Git cannot carry an empty directory, so a committed (or staged)
+  // tree never contains one — it exists only in a live worktree (`gateforge
+  // init` leaves both optional dirs empty). Two different markers would
+  // make `enforcement pin` (worktree-shaped) and the candidate-commit gate
+  // (tree-shaped) compute two digests for the SAME committed bytes, and a
+  // fresh adoption could never push. One absence marker, both shapes.
+  const absentAdaptersMarker = marker(`${configPaths.adaptersDir}/(missing adapters dir)`);
   try {
     const names = readdirSync(adapterDir)
       .filter((name) => name.endsWith('.mjs'))
       .sort();
     if (names.length === 0) {
-      adapterEntries.push(marker(`${configPaths.adaptersDir}/(no .mjs adapters)`));
+      adapterEntries.push(absentAdaptersMarker);
     }
     for (const name of names) {
       const relative = `${configPaths.adaptersDir}/${name}`;
@@ -182,7 +190,7 @@ export function trustedPolicyDigestEntries(
         `trusted policy digest cannot read the adapters dir '${configPaths.adaptersDir}': ${(error as Error).message}`,
       );
     }
-    adapterEntries.push(marker(`${configPaths.adaptersDir}/(missing adapters dir)`));
+    adapterEntries.push(absentAdaptersMarker);
   }
   const waiverEntries = configPaths.waiverFiles
     .map((path) => entry(path, path, true))

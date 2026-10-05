@@ -1,24 +1,23 @@
 /**
- * `gateforge enforcement pin`, `gateforge check --staged` and
+ * `gateforge enforcement pin`, `gateforge check --staged`,
+ * `gateforge check --candidate-commit` (the pre-push/CI gate) and
  * `gateforge enforcement doctor` must agree on ONE policy digest for the
  * same repository — including the repository `gateforge init` leaves
  * behind: EMPTY, UNTRACKED `.gateforge/adapters/` and
  * `.gateforge/waivers/`.
  *
- * Git cannot carry an empty directory, so `checkout-index` never creates
- * one in the isolated candidate checkout. The trusted-digest entry list
- * still distinguishes an EMPTY optional config directory
- * (`<dir>/(no .mjs adapters)`) from a MISSING one
- * (`<dir>/(missing adapters dir)`), so every surface that digests the
- * staged checkout has to mirror the worktree's directory presence or the
- * three surfaces compute three different digests: pin writes one, doctor
- * compares the pin against the same wrong value and calls it
- * `matches staged`, and `check --staged` — which DOES mirror — blocks
- * `ENFORCEMENT_UNTRUSTED` on a freshly written pin, forever.
+ * Git cannot carry an empty directory, so a committed (or staged) tree
+ * never contains one — it exists only in the live worktree. The trusted
+ * digest entry list and the input snapshot therefore digest an EMPTY
+ * optional config directory exactly like an ABSENT one (one shared
+ * absence marker per surface), so every surface computes the same digest
+ * for the same committed bytes: the pin a fresh adoption writes is the
+ * digest the staged gate, the doctor AND the commit gate all compute.
  *
  * The assertions go through the real surfaces (pin, the staged gate, the
- * doctor JSON), never through the digest function itself: the property
- * under test is that the OWNER's three commands agree.
+ * candidate-commit gate, the doctor JSON), never through the digest
+ * function itself: the property under test is that the OWNER's commands
+ * agree.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -172,6 +171,47 @@ describe('staged policy digest: pin, check --staged and doctor agree', () => {
       repo.stage();
       repo.commit('policy inputs');
       await assertOneDigest(repo);
+    });
+  }, 180_000);
+
+  it('the pin minted over a commit also passes the candidate-commit gate', async () => {
+    await withTempRepo({}, async (repo) => {
+      installWithEmptyOptionalDirs(repo);
+      repo.stage();
+      repo.commit('policy inputs');
+      const candidateSha = repo.headSha();
+      const envFile = join(outsideDir(), 'repo.gateforge.env');
+      const pinned = await runCli(repo, ['enforcement', 'pin', '--pin-file', envFile, '--confirm']);
+      expect(pinned.code, pinned.stderr).toBe(0);
+      const digest = readFileSync(envFile, 'utf8').match(/GATEFORGE_APPROVED_POLICY_DIGEST=([0-9a-f]{64})/)?.[1] ?? '';
+      expect(digest).toMatch(/^[0-9a-f]{64}$/);
+      // The pre-push/CI gate digests the COMMIT TREE, where the empty
+      // directories do not exist. The pin was minted over the SAME
+      // committed bytes — so it must pass this gate unchanged.
+      const result = await runCli(
+        repo,
+        ['check', '--candidate-commit', candidateSha ?? '', '--format', 'json'],
+        { GATEFORGE_APPROVED_POLICY_DIGEST: digest },
+      );
+      expect(
+        result.stdout,
+        `candidate-commit must accept the pin minted over this very commit:\n${result.stdout}`,
+      ).not.toContain('ENFORCEMENT_UNTRUSTED');
+      // What blocks instead is this fixture's ordinary policy verdict —
+      // it carries no adapter modules, so its two user-facing resources
+      // are ADAPTER_MISSING + classification-blocked. The digest gate
+      // itself passed.
+      expect(result.code).toBe(1);
+      const report = JSON.parse(result.stdout) as { summary?: { blocking?: number } };
+      expect(report.summary?.blocking).toBe(4);
+      // The gate still compares: a digest that is not the pin blocks.
+      const stale = await runCli(
+        repo,
+        ['check', '--candidate-commit', candidateSha ?? '', '--format', 'json'],
+        { GATEFORGE_APPROVED_POLICY_DIGEST: '0'.repeat(64) },
+      );
+      expect(stale.code).toBe(1);
+      expect(stale.stdout).toContain('ENFORCEMENT_UNTRUSTED');
     });
   }, 180_000);
 });

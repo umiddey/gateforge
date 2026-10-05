@@ -606,9 +606,15 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
 
   // Adapter modules (top-level .mjs, as the pipeline loads them) plus
   // every file under the waivers directory (gate decisions read them).
-  // Missing optional directories are explicit absence markers, never
-  // silent gaps.
+  // An EMPTY optional config directory contributes the SAME absence
+  // marker as a MISSING one: Git cannot carry an empty directory, so a
+  // committed tree never contains one — it exists only in a live
+  // worktree (`gateforge init` leaves both optional dirs empty). Two
+  // different markers would give the worktree and the candidate checkout
+  // different identities for the same committed bytes. Nested empty
+  // directories contribute nothing, exactly like Git sees them.
   const adaptersDir = toPosix(config.adapters);
+  const missingAdaptersMarker = `absent:${adaptersDir}/(missing adapters dir)`;
   try {
     const entries = readdirSync(join(cwd, ...adaptersDir.split('/')));
     let seen = false;
@@ -618,10 +624,10 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
         seen = true;
       }
     }
-    if (!seen) paths.add(`absent:${adaptersDir}/(no .mjs adapters)`);
+    if (!seen) paths.add(missingAdaptersMarker);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      paths.add(`absent:${adaptersDir}/(missing adapters dir)`);
+      paths.add(missingAdaptersMarker);
     } else {
       throw new UnsupportedSnapshotError(
         `input snapshot cannot read adapters dir '${adaptersDir}' (${(error as Error).message}); ` +
@@ -630,6 +636,7 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
     }
   }
   const waiversDir = toPosix(config.waivers);
+  const missingWaiversMarker = `absent:${waiversDir}/(missing waivers dir)`;
   try {
     const walk = (dir: string, prefix: string): void => {
       const entries = readdirSync(join(cwd, dir), { withFileTypes: true });
@@ -644,12 +651,15 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
           count += 1;
         }
       }
-      if (count === 0) paths.add(`absent:${prefix}/(empty)`);
+      // Only the TOP-level optional directory is a config dir whose
+      // absence is an explicit marker; a nested empty directory is
+      // invisible to Git, so it is invisible here too.
+      if (count === 0 && prefix === waiversDir) paths.add(missingWaiversMarker);
     };
     walk(waiversDir, waiversDir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      paths.add(`absent:${waiversDir}/(missing waivers dir)`);
+      paths.add(missingWaiversMarker);
     } else {
       throw new UnsupportedSnapshotError(
         `input snapshot cannot read waivers dir '${waiversDir}' (${(error as Error).message}); ` +

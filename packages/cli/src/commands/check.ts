@@ -238,7 +238,6 @@ import {
   freezeCommitCandidate,
   freezeStagedCandidate,
   materializeStagedCandidate,
-  mirrorEmptyConfigDirs,
   recheckStagedCandidate,
   releaseStagedCandidate,
   StagedCandidateBlockError,
@@ -825,23 +824,16 @@ async function stagedCheckCommand(
   let cacheExclusions: readonly string[] = [];
   try {
     checkoutDir = materializeStagedCandidate(io.cwd, io.env, frozen);
-    // Empty directories are invisible to Git trees — checkout-index cannot
-    // create them — yet the input snapshot distinguishes an EMPTY optional
-    // config directory (adapters/waivers) from a MISSING one through
-    // explicit absence markers, and so does the trusted-policy digest entry
-    // list. `mirrorEmptyConfigDirs` is the ONE implementation of that
-    // mirroring, shared with every other surface that digests or snapshots
-    // the staged checkout (`enforcement pin`, doctor, the pre-commit gate),
-    // so all of them compute the same digest for the same bytes. The bytes
-    // stay exactly the staged tree; only the marker-relevant empty dirs are
-    // mirrored, and only for a STAGED index (a candidate commit tree is
-    // gated on its own contents, never on the worktree around it).
+    // An EMPTY optional config directory (`.gateforge/adapters/`,
+    // `.gateforge/waivers/` — exactly what `gateforge init` leaves) is
+    // digested and snapshotted exactly like an ABSENT one, on every
+    // surface: the markers live in the digest entry list and the input
+    // snapshot, so a materialized checkout needs no worktree shaping for
+    // its digest to match — the bytes of the tree under test are the
+    // whole story, for a staged index and a candidate commit alike.
     const checkoutConfig = loadConfigAt(checkoutDir);
     docsExclusions = loadDocsExclusions(checkoutDir, checkoutConfig);
     cacheExclusions = loadCacheExclusions(checkoutDir, checkoutConfig);
-    mirrorEmptyConfigDirs(io.cwd, checkoutDir, checkoutConfig, {
-      fromStagedIndex: options.candidateCommitSha === undefined,
-    });
     // The candidate's own staged-runtime document prepares ITS checkout
     // (dependency reuse + tracked preparation command) — discovery reads
     // installed tooling from the candidate, never the worktree. The

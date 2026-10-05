@@ -66,7 +66,6 @@ import {
   StagedCandidateBlockError,
   freezeStagedCandidate,
   materializeStagedCandidate,
-  mirrorEmptyConfigDirs,
   releaseStagedCandidate,
 } from '../staged-candidate.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
@@ -299,16 +298,10 @@ function stagedPolicyState(io: Io): StagedPolicyState {
   try {
     const checkoutDir = materializeStagedCandidate(io.cwd, io.env, frozen);
     const checkoutConfig = loadConfigAt(checkoutDir);
-    // Git cannot carry an EMPTY directory, so a materialized staged
-    // checkout is MISSING the worktree's empty `.gateforge/adapters/` and
-    // `.gateforge/waivers/` — while the digest entry list tells an empty
-    // directory (`(no .mjs adapters)`) from a missing one
-    // (`(missing adapters dir)`). Without the SAME mirroring `check
-    // --staged` applies, this surface digests a DIFFERENT revision than the
-    // commit gate: the pin would be written for a digest no gate ever
-    // computes, and doctor's `approved-digest` row would call that match.
-    // The candidate is always the staged index here, never a commit tree.
-    mirrorEmptyConfigDirs(io.cwd, checkoutDir, checkoutConfig, { fromStagedIndex: true });
+    // An EMPTY optional config directory is digested exactly like an
+    // ABSENT one (one absence marker in the digest entry list), so the
+    // staged checkout needs no worktree shaping: this surface computes
+    // the same digest the commit gate computes for the same bytes.
     const entries: TrustedPolicyEntry[] = trustedPolicyDigestEntriesForConfig(checkoutDir, checkoutConfig);
     const changedSinceHead = entries.flatMap((entry) => {
       if (entry.path === null) return [];

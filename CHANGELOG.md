@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A fresh adoption can push again: an empty optional config directory is digested exactly like an absent one.** `gateforge init` creates EMPTY `.gateforge/adapters/` and `.gateforge/waivers/`, and Git cannot carry an empty directory — so the committed tree has neither, while the live worktree has both. The trusted-policy digest entry list and the input snapshot each gave the two shapes DIFFERENT absence markers (`(no .mjs adapters)` vs `(missing adapters dir)`, `absent:<dir>/(empty)` vs `absent:<waiversDir>/(missing waivers dir)`), so the pin an owner minted over their adoption commit (`enforcement pin`) was a digest the pre-push/CI candidate-commit gate never computed for that very commit: every push blocked `ENFORCEMENT_UNTRUSTED`, and re-pinning could not converge. Both surfaces now emit ONE absence marker per optional directory (nested empty directories are invisible, exactly as Git sees them), which also retires the worktree-shaping of materialized candidate checkouts (`mirrorEmptyConfigDirs` is gone — the bytes of the tree under test are the whole story). A repository with a missing directory, or with tracked adapter/waiver files, keeps today's digest byte-for-byte; only a repository that pinned over empty directories re-pins once, and from then on every surface agrees.
 
 
 ## 0.11.1
