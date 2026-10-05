@@ -187,13 +187,19 @@ import { unmatchedRouteBannerLines } from '../unmatched-routes.js';
 import { annotationMapSyncAdvisories, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
 import {
   businessRuleInventory,
+  businessRuleReportEntries,
   businessRuleRunFacts,
   gradeBusinessRules,
   partitionBusinessRuleEntries,
   witnessedRunnersOf,
 } from '../business-rules.js';
 import { runnerConfigPaths, runtimeDeclaredInputs } from '../test-infrastructure.js';
-import type { MappedCoverage, RuleClaimBindings, TestCatalog } from '@gate-forge/core';
+import type {
+  BusinessRuleCaseResult,
+  MappedCoverage,
+  RuleClaimBindings,
+  TestCatalog,
+} from '@gate-forge/core';
 import {
   collectInputFiles,
   computeInputSnapshot,
@@ -2202,6 +2208,12 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     blocking: [],
     advisories: [],
   };
+  // Every graded case (satisfied ones included) for the report's
+  // `businessRules` section: a satisfied case names the channel that
+  // proved it, and an advisory case is listed here beside its
+  // advisory-channel entry (invariant 6: the output says what was
+  // proven; invariant 7: a demoted rule never hides).
+  let ruleCases: BusinessRuleCaseResult[] = [];
   // `ruleCatalog` is non-null here by construction: declaring rules is
   // exactly what makes the mapping resolution above run. The guard says
   // so to the type checker rather than asserting it.
@@ -2220,16 +2232,14 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             docsOnly: verifiedRuleReceipt.receipt.docsOnly === true,
             catalog: ruleCatalog,
           });
-    rulePartition = partitionBusinessRuleEntries(
-      pipeline.businessRules,
-      gradeBusinessRules({
-        rules: pipeline.businessRules,
-        ruleBindings,
-        inventory: businessRuleInventory(pipeline.graph),
-        runFacts,
-        catalog: ruleCatalog,
-      }).cases,
-    );
+    ruleCases = gradeBusinessRules({
+      rules: pipeline.businessRules,
+      ruleBindings,
+      inventory: businessRuleInventory(pipeline.graph),
+      runFacts,
+      catalog: ruleCatalog,
+    }).cases;
+    rulePartition = partitionBusinessRuleEntries(pipeline.businessRules, ruleCases);
   }
 
   const inScopeSourcePaths =
@@ -2388,6 +2398,19 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     } else if (format === 'text' && cacheCounts.hits + cacheCounts.misses > 0) {
       report = `${report}\ncache: ${String(cacheCounts.hits)} hit(s), ${String(cacheCounts.misses)} miss(es)`;
     }
+  }
+  if (ruleCases.length > 0 && format === 'json') {
+    // Owner-declared business rules (plan §7.5, invariant 6): every
+    // graded case is serialized with its status and the channel that
+    // proved it — a satisfied case must be VISIBLE naming its channel,
+    // because "satisfied" read as "the rule holds" is exactly the
+    // overclaim the naming exists to prevent. Additive: no declared
+    // rules, no section, byte-identical report (invariant 1).
+    const document = JSON.parse(report) as Record<string, JsonValue>;
+    report = canonicalJson({
+      ...document,
+      businessRules: businessRuleReportEntries(pipeline.businessRules, ruleCases),
+    } as unknown as JsonValue);
   }
   // Owner-chosen strictness: the decision
   // is a pure mapping of the strict result that was ALREADY computed, so

@@ -116,6 +116,7 @@ import {
   withoutQuarantinedBindings,
   type LoadedQuarantine,
   type Obligation,
+  type BusinessRuleCaseResult,
   type RuleClaimBindings,
   type TestCatalog,
   type TestMap,
@@ -198,6 +199,7 @@ import {
 import { evaluateRun, scopeBlocking, splitBlockingByBaseline, type EvaluateInput } from '../evaluate.js';
 import {
   businessRuleInventory,
+  businessRuleReportEntries,
   businessRuleRunFacts,
   gradeBusinessRules,
   partitionBusinessRuleEntries,
@@ -5353,24 +5355,27 @@ async function runSupervisedTestGatesInner(
     blocking: [],
     advisories: [],
   };
+  // Every graded case (satisfied ones included) for the persisted and
+  // stdout json document's `businessRules` section: a satisfied case
+  // names the channel that proved it (invariant 6), and an advisory case
+  // is listed here beside its advisory-channel entry (invariant 7).
+  let ruleCases: BusinessRuleCaseResult[] = [];
   if (pipeline.businessRules.length > 0 && catalog !== null) {
-    rulePartition = partitionBusinessRuleEntries(
-      pipeline.businessRules,
-      gradeBusinessRules({
-        rules: pipeline.businessRules,
-        ruleBindings,
-        inventory: businessRuleInventory(pipeline.graph),
-        runFacts: businessRuleRunFacts({
-          result: sealed.result,
-          records: evaluatedBase.records,
-          witnessedRunners: witnessedRunnersOf(config),
-          scope: options.scope === 'changed' ? 'changed' : 'full',
-          docsOnly: false,
-          catalog,
-        }),
+    ruleCases = gradeBusinessRules({
+      rules: pipeline.businessRules,
+      ruleBindings,
+      inventory: businessRuleInventory(pipeline.graph),
+      runFacts: businessRuleRunFacts({
+        result: sealed.result,
+        records: evaluatedBase.records,
+        witnessedRunners: witnessedRunnersOf(config),
+        scope: options.scope === 'changed' ? 'changed' : 'full',
+        docsOnly: false,
         catalog,
-      }).cases,
-    );
+      }),
+      catalog,
+    }).cases;
+    rulePartition = partitionBusinessRuleEntries(pipeline.businessRules, ruleCases);
   }
   // Twin path coverage in `block` mode joins the run's OWN blocking set:
   // it appears in `blocking` (not only in `advisories`) and it fails the
@@ -5704,6 +5709,12 @@ async function runSupervisedTestGatesInner(
               })),
             },
           }),
+      // Owner-declared business rules (plan §7.5, invariant 6): every
+      // graded case with its status and proof channel. Additive — no
+      // declared rules, no section, byte-identical document.
+      ...(ruleCases.length === 0
+        ? {}
+        : { businessRules: businessRuleReportEntries(pipeline.businessRules, ruleCases) }),
     } as unknown as JsonValue);
   const report =
     format === 'text'

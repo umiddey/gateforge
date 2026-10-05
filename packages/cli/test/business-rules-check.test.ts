@@ -197,6 +197,15 @@ describe('§7.2 a declared rule with no mappings blocks with one finding per cas
       // precedes `.../unpaid-can-cancel` (invariant 9).
       expect(blocking[0]?.detail).toContain("case 'paid-cannot-cancel'");
       expect(blocking[1]?.detail).toContain("case 'unpaid-can-cancel'");
+      // The additive `businessRules` section lists EVERY graded case with
+      // its status (invariant 6): here both, unmapped, in claim-id order.
+      const sections = (report as Report & { businessRules?: Array<{ ruleId: string; caseId: string; status: string; channel: string | null; enforcement: string; finding: { cause: string } | null }> }).businessRules;
+      expect(sections?.map((entry) => [entry.ruleId, entry.caseId, entry.status])).toEqual([
+        ['invoice-cancel-only-unpaid', 'paid-cannot-cancel', 'unmapped'],
+        ['invoice-cancel-only-unpaid', 'unpaid-can-cancel', 'unmapped'],
+      ]);
+      expect(sections?.every((entry) => entry.channel === null && entry.enforcement === 'block')).toBe(true);
+      expect(sections?.every((entry) => entry.finding?.cause === 'BUSINESS_RULE_TEST_MISSING')).toBe(true);
       // A missing test is a blocking rule finding, never advisory.
       expect(ruleEntries(report.advisories)).toEqual([]);
     });

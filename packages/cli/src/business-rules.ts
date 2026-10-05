@@ -356,3 +356,71 @@ export function businessRuleInventory(graph: ResourceGraph): string[] {
     ...new Set(graph.resources.flatMap((resource) => (resource.name === null ? [] : [resource.name]))),
   ].sort();
 }
+
+/** One serialized rule case in a report's additive `businessRules` section. */
+export interface BusinessRuleReportEntry {
+  /** The rule the case belongs to. */
+  ruleId: string;
+  /** The case id (unique within the rule). */
+  caseId: string;
+  /** The rule's declared proof type (`e2e`, `pytest`, ...). */
+  test: string;
+  /** The rule's enforcement (`block` | `advisory`). */
+  enforcement: string;
+  /** `unmapped` | `wrong-type` | `unproven` | `failing` | `satisfied`. */
+  status: string;
+  /** The channel that proved a satisfied case (`engine`, `observe`, `execution`), else null. */
+  channel: string | null;
+  /** The gradeable mapped tests of the case, sorted. */
+  mappedTests: readonly string[];
+  /** The typed finding, null exactly when satisfied. */
+  finding: {
+    cause: string;
+    detail: string;
+    nextAction: string;
+    tests: readonly string[];
+  } | null;
+}
+
+/**
+ * Serializes every graded rule case for the report's `businessRules`
+ * section (plan §7.5, invariant 6): a SATISFIED case must be visible
+ * naming the channel that proved it — "satisfied" read as "the rule
+ * holds" is exactly the overclaim the channel naming exists to prevent —
+ * and a demoted (advisory) case appears here beside its advisory-channel
+ * entry, so the section is the one place that lists EVERY case with its
+ * status. The section rides the json document only when rules are
+ * declared, so a repository without the feature keeps its exact report.
+ *
+ * Args:
+ *   rules: the owner's declared rules (status and channel context).
+ *   cases: the graded case results, sorted by rule id then case id.
+ *
+ * Returns:
+ *   BusinessRuleReportEntry[]: the serialized cases, input order.
+ */
+export function businessRuleReportEntries(
+  rules: readonly BusinessRule[],
+  cases: readonly BusinessRuleCaseResult[],
+): BusinessRuleReportEntry[] {
+  const typeOf = new Map(rules.map((rule) => [rule.id, rule.test]));
+  const enforcementOf = new Map(rules.map((rule) => [rule.id, rule.enforcement]));
+  return cases.map((result) => ({
+    ruleId: result.ruleId,
+    caseId: result.caseId,
+    test: typeOf.get(result.ruleId) ?? 'e2e',
+    enforcement: enforcementOf.get(result.ruleId) ?? 'block',
+    status: result.status,
+    channel: result.channel,
+    mappedTests: result.mappedTests,
+    finding:
+      result.finding === null
+        ? null
+        : {
+            cause: result.finding.cause,
+            detail: result.finding.detail,
+            nextAction: result.finding.nextAction,
+            tests: result.finding.tests,
+          },
+  }));
+}
