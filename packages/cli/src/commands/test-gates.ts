@@ -194,7 +194,7 @@ import {
   SUPERVISED_INVOCATION,
   type PlannedRow,
 } from '../execution.js';
-import { evaluateRun, scopeBlocking, type EvaluateInput } from '../evaluate.js';
+import { evaluateRun, scopeBlocking, splitBlockingByBaseline, type EvaluateInput } from '../evaluate.js';
 import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
 import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
 import { CACHE_EXCLUSIONS_GUARANTEE, loadCacheExclusions } from '../cache-exclusions.js';
@@ -3479,6 +3479,19 @@ async function runSupervisedTestGatesInner(
         currentTreeId: frozenTreeId,
         evaluatedPaths: scopeDecision.changedFiles,
       });
+    // The policy-debt term reads the ADOPTED-baseline view, not the raw
+    // one. What a carry-forward must never seal over is NEW debt, and the
+    // raw list cannot express that: in a repository that ran `gateforge
+    // adopt` it holds the adopted classification, finding, unclassified
+    // and unresolved entries forever, so the term denied the carry there
+    // altogether. The split keeps the protection and drops only what
+    // adoption forgave — an entry adoption never recorded still blocks —
+    // and it is the same split `applyBaseline` grades through, so the guard
+    // and the grading cannot disagree about what debt is forgiven.
+    const unadoptedPolicyBlocking = splitBlockingByBaseline(
+      adoptedBaseline,
+      pipeline.policy.blocking,
+    ).kept;
     // A planned re-seal is never a carry-forward: it re-runs the
     // affected tests and seals its own receipt. `affectedTestCount`
     // is the CHANGED-SCOPE plan's count, which a test-only change
@@ -3500,7 +3513,7 @@ async function runSupervisedTestGatesInner(
       scopeBlockers.length === 0 &&
       mappingBlockers.length === 0 &&
       inventoryBlocking.length === 0 &&
-      pipeline.policy.blocking.length === 0 &&
+      unadoptedPolicyBlocking.length === 0 &&
       (config.diagnostics?.suites.length ?? 0) === 0 &&
       pipeline.policy.obligations.length === carryParent.receipt.verdictSummary.total &&
       carryParent.receipt.behaviorCatalogDigest === behaviorBindings.behaviorCatalogDigest &&

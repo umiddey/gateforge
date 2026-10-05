@@ -702,17 +702,9 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
  * exactly as before; a null/empty set changes nothing.
  *
  * The classification layer (two-layer adoption) waives by RESOURCE
- * IDENTITY (`classificationBlockedIdentity`), which is merge-stable where
- * whole-entry fingerprints are not (they bake in detail text and line
- * numbers, so an upstream merge would otherwise un-forgive the same
- * resource): a `classification` or `unclassified` entry whose adopted
- * identity is in the receipt's set is waived — loudly counted (as
- * DISTINCT resources), not exit-counted, not in the blocking list. The
- * layer runs FIRST; entries it waives are never double-counted under the
- * fingerprint pass. Fail-closed edges: entries without an identity
- * (document-level classifier blocks — stale targets, invalid signals) are
- * never waived here; a NEW blocked resource is by definition not in the
- * shrink-only set and still blocks.
+ * IDENTITY rather than by whole-entry fingerprint; that rule and its
+ * fail-closed edges now live in {@link splitBlockingByBaseline}, which
+ * this function grades its blocking half through.
  */
 function applyBaseline(
   baseline: {
@@ -735,7 +727,6 @@ function applyBaseline(
   }
   const fingerprints = baseline.fingerprints;
   const classificationIds = baseline.classificationBlocked;
-  const classificationProvided = classificationIds !== undefined;
   const classification =
     classificationIds !== undefined && classificationIds.size > 0 ? classificationIds : null;
   if (fingerprints.size === 0 && classification === null) {
@@ -754,31 +745,88 @@ function applyBaseline(
       reason: `${BASELINE_VERDICT_REASON} adopted as forgiven (was ${entry.verdict}); baseline is shrink-only`,
     };
   });
-  const blocking: BlockingEntry[] = [];
-  let blockingEntries = 0;
-  const waivedClassifications = new Set<string>();
-  for (const entry of run.blocking) {
+  const split = splitBlockingByBaseline(baseline, run.blocking);
+  return {
+    verdicts,
+    blocking: split.kept,
+    baselined: {
+      obligations,
+      blockingEntries: split.forgivenEntries,
+      neverWitnessed,
+      classificationBlocked: split.classificationProvided
+        ? split.forgivenClassifications.size
+        : undefined,
+    },
+  };
+}
+
+/** The two halves an adopted baseline takes a blocking set apart into. */
+export interface BaselineBlockingSplit {
+  /** The entries adoption did NOT forgive — they keep blocking. */
+  kept: BlockingEntry[];
+  /** Whole-entry fingerprints the baseline forgave (loud count). */
+  forgivenEntries: number;
+  /** Distinct resource identities the classification layer forgave. */
+  forgivenClassifications: Set<string>;
+  /** Whether the adoption receipt carries the classification layer at all. */
+  classificationProvided: boolean;
+}
+
+/**
+ * Splits blocking entries into the ones an adopted baseline forgives and the
+ * ones it does not. THE one implementation of that rule — `applyBaseline`
+ * grades through it, and a caller that must ask "does this repository carry
+ * policy debt that adoption did not forgive?" asks it here, so the guard and
+ * the grading can never disagree about what the baseline forgave.
+ *
+ * The classification layer (two-layer adoption) waives by RESOURCE IDENTITY
+ * (`classificationBlockedIdentity`), which is merge-stable where whole-entry
+ * fingerprints are not (they bake in detail text and line numbers): a
+ * `classification` or `unclassified` entry whose adopted identity is in the
+ * receipt's set is waived. It runs FIRST, and entries it waives are never
+ * double-counted under the fingerprint pass. Fail-closed edges: entries
+ * without an identity (document-level classifier blocks — stale targets,
+ * invalid signals) are never waived here; a NEW blocked resource is by
+ * definition not in the shrink-only set and stays in `kept`.
+ *
+ * @throws never — a null or empty baseline forgives nothing.
+ */
+export function splitBlockingByBaseline(
+  baseline: {
+    fingerprints: ReadonlySet<string>;
+    classificationBlocked?: ReadonlySet<string>;
+  } | null,
+  blocking: readonly BlockingEntry[],
+): BaselineBlockingSplit {
+  const classificationIds = baseline?.classificationBlocked;
+  const classificationProvided = baseline !== null && classificationIds !== undefined;
+  const classification =
+    classificationIds !== undefined && classificationIds.size > 0 ? classificationIds : null;
+  const fingerprints = baseline?.fingerprints;
+  if (baseline === null || fingerprints === undefined || (fingerprints.size === 0 && classification === null)) {
+    return {
+      kept: [...blocking],
+      forgivenEntries: 0,
+      forgivenClassifications: new Set<string>(),
+      classificationProvided,
+    };
+  }
+  const kept: BlockingEntry[] = [];
+  const forgivenClassifications = new Set<string>();
+  let forgivenEntries = 0;
+  for (const entry of blocking) {
     const identity = classificationBlockedIdentity(entry);
     if (identity !== null && classification !== null && classification.has(identity)) {
-      waivedClassifications.add(identity);
+      forgivenClassifications.add(identity);
       continue;
     }
     if (fingerprints.has(blockingEntryFingerprint(entry))) {
-      blockingEntries += 1;
+      forgivenEntries += 1;
       continue;
     }
-    blocking.push(entry);
+    kept.push(entry);
   }
-  return {
-    verdicts,
-    blocking,
-    baselined: {
-      obligations,
-      blockingEntries,
-      neverWitnessed,
-      classificationBlocked: classificationProvided ? waivedClassifications.size : undefined,
-    },
-  };
+  return { kept, forgivenEntries, forgivenClassifications, classificationProvided };
 }
 
 /**

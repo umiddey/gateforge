@@ -8,8 +8,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { GateReceiptSchema, RunManifestSchema, loadConfig, withTempRepo, fingerprint } from '@gate-forge/core';
-import { configYml, fixtureFingerprint, installFixture, runCli } from './helpers.js';
+import { GateReceiptSchema, RunManifestSchema, loadConfig, withTempRepo, fingerprint, type TempRepo } from '@gate-forge/core';
+import { PLUGIN_SOURCE, configYml, fixtureFingerprint, installFixture, runCli } from './helpers.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 
@@ -504,4 +504,136 @@ describe('gateforge test-gates', () => {
       }
     });
   });
+});
+
+
+/**
+ * The fixture plugin plus one detector finding — a blocking ENTRY, not an
+ * obligation, so `gateforge adopt` records it in the baseline while the RAW
+ * policy blocking list stays non-empty for the rest of the repository's life.
+ */
+const ADOPTED_FINDING_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
+  'return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };',
+  'return { resources, unresolved: [], findings: [{ code: "PARTIAL_DISCOVERY", detail: "fixture finding: one route unverified", locations: [{ file: "src/logs.txt", line: 1, col: 0 }] }], classificationSignals, scannedPaths };',
+);
+
+/**
+ * The same plugin with the finding's DETAIL derived from the bytes of the
+ * inert file a carry-forward run changes, so that edit mints a NEW blocking
+ * entry no adoption receipt ever forgave.
+ */
+const NEW_FINDING_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
+  'const resources = [];',
+  "const resources = [];\n    let logConstant = '';",
+)
+  .replace(
+    'scannedPaths.push(rel);',
+    "scannedPaths.push(rel);\n      if (rel === 'src/logs.txt') logConstant = text.trim();",
+  )
+  .replace(
+    'return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };',
+    "return { resources, unresolved: [], findings: [{ code: \"PARTIAL_DISCOVERY\", detail: \"fixture finding: the log constant reads \" + logConstant, locations: [{ file: \"src/logs.txt\", line: 1, col: 0 }] }], classificationSignals, scannedPaths };",
+  );
+
+/**
+ * A gated repository that ADOPTED its existing debt (one detector finding),
+ * with a sealed parent receipt over the bytes the adoption produced.
+ *
+ * Returns the base sha and the owner pin of those bytes.
+ */
+async function adoptedCarryForwardParent(
+  repo: TempRepo,
+  pluginSource: string,
+  verifierKey: string,
+): Promise<{ baseSha: string | null; approvedPolicyDigest: string }> {
+  installFixture(repo);
+  repo.writeFiles({
+    '.gateforge.yml': `${configYml()}\nenforcement:\n  receiptStage: pre-push\n`,
+    '.gitignore': '.gateforge/test-gates/\n',
+    'src/logs.txt': '# base log constant\n',
+    'plugin.mjs': pluginSource,
+  });
+  repo.commitFiles({}, 'existing product code, no gate yet');
+  const adopted = await runCli(repo, ['adopt']);
+  expect(adopted.code, `${adopted.stdout}\n${adopted.stderr}`).toBe(0);
+  // Adoption WIRES the gate: committed, so the change the carry-forward run
+  // evaluates is the inert one alone and every changed file was scanned.
+  repo.commitFiles({}, 'adopt the gate');
+  const baseSha = repo.headSha();
+  // Taken AFTER adoption: the baseline it wrote is a trusted policy input.
+  const approvedPolicyDigest = trustedPolicyDigestForConfig(
+    repo.root,
+    loadConfig(repo.path('.gateforge.yml')),
+  );
+  await mintCompleteRunReceipt(repo, {
+    verifierKey,
+    parentSha: baseSha,
+    approvedPolicyDigest,
+    verdictSummary: { total: 2, satisfied: 0, waived: 2, blocking: 0 },
+  });
+  return { baseSha, approvedPolicyDigest };
+}
+
+/** The empty slice a carry-forward serves: one inert committed change. */
+const INERT_LOG_UPDATE = '# updated log constant\n';
+
+describe('carry-forward over an adopted baseline', () => {
+  it('carries forward when every policy blocking entry was adopted', async () => {
+    await withTempRepo({}, async (repo) => {
+      const verifierKey = 'carry-forward-adopted-debt-key';
+      const { baseSha, approvedPolicyDigest } = await adoptedCarryForwardParent(
+        repo,
+        ADOPTED_FINDING_PLUGIN_SOURCE,
+        verifierKey,
+      );
+      repo.commitFiles({ 'src/logs.txt': INERT_LOG_UPDATE }, 'inert log update');
+
+      const result = await runCli(
+        repo,
+        ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'],
+        {
+          GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey,
+          GATEFORGE_APPROVED_POLICY_DIGEST: approvedPolicyDigest,
+          CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha ?? '',
+        },
+      );
+      const output = `${result.stdout}\n${result.stderr}`;
+      expect(result.code, output).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        carriedForward: true,
+        carriedFrom: baseSha,
+        testsPerformedThisInvocation: 0,
+      });
+    });
+  }, 180_000);
+
+  it('refuses to carry forward a policy blocking entry adoption never forgave', async () => {
+    await withTempRepo({}, async (repo) => {
+      const verifierKey = 'carry-forward-new-debt-key';
+      const { baseSha, approvedPolicyDigest } = await adoptedCarryForwardParent(
+        repo,
+        NEW_FINDING_PLUGIN_SOURCE,
+        verifierKey,
+      );
+      // The same inert edit, but the finding's DETAIL moves with it: the
+      // entry is NEW debt, which no adoption receipt forgives.
+      repo.commitFiles({ 'src/logs.txt': INERT_LOG_UPDATE }, 'inert log update');
+
+      const result = await runCli(
+        repo,
+        ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'],
+        {
+          GATEFORGE_WITNESS_VERIFIER_KEY: verifierKey,
+          GATEFORGE_APPROVED_POLICY_DIGEST: approvedPolicyDigest,
+          CI_MERGE_REQUEST_DIFF_BASE_SHA: baseSha ?? '',
+        },
+      );
+      const output = `${result.stdout}\n${result.stderr}`;
+      expect(result.code, output).not.toBe(0);
+      expect(result.stdout).not.toContain('"carriedForward":true');
+      // The new finding is reported as debt, exactly as any un-adopted entry.
+      expect(result.stdout, output).toContain('PARTIAL_DISCOVERY');
+      expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
+    });
+  }, 180_000);
 });
