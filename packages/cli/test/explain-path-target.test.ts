@@ -44,6 +44,10 @@ describe('explain on a repo-relative path', () => {
       expect(run.stdout).toContain('unclassified product file');
       expect(run.stdout).toContain('CHANGE_UNMAPPED');
       expect(run.stdout).toContain('gateforge init --docs-exclude <folders>');
+      // 0.10.2: developer/CI tooling the repository declares in
+      // `project.paths.testTooling` is the third route, and the remedy
+      // has to name it — an owner cannot find a key nobody printed.
+      expect(run.stdout).toContain('project.paths.testTooling');
     });
   }, 240_000);
 

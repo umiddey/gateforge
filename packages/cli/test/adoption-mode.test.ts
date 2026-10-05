@@ -111,8 +111,8 @@ const ENFORCEMENT_BLOCKS = {
  * repository with configuration and NO gate, which is what HEAD looks
  * like the day before adoption.
  */
-function fixtureConfig(enforcement: '' | 'strict' | 'off'): string {
-  return `${ENFORCEMENT_BLOCKS[enforcement]}${configYml()}`;
+function fixtureConfig(enforcement: '' | 'strict' | 'off', testTooling?: readonly string[]): string {
+  return `${ENFORCEMENT_BLOCKS[enforcement]}${configYml(testTooling === undefined ? {} : { testTooling })}`;
 }
 
 
@@ -531,4 +531,42 @@ describe('R10 the guide and the generated hook name the same command', () => {
     expect(quickstart).toMatch(/gateforge check --staged/);
     expect(quickstart).toMatch(/without (?:a )?bypass|without --no-verify/i);
   });
+});
+
+describe('0.10.2: an adoption commit may carry the tooling the runner configuration names', () => {
+  it('a config-named reporter and a declared tool script commit with exit 0', async () => {
+    const app = await startEvidenceApp();
+    try {
+      await withTempRepo({}, async (repo) => {
+        await installUngated(repo, app.url);
+        // The two files a real first adoption commit carried and 0.10.1
+        // refused: a custom reporter the runner configuration NAMES but
+        // no test imports, and a developer script under `scripts/e2e/`
+        // that only `package.json` names. Neither is a policy input, a
+        // test file or test infrastructure, so before this fix both were
+        // `CHANGE_UNMAPPED` and the owner had to bypass the hook.
+        const env = await stageAdoptionCommit(repo, {
+          '.gateforge.yml': fixtureConfig('strict', ['scripts/e2e/**']),
+          'playwright.config.mjs':
+            "export default { testDir: 'e2e', projects: [{ name: 'chromium' }], reporter: [['./reporting/adoption-reporter.js']] };\n",
+          // Outside every test directory on purpose: only the runner
+          // configuration's own `reporter:` path can attribute this file,
+          // and `scripts/e2e/guard.sh` only the declared glob can.
+          'reporting/adoption-reporter.js': 'export default (result) => result;\n',
+          'scripts/e2e/guard.sh': '#!/bin/sh\nexit 0\n',
+        });
+        await sealScopedReceipt(repo, env);
+
+        const run = await runStagedCheck(repo, env);
+        const output = `${run.stdout}\n${run.stderr}`;
+        const report = JSON.parse(run.stdout) as Report;
+
+        expect(report.blocking.map((entry) => entry.cause ?? ''), output).not.toContain('CHANGE_UNMAPPED');
+        expect(report.summary.blocking, output).toBe(0);
+        expect(run.code, output).toBe(0);
+      });
+    } finally {
+      await app.close();
+    }
+  }, 240_000);
 });

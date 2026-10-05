@@ -411,6 +411,19 @@ export const GateforgeConfigSchema = z
             include: z.array(z.string().min(1)).min(1),
             /** Globs to exclude. */
             exclude: z.array(z.string().min(1)),
+            /**
+             * Owner-declared TEST/DEVELOPER TOOLING (0.10.2). A changed
+             * file matching one is attributed `test-tooling:<file>`: it
+             * EXPANDS the evaluation scope (conservative, never a skip)
+             * and is never `CHANGE_UNMAPPED`. It cannot hide product
+             * code — a discovered resource's own source keeps its own
+             * treatment, and a glob matching one is a config error.
+             * ABSENT = nothing is declared, byte for byte, digests
+             * included: the key lives in `.gateforge.yml`, so the list is
+             * inside the owner-approved policy digest like every other
+             * declaration there.
+             */
+            testTooling: z.array(z.string().min(1)).optional(),
           })
           .strict(),
       })

@@ -63,7 +63,9 @@ import {
   type NativeListResult,
 } from './reconcile.js';
 import type { InferenceResult } from './inference.js';
+import { runnerConfigPaths } from './runner-config-paths.js';
 import {
+  namedPathGraph,
   scanTestFiles,
   UNRESOLVED_TITLE_PLACEHOLDER,
   type RepoRelativeFileFilter,
@@ -160,12 +162,18 @@ export interface DiscoverResult {
    */
   fileVerdict: (file: string) => RunnerFileVerdict;
   /**
-   * Files reachable from a CONFIGURED-runner catalog test file by
+   * The repository's own test infrastructure, as the import graph proves
+   * it: files reachable from a CONFIGURED-runner catalog test file by
    * relative import (transitively, bounded by the scan's traversal
-   * budget) — the helper/fixture modules the suite's own tests load,
-   * proven by the import graph rather than by a folder name. Empty when
-   * the scan's import budget cut resolution short: an incomplete graph
-   * must attribute nothing, never guess.
+   * budget) — the helper/fixture modules the suite's own tests load —
+   * PLUS the files every resolved runner configuration NAMES by a
+   * relative path string (its reporter, `globalSetup`/`globalTeardown`, a
+   * project `storageState`, a `require.resolve('./…')`) and their own
+   * import closure. No test imports those, so a graph rooted at the
+   * catalog's test files can never reach them; both halves are read by
+   * the same parser and the same import resolution. Empty when a budget
+   * cut resolution short: an incomplete graph must attribute nothing,
+   * never guess.
    */
   testInfrastructureFiles: string[];
   /**
@@ -374,6 +382,7 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
           scan,
           new Set(entries.filter((row) => row.runner === config.runner).map((row) => row.file)),
         ),
+        ...namedPathGraph(cwd, runnerConfigPaths(cwd, config.runner)).files,
       ].sort(),
       timings: {
         scanMs,

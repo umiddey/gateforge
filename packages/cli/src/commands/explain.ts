@@ -369,6 +369,8 @@ function pathGovernance(args: {
     resources: [],
     nextStep:
       'map the resource it belongs to, declare documentation folders with `gateforge init --docs-exclude <folders>`, ' +
-      'or add the detection that owns it. Never weaken the policy.',
+      "declare developer/CI tooling with `project.paths.testTooling` in `.gateforge.yml` " +
+      "(a `scripts/e2e/**` helper only `package.json` names — the declaration expands the scope and is " +
+      'never a skip), or add the detection that owns it. Never weaken the policy.',
   };
 }

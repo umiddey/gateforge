@@ -106,6 +106,8 @@ import {
   inspectEngineBrowserBuilds,
   resolveEngineBrowserInstall,
 } from '../engine-browser.js';
+import { runPipeline, sourcesByResourceId } from '../pipeline.js';
+import { testToolingSourceConflicts } from '../scope.js';
 
 export const ENFORCEMENT_USAGE =
   'usage: gateforge enforcement doctor [--json] [--strict-preflight]\n' +
@@ -1179,12 +1181,16 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
   let strictE2E = false;
   let strictnessMode: StrictnessMode = 'strict';
   let configOk = true;
+  // Hoisted so the checks below can read the loaded config without
+  // loading it twice (and never after a failed load).
+  let loadedConfig: GateforgeConfig | null = null;
   // The managed-run preconditions are an independent, read-only
   // section: they add no authority over the enforcement checks.
   const run = await buildRunPreflight(io);
   let configDetail = 'no .gateforge.yml — gateforge is not initialized in this repository';
   try {
     const config = loadConfigAt(io.cwd);
+    loadedConfig = config;
     mode = config.enforcement?.mode ?? 'standard';
     strictE2E = config.enforcement?.strictE2E === true;
     strictnessMode = resolveStrictnessMode(config);
@@ -1195,6 +1201,57 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     configDetail = `.gateforge.yml could not be loaded: ${(error as Error).message.split('\n')[0] ?? 'unknown'}`;
   }
   checks.push({ id: 'config', status: configOk ? 'ok' : 'fail', detail: configDetail });
+
+  // 0.10.2: a declared test-tooling glob that reaches a discovered
+  // resource's own source is a CONFIG error. `check` refuses it with
+  // exit 2; the doctor states it before the owner ever commits, and
+  // never runs the detection pipeline for a repository that declares no
+  // globs (today's report, byte for byte).
+  const declaredTestTooling = loadedConfig?.project.paths.testTooling ?? [];
+  if (loadedConfig !== null && declaredTestTooling.length > 0) {
+    try {
+      const pipeline = await runPipeline({
+        cwd: io.cwd,
+        env: io.env,
+        config: loadedConfig,
+        provider: 'all-files',
+        stateDir: resolveStateDir(io.cwd),
+      });
+      const sources = [
+        ...new Set(
+          pipeline.graph.resources.flatMap((resource) =>
+            resource.id === null
+              ? []
+              : sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog).get(resource.id) ?? [],
+          ),
+        ),
+      ];
+      const conflicts = testToolingSourceConflicts(loadedConfig, sources);
+      checks.push({
+        id: 'test-tooling',
+        status: conflicts.length === 0 ? 'ok' : 'fail',
+        detail:
+          conflicts.length === 0
+            ? `declared test tooling (${declaredTestTooling.join(', ')}) matches no discovered resource source`
+            : conflicts
+                .map(
+                  (conflict) =>
+                    `project.paths.testTooling glob '${conflict.glob}' matches the source of a discovered ` +
+                    `resource ('${conflict.file}') — declared test tooling cannot be product code; narrow the glob`,
+                )
+                .join('; '),
+      });
+    } catch (error) {
+      checks.push({
+        id: 'test-tooling',
+        status: 'warn',
+        detail:
+          'declared test tooling could not be checked against the discovered resources: ' +
+          `${(error as Error).message.split('\n')[0] ?? 'discovery failed'} — ` +
+          '`gateforge check` refuses such a glob with exit 2',
+      });
+    }
+  }
 
   // Gate strictness: a softened gate is not
   // a failure — it is an owner decision that must stay LOUD forever, so

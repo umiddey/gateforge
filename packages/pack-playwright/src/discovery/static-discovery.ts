@@ -1304,6 +1304,122 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
   return state.result;
 }
 
+/** One named-path graph walk: the files reached, and whether it was complete. */
+export interface NamedPathGraph {
+  /** Repo-relative files a root names, plus their own import closure. */
+  files: string[];
+  /** True when the traversal budget cut the walk short. */
+  budgetExceeded: boolean;
+}
+
+/**
+ * The files the given roots NAME, plus their own import closure.
+ *
+ * A root is a runner configuration: `reporter: [['./tests/e2e/fixtures/reporter.js']]`,
+ * `globalSetup`, `globalTeardown`, a project `use: { storageState }`, a
+ * `require.resolve('./…')` — none of which is an import statement, so the
+ * catalog's import graph never reaches it. This walk reads them the same
+ * way the rest of the scanner reads code: the SAME parser, the SAME
+ * `resolveSpecifier` (so `./x`, `./x.ts`, `./x/index.js` behave exactly
+ * as an import does), the SAME traversal budget.
+ *
+ * Two edges leave a modeled file, and both are followed:
+ * - every RELATIVE string literal that resolves to an existing file
+ *   (the named-file edge). A literal that resolves to nothing contributes
+ *   nothing — a declaration is read as a fact, never as a
+ *   candidate-supplied string;
+ * - the file's own resolved import edges (the transitive edge).
+ *
+ * ISOLATED from the test scan on purpose: this walk builds its own scan
+ * state, so a runner configuration that half-parses adds no parse-error
+ * row to the catalog and can never flip `inventoryComplete`.
+ *
+ * FAIL-OPEN like the catalog's own import graph: a walk the budget cut
+ * short attributes NOTHING, because a partial graph must attribute
+ * nothing rather than guess at the rest.
+ *
+ * Args:
+ *   cwd: absolute repo root.
+ *   roots: repo-relative posix files to start from (excluded from the answer).
+ *   budget: traversal knobs (defaults as documented on {@link ScanBudget}).
+ *
+ * Returns:
+ *   NamedPathGraph: the reached files, sorted, and the budget flag.
+ */
+export function namedPathGraph(cwd: string, roots: readonly string[], budget?: ScanBudget): NamedPathGraph {
+  const state: ScanState = {
+    cwd,
+    result: {
+      entries: [],
+      unresolved: [],
+      parseErrors: [],
+      registrationWarnings: [],
+      scannedFiles: [],
+      importsByFile: [],
+      budgetExceeded: false,
+    },
+    models: new Map(),
+    seeded: new Set(),
+    traversed: new Set(),
+    resolving: new Set(),
+    maxTraversedFiles: budget?.maxTraversedFiles ?? DEFAULT_MAX_TRAVERSED_FILES,
+    maxImportDepth: budget?.maxImportDepth ?? DEFAULT_MAX_IMPORT_DEPTH,
+    testGlobals: (): boolean => false,
+  };
+  const rootFiles = new Set(roots);
+  const reached = new Set<string>();
+  const queue = [...roots];
+  while (queue.length > 0) {
+    const file = queue.pop() as string;
+    const model = modelOf(state, cwd, file, true);
+    if (model === null) continue;
+    for (const target of relativeLiteralsIn(state, cwd, model)) {
+      if (rootFiles.has(target) || reached.has(target)) continue;
+      reached.add(target);
+      queue.push(target);
+    }
+    for (const binding of model.bindings.values()) {
+      if (binding.kind !== 'import' || binding.target === undefined) continue;
+      const target = binding.target;
+      if (rootFiles.has(target) || reached.has(target)) continue;
+      reached.add(target);
+      queue.push(target);
+    }
+  }
+  if (state.result.budgetExceeded) return { files: [], budgetExceeded: true };
+  return { files: [...reached].sort(), budgetExceeded: false };
+}
+
+/**
+ * The repo-relative files a modeled file NAMES by a relative string
+ * literal, through the scanner's own specifier resolution.
+ *
+ * Args:
+ *   state: the walk's scan state (specifier resolution reads its sets).
+ *   cwd: absolute repo root.
+ *   model: the modeled file to read the literals from.
+ *
+ * Returns:
+ *   string[]: resolved repo-relative paths, sorted, without duplicates.
+ */
+function relativeLiteralsIn(state: ScanState, cwd: string, model: FileModel): string[] {
+  const found = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    const text = ts.isStringLiteral(node)
+      ? node.text
+      : ts.isNoSubstitutionTemplateLiteral(node)
+        ? node.text
+        : null;
+    if (text !== null && (text.startsWith('./') || text.startsWith('../'))) {
+      const target = resolveSpecifier(state, cwd, model.file, text);
+      if (target !== null) found.add(target);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(model.source);
+  return [...found].sort();
+}
+
 /** Deterministic entry order: file, then titlePath, then line. */
 function compareEntry(a: StaticTestEntry, b: StaticTestEntry): number {
   return (

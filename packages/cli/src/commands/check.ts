@@ -147,6 +147,7 @@ import {
   volatileEchoSkips,
   engineBundleDigestOf,
   executionBoundaryDigestOf,
+  GateforgeConfigError,
   GateReceiptSchema,
   humanMessage,
   LOCAL_UNISOLATED_BOUNDARY,
@@ -220,6 +221,7 @@ import { changeBaseTextReader, mergeRequestScopePreflight, resolveProvider, text
 import {
   computeEvaluationScope,
   detectStagedWorkingTreeMismatches,
+  testToolingSourceConflicts,
   type ScopeDecision,
 } from '../scope.js';
 import {
@@ -1263,6 +1265,33 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     ...(fixedChangedFiles !== undefined ? { changedFilesOverride: fixedChangedFiles } : {}),
     pluginCache: cacheControl,
   });
+  // 0.10.2: a declared test-tooling glob that reaches a discovered
+  // resource's own source is a CONFIG error, not a silent pass — the
+  // declaration exists so tooling can be attributed, never so product
+  // code can hide behind it. Fail closed before anything is graded.
+  const toolingConflicts = testToolingSourceConflicts(
+    config,
+    [
+      ...new Set(
+        pipeline.graph.resources.flatMap((resource) =>
+          resource.id === null ? [] : sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog).get(resource.id) ?? [],
+        ),
+      ),
+    ],
+  );
+  if (toolingConflicts.length > 0) {
+    throw new GateforgeConfigError(
+      toolingConflicts.map((conflict) => ({
+        file: '.gateforge.yml',
+        jsonPath: '$.project.paths.testTooling',
+        message:
+          `glob '${conflict.glob}' matches the source of a discovered resource: declared test tooling ` +
+          'cannot be product code — narrow the glob',
+        expected: 'a glob that matches no discovered resource source',
+        got: conflict.file,
+      })),
+    );
+  }
   // Owner quarantine population: check is
   // the debt view, so an owner-quarantined test is reported here too —
   // loaded against the INJECTED run clock, never the wall clock. It is

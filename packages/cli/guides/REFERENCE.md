@@ -669,6 +669,26 @@ check:
   policy digest, so a weakened candidate fails closed until a separate
   trusted update is accepted.
 
+**Developer and CI tooling is owner-declared.** A `scripts/e2e/run.sh`
+only `package.json` scripts name, or a custom reporter the runner
+configuration NAMES but no test imports, is test infrastructure by
+different evidence — the import graph roots at the runner configurations
+too, so a `reporter`, `globalSetup`, `globalTeardown`, project
+`storageState` or `require.resolve('./…')` path that resolves to an
+existing file is attributable, together with its own import closure. What
+NOBODY names, the owner declares: `project.paths.testTooling` in
+`.gateforge.yml` takes a list of globs, and a changed file matching one is
+attributed `test-tooling:<file>`. The pass is deliberately weak — it
+EXPANDS the evaluation scope exactly like test infrastructure (so a change
+to declared tooling is never proven by a slice of the suite) and it is
+NEVER `CHANGE_UNMAPPED`. It cannot hide product code: a discovered
+resource's own source keeps its own treatment, and a glob that matches
+one is a config error — `gateforge check` exits 2 and
+`gateforge enforcement doctor` fails a `test-tooling` row, both naming the
+file and the glob. The key lives in `.gateforge.yml`, so it is inside the
+approved policy digest: widening the list needs your pin re-approved.
+Absent means today's behaviour, byte for byte, digests included.
+
 **Gateforge's own files are policy inputs.** The config, the policy,
 classification, behavior and runtime documents, the exclusion declarations,
 the mapping sidecar, the adapter/waiver/baseline/quarantine records, the
@@ -1043,6 +1063,14 @@ Enforcement-relevant sections:
   `playwright` (the default when the key is absent), `pytest`, `vitest` or
   `cypress`. `check`, `next`, `tests`, `test-gates`, `doctor` and `init`
   all follow it. See `guides/RUNNER-NEUTRAL-EVIDENCE.md`.
+- `project.paths.testTooling:` — globs the owner asserts are test/developer
+  tooling (`scripts/e2e/**`, `tools/dev/**`). A changed file matching one is
+  attributed `test-tooling:<file>`: scope-expanding exactly like test
+  infrastructure and never `CHANGE_UNMAPPED`, and never a pass over a
+  discovered resource's own source — a glob that matches one is a config
+  error (`check` exits 2). Optional; inside the trusted policy digest, so
+  changing the list moves the approved revision. See "Developer and CI
+  tooling is owner-declared" above.
 
 ## Classification policy (`.gateforge/classification-policy.yml`)
 

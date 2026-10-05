@@ -186,6 +186,8 @@ export {
   unnamedProjectConfigWarning,
   findPlaywrightConfig,
   findPlaywrightConfigs,
+  runnerConfigPaths,
+  existingRepoFile,
   PLAYWRIGHT_CONFIG_NAMES,
   CONFIG_SEARCH_PRUNED_DIRS,
   untrustedEnv,

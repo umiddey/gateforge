@@ -37,6 +37,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { normalizeChangedFiles, type GateforgeConfig } from '@gate-forge/core';
+import picomatch from 'picomatch';
 import { GATEFORGE_TEST_MAP_PATH } from './gateforge-owned.js';
 import {
   GIT_SCOPE_CONTROL_BASENAMES,
@@ -263,6 +264,10 @@ export function computeEvaluationScope(input: {
   const docsOnlyFiles = new Set<string>();
   const isDocsOnly = (file: string): boolean =>
     file.startsWith('docs/') && file.endsWith('.md');
+  // 0.10.2: the owner's declared test/dev tooling globs, compiled once
+  // for this change set. ABSENT = no matchers = exactly today's answer
+  // for every file, which is what the key's contract promises.
+  const testToolingMatchers = (input.config.project.paths.testTooling ?? []).map((glob) => picomatch(glob));
   for (const file of changed) {
     // Each branch below is one attribution of the file. The branches
     // marked neutral are the kinds that cannot carry product behaviour;
@@ -317,6 +322,19 @@ export function computeEvaluationScope(input: {
     // A discovered resource's own source is product behaviour by
     // definition: it is never neutral.
     if (knownSources.has(file)) continue;
+    // 0.10.2: the OWNER asserts this path is test/developer tooling. The
+    // pass is deliberately weak — it expands the scope exactly like test
+    // infrastructure (so a change to declared tooling is never proven by
+    // a slice of the suite) and is neutral, so it is never
+    // CHANGE_UNMAPPED. It sits AFTER the known-source check above: a
+    // discovered resource's own source is product behaviour, and no
+    // declaration may hide it (the caller turns such a glob into a
+    // config error).
+    if (testToolingMatchers.some((matcher) => matcher(file))) {
+      reasons.add(`test-tooling:${file}`);
+      neutralFiles.add(file);
+      continue;
+    }
     if (isDocsOnly(file)) {
       docsOnlyFiles.add(file);
       neutralFiles.add(file);
@@ -360,6 +378,51 @@ export function computeEvaluationScope(input: {
   return expandedBecause.length > 0
     ? { mode: 'all', changedFiles: changed, ...decision }
     : { mode: 'changed', changedFiles: changed, ...decision };
+}
+
+/** One declared test-tooling glob that reaches a discovered resource's own source. */
+export interface TestToolingConflict {
+  /** The product source file the glob matches. */
+  file: string;
+  /** The declared glob, verbatim. */
+  glob: string;
+}
+
+/**
+ * The declared test-tooling globs that match a discovered resource's own
+ * source.
+ *
+ * The declaration cannot hide product code: `computeEvaluationScope`
+ * reads the resource-source check FIRST and never reaches the tooling
+ * branch for such a file, so a change to it keeps its ordinary
+ * attribution. This is the other half — the owner is told their glob is
+ * wrong instead of silently watching a narrowing pass take effect. Both
+ * `check` and `enforcement doctor` report the same list from this one
+ * function, so they cannot disagree.
+ *
+ * Args:
+ *   config: the loaded gateforge config.
+ *   knownSourceFiles: every repo-relative path a discovered resource
+ *     claims as its own source.
+ *
+ * Returns:
+ *   TestToolingConflict[]: sorted by file; empty when nothing conflicts
+ *   (including when the owner declares no globs at all).
+ */
+export function testToolingSourceConflicts(
+  config: GateforgeConfig,
+  knownSourceFiles: readonly string[],
+): TestToolingConflict[] {
+  const globs = config.project.paths.testTooling ?? [];
+  if (globs.length === 0 || knownSourceFiles.length === 0) return [];
+  const matchers = globs.map((glob) => ({ glob, matches: picomatch(glob) }));
+  const conflicts: TestToolingConflict[] = [];
+  for (const raw of knownSourceFiles) {
+    const file = normalizeRepoPath(raw);
+    const hit = matchers.find((matcher) => matcher.matches(file));
+    if (hit !== undefined) conflicts.push({ file, glob: hit.glob });
+  }
+  return conflicts.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
 }
 
 /** The tracked mapping sidecar path (scope-expansion trigger). */

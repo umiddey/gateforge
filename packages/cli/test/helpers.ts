@@ -162,6 +162,8 @@ export function configYml(options: {
   clockMode?: 'fixed' | 'system';
   /** Owner-declared evidence exclusions (0.10.0 `evidence.exclude`). */
   evidence?: { docs?: readonly string[]; cache?: readonly string[] };
+  /** Owner-declared test/dev tooling globs (0.10.2 `project.paths.testTooling`). */
+  testTooling?: readonly string[];
 } = {}): string {
   const include = options.include ?? "['src/**/*.txt']";
   const plugins =
@@ -195,13 +197,22 @@ export function configYml(options: {
             ];
           }),
         ].join('\n')}`;
+  // Same rule as `evidenceSection`: absent emits ZERO bytes, so a fixture
+  // that declares no test tooling keeps byte-identical `.gateforge.yml`
+  // text — and therefore the digest of every such fixture.
+  const testToolingSection =
+    options.testTooling === undefined
+      ? ''
+      : `\n    testTooling: ${options.testTooling.length === 0 ? '[]' : ''}${options.testTooling
+          .map((glob) => `\n      - ${JSON.stringify(glob)}`)
+          .join('')}`;
   return `\
 schemaVersion: 1
 project:
   languages: [python]
   paths:
     include: ${include}
-    exclude: []
+    exclude: []${testToolingSection}
 plugins:
 ${plugins}${evidenceSection}
 policies: .gateforge/policies.yml
