@@ -94,6 +94,10 @@ export const CauseCodeSchema = z.enum([
   'RESOURCE_SINGLETON_PER_TENANT',
   'RESPONSE_FIELD_MISSING_FROM_MODEL',
   'TWIN_PATH_DIVERGENT',
+  'BUSINESS_RULE_TEST_MISSING',
+  'BUSINESS_RULE_TEST_TYPE_MISMATCH',
+  'BUSINESS_RULE_TEST_UNPROVEN',
+  'BUSINESS_RULE_TEST_FAILING',
 ]);
 
 /** Inferred cause-code union. */
@@ -185,4 +189,17 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
     'about this read',
   TWIN_PATH_DIVERGENT:
     'Make the raw test and its witnessed twin send the same request: align the shared helper defaults, or map the pair with `twinOf`',
+  BUSINESS_RULE_TEST_MISSING:
+    'Write the test the rule names (a starter is printed by `gateforge next`), then map it with ' +
+    '`gateforge tests mark --rule <rule>/<case> --test <file>#<title> --kind <kind> --reason "…"`. ' +
+    'A mapping alone is a declaration, never a proof.',
+  BUSINESS_RULE_TEST_TYPE_MISMATCH:
+    'Map a test of the type the rule names (`gateforge tests explain` lists the accepted kinds): a ' +
+    'weaker test kind never satisfies a stronger rule type.',
+  BUSINESS_RULE_TEST_UNPROVEN:
+    'Run the mapped test under supervision for this exact candidate (`gateforge test-gates`). A case ' +
+    'with no passing, witnessed run is `unproven`, never satisfied.',
+  BUSINESS_RULE_TEST_FAILING:
+    'Fix the mapped test or the behaviour it proves: every mapped test of a case must pass (a green ' +
+    'sibling never forgives a red one).',
 });

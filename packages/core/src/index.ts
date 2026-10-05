@@ -312,6 +312,43 @@ export type {
 } from './schemas/coverage-policy.js';
 
 /**
+ * Business rules (plan 2026-10-05 §4/D1/D2): the owner-declared `rules:`
+ * section of the answers document, and the TYPE TABLE that decides which
+ * test kinds may prove a rule and what proof each of them owes. A rule is
+ * a declaration, never an obligation — nothing here mints an id the
+ * verdict engine grades; the pure evaluator does, over sealed run facts.
+ */
+export {
+  BUSINESS_RULES_KEY,
+  BUSINESS_RULE_CASE_STATUSES,
+  BUSINESS_RULE_NAMESPACE,
+  BUSINESS_RULE_TEST_TYPES,
+  BUSINESS_RULE_TYPE_TABLE,
+  BusinessRuleCaseSchema,
+  BusinessRuleHintsSchema,
+  BusinessRulePolicySchema,
+  BusinessRuleSchema,
+  BusinessRulesSchema,
+  IMPLICIT_CASE_ID,
+  businessRuleClaimId,
+  businessRuleTypeRows,
+  casesOf,
+  isBusinessRuleClaimId,
+  parseBusinessRuleClaimId,
+} from './schemas/business-rules.js';
+/** Inferred business-rule types. */
+export type {
+  BusinessRule,
+  BusinessRuleCase,
+  BusinessRuleCaseStatus,
+  BusinessRuleHints,
+  BusinessRulePolicy,
+  BusinessRules,
+  BusinessRuleTestType,
+  BusinessRuleTypeRow,
+} from './schemas/business-rules.js';
+
+/**
  * Staged-runtime configuration (plan 2026-09-21 witnessed pre-commit):
  * the owner-reviewed `.gateforge/runtime.yml` — dependency preparation,
  * sanctioned dependency reuse, and candidate-owned services with
@@ -806,6 +843,30 @@ export type {
   CoverageConfigError,
   CoverageBlockingFinding,
   CoveragePolicyResult,
+} from './policy/index.js';
+
+/**
+ * Owner-declared business-rules evaluator (plan 2026-10-05 §4/D4): pure;
+ * grades every rule case from the resolver's rule bindings and — when one
+ * exists — the SEALED facts of a run, and returns typed
+ * `BUSINESS_RULE_TEST_*` findings. It mints no obligation, no verdict and
+ * no receipt field.
+ */
+export {
+  evaluateBusinessRules,
+  isBusinessRuleFinding,
+  worstBusinessRuleStatus,
+} from './policy/index.js';
+/** Business-rule evaluator input/result types. */
+export type {
+  BusinessRuleBinding,
+  BusinessRuleRunFacts,
+  BusinessRuleTestFact,
+  BusinessRuleConfigError,
+  BusinessRuleFinding,
+  BusinessRuleCaseResult,
+  BusinessRuleEvaluation,
+  EvaluateBusinessRulesInput,
 } from './policy/index.js';
 
 /**

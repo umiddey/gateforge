@@ -34,6 +34,19 @@ export {
   type CoveragePolicyResult,
 } from './coverage.js';
 export {
+  evaluateBusinessRules,
+  isBusinessRuleFinding,
+  worstBusinessRuleStatus,
+  type BusinessRuleBinding,
+  type BusinessRuleRunFacts,
+  type BusinessRuleTestFact,
+  type BusinessRuleConfigError,
+  type BusinessRuleFinding,
+  type BusinessRuleCaseResult,
+  type BusinessRuleEvaluation,
+  type EvaluateBusinessRulesInput,
+} from './business-rules.js';
+export {
   TRUSTED_POLICY_DOMAIN,
   trustedPolicyDigest,
   policyWeakenedCandidate,
