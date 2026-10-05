@@ -745,6 +745,34 @@ export const GateforgeConfigSchema = z
       })
       .strict()
       .optional(),
+    /** Page-reader selection and owner-declared audience/error expectations (0.13). */
+    pages: z
+      .object({
+        router: z.enum(['react-router', 'manual']),
+        audiences: z.array(z.object({
+          name: z.string().min(1),
+          loginRoute: z.string().startsWith('/'),
+          guard: z.string().min(1).optional(),
+          pathPrefix: z.string().startsWith('/').optional(),
+          session: z.string().min(1).optional(),
+        }).strict()).default([]),
+        errorMarkers: z.array(z.string().min(1)).default([]),
+        params: z.record(z.string(), z.record(z.string(), z.string())).default({}),
+        exclude: z.array(z.string().startsWith('/')).default([]),
+        sweep: z.boolean().default(true),
+      })
+      .strict()
+      .superRefine((pages, ctx) => {
+        const names = new Set<string>();
+        for (const [index, audience] of pages.audiences.entries()) {
+          if (names.has(audience.name)) ctx.addIssue({ code: 'custom', path: ['audiences', index, 'name'], message: `duplicate audience '${audience.name}'` });
+          names.add(audience.name);
+          if ((audience.guard === undefined) === (audience.pathPrefix === undefined)) {
+            ctx.addIssue({ code: 'custom', path: ['audiences', index], message: 'audience requires exactly one of guard or pathPrefix' });
+          }
+        }
+      })
+      .optional(),
   })
   .strict();
 

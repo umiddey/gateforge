@@ -56,6 +56,28 @@ describe('parseConfig (pin #6)', () => {
     expect(config.plugins).toHaveLength(2);
     expect(config.clock.mode).toBe('system');
   });
+  it('validates pages router, audiences, error markers and sweep settings', () => {
+    const pages = parseConfig({
+      ...validConfig,
+      pages: {
+        router: 'react-router',
+        audiences: [{ name: 'tenant', loginRoute: '/login', guard: 'TenantGuard' }],
+        errorMarkers: ['Something went wrong'],
+        params: { '/orders/:id': { id: 'seeded-order' } },
+        exclude: [],
+        sweep: true,
+      },
+    }).pages;
+    expect(pages?.audiences[0]?.guard).toBe('TenantGuard');
+    expect(() => parseConfig({
+      ...validConfig,
+      pages: { router: 'other', audiences: [], errorMarkers: [], params: {}, exclude: [], sweep: true },
+    })).toThrow();
+    expect(() => parseConfig({
+      ...validConfig,
+      pages: { router: 'manual', audiences: [{ name: 'bad', loginRoute: '/login' }], errorMarkers: [], params: {}, exclude: [], sweep: true },
+    })).toThrow();
+  });
 
   it('defaults an absent runner key to playwright (frozen behavior)', () => {
     const config = parseConfig(validConfig);

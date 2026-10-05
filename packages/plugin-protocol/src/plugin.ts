@@ -53,6 +53,8 @@ export interface DiscoverSections {
   fastapi?: unknown;
   /** `endpoints:` of the owner-answers document. */
   endpoints?: unknown;
+  /** `pages:` of `.gateforge.yml`. */
+  pages?: unknown;
 }
 
 /**

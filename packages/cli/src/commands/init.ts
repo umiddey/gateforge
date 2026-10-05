@@ -46,6 +46,7 @@ import {
 } from '../route-plane-proposals.js';
 import { PACK_VERSION as PACK_FASTAPI_VERSION } from '@gate-forge/pack-fastapi';
 import { PACK_VERSION as PACK_HTTP_VERSION } from '@gate-forge/pack-http';
+import { PACK_VERSION as PACK_REACT_ROUTER_VERSION } from '@gate-forge/pack-react-router';
 import { PACK_VERSION as PACK_TASK_VERSION } from '@gate-forge/pack-task';
 import { renderAlembicOptIn } from '@gate-forge/pack-alembic';
 import { parseArgs, stringFlag } from '../args.js';
@@ -143,6 +144,7 @@ export const BEHAVIOR_CHECKLIST = [
 const BUNDLED_PLUGIN_MODULES: Readonly<Record<string, string>> = Object.freeze({
   'gateforge.pack-fastapi': '@gate-forge/pack-fastapi',
   'gateforge.pack-http': '@gate-forge/pack-http',
+  'gateforge.pack-react-router': '@gate-forge/pack-react-router',
   'gateforge.pack-sqlalchemy': '@gate-forge/pack-sqlalchemy',
   'gateforge.pack-task': '@gate-forge/pack-task',
 });
@@ -158,6 +160,7 @@ const BUNDLED_PLUGIN_MODULES: Readonly<Record<string, string>> = Object.freeze({
 const BUNDLED_PLUGIN_VERSIONS: Readonly<Record<string, string>> = Object.freeze({
   'gateforge.pack-fastapi': PACK_FASTAPI_VERSION,
   'gateforge.pack-http': PACK_HTTP_VERSION,
+  'gateforge.pack-react-router': PACK_REACT_ROUTER_VERSION,
   'gateforge.pack-sqlalchemy': PACK_SQLALCHEMY_VERSION,
   'gateforge.pack-task': PACK_TASK_VERSION,
 });
@@ -569,6 +572,7 @@ function configTemplate(
     runner?: string;
     /** `unmatchedRoutes` writes the owner-owned `endpoints.unmatchedRoutes` key; undefined writes NO key. */
     unmatchedRoutes?: 'block' | 'warn';
+    pagesBlock?: string;
   } = {},
 ): string {
   const enforcementBlock =
@@ -665,7 +669,7 @@ witness:
   maxDurationSeconds: 5
 clock:
   mode: system
-${endpointsBlock}${runnerBlock}${historyBlock}${strictnessBlock}${enforcementBlock}\
+${endpointsBlock}${options.pagesBlock ?? ''}${runnerBlock}${historyBlock}${strictnessBlock}${enforcementBlock}\
 `;
 }
 
@@ -1079,6 +1083,38 @@ async function resolveHistoryRetention(io: Io): Promise<number | 'off' | undefin
     const days = Number(answer);
     if (Number.isInteger(days) && days >= 1 && days <= 90) return days;
     throw new UsageError("init: history retention must be an integer from 1 to 90, or 'off'");
+  } finally {
+    rl.close();
+  }
+}
+
+/** Prompts for the first page-reader declaration when the reader is selected. */
+async function resolvePagesBlock(io: Io, selected: readonly string[], configExists: boolean): Promise<string | undefined> {
+  if (!selected.includes('gateforge.pack-react-router') || configExists) return undefined;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    writeLine(io.stdout, "tip: configure pages.router, pages.audiences (name|loginRoute|guard), and pages.errorMarkers in .gateforge.yml; router pages are not guessed in a non-interactive init");
+    return undefined;
+  }
+  writeLine(io.stdout, 'Page reader: choose react-router or manual; audiences are owner declarations, never inferred.');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const routerAnswer = (await rl.question('pages.router [react-router/manual]: ')).trim().toLowerCase();
+    if (routerAnswer !== 'react-router' && routerAnswer !== 'manual') throw new UsageError("init: pages.router must be 'react-router' or 'manual'");
+    const audienceAnswer = (await rl.question('pages.audiences (comma-separated name|loginRoute|guard:Component or name|loginRoute|path:/prefix; blank for none): ')).trim();
+    const audiences = audienceAnswer === '' ? [] : audienceAnswer.split(',').map((row) => {
+      const [name, loginRoute, binding] = row.trim().split('|');
+      if (!name || !loginRoute || !binding) throw new UsageError('init: each page audience requires name|loginRoute|guard:Component or name|loginRoute|path:/prefix');
+      const separator = binding.indexOf(':');
+      const key = binding.slice(0, separator);
+      const value = binding.slice(separator + 1);
+      if (!value || (key !== 'guard' && key !== 'path')) throw new UsageError(`init: invalid audience binding '${binding}'`);
+      return { name, loginRoute, [key === 'guard' ? 'guard' : 'pathPrefix']: value };
+    });
+    const markerAnswer = (await rl.question('pages.errorMarkers (comma-separated exact error-screen text; blank for none): ')).trim();
+    const markers = markerAnswer === '' ? [] : markerAnswer.split(',').map((marker) => marker.trim()).filter(Boolean);
+    const audienceRows = audiences.map((audience) => `    - name: ${JSON.stringify(audience.name)}\n      loginRoute: ${JSON.stringify(audience.loginRoute)}\n      ${'guard' in audience ? `guard: ${JSON.stringify(audience.guard)}` : `pathPrefix: ${JSON.stringify(audience.pathPrefix)}`}`);
+    const audienceYaml = audienceRows.length === 0 ? '  audiences: []' : `  audiences:\n${audienceRows.join('\n')}`;
+    return `# Page routes are read from source; audience bindings are owner assertions.\npages:\n  router: ${routerAnswer}\n${audienceYaml}\n  errorMarkers: [${markers.map((marker) => JSON.stringify(marker)).join(', ')}]\n  params: {}\n  exclude: []\n  sweep: true\n`;
   } finally {
     rl.close();
   }
@@ -1931,6 +1967,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   if (unmatchedRoutes.note !== undefined) writeLine(io.stdout, unmatchedRoutes.note);
   const languages = scan.languages;
   const pluginIds = recommended;
+  const pagesBlock = await resolvePagesBlock(io, pluginIds, existedConfigAtStart);
   const configOptions = {
     strictE2E,
     enforcement:
@@ -1946,6 +1983,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     runner: detectedRunner,
     // The owner's answer for unmatched by-id routes; undefined writes no key.
     unmatchedRoutes: unmatchedRoutes.mode,
+    pagesBlock,
   };
   const generatedDraftConfig = (): ReturnType<typeof loadConfig> =>
     parseConfig(parseYaml(configTemplate(languages, pluginIds, configOptions)), { file: '.gateforge.yml' });

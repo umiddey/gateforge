@@ -29,6 +29,7 @@ import { UsageError } from './errors.js';
 export const TRUSTED_DETECTOR_PACKAGES: Readonly<Record<string, string>> = Object.freeze({
   'gateforge.pack-fastapi': '@gate-forge/pack-fastapi',
   'gateforge.pack-http': '@gate-forge/pack-http',
+  'gateforge.pack-react-router': '@gate-forge/pack-react-router',
   'gateforge.pack-sqlalchemy': '@gate-forge/pack-sqlalchemy',
   'gateforge.pack-task': '@gate-forge/pack-task',
   'gateforge.pack-auth': '@gate-forge/pack-auth',
@@ -40,6 +41,7 @@ export const TRUSTED_DETECTOR_PACKAGES: Readonly<Record<string, string>> = Objec
 const SHORT_NAMES: Readonly<Record<string, string>> = Object.freeze({
   'gateforge.pack-fastapi': 'pack-fastapi',
   'gateforge.pack-http': 'pack-http',
+  'gateforge.pack-react-router': 'pack-react-router',
   'gateforge.pack-sqlalchemy': 'pack-sqlalchemy',
   'gateforge.pack-task': 'pack-task',
   'gateforge.pack-auth': 'pack-auth',

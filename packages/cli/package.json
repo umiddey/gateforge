@@ -38,6 +38,7 @@
     "@gate-forge/pack-fastapi": "^0.12.0",
     "@gate-forge/pack-alembic": "^0.12.0",
     "@gate-forge/pack-http": "^0.12.0",
+    "@gate-forge/pack-react-router": "^0.12.0",
     "@gate-forge/pack-playwright": "^0.12.0",
     "@gate-forge/pack-sqlalchemy": "^0.12.0",
     "@gate-forge/pack-task": "^0.12.0",
