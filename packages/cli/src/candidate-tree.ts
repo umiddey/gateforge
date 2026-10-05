@@ -35,6 +35,9 @@ import {
   type RuntimeReuseMount,
   validateRuntimeReuseMounts,
 } from './runtime-reuse.js';
+import { DEFAULT_STATE_DIR } from './state.js';
+import { RUN_CACHE_DIR } from './run-cache.js';
+
 
 /** 40-char lowercase sha1 hex. */
 const TREE_PATTERN = /^[0-9a-f]{40}$/;
@@ -173,8 +176,13 @@ function collectEntries(
     }
     if (rel.startsWith(`${root}/`)) excludePrefix = rel.slice(root.length + 1);
   }
+  // `check` can write its fixed cache beside a run using a custom `--out`.
+  // Exclude only Gateforge's own cache root, not other ignored/state files.
+  const defaultCachePrefix = `${DEFAULT_STATE_DIR}/${RUN_CACHE_DIR}`;
   const excluded = (rel: string): boolean =>
     (excludePrefix !== null && (rel === excludePrefix || rel.startsWith(`${excludePrefix}/`))) ||
+    rel === defaultCachePrefix ||
+    rel.startsWith(`${defaultCachePrefix}/`) ||
     docsExclusions.some((folder) => rel === folder || rel.startsWith(`${folder}/`)) ||
     cacheExclusions.includes(rel);
   const inspectExcludedDirectory = (directory: string, relativeDirectory: string): void => {

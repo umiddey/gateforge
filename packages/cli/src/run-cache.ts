@@ -46,11 +46,14 @@ export const PLUGIN_CACHE_FORMAT_VERSION = 1;
 /** Domain tag keeping plugin-cache keys separate from every other digest. */
 export const PLUGIN_CACHE_DOMAIN = 'gateforge.plugin-cache.v1';
 
+/** Directory under the run-state dir holding all Gateforge run caches. */
+export const RUN_CACHE_DIR = 'cache';
+
 /** Directory under the run-state dir holding plugin cache entries. */
-export const PLUGIN_CACHE_DIR = 'cache/plugin';
+export const PLUGIN_CACHE_DIR = `${RUN_CACHE_DIR}/plugin`;
 
 /** Directory under the run-state dir holding pytest collection entries. */
-export const PYTEST_CACHE_DIR = 'cache/pytest';
+export const PYTEST_CACHE_DIR = `${RUN_CACHE_DIR}/pytest`;
 
 /** Beyond this many files a package tree is treated as uncacheable (fail closed). */
 const PACKAGE_DIGEST_FILE_BUDGET = 5000;

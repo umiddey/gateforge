@@ -193,6 +193,25 @@ describe('candidate tree ingestion computes the same id in process as it did one
       expect(entries.some((entry) => entry.path.endsWith('.pyc'))).toBe(false);
     });
   });
+  it('excludes only Gateforge’s default cache when a run uses another state directory', () => {
+    withTempRepo({}, (repo) => {
+      writeMixedFixture(repo);
+      const gitDir = resolveGitDir(repo.root, process.env);
+      if (gitDir === null) throw new Error('test repository has no Git directory');
+      const customStateDir = join(repo.root, '.gateforge', 'test-gates-selected');
+      const treeBeforeCache = computeCandidateTreeId(gitDir, repo.root, process.env, customStateDir, 'record');
+
+      repo.writeFiles({
+        '.gateforge/test-gates/cache/plugin/entry.json': '{"cached":true}\n',
+      });
+      const treeAfterCache = computeCandidateTreeId(gitDir, repo.root, process.env, customStateDir, 'record');
+      expect(treeAfterCache).toBe(treeBeforeCache);
+
+      repo.writeFiles({ '.gateforge/test-gates/run.log': 'ordinary state file\n' });
+      expect(computeCandidateTreeId(gitDir, repo.root, process.env, customStateDir, 'record')).not.toBe(treeBeforeCache);
+    });
+  });
+
 
   it('binds an approved runtime reuse mount to the same marker blob', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'gateforge-reuse-mount-'));
