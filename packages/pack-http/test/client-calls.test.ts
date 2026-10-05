@@ -209,17 +209,21 @@ describe('detector integration (phase 3)', () => {
     }
   });
 
-  it('reads the .gateforge/http-clients.json config document', () => {
+  it('reads the scan.httpClients section the host hands it', () => {
     const dir = project({
-      '.gateforge/http-clients.json': JSON.stringify({
-        clientSymbols: ['apiClient'],
-        urlBuilders: [{ name: 'buildApiPath', base: '/api' }],
-      }),
       'src/api.ts': `export const ACCOUNTS_PATH = buildApiPath('/accounts');\n`,
       'src/app.ts': `import { ACCOUNTS_PATH } from './api';\napiClient.get(ACCOUNTS_PATH);\n`,
     });
     try {
-      const outcome = createHttpDetector({ root: dir }).discover(['src']);
+      const outcome = createHttpDetector({ root: dir }).discover(['src'], {
+        root: dir,
+        sections: {
+          httpClients: {
+            clientSymbols: ['apiClient'],
+            urlBuilders: [{ name: 'buildApiPath', base: '/api' }],
+          },
+        },
+      });
       expect(frontendFacts(outcome)).toEqual(['GET /api/accounts']);
     } finally {
       rmSync(dir, { recursive: true, force: true });

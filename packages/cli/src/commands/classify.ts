@@ -20,14 +20,11 @@ import {
   ClassificationPolicySchema,
   DeleteRulesSchema,
   globMatch,
+  OWNER_ANSWERS_PATH,
   type DeleteRule,
   type JsonValue,
 } from '@gate-forge/core';
-import {
-  PLANES_CONFIG_PATH,
-  parsePlanesConfigText,
-  type SqlalchemyPlane,
-} from '@gate-forge/pack-sqlalchemy';
+import { planesConfigFromSection, type SqlalchemyPlane } from '@gate-forge/pack-sqlalchemy';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { parseArgs, repeatableStringFlag, stringFlag } from '../args.js';
 import type { Io } from '../io.js';
@@ -35,6 +32,7 @@ import { writeLine } from '../io.js';
 import { runPipeline, resolveRepoPath } from '../pipeline.js';
 import { resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
+import { declaresTopLevelSection, setTopLevelSection } from '../yaml-section.js';
 import { UsageError } from '../errors.js';
 
 export const CLASSIFY_USAGE =
@@ -263,14 +261,25 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
     throw new UsageError(`classify plane requires --reason (${CLASSIFY_PLANE_USAGE})`);
   }
 
-  const path = resolveRepoPath(io.cwd, PLANES_CONFIG_PATH);
+  const path = resolveRepoPath(io.cwd, OWNER_ANSWERS_PATH);
   if (!existsSync(path)) {
     throw new UsageError(
-      `classify plane updates only an existing owner-reviewed '${PLANES_CONFIG_PATH}'; add the reviewed file before using this command`,
+      `classify plane updates only an existing owner-reviewed '${OWNER_ANSWERS_PATH}' with a ` +
+        '`planes:` section; add the reviewed section before using this command',
     );
   }
   const before = readFileSync(path, 'utf8');
-  const current = parsePlanesConfigText(before, path);
+  // The ONE answers document, read once, exactly as the run reads it. A
+  // `planes:` section the writer cannot parse is refused here rather than
+  // rewritten from a half-understood body.
+  const answers = parseYaml(before) as Record<string, unknown> | null;
+  if (!declaresTopLevelSection(before, 'planes', OWNER_ANSWERS_PATH)) {
+    throw new UsageError(
+      `classify plane updates only an existing owner-reviewed 'planes:' section of ` +
+        `'${OWNER_ANSWERS_PATH}'; add the reviewed section before using this command`,
+    );
+  }
+  const current = planesConfigFromSection(answers?.['planes'], `${OWNER_ANSWERS_PATH} planes:`);
   // Overlap is tested in BOTH directions: a broader existing rule already
   // covers the new pattern, and a broader new pattern would swallow a
   // narrower existing rule. Either way an answer is already on record, and
@@ -289,7 +298,7 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
     // command is the only way the product ever suggests that answer, so
     // there was no other way back from it.
     throw new UsageError(
-      `classify plane will not add a conflicting rule for '${label}'; edit the existing owner-reviewed rule in '${PLANES_CONFIG_PATH}':\n` +
+      `classify plane will not add a conflicting rule for '${label}'; edit the existing owner-reviewed rule in '${OWNER_ANSWERS_PATH}':\n` +
         conflicting
           .map(
             (rule) =>
@@ -300,14 +309,25 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
     );
   }
   if (overlapping.length > 0) {
-    writeLine(io.stdout, `${label} already has the reviewed ${planeValue} plane in ${PLANES_CONFIG_PATH}; no change`);
+    writeLine(
+      io.stdout,
+      `${label} already has the reviewed ${planeValue} plane in the planes: section of ` +
+        `${OWNER_ANSWERS_PATH}; no change`,
+    );
     return 0;
   }
 
   const rule = { match, plane: planeValue as SqlalchemyPlane, reason: reason.trim() };
-  const after = `${JSON.stringify({ rules: [...current.rules, rule] }, null, 2)}\n`;
-  writeLine(io.stdout, configDiff(PLANES_CONFIG_PATH, before, after));
-  writeLine(io.stdout, `${PLANES_CONFIG_PATH} is an owner-reviewed classification input.`);
+  // Text-level splice into the existing document: every other section, and
+  // every comment the owner wrote, survives byte for byte.
+  const after = setTopLevelSection(
+    before,
+    'planes',
+    { rules: [...current.rules, rule] },
+    OWNER_ANSWERS_PATH,
+  );
+  writeLine(io.stdout, configDiff(OWNER_ANSWERS_PATH, before, after));
+  writeLine(io.stdout, `the planes: section of ${OWNER_ANSWERS_PATH} is an owner-reviewed classification input.`);
   writeLine(
     io.stdout,
     'If an approved policy pin is in use, this changes the trusted-policy digest and must be re-approved before strict gates run.',
@@ -317,7 +337,7 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
     return 0;
   }
   writeFileSync(path, after, 'utf8');
-  writeLine(io.stdout, `updated ${PLANES_CONFIG_PATH}`);
+  writeLine(io.stdout, `updated the planes: section of ${OWNER_ANSWERS_PATH}`);
   return 0;
 }
 

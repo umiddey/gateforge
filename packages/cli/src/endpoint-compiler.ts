@@ -51,7 +51,6 @@
  * `crud-delete`/`crud-archive` on a DELETE endpoint resolves the
  * archive-vs-hard question the linked model could not prove.
  */
-import { join as joinPath } from 'node:path';
 import {
   ENDPOINT_CAPABILITY_CONTRADICTION,
   ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED,
@@ -70,18 +69,24 @@ import {
   type HttpMethod,
   type JoinBlock,
 } from '@gate-forge/http-contract';
-import { HTTP_ENDPOINT_RESOURCE_KIND, type DetectorOutput, type Finding, type Resource } from '@gate-forge/core';
+import {
+  globMatch,
+  HTTP_ENDPOINT_RESOURCE_KIND,
+  OWNER_ANSWERS_PATH,
+  type DeleteRule,
+  type DetectorOutput,
+  type Finding,
+  type Resource,
+} from '@gate-forge/core';
 import {
   PLANE_RULE_CONTRADICTION,
-  PLANES_CONFIG_PATH,
-  readPlanesConfigOrNull,
+  planesConfigFromSection,
   resolvePlaneByRules,
   type PlanesConfig,
 } from '@gate-forge/pack-sqlalchemy';
 import {
-  ENDPOINTS_CONFIG_PATH,
   handlerSimpleName,
-  readEndpointsConfigOrNull,
+  parseEndpointsConfigDocument,
   resolveDeclaredCapabilities,
   type EndpointsConfig,
 } from './endpoint-config.js';
@@ -131,6 +136,12 @@ interface BusinessResourceName {
   kind: string;
   /** Declaration location of the first same-named resource (diagnostics). */
   location: HttpLocation;
+  /**
+   * Source files this resource name was discovered under. The owner's
+   * `deleteRules` globs match over exactly these, so the endpoint and its
+   * linked resource resolve hard/archive from ONE declaration.
+   */
+  sources: Set<string>;
   /**
    * Plane evidence visible at compile time for this resource name:
    * `attributes.plane` across same-named business (non-endpoint)
@@ -423,6 +434,26 @@ const SEARCH_SHAPED = (c: CapabilityContext): boolean =>
   CAPABILITY_RULES.find((rule) => rule.capability === 'search-query')?.test(c) ?? false;
 
 /** Deletes classify separately: semantics need positive evidence. */
+/**
+ * The owner's hard/archive answer for one endpoint, from its `deleteRules`
+ * matched over the endpoint's OWN route source files — the same input the
+ * classifier matches them against for the endpoint resource, so a route
+ * and its resource read one declaration. Returns null when no rule matches
+ * or when matching rules disagree (never pick one).
+ */
+function ownerSemanticsForEndpoint(
+  routeSources: readonly string[],
+  deleteRules: readonly DeleteRule[] | undefined,
+): 'hard' | 'archive' | null {
+  if (deleteRules === undefined || deleteRules.length === 0) return null;
+  let answer: 'hard' | 'archive' | null = null;
+  for (const rule of deleteRules) {
+    if (!routeSources.some((source) => globMatch(source, rule.match))) continue;
+    if (answer !== null && answer !== rule.semantics) return null; // contradictory
+    answer = rule.semantics;
+  }
+  return answer;
+}
 function classifyDelete(
   routes: readonly HttpContractFact[],
   deleteSemantics: 'hard' | 'archive' | null,
@@ -527,18 +558,38 @@ export function extractContractFacts(
 
 /**
  * Optional compiler inputs. Omitted (default) — e.g. by direct callers
- * and existing tests — no config document is read and the compiled
- * output is byte-identical to the pre-config-channel compiler.
+ * that declare no planes and no endpoint capabilities — the compiled
+ * output is byte-identical to a repository that declares neither.
+ *
+ * Since 0.11.0 both documents are SECTIONS of the one owner-answers
+ * file, already parsed and shape-validated by the host; the compiler no
+ * longer opens a file of its own.
  */
 export interface EndpointCompilerOptions {
   /**
-   * Repo root. When provided, `.gateforge/planes.json` is read from it
-   * (the same path convention the packs use) and its `match` rules
-   * become endpoint-plane evidence keyed on router source paths, and
-   * `.gateforge/endpoints.json` is read from it for declared endpoint
-   * capabilities (the service-delegation escape hatch).
+   * The owner's `planes:` section. Its `match` rules become
+   * endpoint-plane evidence keyed on router source paths; absent leaves
+   * every endpoint on the inheritance/operational channels as before.
    */
-  readonly cwd?: string;
+  readonly planes?: unknown;
+  /**
+   * The owner's `endpoints:` section: declared endpoint capabilities
+   * (the service-delegation escape hatch the `ENDPOINT_SEMANTICS_UNRESOLVED`
+   * message promises).
+   *
+   * Since 0.11.0 it no longer carries `crud-delete`/`crud-archive`: the
+   * hard-vs-archive answer exists ONCE, in `deleteRules` (D0).
+   */
+  readonly endpoints?: unknown;
+  /**
+   * The owner's `deleteRules` — the ONE place hard/archive is answered.
+   * Matched against a linked resource's SOURCE FILE with the same glob
+   * engine the classifier uses, so a DELETE route resolves its semantics
+   * from the same declaration the resource does. Absent = no owner
+   * answer, and a DELETE endpoint stays unresolved without model
+   * evidence.
+   */
+  readonly deleteRules?: readonly DeleteRule[];
 }
 
 /**
@@ -551,28 +602,25 @@ export function compileEndpointContribution(
 ): CompileResult {
   const { facts, findings } = extractContractFacts(contributions);
 
-  // Declarative endpoint-plane config (plan phase 5): read once per
-  // compile. Absence is normal (the default config has no rules and no
-  // observable effect); a malformed document throws (fail closed) — the
-  // CLI surfaces it as a config error instead of scanning with partial
-  // trust, mirroring the pack config readers exactly (same reader).
+  // Declarative endpoint-plane config (0.11.0: the owner's `planes:`
+  // section): read once per compile from what the host parsed. Absence is
+  // normal (the default config has no rules and no observable effect); a
+  // malformed section throws (fail closed) — the CLI surfaces it as a
+  // config error instead of scanning with partial trust, mirroring the
+  // pack config readers exactly (same reader).
   let planesConfig: PlanesConfig | null = null;
-  if (options.cwd !== undefined) {
-    try {
-      planesConfig = readPlanesConfigOrNull(joinPath(options.cwd, PLANES_CONFIG_PATH));
-    } catch (error) {
-      throw new UsageError((error as Error).message);
-    }
+  try {
+    planesConfig = planesConfigFromSection(options.planes, OWNER_ANSWERS_PATH);
+  } catch (error) {
+    throw new UsageError((error as Error).message);
   }
-  // Declarative endpoint-capability config (.gateforge/endpoints.json):
-  // identical posture, read once per compile beside the plane document.
+  // Declarative endpoint-capability config (0.11.0: the owner's
+  // `endpoints:` section): identical posture, from the same host parse.
   let endpointsConfig: EndpointsConfig | null = null;
-  if (options.cwd !== undefined) {
-    try {
-      endpointsConfig = readEndpointsConfigOrNull(joinPath(options.cwd, ENDPOINTS_CONFIG_PATH));
-    } catch (error) {
-      throw new UsageError((error as Error).message);
-    }
+  try {
+    endpointsConfig = parseEndpointsConfigDocument(options.endpoints, OWNER_ANSWERS_PATH);
+  } catch (error) {
+    throw new UsageError((error as Error).message);
   }
 
   const businessNames = new Map<string, BusinessResourceName>();
@@ -587,10 +635,15 @@ export function compileEndpointContribution(
           name,
           kind: resource.kind,
           location: resource.location,
+          // The SOURCE FILE the owner's `deleteRules` globs match over —
+          // the same input the classifier matches them against, so a route
+          // and its linked resource answer hard/archive identically.
+          sources: new Set<string>(),
           planes: new Set<string>(),
         };
         businessNames.set(name, entry);
       }
+      if (resource.source.length > 0) entry.sources.add(resource.source);
       if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND) continue; // never chain through endpoints
       const plane = resource.attributes['plane'];
       if (plane === 'tenant' || plane === 'master' || plane === 'global') entry.planes.add(plane);
@@ -618,6 +671,32 @@ export function compileEndpointContribution(
       }
     }
   }
+
+  // The owner's `deleteRules` (0.11.0, D0): the ONE place hard/archive is
+  // answered. Matched over each linked resource's source files with the
+  // SAME glob engine and the SAME input the classifier matches them
+  // against, so a route and its resource never disagree. Two owner rules
+  // that DISAGREE are a contradiction: this map resolves nothing for that
+  // name (the classifier reports the conflict on the resource), rather
+  // than picking one. A rule that merely disagrees with MODEL evidence is
+  // a different case — the classifier blocks the resource as conflicting,
+  // and the owner answer stays the route's positive evidence.
+  const ownerDeleteSemanticsByName = new Map<string, 'hard' | 'archive'>();
+  const ownerDeleteConflict = new Set<string>();
+  for (const entry of businessNames.values()) {
+    for (const rule of options.deleteRules ?? []) {
+      if (![...entry.sources].some((source) => globMatch(source, rule.match))) continue;
+      const existing = ownerDeleteSemanticsByName.get(entry.name);
+      if (existing !== undefined && existing !== rule.semantics) {
+        ownerDeleteSemanticsByName.delete(entry.name);
+        ownerDeleteConflict.add(entry.name);
+        break;
+      }
+      ownerDeleteSemanticsByName.set(entry.name, rule.semantics);
+    }
+  }
+  // A conflicting owner pair leaves the map entry ABSENT, so the route
+  // falls through to model evidence and, failing that, stays UNRESOLVED.
 
   const routes = facts.filter((fact) => fact.role === 'server-route');
   const calls = facts.filter((fact) => fact.role === 'frontend-call');
@@ -903,34 +982,39 @@ export function compileEndpointContribution(
       // may overlap); never duplicate a capability an earlier hit or a
       // detected rule already asserted.
       if (!capabilities.includes(hit.capability)) capabilities.push(hit.capability);
-      capabilityTrace.push({ capability: hit.capability, rule: 'endpoints.json', evidence: `declared: ${hit.reason}` });
+      capabilityTrace.push({ capability: hit.capability, rule: 'endpoints:', evidence: `declared: ${hit.reason}` });
     }
     let deleteSemantics: 'hard' | 'archive' | null = null;
-    // A declared crud-delete/crud-archive is positive human evidence: it
-    // resolves archive-vs-hard without model declarations and without
-    // requiring linkage (the model-evidence channel below stays for the
-    // undeclared case).
-    const declaredDelete = declaredHits.find(
-      (hit) => hit.capability === 'crud-delete' || hit.capability === 'crud-archive',
+    // The owner's OWN answer for this endpoint's delete semantics, when
+    // one resolved (model evidence is NOT an owner answer and mints no
+    // declaration signal below). Absent = the endpoint's semantics came
+    // from the handler text or the linked model alone.
+    let declaredDelete: 'hard' | 'archive' | undefined;
+    // D0 "one answer per fact": `endpoints:` no longer asserts
+    // crud-delete/crud-archive. The hard-vs-archive answer is the owner's
+    // `deleteRules` (and model evidence). Resolve from the owner's rules
+    // matched over the endpoint's own route sources (the same input the
+    // classifier matches them against for the endpoint resource), else the
+    // linked resource's owner answer, else model evidence.
+    const ownerSemantics = ownerSemanticsForEndpoint(
+      endpointRoutes.map((route) => route.source.file),
+      options.deleteRules,
     );
-    if (declaredDelete !== undefined) {
-      deleteSemantics = declaredDelete.capability === 'crud-archive' ? 'archive' : 'hard';
-      capabilityTrace.push({
-        capability: declaredDelete.capability,
-        rule: 'DELETE_DECLARED',
-        evidence: `declared delete semantics: ${declaredDelete.reason}`,
-      });
-    } else if (method === 'DELETE' && linkedResourceName !== null) {
-      const fromModel = deleteSemanticsByName.get(linkedResourceName) ?? null;
-      const classified = classifyDelete(endpointRoutes, fromModel);
+    if (method === 'DELETE') {
+      const fromOwner =
+        ownerSemantics ??
+        (linkedResourceName !== null ? ownerDeleteSemanticsByName.get(linkedResourceName) ?? null : null);
+      declaredDelete = fromOwner ?? undefined;
+      const fromModel =
+        linkedResourceName !== null ? deleteSemanticsByName.get(linkedResourceName) ?? null : null;
+      const classified = classifyDelete(endpointRoutes, fromOwner ?? fromModel);
       if (classified.capability !== null) {
         capabilities.push(classified.capability);
         capabilityTrace.push(...classified.trace);
         if (classified.capability === 'crud-archive') deleteSemantics = 'archive';
         if (classified.capability === 'crud-delete') deleteSemantics = 'hard';
-      } else {
-        // Plan phase 4 checklist: archive vs hard delete stays unresolved
-        // without positive semantics.
+      } else if (linkedResourceName !== null) {
+        // Archive vs hard delete stays unresolved without positive semantics.
         const key = `delete-semantics:${identity}`;
         if (!seenEndpointUnresolved.has(key)) {
           seenEndpointUnresolved.add(key);
@@ -960,7 +1044,7 @@ export function compileEndpointContribution(
             detail:
               `endpoint '${identity}' has no positive capability evidence (method alone never ` +
               'decides semantics); add handler/schema/model evidence, an explicit classification, ' +
-              'or a .gateforge/endpoints.json capability declaration',
+              'or a capability declaration in the endpoints: section of the owner-answers document',
             location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
           });
       }
@@ -1025,7 +1109,12 @@ export function compileEndpointContribution(
           schemaVersion: 1,
           target: { resourceName: linkedResourceName },
           dimension: 'delete-semantics',
-          assertion: deleteSemantics,
+          // The OWNER's answer (`deleteRules`), not whatever the handler
+          // text or the model happened to imply: the signal exists so the
+          // classifier sees one declaration of the owner's delete
+          // semantics, next to the resource's own, and can block when the
+          // two contradict.
+          assertion: declaredDelete,
           basis: 'declaration',
           source: `${ENDPOINT_COMPILER_DETECTOR_ID}:config`,
           location: record.routes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },

@@ -1,5 +1,6 @@
 /**
- * Declarative endpoint-capability config (`.gateforge/endpoints.json`).
+ * Declarative endpoint-capability config (`endpoints:` of the
+ * owner-answers document).
  *
  * The endpoint compiler derives capabilities from detector FACTS only
  * (method/path/handler-name/schema/link); a handler whose logic lives in
@@ -10,31 +11,33 @@
  * and/or exact method — every rule carrying a non-empty `reason`, the
  * review artifact.
  *
- * Posture mirrors `.gateforge/planes.json` exactly (same reader shape,
- * same fail-closed semantics):
+ * Posture mirrors the plane rules exactly (same reader shape, same
+ * fail-closed semantics):
  * - absence is normal and byte-identical to not having the channel;
- * - a malformed document throws (the CLI surfaces a config error rather
+ * - a malformed section throws (the CLI surfaces a config error rather
  *   than scanning with partial trust);
  * - ALL matching rules must AGREE: agreement applies the declared
  *   capability (composed with detected ones — capabilities concatenate,
  *   only `crud-*` fallbacks defer); disagreement emits a typed
  *   `ENDPOINT_CAPABILITY_CONTRADICTION` blocking entry and applies
  *   nothing — never first-rule-wins.
+ *
+ * The hard-vs-archive DELETE answer is NOT here (0.11.0, "one answer per
+ * fact"): it lives in the owner's `deleteRules`, which the compiler
+ * resolves per endpoint and per linked resource.
  */
 
-import { readFileSync } from 'node:fs';
 import { globMatch } from '@gate-forge/core';
 import type { HttpMethod } from '@gate-forge/http-contract';
 
-/** Repo-root-relative location of the declarative endpoint config. */
-export const ENDPOINTS_CONFIG_PATH = '.gateforge/endpoints.json';
-
 /**
  * The closed capability vocabulary a rule may assert — exactly the
- * compiler's own rule vocabulary (path/handler shapes plus the
- * corroborated crud fallbacks and both delete semantics). A declared
- * `crud-delete`/`crud-archive` on a DELETE endpoint resolves the
- * archive-vs-hard question the linked model could not prove.
+ * compiler's own rule vocabulary for WHAT an endpoint is (path/handler
+ * shapes plus the corroborated crud fallbacks).
+ *
+ * The two DELETE semantics are NOT here (0.11.0, "one answer per fact"):
+ * hard-vs-archive exists once, in the owner's `deleteRules`. A rule that
+ * tries to state it is refused by name rather than silently ignored.
  */
 export const ENDPOINT_CAPABILITIES = [
   'health-operations',
@@ -50,8 +53,6 @@ export const ENDPOINT_CAPABILITIES = [
   'crud-create',
   'crud-read',
   'crud-update',
-  'crud-delete',
-  'crud-archive',
 ] as const;
 
 /** One declared endpoint capability. */
@@ -215,45 +216,47 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
 }
 
 /**
- * Reads a declarative endpoint config document. Returns the default
- * config when the file is absent (normal; byte-identical to not having
- * the channel); malformed documents throw (fail closed — the CLI
- * surfaces the error instead of compiling with partial trust).
+ * Parses the owner's `endpoints:` section (0.11.0: these bytes moved
+ * into `.gateforge/classification-policy.yml` from
+ * `.gateforge/endpoints.json`, and the host hands them over already
+ * parsed). An ABSENT section is normal and yields the default config
+ * (byte-identical to not having the channel); a malformed one throws
+ * (fail closed — the CLI surfaces the error instead of compiling with
+ * partial trust).
  *
  * Accepted shape: `{ rules: [{ match?, handlers?, paths?, method?,
  * capability, reason }] }` — a rule carries AT LEAST ONE selector
  * (`match` router-file glob, `handlers` handler-simple-name globs,
  * `paths` canonical-path globs), an optional exact `method`, always a
  * strict `capability` and a non-empty human `reason`.
+ *
+ * Args:
+ *   section: the parsed section, or null/undefined when absent.
+ *   at: where the bytes came from, named in every refusal.
+ *
+ * Returns:
+ *   EndpointsConfig: the validated configuration.
  */
-export function readEndpointsConfigOrNull(path: string | null): EndpointsConfig {
-  if (path === null) return DEFAULT_ENDPOINTS_CONFIG;
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    return DEFAULT_ENDPOINTS_CONFIG; // absence is normal; malformed is not (below)
+export function parseEndpointsConfigDocument(section: unknown, at: string): EndpointsConfig {
+  if (section === null || section === undefined) return DEFAULT_ENDPOINTS_CONFIG;
+  if (typeof section !== 'object' || Array.isArray(section)) {
+    throw new Error(`invalid endpoints config: expected an object at ${at}`);
   }
-  const parsed: unknown = JSON.parse(text);
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`invalid endpoints config: expected an object at ${path}`);
-  }
-  const document = parsed as Record<string, unknown>;
+  const document = section as Record<string, unknown>;
   const unknownKeys = Object.keys(document).filter((key) => key !== 'rules');
   if (unknownKeys.length > 0) {
     throw new Error(
-      `invalid endpoints config: unknown key(s) ${unknownKeys.sort().join(', ')} at ${path}`,
+      `invalid endpoints config: unknown key(s) ${unknownKeys.sort().join(', ')} at ${at}`,
     );
   }
   const rules = document['rules'];
   if (!Array.isArray(rules)) {
     throw new Error(
-      `invalid endpoints config: 'rules' must be an array of rule objects at ${path}`,
+      `invalid endpoints config: 'rules' must be an array of rule objects at ${at}`,
     );
   }
   return { rules: rules.map((rule, index) => parseEndpointCapabilityRule(rule, index)) };
 }
-
 /** The facts one endpoint identity is matched against. */
 export interface EndpointMatchInput {
   /**

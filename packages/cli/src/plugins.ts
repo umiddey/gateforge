@@ -40,7 +40,7 @@ import {
   type DetectorOutput,
   type PluginRegistration,
 } from '@gate-forge/core';
-import { PluginSession } from '@gate-forge/plugin-protocol';
+import { PluginSession, type DiscoverContext, type DiscoverSections } from '@gate-forge/plugin-protocol';
 import { UsageError } from './errors.js';
 import {
   digestPathListInputs,
@@ -58,10 +58,36 @@ export interface PluginRunResult {
   cache: CacheCounts;
 }
 
+/**
+ * What the host hands every detector at discover time: the repo root in
+ * force and the already-parsed OWNER sections a detector may need. Since
+ * 0.11.0 the packs receive their plane / client-scan / import-root
+ * declarations here instead of reading a file of their own
+ * (`.gateforge/planes.json`, `.gateforge/http-clients.json`,
+ * `.gateforge/fastapi.json` are gone) — one document the host already
+ * reads and validates, handed to the pack that owns the rules.
+ */
+export interface HostDiscoverContext extends DiscoverContext {
+  /** Absolute repo root; also the subprocess cwd and module base. */
+  root: string;
+  /** The parsed owner sections; absent members mean "declared nothing". */
+  sections: DiscoverSections;
+}
+
+/**
+ * Builds the context every plugin run of this repository shares. The
+ * members are the PARSED sections exactly as the host validated them; a
+ * detector that wants the raw bytes of one of its old files must migrate.
+ */
+export function hostDiscoverContext(root: string, sections: DiscoverSections): HostDiscoverContext {
+  return { root, sections };
+}
+
 /** Default export shape every in-process plugin must provide. */
 export interface InProcessPluginModule {
   discover(
     paths: readonly string[],
+    context?: DiscoverContext,
   ):
     | Promise<{
         resources: unknown[];
@@ -89,7 +115,7 @@ export interface InProcessPluginModule {
  * Args:
  *   plugins: plugin entries from `.gateforge.yml` (config order).
  *   paths: expanded repo-relative include paths (possibly empty).
- *   cwd: repo root; subprocess cwd and in-process module base.
+ *   context: repo root plus the parsed owner sections to hand each detector.
  *   cache: cache control; omitted or disabled means a full scan.
  *
  * Returns:
@@ -104,14 +130,21 @@ export interface InProcessPluginModule {
 export async function runPlugins(
   plugins: readonly ConfigPlugin[],
   paths: readonly string[],
-  cwd: string,
+  context: HostDiscoverContext,
   cache?: CacheControl,
 ): Promise<PluginRunResult> {
+  const cwd = context.root;
   const contributions: DetectorOutput[] = [];
   const registrations: PluginRegistration[] = [];
   const cacheCounts: CacheCounts = { hits: 0, misses: 0 };
   const cacheActive = cache !== undefined && !cache.disabled;
-  const inputsDigest = cacheActive ? digestPathListInputs(cwd, paths) : null;
+  // The owner sections are a KEY INPUT like the file bytes: a detector's
+  // facts depend on the plane / client-scan / import-root declarations the
+  // host parsed, so a cached result computed under a different section is
+  // stale, not a hit. They join the digest, never the plugin's own bytes.
+  const inputsDigest = cacheActive
+    ? digestPathListInputs(cwd, paths, context.sections)
+    : null;
   for (const plugin of plugins) {
     const cached =
       cacheActive && inputsDigest !== null
@@ -124,7 +157,7 @@ export async function runPlugins(
       const fresh =
         plugin.transport === 'subprocess'
           ? await runSubprocessPlugin(plugin, paths, cwd)
-          : await runInProcessPlugin(plugin, paths, cwd);
+          : await runInProcessPlugin(plugin, paths, context);
       contributions.push(fresh);
       if (cacheActive) {
         cacheCounts.misses += 1;
@@ -218,8 +251,9 @@ function signalIdentityFix(
 async function runInProcessPlugin(
   plugin: ConfigPlugin,
   paths: readonly string[],
-  cwd: string,
+  context: HostDiscoverContext,
 ): Promise<DetectorOutput> {
+  const cwd = context.root;
   const moduleSpecifier = plugin.module;
   if (moduleSpecifier === undefined) {
     throw new UsageError(`in-process plugin '${plugin.id}' has no module (config error)`);
@@ -241,7 +275,7 @@ async function runInProcessPlugin(
   if (typeof api !== 'object' || api === null || typeof api.discover !== 'function') {
     throw new UsageError(
       `in-process plugin '${plugin.id}': module '${moduleSpecifier}' must default-export ` +
-        `{ discover(paths) } (the pinned in-process plugin contract)`,
+        `{ discover(paths, context) } (the pinned in-process plugin contract)`,
     );
   }
   let result: {
@@ -252,7 +286,7 @@ async function runInProcessPlugin(
     scannedPaths?: string[];
   };
   try {
-    const outcome = await api.discover(paths);
+    const outcome = await api.discover(paths, context);
     result = {
       resources: Array.isArray(outcome.resources) ? outcome.resources : [],
       unresolved: Array.isArray(outcome.unresolved) ? outcome.unresolved : [],

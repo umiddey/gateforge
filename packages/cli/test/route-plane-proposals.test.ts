@@ -11,10 +11,11 @@
  * a guess (an unresolved linked model, or two models that disagree).
  */
 import { describe, expect, it } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { withTempRepo, type TempRepo } from '@gate-forge/core';
-import { configYml } from './helpers.js';
+import { parse as parseYaml } from 'yaml';
+import { OWNER_ANSWERS_PATH, withTempRepo, type TempRepo } from '@gate-forge/core';
+import { CLASSIFICATION_POLICY_YML, configYml } from './helpers.js';
 import type { DetectorOutput } from '@gate-forge/core';
 import type { HttpContractFact, HttpMethod } from '@gate-forge/http-contract';
 import {
@@ -153,6 +154,10 @@ async function installRouteRepo(repo: TempRepo, gitignore: string): Promise<void
     'routes.mjs': ROUTE_FIXTURE_PLUGIN,
     'app/api/orders.py': 'def list_orders():\n    return []\n',
     'build/api/orders.py': 'def list_orders():\n    return []\n',
+    // The proposal pass reads the ONE owner-answers document (0.11.0), and
+    // `loadOwnerAnswers` fails closed when it is absent — a fixture that
+    // wants a proposal must ship the document a real repository has.
+    [OWNER_ANSWERS_PATH]: CLASSIFICATION_POLICY_YML,
   });
 }
 
@@ -180,7 +185,6 @@ describe('route-folder plane proposals (problem 13)', () => {
           ]),
           model('accounts', 'tenant') as DetectorOutput,
         ],
-        repo.root,
       );
       const proposals = proposeRouteFolderPlanes(facts);
       expect(
@@ -203,14 +207,15 @@ describe('route-folder plane proposals (problem 13)', () => {
           ]),
           model('accounts', 'tenant') as DetectorOutput,
         ],
-        repo.root,
+        {},
       );
       const [proposal] = proposeRouteFolderPlanes(facts);
       expect(proposal?.folder).toBe('backend/api/v1');
       // The hint is evidence the owner reads. The function applies nothing
-      // and writes nothing: no planes document exists after the call.
-      expect(proposal?.hintPlane).toBe('tenant');
+      // and writes nothing: this repository had no owner-answers document
+      // to begin with, and the pure call left it that way.
       expect(proposal?.linkedModels).toEqual(['accounts']);
+      expect(existsSync(join(repo.root, OWNER_ANSWERS_PATH))).toBe(false);
       expect(existsSync(join(repo.root, '.gateforge/planes.json'))).toBe(false);
     });
   });
@@ -276,7 +281,6 @@ describe('route-folder plane proposals (problem 13)', () => {
             route('GET', '/api/v1/root-level', 'health.py'),
           ]),
         ],
-        repo.root,
       );
       expect(facts.map((entry) => entry.source)).toEqual([
         'backend/api/v1/accounts.py',

@@ -57,7 +57,7 @@
  */
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
-import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
+import type { DiscoverContext, DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import type { z } from 'zod';
 import { LocationSchema } from '@gate-forge/core';
 import {
@@ -70,7 +70,7 @@ import {
 import {
   activeClientSymbolNamesIn,
   fileInServerScanRoots,
-  readClientScanConfigOrNull,
+  parseClientScanConfigDocument,
   scanClientCalls,
   type ClientCall,
   type ClientScanConfig,
@@ -80,9 +80,9 @@ import { PACK_VERSION } from './version.js';
 /** Inferred location shape (file, 1-based line, 0-based col). */
 type Location = z.infer<typeof LocationSchema>;
 
-/** Detector contract: `discover(paths)` is sync (pure over file bytes). */
+/** Detector contract: `discover(paths, context?)` is sync (pure over file bytes). */
 export interface HttpDetector {
-  discover(paths: readonly string[]): DiscoveryOutcome;
+  discover(paths: readonly string[], context?: DiscoverContext): DiscoveryOutcome;
 }
 
 /** Options for {@link createHttpDetector}. */
@@ -96,12 +96,6 @@ export interface HttpDetectorOptions {
   root?: string;
   /** Client-scan configuration (declarates resolvable APIs, ADR 0004 D6). */
   clientScan?: ClientScanConfig;
-  /**
-   * Repo-relative path of a client-scan config document (JSON) read from
-   * the root in force at discover time when `clientScan` is not given
-   * (default: `.gateforge/http-clients.json`; absence is normal).
-   */
-  clientScanConfigPath?: string;
 }
 
 /** Where an externally-reachable artifact was found. */
@@ -281,21 +275,22 @@ function scanNestControllers(text: string, file: string): HttpArtifact[] {
  */
 export function createHttpDetector(options: HttpDetectorOptions = {}): HttpDetector {
   return {
-    discover(paths) {
+    discover(paths, context) {
       if (paths.length === 0) {
         return { resources: [], unresolved: [], findings: [], classificationSignals: [], scannedPaths: [] };
       }
-      // The repo root AND its config document are resolved per discover
+      // The repo root AND the owner section are resolved per discover
       // call unless the caller pinned them: `gateforge check --staged` moves
       // the process cwd to the staged candidate checkout before discovery
       // runs, so the gated repository is the one in force here, not whatever
-      // root was current when this instance was created.
-      const root = options.root ?? process.cwd();
+      // root was current when this instance was created. Since 0.11.0 the
+      // client-scan settings arrive as the host's parsed `scan.httpClients`
+      // section (0.11.0: they used to be read from
+      // `.gateforge/http-clients.json`, which no command reads anymore).
+      const root = options.root ?? context?.root ?? process.cwd();
       const clientScan =
         options.clientScan ??
-        readClientScanConfigOrNull(
-          resolve(root, options.clientScanConfigPath ?? '.gateforge/http-clients.json'),
-        );
+        parseClientScanConfigDocument(context?.sections.httpClients, 'scan.httpClients');
       const files = resolveInputs(paths, root);
       const artifacts: HttpArtifact[] = [];
       const findings: Array<{ code: string; detail: string; locations: Location[] }> = [];

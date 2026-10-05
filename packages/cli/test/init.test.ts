@@ -8,9 +8,9 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { withTempRepo, loadConfig } from '@gate-forge/core';
+import { OWNER_ANSWERS_PATH, withTempRepo, loadConfig } from '@gate-forge/core';
 import { VERSION } from '../src/commands/common.js';
-import { readPlanesConfigOrNull } from '@gate-forge/pack-sqlalchemy';
+import { planesConfigFromSection, type PlaneConfigRule } from '@gate-forge/pack-sqlalchemy';
 import { runCli } from './helpers.js';
 
 /** The pack-playwright package root (its packed layout is the fixture's home). */
@@ -925,7 +925,7 @@ describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', ()
     });
   });
 });
-describe('gateforge init --planes (proposed planes.json from discovered model trees)', () => {
+describe('gateforge init --planes (proposed planes: section from discovered model trees)', () => {
   /** A minimal declarative model the sqlalchemy detector recognizes. */
   const MODEL = (table: string, cls: string): string => `\
 """Fixture model."""
@@ -951,8 +951,11 @@ class ${cls}(Base):
       });
       const { code, stdout } = await runCli(repo, ['init']);
       expect(code).toBe(0);
-      expect(existsSync(repo.path('.gateforge/planes.json'))).toBe(false);
-      expect(stdout).toContain('--planes proposes .gateforge/planes.json');
+      // The proposal is a SECTION of the one answers document, so "nothing
+      // proposed" is that document declaring no `planes:` key.
+      const document = parseYaml(readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8'));
+      expect(document).not.toHaveProperty('planes');
+      expect(stdout).toContain(`--planes proposes the planes: section of ${OWNER_ANSWERS_PATH}`);
     });
   });
 
@@ -964,17 +967,15 @@ class ${cls}(Base):
       });
       const { code, stdout } = await runCli(repo, ['init', '--planes']);
       expect(code).toBe(0);
-      const planesPath = repo.path('.gateforge/planes.json');
-      expect(existsSync(planesPath)).toBe(true);
       expect(stdout).toContain('created:');
       expect(stdout).toContain('review the reasons');
       // The document round-trips the runtime's own strict parser.
-      const config = readPlanesConfigOrNull(planesPath);
-      const byMatch = new Map(config.rules.map((rule) => [rule.match, rule]));
+      const rules = proposedPlanes(repo);
+      const byMatch = new Map(rules.map((rule) => [rule.match, rule]));
       expect(byMatch.get('backend/admin_platform/**')?.plane).toBe('master');
       expect(byMatch.get('backend/models/**')?.plane).toBe('tenant');
-      for (const rule of config.rules) {
-        expect(rule.reason).toContain("inferred from model directory");
+      for (const rule of rules) {
+        expect(rule.reason).toContain('inferred from model directory');
         expect(rule.reason).toContain('review');
       }
     });
@@ -987,30 +988,50 @@ class ${cls}(Base):
       });
       const { code } = await runCli(repo, ['init', '--planes']);
       expect(code).toBe(0);
-      const config = readPlanesConfigOrNull(repo.path('.gateforge/planes.json'));
-      expect(config.rules).toHaveLength(1);
-      expect(config.rules[0]?.match).toBe('backend/models/*.py');
-      expect(config.rules[0]?.plane).toBe('tenant');
+      const rules = proposedPlanes(repo);
+      expect(rules).toHaveLength(1);
+      expect(rules[0]?.match).toBe('backend/models/*.py');
+      expect(rules[0]?.plane).toBe('tenant');
     });
   });
 
-  it('never overwrites an existing planes.json (idempotent, review artifact)', async () => {
+  it('never overwrites an existing planes: section (idempotent, review artifact)', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles({
         'backend/models/account.py': MODEL('accounts', 'Account'),
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [{ match: 'backend/models/**', plane: 'global', reason: 'hand-reviewed' }],
-        }),
+        [OWNER_ANSWERS_PATH]: `schemaVersion: 1
+trustedInternalEntryPoints: []
+internalRules: []
+planes:
+  rules:
+    - match: 'backend/models/**'
+      plane: global
+      reason: hand-reviewed
+`,
       });
       const { code, stdout } = await runCli(repo, ['init', '--planes']);
       expect(code).toBe(0);
       expect(stdout).toContain('exists, leaving untouched');
-      const config = readPlanesConfigOrNull(repo.path('.gateforge/planes.json'));
-      expect(config.rules[0]?.plane).toBe('global');
-      expect(config.rules[0]?.reason).toBe('hand-reviewed');
+      const rules = proposedPlanes(repo);
+      expect(rules[0]?.plane).toBe('global');
+      expect(rules[0]?.reason).toBe('hand-reviewed');
     });
   });
 });
+
+/**
+ * The `planes:` rules a repository's answers document declares, read back
+ * through the runtime's OWN strict parser — a fixture that asserted on raw
+ * YAML would accept a section the next run refuses.
+ */
+function proposedPlanes(repo: { path: (relative: string) => string }): readonly PlaneConfigRule[] {
+  const document = parseYaml(readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8'));
+  const section =
+    typeof document === 'object' && document !== null && 'planes' in document
+      ? document.planes
+      : undefined;
+  return planesConfigFromSection(section, `${OWNER_ANSWERS_PATH} planes:`).rules;
+}
 
 /**
  * A repository that shows the queue machinery a background worker uses

@@ -47,7 +47,7 @@ function paths(outcome: WrapperOutcome): string[] {
     .sort();
 }
 
-describe('the template mount shape under .gateforge/fastapi.json importRoots', () => {
+describe('the template mount shape under scan.fastapi importRoots', () => {
   it('without roots the inner mounts are an unresolvable target and routes lose their prefix', async () => {
     const outcome = await scan([]);
     expect(
@@ -66,12 +66,12 @@ describe('the template mount shape under .gateforge/fastapi.json importRoots', (
     expect(paths(outcome)).toEqual(['GET /api/v1/items', 'POST /api/v1/login/access-token']);
   });
 
-  it('reads the same root from a config document path (byte-identical outcome)', async () => {
-    const fromConfig = (await createFastapiDetector({
-      env: pythonEnv(),
-      cwd: FIXTURE_ROOT,
-      importRootsConfigPath: 'template-mount/fastapi.config.json',
-    }).discover([...MOUNT_FIXTURES])) as WrapperOutcome;
-    expect(JSON.stringify(fromConfig)).toBe(JSON.stringify(await scan(BACKEND_ROOT)));
+  it('reads the same root from the handed section (byte-identical outcome)', async () => {
+    const detector = createFastapiDetector({ env: pythonEnv(), cwd: FIXTURE_ROOT });
+    const fromSection = (await detector.discover([...MOUNT_FIXTURES], {
+      root: FIXTURE_ROOT,
+      sections: { fastapi: { importRoots: BACKEND_ROOT } },
+    })) as WrapperOutcome;
+    expect(JSON.stringify(fromSection)).toBe(JSON.stringify(await scan(BACKEND_ROOT)));
   });
 });

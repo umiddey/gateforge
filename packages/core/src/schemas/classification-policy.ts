@@ -358,6 +358,14 @@ export const EndpointsSectionSchema = z
 export type EndpointsSection = z.infer<typeof EndpointsSectionSchema>;
 
 /**
+ * Repo-root-relative location of the ONE owner-answers document. Named
+ * once, in the package that owns the document, so every diagnostic that
+ * has to point the owner at a declaration — the refusals, the migrator,
+ * the packs — names the same path.
+ */
+export const OWNER_ANSWERS_PATH = '.gateforge/classification-policy.yml';
+
+/**
  * The classification-policy document: the ONE owner-answers file
  * (`.gateforge/classification-policy.yml`, name kept by owner decision).
  * Since 0.11.0 it holds every owner answer — trusted internal

@@ -27,14 +27,17 @@ import { join } from 'node:path';
 import {
   classifyResources,
   lifecycleAllowsContract,
-  type ClassificationPolicy,
+  type ClassifierPolicy,
   type ClassifierResourceRef,
 } from '@gate-forge/core';
 import { createHttpDetector } from '../src/index.js';
 
 /** The org policy every scenario uses: sources + trusted worker category
- * + a coverage rule (a scan is only provably complete per detector). */
-function policy(dir: string): ClassificationPolicy {
+ * + a coverage rule (a scan is only provably complete per detector).
+ * Since 0.11.0 the classifier consumes the COMPOSED policy — the owner
+ * answers and the `scan:` settings together — so this fixture builds that
+ * one object, exactly as the pipeline does. */
+function policy(dir: string): ClassifierPolicy {
   return {
     schemaVersion: 1,
     scanRoots: [`${dir}/**`],

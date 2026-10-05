@@ -16,10 +16,8 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { parse as parseYaml } from 'yaml';
 import {
   ClaimSchema,
-  ClassificationPolicySchema,
   ClassificationSignalSchema,
   PolicyFileSchema,
   PolicyEvaluationError,
@@ -28,8 +26,6 @@ import {
   compareStrings,
   compileBehaviorPolicy,
   evaluatePolicies,
-  isMovedScannerKey,
-  jsonPathFor,
   loadWaivers,
   normalizeChangedFiles,
   parseBehaviorPolicy,
@@ -58,7 +54,7 @@ import { assertBundledDetectors, validateCoverageTrust } from './detector-trust.
 import { clockFromConfig } from './clock.js';
 import { expandScanPaths, type ExpandError } from './glob.js';
 import { gitIgnoredPaths } from './git-ignored.js';
-import { runPlugins } from './plugins.js';
+import { hostDiscoverContext, runPlugins } from './plugins.js';
 import { resolveRepoPath } from './repo-path.js';
 import type { CacheControl, CacheCounts } from './run-cache.js';
 import { compileEndpointContribution, type EndpointInventory } from './endpoint-compiler.js';
@@ -69,6 +65,8 @@ import {
 } from './unmatched-routes.js';
 import { readJsonArray } from './state.js';
 import { providerFor } from './providers.js';
+import { loadOwnerAnswers } from './owner-answers.js';
+import { firstIssueText, loadYaml } from './yaml.js';
 
 /** Everything one pipeline run needs. */
 export interface PipelineOptions {
@@ -243,23 +241,6 @@ export function headSha(cwd: string): string | null {
   return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
 }
 
-/** Reads a YAML document fail-closed (missing/unparsable → UsageError). */
-export function loadYaml(path: string, label: string): unknown {
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code ?? 'UNKNOWN';
-    throw new UsageError(`cannot read ${label} file '${path}' (${code})`);
-  }
-  try {
-    return parseYaml(raw);
-  } catch (error) {
-    throw new UsageError(
-      `${label} file '${path}' is not valid YAML: ${(error as Error).message.split('\n')[0] ?? 'parse error'}`,
-    );
-  }
-}
 
 /** Lists adapter names (basenames sans `.mjs`) from the adapters dir. */
 export function loadAdapterNames(cwd: string, dir: string): string[] {
@@ -362,14 +343,6 @@ function adapterProjectionBlockers(
   );
 }
 
-/** First zod issue as one actionable `path: message` line. */
-function firstIssueText(
-  error: { issues?: Array<{ path: PropertyKey[]; message: string }> },
-  fallback: string,
-): string {
-  const issue = error.issues?.[0];
-  return issue === undefined ? fallback : `${jsonPathFor(issue.path)}: ${issue.message}`;
-}
 
 /**
  * Runs the full pipeline.
@@ -405,42 +378,29 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     gitIgnored,
     expandErrors,
   );
+  // The owner-answers document is read BEFORE discovery, because 0.11.0
+  // hands its parsed `planes:` / `endpoints:` sections to the detectors
+  // instead of letting each pack re-read a file of its own (the two are
+  // the same facts read once, never twice).
+  const policyDoc = loadOwnerAnswers(cwd, config);
   const pipelineStartedAtMs = performance.now();
   const pluginsStartedAtMs = performance.now();
   const { contributions, registrations, cache: pluginCacheCounts } = await runPlugins(
     config.plugins,
     paths,
-    cwd,
+    hostDiscoverContext(cwd, {
+      planes: policyDoc.planes,
+      endpoints: policyDoc.endpoints,
+      httpClients: config.scan.httpClients,
+      fastapi: config.scan.fastapi,
+    }),
     options.pluginCache,
   );
   const pluginsMs = performance.now() - pluginsStartedAtMs;
-
-  const policyDocRaw = loadYaml(resolveRepoPath(cwd, config.classificationPolicy), 'classification-policy');
-  // Upgrade posture (0.11.0): the four scanner settings moved OUT of this
-  // document into `.gateforge.yml` under `scan:`. Checked BEFORE the parse,
-  // because the strict schema would only report "unrecognized key" — this
-  // refusal names the command that moves them, like every other
-  // consolidated declaration.
-  const movedKeys = Object.keys(policyDocRaw ?? {})
-    .filter((key) => isMovedScannerKey(key))
-    .sort(compareStrings);
-  if (movedKeys.length > 0) {
-    throw new UsageError(
-      `${config.classificationPolicy} carries ${movedKeys.join(', ')}: since 0.11 the scanner ` +
-        'settings live in .gateforge.yml under `scan:` — run `gateforge migrate` (preview, then ' +
-        '--confirm), then re-approve the policy digest (gateforge enforcement pin --pin-file <path> --confirm)',
-    );
-  }
-  const policyDocParsed = ClassificationPolicySchema.safeParse(policyDocRaw);
-  if (!policyDocParsed.success) {
-    throw new UsageError(
-      `classification-policy document is invalid: ${firstIssueText(policyDocParsed.error, 'unknown issue')}`,
-    );
-  }
   // The classifier consumes ONE policy: the owner answers composed with the
   // scanner settings they now live beside. Nothing downstream learned that
   // the two documents were split.
-  const classifierPolicy: ClassifierPolicy = { ...policyDocParsed.data, ...config.scan };
+  const classifierPolicy: ClassifierPolicy = { ...policyDoc, ...config.scan };
   // Coverage-trust validation (red-team round 4): scan-completeness
   // evidence is accepted ONLY from bundled detectors loaded from their
   // fixed packages. A policy rule naming anything else — or a trusted id
@@ -449,7 +409,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   // Reachability trust (red-team round 5): a trusted entry-point category
   // naming a detector binds reachability evidence to that BUNDLED detector.
   assertBundledDetectors(
-    policyDocParsed.data.trustedInternalEntryPoints
+    policyDoc.trustedInternalEntryPoints
       .map((entry) => entry.detector)
       .filter((detector): detector is string => detector !== undefined),
     config.plugins,
@@ -476,12 +436,17 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   // detectors' contract facts; its output is a synthetic engine
   // contribution that participates in the graph like any detector's.
   // Coverage/successful-detector accounting stays pinned to the PLUGIN
-  // contributions — the compiler examines no files itself. The repo root
-  // is passed so the declarative endpoint-plane rules in
-  // `.gateforge/planes.json` (absence is normal) participate as endpoint
-  // plane evidence; a malformed document fails the run closed.
+  // contributions — the compiler examines no files itself. It receives
+  // the ALREADY-PARSED owner sections (0.11.0): the declarative
+  // endpoint-plane rules of `planes:` participate as endpoint plane
+  // evidence and `endpoints:` declares endpoint capabilities; absence is
+  // normal and a malformed section fails the run closed.
   const { contribution: endpointContribution, inventory: endpointInventory } =
-    compileEndpointContribution(contributions, { cwd });
+    compileEndpointContribution(contributions, {
+      planes: policyDoc.planes,
+      endpoints: policyDoc.endpoints,
+      deleteRules: policyDoc.deleteRules,
+    });
 
   const built = buildResourceGraph({
     detectors: [...contributions, endpointContribution],

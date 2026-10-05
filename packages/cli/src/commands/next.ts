@@ -16,6 +16,7 @@ import {
   CAUSE_NEXT_ACTIONS,
   BEHAVIOR_CASE_DOMAIN,
   HTTP_ENDPOINT_RESOURCE_KIND,
+  OWNER_ANSWERS_PATH,
   PolicyFileSchema,
   sha256Canonical,
   type BlockingEntry,
@@ -30,8 +31,7 @@ import {
   ENDPOINT_SEMANTICS_UNRESOLVED,
   FASTAPI_PREFIX_UNRESOLVED,
 } from '@gate-forge/http-contract';
-import { PLANES_CONFIG_PATH } from '@gate-forge/pack-sqlalchemy';
-import { FASTAPI_SCAN_CONFIG_PATH } from '@gate-forge/pack-fastapi';
+import { FASTAPI_SCAN_CONFIG_SECTION } from '@gate-forge/pack-fastapi';
 import {
   discoverTestCatalog,
   TestDiscoveryError,
@@ -41,6 +41,7 @@ import { parseArgs } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
+import { declaresTopLevelSection } from '../yaml-section.js';
 import { writeLine } from '../io.js';
 import { evaluateRun } from '../evaluate.js';
 import {
@@ -80,7 +81,7 @@ import {
   type BehaviorEffectFacts,
   type BehaviorEndpointFacts,
 } from '../behavior-setup.js';
-import { ENDPOINT_CAPABILITIES, ENDPOINTS_CONFIG_PATH } from '../endpoint-config.js';
+import { ENDPOINT_CAPABILITIES } from '../endpoint-config.js';
 
 export const NEXT_USAGE = 'usage: gateforge next [--changed] [--json]';
 
@@ -322,9 +323,9 @@ const CLASSIFIER_BLOCK_ANSWERS: Readonly<Record<string, string>> = {
   ADAPTER_MISSING:
     '`gateforge adapters scaffold` — run it, then review the adapter it writes for this resource',
   DELETE_SEMANTICS_UNRESOLVED:
-    "declare what the endpoint does in '.gateforge/endpoints.json' — 'crud-archive' or 'crud-delete' on a DELETE endpoint (an ENDPOINT_SEMANTICS_UNRESOLVED block prints the exact entry)",
+    "declare what the endpoint does — `gateforge classify delete <file|folder|glob> <hard|archive> --reason '<why>' --confirm` writes the owner's deleteRules entry, the ONE place hard-vs-archive is answered",
   PLANE_UNRESOLVED:
-    "gateforge classify plane <file|folder|glob> <tenant|master|global> --reason '<why>' --confirm — or change the existing rule for that source in '.gateforge/planes.json'",
+    "gateforge classify plane <file|folder|glob> <tenant|master|global> --reason '<why>' --confirm — or change the existing rule for that source in the planes: section of '.gateforge/classification-policy.yml'",
 };
 
 /**
@@ -415,7 +416,10 @@ function unresolvedRouteGuidance(
     const reason = `Owner review confirms the ${plane} plane for ${routeName}.`;
     return `gateforge classify plane ${shellQuote(source)} ${plane} --reason ${shellQuote(reason)} --confirm`;
   });
-  const planesMissing = !existsSync(join(cwd, PLANES_CONFIG_PATH));
+  const answersPath = join(cwd, OWNER_ANSWERS_PATH);
+  const planesMissing =
+    !existsSync(answersPath) ||
+    !declaresTopLevelSection(readFileSync(answersPath, 'utf8'), 'planes', OWNER_ANSWERS_PATH);
   return [
     // One plain line BEFORE the question: a new repo meets this
     // question first, and no shipped document prepares anyone for it.
@@ -430,7 +434,7 @@ function unresolvedRouteGuidance(
     'This edits a classification input; re-approve any approved policy pin before strict gates run.',
     ...(planesMissing
       ? [
-          `The plane command below needs the owner-reviewed '${PLANES_CONFIG_PATH}' first — run this once to create it:`,
+          `The plane command below needs the owner-reviewed \`planes:\` section of '${OWNER_ANSWERS_PATH}' first — run this once to create it:`,
           'gateforge init --planes',
         ]
       : []),
@@ -478,20 +482,33 @@ function endpointSemanticsGuidance(detail: string, graph: ResourceGraph): string
   const method = route.attributes['method'];
   const canonicalPath = route.attributes['canonicalPath'];
   if (typeof method !== 'string' || typeof canonicalPath !== 'string') return [];
-  // A DELETE is asked one question (archive or really delete); every
+  // A DELETE is answered ONCE, in the owner's `deleteRules` (0.11.0); every
   // other verb is asked what the endpoint DOES at all.
   const choices =
     method === 'DELETE'
       ? [
-          "'crud-archive' (the record survives — the handler only sets an archived/deactivated state)",
-          "'crud-delete' (the record is really removed)",
+          'one command, not a rule: `gateforge classify delete <file|folder|glob> <hard|archive> --reason "<why>" --confirm`',
+          'hard (the record is really removed) or archive (it survives, with an archived/deactivated state)',
         ]
       : [`one of: ${ENDPOINT_CAPABILITIES.join(', ')}`];
+  if (method === 'DELETE') {
+    return [
+      `about this block: ${method} ${canonicalPath} deletes a resource, but nothing Gateforge can read in the code`,
+      'says whether the record survives — and the owner answers that exactly once, per source, in `deleteRules`.',
+      'Run exactly this command, then run `gateforge next` again:',
+      `gateforge classify delete ${shellQuote(canonicalPath)} <hard|archive> --reason "<owner-written reason and evidence>" --confirm`,
+      'Two `deleteRules` entries that match the same source with different semantics are a contradiction and',
+      'resolve to nothing — never edit one to shadow the other.',
+      ...(route.id === null
+        ? []
+        : [`Then prove the answer applied — \`gateforge explain ${shellQuote(route.id)}\``]),
+    ];
+  }
   return [
     `about this block: ${method} ${canonicalPath} is discovered, but nothing Gateforge can read in the code says what it DOES —`,
     'its logic sits behind a service call, and a method alone never decides semantics. Only the owner can',
-    `answer, and the answer is one rule in the owner-reviewed '${ENDPOINTS_CONFIG_PATH}'. Add it to that file`,
-    '(create the file with exactly these contents if it does not exist yet; append the rule to "rules" if it does):',
+    `answer, and the answer is one rule in the owner-reviewed \`endpoints:\` section of '${OWNER_ANSWERS_PATH}'. Add it there`,
+    '(add the section with exactly these contents if it is absent; append the rule to "rules" if it is there):',
     '```json',
     '{',
     '  "rules": [',
@@ -509,7 +526,7 @@ function endpointSemanticsGuidance(detail: string, graph: ResourceGraph): string
     ...(route.id === null
       ? []
       : [
-          'Then prove the declaration applied — the capabilities line names the capability and the trace says endpoints.json:',
+          'Then prove the declaration applied — the capabilities line names the capability and the trace names the `endpoints:` declaration:',
           `gateforge explain ${shellQuote(route.id)}`,
         ]),
   ];
@@ -598,7 +615,7 @@ function fastapiPrefixGuidance(detail: string, cwd: string): string[] {
       'here: this mount is not written with a computed prefix, so there is no prefix expression to replace.',
       `Fix it with a declaration and NO application edit: the import roots tell the scanner which directory the`,
       `absolute imports in ${file} are written relative to.`,
-      `Write this file — '${FASTAPI_SCAN_CONFIG_PATH}' — and run \`gateforge next\` again:`,
+      `Add this under \`${FASTAPI_SCAN_CONFIG_SECTION}\` in '.gateforge.yml' — and run \`gateforge next\` again:`,
       '```json',
       JSON.stringify(
         roots === null
@@ -642,7 +659,7 @@ function fastapiPrefixDo(detail: string): string {
     return 'make the mount prefix a literal at the site named below, then run `gateforge next` again';
   }
   if (ambiguousImportRoots(detail) !== null || /cannot be resolved in the scanned set/.test(detail)) {
-    return `declare the import roots in '${FASTAPI_SCAN_CONFIG_PATH}' — the exact entry to add is below`;
+    return `declare the import roots under \`${FASTAPI_SCAN_CONFIG_SECTION}\` in '.gateforge.yml' — the exact entry to add is below`;
   }
   return 'break the include cycle at the site named below, then run `gateforge next` again';
 }
@@ -1285,7 +1302,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     } else if (endpointGuidance.length > 0) {
       writeLine(
         io.stdout,
-        `do: declare what this endpoint does in '${ENDPOINTS_CONFIG_PATH}' — the exact entry to add is below`,
+        `do: declare what this endpoint does in the \`endpoints:\` section of '${OWNER_ANSWERS_PATH}' — the exact entry to add is below`,
       );
       for (const line of endpointGuidance) writeLine(io.stdout, line);
     } else if (prefixGuidance.length > 0) {

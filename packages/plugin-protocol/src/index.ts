@@ -87,3 +87,4 @@ export type { PluginSpawnOptions, PluginTimeouts } from './host.js';
 
 export { servePlugin } from './plugin.js';
 export type { ServePluginOptions, DiscoverHandler, DiscoveryResult } from './plugin.js';
+export type { DiscoverContext, DiscoverSections } from './plugin.js';

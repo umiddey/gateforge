@@ -6,9 +6,11 @@
  *
  * - a programmatic {@link PlaneRule} (the detector factory option; for
  *   host code and tests); and
- * - the declarative `.gateforge/planes.json` document — an explicit,
- *   human-reviewed config file (every rule must carry a non-empty
- *   `reason`, the review artifact). A `match` rule may additionally
+ * - the owner's `planes:` section (0.11.0: it moved into
+ *   `.gateforge/classification-policy.yml`, was `.gateforge/planes.json`)
+ *   — explicit, human-reviewed rules handed to `discover()` by the host
+ *   (every rule must carry a non-empty `reason`, the review artifact). A
+ *   `match` rule may additionally
  *   carry `exclude` — repo-root-relative globs pruning whole FILES from
  *   the rule's surface (a directory surface mixing planes, e.g.
  *   contractor-scoped routers beside global-ingress endpoints under one
@@ -28,11 +30,10 @@
  *   plane-unresolved and the core classifier blocks it, forcing the
  *   config author to cover every table (closed-world completeness).
  *
- * Absence of the config file is normal and byte-identical to
- * {@link NO_PLANE_MAPPING}; a malformed document throws (fail closed).
+ * Absence of the section is normal and byte-identical to
+ * {@link NO_PLANE_MAPPING}; a malformed one throws (fail closed).
  */
 
-import { readFileSync } from 'node:fs';
 import { globMatch } from '@gate-forge/core';
 
 /** The plane enum the graph accepts. */
@@ -58,11 +59,14 @@ export function byTableName(mapping: Record<string, SqlalchemyPlane>): PlaneRule
 }
 
 // ---------------------------------------------------------------------------
-// Declarative plane config (`.gateforge/planes.json`)
+// Declarative plane rules (`planes:` of the owner-answers document)
 // ---------------------------------------------------------------------------
 
-/** Repo-root-relative location of the declarative plane config document. */
-export const PLANES_CONFIG_PATH = '.gateforge/planes.json';
+// The plane rules live in the `planes:` section of the ONE owner-answers
+// document (0.11.0; they used to be a standalone `.gateforge/planes.json`).
+// That path is named once by the package that owns the document —
+// `OWNER_ANSWERS_PATH` from `@gate-forge/core` — so every diagnostic that
+// has to point the owner at the declaration names the same file.
 
 /** One reviewed rule of the declarative plane config. */
 export interface PlaneConfigRule {
@@ -256,11 +260,11 @@ function parsePlaneConfigRule(value: unknown, path: string, index: number): Plan
 }
 
 /**
- * Parses and validates one declarative plane config DOCUMENT TEXT
- * (strict; every rule reviewed). Exported for generators that must
- * self-check a proposed document BEFORE writing it (e.g. `gateforge
- * init --planes`) — the exact validation the runtime reader applies,
- * applied to the draft.
+ * Parses and validates the OWNER's plane section exactly as it always
+ * validated the standalone document (strict; every rule reviewed). The
+ * bytes moved into `.gateforge/classification-policy.yml` under `planes:`
+ * in 0.11.0, but the RULES and their refusals did not change: this stays
+ * the single validation source for plane rules, whoever holds the bytes.
  *
  * Accepted shape: `{ rules: [{ match?, exclude?, tables?, plane, reason }] }` — a
  * rule carries EXACTLY ONE of `match` (repo-root-relative source-path
@@ -270,42 +274,42 @@ function parsePlaneConfigRule(value: unknown, path: string, index: number): Plan
  * repo-root-relative globs pruning files from its surface — rejected
  * on a `tables` rule).
  */
-export function parsePlanesConfigText(text: string, path: string): PlanesConfig {
-  const parsed: unknown = JSON.parse(text);
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`invalid planes config: expected an object at ${path}`);
+export function parsePlanesConfigDocument(document: unknown, at: string): PlanesConfig {
+  if (document === null || typeof document !== 'object' || Array.isArray(document)) {
+    throw new Error(`invalid planes config: expected an object at ${at}`);
   }
-  const document = parsed as Record<string, unknown>;
-  const unknownKeys = Object.keys(document).filter((key) => key !== 'rules');
+  const record = document as Record<string, unknown>;
+  const unknownKeys = Object.keys(record).filter((key) => key !== 'rules');
   if (unknownKeys.length > 0) {
     throw new Error(
-      `invalid planes config: unknown key(s) ${unknownKeys.sort().join(', ')} at ${path}`,
+      `invalid planes config: unknown key(s) ${unknownKeys.sort().join(', ')} at ${at}`,
     );
   }
-  const rules = document['rules'];
+  const rules = record['rules'];
   if (!Array.isArray(rules)) {
     throw new Error(
-      `invalid planes config: 'rules' must be an array of rule objects at ${path}`,
+      `invalid planes config: 'rules' must be an array of rule objects at ${at}`,
     );
   }
-  return { rules: rules.map((rule, index) => parsePlaneConfigRule(rule, path, index)) };
+  return { rules: rules.map((rule, index) => parsePlaneConfigRule(rule, at, index)) };
 }
 
 /**
- * Reads a declarative plane config document. Returns the default config
- * when the file is absent (normal; byte-identical to
- * {@link NO_PLANE_MAPPING}); malformed documents throw (fail closed —
- * the CLI surfaces the error instead of scanning with partial trust).
+ * Parses plane rules out of the section the host hands this detector.
+ * An ABSENT section is normal and byte-identical to the absent document:
+ * no rules, no mapping. A malformed one throws (fail closed).
  */
-export function readPlanesConfigOrNull(path: string | null): PlanesConfig {
-  if (path === null) return DEFAULT_PLANES_CONFIG;
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    return DEFAULT_PLANES_CONFIG; // absence is normal; malformed is not (below)
-  }
-  return parsePlanesConfigText(text, path);
+export function planesConfigFromSection(section: unknown, at: string): PlanesConfig {
+  if (section === undefined || section === null) return DEFAULT_PLANES_CONFIG;
+  return parsePlanesConfigDocument(section, at);
+}
+
+/**
+ * Parses and validates plane rules from JSON TEXT. Kept for generators
+ * that must self-check a proposed document BEFORE it is written.
+ */
+export function parsePlanesConfigText(text: string, path: string): PlanesConfig {
+  return parsePlanesConfigDocument(JSON.parse(text) as unknown, path);
 }
 
 /** The facts one `sqlalchemy.table` resource is matched against. */

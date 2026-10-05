@@ -17,7 +17,6 @@ import { dirname, join } from 'node:path';
 import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
 import {
   createSqlalchemyDetector,
-  PLANES_CONFIG_PATH,
   TENANCY_CONFIG_PATH,
   type PlanesConfig,
   type SqlalchemyDetectorOptions,
@@ -92,10 +91,9 @@ function makeProject(name: string): string {
   return root;
 }
 
-/** Writes `.gateforge/planes.json` into `project`. */
-function writePlanesConfig(project: string, document: PlanesConfig): void {
-  mkdirSync(join(project, '.gateforge'), { recursive: true });
-  writeFileSync(join(project, PLANES_CONFIG_PATH), JSON.stringify(document), 'utf8');
+/** The owner's `planes:` section as the host hands it at discover time. */
+function planesSection(document: PlanesConfig): { planes: PlanesConfig } {
+  return { planes: document };
 }
 
 /** Writes a `.gateforge.yml` declaring the tenancy scope columns. */
@@ -112,10 +110,14 @@ async function discoverIn(
   project: string,
   paths: readonly string[],
   options: SqlalchemyDetectorOptions = {},
+  sections: { planes?: unknown } = {},
 ): Promise<DiscoveryOutcome> {
   process.chdir(project);
   try {
-    return (await createSqlalchemyDetector(options).discover([...paths])) as DiscoveryOutcome;
+    return (await createSqlalchemyDetector(options).discover([...paths], {
+      root: project,
+      sections,
+    })) as DiscoveryOutcome;
   } finally {
     process.chdir(ORIGINAL_CWD);
   }
@@ -136,23 +138,25 @@ const planeOf = (outcome: DiscoveryOutcome, tableName: string): unknown =>
 const singletonTagOf = (outcome: DiscoveryOutcome, tableName: string): unknown =>
   tableNamed(outcome, tableName)?.attributes['singletonPerTenant'];
 
-describe('pack-sqlalchemy reads its config documents at discover time', () => {
-  it('reads .gateforge/planes.json from the root in force at the discover call', async () => {
+describe('pack-sqlalchemy resolves its configuration at discover time', () => {
+  it('uses the planes: section handed at the discover call, never one read from a file', async () => {
     const factoryCwd = makeProject('config-factory');
     const discoverCwd = makeProject('config-discover');
     try {
-      // The document visible at factory time says master; the gated root's
-      // document says tenant. The gated root wins.
-      writePlanesConfig(factoryCwd, {
-        rules: [{ match: 'planes/**', plane: 'master', reason: 'working-tree plane' }],
-      });
-      writePlanesConfig(discoverCwd, {
-        rules: [{ match: 'planes/**', plane: 'tenant', reason: 'staged plane' }],
-      });
+      // The detector is built in a DIFFERENT root with no section at all;
+      // the discover call hands the staged root's section. What it
+      // resolves is that hand-over: the host parses the owner document once
+      // from the root in force at the discover call, so a factory-time
+      // read of a file of its own is no longer possible.
       process.chdir(factoryCwd);
       const detector = createSqlalchemyDetector();
       process.chdir(discoverCwd);
-      const outcome = (await detector.discover([...PLANE_FIXTURES])) as DiscoveryOutcome;
+      const outcome = (await detector.discover([...PLANE_FIXTURES], {
+        root: discoverCwd,
+        sections: planesSection({
+          rules: [{ match: 'planes/**', plane: 'tenant', reason: 'staged plane' }],
+        }),
+      })) as DiscoveryOutcome;
       expect(planeOf(outcome, 'planes_admin_users')).toBe('tenant');
       expect(planeOf(outcome, 'planes_erp_clients')).toBe('tenant');
       expect(outcome.findings).toEqual([]);
@@ -163,15 +167,17 @@ describe('pack-sqlalchemy reads its config documents at discover time', () => {
     }
   });
 
-  it('an explicit planesConfig option still wins over the config document', async () => {
+  it('an explicit planesConfig option still wins over the handed section', async () => {
     const project = makeProject('explicit-config');
     try {
-      writePlanesConfig(project, {
-        rules: [{ match: 'planes/**', plane: 'master', reason: 'document plane' }],
-      });
-      const outcome = await discoverIn(project, PLANE_FIXTURES, {
-        planesConfig: { rules: [{ match: 'planes/**', plane: 'global', reason: 'option plane' }] },
-      });
+      const outcome = await discoverIn(
+        project,
+        PLANE_FIXTURES,
+        {
+          planesConfig: { rules: [{ match: 'planes/**', plane: 'global', reason: 'option plane' }] },
+        },
+        planesSection({ rules: [{ match: 'planes/**', plane: 'master', reason: 'section plane' }] }),
+      );
       expect(planeOf(outcome, 'planes_admin_users')).toBe('global');
     } finally {
       rmSync(project, { recursive: true, force: true });

@@ -22,11 +22,14 @@ import { join } from 'node:path';
 import {
   buildResourceGraph,
   runClassification,
-  type ClassificationPolicy,
+  type ClassifierPolicy,
 } from '@gate-forge/core';
 import { createTaskDetector, PACK_PLUGIN_ID, PACK_VERSION } from '../src/index.js';
 
-function policy(_dir: string): ClassificationPolicy {
+/** Since 0.11.0 the classifier consumes the COMPOSED policy (owner answers
+ * plus the `scan:` settings), so this fixture builds that one object,
+ * exactly as the pipeline does. */
+function policy(_dir: string): ClassifierPolicy {
   return {
     schemaVersion: 1,
     // Scan roots are repo-root-relative globs (the detector's location

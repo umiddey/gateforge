@@ -41,16 +41,17 @@ import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { DiscoveryOutcome } from '@gate-forge/plugin-protocol';
+import type { DiscoverContext, DiscoveryOutcome } from '@gate-forge/plugin-protocol';
+import { OWNER_ANSWERS_PATH } from '@gate-forge/core';
 import {
   DEFAULT_PLANES_CONFIG,
-  PLANES_CONFIG_PATH,
   PLANE_RULE_CONTRADICTION,
   byTableName,
   createSqlalchemyDetector,
   NO_PLANE_MAPPING,
+  parsePlanesConfigDocument,
   planeRuleMatches,
-  readPlanesConfigOrNull,
+  planesConfigFromSection,
   resolvePlaneByRules,
   type PlaneConfigRule,
   type PlanesConfig,
@@ -76,23 +77,21 @@ function makeProject(): string {
   return project;
 }
 
-/** Writes `.gateforge/planes.json` (or an explicit name) into `project`. */
-function writePlanesConfig(project: string, document: unknown, name = PLANES_CONFIG_PATH): string {
-  mkdirSync(join(project, '.gateforge'), { recursive: true });
-  const path = join(project, name);
-  writeFileSync(path, typeof document === 'string' ? document : JSON.stringify(document), 'utf8');
-  return path;
-}
-
-/** Discovers `paths` with the project as working directory (always restores cwd). */
+/**
+ * Discovers `paths` with the project as working directory (always restores
+ * cwd). `planes` is the owner's `planes:` section exactly as the host hands
+ * it at discover time; absent = the repository declares no plane rules.
+ */
 async function discoverIn(
   project: string,
   paths: readonly string[],
   options: SqlalchemyDetectorOptions = {},
+  planes?: unknown,
 ): Promise<DiscoveryOutcome> {
   process.chdir(project);
   try {
-    return (await createSqlalchemyDetector(options).discover([...paths])) as DiscoveryOutcome;
+    const context: DiscoverContext = { root: project, sections: { planes } };
+    return (await createSqlalchemyDetector(options).discover([...paths], context)) as DiscoveryOutcome;
   } finally {
     process.chdir(ORIGINAL_CWD);
   }
@@ -113,21 +112,13 @@ const PATH_RULE: PlaneConfigRule = {
   reason: 'control-plane models',
 };
 
-describe('planes config reader (offline)', () => {
-  let dir: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'gateforge-planes-read-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
+describe('planes section reader (offline)', () => {
   const readDoc = (document: unknown): PlanesConfig =>
-    readPlanesConfigOrNull(writePlanesConfig(dir, document));
+    parsePlanesConfigDocument(document, `${OWNER_ANSWERS_PATH} planes:`);
 
-  it('null path and absent file both yield the default (no rules)', () => {
-    expect(readPlanesConfigOrNull(null)).toBe(DEFAULT_PLANES_CONFIG);
-    expect(readPlanesConfigOrNull(join(dir, 'missing.json'))).toBe(DEFAULT_PLANES_CONFIG);
+  it('an absent section is the default (no rules)', () => {
+    expect(planesConfigFromSection(undefined, OWNER_ANSWERS_PATH)).toBe(DEFAULT_PLANES_CONFIG);
+    expect(planesConfigFromSection(null, OWNER_ANSWERS_PATH)).toBe(DEFAULT_PLANES_CONFIG);
   });
 
   it('parses a valid document with path and tables rules', () => {
@@ -143,8 +134,12 @@ describe('planes config reader (offline)', () => {
     ]);
   });
 
-  it('malformed JSON throws (fail closed, not the default)', () => {
-    expect(() => readDoc('{"rules": [oops]')).toThrow();
+  it('a section that is not a mapping throws (fail closed, not the default)', () => {
+    // Unparsable BYTES never reach this reader: the host reads the YAML
+    // document and refuses the run before a section exists. What this
+    // reader owns is the shape of a section that did parse, and a shape it
+    // cannot understand is refused rather than defaulted.
+    expect(() => readDoc('{"rules": [oops]')).toThrow(/expected an object/);
   });
 
   it('non-object documents throw', () => {
@@ -567,13 +562,12 @@ describe('planes config end-to-end (in-process transport)', () => {
     expect(outcome.findings).toEqual([]);
   });
 
-  it('a malformed exclude in the config file throws from discover (fail closed)', async () => {
-    writePlanesConfig(project, {
-      rules: [{ match: 'planes/**', exclude: ['/abs/x'], plane: 'master', reason: 'x' }],
-    });
-    await expect(discoverIn(project, ['planes/admin_models.py'], {})).rejects.toThrow(
-      /rules\[0\]\.exclude\[0\] must be a repo-root-relative glob/,
-    );
+  it('a malformed exclude in the planes: section throws from discover (fail closed)', async () => {
+    await expect(
+      discoverIn(project, ['planes/admin_models.py'], {}, {
+        rules: [{ match: 'planes/**', exclude: ['/abs/x'], plane: 'master', reason: 'x' }],
+      }),
+    ).rejects.toThrow(/rules\[0\]\.exclude\[0\] must be a repo-root-relative glob/);
   });
 
   it('a tables rule matches by class simple name (tableName differs)', async () => {
@@ -647,7 +641,7 @@ describe('planes config end-to-end (in-process transport)', () => {
     expect(finding.detail).toContain("table 'planes_admin_users'");
     expect(finding.detail).toContain('rule 0 (master, "platform control-plane tables")');
     expect(finding.detail).toContain('rule 1 (tenant, "tenant workspace users")');
-    expect(finding.detail).toContain(PLANES_CONFIG_PATH);
+    expect(finding.detail).toContain(OWNER_ANSWERS_PATH);
     expect(finding.locations).toEqual([{ file: 'planes/admin_models.py', line: 16, col: 0 }]);
     // Fail closed: the conflicting table stays plane-unresolved.
     expect(byTableNameAttr(outcome, 'planes_admin_users')?.attributes['plane']).toBeUndefined();
@@ -673,30 +667,31 @@ describe('planes config end-to-end (in-process transport)', () => {
     }
   });
 
-  it('the programmatic plane option wins and the config file is not read at all', async () => {
-    // The document would map the table to master; also deliberately
-    // MALFORMED to prove the programmatic channel skips the file read.
-    writePlanesConfig(project, { rules: [{ match: 'planes/**' }] });
-    const outcome = await discoverIn(project, ['planes/admin_models.py'], {
-      plane: byTableName({ planes_admin_users: 'global' }),
-    });
+  it('the programmatic plane option wins and the planes: section is not read at all', async () => {
+    // The section would map the table to master; also deliberately
+    // MALFORMED to prove the programmatic channel never reads it.
+    const outcome = await discoverIn(
+      project,
+      ['planes/admin_models.py'],
+      { plane: byTableName({ planes_admin_users: 'global' }) },
+      { rules: [{ match: 'planes/**' }] },
+    );
     expect(byTableNameAttr(outcome, 'planes_admin_users')?.attributes['plane']).toBe('global');
   });
 
-  it('a malformed config file throws from discover (fail closed, CLI surfaces it)', async () => {
-    writePlanesConfig(project, { planeMapping: { planes_admin_users: 'master' } });
+  it('a malformed planes: section throws from discover (fail closed, CLI surfaces it)', async () => {
     await expect(
-      discoverIn(project, ['planes/admin_models.py'], {}),
+      discoverIn(project, ['planes/admin_models.py'], {}, { planeMapping: { planes_admin_users: 'master' } }),
     ).rejects.toThrow(/unknown key\(s\) planeMapping/);
   });
 
-  it('an explicit planesConfig option overrides the document entirely', async () => {
-    writePlanesConfig(project, {
-      rules: [{ tables: ['planes_admin_users'], plane: 'tenant', reason: 'doc says tenant' }],
-    });
-    const outcome = await discoverIn(project, ['planes/admin_models.py'], {
-      planesConfig: { rules: [PATH_RULE] },
-    });
+  it('an explicit planesConfig option overrides the handed section entirely', async () => {
+    const outcome = await discoverIn(
+      project,
+      ['planes/admin_models.py'],
+      { planesConfig: { rules: [PATH_RULE] } },
+      { rules: [{ tables: ['planes_admin_users'], plane: 'tenant', reason: 'the section says tenant' }] },
+    );
     expect(byTableNameAttr(outcome, 'planes_admin_users')?.attributes['plane']).toBe('master');
   });
 });

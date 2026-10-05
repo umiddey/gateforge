@@ -25,6 +25,7 @@ import {
   ClassificationPolicySchema,
   PolicyFileSchema,
   loadConfig,
+  OWNER_ANSWERS_PATH,
   parseConfig,
   resolveStrictnessMode,
   serializeBaseline,
@@ -33,9 +34,8 @@ import {
 import type { GateforgeConfig, StrictnessMode } from '@gate-forge/core';
 import {
   DEFAULT_PLANES_CONFIG,
-  PLANES_CONFIG_PATH,
   createSqlalchemyDetector,
-  parsePlanesConfigText,
+  parsePlanesConfigDocument,
   PACK_VERSION as PACK_SQLALCHEMY_VERSION,
   type PlaneConfigRule,
   type SqlalchemyPlane,
@@ -57,6 +57,7 @@ import { rejectUnknownFlags, VERSION } from './common.js';
 import { expandScanPaths, type ExpandError } from '../glob.js';
 import { gitIgnoredPaths } from '../git-ignored.js';
 import { inferPlanesConfig } from '../planes-inference.js';
+import { declaresTopLevelSection, setTopLevelSection } from '../yaml-section.js';
 import { hasGateforgeMarker, installCommitHook, installPrePushHook, writeStandaloneGateScript } from '../git-hooks.js';
 import {
   appendPreCommitHook,
@@ -1176,10 +1177,10 @@ async function resolveBehaviorPacks(
 }
 
 /**
- * Asks (TTY only) whether init should propose `.gateforge/planes.json`
- * from the discovered model directories. Flags win: --planes forces
- * yes, --no-planes forces no, non-interactive runs default to no (the
- * same contract as {@link resolveBlocking}).
+ * Asks (TTY only) whether init should propose the `planes:` section of the
+ * owner-answers document from the discovered model directories. Flags win:
+ * `--planes` forces yes, `--no-planes` forces no, non-interactive runs
+ * default to no (the same contract as {@link resolveBlocking}).
  */
 async function resolvePlanes(io: Io, options: Readonly<Record<string, unknown>>): Promise<boolean> {
   if (options['planes'] === true) return true;
@@ -1187,7 +1188,8 @@ async function resolvePlanes(io: Io, options: Readonly<Record<string, unknown>>)
   if (!process.stdin.isTTY) {
     writeLine(
       io.stdout,
-      'tip: gateforge init --planes proposes .gateforge/planes.json from discovered model directories (review before the next run)',
+      `tip: gateforge init --planes proposes the planes: section of ${OWNER_ANSWERS_PATH} from ` +
+        'discovered model directories (review before the next run)',
     );
     return false;
   }
@@ -1195,7 +1197,8 @@ async function resolvePlanes(io: Io, options: Readonly<Record<string, unknown>>)
   try {
     const answer = (
       await rl.question(
-        'Propose .gateforge/planes.json from discovered model directories (review before the next run)? [y/N] ',
+        `Propose the planes: section of ${OWNER_ANSWERS_PATH} from discovered model directories ` +
+          '(review before the next run)? [y/N] ',
       )
     )
       .trim()
@@ -1453,9 +1456,10 @@ async function askRouteFolderPlanes(cwd: string, io: Io): Promise<PlaneConfigRul
  * Runs discovery over the repo's own include/exclude config, infers a
  * planes proposal from the discovered table directories, adds the owner's
  * answered ROUTE-folder rules, self-checks the draft against the runtime's
- * strict parser, and writes `.gateforge/planes.json` — only when absent
- * (never overwrites a reviewed document). Inference failure is surfaced as a
- * visible warning, never silently skipped, but does not abort the scaffold.
+ * strict parser, and writes the `planes:` section of the ONE owner-answers
+ * document — only when absent (never overwrites a reviewed section).
+ * Inference failure is surfaced as a visible warning, never silently
+ * skipped, but does not abort the scaffold.
  */
 
 async function proposePlanesConfig(
@@ -1463,9 +1467,18 @@ async function proposePlanesConfig(
   io: Io,
   routeRules: readonly PlaneConfigRule[] = [],
 ): Promise<void> {
-  const planesPath = join(cwd, PLANES_CONFIG_PATH);
-  if (existsSync(planesPath)) {
-    writeLine(io.stdout, `exists, leaving untouched: ${planesPath}`);
+  const answersPath = join(cwd, OWNER_ANSWERS_PATH);
+  if (!existsSync(answersPath)) {
+    writeLine(
+      io.stdout,
+      `warning: ${OWNER_ANSWERS_PATH} is absent, so no planes: section can be written — ` +
+        'init continues',
+    );
+    return;
+  }
+  const before = readFileSync(answersPath, 'utf8');
+  if (declaresTopLevelSection(before, 'planes', OWNER_ANSWERS_PATH)) {
+    writeLine(io.stdout, `exists, leaving untouched: the planes: section of ${answersPath}`);
     return;
   }
   let tableSources: string[];
@@ -1497,7 +1510,7 @@ async function proposePlanesConfig(
     writeLine(
       io.stdout,
       `warning: plane inference failed (${cause instanceof Error ? cause.message : String(cause)}); ` +
-        'add .gateforge/planes.json manually — init continues',
+        `add a planes: section to ${OWNER_ANSWERS_PATH} manually — init continues`,
     );
     return;
   }
@@ -1508,31 +1521,33 @@ async function proposePlanesConfig(
       `note: ${inference.skippedTestTables} table(s) under test directories were excluded from plane inference (fixtures are not business surface)`,
     );
   }
-  // A reviewed file with zero rules is a real answer, not a failure:
+  // A `planes:` section with zero rules is a real answer, not a failure:
   // it declares no plane, which is exactly what the classifier already
-  // assumes while the file is absent. Writing it anyway is what makes
+  // assumes while the section is absent. Writing it anyway is what makes
   // `gateforge init --planes` the runnable prerequisite the
   // `gateforge next` guidance prints for an unresolved route.
   // The owner's ROUTE-folder answers join the inferred model rules in the
-  // one file init writes: both are reviewed proposals, and splitting them
-  // across two writes would make the second overwrite the first.
+  // one section init writes: both are reviewed proposals, and splitting
+  // them across two writes would make the second overwrite the first.
   const combined = [...(inference.config?.rules ?? []), ...routeRules];
-  const serialized = `${JSON.stringify(combined.length === 0 ? { rules: [] } : { rules: combined }, null, 2)}\n`;
   // Self-check the draft against the runtime's strict reader contract
   // BEFORE writing (a broken proposal must fail here, not at the next run).
-  parsePlanesConfigText(serialized, planesPath);
-  writeFileSync(planesPath, serialized, 'utf8');
+  parsePlanesConfigDocument({ rules: combined }, `${OWNER_ANSWERS_PATH} planes:`);
+  const after = setTopLevelSection(before, 'planes', { rules: combined }, OWNER_ANSWERS_PATH);
+  writeFileSync(answersPath, after, 'utf8');
   if (inference.config === null) {
     writeLine(
       io.stdout,
-      `created: ${planesPath} (no rule could be inferred — ${inference.note ?? 'nothing to propose'}; ` +
-        'the file declares no plane, so every table still blocks until you add a reviewed rule)',
+      `created: the planes: section of ${answersPath} (no rule could be inferred — ` +
+        `${inference.note ?? 'nothing to propose'}; the section declares no plane, so every table ` +
+        'still blocks until you add a reviewed rule)',
     );
     return;
   }
   writeLine(
     io.stdout,
-    `created: ${planesPath} (${combined.length} rule(s) — ${inference.config?.rules.length ?? 0} inferred from model directories, ` +
+    `created: the planes: section of ${answersPath} (${combined.length} rule(s) — ` +
+      `${inference.config?.rules.length ?? 0} inferred from model directories, ` +
       `${routeRules.length} answered for route folders — review the reasons before the next gateforge run)`,
   );
 }
@@ -2211,9 +2226,10 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
   // Plane-config proposal (flags win; TTY prompt fills the gap;
   // non-interactive defaults to scaffold-only, like every granular step):
   //   --planes / --no-planes
-  //       propose .gateforge/planes.json from the model directories the
-  //       discovered tables live in — a review artifact with a reason on
-  //       every rule, written only when absent, never silently applied
+  //       propose the `planes:` section of the owner-answers document from
+  //       the model directories the discovered tables live in — a review
+  //       artifact with a reason on every rule, written only when absent,
+  //       never silently applied
   //       (the next run reads it and the user reviews first).
   //
   // An EXPLICIT `--planes` is always honored: it is the runnable
@@ -2226,7 +2242,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     if (await resolvePlanes(io, options)) {
       // The route folders are asked in the SAME flow, right before the
       // model folders are written, so both sets of answers land in one
-      // reviewed `.gateforge/planes.json`.
+      // reviewed `planes:` section.
       const routeRules = await askRouteFolderPlanes(cwd, io);
       await proposePlanesConfig(cwd, io, routeRules);
     }

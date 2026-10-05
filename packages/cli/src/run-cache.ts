@@ -456,16 +456,26 @@ function moduleBytesDigestOf(moduleSpecifier: string, cwd: string): string | nul
 
 /**
  * Digests the plugin input bytes: every expanded scan path with its
- * content, sorted by path (order-insensitive like the detectors' view).
+ * content, sorted by path (order-insensitive like the detectors' view),
+ * plus the owner SECTIONS the host handed every detector — a detector's
+ * facts depend on the plane / client-scan / import-root declarations, so
+ * the same bytes under a different declaration are a cache MISS, never a
+ * stale hit. Before 0.11 those bytes were separate files and were NOT
+ * part of this key; the sections join it for exactly that reason.
  *
  * Args:
  *   cwd: repo root the relative paths resolve against.
  *   paths: repo-relative scanned paths handed to every plugin.
+ *   sections: the parsed owner sections handed to every plugin.
  *
  * Returns:
  *   string | null: hex digest, or null when any input is unreadable.
  */
-export function digestPathListInputs(cwd: string, paths: readonly string[]): string | null {
+export function digestPathListInputs(
+  cwd: string,
+  paths: readonly string[],
+  sections: unknown = null,
+): string | null {
   const sorted = [...paths].sort();
   const parts: string[] = [];
   for (const relativePath of sorted) {
@@ -473,7 +483,7 @@ export function digestPathListInputs(cwd: string, paths: readonly string[]): str
     if (digest === null) return null;
     parts.push(digest);
   }
-  return sha256Hex(parts.join('\n'));
+  return sha256Hex([JSON.stringify(sections ?? null), ...parts].join('\n'));
 }
 
 /**

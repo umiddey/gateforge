@@ -27,10 +27,11 @@
  */
 import { compareStrings, loadConfig, type DetectorOutput } from '@gate-forge/core';
 import { isTestSourcePath, type SqlalchemyPlane } from '@gate-forge/pack-sqlalchemy';
-import { compileEndpointContribution } from './endpoint-compiler.js';
+import { compileEndpointContribution, type EndpointCompilerOptions } from './endpoint-compiler.js';
 import { expandScanPaths } from './glob.js';
-import { runPlugins } from './plugins.js';
+import { hostDiscoverContext, runPlugins } from './plugins.js';
 import { gitIgnoredPaths } from './git-ignored.js';
+import { loadOwnerAnswers } from './owner-answers.js';
 import { HTTP_ENDPOINT_RESOURCE_KIND } from '@gate-forge/core';
 
 /** The plane values a fact can carry (never inferred, only read). */
@@ -121,21 +122,43 @@ export async function collectRoutePlaneFacts(cwd: string): Promise<RoutePlaneFac
     cwd,
     gitIgnoredPaths(cwd),
   );
-  const { contributions } = await runPlugins(config.plugins, paths, cwd);
-  return routePlaneFactsOf(contributions, cwd);
+  // 0.11.0: the owner's sections are read ONCE, here, and handed to the
+  // detectors and to the endpoint compiler. Reading the answers document
+  // in two places is how the proposal pass and the run it proposes for
+  // would drift apart, and a proposal that disagrees with its own run is
+  // worse than no proposal.
+  const answers = loadOwnerAnswers(cwd, config);
+  const sections: EndpointCompilerOptions = {
+    planes: answers.planes,
+    endpoints: answers.endpoints,
+    deleteRules: answers.deleteRules,
+  };
+  const { contributions } = await runPlugins(
+    config.plugins,
+    paths,
+    hostDiscoverContext(cwd, {
+      planes: answers.planes,
+      endpoints: answers.endpoints,
+      httpClients: config.scan.httpClients,
+      fastapi: config.scan.fastapi,
+    }),
+  );
+  return routePlaneFactsOf(contributions, sections);
 }
 
 /**
  * Reduces detector contributions to route-plane facts. Pure over its
- * inputs apart from reading `cwd` for the declarative planes document.
+ * inputs, including the owner sections (0.11.0: the already-parsed
+ * `planes:` / `endpoints:` / `deleteRules` the host read).
  *
  * @param contributions - Every configured plugin's discovery output.
- * @param cwd - Repository root the planes document is read from.
+ * @param sections - The owner's already-parsed sections; absent = the
+ *   repository declares none, which is what an empty document means.
  * @returns One fact per compiled endpoint, sorted and deduplicated.
  */
 export function routePlaneFactsOf(
   contributions: readonly DetectorOutput[],
-  cwd: string,
+  sections: EndpointCompilerOptions = {},
 ): RoutePlaneFact[] {
   // Plane evidence per BUSINESS resource name (endpoints excluded): the
   // same view the endpoint compiler and the classifier both read.
@@ -152,7 +175,7 @@ export function routePlaneFactsOf(
       else planes.add(plane);
     }
   }
-  const compiled = compileEndpointContribution(contributions, { cwd });
+  const compiled = compileEndpointContribution(contributions, sections);
   // Every plane assertion the compiler minted, keyed by endpoint name. A
   // name with disagreeing assertions resolves to nothing.
   const asserted = new Map<string, Set<SqlalchemyPlane>>();

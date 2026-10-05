@@ -5,7 +5,7 @@
  *
  * - **in-process**: `.gateforge.yml` declares
  *   `transport: in-process, module: "@gate-forge/pack-fastapi"`; the CLI
- *   imports this package's default export and calls `discover(paths)`.
+ *   imports this package's default export and calls `discover(paths, context)`.
  *   The implementation spawns the SAME python detector (GPP/3, hardened
  *   host) with a computed `PYTHONPATH`, so one detector implementation
  *   serves both transports.
@@ -22,16 +22,20 @@
  * handler corroboration over the facts this pack emits).
  *
  * Determinism: the python scan is pure over (paths, file bytes). The
- * The optional `.gateforge/fastapi.json` config (import roots for absolute
- * imports, the central-router-registry pattern) is read from the root that
- * is in force at DISCOVER time and passed to the scanner as an explicit
+ * optional `scan.fastapi` section of `.gateforge.yml` (import roots for
+ * absolute imports, the central-router-registry pattern) is handed to this
+ * discover call by the host and passed to the scanner as an explicit
  * `--import-roots` argv flag — never environment state, never per-request
  * mutation.
  */
 import { readFileSync } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PluginSession, type DiscoveryOutcome } from '@gate-forge/plugin-protocol';
+import {
+  PluginSession,
+  type DiscoverContext,
+  type DiscoveryOutcome,
+} from '@gate-forge/plugin-protocol';
 import { canonicalizeFacts, type ContractResource } from './facts.js';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
 
@@ -47,13 +51,15 @@ const PROTOCOL_PYTHON_DIR = fileURLToPath(
 export const DEFAULT_COMMAND = ['python3', '-m', 'gateforge_fastapi_detector'];
 
 /**
- * The detector's config channel: a JSON document read from the repo root
- * (same precedent as pack-http's `.gateforge/http-clients.json`). Absence
- * is normal; a malformed document throws (fail closed).
+ * The detector's config channel — repo-root-relative Python import roots
+ * for ABSOLUTE imports (the central-router-registry pattern). Since 0.11.0
+ * these are the owner's `scan.fastapi` section of `.gateforge.yml`, handed
+ * to `discover()` by the host; they used to be read from this path, which
+ * no command reads anymore.
  */
-export const FASTAPI_SCAN_CONFIG_PATH = '.gateforge/fastapi.json';
+export const FASTAPI_SCAN_CONFIG_SECTION = 'scan.fastapi';
 
-/** Parsed `.gateforge/fastapi.json` document (strict schema). */
+/** Parsed `scan.fastapi` section (strict schema; was `.gateforge/fastapi.json`). */
 export interface FastapiScanConfig {
   /**
    * Repo-root-relative directories that act as Python import roots for
@@ -89,9 +95,51 @@ function normalizeImportRoot(raw: unknown, path: string): string {
 }
 
 /**
- * Reads a fastapi detector config document. Returns the default config
- * when the file is absent; malformed documents throw (fail closed — the
- * CLI surfaces the error instead of scanning with partial trust).
+ * Parses the `scan.fastapi` section the host hands this detector. An
+ * ABSENT section is normal and yields the default config (no import
+ * roots); a malformed one throws (fail closed — the CLI surfaces the
+ * error instead of scanning with partial trust).
+ *
+ * Args:
+ *   section: the parsed section, or null/undefined when absent.
+ *   at: where the bytes came from, named in every refusal.
+ *
+ * Returns:
+ *   FastapiScanConfig: the validated configuration.
+ */
+export function parseFastapiScanConfigDocument(section: unknown, at: string): FastapiScanConfig {
+  if (section === null || section === undefined) return DEFAULT_FASTAPI_SCAN_CONFIG;
+  if (typeof section !== 'object' || Array.isArray(section)) {
+    throw new Error(`invalid fastapi detector config: expected an object at ${at}`);
+  }
+  const document = section as Record<string, unknown>;
+  const unknownKeys = Object.keys(document).filter((key) => key !== 'importRoots');
+  if (unknownKeys.length > 0) {
+    // Strict on purpose: a typo'd key would otherwise silently disable the
+    // import roots and hide exactly the routes they exist to expose.
+    throw new Error(
+      `invalid fastapi detector config: unknown key(s) ` +
+        `${unknownKeys.sort().join(', ')} at ${at}`,
+    );
+  }
+  const config: FastapiScanConfig = {};
+  const roots = document['importRoots'];
+  if (roots !== undefined) {
+    if (!Array.isArray(roots)) {
+      throw new Error(
+        `invalid fastapi detector config: 'importRoots' must be an array of ` +
+          `repo-root-relative directories at ${at}`,
+      );
+    }
+    config.importRoots = roots.map((root) => normalizeImportRoot(root, at));
+  }
+  return config;
+}
+
+/**
+ * Parses a fastapi detector config document from JSON TEXT. Kept for
+ * generators and tests that must self-check a proposed document BEFORE it
+ * is written; it applies the exact runtime validation.
  */
 export function readFastapiScanConfigOrNull(path: string | null): FastapiScanConfig {
   if (path === null) return DEFAULT_FASTAPI_SCAN_CONFIG;
@@ -102,31 +150,7 @@ export function readFastapiScanConfigOrNull(path: string | null): FastapiScanCon
     return DEFAULT_FASTAPI_SCAN_CONFIG; // absence is normal; malformed is not (below)
   }
   const parsed: unknown = JSON.parse(text);
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`invalid fastapi detector config: expected an object at ${path}`);
-  }
-  const document = parsed as Record<string, unknown>;
-  const unknownKeys = Object.keys(document).filter((key) => key !== 'importRoots');
-  if (unknownKeys.length > 0) {
-    // Strict on purpose: a typo'd key would otherwise silently disable the
-    // import roots and hide exactly the routes they exist to expose.
-    throw new Error(
-      `invalid fastapi detector config: unknown key(s) ` +
-        `${unknownKeys.sort().join(', ')} at ${path}`,
-    );
-  }
-  const config: FastapiScanConfig = {};
-  const roots = document['importRoots'];
-  if (roots !== undefined) {
-    if (!Array.isArray(roots)) {
-      throw new Error(
-        `invalid fastapi detector config: 'importRoots' must be an array of ` +
-          `repo-root-relative directories at ${path}`,
-      );
-    }
-    config.importRoots = roots.map((root) => normalizeImportRoot(root, path));
-  }
-  return config;
+  return parseFastapiScanConfigDocument(parsed, path);
 }
 
 /**
@@ -165,18 +189,13 @@ export interface FastapiDetectorOptions {
    * document entirely when given.
    */
   importRoots?: readonly string[];
-  /**
-   * Repo-relative path of a config document (JSON) read from the root in
-   * force at discover time when `importRoots` is not given (default:
-   * `.gateforge/fastapi.json`; absence is normal, malformed throws).
-   */
-  importRootsConfigPath?: string;
 }
 
-/** The pinned in-process plugin contract: `{ discover(paths) }`. */
+/** The pinned in-process plugin contract: `{ discover(paths, context) }`. */
 export interface FastapiDetector {
   discover(
     paths: readonly string[],
+    context?: DiscoverContext,
   ): Promise<{
     resources: unknown[];
     unresolved: unknown[];
@@ -201,29 +220,30 @@ export function createFastapiDetector(options: FastapiDetectorOptions = {}): Fas
   // process cwd to the staged candidate checkout before discovery runs. A
   // root captured at factory time would pin the loader's cwd and read the
   // user's worktree bytes instead of the gated ones. The same holds for the
-  // config document: `.gateforge/fastapi.json` is read from the root in
-  // force at this discover call. Explicit options always win.
-  const resolveRoot = (): string => options.cwd ?? process.cwd();
-  const resolveArgv = (cwd: string): string[] => {
-    // Explicit roots win; otherwise the config document (absence normal,
-    // malformed throws). With no roots at all the spawned command is
-    // byte-identical to the pre-config surface.
+  // owner section: `scan.fastapi` is handed to this discover call, so it
+  // describes the gated candidate. Explicit options always win.
+  const resolveRoot = (context?: DiscoverContext): string =>
+    options.cwd ?? context?.root ?? process.cwd();
+  const resolveArgv = (cwd: string, context?: DiscoverContext): string[] => {
+    // Explicit roots win; otherwise the owner's `scan.fastapi` section
+    // (absence normal, malformed throws). With no roots at all the spawned
+    // command is byte-identical to the pre-config surface.
     const importRoots =
       options.importRoots ??
-      readFastapiScanConfigOrNull(resolve(cwd, options.importRootsConfigPath ?? FASTAPI_SCAN_CONFIG_PATH))
+      parseFastapiScanConfigDocument(context?.sections.fastapi, FASTAPI_SCAN_CONFIG_SECTION)
         .importRoots ??
       [];
     return importRoots.length > 0 ? [...command, '--import-roots', JSON.stringify(importRoots)] : [...command];
   };
 
   return {
-    async discover(paths) {
+    async discover(paths, context) {
       if (paths.length === 0) {
         return { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       }
-      const cwd = resolveRoot();
+      const cwd = resolveRoot(context);
       const session = new PluginSession({
-        command: resolveArgv(cwd),
+        command: resolveArgv(cwd, context),
         pluginId,
         pluginVersion,
         cwd,

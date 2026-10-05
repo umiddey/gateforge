@@ -40,7 +40,6 @@
  */
 
 import ts from 'typescript';
-import { readFileSync } from 'node:fs';
 import { posix } from 'node:path';
 import {
   FRONTEND_CALL_TARGET_UNRESOLVED,
@@ -2017,38 +2016,41 @@ function parseEntryScoping(
 }
 
 /**
- * Reads a client-scan config document. Returns the default config when
- * the file is absent; malformed documents throw (fail closed — the CLI
- * surfaces the error instead of scanning with partial trust).
+ * Parses the WHOLE client-scan document — every key of the owner's
+ * `scan.httpClients` section (0.11.0: these bytes used to live in
+ * `.gateforge/http-clients.json`, and the host handed them over
+ * instead of letting every detector re-read a file).
+ *
+ * An ABSENT section is normal and yields the default config (no roots,
+ * no symbols) — byte-identical to the absent document. A malformed one
+ * throws (fail closed — the CLI surfaces the error instead of scanning
+ * with partial trust).
  *
  * Accepted shapes (phase 3 scan-scoping): `clientSymbols` entries are a
  * plain string (back-compat, unscoped) or `{ name, include?, exclude? }`;
  * `wrapperFunctions` / `urlBuilders` entries carry the same optional
  * include/exclude next to their existing `method` / `base` fields; the
  * top-level `clientScanRoots` / `serverScanRoots` arrays scope where
- * client-call and server-route scanning apply at all. Consistent with
- * the pre-existing parser posture: unknown keys are ignored, non-array
- * known keys are ignored, but malformed ENTRY values throw (the wrapper
- * verb check predates this; the new scoping fields throw on wrong
- * shapes and missing names because silently dropping a scope widens the
- * scan instead of narrowing it).
+ * client-call and server-route scanning apply at all. Consistent with the
+ * pre-existing parser posture: unknown keys are ignored, non-array known
+ * keys are ignored, but malformed ENTRY values throw (the wrapper verb
+ * check predates this; the scoping fields throw on wrong shapes and
+ * missing names because silently dropping a scope widens the scan
+ * instead of narrowing it).
+ *
+ * Args:
+ *   section: the parsed `scan.httpClients` section, or null/undefined when absent.
+ *   at: where the bytes came from, named in every refusal.
+ *
+ * Returns:
+ *   ClientScanConfig: the validated configuration.
  */
-export function readClientScanConfigOrNull(path: string | null): ClientScanConfig {
-  if (path === null) return DEFAULT_CLIENT_SCAN_CONFIG;
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    return DEFAULT_CLIENT_SCAN_CONFIG; // absence is normal; malformed is not (below)
+export function parseClientScanConfigDocument(section: unknown, at: string): ClientScanConfig {
+  if (section === null || section === undefined) return DEFAULT_CLIENT_SCAN_CONFIG;
+  if (typeof section !== 'object' || Array.isArray(section)) {
+    throw new Error(`invalid http client config: expected an object at ${at}`);
   }
-  // YAML is intentionally not a dependency here: the document is JSON or
-  // JSON-with-comments parsed by the CLI layer. This module accepts only
-  // plain JSON objects.
-  const parsed: unknown = JSON.parse(text);
-  if (parsed === null || typeof parsed !== 'object') {
-    throw new Error(`invalid http client config: expected an object at ${path}`);
-  }
-  const document = parsed as Record<string, unknown>;
+  const document = section as Record<string, unknown>;
   const config: ClientScanConfig = {};
   if (Array.isArray(document['clientScanRoots'])) {
     config.clientScanRoots = document['clientScanRoots'].map((root) => String(root));
@@ -2061,13 +2063,13 @@ export function readClientScanConfigOrNull(path: string | null): ClientScanConfi
       // Plain string: the original shape, unscoped — byte-identical.
       if (typeof entry === 'string') return entry;
       if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-        throw new Error(`invalid http client config: clientSymbols entries must be a name or a {name, include?, exclude?} object at ${path}`);
+        throw new Error(`invalid http client config: clientSymbols entries must be a name or a {name, include?, exclude?} object at ${at}`);
       }
       const record = entry as Record<string, unknown>;
       if (record['name'] === undefined) {
-        throw new Error(`invalid http client config: clientSymbols object entries must carry a name at ${path}`);
+        throw new Error(`invalid http client config: clientSymbols object entries must carry a name at ${at}`);
       }
-      return { name: String(record['name']), ...parseEntryScoping(record, 'clientSymbols', path) };
+      return { name: String(record['name']), ...parseEntryScoping(record, 'clientSymbols', at) };
     });
   }
   if (Array.isArray(document['wrapperFunctions'])) {
@@ -2075,9 +2077,9 @@ export function readClientScanConfigOrNull(path: string | null): ClientScanConfi
       const record = entry as Record<string, unknown>;
       const method = normalizeHttpMethodValue(String(record['method'] ?? 'GET'));
       if (method === null) {
-        throw new Error(`invalid http client config: wrapper method must be a concrete verb at ${path}`);
+        throw new Error(`invalid http client config: wrapper method must be a concrete verb at ${at}`);
       }
-      return { name: String(record['name']), method, ...parseEntryScoping(record, 'wrapperFunctions', path) };
+      return { name: String(record['name']), method, ...parseEntryScoping(record, 'wrapperFunctions', at) };
     });
   }
   if (Array.isArray(document['urlBuilders'])) {
@@ -2087,7 +2089,7 @@ export function readClientScanConfigOrNull(path: string | null): ClientScanConfi
       return {
         name: String(record['name']),
         base: record['base'] === undefined ? undefined : String(record['base']),
-        ...parseEntryScoping(record, 'urlBuilders', path),
+        ...parseEntryScoping(record, 'urlBuilders', at),
       };
     });
   }

@@ -1,5 +1,5 @@
 /**
- * Import-root resolution tests (`.gateforge/fastapi.json`): the central
+ * Import-root resolution tests (`scan.fastapi`): the central
  * router-registry pattern (`from api.v1.endpoints import activities` +
  * `app.include_router(activities.router, prefix=...)`) that file-relative
  * resolution alone cannot join.
@@ -17,7 +17,7 @@ import { runRedProbe } from '@gate-forge/core';
 import {
   createFastapiDetector,
   DEFAULT_FASTAPI_SCAN_CONFIG,
-  readFastapiScanConfigOrNull,
+  parseFastapiScanConfigDocument,
 } from '../src/detector.js';
 import {
   AMBIGUOUS_IMPORT_ROOTS,
@@ -93,15 +93,14 @@ describe('fastapi import-root resolution (.gateforge/fastapi.json)', () => {
     }
   });
 
-  it('reads the same roots from a config document path (byte-identical outcome)', async () => {
-    const detector = createFastapiDetector({
-      env: pythonEnv(),
-      cwd: FIXTURE_ROOT,
-      importRootsConfigPath: 'import-roots/fastapi.config.json',
-    });
-    const fromConfig = (await detector.discover([...IMPORT_ROOTS_FIXTURES])) as WrapperOutcome;
+  it('reads the same roots from the handed section (byte-identical outcome)', async () => {
+    const detector = createFastapiDetector({ env: pythonEnv(), cwd: FIXTURE_ROOT });
+    const fromSection = (await detector.discover([...IMPORT_ROOTS_FIXTURES], {
+      root: FIXTURE_ROOT,
+      sections: { fastapi: { importRoots: BACKEND_IMPORT_ROOTS } },
+    })) as WrapperOutcome;
     const fromOption = await runDetectorWithImportRoots(IMPORT_ROOTS_FIXTURES, BACKEND_IMPORT_ROOTS);
-    expect(JSON.stringify(fromConfig)).toBe(JSON.stringify(fromOption));
+    expect(JSON.stringify(fromSection)).toBe(JSON.stringify(fromOption));
   });
 
   it('keeps an ambiguous module path typed-unresolved instead of guessing', async () => {
@@ -343,78 +342,55 @@ describe('fastapi registry-function propagation (function-mediated include_route
   });
 });
 
-describe('fastapi detector config reader (.gateforge/fastapi.json)', () => {
-  it('absence is normal and yields the default config', () => {
-    expect(readFastapiScanConfigOrNull(null)).toEqual(DEFAULT_FASTAPI_SCAN_CONFIG);
-    expect(readFastapiScanConfigOrNull(join(FIXTURE_ROOT, 'definitely-absent.json'))).toEqual(
+describe('fastapi detector section reader (scan.fastapi)', () => {
+  it('an absent section is normal and yields the default config', () => {
+    expect(parseFastapiScanConfigDocument(undefined, 'scan.fastapi')).toEqual(
+      DEFAULT_FASTAPI_SCAN_CONFIG,
+    );
+    expect(parseFastapiScanConfigDocument(null, 'scan.fastapi')).toEqual(
       DEFAULT_FASTAPI_SCAN_CONFIG,
     );
   });
 
-  it('parses a valid document', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'gateforge-fastapi-config-'));
-    try {
-      const path = join(dir, 'fastapi.json');
-      writeFileSync(path, '{ "importRoots": ["backend", "services/api"] }\n', 'utf8');
-      expect(readFastapiScanConfigOrNull(path)).toEqual({
-        importRoots: ['backend', 'services/api'],
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  it('parses a valid section', () => {
+    expect(
+      parseFastapiScanConfigDocument({ importRoots: ['backend', 'services/api'] }, 'scan.fastapi'),
+    ).toEqual({ importRoots: ['backend', 'services/api'] });
   });
 
-  it('throws on malformed documents (JSON, shape, unknown keys, bad roots)', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'gateforge-fastapi-config-'));
-    try {
-      const write = (name: string, text: string): string => {
-        const path = join(dir, name);
-        writeFileSync(path, text, 'utf8');
-        return path;
-      };
-      expect(() =>
-        readFastapiScanConfigOrNull(write('broken.json', '{ "importRoots": [')),
-      ).toThrow();
-      expect(() => readFastapiScanConfigOrNull(write('array.json', '["backend"]'))).toThrow(
-        /expected an object/,
-      );
-      expect(() =>
-        readFastapiScanConfigOrNull(write('unknown.json', '{ "importRoot": ["backend"] }')),
-      ).toThrow(/unknown key\(s\) importRoot/);
-      expect(() =>
-        readFastapiScanConfigOrNull(write('notarray.json', '{ "importRoots": "backend" }')),
-      ).toThrow(/must be an array/);
-      expect(() =>
-        readFastapiScanConfigOrNull(write('escape.json', '{ "importRoots": ["../backend"] }')),
-      ).toThrow(/repo-root-relative directory/);
-      expect(() =>
-        readFastapiScanConfigOrNull(write('number.json', '{ "importRoots": [7] }')),
-      ).toThrow(/import roots must be strings/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  it('throws on malformed sections (shape, unknown keys, bad roots)', () => {
+    // Unparsable BYTES fail in the host's YAML reader before a section
+    // exists; what this reader owns is the shape of a section that did
+    // parse, and an unreadable shape is refused rather than defaulted.
+    expect(() => parseFastapiScanConfigDocument(['backend'], 'scan.fastapi')).toThrow(
+      /expected an object/,
+    );
+    expect(() =>
+      parseFastapiScanConfigDocument({ importRoot: ['backend'] }, 'scan.fastapi'),
+    ).toThrow(/unknown key\(s\) importRoot/);
+    expect(() =>
+      parseFastapiScanConfigDocument({ importRoots: 'backend' }, 'scan.fastapi'),
+    ).toThrow(/must be an array/);
+    expect(() =>
+      parseFastapiScanConfigDocument({ importRoots: ['../backend'] }, 'scan.fastapi'),
+    ).toThrow(/repo-root-relative directory/);
+    expect(() =>
+      parseFastapiScanConfigDocument({ importRoots: [7] }, 'scan.fastapi'),
+    ).toThrow(/import roots must be strings/);
   });
 
-  it('a malformed config fails the discover closed (no scan with partial trust)', async () => {
-    // The config document is read from the root in force at DISCOVER time
+  it('a malformed section fails the discover closed (no scan with partial trust)', async () => {
+    // The section is handed at DISCOVER time from the root in force there
     // (the default export is created at module import, so a factory-time
-    // read would grade the loader's config instead of the gated
+    // read would grade the loader's repository instead of the gated
     // candidate's) — the fail-closed guarantee therefore lands on the
     // discover call rather than on the factory.
-    const dir = mkdtempSync(join(tmpdir(), 'gateforge-fastapi-config-'));
-    try {
-      const path = join(dir, 'fastapi.json');
-      writeFileSync(path, '{ "importRoots": [".."] }', 'utf8');
-      const detector = createFastapiDetector({
-        env: pythonEnv(),
-        cwd: FIXTURE_ROOT,
-        importRootsConfigPath: path,
-      });
-      await expect(detector.discover([...REGISTRY_FIXTURES])).rejects.toThrow(
-        /repo-root-relative directory/,
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const detector = createFastapiDetector({ env: pythonEnv(), cwd: FIXTURE_ROOT });
+    await expect(
+      detector.discover([...REGISTRY_FIXTURES], {
+        root: FIXTURE_ROOT,
+        sections: { fastapi: { importRoots: ['..'] } },
+      }),
+    ).rejects.toThrow(/repo-root-relative directory/);
   });
 });

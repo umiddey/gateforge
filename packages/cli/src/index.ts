@@ -31,8 +31,9 @@ export {
   resolveProvider,
 } from './providers.js';
 export type { ChangedFileProvider } from '@gate-forge/core';
-export { runPipeline, sourceByResourceId, headSha, loadYaml } from './pipeline.js';
+export { runPipeline, sourceByResourceId, headSha } from './pipeline.js';
 export type { PipelineOptions, PipelineResult } from './pipeline.js';
+export { loadYaml } from './yaml.js';
 export {
   APPROVED_POLICY_DIGEST_ENV,
   TRUSTED_CONFIG_ENV,

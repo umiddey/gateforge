@@ -6,9 +6,12 @@
  * `@gate-forge/pack-http` statically at startup and
  * `gateforge check --staged` moves the process cwd to the staged candidate
  * checkout before discovery runs. A factory-time capture would compute
- * every repo-relative `source`/`location` — and read
- * `.gateforge/http-clients.json` — against the loader's cwd instead of the
- * gated repository root.
+ * every repo-relative `source`/`location` against the loader's cwd instead
+ * of the gated repository root.
+ *
+ * The owner scanner settings are not a file this pack opens at all
+ * (0.11.0): the host hands them as `scan.httpClients` on the discover
+ * context, parsed once from the root in force at that call.
  *
  * An explicit `root` (and an explicit `clientScan`) still win.
  */
@@ -62,25 +65,22 @@ describe('createHttpDetector resolves the repo root at discover time', () => {
     }
   });
 
-  it('reads .gateforge/http-clients.json from the root at discover time', () => {
-    // `serverScanRoots` is the config channel's server scoping: with the
-    // route directory declared, the route is scanned as a server artifact.
-    const factoryCwd = project('config-factory', {
-      'src/app.ts': expressApp('/factory'),
-      '.gateforge/http-clients.json': JSON.stringify({ serverScanRoots: ['server/**'] }),
-    });
-    const discoverCwd = project('config-discover', {
-      'server/app.ts': expressApp('/discover'),
-      '.gateforge/http-clients.json': JSON.stringify({ serverScanRoots: ['src/**'] }),
-    });
+  it('uses the scan.httpClients section handed at the discover call', () => {
+    // `serverScanRoots` is the section's server scoping: with the route
+    // directory declared, the route is scanned as a server artifact.
+    const factoryCwd = project('config-factory', { 'src/app.ts': expressApp('/factory') });
+    const discoverCwd = project('config-discover', { 'server/app.ts': expressApp('/discover') });
     try {
       process.chdir(factoryCwd);
       const detector = createHttpDetector();
       process.chdir(discoverCwd);
-      const outcome = detector.discover(['server']);
-      // The discover-time document scopes server routes to `src/**`, which
+      const outcome = detector.discover(['server'], {
+        root: discoverCwd,
+        sections: { httpClients: { serverScanRoots: ['src/**'] } },
+      });
+      // The discover-time section scopes server routes to `src/**`, which
       // does NOT cover `server/**` — so the route yields no artifact. A
-      // factory-time read (scoping `server/**`) would have emitted it.
+      // section scoping `server/**` would have emitted it.
       expect(outcome.resources).toEqual([]);
       expect((outcome.scannedPaths as string[]).sort()).toEqual(['server/app.ts']);
     } finally {
@@ -106,15 +106,15 @@ describe('createHttpDetector resolves the repo root at discover time', () => {
     }
   });
 
-  it('an explicit clientScan option still wins over the config document', () => {
-    const root = project('explicit-scan', {
-      'src/app.ts': expressApp('/explicit'),
-      '.gateforge/http-clients.json': JSON.stringify({ serverScanRoots: ['nowhere/**'] }),
-    });
+  it('an explicit clientScan option still wins over the handed section', () => {
+    const root = project('explicit-scan', { 'src/app.ts': expressApp('/explicit') });
     try {
       const detector = createHttpDetector({ clientScan: { serverScanRoots: ['src/**'] } });
       process.chdir(root);
-      const outcome = detector.discover(['src']);
+      const outcome = detector.discover(['src'], {
+        root,
+        sections: { httpClients: { serverScanRoots: ['nowhere/**'] } },
+      });
       expect(sourcesOf(outcome)).toEqual(['src/app.ts']);
     } finally {
       process.chdir(ORIGINAL_CWD);

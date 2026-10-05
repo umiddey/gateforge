@@ -1,6 +1,6 @@
 /**
  * Phase 3 scan-scoping suite: `clientScanRoots` / `serverScanRoots` and
- * per-symbol include/exclude in `.gateforge/http-clients.json`.
+ * per-symbol include/exclude under `scan.httpClients` in `.gateforge.yml`.
  *
  * Two real dogfood failures drove the design (both reproduced here as
  * red probes, then fixed by scoping):
@@ -20,7 +20,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHttpDetector } from '../src/index.js';
-import { readClientScanConfigOrNull, type ClientScanConfig } from '../src/client-calls.js';
+import { parseClientScanConfigDocument, type ClientScanConfig } from '../src/client-calls.js';
 
 /** Materializes a repo-root-relative fixture tree in a temp directory. */
 function project(files: Record<string, string>): string {
@@ -356,20 +356,22 @@ describe('serverScanRoots (server-route scoping)', () => {
   });
 });
 
-describe('http-clients.json parsing of the scoping keys', () => {
-  it('reads scoped config end to end from the default document path', () => {
+describe('scan.httpClients parsing of the scoping keys', () => {
+  it('reads a scoped section end to end from the discover context', () => {
     const config: ClientScanConfig = {
       clientScanRoots: ['frontend/**'],
       serverScanRoots: ['src/**'],
       clientSymbols: [{ name: 'api', include: ['frontend/src/**'], exclude: ['frontend/src/generated/**'] }],
     };
     const dir = project({
-      '.gateforge/http-clients.json': JSON.stringify(config),
       'frontend/src/app.ts': `api.get('/api/accounts');\n`,
       'e2e/spec.ts': `api('POST', '/api/login', {});\n`,
     });
     try {
-      const outcome = createHttpDetector({ root: dir }).discover(['frontend', 'e2e']);
+      const outcome = createHttpDetector({ root: dir }).discover(['frontend', 'e2e'], {
+        root: dir,
+        sections: { httpClients: config },
+      });
       expect(frontendFacts(outcome)).toEqual(['GET /api/accounts']);
       expect(outcome.unresolved).toEqual([]);
     } finally {
@@ -378,54 +380,49 @@ describe('http-clients.json parsing of the scoping keys', () => {
   });
 
   it('preserves the old shapes byte-for-byte and keeps the non-array posture', () => {
-    const dir = project({
-      '.gateforge/old.json': JSON.stringify({
-        clientSymbols: ['apiClient'],
-        wrapperFunctions: [{ name: 'apiGet', method: 'GET' }],
-        urlBuilders: ['buildPath', { name: 'buildApiPath', base: '/api' }],
-        sameOriginHosts: ['app.example.com'],
-      }),
-      '.gateforge/new.json': JSON.stringify({
-        clientScanRoots: 'frontend/**', // non-array: ignored, as before
-        clientSymbols: [{ name: 'api', include: ['frontend/**'] }],
-      }),
+    expect(
+      parseClientScanConfigDocument(
+        {
+          clientSymbols: ['apiClient'],
+          wrapperFunctions: [{ name: 'apiGet', method: 'GET' }],
+          urlBuilders: ['buildPath', { name: 'buildApiPath', base: '/api' }],
+          sameOriginHosts: ['app.example.com'],
+        },
+        'scan.httpClients',
+      ),
+    ).toEqual({
+      clientSymbols: ['apiClient'],
+      wrapperFunctions: [{ name: 'apiGet', method: 'GET' }],
+      urlBuilders: [{ name: 'buildPath' }, { name: 'buildApiPath', base: '/api' }],
+      sameOriginHosts: ['app.example.com'],
     });
-    try {
-      const oldConfig = readClientScanConfigOrNull(join(dir, '.gateforge/old.json'));
-      expect(oldConfig).toEqual({
-        clientSymbols: ['apiClient'],
-        wrapperFunctions: [{ name: 'apiGet', method: 'GET' }],
-        urlBuilders: [{ name: 'buildPath' }, { name: 'buildApiPath', base: '/api' }],
-        sameOriginHosts: ['app.example.com'],
-      });
-      const newConfig = readClientScanConfigOrNull(join(dir, '.gateforge/new.json'));
-      expect(newConfig).toEqual({
-        clientSymbols: [{ name: 'api', include: ['frontend/**'] }],
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    expect(
+      parseClientScanConfigDocument(
+        {
+          clientScanRoots: 'frontend/**', // non-array: ignored, as before
+          clientSymbols: [{ name: 'api', include: ['frontend/**'] }],
+        },
+        'scan.httpClients',
+      ),
+    ).toEqual({
+      clientSymbols: [{ name: 'api', include: ['frontend/**'] }],
+    });
   });
 
   it('throws on malformed scoping entries (fail closed) but ignores unknown keys (unchanged posture)', () => {
-    const dir = project({
-      '.gateforge/missing-name.json': JSON.stringify({ clientSymbols: [{ include: ['x/**'] }] }),
-      '.gateforge/bad-include.json': JSON.stringify({ clientSymbols: [{ name: 'api', include: 'x/**' }] }),
-      '.gateforge/bad-wrapper-scope.json': JSON.stringify({
-        wrapperFunctions: [{ name: 'apiGet', method: 'GET', exclude: 42 }],
-      }),
-      '.gateforge/unknown.json': JSON.stringify({ totallyUnknownKey: true, clientSymbols: ['api'] }),
+    const read = (section: unknown): unknown =>
+      parseClientScanConfigDocument(section, 'scan.httpClients');
+    expect(() => read({ clientSymbols: [{ include: ['x/**'] }] })).toThrow(/must carry a name/);
+    expect(() => read({ clientSymbols: [{ name: 'api', include: 'x/**' }] })).toThrow(
+      /must be an array of globs/,
+    );
+    expect(() => read({ wrapperFunctions: [{ name: 'apiGet', method: 'GET', exclude: 42 }] })).toThrow(
+      /must be an array of globs/,
+    );
+    // Unknown keys stay ignored — the parser was never strict about
+    // them, and consistency beats new strictness on old surface.
+    expect(read({ totallyUnknownKey: true, clientSymbols: ['api'] })).toEqual({
+      clientSymbols: ['api'],
     });
-    try {
-      const read = (name: string) => readClientScanConfigOrNull(join(dir, `.gateforge/${name}`));
-      expect(() => read('missing-name.json')).toThrow(/must carry a name/);
-      expect(() => read('bad-include.json')).toThrow(/must be an array of globs/);
-      expect(() => read('bad-wrapper-scope.json')).toThrow(/must be an array of globs/);
-      // Unknown keys stay ignored — the parser was never strict about
-      // them, and consistency beats new strictness on old surface.
-      expect(read('unknown.json')).toEqual({ clientSymbols: ['api'] });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });

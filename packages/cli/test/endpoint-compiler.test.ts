@@ -9,7 +9,6 @@ import {
   classifyResources,
   evaluatePolicies,
   isEvidenceOnlyKind,
-  withTempRepo,
   type ClassifierPolicy,
   type ClassificationResult,
   type ClassificationSignal,
@@ -550,69 +549,63 @@ describe('linkage corroboration (path-name coincidence never links)', () => {
   });
 
   it('uses declared DELETE semantics on a plural collection to classify its linked singular model', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/endpoints.json': JSON.stringify({
-          rules: [{
-            paths: ['/api/products/**'],
-            method: 'DELETE',
-            capability: 'crud-delete',
-            reason: 'the handler deletes the product row and commits',
-          }],
-        }),
-      });
-      const business = businessTable('product');
-      const modelSignal = {
-        schemaVersion: 1 as const,
-        target: { resourceName: 'product' },
-        basis: 'code-positive' as const,
-        source: 'test.models',
-        location: { file: 'backend/models/product.py', line: 4, col: 0 },
-        detector: { id: 'test.models', version: '1' },
-      };
-      const modelSignals: ClassificationSignal[] = [
-        { ...modelSignal, dimension: 'plane', assertion: 'tenant' },
-        { ...modelSignal, dimension: 'identity', assertion: ['id'] },
-      ];
-      const route = routeFact('DELETE', '/api/products/{id}', {
-        handlerSymbol: 'app.delete_product',
-      });
-      const compiled = compileEndpointContribution([
-        contribution([route]),
-        { ...business, classificationSignals: modelSignals },
-      ], { cwd: repo.root });
-      const resources: ClassifierResourceRef[] = [
-        ...business.resources,
-        ...compiled.contribution.resources,
-      ].map((resource) => ({
-        name: String(resource.attributes['resourceName']),
-        id: null,
-        kind: resource.kind,
-        source: resource.source,
-        location: resource.location,
-        detector: resource.kind === HTTP_ENDPOINT_KIND
-          ? { id: 'gateforge.endpoint-compiler', version: '1' }
-          : modelSignal.detector,
-        attributes: resource.attributes,
-      }));
-      const result = classifyResources({
-        resources,
-        signals: [...modelSignals, ...compiled.contribution.classificationSignals] as ClassificationSignal[],
-        policy: {
-          schemaVersion: 1,
-          scanRoots: [],
-          trustedInternalEntryPoints: [{ category: 'migration', patterns: [] }],
-          internalRules: [],
-          declarations: { internality: 'gateforge:internal', archiveState: 'gateforge:archive-state' },
-          volatileFields: [],
-        },
-        adapters: ['product'],
-        scan: { requestedPaths: [], scannedPaths: [], findings: [], unresolved: [] },
-      });
-      const model = result.decisions.find((decision) => decision.name === 'product');
-      expect(model?.classification?.plane).toBe('tenant');
-      expect(model?.classification?.lifecycle.deleteSemantics).toBe('hard');
+    // D0 "one answer per fact": since 0.11 the hard-vs-archive answer
+    // exists ONCE, in the owner's `deleteRules` — so a DELETE route's
+    // semantics come from the same declaration its linked model's do.
+    const deleteRules = [
+      { match: 'backend/routes.py', semantics: 'hard' as const, reason: 'the handler deletes the product row and commits' },
+    ];
+    const business = businessTable('product');
+    const modelSignal = {
+      schemaVersion: 1 as const,
+      target: { resourceName: 'product' },
+      basis: 'code-positive' as const,
+      source: 'test.models',
+      location: { file: 'backend/models/product.py', line: 4, col: 0 },
+      detector: { id: 'test.models', version: '1' },
+    };
+    const modelSignals: ClassificationSignal[] = [
+      { ...modelSignal, dimension: 'plane', assertion: 'tenant' },
+      { ...modelSignal, dimension: 'identity', assertion: ['id'] },
+    ];
+    const route = routeFact('DELETE', '/api/products/{id}', {
+      handlerSymbol: 'app.delete_product',
     });
+    const compiled = compileEndpointContribution(
+      [contribution([route]), { ...business, classificationSignals: modelSignals }],
+      { deleteRules },
+    );
+    const resources: ClassifierResourceRef[] = [
+      ...business.resources,
+      ...compiled.contribution.resources,
+    ].map((resource) => ({
+      name: String(resource.attributes['resourceName']),
+      id: null,
+      kind: resource.kind,
+      source: resource.source,
+      location: resource.location,
+      detector: resource.kind === HTTP_ENDPOINT_KIND
+        ? { id: 'gateforge.endpoint-compiler', version: '1' }
+        : modelSignal.detector,
+      attributes: resource.attributes,
+    }));
+    const result = classifyResources({
+      resources,
+      signals: [...modelSignals, ...compiled.contribution.classificationSignals] as ClassificationSignal[],
+      policy: {
+        schemaVersion: 1,
+        scanRoots: [],
+        trustedInternalEntryPoints: [{ category: 'migration', patterns: [] }],
+        internalRules: [],
+        declarations: { internality: 'gateforge:internal', archiveState: 'gateforge:archive-state' },
+        volatileFields: [],
+      },
+      adapters: ['product'],
+      scan: { requestedPaths: [], scannedPaths: [], findings: [], unresolved: [] },
+    });
+    const model = result.decisions.find((decision) => decision.name === 'product');
+    expect(model?.classification?.plane).toBe('tenant');
+    expect(model?.classification?.lifecycle.deleteSemantics).toBe('hard');
   });
 
   it('does NOT corroborate when the word only appears inside a larger word', () => {
@@ -1097,212 +1090,182 @@ describe('endpoint plane config channel (the `planes:` section, plan phase 5)', 
     ) as Array<Record<string, unknown>>;
 
   it('an endpoint match rule applies its plane and qualifies the id', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [
-            { match: 'backend/api/v1/**', plane: 'tenant', reason: 'tenant middleware requires a subdomain' },
-          ],
-        }),
-      });
-      const compiled = compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root });
-      const resourceName = compiled.inventory.endpoints[0]?.resourceName ?? '';
-
-      // Exactly one plane signal, on the config channel, at the router source.
-      const planeSignals = planeSignalsOf(compiled);
-      expect(planeSignals).toHaveLength(1);
-      expect(planeSignals[0]).toMatchObject({
-        target: { resourceName },
-        dimension: 'plane',
-        assertion: 'tenant',
-        basis: 'declaration',
-        source: 'gateforge.endpoint-compiler:config',
-        location: { file: 'backend/api/v1/accounts.py' },
-      });
-      expect(compiled.contribution.unresolved).toEqual([]);
-
-      // The classifier resolves the plane from it; the endpoint binds its
-      // own-name adapter so the user-facing default stays resolvable.
-      const result = classifyCompiled(compiled, null, [resourceName]);
-      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
-      expect(decision?.classification?.plane).toBe('tenant');
-      expect(decision?.blocks).toEqual([]);
-      // The id the graph binds is plane-qualified from this decision.
-      expect(`${decision?.classification?.plane}.${decision?.name}`).toBe(`tenant.${resourceName}`);
+    const compiled = compileEndpointContribution([contribution([accountsRoute()])], {
+      planes: {
+        rules: [
+          { match: 'backend/api/v1/**', plane: 'tenant', reason: 'tenant middleware requires a subdomain' },
+        ],
+      },
     });
+    const resourceName = compiled.inventory.endpoints[0]?.resourceName ?? '';
+
+    // Exactly one plane signal, on the config channel, at the router source.
+    const planeSignals = planeSignalsOf(compiled);
+    expect(planeSignals).toHaveLength(1);
+    expect(planeSignals[0]).toMatchObject({
+      target: { resourceName },
+      dimension: 'plane',
+      assertion: 'tenant',
+      basis: 'declaration',
+      source: 'gateforge.endpoint-compiler:config',
+      location: { file: 'backend/api/v1/accounts.py' },
+    });
+    expect(compiled.contribution.unresolved).toEqual([]);
+
+    // The classifier resolves the plane from it; the endpoint binds its
+    // own-name adapter so the user-facing default stays resolvable.
+    const result = classifyCompiled(compiled, null, [resourceName]);
+    const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+    expect(decision?.classification?.plane).toBe('tenant');
+    expect(decision?.blocks).toEqual([]);
+    // The id the graph binds is plane-qualified from this decision.
+    expect(`${decision?.classification?.plane}.${decision?.name}`).toBe(`tenant.${resourceName}`);
   });
 
   it('two matching rules that disagree block as PLANE_RULE_CONTRADICTION with no plane evidence', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [
-            { match: 'backend/api/v1/**', plane: 'tenant', reason: 'router-level tenant rule' },
-            { match: 'backend/api/v1/accounts.py', plane: 'master', reason: 'accounts is master control-plane' },
-          ],
-        }),
-      });
-      const compiled = compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root });
-
-      const contradictions = compiled.contribution.unresolved.filter(
-        (entry) => entry.code === 'PLANE_RULE_CONTRADICTION',
-      );
-      expect(contradictions).toHaveLength(1);
-      expect(contradictions[0]?.detail).toContain('master vs tenant');
-      expect(contradictions[0]?.detail).toContain('router-level tenant rule');
-      expect(contradictions[0]?.detail).toContain('accounts is master control-plane');
-      expect(contradictions[0]?.location.file).toBe('backend/api/v1/accounts.py');
-      // No plane evidence on a conflict — never first-match-wins.
-      expect(planeSignalsOf(compiled)).toEqual([]);
-
-      // The endpoint stays plane-unresolved in the classifier too.
-      const result = classifyCompiled(compiled, null, []);
-      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
-      expect(decision?.classification).toBeNull();
-      expect(decision?.blocks.some((block) => block.code === 'PLANE_UNRESOLVED')).toBe(true);
+    const compiled = compileEndpointContribution([contribution([accountsRoute()])], {
+      planes: {
+        rules: [
+          { match: 'backend/api/v1/**', plane: 'tenant', reason: 'router-level tenant rule' },
+          { match: 'backend/api/v1/accounts.py', plane: 'master', reason: 'accounts is master control-plane' },
+        ],
+      },
     });
+
+    const contradictions = compiled.contribution.unresolved.filter(
+      (entry) => entry.code === 'PLANE_RULE_CONTRADICTION',
+    );
+    expect(contradictions).toHaveLength(1);
+    expect(contradictions[0]?.detail).toContain('master vs tenant');
+    expect(contradictions[0]?.detail).toContain('router-level tenant rule');
+    expect(contradictions[0]?.detail).toContain('accounts is master control-plane');
+    expect(contradictions[0]?.location.file).toBe('backend/api/v1/accounts.py');
+    // No plane evidence on a conflict — never first-match-wins.
+    expect(planeSignalsOf(compiled)).toEqual([]);
+
+    // The endpoint stays plane-unresolved in the classifier too.
+    const result = classifyCompiled(compiled, null, []);
+    const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+    expect(decision?.classification).toBeNull();
+    expect(decision?.blocks.some((block) => block.code === 'PLANE_UNRESOLVED')).toBe(true);
   });
 
   it('an agreeing linked-resource plane resolves alongside the config plane', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [{ match: 'backend/api/**', plane: 'tenant', reason: 'tenant middleware requires a subdomain' }],
-        }),
-      });
-      const business = businessFixture('accounts', 'tenant');
-      const compiled = compileEndpointContribution(
-        [contribution([accountsRoute()]), business.contribution as never],
-        { cwd: repo.root },
-      );
+    const business = businessFixture('accounts', 'tenant');
+    const compiled = compileEndpointContribution(
+      [contribution([accountsRoute()]), business.contribution as never],
+      { planes: { rules: [{ match: 'backend/api/**', plane: 'tenant', reason: 'tenant middleware requires a subdomain' }] } },
+    );
 
-      // Agreement adds no mirror signal: one config assertion only.
-      const planeSignals = planeSignalsOf(compiled);
-      expect(planeSignals).toHaveLength(1);
-      expect(planeSignals[0]).toMatchObject({
-        assertion: 'tenant',
-        source: 'gateforge.endpoint-compiler:config',
-      });
-
-      const result = classifyCompiled(compiled, business, ['accounts']);
-      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
-      expect(decision?.classification?.plane).toBe('tenant');
-      expect(decision?.blocks).toEqual([]);
+    // Agreement adds no mirror signal: one config assertion only.
+    const planeSignals = planeSignalsOf(compiled);
+    expect(planeSignals).toHaveLength(1);
+    expect(planeSignals[0]).toMatchObject({
+      assertion: 'tenant',
+      source: 'gateforge.endpoint-compiler:config',
     });
+
+    const result = classifyCompiled(compiled, business, ['accounts']);
+    const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+    expect(decision?.classification?.plane).toBe('tenant');
+    expect(decision?.blocks).toEqual([]);
   });
 
   it('a contradicting linked-resource plane surfaces both assertions and blocks PLANE_CONTRADICTION', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [{ match: 'backend/api/**', plane: 'tenant', reason: 'tenant middleware requires a subdomain' }],
-        }),
-      });
-      const business = businessFixture('accounts', 'master');
-      const compiled = compileEndpointContribution(
-        [contribution([accountsRoute()]), business.contribution as never],
-        { cwd: repo.root },
-      );
+    const business = businessFixture('accounts', 'master');
+    const compiled = compileEndpointContribution(
+      [contribution([accountsRoute()]), business.contribution as never],
+      { planes: { rules: [{ match: 'backend/api/**', plane: 'tenant', reason: 'tenant middleware requires a subdomain' }] } },
+    );
 
-      // Both channels are emitted: the config rule AND the linked table's
-      // plane (mirrored so the classifier sees both — the config channel
-      // must never silently override inheritance).
-      const planeSignals = planeSignalsOf(compiled);
-      expect(planeSignals).toHaveLength(2);
-      expect(planeSignals.map((signal) => signal['source']).sort()).toEqual([
-        'gateforge.endpoint-compiler:config',
-        'gateforge.endpoint-compiler:linked-resource',
-      ]);
-      const mirror = planeSignals.find(
-        (signal) => signal['source'] === 'gateforge.endpoint-compiler:linked-resource',
-      );
-      expect(mirror).toMatchObject({
-        assertion: 'master',
-        location: { file: 'backend/models/accounts.py' },
-      });
-
-      const result = classifyCompiled(compiled, business, ['accounts']);
-      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
-      expect(decision?.classification).toBeNull();
-      const contradiction = decision?.blocks.find((block) => block.code === 'PLANE_CONTRADICTION');
-      expect(contradiction?.detail).toContain('master, tenant');
-      // A business-linked contradiction carries no probe hint:
-      // the answer is a plane decision, not a probe rule.
-      expect(contradiction?.detail).not.toContain(
-        'health/readiness probes are global on their own',
-      );
-      expect(contradiction?.locations.map((location) => location.file).sort()).toEqual([
-        'backend/api/v1/accounts.py',
-        'backend/models/accounts.py',
-      ]);
+    // Both channels are emitted: the config rule AND the linked table's
+    // plane (mirrored so the classifier sees both — the config channel
+    // must never silently override inheritance).
+    const planeSignals = planeSignalsOf(compiled);
+    expect(planeSignals).toHaveLength(2);
+    expect(planeSignals.map((signal) => signal['source']).sort()).toEqual([
+      'gateforge.endpoint-compiler:config',
+      'gateforge.endpoint-compiler:linked-resource',
+    ]);
+    const mirror = planeSignals.find(
+      (signal) => signal['source'] === 'gateforge.endpoint-compiler:linked-resource',
+    );
+    expect(mirror).toMatchObject({
+      assertion: 'master',
+      location: { file: 'backend/models/accounts.py' },
     });
+
+    const result = classifyCompiled(compiled, business, ['accounts']);
+    const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+    expect(decision?.classification).toBeNull();
+    const contradiction = decision?.blocks.find((block) => block.code === 'PLANE_CONTRADICTION');
+    expect(contradiction?.detail).toContain('master, tenant');
+    // A business-linked contradiction carries no probe hint:
+    // the answer is a plane decision, not a probe rule.
+    expect(contradiction?.detail).not.toContain(
+      'health/readiness probes are global on their own',
+    );
+    expect(contradiction?.locations.map((location) => location.file).sort()).toEqual([
+      'backend/api/v1/accounts.py',
+      'backend/models/accounts.py',
+    ]);
   });
 
   it('a config plane contradicting the operational global rule blocks; agreement resolves', () => {
-    const rules = (plane: string): string =>
-      JSON.stringify({
-        rules: [{ match: 'backend/api/**', plane, reason: 'ops routers are declared explicitly' }],
-      });
-
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({ '.gateforge/planes.json': rules('tenant') });
-      const compiled = compileEndpointContribution([contribution([healthRoute()])], { cwd: repo.root });
-      const planeSignals = planeSignalsOf(compiled);
-      expect(planeSignals.map((signal) => [signal['source'], signal['assertion']]).sort()).toEqual([
-        ['gateforge.endpoint-compiler:config', 'tenant'],
-        ['gateforge.endpoint-compiler:operational', 'global'],
-      ]);
-      const result = classifyCompiled(compiled, null, []);
-      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
-      expect(decision?.classification).toBeNull();
-      const contradiction = decision?.blocks.find(
-        (block) => block.code === 'PLANE_CONTRADICTION',
-      );
-      // The contradiction includes the mirrored operational
-      // `global` assertion: the detail says probes are global on
-      // their own and names the router file to answer for.
-      expect(contradiction?.detail).toContain(
-        'health/readiness probes are global on their own',
-      );
-      expect(contradiction?.detail).toContain('backend/api/ops/health.py');
+    const planes = (plane: string) => ({
+      rules: [{ match: 'backend/api/**', plane, reason: 'ops routers are declared explicitly' }],
     });
 
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({ '.gateforge/planes.json': rules('global') });
-      const compiled = compileEndpointContribution([contribution([healthRoute()])], { cwd: repo.root });
-      expect(planeSignalsOf(compiled)).toHaveLength(1);
-      const result = classifyCompiled(compiled, null, []);
-      const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
-      expect(decision?.classification?.plane).toBe('global');
-      expect(decision?.blocks).toEqual([]);
+    const contradicting = compileEndpointContribution([contribution([healthRoute()])], {
+      planes: planes('tenant'),
     });
+    const planeSignals = planeSignalsOf(contradicting);
+    expect(planeSignals.map((signal) => [signal['source'], signal['assertion']]).sort()).toEqual([
+      ['gateforge.endpoint-compiler:config', 'tenant'],
+      ['gateforge.endpoint-compiler:operational', 'global'],
+    ]);
+    const result = classifyCompiled(contradicting, null, []);
+    const decision = result.decisions.find((entry) => entry.kind === 'http.endpoint');
+    expect(decision?.classification).toBeNull();
+    const contradiction = decision?.blocks.find(
+      (block) => block.code === 'PLANE_CONTRADICTION',
+    );
+    // The contradiction includes the mirrored operational
+    // `global` assertion: the detail says probes are global on
+    // their own and names the router file to answer for.
+    expect(contradiction?.detail).toContain(
+      'health/readiness probes are global on their own',
+    );
+    expect(contradiction?.detail).toContain('backend/api/ops/health.py');
+
+    const agreeing = compileEndpointContribution([contribution([healthRoute()])], {
+      planes: planes('global'),
+    });
+    expect(planeSignalsOf(agreeing)).toHaveLength(1);
+    const resolved = classifyCompiled(agreeing, null, []);
+    const resolvedDecision = resolved.decisions.find((entry) => entry.kind === 'http.endpoint');
+    expect(resolvedDecision?.classification?.plane).toBe('global');
+    expect(resolvedDecision?.blocks).toEqual([]);
   });
 
   it('tables rules never apply to endpoints', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [{ tables: ['accounts'], plane: 'tenant', reason: 'a table rule' }],
-        }),
-      });
-      const compiled = compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root });
-      expect(planeSignalsOf(compiled)).toEqual([]);
-      expect(compiled.contribution.unresolved).toEqual([]);
+    const compiled = compileEndpointContribution([contribution([accountsRoute()])], {
+      planes: { rules: [{ tables: ['accounts'], plane: 'tenant', reason: 'a table rule' }] },
     });
+    expect(planeSignalsOf(compiled)).toEqual([]);
+    expect(compiled.contribution.unresolved).toEqual([]);
   });
 
-  it('absence of the config file is byte-identical to the channel being absent', () => {
+  it('an absent planes section is byte-identical to a repository that declares none', () => {
     const facts = [
       accountsRoute(),
       healthRoute(),
       callFact('POST', '/api/v1/accounts'),
     ];
-    withTempRepo({}, (repo) => {
-      const withoutFile = compileEndpointContribution([contribution(facts)]);
-      const withEmptyRepo = compileEndpointContribution([contribution(facts)], { cwd: repo.root });
-      expect(JSON.stringify(withEmptyRepo.contribution)).toBe(JSON.stringify(withoutFile.contribution));
-      expect(JSON.stringify(withEmptyRepo.inventory)).toBe(JSON.stringify(withoutFile.inventory));
-    });
+    const omitted = compileEndpointContribution([contribution(facts)]);
+    const emptySection = compileEndpointContribution([contribution(facts)], { planes: undefined });
+    expect(JSON.stringify(emptySection.contribution)).toBe(JSON.stringify(omitted.contribution));
+    expect(JSON.stringify(emptySection.inventory)).toBe(JSON.stringify(omitted.inventory));
   });
 
   it('a merged identity contributed by multiple router files is plane-qualified only when EVERY contributor is covered', () => {
@@ -1311,105 +1274,84 @@ describe('endpoint plane config channel (the `planes:` section, plan phase 5)', 
     // inherit the one covered file's plane.
     const routeIn = (file: string) =>
       routeFact('GET', '/api/accounts', { source: { file, line: 10, col: 0 } });
+    const both = () => contribution([routeIn('backend/a.py'), routeIn('backend/b.py')]);
 
-    withTempRepo({}, (repo) => {
-      // PARTIAL coverage: only backend/a.py matches a rule.
-      repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [{ match: 'backend/a.py', plane: 'tenant', reason: 'covered router' }],
-        }),
-      });
-      const compiled = compileEndpointContribution(
-        [contribution([routeIn('backend/a.py'), routeIn('backend/b.py')])],
-        { cwd: repo.root },
-      );
-      expect(
-        planeSignalsOf(compiled).filter((signal) => signal['source'] === 'gateforge.endpoint-compiler:config'),
-      ).toEqual([]);
-      const partial = compiled.contribution.unresolved.filter((u) => u.code === 'PLANE_RULE_CONTRADICTION');
-      expect(partial).toHaveLength(1);
-      expect(partial[0]?.detail).toContain('cover only 1');
-      expect(partial[0]?.detail).toContain("'backend/b.py'");
+    // PARTIAL coverage: only backend/a.py matches a rule.
+    const partial = compileEndpointContribution([both()], {
+      planes: { rules: [{ match: 'backend/a.py', plane: 'tenant', reason: 'covered router' }] },
     });
+    expect(
+      planeSignalsOf(partial).filter((signal) => signal['source'] === 'gateforge.endpoint-compiler:config'),
+    ).toEqual([]);
+    const partialContradiction = partial.contribution.unresolved.filter((u) => u.code === 'PLANE_RULE_CONTRADICTION');
+    expect(partialContradiction).toHaveLength(1);
+    expect(partialContradiction[0]?.detail).toContain('cover only 1');
+    expect(partialContradiction[0]?.detail).toContain("'backend/b.py'");
 
-    withTempRepo({}, (repo) => {
-      // FULL agreeing coverage → the config plane applies.
-      repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [{ match: 'backend/**', plane: 'tenant', reason: 'covered routers' }],
-        }),
-      });
-      const compiled = compileEndpointContribution(
-        [contribution([routeIn('backend/a.py'), routeIn('backend/b.py')])],
-        { cwd: repo.root },
-      );
-      const configSignals = planeSignalsOf(compiled).filter(
-        (signal) => signal['source'] === 'gateforge.endpoint-compiler:config',
-      );
-      expect(configSignals).toHaveLength(1);
-      expect(configSignals[0]?.['assertion']).toBe('tenant');
-      // The plane channel is clean; any remaining unresolved entry is the
-      // unrelated semantics debt of a bare GET (no schema/link), not a
-      // plane contradiction.
-      expect(
-        compiled.contribution.unresolved.filter((u) => u.code === 'PLANE_RULE_CONTRADICTION'),
-      ).toEqual([]);
+    // FULL agreeing coverage → the config plane applies.
+    const full = compileEndpointContribution([both()], {
+      planes: { rules: [{ match: 'backend/**', plane: 'tenant', reason: 'covered routers' }] },
     });
+    const configSignals = planeSignalsOf(full).filter(
+      (signal) => signal['source'] === 'gateforge.endpoint-compiler:config',
+    );
+    expect(configSignals).toHaveLength(1);
+    expect(configSignals[0]?.['assertion']).toBe('tenant');
+    // The plane channel is clean; any remaining unresolved entry is the
+    // unrelated semantics debt of a bare GET (no schema/link), not a
+    // plane contradiction.
+    expect(
+      full.contribution.unresolved.filter((u) => u.code === 'PLANE_RULE_CONTRADICTION'),
+    ).toEqual([]);
 
-    withTempRepo({}, (repo) => {
-      // Contributors covered but DISAGREEING → cross-file contradiction.
-      repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [
-            { match: 'backend/a.py', plane: 'tenant', reason: 'a surface' },
-            { match: 'backend/b.py', plane: 'master', reason: 'b surface' },
-          ],
-        }),
-      });
-      const compiled = compileEndpointContribution(
-        [contribution([routeIn('backend/a.py'), routeIn('backend/b.py')])],
-        { cwd: repo.root },
-      );
-      expect(
-        planeSignalsOf(compiled).filter((signal) => signal['source'] === 'gateforge.endpoint-compiler:config'),
-      ).toEqual([]);
-      const contradictions = compiled.contribution.unresolved.filter(
-        (u) => u.code === 'PLANE_RULE_CONTRADICTION',
-      );
-      expect(contradictions).toHaveLength(1);
-      expect(contradictions[0]?.detail).toContain('disagree');
-      expect(contradictions[0]?.detail).toContain("'tenant'");
-      expect(contradictions[0]?.detail).toContain("'master'");
+    // Contributors covered but DISAGREEING → cross-file contradiction.
+    const disagreeing = compileEndpointContribution([both()], {
+      planes: {
+        rules: [
+          { match: 'backend/a.py', plane: 'tenant', reason: 'a surface' },
+          { match: 'backend/b.py', plane: 'master', reason: 'b surface' },
+        ],
+      },
     });
+    expect(
+      planeSignalsOf(disagreeing).filter((signal) => signal['source'] === 'gateforge.endpoint-compiler:config'),
+    ).toEqual([]);
+    const contradictions = disagreeing.contribution.unresolved.filter(
+      (u) => u.code === 'PLANE_RULE_CONTRADICTION',
+    );
+    expect(contradictions).toHaveLength(1);
+    expect(contradictions[0]?.detail).toContain('disagree');
+    expect(contradictions[0]?.detail).toContain("'tenant'");
+    expect(contradictions[0]?.detail).toContain("'master'");
   });
 
-  it('a malformed planes document throws (fail closed)', () => {
-    withTempRepo({}, (repo) => {
-      // Missing required `reason` — the human review artifact.
-      repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({ rules: [{ match: 'a/**', plane: 'tenant' }] }),
-      });
-      expect(() =>
-        compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root }),
-      ).toThrow(/invalid planes config.*reason/s);
+  it('a malformed planes section throws (fail closed)', () => {
+    // Missing required `reason` — the human review artifact.
+    expect(() =>
+      compileEndpointContribution([contribution([accountsRoute()])], {
+        planes: { rules: [{ match: 'a/**', plane: 'tenant' }] },
+      }),
+    ).toThrow(/invalid planes config.*reason/s);
 
-      // Unknown top-level key — a typo'd document must not scan with
-      // partial trust.
-      repo.writeFiles({ '.gateforge/planes.json': '{"ruls": []}' });
-      expect(() =>
-        compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root }),
-      ).toThrow(/invalid planes config.*unknown key/s);
+    // Unknown key inside the section — a typo'd section must not scan
+    // with partial trust.
+    expect(() =>
+      compileEndpointContribution([contribution([accountsRoute()])], {
+        planes: { ruls: [] },
+      }),
+    ).toThrow(/invalid planes config.*unknown key/s);
 
-      // Not JSON at all.
-      repo.writeFiles({ '.gateforge/planes.json': 'not json' });
-      expect(() =>
-        compileEndpointContribution([contribution([accountsRoute()])], { cwd: repo.root }),
-      ).toThrow();
-    });
+    // Not a mapping at all: the section is a document fragment the host
+    // already parsed, so a scalar can only be a wrong answer.
+    expect(() =>
+      compileEndpointContribution([contribution([accountsRoute()])], {
+        planes: 'not a section',
+      }),
+    ).toThrow(/invalid planes config.*expected an object/s);
   });
 });
 
-describe('endpoint capability config channel (.gateforge/endpoints.json)', () => {
+describe('endpoint capability config channel (the `endpoints:` section)', () => {
   /**
    * The motivating service-delegation shape: a GET whose handler
    * delegates to a service module — no schema symbols, no linkage
@@ -1431,172 +1373,167 @@ describe('endpoint capability config channel (.gateforge/endpoints.json)', () =>
     });
   }
 
-  it('without the config file, service delegation stays ENDPOINT_SEMANTICS_UNRESOLVED', () => {
-    withTempRepo({}, (repo) => {
-      const compiled = compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root });
-      const unresolved = compiled.contribution.unresolved.filter(
-        (entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED',
-      );
-      expect(unresolved).toHaveLength(1);
-      expect(unresolved[0]?.detail).toContain('no positive capability evidence');
-      expect(compiled.inventory.endpoints[0]?.capabilities).toEqual([]);
-    });
+  it('without a declaration, service delegation stays ENDPOINT_SEMANTICS_UNRESOLVED', () => {
+    const compiled = compileEndpointContribution([contribution([analyticsRoute()])]);
+    const unresolved = compiled.contribution.unresolved.filter(
+      (entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED',
+    );
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0]?.detail).toContain('no positive capability evidence');
+    expect(compiled.inventory.endpoints[0]?.capabilities).toEqual([]);
   });
 
   it('a declared capability resolves service delegation and suppresses the unresolved block', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/endpoints.json': JSON.stringify({
-          rules: [
-            {
-              handlers: ['get_analytics_*'],
-              capability: 'crud-read',
-              reason: 'delegates to analytics_service.read; declared by the service owner',
-            },
-          ],
-        }),
-      });
-      const compiled = compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root });
-      expect(compiled.contribution.unresolved).toEqual([]);
-      const endpoint = compiled.inventory.endpoints[0];
-      expect(endpoint?.capabilities).toEqual(['crud-read']);
-      expect(endpoint?.capabilityTrace).toContainEqual({
-        capability: 'crud-read',
-        rule: 'endpoints.json',
-        evidence: 'declared: delegates to analytics_service.read; declared by the service owner',
-      });
+    const compiled = compileEndpointContribution([contribution([analyticsRoute()])], {
+      endpoints: {
+        rules: [
+          {
+            handlers: ['get_analytics_*'],
+            capability: 'crud-read',
+            reason: 'delegates to analytics_service.read; declared by the service owner',
+          },
+        ],
+      },
+    });
+    expect(compiled.contribution.unresolved).toEqual([]);
+    const endpoint = compiled.inventory.endpoints[0];
+    expect(endpoint?.capabilities).toEqual(['crud-read']);
+    expect(endpoint?.capabilityTrace).toContainEqual({
+      capability: 'crud-read',
+      rule: 'endpoints:',
+      evidence: 'declared: delegates to analytics_service.read; declared by the service owner',
     });
   });
 
   it('a declared capability composes with detected capabilities without duplication', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/endpoints.json': JSON.stringify({
-          rules: [
-            { paths: ['/analytics/logs'], capability: 'crud-read', reason: 'read surface' },
-            { match: 'backend/api/v1/**', capability: 'crud-read', reason: 'api reads' },
-          ],
-        }),
-      });
-      const compiled = compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root });
-      const endpoint = compiled.inventory.endpoints[0];
-      expect(endpoint?.capabilities).toEqual(['crud-read']);
-      // Both agreeing rules ride the trace; one capability stands.
-      expect(endpoint?.capabilityTrace.filter((entry) => entry.rule === 'endpoints.json')).toHaveLength(2);
+    const compiled = compileEndpointContribution([contribution([analyticsRoute()])], {
+      endpoints: {
+        rules: [
+          { paths: ['/analytics/logs'], capability: 'crud-read', reason: 'read surface' },
+          { match: 'backend/api/v1/**', capability: 'crud-read', reason: 'api reads' },
+        ],
+      },
     });
+    const endpoint = compiled.inventory.endpoints[0];
+    expect(endpoint?.capabilities).toEqual(['crud-read']);
+    // Both agreeing rules ride the trace; one capability stands.
+    expect(endpoint?.capabilityTrace.filter((entry) => entry.rule === 'endpoints:')).toHaveLength(2);
   });
 
   it('two rules asserting different capabilities block as ENDPOINT_CAPABILITY_CONTRADICTION', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/endpoints.json': JSON.stringify({
-          rules: [
-            { paths: ['/analytics/**'], capability: 'crud-read', reason: 'directory-level read rule' },
-            { handlers: ['get_analytics_*'], capability: 'search-query', reason: 'analytics logs are a query surface' },
-          ],
-        }),
-      });
-      const compiled = compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root });
-      const contradictions = compiled.contribution.unresolved.filter(
-        (entry) => entry.code === 'ENDPOINT_CAPABILITY_CONTRADICTION',
-      );
-      expect(contradictions).toHaveLength(1);
-      expect(contradictions[0]?.detail).toContain('crud-read vs search-query');
-      expect(contradictions[0]?.detail).toContain('directory-level read rule');
-      expect(contradictions[0]?.detail).toContain('analytics logs are a query surface');
-      // Fail closed: NO declared capability is applied on a conflict.
-      expect(compiled.inventory.endpoints[0]?.capabilities).toEqual([]);
-      // And the endpoint still fail-closes on semantics (no evidence).
-      expect(
-        compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED'),
-      ).toBe(true);
+    const compiled = compileEndpointContribution([contribution([analyticsRoute()])], {
+      endpoints: {
+        rules: [
+          { paths: ['/analytics/**'], capability: 'crud-read', reason: 'directory-level read rule' },
+          { handlers: ['get_analytics_*'], capability: 'search-query', reason: 'analytics logs are a query surface' },
+        ],
+      },
     });
+    const contradictions = compiled.contribution.unresolved.filter(
+      (entry) => entry.code === 'ENDPOINT_CAPABILITY_CONTRADICTION',
+    );
+    expect(contradictions).toHaveLength(1);
+    expect(contradictions[0]?.detail).toContain('crud-read vs search-query');
+    expect(contradictions[0]?.detail).toContain('directory-level read rule');
+    expect(contradictions[0]?.detail).toContain('analytics logs are a query surface');
+    // Fail closed: NO declared capability is applied on a conflict.
+    expect(compiled.inventory.endpoints[0]?.capabilities).toEqual([]);
+    // And the endpoint still fail-closes on semantics (no evidence).
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED'),
+    ).toBe(true);
   });
 
-  it('a declared crud-archive resolves DELETE semantics without model evidence', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/endpoints.json': JSON.stringify({
+  it('an owner archive answer resolves DELETE semantics without model evidence', () => {
+    // D0 "one answer per fact": the hard-vs-archive answer lives in
+    // `deleteRules` only — `endpoints:` cannot restate it.
+    const compiled = compileEndpointContribution([contribution([deleteRoute()])], {
+      deleteRules: [
+        {
+          match: 'backend/api/v1/accounts.py',
+          semantics: 'archive',
+          archiveFields: { archived_at: 'now()' },
+          reason: 'removes set archived_at via the service; soft delete by design',
+        },
+      ],
+    });
+    const endpoint = compiled.inventory.endpoints[0];
+    expect(endpoint?.capabilities).toContain('crud-archive');
+    expect(endpoint?.deleteSemantics).toBe('archive');
+    expect(endpoint?.capabilityTrace).toContainEqual({
+      capability: 'crud-archive',
+      rule: 'DELETE_ARCHIVE_EVIDENCE',
+      evidence: 'archive semantics in handler/path/linked-model evidence',
+    });
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED'),
+    ).toBe(false);
+  });
+
+  it('the endpoints: section refuses to restate the hard-vs-archive answer', () => {
+    expect(() =>
+      compileEndpointContribution([contribution([deleteRoute()])], {
+        endpoints: {
           rules: [
             {
               match: 'backend/api/v1/accounts.py',
               method: 'DELETE',
               capability: 'crud-archive',
-              reason: 'removes set archived_at via the service; soft delete by design',
+              reason: 'a second place to answer the same fact',
             },
           ],
-        }),
-      });
-      const compiled = compileEndpointContribution([contribution([deleteRoute()])], { cwd: repo.root });
-      const endpoint = compiled.inventory.endpoints[0];
-      expect(endpoint?.capabilities).toContain('crud-archive');
-      expect(endpoint?.deleteSemantics).toBe('archive');
-      expect(endpoint?.capabilityTrace).toContainEqual({
-        capability: 'crud-archive',
-        rule: 'DELETE_DECLARED',
-        evidence: 'declared delete semantics: removes set archived_at via the service; soft delete by design',
-      });
-      expect(
-        compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED'),
-      ).toBe(false);
-    });
+        },
+      }),
+    ).toThrow(/capability must be one of/);
   });
 
   it('method-scoped rules never leak across methods', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/endpoints.json': JSON.stringify({
-          rules: [
-            { paths: ['/api/v1/accounts/**'], method: 'DELETE', capability: 'crud-archive', reason: 'delete surface only' },
-          ],
-        }),
-      });
-      // A GET on the same item path: the DELETE-scoped rule does not apply.
-      const getRoute = routeFact('GET', '/api/v1/accounts/{account_id}', {
-        handlerSymbol: 'app.api.accounts:get_account',
-        source: { file: 'backend/api/v1/accounts.py', line: 70, col: 0 },
-      });
-      const compiled = compileEndpointContribution([contribution([getRoute])], { cwd: repo.root });
-      const endpoint = compiled.inventory.endpoints[0];
-      expect(endpoint?.capabilities).toEqual([]);
-      expect(endpoint?.deleteSemantics).toBeNull();
-      expect(
-        compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_CAPABILITY_CONTRADICTION'),
-      ).toBe(false);
+    // A DELETE-scoped rule on the same item path: a GET never sees it.
+    const getRoute = routeFact('GET', '/api/v1/accounts/{account_id}', {
+      handlerSymbol: 'app.api.accounts:get_account',
+      source: { file: 'backend/api/v1/accounts.py', line: 70, col: 0 },
     });
+    const compiled = compileEndpointContribution([contribution([getRoute])], {
+      endpoints: {
+        rules: [
+          { paths: ['/api/v1/accounts/**'], method: 'DELETE', capability: 'crud-update', reason: 'delete surface only' },
+        ],
+      },
+    });
+    const endpoint = compiled.inventory.endpoints[0];
+    expect(endpoint?.capabilities).toEqual([]);
+    expect(endpoint?.deleteSemantics).toBeNull();
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_CAPABILITY_CONTRADICTION'),
+    ).toBe(false);
   });
 
-  it('a malformed document throws (fail closed), like the planes channel', () => {
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/endpoints.json': JSON.stringify({
-          rules: [{ paths: ['/x'], capability: 'nonsense-capability', reason: 'typo\'d vocabulary' }],
-        }),
-      });
-      expect(() =>
-        compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root }),
-      ).toThrow(/capability must be one of/);
-    });
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/endpoints.json': JSON.stringify({
-          rules: [{ capability: 'crud-read', reason: 'unconstrained: no selector' }],
-        }),
-      });
-      expect(() =>
-        compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root }),
-      ).toThrow(/at least one of/);
-    });
-    withTempRepo({}, (repo) => {
-      repo.writeFiles({
-        '.gateforge/endpoints.json': JSON.stringify({
-          rules: [{ paths: ['analytics/logs'], capability: 'crud-read', reason: 'missing leading slash' }],
-        }),
-      });
-      expect(() =>
-        compileEndpointContribution([contribution([analyticsRoute()])], { cwd: repo.root }),
-      ).toThrow(/must start with '\//);
-    });
+  it('a malformed section throws (fail closed), like the planes channel', () => {
+    expect(() =>
+      compileEndpointContribution([contribution([analyticsRoute()])], {
+        endpoints: { rules: [{ paths: ['/x'], capability: 'nonsense-capability', reason: 'typo\'d vocabulary' }] },
+      }),
+    ).toThrow(/capability must be one of/);
+
+    expect(() =>
+      compileEndpointContribution([contribution([analyticsRoute()])], {
+        endpoints: { rules: [{ capability: 'crud-read', reason: 'unconstrained: no selector' }] },
+      }),
+    ).toThrow(/at least one of/);
+
+    expect(() =>
+      compileEndpointContribution([contribution([analyticsRoute()])], {
+        endpoints: { rules: [{ paths: ['analytics/logs'], capability: 'crud-read', reason: 'missing leading slash' }] },
+      }),
+    ).toThrow(/must start with '\//);
+
+    // Not a mapping at all: the section is a document fragment the host
+    // already parsed, so a scalar can only be a wrong answer.
+    expect(() =>
+      compileEndpointContribution([contribution([analyticsRoute()])], {
+        endpoints: 'not a section',
+      }),
+    ).toThrow(/expected an object/);
   });
 });
 

@@ -37,13 +37,13 @@ export {
 } from './detector.js';
 
 /**
- * The default CLI in-process plugin module: `{ discover(paths) }`.
+ * The default CLI in-process plugin module: `{ discover(paths, context) }`.
  *
  * Like every other pack, the instance is created at module import — safe
- * because `createHttpDetector` resolves the repo root AND its
- * `.gateforge/http-clients.json` document at DISCOVER time, not at factory
- * time. `gateforge check --staged` imports this module at startup and only
- * moves the process cwd to the staged candidate checkout afterwards, so a
+ * because `createHttpDetector` resolves the repo root AND its owner
+ * client-scan section at DISCOVER time, not at factory time. `gateforge
+ * check --staged` imports this module at startup and only moves the
+ * process cwd to the staged candidate checkout afterwards, so a
  * factory-time capture would grade the user's worktree instead of the
  * staged bytes.
  */

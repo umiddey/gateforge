@@ -29,8 +29,50 @@ export interface DiscoveryResult {
   scannedPaths?: JsonValue[];
 }
 
+/**
+ * The OWNER sections the host hands a detector at discover time
+ * (0.11.0). Before 0.11.0 each detector read its own configuration file
+ * by path (`.gateforge/planes.json`, `.gateforge/http-clients.json`,
+ * `.gateforge/fastapi.json`); those bytes now live in the two owner
+ * documents the host already reads and validates, so the host passes the
+ * PARSED section instead of making every detector re-read a file it
+ * would have to parse and disagree about.
+ *
+ * The members are `unknown` on purpose: the host validates the section
+ * SHAPE, the owning detector validates its RULES with its own reader
+ * (one validation source per document, unchanged from the readers that
+ * have always guarded them). A member is absent when the repository
+ * declared nothing, which every reader treats as its default.
+ */
+export interface DiscoverSections {
+  /** `planes:` of the owner-answers document. */
+  planes?: unknown;
+  /** `scan.httpClients` of `.gateforge.yml`. */
+  httpClients?: unknown;
+  /** `scan.fastapi` of `.gateforge.yml`. */
+  fastapi?: unknown;
+  /** `endpoints:` of the owner-answers document. */
+  endpoints?: unknown;
+}
+
+/**
+ * The second `discover()` argument. OPTIONAL in the signature so a
+ * plugin written before 0.11.0 keeps type-checking and running: it simply
+ * ignores the context and reads nothing from a file that no longer
+ * exists, which is a loud, honest failure rather than a silent fallback.
+ */
+export interface DiscoverContext {
+  /** Absolute repo root in force at discover time (never the factory-time cwd). */
+  root: string;
+  /** The already-parsed owner sections this detector may need. */
+  sections: DiscoverSections;
+}
+
 /** User-implemented discovery callback. Throw to answer with an `error` frame. */
-export type DiscoverHandler = (paths: readonly string[]) => Promise<DiscoveryResult> | DiscoveryResult;
+export type DiscoverHandler = (
+  paths: readonly string[],
+  context?: DiscoverContext,
+) => Promise<DiscoveryResult> | DiscoveryResult;
 
 /** Options for {@link servePlugin}. */
 export interface ServePluginOptions {

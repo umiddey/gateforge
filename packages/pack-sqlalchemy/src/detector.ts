@@ -22,14 +22,15 @@ import { fileURLToPath } from 'node:url';
 import { delimiter, resolve } from 'node:path';
 import {
   PluginSession,
+  type DiscoverContext,
   type DiscoveryOutcome,
   type Finding,
 } from '@gate-forge/plugin-protocol';
 import { PACK_PLUGIN_ID, PACK_VERSION } from './version.js';
+import { OWNER_ANSWERS_PATH } from '@gate-forge/core';
 import {
   NO_PLANE_MAPPING,
-  PLANES_CONFIG_PATH,
-  readPlanesConfigOrNull,
+  planesConfigFromSection,
   resolvePlaneByRules,
   type PlanesConfig,
   type PlaneRule,
@@ -74,23 +75,15 @@ export function pythonEnvironment(extra: readonly string[] = []): NodeJS.Process
 export interface SqlalchemyDetectorOptions {
   /**
    * Optional programmatic plane mapping. Takes precedence over the
-   * declarative config channel: when given, `.gateforge/planes.json` is
-   * not read at all. The default is `NO_PLANE_MAPPING`.
+   * declarative config channel: when given, the host's `planes:`
+   * section is not read at all. The default is `NO_PLANE_MAPPING`.
    */
   plane?: PlaneRule;
   /**
-   * Explicit declarative plane config; overrides the
-   * `.gateforge/planes.json` document entirely when given (and is
-   * ignored while `plane` is given).
+   * Explicit declarative plane rules; overrides the host's `planes:`
+   * section entirely when given (and is ignored while `plane` is given).
    */
   planesConfig?: PlanesConfig;
-  /**
-   * Repo-relative path of the declarative plane config document (JSON),
-   * resolved against the working directory at discover time (default:
-   * `.gateforge/planes.json`). Absence is normal — the outcome is then
-   * byte-identical to `NO_PLANE_MAPPING`; a malformed document throws.
-   */
-  planesConfigPath?: string;
   /**
    * Explicit owner-declared tenant scope columns. Overrides the
    * `.gateforge.yml` `tenancy.scopeColumns` document entirely when given.
@@ -114,10 +107,11 @@ export interface SqlalchemyDetectorOptions {
   pluginVersion?: string;
 }
 
-/** The pinned in-process plugin contract: `{ discover(paths) }`. */
+/** The pinned in-process plugin contract: `{ discover(paths, context) }`. */
 export interface SqlalchemyDetector {
   discover(
     paths: readonly string[],
+    context?: DiscoverContext,
   ): Promise<{
     resources: unknown[];
     unresolved: unknown[];
@@ -255,8 +249,8 @@ function planeContradictionFinding(
     code: PLANE_RULE_CONTRADICTION,
     detail:
       `table '${facts.tableName}' matches ${hits.length} declarative plane rules with ` +
-      `conflicting planes: ${described}; fix ${PLANES_CONFIG_PATH} so exactly one plane ` +
-      'remains — the table stays plane-unresolved and blocks until then',
+      `conflicting planes: ${described}; fix the \`planes:\` section of ${OWNER_ANSWERS_PATH} ` +
+      'so exactly one plane remains — the table stays plane-unresolved and blocks until then',
     locations: [{ file: location.file, line: location.line, col: location.col }],
   };
 }
@@ -341,10 +335,10 @@ export function applyPlanesConfig(
  *
  * Plane channels, in strict precedence order: the programmatic
  * `options.plane` rule (config channel not read at all), then the
- * explicit `options.planesConfig`, then the `.gateforge/planes.json`
- * document read from the working directory at discover time (absence
- * normal → `NO_PLANE_MAPPING` behavior byte-identical; malformed
- * throws).
+ * `options.plane` rule (config channel not used at all), then the
+ * explicit `options.planesConfig`, then the `planes:` section the host
+ * hands to `discover()` (absent → `NO_PLANE_MAPPING` behavior
+ * byte-identical; malformed throws).
  *
  * Args:
  *   options: Plane mapping, spawn command/env, and handshake identity.
@@ -367,7 +361,7 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
     TENANT_SCOPE_COLUMNS;
 
   return {
-    async discover(paths) {
+    async discover(paths, context) {
       if (paths.length === 0) {
         return { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       }
@@ -394,8 +388,7 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
           return planeIsNoop(plane) ? withSignals : applyPlaneMapping(withSignals, plane, scopeColumns);
         }
         const config =
-          options.planesConfig ??
-          readPlanesConfigOrNull(resolve(process.cwd(), options.planesConfigPath ?? PLANES_CONFIG_PATH));
+          options.planesConfig ?? planesConfigFromSection(context?.sections.planes, OWNER_ANSWERS_PATH);
         if (config.rules.length === 0) {
           return withSignals; // no rules: byte-identical to NO_PLANE_MAPPING
         }

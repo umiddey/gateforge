@@ -1,8 +1,32 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
+import { OWNER_ANSWERS_PATH } from '@gate-forge/core';
+import { planesConfigFromSection, type PlaneConfigRule } from '@gate-forge/pack-sqlalchemy';
 import { CLASSIFICATION_POLICY_YML, installFixture, runCli, withTempRepo } from './helpers.js';
 import { classificationPolicyTemplate } from '../src/commands/init.js';
+
+/**
+ * The fixture answers document plus a `planes:` section (0.11.0: the plane
+ * rules are a SECTION of the one owner-answers file, not a side file).
+ */
+function withPlanesSection(rules: readonly unknown[]): string {
+  return `${CLASSIFICATION_POLICY_YML}planes:\n  rules: ${JSON.stringify(rules)}\n`;
+}
+
+/**
+ * The `planes:` rules a repository's answers document currently declares,
+ * read back through the runtime's OWN strict parser: a fixture that
+ * asserted on raw YAML would accept a section the run refuses.
+ */
+function planeRulesOf(repo: { path: (relative: string) => string }): readonly PlaneConfigRule[] {
+  const document = parseYaml(readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8'));
+  const section =
+    typeof document === 'object' && document !== null && 'planes' in document
+      ? document.planes
+      : undefined;
+  return planesConfigFromSection(section, `${OWNER_ANSWERS_PATH} planes:`).rules;
+}
 
 describe('automatic classification commands', () => {
   it('classify emits deterministic effective decisions and a derived snapshot', async () => {
@@ -21,7 +45,6 @@ describe('automatic classification commands', () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       const existing = { match: 'src/accounts.txt', plane: 'tenant', reason: 'Existing reviewed rule.' };
-      repo.writeFiles({ '.gateforge/planes.json': JSON.stringify({ rules: [existing] }) });
       const args = [
         'classify',
         'plane',
@@ -30,29 +53,28 @@ describe('automatic classification commands', () => {
         '--reason',
         'This route serves operator-managed records.',
       ];
+      repo.writeFiles({
+        [OWNER_ANSWERS_PATH]: withPlanesSection([existing]),
+      });
 
       const preview = await runCli(repo, args);
       expect(preview.code).toBe(0);
-      expect(preview.stdout).toContain('"match": "src/new-route.js"');
+      expect(preview.stdout).toContain('match: src/new-route.js');
       expect(preview.stdout).toContain('owner-reviewed classification input');
       expect(preview.stdout).toContain('approved policy pin is in use');
       expect(preview.stdout).toContain('rerun this command with --confirm');
-      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
-        rules: [existing],
-      });
+      expect(planeRulesOf(repo)).toEqual([existing]);
 
       const confirmed = await runCli(repo, [...args, '--confirm']);
       expect(confirmed.code).toBe(0);
-      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
-        rules: [
-          existing,
-          {
-            match: 'src/new-route.js',
-            plane: 'master',
-            reason: 'This route serves operator-managed records.',
-          },
-        ],
-      });
+      expect(planeRulesOf(repo)).toEqual([
+        existing,
+        {
+          match: 'src/new-route.js',
+          plane: 'master',
+          reason: 'This route serves operator-managed records.',
+        },
+      ]);
     });
   });
 
@@ -62,7 +84,7 @@ describe('automatic classification commands', () => {
       repo.writeFiles({
         'backend/api/v1/accounts.py': '# router fixture\n',
         'backend/api/v1/orders.py': '# router fixture\n',
-        '.gateforge/planes.json': JSON.stringify({ rules: [] }),
+        [OWNER_ANSWERS_PATH]: withPlanesSection([]),
       });
       const args = [
         'classify',
@@ -76,23 +98,19 @@ describe('automatic classification commands', () => {
       // The preview shows the folder rule and writes nothing.
       const preview = await runCli(repo, args);
       expect(preview.code).toBe(0);
-      expect(preview.stdout).toContain('"match": "backend/api/v1/**"');
+      expect(preview.stdout).toContain('match: backend/api/v1/**');
       expect(preview.stdout).toContain('rerun this command with --confirm');
-      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
-        rules: [],
-      });
+      expect(planeRulesOf(repo)).toEqual([]);
 
       const confirmed = await runCli(repo, [...args, '--confirm']);
       expect(confirmed.code).toBe(0);
-      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
-        rules: [
-          {
-            match: 'backend/api/v1/**',
-            plane: 'tenant',
-            reason: 'Every router in this folder is tenant-scoped.',
-          },
-        ],
-      });
+      expect(planeRulesOf(repo)).toEqual([
+        {
+          match: 'backend/api/v1/**',
+          plane: 'tenant',
+          reason: 'Every router in this folder is tenant-scoped.',
+        },
+      ]);
 
       // A source that escapes the repository is refused: a rule must never
       // point at bytes the gate does not read.
@@ -109,15 +127,13 @@ describe('automatic classification commands', () => {
         expect([outside, refused.code]).toEqual([outside, 2]);
         expect(refused.stderr).toContain('repo-relative');
       }
-      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
-        rules: [
-          {
-            match: 'backend/api/v1/**',
-            plane: 'tenant',
-            reason: 'Every router in this folder is tenant-scoped.',
-          },
-        ],
-      });
+      expect(planeRulesOf(repo)).toEqual([
+        {
+          match: 'backend/api/v1/**',
+          plane: 'tenant',
+          reason: 'Every router in this folder is tenant-scoped.',
+        },
+      ]);
     });
   });
 
@@ -126,7 +142,7 @@ describe('automatic classification commands', () => {
       installFixture(repo);
       repo.writeFiles({
         'src/api/accounts.js': '// route fixture\n',
-        '.gateforge/planes.json': JSON.stringify({ rules: [] }),
+        '.gateforge/classification-policy.yml': withPlanesSection([]),
       });
 
       const globbed = await runCli(repo, [
@@ -139,22 +155,18 @@ describe('automatic classification commands', () => {
         '--confirm',
       ]);
       expect(globbed.code).toBe(0);
-      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
-        rules: [
-          { match: 'src/api/**', plane: 'master', reason: 'The whole api folder is operator-managed.' },
-        ],
-      });
+      expect(planeRulesOf(repo)).toEqual([
+        { match: 'src/api/**', plane: 'master', reason: 'The whole api folder is operator-managed.' },
+      ]);
 
       // A narrower, disagreeing rule already covers files inside the new
       // glob's surface: the owner edits that rule instead of stacking a
       // second one over it.
       repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [
-            { match: 'src/api/**', plane: 'master', reason: 'folder rule' },
-            { match: 'src/api/public.js', plane: 'global', reason: 'public ingress' },
-          ],
-        }),
+        '.gateforge/classification-policy.yml': withPlanesSection([
+          { match: 'src/api/**', plane: 'master', reason: 'folder rule' },
+          { match: 'src/api/public.js', plane: 'global', reason: 'public ingress' },
+        ]),
       });
       const shadowed = await runCli(repo, [
         'classify',
@@ -171,9 +183,10 @@ describe('automatic classification commands', () => {
     });
   });
 
-  it('does not create a new plane trust file', async () => {
+  it('refuses to add a planes: section the owner never wrote', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
+      const before = readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8');
       const result = await runCli(repo, [
         'classify',
         'plane',
@@ -184,15 +197,22 @@ describe('automatic classification commands', () => {
         '--confirm',
       ]);
       expect(result.code).toBe(2);
-      expect(result.stderr).toContain('.gateforge/planes.json');
-      expect(existsSync(repo.path('.gateforge/planes.json'))).toBe(false);
+      // Since 0.11.0 there is no second plane document to create: the
+      // answers document must already declare the reviewed `planes:`
+      // section, and the command refuses to invent one.
+      expect(result.stderr).toContain(OWNER_ANSWERS_PATH);
+      expect(result.stderr).toContain("'planes:' section of '.gateforge/classification-policy.yml'");
+      expect(readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8')).toBe(before);
     });
   });
+
   it('refuses a plane rule that conflicts with an existing matching declaration', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       const existing = { match: 'src/**', plane: 'tenant', reason: 'Owner-reviewed tenant data.' };
-      repo.writeFiles({ '.gateforge/planes.json': JSON.stringify({ rules: [existing] }) });
+      repo.writeFiles({
+        [OWNER_ANSWERS_PATH]: withPlanesSection([existing]),
+      });
       const result = await runCli(repo, [
         'classify',
         'plane',
@@ -204,9 +224,7 @@ describe('automatic classification commands', () => {
       ]);
       expect(result.code).toBe(2);
       expect(result.stderr).toContain('will not add a conflicting rule');
-      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
-        rules: [existing],
-      });
+      expect(planeRulesOf(repo)).toEqual([existing]);
     });
   });
 
@@ -214,7 +232,9 @@ describe('automatic classification commands', () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       const existing = { match: 'src/**', plane: 'tenant', reason: 'Owner-reviewed tenant data.' };
-      repo.writeFiles({ '.gateforge/planes.json': JSON.stringify({ rules: [existing] }) });
+      repo.writeFiles({
+        [OWNER_ANSWERS_PATH]: withPlanesSection([existing]),
+      });
       const result = await runCli(repo, [
         'classify',
         'plane',
@@ -232,9 +252,7 @@ describe('automatic classification commands', () => {
       expect(result.stderr).toContain('`plane`');
       expect(result.stderr).toContain('master');
       // Nothing is written and the exit code is unchanged.
-      expect(JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8'))).toEqual({
-        rules: [existing],
-      });
+      expect(planeRulesOf(repo)).toEqual([existing]);
     });
   });
 
