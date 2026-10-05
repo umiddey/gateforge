@@ -409,7 +409,8 @@ const EVIDENCE_SPEC_TABLE = [
 /** The two-spec evidence repository every existing suite installs. */
 export const DEFAULT_EVIDENCE_NAMES: readonly string[] = ['accounts', 'orders'];
 
-function evidenceSpecTable(names: readonly string[]): Array<(typeof EVIDENCE_SPEC_TABLE)[number]> {
+/** The fixture's spec rows; exported for suites that extend the stub runner. */
+export function evidenceSpecTable(names: readonly string[]): Array<(typeof EVIDENCE_SPEC_TABLE)[number]> {
   const chosen = EVIDENCE_SPEC_TABLE.filter((row) => names.includes(row.name));
   if (chosen.length !== names.length) throw new Error(`unknown evidence spec: ${names.join(', ')}`);
   return chosen;
