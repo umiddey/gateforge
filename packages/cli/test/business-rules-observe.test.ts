@@ -67,6 +67,7 @@ const RULE_FILE = 'e2e/invoices.spec.mjs';
 const RULE_TITLE = 'reads an invoice';
 /** The catalog logical key of that test (the sidecar identity `tests mark` writes). */
 const RULE_KEY = `playwright:chromium:${RULE_FILE}:${RULE_TITLE}`;
+const ACCOUNT_RULE_KEY = 'playwright:chromium:e2e/accounts.spec.mjs:reads an account';
 
 /** The two-case invoice rule the fixture declares. */
 const RULE = businessRule({
@@ -111,10 +112,25 @@ function ruleSpec(specOverrides: Record<string, string> = {}): string {
   return `${(beforeMarker ?? generated).trimEnd()}\n`;
 }
 
-/** The rule's sidecar entry: the invoice test, kind observed-e2e, both claim namespaces. */
-function observeTestMap(): string {
+/** The sidecar entries for the invoice journey and optional second rule test. */
+function observeTestMap(secondRuleTest = false): string {
+  const secondRuleMapping = secondRuleTest
+    ? [
+        '  - key: playwright:chromium:e2e/accounts.spec.mjs:reads an account',
+        '    selector:',
+        '      runner: playwright',
+        '      file: e2e/accounts.spec.mjs',
+        '      titlePath:',
+        '        - reads an account',
+        '    kind: observed-e2e',
+        '    claims:',
+        `      - ${CLAIM_AFTER}`,
+        '    reason: the account journey also claims the unpaid invoice case',
+      ]
+    : [];
   return [
     evidenceTestMap(['accounts', 'orders']),
+    ...secondRuleMapping,
     '  - key: ' + RULE_KEY,
     '    selector:',
     '      runner: playwright',
@@ -294,7 +310,7 @@ function installObserveRepo(
   repo: TempRepo,
   appUrl: string,
   specOverrides: Record<string, string> = {},
-  options: { scanSpecs?: boolean; observeClaims?: readonly string[] } = {},
+  options: { scanSpecs?: boolean; observeClaims?: readonly string[]; secondRuleTest?: boolean } = {},
 ): void {
   installFixture(repo);
   repo.writeFiles({
@@ -306,7 +322,7 @@ function installObserveRepo(
     )),
     ...Object.fromEntries(NAMES.map((name) => [`src/${name}.txt`, `${name} fixture.table\n`])),
     ...Object.fromEntries(NAMES.map((name) => [`.gateforge/adapters/${name}.mjs`, evidenceAdapter(appUrl)])),
-    '.gateforge/test-map.yml': observeTestMap(),
+    '.gateforge/test-map.yml': observeTestMap(options.secondRuleTest === true),
     '.gateforge/waivers/invoices.json': invoicesWaiver(),
     '.gateforge/classification-policy.yml': answersYml([RULE]),
     '.gateforge.yml': `mode: changed\n${configYml(
@@ -469,6 +485,38 @@ describe('§7.5 a real sealed run grades the rule from its own authorized record
         // A failing run seals no receipt: there is nothing for a later
         // check to grade satisfied from.
         expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json')), output).toBe(false);
+      });
+    } finally {
+      await app.close();
+    }
+  }, 240_000);
+
+  it('fails a case when its second mapped test is red and its sibling is green', async () => {
+    const app = await startEvidenceApp();
+    try {
+      await withTempRepo({}, async (repo) => {
+        installObserveRepo(
+          repo,
+          app.url,
+          { 'e2e/accounts.spec.mjs': '// __FAIL__ the account journey is red\n' },
+          { secondRuleTest: true },
+        );
+        repo.commitFiles({}, 'base');
+        const env = gateEnv(repo, app.url);
+
+        const run = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+        const output = `${run.stdout}\n${run.stderr}`;
+        expect(run.code, output).toBe(1);
+        const report = JSON.parse(run.stdout) as Report;
+        const caseEntry = report.businessRules?.find((entry) => entry.caseId === 'read-after-issue');
+        expect(caseEntry?.status, output).toBe('failing');
+        expect(caseEntry?.mappedTests, output).toEqual([ACCOUNT_RULE_KEY, RULE_KEY]);
+        expect(caseEntry?.finding?.cause, output).toBe('BUSINESS_RULE_TEST_FAILING');
+        expect(caseEntry?.finding?.tests, output).toEqual([ACCOUNT_RULE_KEY]);
+        expect(
+          report.businessRules?.find((entry) => entry.caseId === 'read-shows-fields')?.status,
+          output,
+        ).toBe('satisfied');
       });
     } finally {
       await app.close();
