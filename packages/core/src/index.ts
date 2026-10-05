@@ -1093,6 +1093,7 @@ export type {
   ResolveMappingsInput,
   ResolvedMappings,
   ObligationBindings,
+  RuleClaimBindings,
   ResolvedClaimBinding,
   MappingProblem,
   MappingProblemCause,

@@ -139,6 +139,27 @@ describe('quarantine and the mapping surface', () => {
         ],
       },
     ],
+    // A business-rule case the SAME quarantined test claimed: a
+    // quarantined test proves nothing for a rule either, so this is the
+    // arm that would silently stay "mapped" if the quarantine only
+    // filtered the obligation side.
+    ruleBindings: [
+      {
+        claimId: 'business-rule:invoice-cancel-only-unpaid/paid-cannot-cancel',
+        bindings: [
+          {
+            logicalKey: KEY,
+            instances: [],
+            origin: 'sidecar',
+            sourceDigest: null,
+            declaredKind: 'observed-e2e',
+            categories: [],
+            reason: 'declares that a paid invoice cannot be cancelled',
+            sourceLocation: null,
+          },
+        ],
+      },
+    ],
     problems: [],
   };
 
@@ -147,7 +168,9 @@ describe('quarantine and the mapping surface', () => {
     expect(filtered.obligations[0]?.bindings).toEqual([]);
     expect(filtered.obligations[1]?.bindings).toHaveLength(1);
     expect(filtered.problems).toEqual(resolution.problems);
+    expect(filtered.ruleBindings[0]?.bindings).toEqual([]);
   });
+
 
   it('returns the same document when nothing is quarantined', () => {
     expect(withoutQuarantinedBindings(resolution, new Set())).toBe(resolution);

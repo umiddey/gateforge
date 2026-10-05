@@ -36,6 +36,7 @@ import type { TestCatalog, TestCatalogEntry, TestKind } from '../schemas/test-ca
 import type { TestMap } from '../schemas/test-map.js';
 import type { BehaviorCatalog } from '../schemas/behavior-catalog.js';
 import { CAUSE_NEXT_ACTIONS } from '../schemas/verdict.js';
+import { isBusinessRuleClaimId, parseBusinessRuleClaimId } from '../schemas/business-rules.js';
 
 /** Why a mapping problem exists (plan §5.4 rows TEST_MAPPING_* + TEST_KIND_UNKNOWN). */
 export type MappingProblemCause =
@@ -103,6 +104,19 @@ export interface ObligationBindings {
   bindings: ResolvedClaimBinding[];
 }
 
+/**
+ * Every resolved binding for one business-rule CASE claim (sorted by
+ * origin, then key). Structurally identical to {@link ObligationBindings}
+ * and deliberately kept apart from it: the business-rules evaluator reads
+ * these, the obligation grader never does.
+ */
+export interface RuleClaimBindings {
+  /** The `business-rule:<ruleId>/<caseId>` claim id. */
+  claimId: string;
+  /** The resolved declarations (possibly empty — an unmapped case). */
+  bindings: ResolvedClaimBinding[];
+}
+
 /** One typed mapping problem (plan §5.4: actionable, both locations). */
 export interface MappingProblem {
   /** Stable cause code. */
@@ -119,6 +133,14 @@ export interface MappingProblem {
 export interface ResolvedMappings {
   /** One entry per known obligation id, sorted by id. */
   obligations: ObligationBindings[];
+  /**
+   * One entry per known business-rule case claim id, sorted by id. Empty
+   * unless the owner declared `rules:`, and it is never merged into
+   * `obligations` — a rule binding must not reach an obligation set, a
+   * graded obligation array or a receipt coverage list (plan D3,
+   * invariant 3).
+   */
+  ruleBindings: RuleClaimBindings[];
   /** Typed problems, sorted by (cause, obligationId, detail). */
   problems: MappingProblem[];
 }
@@ -137,6 +159,14 @@ export interface ResolveMappingsInput {
   sidecar: TestMap;
   /** The obligation registry's ids (the obligations dump path). */
   obligationIds: readonly string[];
+  /**
+   * The owner-declared BUSINESS RULE case claim ids
+   * (`business-rule:<ruleId>/<caseId>`) this run's rules registry knows.
+   * A separate namespace beside `obligationIds`: a rule claim resolves in
+   * the same resolver and reuses every staleness, ambiguity and
+   * quarantine rule, but lands in `ruleBindings`, never in `obligations`.
+   */
+  businessRuleClaimIds?: readonly string[];
   /** Optional prior-run observations (suggestions only, never grading). */
   priorRunHints?: readonly PriorRunHint[];
   /** Playwright files whose native test load failed; selectors there are unknown, not stale. */
@@ -172,6 +202,13 @@ export function withoutQuarantinedBindings(
     obligations: resolution.obligations.map((obligation) => ({
       obligationId: obligation.obligationId,
       bindings: obligation.bindings.filter((binding) => !quarantinedKeys.has(binding.logicalKey)),
+    })),
+    // A quarantined test proves nothing, and that holds for a rule case
+    // exactly as for an obligation: dropping only the obligation side
+    // would leave a case looking mapped by a test the owner excluded.
+    ruleBindings: resolution.ruleBindings.map((claim) => ({
+      claimId: claim.claimId,
+      bindings: claim.bindings.filter((binding) => !quarantinedKeys.has(binding.logicalKey)),
     })),
     problems: resolution.problems,
   };
@@ -248,11 +285,41 @@ function instanceOf(row: TestCatalogEntry): TestInstanceRef {
  */
 export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappings {
   const registry = new Set(input.obligationIds);
+  // The business-rule claim registry is a SEPARATE namespace (plan D3):
+  // `business-rule:<ruleId>/<caseId>` ids resolve here exactly like
+  // obligation ids do, but they land in `ruleBindings` and never in
+  // `obligations`, so no rule binding can reach an obligation set, a
+  // graded obligation array or a receipt coverage list.
+  const ruleRegistry = new Set(input.businessRuleClaimIds ?? []);
   const rowsByKey = new Map(input.catalog.entries.map((row) => [row.logicalKey, row]));
   const problems: MappingProblem[] = [];
   const seenProblems = new Set<string>();
-  /** obligationId → logicalKey → binding. */
-  const byObligation = new Map<string, Map<string, ResolvedClaimBinding>>();
+  /** claimId (obligation OR business-rule) → logicalKey → binding. */
+  const byClaim = new Map<string, Map<string, ResolvedClaimBinding>>();
+
+  /** Whether one claim id names something the current run declares. */
+  const knownClaim = (claimId: string): boolean => registry.has(claimId) || ruleRegistry.has(claimId);
+
+  /**
+   * The staleness detail for a claim id naming neither an obligation nor
+   * a rule case. A `business-rule:` id is checked against the OWNER's
+   * `rules:` section, so the message must say that — "not in the current
+   * obligation registry" would send the reader hunting an obligation.
+   */
+  function unknownClaimDetail(claimId: string, subject: string): string {
+    if (isBusinessRuleClaimId(claimId)) {
+      const pair = parseBusinessRuleClaimId(claimId);
+      return (
+        `${subject} claims business rule '${pair?.ruleId ?? '?'}' case '${pair?.caseId ?? '?'}', ` +
+        'which the rules: section of the owner answers document does not declare ' +
+        '(the rule or the case was renamed or removed); correct the mapping'
+      );
+    }
+    return (
+      `${subject} claims '${claimId}', which is not in the current obligation registry ` +
+      '(the obligation vanished or the id is misspelled); correct the mapping'
+    );
+  }
 
   const pushProblem = (problem: MappingProblem): void => {
     const dedupeKey = `${problem.cause}\u0000${problem.obligationId ?? ''}\u0000${problem.detail}`;
@@ -261,11 +328,11 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     problems.push(problem);
   };
 
-  const bindingsFor = (obligationId: string): Map<string, ResolvedClaimBinding> => {
-    let existing = byObligation.get(obligationId);
+  const bindingsFor = (claimId: string): Map<string, ResolvedClaimBinding> => {
+    let existing = byClaim.get(claimId);
     if (existing === undefined) {
       existing = new Map();
-      byObligation.set(obligationId, existing);
+      byClaim.set(claimId, existing);
     }
     return existing;
   };
@@ -304,13 +371,11 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
           input.nativeErrorFiles?.includes(entry.selector.file) === true);
       if (nativeLoadFailed) {
         for (const obligationId of claims) {
-          if (!registry.has(obligationId)) {
+          if (!knownClaim(obligationId)) {
             pushProblem({
               cause: 'TEST_MAPPING_STALE',
               obligationId,
-              detail:
-                `sidecar entry '${entry.key}' claims '${obligationId}', which is not in the current ` +
-                'obligation registry (the obligation vanished or the id is misspelled); correct the mapping',
+              detail: unknownClaimDetail(obligationId, `sidecar entry '${entry.key}'`),
               locations: [{ file: entry.selector.file, line: 1, col: 0 }],
             });
           }
@@ -332,7 +397,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
                 .join(', ')})`
             : `the file '${entry.selector.file}' has no catalog rows anymore`;
         for (const obligationId of claims) {
-          if (!registry.has(obligationId)) continue;
+          if (!knownClaim(obligationId)) continue;
           pushProblem({
             cause: 'TEST_MAPPING_STALE',
             obligationId,
@@ -351,13 +416,11 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     // points outside the registry — the obligation vanished or the id is
     // misspelled. Other claims of the same entry still bind.
     for (const obligationId of claims) {
-      if (!registry.has(obligationId)) {
+      if (!knownClaim(obligationId)) {
         pushProblem({
           cause: 'TEST_MAPPING_STALE',
           obligationId,
-          detail:
-            `sidecar entry '${entry.key}' claims '${obligationId}', which is not in the current ` +
-            'obligation registry (the obligation vanished or the id is misspelled); correct the mapping',
+          detail: unknownClaimDetail(obligationId, `sidecar entry '${entry.key}'`),
           locations: [matched[0]?.sourceLocation ?? { file: entry.selector.file, line: 1, col: 0 }],
         });
       }
@@ -369,7 +432,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
       if (entry.kind === undefined) {
         if (row.inferredKind === 'unknown') {
           for (const obligationId of claims) {
-            if (!registry.has(obligationId)) continue;
+            if (!knownClaim(obligationId)) continue;
             pushProblem({
               cause: 'TEST_KIND_UNKNOWN',
               obligationId,
@@ -451,7 +514,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     // Bind the declaration (many-to-many allowed). Ambiguity problems
     // above stay visible; the binding itself is data for suggestions.
     for (const obligationId of claims) {
-      if (!registry.has(obligationId)) continue;
+      if (!knownClaim(obligationId)) continue;
       bindingsFor(obligationId).set(entry.key, {
         logicalKey: entry.key,
         instances: matched.map(instanceOf),
@@ -473,7 +536,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
   // conflicting declared kinds (§5.4 "a declaration is unsafe").
   const obligationIdsSorted = [...registry].sort(compareStrings);
   for (const obligationId of obligationIdsSorted) {
-    const declared = [...(byObligation.get(obligationId)?.values() ?? [])]
+    const declared = [...(byClaim.get(obligationId)?.values() ?? [])]
       .filter((binding) => binding.origin === 'sidecar' && binding.declaredKind !== null)
       .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey));
     const kinds = new Set(declared.map((binding) => binding.declaredKind));
@@ -501,15 +564,14 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     (a, b) => compareStrings(a.obligationId, b.obligationId) || compareStrings(a.testId, b.testId),
   );
   for (const claim of nativeClaims) {
-    if (!registry.has(claim.obligationId)) {
+    if (!knownClaim(claim.obligationId)) {
       pushProblem({
         cause: 'TEST_MAPPING_STALE',
         obligationId: claim.obligationId,
-        detail:
-          `native annotation on test '${claim.testId}'` +
-          `${claim.testFile !== undefined ? ` (${claim.testFile})` : ''} claims ` +
-          `'${claim.obligationId}', which is not in the current obligation registry ` +
-          '(the obligation vanished or the policy changed); correct the annotation or the mapping',
+        detail: unknownClaimDetail(
+          claim.obligationId,
+          `native annotation on test '${claim.testId}'${claim.testFile !== undefined ? ` (${claim.testFile})` : ''}`,
+        ),
         locations: claim.location !== undefined ? [claim.location] : [],
       });
       continue;
@@ -517,7 +579,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     const instances = input.catalog.entries
       .filter((row) => row.file === claim.testFile)
       .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey));
-    const existingBindings = byObligation.get(claim.obligationId);
+    const existingBindings = byClaim.get(claim.obligationId);
     const duplicate =
       existingBindings !== undefined &&
       [...existingBindings.values()].some(
@@ -562,7 +624,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
 
   // --- inference (NEVER auto-writes a mapping; suggestions only) -----------
   for (const obligationId of obligationIdsSorted) {
-    const bindings = byObligation.get(obligationId);
+    const bindings = byClaim.get(obligationId);
     if (bindings !== undefined && [...bindings.values()].some((b) => b.origin === 'native' || b.origin === 'sidecar')) {
       continue; // a declared mapping exists — inference adds nothing
     }
@@ -590,7 +652,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     const mappedCases = new Map<string, Set<string>>();
     for (const obligationId of obligationIdsSorted) {
       const ids = new Set<string>();
-      for (const binding of byObligation.get(obligationId)?.values() ?? []) {
+      for (const binding of byClaim.get(obligationId)?.values() ?? []) {
         if (binding.origin !== 'sidecar') continue;
         for (const caseId of binding.caseIds ?? []) ids.add(caseId);
       }
@@ -613,12 +675,23 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     }
   }
 
-  const obligations = obligationIdsSorted.map((obligationId) => ({
-    obligationId,
-    bindings: [...(byObligation.get(obligationId)?.values() ?? [])].sort(
+  const sortBindings = (bindings: ResolvedClaimBinding[]): ResolvedClaimBinding[] =>
+    bindings.sort(
       (a, b) =>
         ORIGIN_RANK[a.origin] - ORIGIN_RANK[b.origin] || compareStrings(a.logicalKey, b.logicalKey),
-    ),
+    );
+  const obligations = obligationIdsSorted.map((obligationId) => ({
+    obligationId,
+    bindings: sortBindings([...(byClaim.get(obligationId)?.values() ?? [])]),
+  }));
+  // Rule bindings are collected from the SAME claim map but published
+  // under their own key, sorted by claim id. Nothing merges them into
+  // `obligations` — that separation is what keeps a rule out of every
+  // obligation set, graded obligation array and receipt coverage list.
+  const ruleClaimIdsSorted = [...ruleRegistry].sort(compareStrings);
+  const ruleBindings = ruleClaimIdsSorted.map((claimId) => ({
+    claimId,
+    bindings: sortBindings([...(byClaim.get(claimId)?.values() ?? [])]),
   }));
   problems.sort(
     (a, b) =>
@@ -626,7 +699,11 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
       compareStrings(a.obligationId ?? '', b.obligationId ?? '') ||
       compareStrings(a.detail, b.detail),
   );
-  return { obligations, problems: problems.map((problem) => ({ ...problem, locations: [...problem.locations] })) };
+  return {
+    obligations,
+    ruleBindings,
+    problems: problems.map((problem) => ({ ...problem, locations: [...problem.locations] })),
+  };
 }
 
 /** One inference candidate: the catalog row plus the matched signals. */
