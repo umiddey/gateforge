@@ -66,6 +66,7 @@ import {
 } from './unmatched-routes.js';
 import { readJsonArray } from './state.js';
 import { providerFor } from './providers.js';
+import { pageObligationsFromGraph } from './page-obligations.js';
 import { loadOwnerAnswers } from './owner-answers.js';
 import { firstIssueText, loadYaml } from './yaml.js';
 
@@ -542,6 +543,13 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       ...adapterProjectionBlockers(cwd, config.adapters, adapters, classification.decisions),
     ],
   });
+  const pageObligations = pageObligationsFromGraph(graph);
+  if (pageObligations.length > 0) {
+    policy = {
+      ...policy,
+      obligations: [...policy.obligations, ...pageObligations].sort((a, b) => compareStrings(a.id, b.id)),
+    };
+  }
   let behaviorCatalog: BehaviorCatalog | null = null;
   if (config.behaviorPolicy !== undefined) {
     const behaviorPath = resolveRepoPath(cwd, config.behaviorPolicy);
