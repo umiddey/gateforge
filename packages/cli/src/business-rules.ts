@@ -1,0 +1,326 @@
+/**
+ * The CLI seam for owner-declared BUSINESS RULES
+ * (plan 2026-10-05 §5 D3/D4/D5, WP4).
+ *
+ * One module owns every fact a rule needs, because the three consumers
+ * — `check`, `next` and `tests mark`/`explain` — must never disagree
+ * about what a case is worth:
+ *
+ * - the OWNER rules come from the owner-answers document, which the
+ *   pipeline already read (never a second read of the same file);
+ * - the CLAIM IDS come from the cases those rules declare, and are what
+ *   the one mapping resolver validates a `business-rule:` claim against;
+ * - the RUN FACTS come from a SEALED execution result plus the sealed
+ *   records and the owner's WITNESSED suite declarations. A run with no
+ *   sealed execution result passes `null`, and `null` grades everything
+ *   mapped as `unproven` — a declaration is never proof.
+ *
+ * Two invariants this module exists to hold:
+ * - **run-wide.** Rule grading reads the FULL rule list and the FULL
+ *   rule bindings, never the changed-file selection, so a `--scope
+ *   changed` run cannot scope a rule away. A case whose test sits
+ *   outside that run's graded slice is reported as `unproven (outside
+ *   this run's graded slice)` — visible, not absent, and never
+ *   satisfied by a receipt that never covered it.
+ * - **advisory never hides.** `enforcement: advisory` routes a case's
+ *   finding into the report's existing `advisories` channel; only
+ *   `enforcement: block` findings reach `blocking` and the exit code.
+ *   Both channels carry the same typed cause, and the channel is decided
+ *   by the OWNER's declaration on the rule, never by a new severity.
+ */
+import {
+  businessRuleClaimId,
+  casesOf,
+  evaluateBusinessRules,
+  type BlockingEntry,
+  type BusinessRule,
+  type BusinessRuleBinding,
+  type BusinessRuleCaseResult,
+  type BusinessRuleEvaluation,
+  type BusinessRuleRunFacts,
+  type BusinessRuleTestFact,
+  type EvidenceRecord,
+  type ExecutionResult,
+  type GateforgeConfig,
+  type ResourceGraph,
+  type TestCatalog,
+} from '@gate-forge/core';
+import { UsageError } from './errors.js';
+
+/** Every rule-case claim id this rule list declares, sorted. */
+export function businessRuleClaimIds(rules: readonly BusinessRule[]): string[] {
+  const ids = rules.flatMap((rule) =>
+    casesOf(rule).map((entry) => businessRuleClaimId(rule.id, entry.id)),
+  );
+  return [...new Set(ids)].sort();
+}
+
+/** The runner each catalog row executes under, keyed by logical key. */
+export function catalogRunnerIndex(catalog: TestCatalog): Map<string, string> {
+  return new Map(catalog.entries.map((entry) => [entry.logicalKey, entry.runner]));
+}
+
+/**
+ * The logical test keys whose FILE the catalog observed intercepting the
+ * system under test. A mocked spec can never satisfy a rule: it proves
+ * the mock, not the rule (plan invariant 6).
+ */
+export function mockedTestKeys(catalog: TestCatalog): Set<string> {
+  return new Set(
+    catalog.entries
+      .filter((entry) => entry.suppressionSignals.some((signal) => signal.kind === 'mock'))
+      .map((entry) => entry.logicalKey),
+  );
+}
+
+/**
+ * The resolver's rule bindings projected onto the evaluator's binding
+ * shape. Pure; the resolver has already dropped quarantined, stale and
+ * wildcard-rejected declarations, and the evaluator independently
+ * refuses anything but `native`/`sidecar` origins.
+ *
+ * A binding whose selector bound no catalog instance contributes no
+ * runner, which the evaluator reads as "not an accepted kind" rather
+ * than guessing one: a declaration with no resolvable instance is not
+ * proof of anything.
+ */
+export function businessRuleBindingsOf(
+  ruleBindings: readonly { claimId: string; bindings: readonly ResolvedRuleBinding[] }[],
+  runners: ReadonlyMap<string, string>,
+  mockedKeys: ReadonlySet<string>,
+): Map<string, readonly BusinessRuleBinding[]> {
+  const bindings = new Map<string, readonly BusinessRuleBinding[]>();
+  for (const claim of ruleBindings) {
+    bindings.set(
+      claim.claimId,
+      claim.bindings.map((binding) => ({
+        logicalKey: binding.logicalKey,
+        origin: binding.origin,
+        declaredKind: binding.declaredKind,
+        runner: runners.get(binding.logicalKey) ?? '',
+        mocked: mockedKeys.has(binding.logicalKey),
+        reason: binding.reason,
+        file: binding.instances[0]?.file ?? binding.logicalKey,
+      })),
+    );
+  }
+  return bindings;
+}
+
+/** The resolver binding shape this projection reads (narrow on purpose). */
+interface ResolvedRuleBinding {
+  logicalKey: string;
+  origin: 'native' | 'sidecar' | 'inferred' | 'prior-run';
+  declaredKind: string | null;
+  reason: string | null;
+  instances: readonly { runner: string; file: string }[];
+}
+
+/**
+ * Reads the OWNER's declared `witnessed` diagnostic suites as the set of
+ * runner names whose proof this repository can produce. A suite the
+ * owner did not mark witnessed contributes nothing: the pytest row of
+ * the type table requires one, and an unwitnessed suite is not proof
+ * (owner decision, 2026-10-04).
+ */
+export function witnessedRunnersOf(config: GateforgeConfig): Set<string> {
+  const runners = new Set<string>();
+  for (const suite of config.diagnostics?.suites ?? []) {
+    if (suite.witnessed === true) runners.add('pytest');
+  }
+  return runners;
+}
+
+/**
+ * One test's sealed facts.
+ *
+ * The GRADED SLICE is the selection the supervisor fixed BEFORE the run:
+ * a test the selection did not name is outside the slice even when the
+ * runner happened to execute it, which is exactly the `--scope changed`
+ * case the plan calls out. Status is the supervisor's own normalized
+ * outcome, never a reporter summary.
+ */
+function testFactOf(
+  result: ExecutionResult,
+  logicalKey: string,
+  runners: ReadonlyMap<string, string>,
+): BusinessRuleTestFact {
+  const planned = result.planned.find((instance) => instance.logicalKey === logicalKey);
+  const outcome = result.outcomes.find((row) => row.logicalKey === logicalKey);
+  // The session trace joins on the INSTANCE identity (project, file,
+  // title path) because the logical key the catalog mints and the key
+  // the reporter emits are the same string only for natively reconciled
+  // rows. An absent trace yields no sessions, and a test with no
+  // sessions cannot produce attributable witness evidence.
+  const trace = (result.sessionTrace ?? []).find(
+    (test) =>
+      planned !== undefined &&
+      test.file === planned.file &&
+      test.project === planned.project &&
+      test.titlePath.join('>') === planned.titlePath.join('>'),
+  );
+  return {
+    logicalKey,
+    runner: runners.get(logicalKey) ?? '',
+    status: outcome?.status ?? 'not-run',
+    inGradedSlice: result.selection.logicalKeys.includes(logicalKey),
+    sessionIds: (trace?.sessions ?? []).map((session) => session.sessionId),
+  };
+}
+
+/** The sealed facts one run makes available, or null when no run exists. */
+export interface BusinessRuleFactsInput {
+  /** The sealed execution result, or null for a static `check` run. */
+  result: ExecutionResult | null;
+  /** The run's sealed evidence records (the witness side). */
+  records: readonly EvidenceRecord[];
+  /** Runners whose suite the owner declared witnessed. */
+  witnessedRunners: ReadonlySet<string>;
+  /** The receipt's evaluation scope. */
+  scope: 'full' | 'changed';
+  /** True for the engine-owned docs-only slice (zero records by construction). */
+  docsOnly: boolean;
+  /** The run's catalog, for the runner each key executes under. */
+  catalog: TestCatalog;
+}
+
+/**
+ * Builds the evaluator's run facts from a SEALED execution result.
+ *
+ * Args:
+ *   input: the sealed execution result (null when none exists), the
+ *     sealed records, the witnessed runners, the receipt's scope, and the
+ *     run's catalog.
+ *
+ * Returns:
+ *   BusinessRuleRunFacts | null: the facts, or null for no sealed run —
+ *   which is what makes a static `check` grade everything mapped as
+ *   `unproven` instead of quietly satisfied.
+ */
+export function businessRuleRunFacts(input: BusinessRuleFactsInput): BusinessRuleRunFacts | null {
+  if (input.result === null) return null;
+  const runners = catalogRunnerIndex(input.catalog);
+  const tests = new Map<string, BusinessRuleTestFact>();
+  // Planned instances first (the expected set), then any outcome for a
+  // key the plan never listed: the plan is pre-run, the outcome is what
+  // actually ran, and an executed-but-unplanned key is still a fact.
+  for (const planned of input.result.planned) {
+    tests.set(planned.logicalKey, testFactOf(input.result, planned.logicalKey, runners));
+  }
+  for (const outcome of input.result.outcomes) {
+    if (tests.has(outcome.logicalKey)) continue;
+    tests.set(outcome.logicalKey, testFactOf(input.result, outcome.logicalKey, runners));
+  }
+  return {
+    scope: input.scope,
+    docsOnly: input.docsOnly,
+    tests,
+    records: input.records,
+    witnessedRunners: input.witnessedRunners,
+  };
+}
+
+/** Everything one rule-grading pass needs beyond the pipeline's own output. */
+export interface BusinessRuleGradingInput {
+  /** The owner's declared rules (empty = the feature is off). */
+  rules: readonly BusinessRule[];
+  /** The one resolver's rule bindings for this run. */
+  ruleBindings: readonly { claimId: string; bindings: readonly ResolvedRuleBinding[] }[];
+  /** The run's resource inventory (validates `subject`). */
+  inventory: readonly string[];
+  /** The sealed run's facts, or null when no sealed run exists. */
+  runFacts: BusinessRuleRunFacts | null;
+  /** The run's catalog (runner identity and observed mocking). */
+  catalog: TestCatalog;
+}
+
+/**
+ * Grades every declared rule case for one run.
+ *
+ * Args:
+ *   input: rules, rule bindings, the inventory, the sealed facts and the
+ *     catalog.
+ *
+ * Returns:
+ *   BusinessRuleEvaluation: config errors plus every case result, sorted
+ *   by rule id then case id.
+ *
+ * Throws:
+ *   UsageError: when a rule names a `subject` the inventory cannot see
+ *     (exit 2 — a silently uncheckable name is a configuration error, the
+ *     same posture as an unknown coverage table).
+ */
+export function gradeBusinessRules(input: BusinessRuleGradingInput): BusinessRuleEvaluation {
+  const evaluation = evaluateBusinessRules({
+    rules: input.rules,
+    bindings: businessRuleBindingsOf(
+      input.ruleBindings,
+      catalogRunnerIndex(input.catalog),
+      mockedTestKeys(input.catalog),
+    ),
+    inventory: input.inventory,
+    runFacts: input.runFacts,
+  });
+  if (evaluation.configErrors.length > 0) {
+    const first = evaluation.configErrors[0];
+    throw new UsageError(
+      `${first?.detail ?? 'a business rule names an unknown subject'}${
+        evaluation.configErrors.length > 1
+          ? ` (and ${String(evaluation.configErrors.length - 1)} more business-rule configuration error(s))`
+          : ''
+      }`,
+    );
+  }
+  return evaluation;
+}
+
+/** One case result projected onto the report's blocking-entry shape. */
+function blockingEntryOf(result: BusinessRuleCaseResult): BlockingEntry {
+  const finding = result.finding;
+  return {
+    kind: 'finding',
+    resourceId: null,
+    name: result.ruleId,
+    detail: finding?.detail ?? '',
+    location: null,
+    cause: finding?.cause ?? 'BUSINESS_RULE_TEST_MISSING',
+    nextAction: finding?.nextAction ?? '',
+  };
+}
+
+/**
+ * Splits a graded evaluation into the report's TWO channels.
+ *
+ * `enforcement: advisory` is decided by the OWNER's declaration on the
+ * rule, not by how bad the case looks: an advisory rule's findings are
+ * printed and serialized every run and only stay out of `blocking` and
+ * the exit code (plan invariant 7). The codes are identical in both
+ * channels, so a reader tells an advisory finding from a blocking one by
+ * where it is, never by a new severity.
+ */
+export function partitionBusinessRuleEntries(
+  rules: readonly BusinessRule[],
+  cases: readonly BusinessRuleCaseResult[],
+): { blocking: BlockingEntry[]; advisories: BlockingEntry[] } {
+  const enforcement = new Map(rules.map((rule) => [rule.id, rule.enforcement]));
+  const blocking: BlockingEntry[] = [];
+  const advisories: BlockingEntry[] = [];
+  for (const result of cases) {
+    if (result.finding === null) continue;
+    const entry = blockingEntryOf(result);
+    if (enforcement.get(result.ruleId) === 'advisory') advisories.push(entry);
+    else blocking.push(entry);
+  }
+  return { blocking, advisories };
+}
+
+/**
+ * The resource names one run's inventory offers as a rule `subject`.
+ * Ranking and display only — a subject is never proof, and a rule
+ * without one is graded regardless of this list.
+ */
+export function businessRuleInventory(graph: ResourceGraph): string[] {
+  return [
+    ...new Set(graph.resources.flatMap((resource) => (resource.name === null ? [] : [resource.name]))),
+  ].sort();
+}

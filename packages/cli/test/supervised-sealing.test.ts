@@ -227,6 +227,7 @@ describe('claimInjectionsFor (session-open obligation claims; Phase 3 gap closur
           ],
         },
       ],
+      ruleBindings: [],
       problems: [],
     };
     const injections = claimInjectionsFor(resolution, catalog([row()]));

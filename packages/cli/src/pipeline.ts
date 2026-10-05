@@ -31,7 +31,8 @@ import {
   parseBehaviorPolicy,
   runClassification,
   sortLifecycleRules,
-    type BehaviorCatalog,
+  type BusinessRule,
+  type BehaviorCatalog,
   type BlockingEntry,
   type ChangedProvider,
   type Claim,
@@ -146,6 +147,14 @@ export interface PipelineResult {
   lifecycleDerivation: LifecycleDerivationReportEntry[];
   /** Compiled complete-behavior catalog, or null when the document is absent. */
   behaviorCatalog: BehaviorCatalog | null;
+  /**
+   * The owner's declared BUSINESS RULES (`rules:` of the owner-answers
+   * document), already validated by that document's own schema. Empty
+   * when the section is absent, which is the feature being off: every
+   * downstream surface then produces exactly the document it produced
+   * before the feature existed (plan invariant 1).
+   */
+  businessRules: readonly BusinessRule[];
   /**
    * Coarse per-step wall-clock timings (`check --timing`): plugin/detector
    * duration and the whole-pipeline
@@ -634,6 +643,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     classificationsView: effectiveClassifications(graph, classification),
     lifecycleDerivation: lifecycleDerivationForReport(classification),
     behaviorCatalog,
+    businessRules: policyDoc.rules ?? [],
     timings: { pluginsMs, totalMs: performance.now() - pipelineStartedAtMs },
     cache: pluginCacheCounts,
     engineAlembicRecords,

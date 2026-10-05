@@ -25,6 +25,7 @@ function resolution(bindings: Array<{ obligationId: string; declaredKind: 'obser
         },
       ],
     })),
+    ruleBindings: [],
     problems: [],
   };
 }

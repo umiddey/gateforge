@@ -39,7 +39,14 @@ import {
   compareStrings,
   mappingSuggestions,
   TestKindSchema,
+  businessRuleClaimId,
+  BUSINESS_RULE_TYPE_TABLE,
+  casesOf,
   TestMapSchema,
+  isBusinessRuleClaimId,
+  parseBusinessRuleClaimId,
+  type BehaviorCatalog,
+  type BusinessRule,
   type Claim,
   type GateforgeConfig,
   type JsonValue,
@@ -96,7 +103,7 @@ usage: gateforge tests discover [--json] [--pytest]
        gateforge tests surface-doctor [--json]
        gateforge tests suggest [--changed] [--json]
        gateforge tests mark --test <key> --kind <kind> [--category <c>]... \\
-         --obligation <id>... --reason "<text>"
+         (--obligation <id>... | --rule <ruleId>/<caseId>) --reason "<text>"
        gateforge tests sync [--json]
        gateforge tests explain --test <key> [--json]
        gateforge tests diagnose [--suite <name>] [--json]`;
@@ -701,28 +708,29 @@ function unknownTestKeyMessage(catalog: TestCatalog, requested: string): string 
   return `${base}. Keys in '${file}': ${shown}${keys.length > 5 ? ` and ${String(keys.length - 5)} more` : ''}`;
 }
 
-/** Implements `tests mark --test … --kind … --obligation … --reason …`. */
+/** Implements `tests mark --test … --kind … --obligation|--rule … --reason …`. */
 async function markSubcommand(
   io: Io,
   options: Record<string, string | boolean | string[]>,
 ): Promise<number> {
-  rejectUnknownFlags(options, ['test', 'kind', 'category', 'obligation', 'reason', 'case', 'json', 'help'], TESTS_USAGE);
+  rejectUnknownFlags(options, ['test', 'kind', 'category', 'obligation', 'reason', 'case', 'rule', 'json', 'help'], TESTS_USAGE);
   const asJson = options['json'] === true;
   const testKey = stringFlag(options, 'test');
   const kind = stringFlag(options, 'kind');
   const reason = stringFlag(options, 'reason');
   const categories = flagArray(options, 'category');
   const obligationIds = flagArray(options, 'obligation');
+  const ruleRefs = flagArray(options, 'rule');
   const caseFlags = flagArray(options, 'case');
   if (
     testKey === undefined ||
     kind === undefined ||
     reason === undefined ||
-    obligationIds.length === 0
+    (obligationIds.length === 0 && ruleRefs.length === 0)
   ) {
     writeLine(io.stderr, MARK_USAGE_LINE);
     throw new UsageError(
-      'tests mark requires --test <key>, --kind <kind>, at least one --obligation <id>, and --reason "<text>"',
+      'tests mark requires --test <key>, --kind <kind>, at least one --obligation <id> or --rule <ruleId>/<caseId>, and --reason "<text>"',
     );
   }
 
@@ -788,6 +796,50 @@ async function markSubcommand(
       );
     }
   }
+
+  // Business-rule cases (`--rule`, plan 2026-10-05 D6). Every refusal here
+  // happens BEFORE the sidecar is written, and every one of them names the
+  // OWNER's `rules:` section rather than an obligation: a rule case is a
+  // declaration the owner wrote down, not a contract the engine generated.
+  const ruleClaims: string[] = [];
+  for (const ref of ruleRefs) {
+    const slash = ref.lastIndexOf('/');
+    if (slash <= 0 || slash === ref.length - 1) {
+      throw new UsageError(`--rule expects <ruleId>/<caseId> (got '${ref}')`);
+    }
+    const ruleId = ref.slice(0, slash);
+    const caseId = ref.slice(slash + 1);
+    const rule = pipeline.businessRules.find((candidate) => candidate.id === ruleId);
+    if (rule === undefined) {
+      throw new UsageError(
+        `unknown business rule '${ruleId}' — not declared in the rules: section of ` +
+          `${config.classificationPolicy} (rule ids are ${pipeline.businessRules.map((candidate) => candidate.id).sort(compareStrings).join(', ') || '(none declared)'})`,
+      );
+    }
+    const businessCase = casesOf(rule).find((candidate) => candidate.id === caseId);
+    if (businessCase === undefined) {
+      throw new UsageError(
+        `business rule '${ruleId}' declares no case '${caseId}' — it declares ` +
+          `${casesOf(rule).map((candidate) => `'${candidate.id}'`).join(', ')}`,
+      );
+    }
+    const row = BUSINESS_RULE_TYPE_TABLE[rule.test];
+    if (!row.acceptedKinds.includes(validatedKind)) {
+      throw new UsageError(
+        `cannot mark '${declaredKey}' as '${validatedKind}' for rule '${ruleId}' case '${caseId}': ` +
+          `the rule declares test: ${row.label}, which accepts ${row.acceptedKinds.join(' or ')} ` +
+          `(a weaker kind never satisfies a stronger type)`,
+      );
+    }
+    if (entry.runner !== row.runner) {
+      throw new UsageError(
+        `cannot mark '${declaredKey}' as '${validatedKind}' for rule '${ruleId}' case '${caseId}': ` +
+          `the rule declares test: ${row.label}, which must run under runner '${row.runner}', but this ` +
+          `test executes under '${entry.runner}'`,
+      );
+    }
+    ruleClaims.push(businessRuleClaimId(ruleId, caseId));
+  }
   const newEntry: TestMapEntry = {
     key: declaredKey,
     selector: {
@@ -798,7 +850,7 @@ async function markSubcommand(
     },
     kind: validatedKind,
     ...(categories.length > 0 ? { categories: [...new Set(categories)].sort(compareStrings) } : {}),
-    claims: [...new Set(obligationIds)].sort(compareStrings),
+    claims: [...new Set([...obligationIds, ...ruleClaims])].sort(compareStrings),
     ...(resolvedCaseIds.length > 0 ? { caseIds: [...new Set(resolvedCaseIds)].sort(compareStrings) } : {}),
     reason,
   };
@@ -848,7 +900,9 @@ async function markSubcommand(
   return 0;
 }
 
-const MARK_USAGE_LINE = 'usage: gateforge tests mark --test <key> --kind <kind> [--category <c>]... --obligation <id>... [--case <caseId>]... --reason "<text>"';
+const MARK_USAGE_LINE =
+  'usage: gateforge tests mark --test <key> --kind <kind> [--category <c>]... ' +
+  '(--obligation <id>... | --rule <ruleId>/<caseId>) [--case <caseId>]... --reason "<text>"';
 
 /** Reads a repeated flag as a string array (single value → one element). */
 function flagArray(options: Record<string, string | boolean | string[]>, name: string): string[] {
@@ -1025,6 +1079,7 @@ async function explainSubcommand(
     nativeClaims: discovered.nativeClaims,
     nativeErrors: discovered.nativeErrors,
     nativeInstances: discovered.nativeInstances,
+    businessRules: pipeline.businessRules,
   });
   // Exit 2 for an unknown or ambiguous key (usage/config error, not a gate
   // result), through the SAME resolver `tests mark` uses.
@@ -1037,6 +1092,7 @@ async function explainSubcommand(
     pipeline.policy.obligations,
     routeHintsByObligation(pipeline.graph, pipeline.policy.obligations),
     pipeline.behaviorCatalog,
+    pipeline.businessRules,
   );
   if (asJson) {
     writeLine(io.stdout, canonicalJson(report as unknown as JsonValue));
@@ -1090,7 +1146,8 @@ function explainReport(
   },
   obligations: readonly Obligation[],
   routeHints: ReadonlyMap<string, readonly string[]>,
-  behaviorCatalog?: import('@gate-forge/core').BehaviorCatalog | null,
+  behaviorCatalog?: BehaviorCatalog | null,
+  rules: readonly BusinessRule[] = [],
 ): ExplainReport {
   const registry = new Set(obligations.map((obligation) => obligation.id));
   const sidecarEntry = mapped.sidecar?.tests.find((candidate) => candidate.key === testKey) ?? null;
@@ -1100,14 +1157,26 @@ function explainReport(
       .filter((binding) => binding.logicalKey === testKey)
       .map((binding) => ({ obligationId: obligation.obligationId, binding })),
   );
-
-  const obligationIds = [
+  // Business-rule cases join the SAME report as obligations, in their own
+  // rows and under their own claim ids. They are filtered OUT of the
+  // obligation ids above: a rule case is a declaration the owner wrote,
+  // never an obligation, so `tests suggest` must never be asked to find a
+  // test for one through the obligation candidate scorer.
+  const ruleBindings = mapped.resolution.ruleBindings.flatMap((claim) =>
+    claim.bindings
+      .filter((binding) => binding.logicalKey === testKey)
+      .map((binding) => ({ claimId: claim.claimId, binding })),
+  );
+  const declaredClaimIds = [
     ...new Set([
       ...(sidecarEntry?.claims ?? []),
       ...nativeClaims.map((claim) => claim.obligationId),
       ...bindings.map((entry_) => entry_.obligationId),
+      ...ruleBindings.map((entry_) => entry_.claimId),
     ]),
   ].sort(compareStrings);
+  const ruleClaimIds = declaredClaimIds.filter(isBusinessRuleClaimId);
+  const obligationIds = declaredClaimIds.filter((id) => !isBusinessRuleClaimId(id));
   // `new test needed` is the resolver's own three-state REUSE verdict for
   // each obligation. It needs the SAME route evidence `tests suggest`
   // uses, or a candidate would read `unverified` here and `no` there.
@@ -1189,6 +1258,47 @@ function explainReport(
       newTestNeeded,
     };
   });
+
+  // One row per declared business-rule case. The honest statement is
+  // narrower than an obligation's: Gateforge proves the named test exists,
+  // ran and passed under the rule's proof channel — never that its
+  // assertions MEAN the rule. The declaration's `reason` is what the owner
+  // reviews for that, which is why it is echoed rather than scored.
+  for (const claimId of ruleClaimIds) {
+    const pair = parseBusinessRuleClaimId(claimId);
+    const rule = rules.find((candidate) => candidate.id === pair?.ruleId);
+    const businessCase = rule === undefined ? undefined : casesOf(rule).find((item) => item.id === pair?.caseId);
+    const sidecarDeclares = sidecarEntry?.claims.includes(claimId) === true;
+    const nativeDeclares = nativeClaims.some((claim) => claim.obligationId === claimId);
+    const binding = ruleBindings.find((candidate) => candidate.claimId === claimId)?.binding ?? null;
+    const label =
+      `business rule ${pair?.ruleId ?? '?'} case ${pair?.caseId ?? '?'}` +
+      (rule === undefined ? ' (not declared in rules:)' : ` — ${rule.title}`);
+    let mapping: string;
+    let nextAction: string;
+    if (sidecarDeclares || nativeDeclares) {
+      mapping = `declared in ${sidecarDeclares ? 'test-map.yml' : 'a native annotation'} — a declaration is intent, never proof`;
+      nextAction =
+        'run the test under supervision so the rule has sealed facts: `gateforge test-gates --changed` ' +
+        '(or `gateforge check --require-e2e` against a sealed receipt)';
+    } else if (binding?.origin === 'prior-run' || binding?.origin === 'inferred') {
+      mapping = `${binding.origin} (suggestion only — never satisfies a run)`;
+      nextAction =
+        `confirm it with \`gateforge tests mark --rule ${pair?.ruleId ?? '?'}/${pair?.caseId ?? '?'}\` ` +
+        'if it really proves the case';
+    } else {
+      mapping = 'unmapped';
+      nextAction =
+        `write or reuse a test and declare it: \`gateforge tests mark --rule ${pair?.ruleId ?? '?'}/${pair?.caseId ?? '?'} ` +
+        '--test <key> --kind <kind> --reason "<text>"`';
+    }
+    blocks.push({
+      requirement: `${label}${businessCase === undefined ? '' : ` (${businessCase.describe})`}`,
+      mapping,
+      nextAction,
+      newTestNeeded: sidecarDeclares || nativeDeclares ? 'no' : 'unverified (no declared test mapping yet)',
+    });
+  }
   if (blocks.length === 0) {
     blocks.push({
       requirement: '(none — no obligation involves this test)',

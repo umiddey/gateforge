@@ -19,11 +19,12 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
   CAUSE_NEXT_ACTIONS,
   ClaimSchema,
+  type BehaviorCatalog,
+  type BusinessRule,
   compareStrings,
   resolveTestMappings,
   TestMapSchema,
   type BlockingEntry,
-  type BehaviorCatalog,
   type Claim,
   type GateforgeConfig,
   type Location,
@@ -49,6 +50,7 @@ import {
 import { UsageError } from './errors.js';
 import { engineGeneratedStateFileFilter } from './state-artifacts.js';
 import { resolveStateDir } from './state.js';
+import { businessRuleClaimIds } from './business-rules.js';
 
 /** The tracked sidecar path, repo-root-relative (plan §5.1 row 2). */
 export const TEST_MAP_RELATIVE = '.gateforge/test-map.yml';
@@ -334,6 +336,15 @@ export interface MappingResolutionOptions {
   stateDir?: string;
   /** The run's obligations (the registry the resolver validates against). */
   obligations: readonly Obligation[];
+  /**
+   * The owner's declared business rules (`rules:` of the owner-answers
+   * document). They are resolved in the SAME pass, as their own claim
+   * namespace: a `business-rule:<ruleId>/<caseId>` claim is validated
+   * against these cases and lands in `ruleBindings`, never in
+   * `obligations`. Absent or empty means the feature is off and the
+   * resolution is byte-identical to a release without it.
+   */
+  businessRules?: readonly BusinessRule[];
   /** Pre-discovered catalog; when absent the module discovers fresh. */
   catalog?: TestCatalog;
   /** Current native annotations from the same discovery pass as catalog. */
@@ -470,6 +481,10 @@ export async function resolveRepositoryMappings(
     nativeClaims,
     sidecar: sidecar ?? { schemaVersion: 1, tests: [] },
     obligationIds: options.obligations.map((obligation) => obligation.id),
+    // A rules registry of ZERO ids is exactly what an absent `rules:`
+    // section means, and passing it changes nothing — the resolver's
+    // `ruleBindings` stays empty.
+    businessRuleClaimIds: businessRuleClaimIds(options.businessRules ?? []),
     ...(options.priorRunHints !== undefined ? { priorRunHints: options.priorRunHints } : {}),
     ...(options.behaviorCatalog !== undefined ? { behaviorCatalog: options.behaviorCatalog } : {}),
     ...(nativeErrors.length > 0 ? { nativeErrorFiles, nativeEnumerationFailed } : {}),

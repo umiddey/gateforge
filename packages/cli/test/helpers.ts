@@ -17,6 +17,7 @@ import { main, CaptureStream, type Io } from '../src/index.js';
 import { computeInputSnapshot } from '../src/input-snapshot.js';
 import { runPipeline } from '../src/pipeline.js';
 import { httpRoutesView, resolveStateDir } from '../src/state.js';
+import { setSection } from '../src/yaml-section.js';
 
 /** The fixed clock all fixture configs use (deterministic verdicts). */
 export const FIXED_AT = '2026-01-01T00:00:00.000Z';
@@ -126,6 +127,45 @@ schemaVersion: 1
 trustedInternalEntryPoints: []
 internalRules: []
 `;
+
+/**
+ * The owner-answers document carrying an optional `rules:` section
+ * (0.12.0). The section is spliced through the SAME text-level writer
+ * production uses (`setSection`), never by concatenating YAML by hand,
+ * so a fixture can never build a document a run would refuse. Absent
+ * returns the byte-identical base document, which is how the "no rules,
+ * no change" arm is written.
+ */
+export function answersYml(rules?: readonly unknown[]): string {
+  return rules === undefined
+    ? CLASSIFICATION_POLICY_YML
+    : setSection(CLASSIFICATION_POLICY_YML, ['rules'], rules, 'classification-policy');
+}
+
+/** One declared business rule as a fixture writes it (plain YAML data). */
+export function businessRule(rule: {
+  id: string;
+  title: string;
+  describe?: string;
+  subject?: string;
+  test?: string;
+  enforcement?: string;
+  advisoryReason?: string;
+  cases?: readonly { id: string; describe: string }[];
+}): Record<string, unknown> {
+  return {
+    id: rule.id,
+    title: rule.title,
+    ...(rule.describe === undefined ? {} : { describe: rule.describe }),
+    ...(rule.subject === undefined ? {} : { subject: rule.subject }),
+    ...(rule.test === undefined ? {} : { test: rule.test }),
+    ...(rule.enforcement === undefined ? {} : { enforcement: rule.enforcement }),
+    ...(rule.advisoryReason === undefined ? {} : { advisoryReason: rule.advisoryReason }),
+    ...(rule.cases === undefined
+      ? {}
+      : { cases: rule.cases.map((entry) => ({ id: entry.id, describe: entry.describe })) }),
+  };
+}
 
 /**
  * Legacy helper for tests that exercise stale manual references.

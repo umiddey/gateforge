@@ -253,7 +253,8 @@ describe('resolveTestMappings — the business-rule claim namespace', () => {
             kindSignals: [
               {
                 ruleId: 'playwright-browser-journey',
-                detail: 'the test drives the browser through the fixture',
+                evidence: 'the test drives the browser through the Gateforge fixture',
+                kind: 'browser-e2e',
                 location: { file: 'e2e/invoices.spec.js', line: 9, col: 0 },
               },
             ],

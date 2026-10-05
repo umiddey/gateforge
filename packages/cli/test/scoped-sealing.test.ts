@@ -160,6 +160,7 @@ describe('planScopedExpectedSet (affected set joined, never guessed)', () => {
           bindings: [sidecarBinding([ordersRow])],
         },
       ],
+      ruleBindings: [],
       problems: [],
     };
     const plan = planScopedExpectedSet({
@@ -192,7 +193,7 @@ describe('planScopedExpectedSet (affected set joined, never guessed)', () => {
     ]);
     const plan = planScopedExpectedSet({
       catalog: theCatalog,
-      resolution: { obligations: [], problems: [] },
+      resolution: { obligations: [], ruleBindings: [], problems: [] },
       obligations: [obligation('tenant.accounts', 'transport:call')],
       graph: joinedGraph,
       changedFiles: ['frontend/client.ts'],
@@ -208,6 +209,7 @@ describe('planScopedExpectedSet (affected set joined, never guessed)', () => {
         obligations: [
           { obligationId: 'tenant.accounts:persistence:read', bindings: [sidecarBinding([accountsRow])] },
         ],
+        ruleBindings: [],
         problems: [],
       },
       obligations: [obligation('tenant.accounts')],
@@ -229,6 +231,7 @@ describe('planScopedExpectedSet (affected set joined, never guessed)', () => {
         obligations: [
           { obligationId: 'tenant.accounts:persistence:read', bindings: [nativeBinding('annotated-test', [accountsRow])] },
         ],
+        ruleBindings: [],
         problems: [],
       },
       obligations: [obligation('tenant.accounts')],
@@ -243,6 +246,7 @@ describe('planScopedExpectedSet (affected set joined, never guessed)', () => {
       catalog: theCatalog,
       resolution: {
         obligations: [{ obligationId: 'tenant.accounts:persistence:read', bindings: [inferredBinding] }],
+        ruleBindings: [],
         problems: [],
       },
       obligations: [obligation('tenant.accounts')],
@@ -264,6 +268,7 @@ describe('planScopedExpectedSet (affected set joined, never guessed)', () => {
       catalog: theCatalog,
       resolution: {
         obligations: [{ obligationId: 'tenant.accounts:persistence:read', bindings: [sidecarBinding([deletedRow])] }],
+        ruleBindings: [],
         problems: [],
       },
       obligations: [obligation('tenant.accounts')],
@@ -278,7 +283,7 @@ describe('planScopedExpectedSet (affected set joined, never guessed)', () => {
   it('changed files affecting no resources yield an empty slice (the caller refuses to run it)', () => {
     const plan = planScopedExpectedSet({
       catalog: theCatalog,
-      resolution: { obligations: [], problems: [] },
+      resolution: { obligations: [], ruleBindings: [], problems: [] },
       obligations: [obligation('tenant.accounts')],
       graph: theGraph,
       changedFiles: ['docs/notes.md'],
@@ -319,6 +324,7 @@ describe('changed-scope planning against adopted baseline debt (E62)', () => {
         bindings: [{ ...sidecarBinding([row({ file: 'e2e/orders.spec.ts' })]), origin: 'inferred' as const }],
       },
     ],
+    ruleBindings: [],
     problems: [],
   };
 
@@ -376,6 +382,7 @@ describe('changed-scope planning against adopted baseline debt (E62)', () => {
         obligations: [
           { obligationId: 'tenant.accounts:persistence:read', bindings: [sidecarBinding([accountsSpec])] },
         ],
+        ruleBindings: [],
         problems: [],
       },
       obligations: [accountsRead, ordersRead],
