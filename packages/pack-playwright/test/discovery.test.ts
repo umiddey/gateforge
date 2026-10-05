@@ -1002,7 +1002,7 @@ describe('native playwright reconciliation', () => {
     expect(catalog.inventoryComplete).toBe(true);
   });
 
-  it('marks static-only cases the runner ignores as typed rows', async () => {
+  it('leaves files the runner config ignores out of the catalog', async () => {
     const root = makeTempDir('gateforge-pw-staticonly-');
     mkdirSync(join(root, 'node_modules'), { recursive: true });
     for (const name of ['playwright', 'playwright-core']) {
@@ -1017,12 +1017,12 @@ describe('native playwright reconciliation', () => {
     });
     const config = fixtureConfig(['e2e/**/*.spec.js']);
     const { catalog } = await discoverTestCatalog({ cwd: root, config });
-    const staticOnly = catalog.entries.filter((entry) => entry.reconciliation === 'static-only');
-    expect(staticOnly.map((entry) => entry.title)).toEqual(['runner ignores me']);
-    expect(staticOnly[0]?.unresolvedReason?.code).toBe('reconciliation-static-only');
-    expect(staticOnly[0]?.discoveryStatus).toBe('unresolved');
-    expect(staticOnly[0]?.resolutionOrigin).toBe('static');
-    expect(catalog.inventoryComplete).toBe(false);
+    // The catalog follows the runner's own testDir/testIgnore: a file the
+    // runner never selects is not a test of this repository, so it is
+    // neither an entry nor a blocking static-only gap.
+    expect(catalog.entries.map((entry) => entry.title)).toEqual(['enumerated']);
+    expect(catalog.entries.some((entry) => entry.reconciliation === 'static-only')).toBe(false);
+    expect(catalog.inventoryComplete).toBe(true);
   });
 
   it('merges parameterized template rows into their enumerated instances (consumer E22)', async () => {
