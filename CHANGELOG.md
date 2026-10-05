@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **React Router page inventory and page obligations (0.13.0).** The
+  `@gate-forge/pack-react-router` pack reads JSX and object route trees,
+  resolves nested paths, reports unreadable paths, and supports an explicit
+  `.gateforge/pages.yml` inventory when `pages.router: manual` is selected.
+  `.gateforge.yml` `pages:` owner declarations bind audiences and error
+  markers; each plane-resolved `ui.page` contributes `page:loads` and
+  `page:data-ok` obligations. These obligations have no proof channel yet,
+  so they remain missing until evidence support is added; `gateforge adopt`
+  records pre-existing page debt without blocking the adoption.
+
 ## 0.12.0
 
 ### Added
