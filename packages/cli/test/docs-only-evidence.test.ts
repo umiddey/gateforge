@@ -58,6 +58,19 @@ const ADOPTED_NAMES = ['accounts', 'orders'] as const;
 /** One product source whose bytes a later commit changes. */
 const ADOPTED_SOURCE = `src/${ADOPTED_NAMES[0]}.txt`;
 
+/**
+ * The fixture plugin plus one detector FINDING — non-obligation policy
+ * debt. A finding lands in the RAW policy blocking list (`kind:
+ * 'finding'`) and never in any verdict, so `gateforge adopt` records it
+ * in the baseline exactly as it records a verdict fingerprint while the
+ * raw list stays non-empty for the rest of the repository's life. That
+ * is the shape a real adopted repository has.
+ */
+const FINDING_PLUGIN_SOURCE = PLUGIN_SOURCE.replace(
+  'return { resources, unresolved: [], findings: [], classificationSignals, scannedPaths };',
+  'return { resources, unresolved: [], findings: [{ code: "PARTIAL_DISCOVERY", detail: "fixture finding: one route unverified", locations: [{ file: "src/accounts.txt", line: 1, col: 0 }] }], classificationSignals, scannedPaths };',
+);
+
 interface Report {
   summary: { blocking: number };
   verdicts: Array<{ obligationId: string; verdict: string; reason: string | null; cause: string | null }>;
@@ -87,13 +100,17 @@ function pinFor(repo: TempRepo): Record<string, string> {
 }
 
 /** A repository with product code and NO gate at HEAD. */
-async function installUngated(repo: TempRepo, appUrl: string): Promise<void> {
+async function installUngated(
+  repo: TempRepo,
+  appUrl: string,
+  pluginSource: string = PLUGIN_SOURCE,
+): Promise<void> {
   repo.writeFiles({
     '.gitignore': '.gateforge/test-gates/\n',
     '.gateforge.yml': configYml(),
     '.gateforge/policies.yml': POLICIES_YML,
     '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,
-    'plugin.mjs': PLUGIN_SOURCE,
+    'plugin.mjs': pluginSource,
     'src/refunds.txt': 'refunds fixture.table\n',
     '.gateforge/adapters/refunds.mjs': evidenceAdapter(appUrl),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`src/${name}.txt`, `${name} fixture.table\n`])),
@@ -178,6 +195,48 @@ describe('0.10.2 the docs-only slice seals a zero-record receipt', () => {
         expect(receipt?.candidateTreeId).toMatch(/^[0-9a-f]{40}$/);
 
         // And the commit gate accepts it.
+        const run = await runStagedCheck(repo, env);
+        const output = `${run.stdout}\n${run.stderr}`;
+        const report = JSON.parse(run.stdout) as Report;
+
+        expect(output).not.toContain('evidence-context');
+        expect(report.summary.blocking, output).toBe(0);
+        expect(run.code, output).toBe(0);
+      });
+    } finally {
+      await app.close();
+    }
+  }, 240_000);
+
+  it('seals over an adopted baseline that also holds non-obligation policy debt', async () => {
+    const app = await startEvidenceApp();
+    try {
+      await withTempRepo({}, async (repo) => {
+        // A repository whose adopted debt is NOT only missing obligations:
+        // the detector finding is a blocking ENTRY, so the RAW policy
+        // blocking list stays non-empty after adoption, forever.
+        await installUngated(repo, app.url, FINDING_PLUGIN_SOURCE);
+        const env = await stageAdoptionCommit(repo);
+        await sealScopedReceipt(repo, env);
+        repo.commitFiles({}, 'adopt the gate');
+
+        repo.writeFiles({ 'docs/gateforge-notes.md': '# Notes\n\nA later documentation-only edit.\n' });
+        repo.stage();
+
+        const seal = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed'], env);
+        const sealOutput = `${seal.stdout}\n${seal.stderr}`;
+        expect(seal.code, sealOutput).toBe(0);
+        expect(sealOutput).toContain('sealed for the docs-only slice');
+        expect(sealOutput).not.toContain('EVIDENCE_SCOPE_INCOMPLETE');
+
+        const receipt = sealedReceipt(repo);
+        expect(receipt, sealOutput).not.toBeNull();
+        expect(receipt?.docsOnly, sealOutput).toBe(true);
+        expect(receipt?.coveredObligationFingerprints ?? []).toEqual([]);
+        expect(receipt?.verdictSummary).toEqual({ total: 0, satisfied: 0, waived: 0, blocking: 0 });
+
+        // The commit gate accepts it: the adopted policy debt is graded
+        // against the baseline, exactly as for every other commit.
         const run = await runStagedCheck(repo, env);
         const output = `${run.stdout}\n${run.stderr}`;
         const report = JSON.parse(run.stdout) as Report;

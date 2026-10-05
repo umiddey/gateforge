@@ -3607,8 +3607,15 @@ async function runSupervisedTestGatesInner(
     // Every condition below is CHECKED, never assumed: an unusable digest,
     // a candidate tree that moved under the run, a missing verifier key, an
     // incomplete inventory or discovery, a diagnostics suite, a planned
-    // re-seal, or any other blocking entry all fall through to today's
-    // refusal below, byte-for-byte.
+    // re-seal, or any mapping, scope or inventory blocker all fall through
+    // to today's refusal below, byte-for-byte.
+    //
+    // The RAW policy blocking list is deliberately NOT one of them. It is the
+    // pre-baseline view, so in a repository that adopted debt with
+    // `gateforge adopt` it is never empty and the seal could never engage.
+    // A docs-only change cannot change a policy entry, and the commit gate
+    // (`check`) grades those entries against the adopted baseline exactly as
+    // for every commit; this receipt covers no obligation.
     const docsOnlySlice =
       !options.resultOnly &&
       namedTestIds === null &&
@@ -3624,7 +3631,6 @@ async function runSupervisedTestGatesInner(
       scopeBlockers.length === 0 &&
       mappingBlockers.length === 0 &&
       inventoryBlocking.length === 0 &&
-      pipeline.policy.blocking.length === 0 &&
       (config.diagnostics?.suites.length ?? 0) === 0 &&
       expectedDigest !== null &&
       frozenTreeId !== null &&
