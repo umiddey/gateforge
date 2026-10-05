@@ -1,6 +1,6 @@
 /**
  * ADOPTION MODE — the one commit a repository with no gate may make
- * weaker in SCOPE, never in trust (0.10.2; `F2-DESIGN.md`).
+ * weaker in SCOPE, never in trust (0.10.2; REFERENCE "Adoption mode").
  *
  * The commit that wires the gate is the commit the gate cannot judge: it
  * always touches `.gateforge.yml`, the runner config and the specs, every
@@ -89,7 +89,7 @@ function declaresEnforcement(text: string | null): boolean {
 }
 
 /**
- * Decides whether the candidate is an ADOPTION COMMIT (F2-DESIGN.md §3).
+ * Decides whether the candidate is an ADOPTION COMMIT.
  *
  * @param input: the base reader, the candidate's config path and
  *   enforcement header, and the frozen change set.

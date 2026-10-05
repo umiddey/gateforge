@@ -1576,7 +1576,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // on its own, and with no pin today's reporting stays (adopted debt is
   // re-graded as blocking). An owner waiver is never forgiveness here.
   //
-  // 0.10.2 (F2, `F2-DESIGN.md` §5 + §9): the commit that WIRES the gate is
+  // 0.10.2 (adoption mode, REFERENCE "Adoption mode"): the commit that WIRES the gate is
   // never policy-inputs-only — it brings the manifest, the runner
   // configuration, the mapping sidecar and the specs, every one of them
   // gate-defining or test infrastructure — so the 0.9.0 condition could

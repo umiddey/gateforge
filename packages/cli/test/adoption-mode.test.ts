@@ -1,5 +1,5 @@
 /**
- * F2 — ADOPTION MODE (0.10.2, `F2-DESIGN.md`).
+ * ADOPTION MODE (0.10.2, REFERENCE "Adoption mode").
  *
  * The wall this removes: the commit that wires the gate is the one
  * commit the gate cannot judge. A first adoption commit always touches
