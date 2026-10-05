@@ -60,6 +60,7 @@ import {
   type RuntimeReuseMount,
   validateRuntimeReuseMounts,
 } from './runtime-reuse.js';
+import { resolveRuntimeReuseDigest } from './runtime.js';
 
 /** Snapshot format version hashed into every digest. */
 export const INPUT_SNAPSHOT_VERSION = 3;
@@ -991,6 +992,13 @@ export function digestSnapshot(files: readonly SnapshotFileEntry[], gateContext:
  *   UsageError: unsafe output overlap (exit 2).
  */
 export function computeInputSnapshot(input: ComputeSnapshotInput): InputSnapshot {
+  // ONE reuse-identity rule for every caller: an explicit digest (the
+  // staged surfaces bind their own, after the links were made) wins, and a
+  // caller that passes none gets the DECLARED `prepare.reuse` roots of
+  // this repository's runtime document — the very directory a worktree run
+  // executes against. Resolving it here means no surface can seal one
+  // input identity and check another.
+  const runtimeReuseDigest = resolveRuntimeReuseDigest(input.cwd, input.config.runtime, input.runtimeReuseDigest);
   const files = collectInputFiles(
     input.cwd,
     input.config,
@@ -1005,7 +1013,7 @@ export function computeInputSnapshot(input: ComputeSnapshotInput): InputSnapshot
     input.classifications ?? {},
     input.obligations ?? [],
     input.httpRoutes ?? [],
-    input.runtimeReuseDigest,
+    runtimeReuseDigest,
   );
   const evidenceInputDigest = digestSnapshot(files, gateContext);
   return {

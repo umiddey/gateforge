@@ -255,7 +255,7 @@ import {
   type PrerequisiteIdentity,
 } from '../native-freeze.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
-import { loadRuntimeConfigAt, runtimeReuseDigest as runtimeReuseDigestOf } from '../runtime.js';
+import { loadRuntimeConfigAt, resolveRuntimeReuseDigest } from '../runtime.js';
 import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
 import { engineIdentity, reportEngineLine } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
@@ -2421,25 +2421,21 @@ async function runSupervisedTestGatesInner(
   // engine default stands when neither declares one.
   const stallTimeoutMs = options.stallTimeoutMs ?? runtimeStallTimeoutMs(io.cwd);
   // The reuse digest is the IDENTITY of the dependency bytes this run
-  // executes against, and it must be the same value whoever computes it:
-  // the commit hook passes the digest `prepareRuntime` bound AFTER the
-  // staged links were made, a run made directly in the worktree binds the
-  // same declared roots through the same function
-  // (`runtimeReuseDigest`, as the timeout readers above read their own
-  // document). Without this, a receipt sealed over a fully staged worktree
-  // could never satisfy the staged check: one side carried the field and
-  // the other did not. A document that cannot be read, or that declares no
+  // executes against, and it must be the same value whoever computes it.
+  // ONE resolver owns that value: the commit hook hands over the digest
+  // `prepareRuntime` bound AFTER the staged links were made, and every
+  // other surface reads the declared `prepare.reuse` roots of the same
+  // runtime document through `resolveRuntimeReuseDigest` — which
+  // `computeInputSnapshot` itself calls for `check`, `next` and `tests`
+  // when they hand it no digest, so no surface can seal one identity and
+  // verify another. A document that cannot be read, or that declares no
   // reuse root, binds nothing — the staged candidate is where a declared
   // root is prepared, and an unbound run fails closed there.
   const config = loadConfigAt(io.cwd);
-  let declaredReuseDigest: string | null = null;
-  try {
-    const runtime = loadRuntimeConfigAt(io.cwd, config.runtime);
-    if (runtime !== null) declaredReuseDigest = runtimeReuseDigestOf(io.cwd, runtime);
-  } catch {
-    declaredReuseDigest = null;
-  }
-  const runtimeReuseDigest = options.runtimeReuseDigest ?? declaredReuseDigest;
+  // The `??` here is not a second identity rule: it only lets the
+  // declared roots below stand in when a mounted caller bound nothing at
+  // all, which is also the value the reuse-drift guards compare against.
+  const runtimeReuseDigest = options.runtimeReuseDigest ?? resolveRuntimeReuseDigest(io.cwd, config.runtime);
   const runtimeReuseMounts = options.runtimeReuseMounts ?? [];
   // The configured runner (plan 2026-09-25, runner-agnostic evidence):
   // `playwright` (the default) keeps the byte-identical supervised path;

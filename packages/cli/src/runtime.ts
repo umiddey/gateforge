@@ -360,6 +360,48 @@ export function runtimeReuseDigest(sourceRoot: string, runtime: RuntimeConfig): 
   }
 }
 
+/**
+ * The ONE rule that resolves which reused dependency bytes an input
+ * snapshot binds, in one place, for every surface that computes one:
+ *
+ *   - an explicit digest WINS — the staged paths (`check --staged`, the
+ *     commit hook) hand over the value `prepareRuntime` bound AFTER the
+ *     staged links were made, including its explicit `null` for "this
+ *     runtime bound nothing";
+ *   - otherwise the DECLARED `prepare.reuse` roots of the staged-runtime
+ *     document are read in this repository and digested through
+ *     {@link runtimeReuseDigest} — the worktree a run executes in uses
+ *     the very same directory, so it must bind the very same bytes;
+ *   - a document that cannot be read, or that declares no reuse root,
+ *     binds nothing (an unbound staged run fails closed there).
+ *
+ * `computeInputSnapshot` calls this itself whenever its caller passes no
+ * digest, so no input-identity computation can forget the declared roots:
+ * a `gateforge run` followed by a standalone `gateforge check` on an
+ * unchanged worktree must land on ONE input identity.
+ *
+ * Args:
+ *   sourceRoot: repository root the declared roots are resolved in.
+ *   runtimePath: the config's staged-runtime document path.
+ *   explicit: a digest this surface already bound, when it has one.
+ *
+ * Returns:
+ *   string | null: the reuse digest to bind, or null for none.
+ */
+export function resolveRuntimeReuseDigest(
+  sourceRoot: string,
+  runtimePath: string | undefined,
+  explicit?: string | null,
+): string | null {
+  if (explicit !== undefined) return explicit;
+  try {
+    const runtime = loadRuntimeConfigAt(sourceRoot, runtimePath);
+    return runtime === null ? null : runtimeReuseDigest(sourceRoot, runtime);
+  } catch {
+    return null;
+  }
+}
+
 /** Returns the approved mount for a linked reuse path, or null for candidate-owned bytes. */
 function runtimeReuseMount(sourceRoot: string, checkoutRoot: string, path: string): RuntimeReuseMount | null {
   const { source, target } = reusePaths(sourceRoot, checkoutRoot, path);
