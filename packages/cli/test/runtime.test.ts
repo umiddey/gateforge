@@ -407,6 +407,10 @@ describe('staged-runtime supervision', () => {
           'adapters: .gateforge/adapters',
           'waivers: .gateforge/waivers',
           'baselines: .gateforge/baselines/obligations.json',
+          'scan:',
+          "  scanRoots: ['src/**']",
+          '  declarations: {}',
+          '  volatileFields: []',
           'changed: { provider: auto }',
           'witness: { maxDurationSeconds: 5 }',
           "clock: { mode: fixed, fixedAt: '2026-01-01T00:00:00.000Z' }",
@@ -424,7 +428,7 @@ describe('staged-runtime supervision', () => {
         ].join('\n'),
         '.gateforge/policies.yml': 'schemaVersion: 1\npolicies: []\n',
         '.gateforge/classification-policy.yml':
-          'schemaVersion: 1\nscanRoots: []\ntrustedInternalEntryPoints: []\ninternalRules: []\ndeclarations: {}\nvolatileFields: []\n',
+          'schemaVersion: 1\ntrustedInternalEntryPoints: []\ninternalRules: []\n',
         'src/accounts.js': '// fixture source.\n',
       });
       repo.git(['add', '-A']);

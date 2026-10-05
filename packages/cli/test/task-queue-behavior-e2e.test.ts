@@ -118,6 +118,11 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['src/**']
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 behaviorPolicy: .gateforge/behavior.yml
 queueObserver:
   kind: bullmq
@@ -146,12 +151,8 @@ policies:
 `;
 
 const CLASSIFICATION_POLICY_YML = `schemaVersion: 1
-scanRoots: ['src/**']
 trustedInternalEntryPoints: []
 internalRules: []
-declarations:
-  internality: gateforge:internal
-volatileFields: []
 `;
 
 /** The fixture detector: the task resource plus the outbox it writes. */

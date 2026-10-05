@@ -59,7 +59,7 @@ const ZERO_OBLIGATION_PROJECT = {
   '.gateforge/policies.yml':
     'schemaVersion: 1\npolicies:\n  - id: user-facing-crud\n    when:\n      exposure: user-facing\n    require:\n      - persistence:read\n',
   '.gateforge/classification-policy.yml':
-    "schemaVersion: 1\nscanRoots: ['src/**/*.txt']\ntrustedInternalEntryPoints: []\ninternalRules: []\ndeclarations:\n  internality: gateforge:internal\nvolatileFields: []\n",
+    "schemaVersion: 1\ntrustedInternalEntryPoints: []\ninternalRules: []\n",
   'plugin.mjs': PLUGIN_SOURCE,
 };
 

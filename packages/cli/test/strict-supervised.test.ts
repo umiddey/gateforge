@@ -416,6 +416,11 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['src/**']
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 changed: { provider: auto }
 witness: { maxDurationSeconds: 5 }
 clock: { mode: fixed, fixedAt: '2026-01-01T00:00:00.000Z' }
@@ -429,12 +434,8 @@ policies:
 `;
 
 const CLASSIFICATION_POLICY_YML = `schemaVersion: 1
-scanRoots: ['src/**']
 trustedInternalEntryPoints: []
 internalRules: []
-declarations:
-  internality: gateforge:internal
-volatileFields: []
 `;
 
 /** Starts the example app as a child; resolves its loopback URL. */

@@ -27,6 +27,11 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['src/**/*.ts']
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -36,7 +41,7 @@ clock:
   fixedAt: '2026-01-01T00:00:00.000Z'
 `,
         '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: persistence\n    when: { exposure: user-facing }\n    require: [persistence:read]\n',
-        '.gateforge/classification-policy.yml': 'schemaVersion: 1\nscanRoots: [\'src/**/*.ts\']\ntrustedInternalEntryPoints: []\ninternalRules: []\ndeclarations:\n  internality: gateforge:internal\nvolatileFields: []\n',
+        '.gateforge/classification-policy.yml': 'schemaVersion: 1\ntrustedInternalEntryPoints: []\ninternalRules: []\n',
         'src/routes.ts': "app.get('/accounts', handler);\n",
       });
       const discover = await runCli(repo, ['discover', '--json']);
@@ -97,6 +102,22 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['**/*.ts', '**/*.py']
+  coverage:
+    - capability: exposure.http
+      detector: gateforge.pack-http
+      appliesTo: ['**/*.ts']
+    - capability: models.sqlalchemy
+      detector: gateforge.pack-sqlalchemy
+      appliesTo: ['**/*.py']
+    - capability: linkage.task
+      detector: gateforge.pack-task
+      appliesTo: ['**/*.ts']
+  declarations:
+    internality: gateforge:internal
+    plane.tenant: gateforge:tenant-plane
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -109,26 +130,11 @@ clock:
         '.gateforge.yml': CONFIG_TEMPLATE,
         '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: persistence\n    when: { exposure: user-facing }\n    require: [persistence:read]\n',
         '.gateforge/classification-policy.yml': `schemaVersion: 1
-scanRoots: ['**/*.ts', '**/*.py']
 trustedInternalEntryPoints:
   - category: worker
     patterns: ['**/workers/**']
     detector: gateforge.pack-task
 internalRules: []
-coverage:
-  - capability: exposure.http
-    detector: gateforge.pack-http
-    appliesTo: ['**/*.ts']
-  - capability: models.sqlalchemy
-    detector: gateforge.pack-sqlalchemy
-    appliesTo: ['**/*.py']
-  - capability: linkage.task
-    detector: gateforge.pack-task
-    appliesTo: ['**/*.ts']
-declarations:
-  internality: gateforge:internal
-  plane.tenant: gateforge:tenant-plane
-volatileFields: []
 `,
         'models.py': `from sqlalchemy import Column, Integer, String
 from sqlalchemy.orm import DeclarativeBase
@@ -243,6 +249,15 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['src/**/*.ts']
+  coverage:
+    - capability: exposure.http
+      detector: evil.plugin
+      appliesTo: ['src/**/*.ts']
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -253,16 +268,8 @@ clock:
 `,
         '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: persistence\n    when: { exposure: user-facing }\n    require: [persistence:read]\n',
         '.gateforge/classification-policy.yml': `schemaVersion: 1
-scanRoots: ['src/**/*.ts']
 trustedInternalEntryPoints: []
 internalRules: []
-coverage:
-  - capability: exposure.http
-    detector: evil.plugin
-    appliesTo: ['src/**/*.ts']
-declarations:
-  internality: gateforge:internal
-volatileFields: []
 `,
         'src/routes.ts': "app.get('/accounts', handler);\n",
         'evil.mjs': `export default {
@@ -301,6 +308,15 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['src/**/*.ts']
+  coverage:
+    - capability: exposure.http
+      detector: gateforge.pack-http
+      appliesTo: ['src/**/*.ts']
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -311,16 +327,8 @@ clock:
 `,
         '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: persistence\n    when: { exposure: user-facing }\n    require: [persistence:read]\n',
         '.gateforge/classification-policy.yml': `schemaVersion: 1
-scanRoots: ['src/**/*.ts']
 trustedInternalEntryPoints: []
 internalRules: []
-coverage:
-  - capability: exposure.http
-    detector: gateforge.pack-http
-    appliesTo: ['src/**/*.ts']
-declarations:
-  internality: gateforge:internal
-volatileFields: []
 `,
         'src/routes.ts': "app.get('/accounts', handler);\n",
         'evil.mjs': `export default {

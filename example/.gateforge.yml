@@ -41,6 +41,36 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+# Machine-wide scanner settings (0.11.0). These four keys used to sit at
+# the top of .gateforge/classification-policy.yml; they moved here because
+# they configure the scan rather than answer any question about the app.
+scan:
+  # Globs a closed-world proof must cover; any parse/unresolved hole inside
+  # them invalidates every suppressive decision in scope.
+  scanRoots:
+    - '**/*'
+  # Coverage requirements for COMPLETE-scan proofs (closed-world
+  # certificates). Each rule: the named detector must report examining
+  # every file matching appliesTo. Declaring none means no scan is
+  # provably complete and closed-world proofs stay unavailable.
+  coverage:
+    - capability: exposure.http
+      detector: gateforge.pack-http
+      appliesTo:
+        - '**/*.ts'
+        - '**/*.js'
+        - '**/*.tsx'
+        - '**/*.jsx'
+        - '**/*.mjs'
+        - '**/*.cjs'
+  # Supported source declaration syntax consumed by the classifier.
+  declarations:
+    internality: 'gateforge:internal'
+    archiveState: 'gateforge:archive-state'
+  # Bookkeeping columns that never satisfy an update by themselves.
+  volatileFields:
+    - updated_at
+    - created_at
 changed:
   provider: auto
 witness:

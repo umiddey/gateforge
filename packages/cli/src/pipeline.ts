@@ -28,6 +28,7 @@ import {
   compareStrings,
   compileBehaviorPolicy,
   evaluatePolicies,
+  isMovedScannerKey,
   jsonPathFor,
   loadWaivers,
   normalizeChangedFiles,
@@ -39,7 +40,7 @@ import {
   type ChangedProvider,
   type Claim,
   type ClassificationFile,
-  type ClassificationPolicy,
+  type ClassifierPolicy,
   type ClassificationResult,
   type ClassificationSignal,
   type DetectorOutput,
@@ -415,17 +416,36 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const pluginsMs = performance.now() - pluginsStartedAtMs;
 
   const policyDocRaw = loadYaml(resolveRepoPath(cwd, config.classificationPolicy), 'classification-policy');
+  // Upgrade posture (0.11.0): the four scanner settings moved OUT of this
+  // document into `.gateforge.yml` under `scan:`. Checked BEFORE the parse,
+  // because the strict schema would only report "unrecognized key" — this
+  // refusal names the command that moves them, like every other
+  // consolidated declaration.
+  const movedKeys = Object.keys(policyDocRaw ?? {})
+    .filter((key) => isMovedScannerKey(key))
+    .sort(compareStrings);
+  if (movedKeys.length > 0) {
+    throw new UsageError(
+      `${config.classificationPolicy} carries ${movedKeys.join(', ')}: since 0.11 the scanner ` +
+        'settings live in .gateforge.yml under `scan:` — run `gateforge migrate` (preview, then ' +
+        '--confirm), then re-approve the policy digest (gateforge enforcement pin --pin-file <path> --confirm)',
+    );
+  }
   const policyDocParsed = ClassificationPolicySchema.safeParse(policyDocRaw);
   if (!policyDocParsed.success) {
     throw new UsageError(
       `classification-policy document is invalid: ${firstIssueText(policyDocParsed.error, 'unknown issue')}`,
     );
   }
+  // The classifier consumes ONE policy: the owner answers composed with the
+  // scanner settings they now live beside. Nothing downstream learned that
+  // the two documents were split.
+  const classifierPolicy: ClassifierPolicy = { ...policyDocParsed.data, ...config.scan };
   // Coverage-trust validation (red-team round 4): scan-completeness
   // evidence is accepted ONLY from bundled detectors loaded from their
   // fixed packages. A policy rule naming anything else — or a trusted id
   // aimed at a repository-local module — fails the run before discovery.
-  validateCoverageTrust(policyDocParsed.data.coverage ?? [], config.plugins, cwd);
+  validateCoverageTrust(config.scan.coverage ?? [], config.plugins, cwd);
   // Reachability trust (red-team round 5): a trusted entry-point category
   // naming a detector binds reachability evidence to that BUNDLED detector.
   assertBundledDetectors(
@@ -489,7 +509,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const authority = mintDeclarationSignals(
     cwd,
     paths,
-    policyDocParsed.data,
+    classifierPolicy,
     built.resources,
     config.classificationPolicy,
   );
@@ -518,7 +538,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       contribution.classificationSignals,
     ),
     authority,
-    policy: policyDocParsed.data,
+    policy: classifierPolicy,
     adapters,
     deriveLifecycleDefaults: true,
     scan: {
@@ -527,7 +547,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       // requested scope, while included files remain subject to the
       // classifier's fail-closed coverage checks.
       requestedPaths: expandScanPaths(
-        policyDocParsed.data.scanRoots,
+        config.scan.scanRoots,
         config.project.paths.exclude,
         cwd,
         gitIgnored,
@@ -750,7 +770,7 @@ export function lifecycleDerivationForReport(
 function mintDeclarationSignals(
   cwd: string,
   paths: readonly string[],
-  policy: ClassificationPolicy,
+  policy: ClassifierPolicy,
   resources: readonly GraphResource[],
   policyPath: string,
 ): ClassificationSignal[] {

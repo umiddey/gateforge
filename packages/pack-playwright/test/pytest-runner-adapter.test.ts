@@ -84,6 +84,11 @@ function configYaml(): string {
     'adapters: .gateforge/adapters',
     'waivers: .gateforge/waivers',
     'baselines: .gateforge/baselines/obligations.json',
+    'scan:',
+    '  scanRoots: ["tests/**/*.py"]',
+    '  declarations:',
+    '    internality: gateforge:internal',
+    '  volatileFields: []',
     'changed:',
     '  provider: auto',
     'witness:',
@@ -109,7 +114,7 @@ function placeholderGateforgeFiles(): Record<string, string> {
   return {
     '.gateforge/policies.yml': 'schemaVersion: 1\npolicies: []\n',
     '.gateforge/classification-policy.yml':
-      "schemaVersion: 1\nscanRoots: []\ntrustedInternalEntryPoints: []\ninternalRules: []\ndeclarations:\n  internality: gateforge:internal\nvolatileFields: []\n",
+      "schemaVersion: 1\ntrustedInternalEntryPoints: []\ninternalRules: []\n",
     '.gateforge/baselines/obligations.json': '{ "schemaVersion": 1, "fingerprints": [] }\n',
   };
 }

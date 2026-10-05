@@ -79,12 +79,8 @@ policies:
 
 const HTTP_CLASSIFICATION_POLICY_YML = `\
 schemaVersion: 1
-scanRoots: ['backend/**/*.py']
 trustedInternalEntryPoints: []
 internalRules: []
-declarations:
-  internality: gateforge:internal
-volatileFields: []
 `;
 
 const PLANES_JSON = JSON.stringify({

@@ -94,12 +94,8 @@ ${emitted}
 
 const CLASSIFICATION_POLICY_YML = `\
 schemaVersion: 1
-scanRoots: ['backend/**/*.py']
 trustedInternalEntryPoints: []
 internalRules: []
-declarations:
-  internality: gateforge:internal
-volatileFields: []
 `;
 
 const PLANES_JSON = JSON.stringify({
@@ -156,6 +152,13 @@ interface ReportVerdict {
  * The exact `check --format json` bytes for a repo whose policies.yml has
  * NO options section, captured from the pre-Phase-4c engine: absent =
  * today, byte for byte. Regenerate ONLY by hand-verifying the diff.
+ *
+ * Re-pinned ONCE by 0.11.0: the ONLY field that moved is `inputDigest`,
+ * because `.gateforge.yml` gained the REQUIRED `scan:` section (the
+ * scanner settings that moved out of the answers document) and those
+ * bytes are inputs. Every other field — the obligation set, the
+ * verdicts, the summary, the advisories — is unchanged, which is exactly
+ * the invariant this case exists to pin.
  */
 const GOLDEN_ABSENT = readFileSync(
   join(

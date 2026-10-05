@@ -82,12 +82,8 @@ policies:
 
 const PING_CLASSIFICATION_POLICY_YML = `\
 schemaVersion: 1
-scanRoots: ['backend/**/*.py']
 trustedInternalEntryPoints: []
 internalRules: []
-declarations:
-  internality: gateforge:internal
-volatileFields: []
 `;
 
 /** Installs the single-route transport fixture. */

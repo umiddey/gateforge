@@ -31,15 +31,8 @@ policies:
 
 function lifecyclePolicy(reason: string, resourceId = 'tenant.accounts'): string {
   return `schemaVersion: 1
-scanRoots: ['models/**/*.py']
 trustedInternalEntryPoints: []
 internalRules: []
-coverage:
-  - capability: models.sqlalchemy
-    detector: gateforge.pack-sqlalchemy
-    appliesTo: ['models/**/*.py']
-declarations: {}
-volatileFields: []
 lifecycleRules:
   - match:
       resourceId: ${resourceId}
@@ -66,6 +59,14 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['models/**/*.py']
+  coverage:
+    - capability: models.sqlalchemy
+      detector: gateforge.pack-sqlalchemy
+      appliesTo: ['models/**/*.py']
+  declarations: {}
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -170,15 +171,8 @@ describe('classification policy lifecycleRules pipeline', () => {
       installBundledFixture(
         repo,
         `schemaVersion: 1
-scanRoots: ['models/**/*.py']
 trustedInternalEntryPoints: []
 internalRules: []
-coverage:
-  - capability: models.sqlalchemy
-    detector: gateforge.pack-sqlalchemy
-    appliesTo: ['models/**/*.py']
-declarations: {}
-volatileFields: []
 `,
       );
       repo.writeFiles({
@@ -273,15 +267,8 @@ class Account(Base):
       installBundledFixture(
         repo,
         `schemaVersion: 1
-scanRoots: ['models/**/*.py']
 trustedInternalEntryPoints: []
 internalRules: []
-coverage:
-  - capability: models.sqlalchemy
-    detector: gateforge.pack-sqlalchemy
-    appliesTo: ['models/**/*.py']
-declarations: {}
-volatileFields: []
 `,
       );
       const marker = repo.path('adapter-evaluated');
@@ -350,6 +337,14 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['models/**/*.py']
+  coverage:
+    - capability: models.sqlalchemy
+      detector: gateforge.pack-sqlalchemy
+      appliesTo: ['models/**/*.py']
+  declarations: {}
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -386,6 +381,14 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['models/**/*.py']
+  coverage:
+    - capability: models.sqlalchemy
+      detector: gateforge.pack-sqlalchemy
+      appliesTo: ['models/orders.py']
+  declarations: {}
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -394,9 +397,11 @@ clock:
   mode: fixed
   fixedAt: '2026-01-01T00:00:00.000Z'
 `,
+        // The coverage rule narrows to `models/orders.py` alone (above), so
+        // `models/accounts.py` is an INCLUDED file no detector covers.
         '.gateforge/classification-policy.yml': lifecyclePolicy(
           'included uncovered model must block',
-        ).replace("appliesTo: ['models/**/*.py']", "appliesTo: ['models/orders.py']"),
+        ),
       });
 
       const uncovered = await runFixture(repo.root);

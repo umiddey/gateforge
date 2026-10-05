@@ -46,7 +46,7 @@ function tempRepo(files: Record<string, string> = {}): string {
   writeTree(dir, {
     '.gateforge.yml': configYml(),
     '.gateforge/policies.yml': 'schemaVersion: 1\npolicies: []\n',
-    '.gateforge/classification-policy.yml': 'schemaVersion: 1\nscanRoots: []\n',
+    '.gateforge/classification-policy.yml': 'schemaVersion: 1\n',
     'plugin.mjs': PLUGIN_SOURCE,
     ...files,
   });

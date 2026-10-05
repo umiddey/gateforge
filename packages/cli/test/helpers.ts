@@ -118,14 +118,13 @@ policies:
 `;
 
 /** Classification policy for the fixture's complete source scan. */
+// Since 0.11.0 this document holds ONLY owner answers. The scanner
+// settings (`scanRoots`, `coverage`, `declarations`, `volatileFields`) live
+// in `.gateforge.yml` under `scan:` — see `configYml`.
 export const CLASSIFICATION_POLICY_YML = `\
 schemaVersion: 1
-scanRoots: ['src/**/*.txt']
 trustedInternalEntryPoints: []
 internalRules: []
-declarations:
-  internality: gateforge:internal
-volatileFields: []
 `;
 
 /**
@@ -164,6 +163,23 @@ export function configYml(options: {
   evidence?: { docs?: readonly string[]; cache?: readonly string[] };
   /** Owner-declared test/dev tooling globs (0.10.2 `project.paths.testTooling`). */
   testTooling?: readonly string[];
+  /**
+   * The scanner settings (0.11.0 `.gateforge.yml` `scan:`). They used to
+   * sit at the top of `.gateforge/classification-policy.yml`; a fixture
+   * now declares them next to the other machine-wide settings, and the
+   * answers document holds only answers. `scanRoots` defaults to the
+   * `include` glob list, `declarations` to the internality detector.
+   */
+  scan?: {
+    /** YAML flow list of the closed-world scan roots. */
+    scanRoots?: string;
+    /** Coverage requirements (whole YAML block, indented two spaces). */
+    coverage?: string;
+    /** Supported declaration syntax, detector key -> source string. */
+    declarations?: Record<string, string>;
+    /** YAML flow list of bookkeeping columns. */
+    volatileFields?: string;
+  };
 } = {}): string {
   const include = options.include ?? "['src/**/*.txt']";
   const plugins =
@@ -172,6 +188,26 @@ export function configYml(options: {
     version: '1.0.0'
     transport: in-process
     module: ./plugin.mjs`;
+  // The scanner section. `scanRoots` rides the `include` globs unless the
+  // fixture declares its own, exactly as every repository did before the
+  // keys moved out of the answers document.
+  const scanSection = [
+    'scan:',
+    `  scanRoots: ${options.scan?.scanRoots ?? include}`,
+    ...(options.scan?.coverage === undefined ? [] : ['  ' + options.scan.coverage]),
+    ...(() => {
+      const declarations = options.scan?.declarations ?? {
+        internality: 'gateforge:internal',
+      };
+      const entries = Object.entries(declarations);
+      if (entries.length === 0) return ['  declarations: {}'];
+      return [
+        '  declarations:',
+        ...entries.map(([key, value]) => `    ${key}: ${value}`),
+      ];
+    })(),
+    `  volatileFields: ${options.scan?.volatileFields ?? '[]'}`,
+  ].join('\n');
   const fixedAt = options.clockMode === 'system' ? '' : `  fixedAt: '${FIXED_AT}'\n`;
   const clockBlock =
     options.clockMode === 'system' ? '  mode: system\n' : `  mode: fixed\n${fixedAt}`;
@@ -220,6 +256,9 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+# Scanner settings (0.11.0): REQUIRED in .gateforge.yml. These four keys
+# used to sit at the top of .gateforge/classification-policy.yml.
+${scanSection}
 changed:
   provider: ${options.provider ?? 'auto'}
 witness:

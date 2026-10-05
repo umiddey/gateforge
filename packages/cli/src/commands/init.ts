@@ -387,62 +387,104 @@ policies:
 `;
 
 /**
- * The classification policy (plan phase 5, ADR 0003 D4/D5): scan roots
- * scope every closed-world proof, trusted categories name the internal
- * entry points an internality certificate may rely on. Organization
- * internal rules and declaration syntax go here too — a name rule alone
- * NEVER proves internality; the certificate is re-derived every run.
- */
-/**
- * Builds the classification policy (plan phase 5, ADR 0003 D4/D5): scan roots
- * scope every closed-world proof, trusted categories name the internal
- * entry points an internality certificate may rely on. Organization
- * internal rules and declaration syntax go here too.
+ * The coverage rules a generated `.gateforge.yml` carries under `scan:`.
  *
- * Task-scoped rules (the `linkage.task` coverage rule and the worker
- * entry-point detector binding) are emitted ONLY when `pack-task` is in
- * the selected plugin set: a coverage rule or detector binding naming an
- * unconfigured detector fails every run closed, and task is opt-in —
- * its contracts grade only with a configured `queueObserver`.
+ * Capabilities (red-team round 6): a rule grants a capability over its
+ * files. Model/task discovery NEVER grants exposure, and no generated
+ * rule declares `exhaustive: true` — today's detectors are heuristics,
+ * so generated configs keep the internality certificate UNAVAILABLE
+ * until the organization asserts an exhaustive exposure parser itself.
+ * Every rule names a detector from the SELECTED plugin set: a rule
+ * naming an unconfigured detector fails every run closed.
+ *
+ * Task-scoped rules (the `linkage.task` coverage rule) are emitted ONLY
+ * when `pack-task` is in the selected plugin set: task is opt-in — its
+ * contracts grade only with a configured `queueObserver`.
  */
-export function classificationPolicyTemplate(
-  languages: readonly string[],
-  pluginIds: readonly string[],
-): string {
+function coverageRulesFor(languages: readonly string[], pluginIds: readonly string[]): string[] {
   const selected = new Set(pluginIds);
   const taskSelected = selected.has('gateforge.pack-task');
   const httpSelected = selected.has('gateforge.pack-http');
   const sqlalchemySelected = selected.has('gateforge.pack-sqlalchemy');
-  const coverageRules: string[] = [];
-  // Capabilities (red-team round 6): a rule grants a capability over its
-  // files. Model/task discovery NEVER grants exposure, and no generated
-  // rule declares `exhaustive: true` — today's detectors are heuristics,
-  // so generated policies keep the internality certificate UNAVAILABLE
-  // until the organization asserts an exhaustive exposure parser itself.
-  // Every rule names a detector from the SELECTED plugin set: a rule
-  // naming an unconfigured detector fails every run closed.
+  const rules: string[] = [];
   if (
     httpSelected &&
     (languages.includes('typescript') || languages.includes('javascript') || languages.includes('node'))
   ) {
-    coverageRules.push(
-      `  - capability: exposure.http\n    detector: gateforge.pack-http\n    appliesTo:\n      - '**/*.ts'\n      - '**/*.js'\n      - '**/*.tsx'\n      - '**/*.jsx'\n      - '**/*.mjs'\n      - '**/*.cjs'`,
+    rules.push(
+      `    - capability: exposure.http\n      detector: gateforge.pack-http\n      appliesTo:\n        - '**/*.ts'\n        - '**/*.js'\n        - '**/*.tsx'\n        - '**/*.jsx'\n        - '**/*.mjs'\n        - '**/*.cjs'`,
     );
     if (taskSelected) {
-      coverageRules.push(
-        `  - capability: linkage.task\n    detector: gateforge.pack-task\n    appliesTo:\n      - '**/*.ts'\n      - '**/*.js'\n      - '**/*.tsx'\n      - '**/*.jsx'\n      - '**/*.mjs'\n      - '**/*.cjs'`,
+      rules.push(
+        `    - capability: linkage.task\n      detector: gateforge.pack-task\n      appliesTo:\n        - '**/*.ts'\n        - '**/*.js'\n        - '**/*.tsx'\n        - '**/*.jsx'\n        - '**/*.mjs'\n        - '**/*.cjs'`,
       );
     }
   }
   if (sqlalchemySelected && languages.includes('python')) {
     // Model discovery is NOT an exposure capability: python exposure stays
     // uncovered until an exhaustive python exposure detector exists.
-    coverageRules.push(
-      `  - capability: models.sqlalchemy\n    detector: gateforge.pack-sqlalchemy\n    appliesTo:\n      - '**/*.py'`,
+    rules.push(
+      `    - capability: models.sqlalchemy\n      detector: gateforge.pack-sqlalchemy\n      appliesTo:\n        - '**/*.py'`,
     );
   }
-  const coverageBlock =
-    coverageRules.length > 0 ? `coverage:\n${coverageRules.join('\n')}` : 'coverage: []';
+  return rules;
+}
+
+/**
+ * Builds the machine-wide `scan:` section of a generated `.gateforge.yml`
+ * (0.11.0). These four settings are not owner ANSWERS — they configure
+ * the scan — so they live beside the other machine-wide keys. The worker
+ * entry-point detector binding stays in the answers document: it names
+ * which categories may certify internality, and that IS an answer.
+ */
+export function scanConfigTemplate(
+  languages: readonly string[],
+  pluginIds: readonly string[],
+): string {
+  const coverageRules = coverageRulesFor(languages, pluginIds);
+  return `\
+# Machine-wide scanner settings (0.11.0). These four keys used to sit at
+# the top of .gateforge/classification-policy.yml; they moved here because
+# they configure the scan rather than answer any question about the app.
+scan:
+  # Globs a closed-world proof must cover; any parse/unresolved hole inside
+  # them invalidates every suppressive decision in scope.
+  scanRoots:
+    - '**/*'
+  # Coverage requirements for COMPLETE-scan proofs (closed-world
+  # certificates). Each rule: the named detector must report examining
+  # every file matching appliesTo. Declaring none means no scan is
+  # provably complete and closed-world proofs stay unavailable.
+  coverage:
+${coverageRules.length > 0 ? coverageRules.join('\n') : '    []'}
+  # Supported source declaration syntax consumed by the classifier.
+  declarations:
+    internality: 'gateforge:internal'
+    archiveState: 'gateforge:archive-state'
+  # Bookkeeping columns that never satisfy an update by themselves.
+  volatileFields:
+    - updated_at
+    - created_at`;
+}
+
+/**
+ * Builds the owner ANSWERS document `.gateforge/classification-policy.yml`
+ * (plan phase 5, ADR 0003 D4/D5): trusted categories name the internal
+ * entry points an internality certificate may rely on, and organization
+ * internal rules are certificate INPUTS — a name rule alone NEVER proves
+ * internality; the certificate is re-derived every run.
+ *
+ * Task-scoped worker entry-point bindings are emitted ONLY when
+ * `pack-task` is in the selected plugin set: a detector binding naming an
+ * unconfigured detector fails every run closed, and task is opt-in.
+ */
+export function classificationPolicyTemplate(
+  languages: readonly string[],
+  pluginIds: readonly string[],
+): string {
+  void languages;
+  const selected = new Set(pluginIds);
+  const taskSelected = selected.has('gateforge.pack-task');
   // The worker entry-point category keeps its detector binding only when
   // task is selected; otherwise it is an unbound category (can never
   // certify reachability) rather than a fail-closed dangling reference.
@@ -451,16 +493,17 @@ export function classificationPolicyTemplate(
     : `  - category: worker\n    patterns: ['**/workers/**', '**/jobs/**']\n    # No detector binding: task is opt-in (no semantic verifier), so this\n    # category can never certify reachability until pack-task is selected.`;
 
   return `\
-# Repository-wide deterministic classification rules (ADR 0003 D5).
-# Effective classifications are computed automatically from detector
-# signals on every run: unknown exposure defaults user-facing, unknown
-# lifecycle operations default enabled, and internal requires a complete
-# closed-world certificate. This file NEVER classifies a resource by hand.
+# Owner ANSWERS (ADR 0003 D5). Effective classifications are computed
+# automatically from detector signals on every run: unknown exposure
+# defaults user-facing, unknown lifecycle operations default enabled, and
+# internal requires a complete closed-world certificate. This file NEVER
+# classifies a resource by hand.
+#
+# Since 0.11.0 the machine-wide SCANNER settings live in \`.gateforge.yml\`
+# under \`scan:\` (\`scanRoots\`, \`coverage\`, \`declarations\`,
+# \`volatileFields\`): they configure the scan, not the answers. Run
+# \`gateforge migrate\` to move them.
 schemaVersion: 1
-# Globs a closed-world proof must cover; any parse/unresolved hole inside
-# them invalidates every suppressive decision in scope.
-scanRoots:
-  - '**/*'
 # Entry-point categories trusted as internal reachability (an internality
 # certificate may rely only on these).
 trustedInternalEntryPoints:
@@ -473,19 +516,6 @@ ${workerEntry}
     patterns: ['**/scripts/maintenance/**']
 # Organization internal rules — certificate INPUTS, never overrides.
 internalRules: []
-# Coverage requirements for COMPLETE-scan proofs (closed-world
-# certificates). Each rule: the named detector must report examining
-# every file matching appliesTo. Declaring none means no scan is
-# provably complete and closed-world proofs stay unavailable.
-${coverageBlock}
-# Supported source declaration syntax consumed by the classifier.
-declarations:
-  internality: 'gateforge:internal'
-  archiveState: 'gateforge:archive-state'
-# Bookkeeping columns that never satisfy an update by themselves.
-volatileFields:
-  - updated_at
-  - created_at
 `;
 }
 /**
@@ -598,6 +628,7 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+${scanConfigTemplate(languages, pluginIds)}
 changed:
   provider: auto
 witness:

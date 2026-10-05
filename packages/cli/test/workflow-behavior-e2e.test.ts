@@ -89,6 +89,11 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['src/**']
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 behaviorPolicy: .gateforge/behavior.yml
 changed: { provider: auto }
 witness: { maxDurationSeconds: 5 }
@@ -107,12 +112,8 @@ policies:
 `;
 
 const CLASSIFICATION_POLICY_YML = `schemaVersion: 1
-scanRoots: ['src/**']
 trustedInternalEntryPoints: []
 internalRules: []
-declarations:
-  internality: gateforge:internal
-volatileFields: []
 `;
 
 /**

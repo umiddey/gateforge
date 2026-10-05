@@ -73,6 +73,10 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['e2e/**/*.spec.js']
+  declarations: {}
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -83,7 +87,7 @@ clock:
 ${configExtra}`,
     '.gateforge/policies.yml': 'schemaVersion: 1\npolicies: []\n',
     '.gateforge/classification-policy.yml':
-      'schemaVersion: 1\nscanRoots: []\ntrustedInternalEntryPoints: []\ninternalRules: []\ndeclarations: {}\nvolatileFields: []\n',
+      'schemaVersion: 1\ntrustedInternalEntryPoints: []\ninternalRules: []\n',
     'plugin.mjs':
       'export default { discover: () => ({ resources: [], unresolved: [], findings: [], classificationSignals: [], scannedPaths: [] }) };\n',
     'package.json': '{ "type": "module", "private": true }\n',

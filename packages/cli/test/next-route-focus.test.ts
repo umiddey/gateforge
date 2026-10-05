@@ -108,6 +108,11 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['src/**/*.txt']
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 changed:
   provider: auto
 witness:

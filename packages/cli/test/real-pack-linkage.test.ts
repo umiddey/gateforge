@@ -48,6 +48,18 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['**/*.ts', '**/*.py']
+  coverage:
+    - capability: exposure.http
+      detector: gateforge.pack-http
+      appliesTo: ['**/*.ts']
+    - capability: models.sqlalchemy
+      detector: gateforge.pack-sqlalchemy
+      appliesTo: ['**/*.py']
+  declarations:
+    plane.tenant: gateforge:tenant-plane
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -58,19 +70,8 @@ clock:
 `,
         '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: persistence\n    when: { exposure: user-facing }\n    require: [persistence:read]\n',
         '.gateforge/classification-policy.yml': `schemaVersion: 1
-scanRoots: ['**/*.ts', '**/*.py']
 trustedInternalEntryPoints: []
 internalRules: []
-coverage:
-  - capability: exposure.http
-    detector: gateforge.pack-http
-    appliesTo: ['**/*.ts']
-  - capability: models.sqlalchemy
-    detector: gateforge.pack-sqlalchemy
-    appliesTo: ['**/*.py']
-declarations:
-  plane.tenant: gateforge:tenant-plane
-volatileFields: []
 `,
         // The REAL python model (AST-scanned by the subprocess detector):
         'models.py': `from sqlalchemy import Column, Integer, String
@@ -219,6 +220,22 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['**/*.ts', '**/*.py']
+  coverage:
+    # Real-pack honesty (round 6): pack-task/pack-sqlalchemy are NOT
+    # exhaustive exposure parsers, so no rule declares exhaustive: true and
+    # the internality certificate must stay UNAVAILABLE for this scope.
+    - capability: exposure.http
+      detector: gateforge.pack-task
+      appliesTo: ['**/*.ts']
+    - capability: models.sqlalchemy
+      detector: gateforge.pack-sqlalchemy
+      appliesTo: ['**/*.py']
+  declarations:
+    plane.tenant: gateforge:tenant-plane
+    internality: gateforge:internal
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -229,26 +246,11 @@ clock:
 `,
         '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: user-facing-persistence\n    when: { exposure: user-facing }\n    require: [persistence:read]\n',
         '.gateforge/classification-policy.yml': `schemaVersion: 1
-scanRoots: ['**/*.ts', '**/*.py']
 trustedInternalEntryPoints:
   - category: worker
     patterns: ['**/*.ts']
     detector: gateforge.pack-task
 internalRules: []
-coverage:
-  # Real-pack honesty (round 6): pack-task/pack-sqlalchemy are NOT
-  # exhaustive exposure parsers, so no rule declares exhaustive: true and
-  # the internality certificate must stay UNAVAILABLE for this scope.
-  - capability: exposure.http
-    detector: gateforge.pack-task
-    appliesTo: ['**/*.ts']
-  - capability: models.sqlalchemy
-    detector: gateforge.pack-sqlalchemy
-    appliesTo: ['**/*.py']
-declarations:
-  plane.tenant: gateforge:tenant-plane
-  internality: gateforge:internal
-volatileFields: []
 `,
         // The REAL python model with internal declaration:
         'models.py': `from sqlalchemy import Column, Integer, String
@@ -350,6 +352,18 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['**/*.ts', '**/*.py']
+  coverage:
+    - capability: exposure.http
+      detector: gateforge.pack-http
+      appliesTo: ['**/*.ts']
+    - capability: models.sqlalchemy
+      detector: gateforge.pack-sqlalchemy
+      appliesTo: ['**/*.py']
+  declarations:
+    plane.tenant: gateforge:tenant-plane
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -360,19 +374,8 @@ clock:
 `,
         '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: user-facing-persistence\n    when: { exposure: user-facing }\n    require: [persistence:read]\n',
         '.gateforge/classification-policy.yml': `schemaVersion: 1
-scanRoots: ['**/*.ts', '**/*.py']
 trustedInternalEntryPoints: []
 internalRules: []
-coverage:
-  - capability: exposure.http
-    detector: gateforge.pack-http
-    appliesTo: ['**/*.ts']
-  - capability: models.sqlalchemy
-    detector: gateforge.pack-sqlalchemy
-    appliesTo: ['**/*.py']
-declarations:
-  plane.tenant: gateforge:tenant-plane
-volatileFields: []
 `,
         'models.py': `from sqlalchemy import Column, Integer, String
 from sqlalchemy.orm import DeclarativeBase

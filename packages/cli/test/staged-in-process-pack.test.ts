@@ -68,6 +68,10 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['**/*.py']
+  declarations: {}
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -85,12 +89,8 @@ policies:
 `;
 
 const CLASSIFICATION_POLICY = `schemaVersion: 1
-scanRoots: ['**/*.py']
 trustedInternalEntryPoints: []
 internalRules: []
-coverage: []
-declarations: {}
-volatileFields: []
 `;
 
 describe('check --staged gates the staged bytes for an in-process pack', () => {

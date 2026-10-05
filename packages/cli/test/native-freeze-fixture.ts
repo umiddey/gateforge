@@ -1836,6 +1836,11 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ${scanInclude}
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 runtime: .gateforge/runtime.yml
 changed: { provider: auto }
 witness: { maxDurationSeconds: 5 }

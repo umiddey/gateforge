@@ -99,6 +99,11 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['fixtures/**/*.gfx']
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -108,7 +113,7 @@ clock:
   fixedAt: '2026-01-01T00:00:00.000Z'
 `,
         '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: noop\n    when: {}\n    require: [persistence:read]\n',
-        '.gateforge/classification-policy.yml': 'schemaVersion: 1\nscanRoots: [\'fixtures/**/*.gfx\']\ntrustedInternalEntryPoints: []\ninternalRules: []\ndeclarations:\n  internality: gateforge:internal\nvolatileFields: []\n',
+        '.gateforge/classification-policy.yml': 'schemaVersion: 1\ntrustedInternalEntryPoints: []\ninternalRules: []\n',
         'fixtures/routes.gfx': 'GET /accounts\nGET /accounts\nPOST /orders\n',
       });
       const first = await runCli(repo, ['discover', '--json']);

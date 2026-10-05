@@ -33,12 +33,19 @@ import { trustedPolicyDigestForConfig } from '../src/execution.js';
 const TOOLING_FILE = 'scripts/e2e/run.sh';
 
 /**
- * The approved policy digest of the standard fixture repository, captured
- * on the engine that had no `testTooling` key at all. The key adds no
- * digest entry and no document bytes when it is absent, so a repository
- * that does not declare it keeps exactly this revision.
+ * The approved policy digest of the standard fixture repository when the
+ * owner declares no `testTooling` at all. The key adds no digest entry and
+ * no document bytes when it is absent, so a repository that does not
+ * declare it keeps exactly this revision.
+ *
+ * Re-pinned ONCE by 0.11.0, and only for that reason: `.gateforge.yml`
+ * gained the REQUIRED `scan:` section (the scanner settings that moved
+ * out of the answers document), which is document bytes the digest
+ * legitimately covers. The invariant this case pins — absent means one
+ * exact, unchanging revision — is unchanged; only that revision's value
+ * moved. The sibling case pins the other half: declaring the list moves it.
  */
-const DIGEST_WITHOUT_TEST_TOOLING = '390042f4b17e78f6644a96ea661f5ad09a178c1b145e3ebebad8722fb294e93a';
+const DIGEST_WITHOUT_TEST_TOOLING = 'd069ba243d256c15b86bacce6cb6bfc8093044e6a3f81721790585b24c7e0665';
 
 describe('a declared test-toolging file is attributable, scope-expanding and neutral', () => {
   it('is CHANGE_UNMAPPED without the declaration and attributed with it', async () => {

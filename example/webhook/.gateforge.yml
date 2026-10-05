@@ -20,6 +20,16 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+# Machine-wide scanner settings (0.11.0), moved out of
+# .gateforge/classification-policy.yml. The fixture/actor provider is
+# engine-side harness code (loaded through GATEFORGE_FIXTURE_PROVIDER,
+# never by the suite), so it is not classified as product source — see
+# the matching project exclude above.
+scan:
+  scanRoots: ['server.js']
+  declarations:
+    internality: gateforge:internal
+  volatileFields: []
 changed:
   provider: auto
 witness:

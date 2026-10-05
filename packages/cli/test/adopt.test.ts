@@ -16,9 +16,9 @@ import { CaptureStream, type Io } from '../src/index.js';
 import { ensureHookScript } from '../src/commands/blocking.js';
 import { VERSION } from '../src/commands/common.js';
 import {
-  CLASSIFICATION_POLICY_YML,
   FIXED_AT,
   PLUGIN_SOURCE,
+  configYml,
   fixtureFingerprint,
   installFixture,
   runCli,
@@ -102,7 +102,7 @@ async function installClassificationFixture(
     // its identity stays unresolved (R1-9 keeps adoption possible).
     'src/legacy.txt': 'legacy fixture.table\n# gateforge:tenant-plane\n',
     '.gateforge/adapters/legacy.mjs': 'export default {};\n',
-    '.gateforge/classification-policy.yml': PLANE_DECLARED_POLICY_YML,
+    '.gateforge.yml': PLANE_DECLARED_CONFIG_YML,
   });
 }
 
@@ -116,20 +116,26 @@ async function installPlaneUnresolvedFixture(
     // test answers the plane by adding the declaration marker.
     'src/legacy.txt': 'legacy fixture.table\n',
     '.gateforge/adapters/legacy.mjs': 'export default {};\n',
-    '.gateforge/classification-policy.yml': PLANE_DECLARED_POLICY_YML,
+    '.gateforge.yml': PLANE_DECLARED_CONFIG_YML,
   });
 }
 /**
- * The fixture classification policy plus one reviewed plane
- * declaration: the owner-reviewed channel that resolves a
- * table's plane from a marker in its own source file — the
- * table-side answer of a plane rule (`gateforge classify plane`
- * writes the route-side answer into `.gateforge/planes.json`).
+ * The fixture config plus one reviewed plane declaration: the
+ * owner-reviewed channel that resolves a table's plane from a marker
+ * in its own source file — the table-side answer of a plane rule
+ * (`gateforge classify plane` writes the route-side answer into
+ * `.gateforge/planes.json`). Since 0.11.0 the declaration syntax a
+ * detector may read is `.gateforge.yml`'s `scan.declarations`, not a
+ * key in the answers document.
  */
-const PLANE_DECLARED_POLICY_YML = CLASSIFICATION_POLICY_YML.replace(
-  'declarations:\n  internality: gateforge:internal\n',
-  'declarations:\n  internality: gateforge:internal\n  plane.tenant: gateforge:tenant-plane\n',
-);
+const PLANE_DECLARED_CONFIG_YML = configYml({
+  scan: {
+    declarations: {
+      internality: 'gateforge:internal',
+      'plane.tenant': 'gateforge:tenant-plane',
+    },
+  },
+});
 
 /** The adoption receipt on disk. */
 function receipt(repo: Parameters<Parameters<typeof withTempRepo>[1]>[0]): Record<string, unknown> {

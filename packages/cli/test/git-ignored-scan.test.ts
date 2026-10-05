@@ -54,6 +54,10 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ['**/*.js']
+  declarations: {}
+  volatileFields: []
 changed:
   provider: auto
 witness:
@@ -65,7 +69,7 @@ clock:
     '.gateforge/policies.yml':
       'schemaVersion: 1\npolicies:\n  - id: persistence\n    when: { exposure: user-facing }\n    require: [persistence:read]\n',
     '.gateforge/classification-policy.yml':
-      "schemaVersion: 1\nscanRoots: ['**/*.js']\ntrustedInternalEntryPoints: []\ninternalRules: []\ndeclarations: {}\nvolatileFields: []\n",
+      "schemaVersion: 1\ntrustedInternalEntryPoints: []\ninternalRules: []\n",
     'report/trace-viewer.js': REPORT_BUNDLE,
   });
 }

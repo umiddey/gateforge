@@ -10,7 +10,7 @@ import {
   evaluatePolicies,
   isEvidenceOnlyKind,
   withTempRepo,
-  type ClassificationPolicy,
+  type ClassifierPolicy,
   type ClassificationResult,
   type ClassificationSignal,
   type ClassifierResourceRef,
@@ -974,8 +974,8 @@ describe('pipeline integration: endpoints classify and keep routes off the table
   });
 });
 
-describe('endpoint plane config channel (.gateforge/planes.json, plan phase 5)', () => {
-  const PLANE_POLICY: ClassificationPolicy = {
+describe('endpoint plane config channel (the `planes:` section, plan phase 5)', () => {
+  const PLANE_POLICY: ClassifierPolicy = {
     schemaVersion: 1,
     scanRoots: [],
     trustedInternalEntryPoints: [{ category: 'migration', patterns: [] }],

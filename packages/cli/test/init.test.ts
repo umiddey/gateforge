@@ -898,15 +898,21 @@ describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', ()
   });
   it('never emits coverage rules for unselected detectors (no dangling references)', async () => {
     // JS/TS in languages but pack-http NOT selected: the generated
-    // classification policy must not name it (fail-closed at runtime).
+    // `scan.coverage` must not name it (fail-closed at runtime). Since
+    // 0.11.0 the coverage rules are SCAN settings and live in
+    // `.gateforge.yml`, not in the answers document — which must carry
+    // no scanner key at all.
     await withTempRepo({}, async (repo) => {
       const { code } = await runCli(repo, [
         'init', '--languages', 'python,typescript', '--plugins', 'gateforge.pack-sqlalchemy,gateforge.pack-fastapi',
       ]);
       expect(code).toBe(0);
+      const config = readFileSync(repo.path('.gateforge.yml'), 'utf8');
+      expect(config).not.toContain('gateforge.pack-http');
+      expect(config).toContain('gateforge.pack-sqlalchemy');
       const policy = readFileSync(repo.path('.gateforge/classification-policy.yml'), 'utf8');
-      expect(policy).not.toContain('gateforge.pack-http');
-      expect(policy).toContain('gateforge.pack-sqlalchemy');
+      for (const moved of ['scanRoots', 'coverage', 'declarations', 'volatileFields'])
+        expect(policy, moved).not.toContain(`${moved}:`);
     });
     // Opting into pack-http restores its rule.
     await withTempRepo({}, async (repo) => {
@@ -915,9 +921,7 @@ describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', ()
         '--plugins', 'gateforge.pack-sqlalchemy,gateforge.pack-fastapi,gateforge.pack-http',
       ]);
       expect(code).toBe(0);
-      expect(readFileSync(repo.path('.gateforge/classification-policy.yml'), 'utf8')).toContain(
-        'gateforge.pack-http',
-      );
+      expect(readFileSync(repo.path('.gateforge.yml'), 'utf8')).toContain('gateforge.pack-http');
     });
   });
 });
