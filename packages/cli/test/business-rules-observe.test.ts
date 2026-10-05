@@ -479,4 +479,90 @@ describe('§7.5 a real sealed run grades the rule from its own authorized record
       await app.close();
     }
   }, 240_000);
+
+  it('keeps a case a --scope changed run did not select unproven and visible', async () => {
+    const app = await startEvidenceApp();
+    try {
+      await withTempRepo({}, async (repo) => {
+        installObserveRepo(repo, app.url);
+        repo.commitFiles({}, 'base');
+        const env = gateEnv(repo, app.url);
+
+        // A product change whose affected slice is the ACCOUNTS test:
+        // the rule's mapped test is outside this run's graded slice.
+        // The rule finding is run-wide (invariant 8) — reported, never
+        // diff-scoped away, never satisfied by a slice that never ran it.
+        // The changed-slice provider diffs COMMIT ranges, so the change
+        // lands as a commit like any real merge request.
+        repo.writeFiles({ 'src/accounts.txt': 'accounts fixture.table — widened\n' });
+        repo.commitFiles({}, 'widen the accounts source');
+        const run = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
+        const output = `${run.stdout}\n${run.stderr}`;
+        expect(run.code, output).toBe(1);
+        const report = JSON.parse(run.stdout) as Report;
+        expect(report.businessRules?.map((entry) => [entry.caseId, entry.status]), output).toEqual([
+          ['read-after-issue', 'unproven'],
+          ['read-shows-fields', 'unproven'],
+        ]);
+        expect(
+          report.businessRules?.every((entry) => entry.finding?.detail.includes('the sealed run did not execute it')),
+          output,
+        ).toBe(true);
+      });
+    } finally {
+      await app.close();
+    }
+  }, 240_000);
+});
+
+describe('§7.9 editing a rule moves the trusted digest and a stale pin is refused', () => {
+  it('re-approves the pin after a rule wording change, and the cases stay unproven', async () => {
+    const app = await startEvidenceApp();
+    try {
+      await withTempRepo({}, async (repo) => {
+        installObserveRepo(repo, app.url);
+        repo.commitFiles({}, 'base');
+        // The owner pin over the rule's CURRENT bytes.
+        const before = trustedPolicyDigestForConfig(repo.root, loadConfig(repo.path('.gateforge.yml')));
+
+        // The owner rewords the rule (same id, new title) and commits.
+        const reworded = businessRule({
+          id: 'invoices-stay-readable',
+          title: 'An issued invoice stays readable through the app',
+          subject: 'invoices',
+          cases: [
+            { id: 'read-after-issue', describe: 'The invoice issued by the journey is still readable afterwards' },
+            { id: 'read-shows-fields', describe: 'Reading the invoice renders the fields the journey entered' },
+          ],
+        });
+        repo.writeFiles({ '.gateforge/classification-policy.yml': answersYml([reworded]) });
+        repo.commitFiles({}, 'reword the rule');
+        const after = trustedPolicyDigestForConfig(repo.root, loadConfig(repo.path('.gateforge.yml')));
+        expect(after).not.toBe(before);
+
+        // A pin minted over the OLD bytes no longer authorizes the
+        // candidate: the answers document is owner-pinned, so a rule the
+        // owner rewrote is exactly what the candidate-commit gate refuses
+        // until the owner re-approves.
+        const refused = await runCli(repo, ['check', '--candidate-commit', repo.headSha() as string, '--format', 'json'], {
+          GATEFORGE_WITNESS_VERIFIER_KEY: VERIFIER_KEY,
+          GATEFORGE_APPROVED_POLICY_DIGEST: before,
+        });
+        const refusedOutput = `${refused.stdout}\n${refused.stderr}`;
+        expect(refused.code, refusedOutput).toBe(1);
+        // The stale pin is refused by name — the owner re-approves.
+        expect(refusedOutput).toContain('ENFORCEMENT_UNTRUSTED');
+
+        // And with the pin re-approved, the gate grades again — the
+        // reworded rule's cases are UNPROVEN until the next sealed run
+        // (the wording change never inherits the old receipt's proof).
+        const repinned = gateEnv(repo, app.url);
+        const clean = await runCli(repo, ['check', '--format', 'json'], repinned);
+        const cleanReport = JSON.parse(clean.stdout) as Report;
+        expect(cleanReport.businessRules?.map((entry) => entry.status)).toEqual(['unproven', 'unproven']);
+      });
+    } finally {
+      await app.close();
+    }
+  }, 240_000);
 });
