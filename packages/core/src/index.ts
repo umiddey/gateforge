@@ -894,6 +894,7 @@ export type {
  * no receipt field.
  */
 export {
+  BUSINESS_RULE_CAUSES,
   evaluateBusinessRules,
   isBusinessRuleFinding,
   worstBusinessRuleStatus,

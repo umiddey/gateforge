@@ -116,6 +116,7 @@ import {
   withoutQuarantinedBindings,
   type LoadedQuarantine,
   type Obligation,
+  type RuleClaimBindings,
   type TestCatalog,
   type TestMap,
   type TestMapEntry,
@@ -195,6 +196,13 @@ import {
   type PlannedRow,
 } from '../execution.js';
 import { evaluateRun, scopeBlocking, splitBlockingByBaseline, type EvaluateInput } from '../evaluate.js';
+import {
+  businessRuleInventory,
+  businessRuleRunFacts,
+  gradeBusinessRules,
+  partitionBusinessRuleEntries,
+  witnessedRunnersOf,
+} from '../business-rules.js';
 import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
 import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
 import { CACHE_EXCLUSIONS_GUARANTEE, loadCacheExclusions } from '../cache-exclusions.js';
@@ -2792,11 +2800,17 @@ async function runSupervisedTestGatesInner(
   // Hoisted: the validated sidecar, the only declaration source the
   // witness-side case assignments are built from.
   let behaviorSidecar: TestMap | null = null;
+  // The one resolver's business-rule claim namespace. Rule findings are
+  // graded AFTER the run seals (they need the run's own facts) but
+  // RESOLVED here, so the sidecar's rule declarations reach the same
+  // staleness, ambiguity and quarantine treatment as obligations.
+  let ruleBindings: RuleClaimBindings[] = [];
   if (catalog !== null) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
       config,
       obligations: pipeline.policy.obligations,
+      businessRules: pipeline.businessRules,
       stateDir,
       catalog,
       nativeClaims,
@@ -2824,6 +2838,7 @@ async function runSupervisedTestGatesInner(
     mappedCoverage = mappedCoverageFrom(gradedResolution, pipeline.policy.obligations, pipeline.graph);
     serverE2eObligations = serverE2eObligationIds(mapped.resolution);
     observeObligations = observeObligationIds(mapped.resolution);
+    ruleBindings = mapped.resolution.ruleBindings;
     // Adopted baseline debt (E62): the changed-scope planner must agree
     // with this run's own grading, which waives exactly the obligations
     // the ADOPTED baseline forgives (`applyBaseline`). Strict E2E
@@ -5322,14 +5337,55 @@ async function runSupervisedTestGatesInner(
     },
   };
   const evaluatedBase = evaluateRun(evaluationInput);
+
+  // Owner-declared business rules (plan 2026-10-05 D4/D5), graded from
+  // THIS run's own sealed facts. A rule with no mapped test, or a mapped
+  // test that did not run, did not pass, or does not carry the type's
+  // proof, is a finding — a declaration is never proof.
+  //
+  // Graded AFTER `evaluateRun` so it reads the run's AUTHORIZED records
+  // (`evaluatedBase.records`), never a raw `records.json` read: a rule
+  // case must not be attributed to evidence the obligation grader
+  // rejected. Merged into the run's own blocking set for the same reason
+  // twin findings are, so one partition and one exit code decide the
+  // outcome (invariant 8).
+  let rulePartition: { blocking: BlockingEntry[]; advisories: BlockingEntry[] } = {
+    blocking: [],
+    advisories: [],
+  };
+  if (pipeline.businessRules.length > 0 && catalog !== null) {
+    rulePartition = partitionBusinessRuleEntries(
+      pipeline.businessRules,
+      gradeBusinessRules({
+        rules: pipeline.businessRules,
+        ruleBindings,
+        inventory: businessRuleInventory(pipeline.graph),
+        runFacts: businessRuleRunFacts({
+          result: sealed.result,
+          records: evaluatedBase.records,
+          witnessedRunners: witnessedRunnersOf(config),
+          scope: options.scope === 'changed' ? 'changed' : 'full',
+          docsOnly: false,
+          catalog,
+        }),
+        catalog,
+      }).cases,
+    );
+  }
   // Twin path coverage in `block` mode joins the run's OWN blocking set:
   // it appears in `blocking` (not only in `advisories`) and it fails the
   // run the way any other blocking finding does. In `advisory` mode this
-  // is the base evaluation, byte-identical.
+  // is the base evaluation, byte-identical. Business-rule findings join
+  // the same set, partitioned by the OWNER's `enforcement` declaration.
+  const runBlocking = [...twinBlocking, ...rulePartition.blocking];
+  // Advisory rules ride the report's existing advisory channel (plan D5,
+  // invariant 7): printed and serialized every run, out of `blocking` and
+  // out of the exit code — so a demoted rule never hides.
+  const runAdvisories = [...twinAdvisories, ...rulePartition.advisories];
   const evaluated: typeof evaluatedBase =
-    twinBlocking.length === 0
+    runBlocking.length === 0
       ? evaluatedBase
-      : { ...evaluatedBase, blocking: [...evaluatedBase.blocking, ...twinBlocking] };
+      : { ...evaluatedBase, blocking: [...evaluatedBase.blocking, ...runBlocking] };
   // Owner-chosen strictness: the mapping from the strict decision to the
   // effective exit code. `changed` reuses the run's own provider diff and
   // the evaluator's own attribution rule — an unknown change fails closed.
@@ -5583,7 +5639,7 @@ async function runSupervisedTestGatesInner(
     // Twin path coverage (E64): reported, never blocking, in advisory
     // mode. An empty list adds no report key, so a run without twin
     // findings keeps exactly the document it always had.
-    ...(twinAdvisories.length === 0 ? {} : { advisories: twinAdvisories }),
+    ...(runAdvisories.length === 0 ? {} : { advisories: runAdvisories }),
     waiverCounts: evaluated.waiverCounts,
     run: manifest,
     toolVersion: VERSION,
@@ -5611,7 +5667,7 @@ async function runSupervisedTestGatesInner(
         renderRun(evaluated.verdicts, {
           format: 'json',
           blocking: evaluated.blocking,
-          ...(twinAdvisories.length === 0 ? {} : { advisories: twinAdvisories }),
+          ...(runAdvisories.length === 0 ? {} : { advisories: runAdvisories }),
           waiverCounts: evaluated.waiverCounts,
           run: manifest,
           toolVersion: VERSION,

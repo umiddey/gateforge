@@ -494,6 +494,30 @@ export function evaluateBusinessRules(input: EvaluateBusinessRulesInput): Busine
   return { configErrors, cases };
 }
 
+/**
+ * The CLOSED table of cause codes a business-rule finding can carry.
+ *
+ * One table, one purpose: the gate's forgiveness layers ask "is this
+ * finding a business rule?" before they forgive anything. The adopted
+ * baseline forgives debt the OWNER recorded before adopting; a rule the
+ * owner wrote in the pinned answers document is not pre-existing debt,
+ * and a finding about it must never be silently waived by a fingerprint
+ * that happens to match (plan invariant 2: rules are owner-pinned, so
+ * an agent cannot weaken or forgive one).
+ *
+ * Keyed over `string`, not `CauseCode`: every call site reads a blocking
+ * entry's cause, which is nullable, so a `Record<CauseCode, true>` index
+ * would force each caller to re-narrow before it could even ask. The
+ * four values are still literal cause codes, and a fifth status cannot
+ * ship without landing here.
+ */
+export const BUSINESS_RULE_CAUSES: Record<string, true> = {
+  BUSINESS_RULE_TEST_MISSING: true,
+  BUSINESS_RULE_TEST_TYPE_MISMATCH: true,
+  BUSINESS_RULE_TEST_UNPROVEN: true,
+  BUSINESS_RULE_TEST_FAILING: true,
+};
+
 /** Whether a case result is one of the four findings the gate reports. */
 export function isBusinessRuleFinding(
   result: BusinessRuleCaseResult,

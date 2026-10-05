@@ -30,6 +30,7 @@
  */
 import {
   businessRuleClaimId,
+  EvidenceRecordSchema,
   casesOf,
   evaluateBusinessRules,
   type BlockingEntry,
@@ -172,8 +173,13 @@ function testFactOf(
 export interface BusinessRuleFactsInput {
   /** The sealed execution result, or null for a static `check` run. */
   result: ExecutionResult | null;
-  /** The run's sealed evidence records (the witness side). */
-  records: readonly EvidenceRecord[];
+  /**
+   * The run's authorized evidence records, exactly as `evaluateRun`
+   * returned them (`unknown[]`: authorization is established, shape is
+   * not). Validated here against the record schema; a record that does
+   * not parse contributes no proof.
+   */
+  records: readonly unknown[];
   /** Runners whose suite the owner declared witnessed. */
   witnessedRunners: ReadonlySet<string>;
   /** The receipt's evaluation scope. */
@@ -215,9 +221,35 @@ export function businessRuleRunFacts(input: BusinessRuleFactsInput): BusinessRul
     scope: input.scope,
     docsOnly: input.docsOnly,
     tests,
-    records: input.records,
+    records: authorizedRecords(input.records),
     witnessedRunners: input.witnessedRunners,
   };
+}
+
+/**
+ * Validates the run's AUTHORIZED records into the typed shape the
+ * evaluator reads.
+ *
+ * `evaluateRun` returns them as `unknown[]` because all that has been
+ * established at that point is AUTHORIZATION, not shape. This is where
+ * the shape is established: a record that does not parse contributes no
+ * proof, which is the fail-closed direction. Parsing here rather than
+ * asserting a type keeps a malformed or tampered ledger from being
+ * attributed to a rule case.
+ *
+ * Args:
+ *   records: the authorized, quarantine-filtered records.
+ *
+ * Returns:
+ *   EvidenceRecord[]: the records that satisfy the schema, in input order.
+ */
+function authorizedRecords(records: readonly unknown[]): EvidenceRecord[] {
+  const valid: EvidenceRecord[] = [];
+  for (const record of records) {
+    const parsed = EvidenceRecordSchema.safeParse(record);
+    if (parsed.success) valid.push(parsed.data);
+  }
+  return valid;
 }
 
 /** Everything one rule-grading pass needs beyond the pipeline's own output. */

@@ -17,6 +17,7 @@ import {
   AttestationSchema,
   BLOCKING_VERDICTS,
   BASELINE_VERDICT_REASON,
+  BUSINESS_RULE_CAUSES,
   blockingEntryFingerprint,
   CAUSE_NEXT_ACTIONS,
   ClaimSchema,
@@ -311,6 +312,22 @@ export interface EvaluateResult {
      */
     classificationBlocked: number | undefined;
   } | null;
+  /**
+   * The run's AUTHORIZED, quarantine-filtered evidence records — the
+   * exact list every obligation verdict in {@link verdicts} was graded
+   * from. Exposed so another grader of the same run (the business-rule
+   * evaluator) can never reach evidence the obligation grader rejected:
+   * a raw `records.json` read would let a rule case be attributed to a
+   * record that was demoted, quarantined out or never authenticated.
+   *
+   * Typed `unknown`, not `EvidenceRecord`: these are untrusted parsed
+   * documents whose only guarantee so far is AUTHORIZATION, not shape.
+   * A consumer validates them against `EvidenceRecordSchema` itself, so
+   * a malformed record contributes no proof instead of being trusted on
+   * a type assertion. Empty is honest, not an error: a run with no
+   * evidence has no proof.
+   */
+  records: readonly unknown[];
 }
 
 /**
@@ -334,6 +351,21 @@ export function scopeBlocking(
 ): BlockingEntry[] {
   const kept: BlockingEntry[] = [];
   for (const entry of blocking) {
+    // A business-rule finding has no resource and no source file, so the
+    // attribution logic below cannot place it — and it must never be
+    // scoped away: a declared rule is graded run-wide whatever the diff
+    // selected (plan invariant 8). The `--changed` gate decision calls
+    // this function with the report's OWN blocking list, so the guard has
+    // to live here too, or a rule would vanish from the exit decision
+    // while still printed in the report.
+    if (
+      entry.cause !== null &&
+      entry.cause !== undefined &&
+      BUSINESS_RULE_CAUSES[entry.cause] === true
+    ) {
+      kept.push(entry);
+      continue;
+    }
     // `unclassified` with a known resource is the only safely
     // attributable kind: the join-aware multi-source map covers the
     // backend source AND every joined frontend-call source, so a
@@ -681,6 +713,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   return {
     verdicts: gradedVerdicts,
     blocking: applied.blocking,
+    records,
     baselined: applied.baselined,
     notGradedObligations: input.obligations.length - scoped.length,
     waiverCounts: {
@@ -859,6 +892,15 @@ function namedScopeBlocking(
   const gradedResources = new Set(graded.map((obligation) => obligation.resourceId));
   return input.blocking.filter(
     (entry) =>
+      // A business-rule finding names no obligation and carries no
+      // resource, so the selection test below would always drop it — a
+      // declared rule must never be scoped away by the selection that
+      // happened to run (plan invariant 8). Checked HERE, where the
+      // projection actually happens, rather than relying on the entry's
+      // `kind` happening to fall through some other filter.
+      (entry.cause !== null &&
+        entry.cause !== undefined &&
+        BUSINESS_RULE_CAUSES[entry.cause] === true) ||
       (entry.name !== null && entry.name !== undefined && namedObligationIds.has(entry.name)) ||
       (entry.resourceId !== null && entry.resourceId !== undefined && gradedResources.has(entry.resourceId)),
   );

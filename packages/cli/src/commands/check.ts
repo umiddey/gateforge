@@ -185,8 +185,15 @@ import { singletonPerTenantAdvisories } from '../singleton-guidance.js';
 import { responseFieldAdvisories } from '../response-field-guidance.js';
 import { unmatchedRouteBannerLines } from '../unmatched-routes.js';
 import { annotationMapSyncAdvisories, loadOptionalTestMap, mappedCoverageFrom, mappingBlocking, nativeInventoryBlocking, resolveRepositoryMappings, TEST_MAP_RELATIVE } from '../mapping.js';
+import {
+  businessRuleInventory,
+  businessRuleRunFacts,
+  gradeBusinessRules,
+  partitionBusinessRuleEntries,
+  witnessedRunnersOf,
+} from '../business-rules.js';
 import { runnerConfigPaths, runtimeDeclaredInputs } from '../test-infrastructure.js';
-import type { MappedCoverage } from '@gate-forge/core';
+import type { MappedCoverage, RuleClaimBindings, TestCatalog } from '@gate-forge/core';
 import {
   collectInputFiles,
   computeInputSnapshot,
@@ -212,7 +219,9 @@ import {
   authenticatedChangedInputs,
   loadReceiptFor,
   receiptGateBlocking,
+  receiptScope,
   scopedReceiptCoverageBlocking,
+  type ReceiptLoad,
   type ScopedObligationRef,
 } from '../receipts.js';
 import { resealChainBlocking, retainedCarriedEvidence } from '../reseal-chain.js';
@@ -1763,12 +1772,18 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       }
       return result;
     };
-  if (currentTestMap !== null) {
+  // A repository that declares business rules but ships no sidecar must
+  // still be graded: every case reads `unmapped` (a blocking finding), so
+  // skipping the resolution here would hide the feature's whole point.
+  let ruleBindings: RuleClaimBindings[] = [];
+  let ruleCatalog: TestCatalog | null = null;
+  if (currentTestMap !== null || pipeline.businessRules.length > 0) {
     const mapped = await resolveRepositoryMappings({
       cwd: io.cwd,
       config,
       stateDir,
       obligations: pipeline.policy.obligations,
+      businessRules: pipeline.businessRules,
       claimBindings,
       behaviorCatalog: pipeline.behaviorCatalog,
       pytestCollection,
@@ -1780,6 +1795,8 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       ...nativeInventoryBlocking(mapped.nativeLoadProblem),
     ];
     mappedCoverage = mappedCoverageFrom(mapped.resolution, pipeline.policy.obligations, pipeline.graph);
+    ruleBindings = mapped.resolution.ruleBindings;
+    ruleCatalog = mapped.catalog;
   }
 
   const adoptedBaseline = resolveAdoptedBaseline(io.cwd, config.baselines);
@@ -1952,6 +1969,13 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   };
 
   let receiptBlocking: BlockingEntry[] = [];
+  // The digest-verified receipt load, hoisted out of the `--require-e2e`
+  // block because the business-rule grader reads its SEALED execution
+  // result. `check` never re-parses `execution-result.json` itself: that
+  // document is suite-writable state, and only the receipt's own MAC and
+  // execution digest make it trustworthy. Absent (no `--require-e2e`, or
+  // no receipt) rules grade as `unproven` — a declaration is never proof.
+  let verifiedRuleReceipt: ReceiptLoad | null = null;
   if (requireE2E) {
     if (snapshotUnavailable || expectedDigest === null) {
       receiptBlocking = [
@@ -2032,6 +2056,10 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         );
         diagnosticEvidenceState = load.status === 'ok' ? 'receipt-verified' : `receipt-${load.status}`;
         if (load.status === 'ok') {
+          // Retained for the business-rule grader below; cleared again at
+          // the end of this branch if any refusal landed, because a
+          // receipt this check is refusing must not grade anything.
+          verifiedRuleReceipt = load;
           if (
             load.receipt.engine !== undefined &&
             load.receipt.engine.version !== engineIdentity().version
@@ -2124,6 +2152,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             }
           }
           if (receiptBlocking.length > 0) diagnosticEvidenceState = 'receipt-verified-with-blocking-entry';
+          if (receiptBlocking.length > 0) verifiedRuleReceipt = null;
         } else {
           receiptBlocking = receiptGateBlocking(load);
           if (load.status === 'stale') {
@@ -2170,6 +2199,47 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     }
   }
 
+  // Owner-declared business rules (plan 2026-10-05 D4/D5). Graded
+  // RUN-WIDE and deliberately OUTSIDE `evaluateRun`: rule findings are
+  // never diff-scoped away by `--changed`, and the evaluator's own
+  // named-scope projection would drop them (they name no obligation).
+  // A case whose test sits outside the sealed run's graded slice is
+  // reported `unproven (outside this run's graded slice)` — visible, not
+  // absent, and never satisfied by a receipt that never covered it.
+  let rulePartition: { blocking: BlockingEntry[]; advisories: BlockingEntry[] } = {
+    blocking: [],
+    advisories: [],
+  };
+  // `ruleCatalog` is non-null here by construction: declaring rules is
+  // exactly what makes the mapping resolution above run. The guard says
+  // so to the type checker rather than asserting it.
+  if (pipeline.businessRules.length > 0 && ruleCatalog !== null) {
+    const runFacts =
+      verifiedRuleReceipt === null
+        ? null
+        : businessRuleRunFacts({
+            result: verifiedRuleReceipt.executionResult,
+            // The AUTHORIZED records `evaluateRun` graded from, never a
+            // raw `records.json` read: a rule case must not be attributed
+            // to evidence the obligation grader rejected.
+            records: evaluated.records,
+            witnessedRunners: witnessedRunnersOf(config),
+            scope: receiptScope(verifiedRuleReceipt.receipt),
+            docsOnly: verifiedRuleReceipt.receipt.docsOnly === true,
+            catalog: ruleCatalog,
+          });
+    rulePartition = partitionBusinessRuleEntries(
+      pipeline.businessRules,
+      gradeBusinessRules({
+        rules: pipeline.businessRules,
+        ruleBindings,
+        inventory: businessRuleInventory(pipeline.graph),
+        runFacts,
+        catalog: ruleCatalog,
+      }).cases,
+    );
+  }
+
   const inScopeSourcePaths =
     diffScoped && scopeDecision.mode === 'changed'
       ? sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog)
@@ -2192,7 +2262,9 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             .filter((file) => changedSourcePaths.has(file))
             .sort(),
         }));
-  const evaluatedBlocking = [...evaluated.blocking, ...receiptBlocking];
+  // Rule findings join the run's OWN blocking set, unconditionally: a
+  // `--changed` run never scopes a declared rule away (plan invariant 8).
+  const evaluatedBlocking = [...evaluated.blocking, ...receiptBlocking, ...rulePartition.blocking];
   const newDebt =
     diffScoped
       ? reportVerdicts
@@ -2236,6 +2308,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       // the entries are already out of `pipeline.policy.blocking`, so
       // the exit code and `check --changed` are untouched.
       ...pipeline.unmatchedRouteAdvisories,
+      // Advisory business rules (plan D5): the same typed cause codes,
+      // in the report's existing advisory channel, out of `blocking` and
+      // out of the exit code — but printed and serialized every run, so a
+      // demoted rule never hides.
+      ...rulePartition.advisories,
     ],
     waiverCounts: evaluated.waiverCounts,
     baseline: baselineReport,

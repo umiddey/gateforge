@@ -34,6 +34,7 @@ export {
   type CoveragePolicyResult,
 } from './coverage.js';
 export {
+  BUSINESS_RULE_CAUSES,
   evaluateBusinessRules,
   isBusinessRuleFinding,
   worstBusinessRuleStatus,
