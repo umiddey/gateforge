@@ -1,6 +1,14 @@
 # Changelog
 
 
+## Unreleased
+
+### Changed
+
+- **One owner answer per fact: four owner-answer files become sections of two documents.** 0.11.0 consolidates what a repository declares. `.gateforge/planes.json` and `.gateforge/endpoints.json` become the `planes:` and `endpoints:` SECTIONS of `.gateforge/classification-policy.yml`; `.gateforge/http-clients.json` and `.gateforge/fastapi.json` become `.gateforge.yml` `scan.httpClients` and `scan.fastapi`; and the four scanner settings (`scanRoots`, `coverage`, `declarations`, `volatileFields`) leave the answers document for a REQUIRED `scan:` section in `.gateforge.yml`. There is NO dual read: a repository that still carries one of the old files is refused BY NAME, with the command that moves it and the file's new home, because silently ignoring the file would silently drop the owner's declaration and quietly change what the engine may conclude. The answers document is an owner-authored review artifact whose comments and reasons ARE the review record, so every write into it is a TEXT-level splice that takes the section's span from the PARSER — a comment at column zero inside the section, a `#` on the key's own line and a trailing comment block after it all survive, and the comment above a key that moves travels with it to its new home. `scan:` is REQUIRED rather than defaulted: these settings decide what a closed-world proof may claim, so a repository that has not answered them fails the config load (exit 2) instead of silently getting the weaker today's-default behaviour.
+- **The hard-vs-archive answer exists ONCE.** `ENDPOINT_CAPABILITIES` lost `crud-delete` and `crud-archive`: a DELETE endpoint's semantics now resolve from the owner's `deleteRules` (and model evidence), so a route and its linked model read one declaration instead of two that could disagree. An `endpoints:` rule that tries to restate the answer is refused by name, not silently ignored.
+- **Upgrading:** `gateforge migrate` previews by default (prints the exact diff, writes nothing) and applies with `--confirm`, one step per moved file. It reads the config LENIENTLY — a repository that needs migrating has no `scan:` yet, which the strict loader refused with "expected object, received undefined" and no next step — and that lenient read exists for this command alone. Every old value is validated by the SAME reader that will read it after the move, BEFORE anything is written, and the composed `scan:` must satisfy the schema a run validates, so a migration can never leave a repository that cannot load. Then re-approve the policy digest once (`gateforge enforcement pin --pin-file <path> --confirm`): the bytes moved between documents are still owner-pinned, so the digest moves exactly once, at the re-pin. A repository that declares none of the moved settings keeps a byte-identical digest.
+- The four pre-0.11 paths are no longer pinned as policy inputs: they do not exist, and the answers they held live in two documents the digest already binds. The generated gate wiring is pinned exactly as before.
 ## 0.10.4
 
 ### Added
@@ -19,6 +27,7 @@
 - **A receipt carried forward no longer reads the raw policy list either.** The same raw term gated the carry-forward over sealed candidate trees, so in an adopted repository the path could never run at all: the parent receipt was verified, the tree difference was proved to lie inside the evaluated paths, and the run still fell through to `--scope changed produced no runnable slice`. What that term has to mean is "no NEW policy debt", and the raw list cannot express it — it is never empty after adoption. It now reads the ADOPTED-baseline view through the same split `applyBaseline` grades with (`splitBlockingByBaseline`, extracted so the guard and the grading cannot disagree): an entry the adoption receipt forgives — by whole-entry fingerprint or by the classification layer's resource identity — is forgiven here too, and an entry adoption never recorded still refuses the carry-forward. Nothing else about the seal moved: the parent receipt must still verify, the two sealed trees must still differ only inside the evaluated paths, and every changed file must still have been scanned.
 
 ## 0.10.2
+
 
 ### Changed
 

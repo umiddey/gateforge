@@ -24,8 +24,8 @@ first commands; the guides cover the walks:
 - [Configuration](#configuration)
 - [Classification policy (`.gateforge/classification-policy.yml`)](#classification-policy-gateforgeclassification-policyyml)
 - [Plugin invocation](#plugin-invocation)
-- [Endpoint plane rules (`.gateforge/planes.json`)](#endpoint-plane-rules-gateforgeplanesjson)
-- [Endpoint capability rules (`.gateforge/endpoints.json`)](#endpoint-capability-rules-gateforgeendpointsjson)
+- [Endpoint plane rules (the `planes:` section)](#endpoint-plane-rules-the-planes-section)
+- [Endpoint capability rules (the `endpoints:` section)](#endpoint-capability-rules-the-endpoints-section)
 - [Proposing planes at init (`gateforge init --planes`)](#proposing-planes-at-init-gateforge-init---planes)
 - [test-gates protocol (G6 surface)](#test-gates-protocol-g6-surface)
 - [Limitations](#limitations)
@@ -50,7 +50,7 @@ first commands; the guides cover the walks:
 
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking` and route-specific `guidance` when relevant). For an endpoint with no plane, ask which boundary owns its data and show the owner-reviewed choices; internality remains owner-only. Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
-| `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. `classify plane` previews or explicitly appends an owner-reviewed endpoint plane rule to the existing `.gateforge/planes.json`; snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
+| `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. `classify plane` previews or explicitly appends an owner-reviewed endpoint plane rule to the existing `planes:` section of the owner-answers document; snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
 | `gateforge classify delete <file\|folder\|glob> <hard\|archive> [--archive-field <key=value>]... --reason <text> [--confirm]` | Preview (default) or explicitly append one owner delete-semantics rule to `.gateforge/classification-policy.yml`: how removal manifests for every model whose source file matches the pattern. `archive` requires at least one `--archive-field` (the owner-owned archived state the run grades removal against); `hard` refuses the flag. The preview writes nothing, prints the exact diff, and quotes the policy-pin consequence; `--confirm` appends the rule at TEXT level — the key at the end of the document when absent, a new `- match:` item at the end of the block when present — so every byte the owner wrote survives (comments, key order, flow sequences), and the resulting document is validated against the pinned schema. A `deleteRules` the command cannot extend safely (flow style, or a value that is not a list of rules) is refused by name. An existing rule for the same source is reported, never shadowed. Declaring is an evidence contract, not an override: contradicting detector evidence still blocks. | 0/2 |
 | `gateforge explain <resourceId\|path> [--json]` | Show one resource's detector signals, classification rules, decision fingerprint, typed blocks, and generated obligations. A repo-relative PATH is also a target: when no resource matches it, the command prints what the file is and what governs it (Gateforge policy input, declared gate input, owner-declared documentation folder, known source of a resource, or an unclassified change) with the steps that attribute it — this is the answer an unmapped `CHANGE_UNMAPPED` file needs. An unknown target stays unknown (exit 1). | 0/1/2 |
 | `gateforge tests discover [--json] [--pytest]` | Inventory existing tests into the derived run-state catalog: static analysis reconciled with native Playwright enumeration (`--list`). Unresolved wrappers, parse errors, and inventory gaps are DATA (never an empty catalog — failed native enumeration is exit 2). `--pytest` additionally collects the configured diagnostic suites' node ids (`--collect-only`). Playwright enumeration runs ONE config (a repo-root config wins; otherwise the alphabetically first config one directory deep), and when the repo holds more than one the runner line names every config, the one used, why, and the ones NOT inventoried. `inventoryComplete=false` means a reconciliation gap (an enumerated-vs-static mismatch, an unresolved case, or a not-inventoried extra config), not a partial success. | 0/2 |
@@ -809,10 +809,9 @@ change the owner re-approves, never something a candidate grants itself.
 lenient default like every other configuration; declare `strict` in
 `.gateforge.yml` to keep the 0.10.3 treatment.
 
-### The pack configs and the generated wiring are owner-pinned
+### The owner answers and the generated wiring are owner-pinned
 
-`.gateforge/planes.json`, `.gateforge/endpoints.json`,
-`.gateforge/http-clients.json` and `.gateforge/fastapi.json` are owner-owned
+The owner-answers document and `.gateforge.yml` are owner-owned
 policy inputs: they are classified as such, so they are never unmapped product
 changes and never expand the evaluation scope — but that exemption is only
 honest while your approved digest binds their bytes. Before 0.10.2 nothing
@@ -1129,27 +1128,81 @@ Enforcement-relevant sections:
   changing the list moves the approved revision. See "Developer and CI
   tooling is owner-declared" above.
 
-## Classification policy (`.gateforge/classification-policy.yml`)
+## Owner answers (`.gateforge/classification-policy.yml`)
 
-The repository-wide deterministic classification inputs. `gateforge init`
-scaffolds the file; every key is an OWNER answer, and the file
-participates in the trusted-policy digest, so changing it re-approves any
-approved policy pin before strict gates run.
+The repository-wide deterministic classification ANSWERS. `gateforge init`
+scaffolds the file; every key is an owner answer, and the file participates
+in the trusted-policy digest, so changing it re-approves any approved policy
+pin before strict gates run.
 
 | Key | What it decides | Shape |
 | --- | --- | --- |
-| `scanRoots` | the files a closed-world proof must cover | repo-root-relative globs |
 | `trustedInternalEntryPoints` | which entry-point categories certify internality | category + patterns + detector |
 | `internalRules` | organization rules for internal resources | `resourceName` / `resourceKind` patterns |
 | `lifecycleRules` | operations that structurally do not exist, for one EXACT resource | exact `<plane>.<resource>` + `disable` |
-| `deleteRules` | how removal manifests, per source glob | `match` glob + `semantics` (+ `archiveFields`) |
+| `deleteRules` | how removal manifests, per source glob — the ONLY place hard-vs-archive is answered | `match` glob + `semantics` (+ `archiveFields`) |
+| `planes` | the plane of a source tree or table set (see [below](#endpoint-plane-rules-the-planes-section)) | `rules[]` of `match`/`tables` + `plane` + `reason` |
+| `endpoints` | capabilities detector facts cannot see (see [below](#endpoint-capability-rules-the-endpoints-section)) | `rules[]` of selectors + `capability` + `reason` |
 | `coverage` | which detector must examine which files before a proof counts | capability + detector + globs (+ `exhaustive`) |
-| `declarations` | the declaration syntax detectors may emit | source strings |
-| `volatileFields` | bookkeeping columns that never satisfy an update | column names |
+
+Since 0.11.0 this document holds ONLY answers. The four scanner settings
+(`scanRoots`, `coverage`, `declarations`, `volatileFields`) live in
+`.gateforge.yml` under [`scan:`](#scanner-settings-gateforgeyml-scan), and
+`.gateforge/planes.json`, `endpoints.json`, `http-clients.json` and
+`fastapi.json` are sections of one of the two documents — run
+`gateforge migrate` to move them (see [Migrating to 0.11](#migrating-to-011)).
 
 Unknown keys, an unknown value, and two rules answering the same target
 are refused (exit 2, fail closed) — the document is an input, never a
 place to smuggle intent past the schema.
+
+## Scanner settings (`.gateforge.yml` `scan:`)
+
+The machine-wide settings that decide what a closed-world proof may claim.
+**REQUIRED**: a repository that has not answered them fails the config load
+(exit 2) instead of silently getting the weaker today's-default behaviour.
+They live in `.gateforge.yml`, so they are inside the owner-approved policy
+digest exactly like the answers they replaced — moving the bytes between
+documents never moves them out of the pin.
+
+| Key | What it decides | Shape |
+| --- | --- | --- |
+| `scanRoots` | the files a closed-world proof must cover | repo-root-relative globs, non-empty |
+| `coverage` | which detector must examine which files before a proof counts | capability + detector + globs (+ `exhaustive`) |
+| `declarations` | the declaration syntax detectors may emit | detector key → source string |
+| `volatileFields` | bookkeeping columns that never satisfy an update | column names |
+| `httpClients` | HTTP client-scan settings (was `.gateforge/http-clients.json`) | `clientSymbols`, `wrapperFunctions`, `urlBuilders`, `sameOriginHosts`, `clientScanRoots`, `serverScanRoots` |
+| `fastapi` | Python import roots (was `.gateforge/fastapi.json`) | `importRoots` |
+
+## Migrating to 0.11
+
+0.11.0 folds four owner-answer FILES into the two documents above. Nothing
+reads the old files: a repository that still carries one is refused **by
+name**, with the command that moves it, because silently ignoring a file
+would silently drop the owner's declaration and quietly change what the
+engine may conclude.
+
+`gateforge migrate` previews by default (prints the exact diff, writes
+nothing) and applies with `--confirm`:
+
+| From | To |
+| --- | --- |
+| `.gateforge/planes.json` | `planes:` section of the answers document |
+| `.gateforge/endpoints.json` | `endpoints:` section of the answers document |
+| `.gateforge/http-clients.json` | `scan.httpClients` in `.gateforge.yml` |
+| `.gateforge/fastapi.json` | `scan.fastapi` in `.gateforge.yml` |
+| `scanRoots` / `coverage` / `declarations` / `volatileFields` at the top of the answers document | `scan:` in `.gateforge.yml` |
+
+Each section is spliced in at TEXT level — every other byte of both
+documents survives, and the comment above a moved key travels with it. Every
+old value is validated by the reader that will read it after the move BEFORE
+anything is written, so a migration can never leave a repository that cannot
+load. The command is idempotent: a repository with nothing to migrate prints
+`nothing to migrate` and exits 0.
+
+**Upgrading:** run `gateforge migrate --confirm`, then re-approve the
+policy digest once (`gateforge enforcement pin --pin-file <path> --confirm`).
+The digest moves exactly once, at the re-pin.
 
 ### Owner-declared delete semantics (`deleteRules`)
 
@@ -1175,7 +1228,7 @@ deleteRules:
 ```
 
 - `match` is a repo-root-relative glob over the SOURCE FILE of the
-  resources it declares for — the same glob engine `.gateforge/planes.json`
+  resources it declares for — the same glob engine the `planes:` section
   uses. It must stay inside the repository.
 - `semantics` is `hard` or `archive`. `archive` REQUIRES non-empty
   `archiveFields`: the owner-owned archived state (e.g.
@@ -1235,7 +1288,7 @@ inputs even when Git ignores them, so an edit to an ignored file still
 invalidates old evidence — the digest is a deliberate superset of the
 scan, never a subset.
 
-## Endpoint plane rules (`.gateforge/planes.json`)
+## Endpoint plane rules (the `planes:` section)
 
 The same declarative plane document the packs apply to business tables
 also carries endpoint-plane evidence. It is consumed by the endpoint
@@ -1274,7 +1327,7 @@ contributions and CONTRADICTS the config plane, the compiler emits both
 assertions so the classifier blocks with `PLANE_CONTRADICTION`; when they
 agree, one plane remains and the endpoint resolves.
 
-Absence of `.gateforge/planes.json` is normal and byte-identical to not
+Absence of the `planes:` section is normal and byte-identical to not
 having this channel; a malformed document (bad JSON, unknown keys, a rule
 without `plane`/`reason`, an absolute or `..`-escaping `match`) fails the
 run closed at startup (exit 2).
@@ -1301,8 +1354,9 @@ gateforge classify plane 'backend/api/v1/*_admin.py' master \
 ```
 
 The default is a dry run: it prints the exact config diff and does not write.
-Add `--confirm` to append the rule to an **existing**
-`.gateforge/planes.json`. The command never creates another trust file,
+Add `--confirm` to append the rule to the **existing** `planes:`
+section of the owner-answers document. The command never creates that
+section,
 replaces a rule, or writes an internality declaration; a source outside the
 repository (absolute, drive-qualified, backslashed, or `..`-escaping) is
 refused, and a new rule that would overlap an existing one with a different
@@ -1316,7 +1370,7 @@ The alternative in `next` is owner-only: use the existing
 the route is genuinely internal. Internal rules still require the existing
 internality certificate; they are not overrides.
 
-## Endpoint capability rules (`.gateforge/endpoints.json`)
+## Endpoint capability rules (the `endpoints:` section)
 
 Capability derivation uses detector FACTS only (method, canonical path,
 handler simple name, schema symbols, resource linkage). A handler whose
@@ -1397,7 +1451,7 @@ allowed values. Answer it by replacing the two marked fields and writing
 the file (append the rule to `rules` when the file already exists), then
 prove it applied with the printed `gateforge explain <endpoint-id>` — its
 `capabilities:` line names the capability and its trace says
-`endpoints.json`.
+`endpoints:`.
 
 The shortest useful file — one exact endpoint, no glob at all — is:
 
@@ -1459,7 +1513,7 @@ and takes `--unmatched-routes block|warn`.
 ## Proposing planes at init (`gateforge init --planes`)
 
 `gateforge init --planes` runs discovery over the repo's own include and
-exclude configuration and PROPOSES `.gateforge/planes.json` from the
+exclude configuration and PROPOSES a `planes:` section from the
 directories the discovered tables live in: one non-overlapping `match`
 glob per model tree, `master` for trees whose path names a control-plane
 segment (`admin`, `master`, `control`, `root`, `operator`), `tenant`
