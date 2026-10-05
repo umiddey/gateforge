@@ -2284,19 +2284,6 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     );
     if (banner.length > 0) report = `${banner.join('\n')}\n${report}`;
   }
-  if (newDebt !== null) {
-    if (format === 'json') {
-      const document = JSON.parse(report) as Record<string, JsonValue>;
-      report = canonicalJson({ ...document, newDebt: { count: newDebt.length, obligationIds: newDebt } });
-    } else if (format === 'text') {
-      const debtLine = humanMessage({
-        detail: `this change adds ${String(newDebt.length)} unproven obligations: ${newDebt.join(', ') || '<none>'}`,
-        type: 'new-debt',
-        nextAction: 'gateforge test-gates --changed',
-      });
-      report = `${report}\n${debtLine}`;
-    }
-  }
   if (options.timing === true) {
     // Per-step wall-clock timings: additive
     // observability behind `--timing`, never an input to any verdict.
@@ -2367,6 +2354,49 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         }
       : {}),
   });
+  // The one footer that answers "what must THIS change still prove, and
+  // which command settles it?". It sits after `decideStrictness` because
+  // it must know whether the run blocks at all: with nothing newly
+  // unproven, a blocking run is blocked for a reason that has nothing to
+  // do with new debt, and the footer used to say so by reporting `0
+  // unproven obligations: <none>` — a blocking entry whose whole text
+  // claimed there was nothing to prove, next to a command that settles a
+  // problem it never described (measured: a commit that upgrades one
+  // dependency and changes nothing else, whose sealed receipt went stale
+  // with the manifest bytes and was refused `evidence-context`). Nothing
+  // about WHAT blocks changes here: only the sentence that names it.
+  if (newDebt !== null) {
+    if (format === 'json') {
+      const document = JSON.parse(report) as Record<string, JsonValue>;
+      report = canonicalJson({ ...document, newDebt: { count: newDebt.length, obligationIds: newDebt } });
+    } else if (format === 'text') {
+      // The evidence-context entries are the ones an owner acts on by
+      // re-sealing, so they are named first and on their own; the rest
+      // follow, in report order, never dropped.
+      const causes = evaluatedBlocking.filter((entry) => entry.detail.startsWith('evidence-context:'));
+      const named = (causes.length > 0 ? causes : evaluatedBlocking)
+        .map((entry) => entry.detail)
+        .join('; ');
+      const debtLine =
+        newDebt.length > 0
+          ? humanMessage({
+              detail: `this change adds ${String(newDebt.length)} unproven obligations: ${newDebt.join(', ')}`,
+              type: 'new-debt',
+              nextAction: 'gateforge test-gates --changed',
+            })
+          : decision.exitCode === 0 || named === ''
+            ? // Nothing is owed and nothing is refused: there is no
+              // remedy to print, and a command here would be advice to
+              // fix a commit that is already committable.
+              ''
+            : humanMessage({
+                detail: `this change adds no NEW unproven obligations; this commit is refused for another reason: ${named}`,
+                type: 'new-debt',
+                nextAction: 'gateforge test-gates --changed',
+              });
+      if (debtLine !== '') report = `${report}\n${debtLine}`;
+    }
+  }
   if (decision.wouldBlock && decision.exitCode !== decision.strictExitCode) {
     // The softened decision is announced on stderr too: a CI log that
     // only keeps stdout must not read as "nothing was wrong".

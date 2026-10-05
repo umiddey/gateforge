@@ -912,8 +912,15 @@ endpoints:
         count: 0,
         obligationIds: [],
       });
+      // This run PASSES: there is no debt to report and nothing to
+      // re-seal, so the text report prints no remedy line at all (0.11.0 —
+      // it used to print `0 unproven obligations: <none>` plus a command,
+      // advice to fix a commit that is already committable; see
+      // `new-debt-cause.test.ts` for the blocked counterpart).
       const text = await runCli(repo, ['check', '--changed']);
-      expect(text.stdout).toContain('this change adds 0 unproven obligations: <none>');
+      expect(text.code).toBe(0);
+      expect(text.stdout).not.toContain('[NEW_DEBT]');
+      expect(text.stdout).not.toContain('unproven obligations: <none>');
     });
   });
 

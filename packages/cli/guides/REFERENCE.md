@@ -1204,6 +1204,19 @@ load. The command is idempotent: a repository with nothing to migrate prints
 policy digest once (`gateforge enforcement pin --pin-file <path> --confirm`).
 The digest moves exactly once, at the re-pin.
 
+**Upgrading Gateforge or dependencies:** do it in that order — upgrade
+first, re-seal second, commit both together. The manifest and the lockfile
+are gate-defining inputs, so they are inside the sealed receipt's
+`inputDigest`: bumping either one (or Gateforge itself) invalidates the
+proof the last run sealed, and the commit is then refused with
+`evidence-context: … inputDigest does not match the current input
+snapshot`. That refusal is CORRECT — old evidence cannot certify changed
+configuration — so re-seal it with `gateforge test-gates --changed`
+(without `--scope changed`: a change set that holds no product source has
+no runnable slice) before committing. Committing the upgrade alone leaves a
+commit that cannot pass; committing the upgrade and its re-seal together
+leaves one that always can.
+
 ### Owner-declared delete semantics (`deleteRules`)
 
 Delete semantics are proven, never guessed. A detector that reads the
