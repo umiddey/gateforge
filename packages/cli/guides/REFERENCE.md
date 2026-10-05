@@ -1140,7 +1140,7 @@ pin before strict gates run.
 | `trustedInternalEntryPoints` | which entry-point categories certify internality | category + patterns + detector |
 | `internalRules` | organization rules for internal resources | `resourceName` / `resourceKind` patterns |
 | `lifecycleRules` | operations that structurally do not exist, for one EXACT resource | exact `<plane>.<resource>` + `disable` |
-| `deleteRules` | how removal manifests, per source glob — the ONLY place hard-vs-archive is answered | `match` glob + `semantics` (+ `archiveFields`) |
+| `deleteRules` | how removal manifests, per source glob (a RESOURCE's own answer) | `match` glob + `semantics` (+ `archiveFields`) |
 | `planes` | the plane of a source tree or table set (see [below](#endpoint-plane-rules-the-planes-section)) | `rules[]` of `match`/`tables` + `plane` + `reason` |
 | `endpoints` | capabilities detector facts cannot see (see [below](#endpoint-capability-rules-the-endpoints-section)) | `rules[]` of selectors + `capability` + `reason` |
 | `coverage` | which detector must examine which files before a proof counts | capability + detector + globs (+ `exhaustive`) |
@@ -1227,6 +1227,16 @@ explain <resource>` names the resource and its source file). `lifecycleRules`
 can DISABLE delete for one exact resource; declaring semantics is the
 other half of the answer, and it needs a pattern because one declaration
 usually covers a whole model tree.
+
+`deleteRules` are the answer for a RESOURCE — their `match` names that
+resource's source file, so one declaration answers every DELETE route
+linked to it. They are not the answer for a DELETE ROUTE THAT LINKS NO
+RESOURCE (a link-row teardown, a draft discard, a cache purge): there is
+no resource to match a glob against. Declare those in the
+[`endpoints:` section](#endpoint-capability-rules-the-endpoints-section)
+as `crud-archive` / `crud-delete`, which needs no model. A DELETE with
+neither stays `ENDPOINT_SEMANTICS_UNRESOLVED` — a word like `archive` in
+a handler name is not evidence about a model that is not there.
 
 ```yaml
 deleteRules:

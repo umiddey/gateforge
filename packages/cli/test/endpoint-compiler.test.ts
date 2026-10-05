@@ -288,6 +288,33 @@ describe('endpoint capabilities (facts decide, methods are candidates)', () => {
     ).toBe(true);
   });
 
+  it('a DELETE whose handler merely SOUNDS like a delete stays unresolved without a linked model', () => {
+    // 0.10.4 read the archive/hard words in the handler symbol ONLY inside
+    // the branch that requires a linked business resource: without one
+    // there is nothing for the word to be evidence ABOUT, and the route
+    // fell through to "no positive capability evidence" and blocked. A
+    // DELETE that no resource links is exactly the shape a link-row
+    // teardown or a draft discard has, so this must not be resolved by a
+    // substring.
+    for (const handlerSymbol of [
+      'app.archive_property_activity_schedule',
+      'app.permanently_remove_draft',
+    ]) {
+      const route = routeFact('DELETE', '/api/v1/property-activity-schedules/{}', { handlerSymbol });
+      const { inventory, contribution: compiled } = compileEndpointContribution([
+        contribution([route]),
+      ]);
+      const endpoint = inventory.endpoints[0];
+      expect(endpoint?.linkedResourceName, handlerSymbol).toBeNull();
+      expect(endpoint?.capabilities, handlerSymbol).not.toContain('crud-archive');
+      expect(endpoint?.capabilities, handlerSymbol).not.toContain('crud-delete');
+      expect(
+        compiled.unresolved.some((entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED'),
+        handlerSymbol,
+      ).toBe(true);
+    }
+  });
+
   it('accepts the linked model pack delete-semantics signal as positive evidence', () => {
     const route = routeFact('DELETE', '/api/v1/accounts/{account_id}', {
       handlerSymbol: 'app.archive_account',
@@ -549,11 +576,11 @@ describe('linkage corroboration (path-name coincidence never links)', () => {
   });
 
   it('uses declared DELETE semantics on a plural collection to classify its linked singular model', () => {
-    // D0 "one answer per fact": since 0.11 the hard-vs-archive answer
-    // exists ONCE, in the owner's `deleteRules` — so a DELETE route's
-    // semantics come from the same declaration its linked model's do.
+    // The owner's hard/archive answer for a RESOURCE, declared in
+    // `deleteRules` against that resource's source file, reaches the
+    // DELETE routes linked to it — the same declaration its model does.
     const deleteRules = [
-      { match: 'backend/routes.py', semantics: 'hard' as const, reason: 'the handler deletes the product row and commits' },
+      { match: 'backend/models/product.py', semantics: 'hard' as const, reason: 'the handler deletes the product row and commits' },
     ];
     const business = businessTable('product');
     const modelSignal = {
@@ -1444,20 +1471,25 @@ describe('endpoint capability config channel (the `endpoints:` section)', () => 
     ).toBe(true);
   });
 
-  it('an owner archive answer resolves DELETE semantics without model evidence', () => {
-    // D0 "one answer per fact": the hard-vs-archive answer lives in
-    // `deleteRules` only — `endpoints:` cannot restate it.
-    const compiled = compileEndpointContribution([contribution([deleteRoute()])], {
-      deleteRules: [
-        {
-          match: 'backend/api/v1/accounts.py',
-          semantics: 'archive',
-          archiveFields: { archived_at: 'now()' },
-          reason: 'removes set archived_at via the service; soft delete by design',
-        },
-      ],
-    });
+  it('an owner archive answer resolves DELETE semantics on a LINKED resource', () => {
+    // `deleteRules` are keyed by a RESOURCE's source glob, so they answer
+    // the DELETE routes that link one. The declaration in `endpoints:` is
+    // the channel for the routes that link none.
+    const compiled = compileEndpointContribution(
+      [contribution([deleteRoute()]), businessTable('account')],
+      {
+        deleteRules: [
+          {
+            match: 'backend/models/account.py',
+            semantics: 'archive',
+            archiveFields: { archived_at: 'now()' },
+            reason: 'removes set archived_at via the service; soft delete by design',
+          },
+        ],
+      },
+    );
     const endpoint = compiled.inventory.endpoints[0];
+    expect(endpoint?.linkedResourceName).toBe('account');
     expect(endpoint?.capabilities).toContain('crud-archive');
     expect(endpoint?.deleteSemantics).toBe('archive');
     expect(endpoint?.capabilityTrace).toContainEqual({
@@ -1470,21 +1502,59 @@ describe('endpoint capability config channel (the `endpoints:` section)', () => 
     ).toBe(false);
   });
 
-  it('the endpoints: section refuses to restate the hard-vs-archive answer', () => {
-    expect(() =>
-      compileEndpointContribution([contribution([deleteRoute()])], {
-        endpoints: {
-          rules: [
-            {
-              match: 'backend/api/v1/accounts.py',
-              method: 'DELETE',
-              capability: 'crud-archive',
-              reason: 'a second place to answer the same fact',
-            },
-          ],
+  it('a deleteRule matching only the ROUTE source does not resolve an unlinked DELETE', () => {
+    // 0.11.0 matched `deleteRules` against a route's own source file, so a
+    // DELETE that links no resource resolved here — a route 0.10.4 left
+    // blocked. `deleteRules` name a RESOURCE, so they are consulted only
+    // where there is one.
+    const compiled = compileEndpointContribution([contribution([deleteRoute()])], {
+      deleteRules: [
+        {
+          match: 'backend/api/v1/accounts.py',
+          semantics: 'archive',
+          archiveFields: { archived_at: 'now()' },
+          reason: 'removes set archived_at via the service; soft delete by design',
         },
-      }),
-    ).toThrow(/capability must be one of/);
+      ],
+    });
+    const endpoint = compiled.inventory.endpoints[0];
+    expect(endpoint?.linkedResourceName).toBeNull();
+    expect(endpoint?.capabilities).toEqual([]);
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED'),
+    ).toBe(true);
+  });
+
+  it('a declared crud-archive resolves an UNLINKED DELETE, and says so', () => {
+    // The declaration is the one delete answer that needs no model: this
+    // route links no business resource, so the resource-keyed
+    // `deleteRules` cannot express it at all. 0.11.0 removed the
+    // capability and left such a route unanswerable — and made an
+    // existing pre-0.11 document unmigratable.
+    const compiled = compileEndpointContribution([contribution([deleteRoute()])], {
+      endpoints: {
+        rules: [
+          {
+            match: 'backend/api/v1/accounts.py',
+            method: 'DELETE',
+            capability: 'crud-archive',
+            reason: 'the handler sets archived_at; the row is never removed',
+          },
+        ],
+      },
+    });
+    const endpoint = compiled.inventory.endpoints[0];
+    expect(endpoint?.linkedResourceName).toBeNull();
+    expect(endpoint?.capabilities).toContain('crud-archive');
+    expect(endpoint?.deleteSemantics).toBe('archive');
+    expect(endpoint?.capabilityTrace).toContainEqual({
+      capability: 'crud-archive',
+      rule: 'DELETE_DECLARED',
+      evidence: 'declared delete semantics: the handler sets archived_at; the row is never removed',
+    });
+    expect(
+      compiled.contribution.unresolved.some((entry) => entry.code === 'ENDPOINT_SEMANTICS_UNRESOLVED'),
+    ).toBe(false);
   });
 
   it('method-scoped rules never leak across methods', () => {

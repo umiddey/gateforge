@@ -22,9 +22,12 @@
  *   `ENDPOINT_CAPABILITY_CONTRADICTION` blocking entry and applies
  *   nothing — never first-rule-wins.
  *
- * The hard-vs-archive DELETE answer is NOT here (0.11.0, "one answer per
- * fact"): it lives in the owner's `deleteRules`, which the compiler
- * resolves per endpoint and per linked resource.
+ * A declared `crud-delete`/`crud-archive` is the ONE delete answer that
+ * needs no linked model, so it lives here and here only for that case.
+ * It is not redundant with the owner's resource-keyed `deleteRules`:
+ * `deleteRules` match a RESOURCE's source glob, so a DELETE route that
+ * links no resource (a link-row teardown, a draft discard) cannot be
+ * expressed there at all.
  */
 
 import { globMatch } from '@gate-forge/core';
@@ -32,12 +35,13 @@ import type { HttpMethod } from '@gate-forge/http-contract';
 
 /**
  * The closed capability vocabulary a rule may assert — exactly the
- * compiler's own rule vocabulary for WHAT an endpoint is (path/handler
- * shapes plus the corroborated crud fallbacks).
- *
- * The two DELETE semantics are NOT here (0.11.0, "one answer per fact"):
- * hard-vs-archive exists once, in the owner's `deleteRules`. A rule that
- * tries to state it is refused by name rather than silently ignored.
+ * compiler's own rule vocabulary (path/handler shapes plus the
+ * corroborated crud fallbacks and both delete semantics). A declared
+ * `crud-delete`/`crud-archive` on a DELETE endpoint resolves the
+ * archive-vs-hard question the linked model could not prove — including
+ * when NO model links the route at all, which is exactly what a
+ * link-row teardown or a draft discard is, and what the resource-keyed
+ * `deleteRules` cannot express.
  */
 export const ENDPOINT_CAPABILITIES = [
   'health-operations',
@@ -53,6 +57,8 @@ export const ENDPOINT_CAPABILITIES = [
   'crud-create',
   'crud-read',
   'crud-update',
+  'crud-delete',
+  'crud-archive',
 ] as const;
 
 /** One declared endpoint capability. */

@@ -435,26 +435,6 @@ const SEARCH_SHAPED = (c: CapabilityContext): boolean =>
   CAPABILITY_RULES.find((rule) => rule.capability === 'search-query')?.test(c) ?? false;
 
 /** Deletes classify separately: semantics need positive evidence. */
-/**
- * The owner's hard/archive answer for one endpoint, from its `deleteRules`
- * matched over the endpoint's OWN route source files — the same input the
- * classifier matches them against for the endpoint resource, so a route
- * and its resource read one declaration. Returns null when no rule matches
- * or when matching rules disagree (never pick one).
- */
-function ownerSemanticsForEndpoint(
-  routeSources: readonly string[],
-  deleteRules: readonly DeleteRule[] | undefined,
-): 'hard' | 'archive' | null {
-  if (deleteRules === undefined || deleteRules.length === 0) return null;
-  let answer: 'hard' | 'archive' | null = null;
-  for (const rule of deleteRules) {
-    if (!routeSources.some((source) => globMatch(source, rule.match))) continue;
-    if (answer !== null && answer !== rule.semantics) return null; // contradictory
-    answer = rule.semantics;
-  }
-  return answer;
-}
 function classifyDelete(
   routes: readonly HttpContractFact[],
   deleteSemantics: 'hard' | 'archive' | null,
@@ -578,17 +558,16 @@ export interface EndpointCompilerOptions {
    * (the service-delegation escape hatch the `ENDPOINT_SEMANTICS_UNRESOLVED`
    * message promises).
    *
-   * Since 0.11.0 it no longer carries `crud-delete`/`crud-archive`: the
-   * hard-vs-archive answer exists ONCE, in `deleteRules` (D0).
+   * A rule may assert `crud-delete`/`crud-archive`: on a DELETE route
+   * that is the answer, with or without a linked model.
    */
   readonly endpoints?: unknown;
   /**
-   * The owner's `deleteRules` — the ONE place hard/archive is answered.
-   * Matched against a linked resource's SOURCE FILE with the same glob
-   * engine the classifier uses, so a DELETE route resolves its semantics
-   * from the same declaration the resource does. Absent = no owner
-   * answer, and a DELETE endpoint stays unresolved without model
-   * evidence.
+   * The owner's `deleteRules`: the hard/archive answer for a RESOURCE,
+   * matched against the endpoint's own route sources and then the linked
+   * resource's, with the same glob engine the classifier uses. Absent =
+   * no owner answer, and an undeclared DELETE route stays unresolved
+   * without model evidence.
    */
   readonly deleteRules?: readonly DeleteRule[];
 }
@@ -986,35 +965,41 @@ export function compileEndpointContribution(
       capabilityTrace.push({ capability: hit.capability, rule: 'endpoints:', evidence: `declared: ${hit.reason}` });
     }
     let deleteSemantics: 'hard' | 'archive' | null = null;
-    // The owner's OWN answer for this endpoint's delete semantics, when
-    // one resolved (model evidence is NOT an owner answer and mints no
-    // declaration signal below). Absent = the endpoint's semantics came
-    // from the handler text or the linked model alone.
-    let declaredDelete: 'hard' | 'archive' | undefined;
-    // D0 "one answer per fact": `endpoints:` no longer asserts
-    // crud-delete/crud-archive. The hard-vs-archive answer is the owner's
-    // `deleteRules` (and model evidence). Resolve from the owner's rules
-    // matched over the endpoint's own route sources (the same input the
-    // classifier matches them against for the endpoint resource), else the
-    // linked resource's owner answer, else model evidence.
-    const ownerSemantics = ownerSemanticsForEndpoint(
-      endpointRoutes.map((route) => route.source.file),
-      options.deleteRules,
+    // A declared crud-delete/crud-archive is positive human evidence: it
+    // resolves archive-vs-hard without model declarations and without
+    // requiring linkage — the only channel that can, since the owner's
+    // `deleteRules` are keyed by a RESOURCE's source glob and a DELETE
+    // route that links no resource (a link-row teardown, a draft
+    // discard) has none. The evidence channel below stays for the
+    // undeclared case.
+    const declaredDelete = declaredHits.find(
+      (hit) => hit.capability === 'crud-delete' || hit.capability === 'crud-archive',
     );
-    if (method === 'DELETE') {
-      const fromOwner =
-        ownerSemantics ??
-        (linkedResourceName !== null ? ownerDeleteSemanticsByName.get(linkedResourceName) ?? null : null);
-      declaredDelete = fromOwner ?? undefined;
-      const fromModel =
-        linkedResourceName !== null ? deleteSemanticsByName.get(linkedResourceName) ?? null : null;
+    if (declaredDelete !== undefined) {
+      deleteSemantics = declaredDelete.capability === 'crud-archive' ? 'archive' : 'hard';
+      capabilityTrace.push({
+        capability: declaredDelete.capability,
+        rule: 'DELETE_DECLARED',
+        evidence: `declared delete semantics: ${declaredDelete.reason}`,
+      });
+    } else if (method === 'DELETE' && linkedResourceName !== null) {
+      // The owner's own answer for the LINKED resource (`deleteRules`
+      // matched over its source files), then the model's own
+      // delete-semantics evidence; both are evidence ABOUT that resource,
+      // which is why this branch requires a linkage at all. Absent both,
+      // the archive/hard words in the handler symbol would be the only
+      // thing left — and for a route with no linked model a substring in
+      // a handler name is not evidence about anything, so the route stays
+      // unresolved exactly as 0.10.4 left it.
+      const fromOwner = ownerDeleteSemanticsByName.get(linkedResourceName) ?? null;
+      const fromModel = deleteSemanticsByName.get(linkedResourceName) ?? null;
       const classified = classifyDelete(endpointRoutes, fromOwner ?? fromModel);
       if (classified.capability !== null) {
         capabilities.push(classified.capability);
         capabilityTrace.push(...classified.trace);
         if (classified.capability === 'crud-archive') deleteSemantics = 'archive';
         if (classified.capability === 'crud-delete') deleteSemantics = 'hard';
-      } else if (linkedResourceName !== null) {
+      } else {
         // Archive vs hard delete stays unresolved without positive semantics.
         const key = `delete-semantics:${identity}`;
         if (!seenEndpointUnresolved.has(key)) {
@@ -1105,17 +1090,17 @@ export function compileEndpointContribution(
     signals.push(endpointSignal('identity', ['method', 'path'], record));
     if (linkedResourceName !== null) {
       signals.push(endpointSignal('adapter-binding', linkedResourceName, record));
-      if (method === 'DELETE' && declaredDelete !== undefined) {
+      if (method === 'DELETE' && deleteSemantics !== null) {
         signals.push({
           schemaVersion: 1,
           target: { resourceName: linkedResourceName },
           dimension: 'delete-semantics',
-          // The OWNER's answer (`deleteRules`), not whatever the handler
-          // text or the model happened to imply: the signal exists so the
-          // classifier sees one declaration of the owner's delete
-          // semantics, next to the resource's own, and can block when the
-          // two contradict.
-          assertion: declaredDelete,
+          // The owner's DECLARED answer for this route (`endpoints:`), or
+          // its `deleteRules` — either way a declaration, never the handler
+          // text or the model's own reading: the signal exists so the
+          // classifier sees one declaration next to the resource's own and
+          // can block when the two contradict.
+          assertion: deleteSemantics,
           basis: 'declaration',
           source: `${ENDPOINT_COMPILER_DETECTOR_ID}:config`,
           location: record.routes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },

@@ -395,8 +395,10 @@ export const ClassificationPolicySchema = z
      * DELETE_SEMANTICS_UNRESOLVED, never remove an obligation: detector
      * evidence that disagrees still blocks as a contradiction.
      *
-     * This is the ONE place the hard/archive answer exists (0.11.0);
-     * `endpoints:` no longer takes `crud-delete`/`crud-archive`.
+     * This is the hard/archive answer for a RESOURCE: the rule's `match`
+     * glob names a source file, so a DELETE route that links no resource
+     * (a link-row teardown, a draft discard) cannot be answered here —
+     * that case is declared as `crud-delete`/`crud-archive` in `endpoints:`.
      */
     deleteRules: DeleteRulesSchema.optional(),
     /** Owner-declared data-plane rules (was `.gateforge/planes.json`). */

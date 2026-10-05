@@ -323,7 +323,7 @@ const CLASSIFIER_BLOCK_ANSWERS: Readonly<Record<string, string>> = {
   ADAPTER_MISSING:
     '`gateforge adapters scaffold` — run it, then review the adapter it writes for this resource',
   DELETE_SEMANTICS_UNRESOLVED:
-    "declare what the endpoint does — `gateforge classify delete <file|folder|glob> <hard|archive> --reason '<why>' --confirm` writes the owner's deleteRules entry, the ONE place hard-vs-archive is answered",
+    "declare what the endpoint does — a 'crud-archive' or 'crud-delete' rule in the endpoints: section of '.gateforge/classification-policy.yml' (works with no linked model), or `gateforge classify delete <file|folder|glob> <hard|archive> --reason '<why>' --confirm` to write the owner's deleteRules entry",
   PLANE_UNRESOLVED:
     "gateforge classify plane <file|folder|glob> <tenant|master|global> --reason '<why>' --confirm — or change the existing rule for that source in the planes: section of '.gateforge/classification-policy.yml'",
 };
@@ -482,23 +482,41 @@ function endpointSemanticsGuidance(detail: string, graph: ResourceGraph): string
   const method = route.attributes['method'];
   const canonicalPath = route.attributes['canonicalPath'];
   if (typeof method !== 'string' || typeof canonicalPath !== 'string') return [];
-  // A DELETE is answered ONCE, in the owner's `deleteRules` (0.11.0); every
-  // other verb is asked what the endpoint DOES at all.
+  // A DELETE is asked one question (archive or really delete); every
+  // other verb is asked what the endpoint DOES at all. Both questions are
+  // answerable in the SAME section — `endpoints:` — and the DELETE one
+  // needs no linked model, so it is the only way to answer a DELETE route
+  // that links no resource.
   const choices =
     method === 'DELETE'
       ? [
-          'one command, not a rule: `gateforge classify delete <file|folder|glob> <hard|archive> --reason "<why>" --confirm`',
-          'hard (the record is really removed) or archive (it survives, with an archived/deactivated state)',
+          "'crud-archive' (the record survives — the handler only sets an archived/deactivated state)",
+          "'crud-delete' (the record is really removed)",
         ]
       : [`one of: ${ENDPOINT_CAPABILITIES.join(', ')}`];
   if (method === 'DELETE') {
     return [
       `about this block: ${method} ${canonicalPath} deletes a resource, but nothing Gateforge can read in the code`,
-      'says whether the record survives — and the owner answers that exactly once, per source, in `deleteRules`.',
-      'Run exactly this command, then run `gateforge next` again:',
-      `gateforge classify delete ${shellQuote(canonicalPath)} <hard|archive> --reason "<owner-written reason and evidence>" --confirm`,
-      'Two `deleteRules` entries that match the same source with different semantics are a contradiction and',
-      'resolve to nothing — never edit one to shadow the other.',
+      'says whether the record survives — and only the owner can say.',
+      `The answer is one rule in the owner-reviewed \`endpoints:\` section of '${OWNER_ANSWERS_PATH}'. Add it there`,
+      '(add the section with exactly these contents if it is absent; append the rule to "rules" if it is there):',
+      '```json',
+      '{',
+      '  "rules": [',
+      '    {',
+      `      "method": ${JSON.stringify(method)},`,
+      `      "paths": [${JSON.stringify(canonicalPath)}],`,
+      '      "capability": "<crud-archive or crud-delete>",',
+      '      "reason": "<owner-written reason and evidence>"',
+      '    }',
+      '  ]',
+      '}',
+      '```',
+      'The same answer can be declared per SOURCE instead, which is what a repository with many',
+      'routes wants: `gateforge classify delete <file|folder|glob> <hard|archive> --reason "<why>" --confirm`',
+      'writes the owner\'s `deleteRules` entry. Two `deleteRules` entries that match the same source',
+      'with different semantics are a contradiction and resolve to nothing — never edit one to shadow',
+      'the other.',
       ...(route.id === null
         ? []
         : [`Then prove the answer applied — \`gateforge explain ${shellQuote(route.id)}\``]),
