@@ -70,6 +70,9 @@ function fixtureConfig(include: string[]): GateforgeConfig {
     adapters: '.gateforge/adapters',
     waivers: '.gateforge/waivers',
     baselines: '.gateforge/baselines/obligations.json',
+    // 0.11.0: the REQUIRED `scan:` section (was the answers document's
+    // scanner keys). `scanRoots` rides the `include` globs.
+    scan: { scanRoots: include, declarations: { internality: 'gateforge:internal' }, volatileFields: [] },
     changed: { provider: 'auto' },
     witness: { maxDurationSeconds: 5 },
     clock: { mode: 'fixed', fixedAt: '2026-01-01T00:00:00.000Z' },
