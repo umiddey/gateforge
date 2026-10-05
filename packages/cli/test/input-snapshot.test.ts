@@ -430,19 +430,23 @@ describe('input snapshot (§11.2)', () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       const baseline = filesDigest(repo);
-      // Pack configs absent → explicit absence entries, present → hashed.
+      // The two consolidated owner documents are inputs of their own
+      // (0.11.0): the scanner settings in `.gateforge.yml` and the
+      // answers in `.gateforge/classification-policy.yml`. The removed
+      // pack-config files are not listed AT ALL — not even as an explicit
+      // absence — because no command reads them anymore and a snapshot
+      // that named them would keep a dead path alive in every digest.
       const snapshot = computeInputSnapshot({
         cwd: repo.root,
         config: fixtureConfig(repo),
         stateDir: resolveStateDir(repo.root),
       });
-      expect(
-        snapshot.files.some(
-          (entry) => entry.type === 'absent' && entry.path.includes('.gateforge/planes.json'),
-        ),
-      ).toBe(true);
+      const snapshotPaths = snapshot.files.map((entry) => entry.path);
+      expect(snapshotPaths).toContain('.gateforge.yml');
+      expect(snapshotPaths).toContain('.gateforge/classification-policy.yml');
+      expect(snapshotPaths.some((path) => path.includes('planes.json'))).toBe(false);
+      expect(snapshotPaths.some((path) => path.includes('endpoints.json'))).toBe(false);
       repo.writeFiles({
-        '.gateforge/planes.json': JSON.stringify({ rules: [] }),
         '.gateforge/waivers/scope.json': JSON.stringify({ schemaVersion: 1 }),
         'package-lock.json': JSON.stringify({ lockfileVersion: 3, packages: {} }),
       });

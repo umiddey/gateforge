@@ -1,9 +1,10 @@
-import { cpSync, mkdirSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo } from '@gate-forge/core';
+import { OWNER_ANSWERS_PATH, withTempRepo } from '@gate-forge/core';
 import { runCli } from './helpers.js';
+import { setSection } from '../src/yaml-section.js';
 
 const EXAMPLE_ROOT = fileURLToPath(new URL('../../../example/', import.meta.url));
 const WORKSPACE_NODE_MODULES = join(EXAMPLE_ROOT, '..', 'node_modules');
@@ -45,7 +46,19 @@ describe('example first run', () => {
       const next = await runCli(repo, ['next']);
       expect(next.code, `${next.stdout}\n${next.stderr}`).toBe(0);
       expect(next.stdout).toContain('next: none — clean');
-      repo.writeFiles({ '.gateforge/planes.json': '{"rules":[]}\n' });
+      // The plane answer is the `planes:` SECTION of the owner-answers
+      // document (0.11.0; it was `.gateforge/planes.json`). Emptying the
+      // section — through the production section writer, so the fixture
+      // cannot build a document a run would refuse — leaves the routes'
+      // plane unresolved again.
+      repo.writeFiles({
+        [OWNER_ANSWERS_PATH]: setSection(
+          readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8'),
+          ['planes'],
+          { rules: [] },
+          OWNER_ANSWERS_PATH,
+        ),
+      });
       const unresolved = await runCli(repo, ['next']);
       expect(unresolved.code).toBe(1);
       expect(unresolved.stdout).toContain('which data plane owns its records?');

@@ -41,6 +41,31 @@ lifecycleRules:
 `;
 }
 
+/**
+ * The plane answer every fixture table shares. Since 0.11.0 the plane
+ * rules are the `planes:` SECTION of the one owner-answers document, so a
+ * fixture that rewrites that document has to carry the section along
+ * instead of leaving it behind in a file no command reads.
+ */
+const PLANES_SECTION = `planes:
+  rules:
+    - tables:
+        - accounts
+        - orders
+      plane: tenant
+      reason: fixture data
+`;
+
+/**
+ * Appends the fixture's plane answer to an owner-answers document.
+ *
+ * @param rules the answers document written so far
+ * @returns the same document with its `planes:` section
+ */
+function withPlanesSection(rules: string): string {
+  return `${rules}${rules.endsWith('\n') ? '' : '\n'}${PLANES_SECTION}`;
+}
+
 function installBundledFixture(repo: Parameters<typeof installFixture>[0], rules: string): void {
   repo.writeFiles({
     '.gateforge.yml': `schemaVersion: 1
@@ -76,10 +101,9 @@ clock:
   fixedAt: '2026-01-01T00:00:00.000Z'
 `,
     '.gateforge/policies.yml': CRUD_POLICIES_YML,
-    '.gateforge/classification-policy.yml': rules,
-    '.gateforge/planes.json': JSON.stringify({
-      rules: [{ tables: ['accounts', 'orders'], plane: 'tenant', reason: 'fixture data' }],
-    }),
+    // 0.11.0: the plane answer is the `planes:` SECTION of the one
+    // owner-answers document (it was `.gateforge/planes.json`).
+    '.gateforge/classification-policy.yml': withPlanesSection(rules),
     '.gateforge/adapters/tenant.accounts.mjs': 'export default {}\n',
     '.gateforge/adapters/tenant.orders.mjs': 'export default {}\n',
     'models/accounts.py': `from sqlalchemy import Column, Integer
@@ -399,8 +423,8 @@ clock:
 `,
         // The coverage rule narrows to `models/orders.py` alone (above), so
         // `models/accounts.py` is an INCLUDED file no detector covers.
-        '.gateforge/classification-policy.yml': lifecyclePolicy(
-          'included uncovered model must block',
+        '.gateforge/classification-policy.yml': withPlanesSection(
+          lifecyclePolicy('included uncovered model must block'),
         ),
       });
 
@@ -460,8 +484,8 @@ clock:
       }).inputDigest;
 
       repo.writeFiles({
-        '.gateforge/classification-policy.yml': lifecyclePolicy(
-          'append-only accounting history with no updates',
+        '.gateforge/classification-policy.yml': withPlanesSection(
+          lifecyclePolicy('append-only accounting history with no updates'),
         ),
       });
       const second = await runFixture(repo.root);

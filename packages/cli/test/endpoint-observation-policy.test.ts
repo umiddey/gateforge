@@ -98,9 +98,16 @@ trustedInternalEntryPoints: []
 internalRules: []
 `;
 
-const PLANES_JSON = JSON.stringify({
-  rules: [{ match: 'backend/api/v1/**', plane: 'tenant', reason: 'tenant router tree' }],
-});
+/**
+ * The plane answer, as the `planes:` SECTION of the owner-answers
+ * document. Since 0.11.0 it is no longer a `.gateforge/planes.json` file.
+ */
+const PLANES_SECTION = `planes:
+  rules:
+    - match: backend/api/v1/**
+      plane: tenant
+      reason: tenant router tree
+`;
 
 /** The transport-only observation scope: `consumed` (today) or `all`. */
 type ObservationScope = 'absent' | 'consumed' | 'all';
@@ -133,8 +140,7 @@ function installRoutesRepo(repo: TempRepo, scope: ObservationScope, routes: read
   repo.writeFiles({
     '.gateforge.yml': configYml({ include: "['backend/**/*.py']" }),
     '.gateforge/policies.yml': policiesYml(scope),
-    '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,
-    '.gateforge/planes.json': PLANES_JSON,
+    '.gateforge/classification-policy.yml': `${CLASSIFICATION_POLICY_YML}${PLANES_SECTION}`,
     'plugin.mjs': routesPluginSource(routes),
     'backend/api/v1/accounts.py': '# router fixture\n',
   });
@@ -154,11 +160,13 @@ interface ReportVerdict {
  * today, byte for byte. Regenerate ONLY by hand-verifying the diff.
  *
  * Re-pinned ONCE by 0.11.0: the ONLY field that moved is `inputDigest`,
- * because `.gateforge.yml` gained the REQUIRED `scan:` section (the
- * scanner settings that moved out of the answers document) and those
- * bytes are inputs. Every other field — the obligation set, the
- * verdicts, the summary, the advisories — is unchanged, which is exactly
- * the invariant this case exists to pin.
+ * because both owner documents are inputs and both moved: `.gateforge.yml`
+ * gained the REQUIRED `scan:` section (the scanner settings that left the
+ * answers document) and the plane answer moved out of
+ * `.gateforge/planes.json` into the `planes:` section of that same
+ * answers document. Every other field — the obligation set, the verdicts,
+ * the summary, the advisories — is unchanged, which is exactly the
+ * invariant this case exists to pin.
  */
 const GOLDEN_ABSENT = readFileSync(
   join(

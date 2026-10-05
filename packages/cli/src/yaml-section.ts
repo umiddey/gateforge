@@ -245,19 +245,27 @@ function indentOf(depth: number): string {
 }
 
 /**
- * Renders one section and every missing level above it: `key:` plus a body
+ * Renders one section and every MISSING level above it: `key:` plus a body
  * indented one level deeper. An empty mapping renders inline
  * (`key: {}`), so a written section never leaves a dangling key behind.
+ *
+ * A level the document already declares is NOT rendered: writing
+ * `scan.httpClients` into a config that already has a `scan:` block must
+ * append the leaf inside it, and rendering the whole chain there would
+ * nest `scan:` inside `scan:` — a document that parses as the wrong shape
+ * and that the writer's own read-back check then refuses.
  *
  * @param keyPath - the section's key path.
  * @param value - the plain-data section body.
  * @param comments - per-key comment lines carried along by a move.
+ * @param declaredDepth - how many leading levels the document already has.
  * @returns the rendered lines, without a trailing newline.
  */
 function renderSection(
   keyPath: readonly string[],
   value: unknown,
   comments: ReadonlyMap<string, readonly string[]>,
+  declaredDepth = 0,
 ): string[] {
   const key = keyPath[keyPath.length - 1];
   if (key === undefined) {
@@ -277,7 +285,7 @@ function renderSection(
   // The body of a nested section is indented twice: once for the parent key
   // it sits under, once for its own body.
   let lines: string[] = leaf;
-  for (let depth = keyPath.length - 1; depth >= 1; depth -= 1) {
+  for (let depth = keyPath.length - 1; depth >= declaredDepth + 1; depth -= 1) {
     const parent = keyPath[depth - 1];
     if (parent === undefined) continue;
     lines = [`${parent}:`, ...lines.map((line) => (line === '' ? '' : `  ${line}`))];
@@ -343,11 +351,12 @@ export function setSection(
     throw new UsageError(`${path}: a section needs at least one key`);
   }
   const span = sectionSpanOrRefuse(text, keyPath, path);
-  const rendered = renderSection(keyPath, value, comments);
   // The longest existing prefix of the path: where a missing section is
-  // appended, and how deep its body must be indented.
+  // appended, how deep its body must be indented, and how much of the
+  // chain is already in the document (so it is not rendered twice).
   const existing = longestExistingPrefix(text, keyPath, path);
   const depth = existing?.length ?? 0;
+  const rendered = renderSection(keyPath, value, comments, depth);
   const indented = rendered.map((line) => (line === '' ? '' : `${indentOf(depth)}${line}`));
   let next: string;
   if (span !== null) {

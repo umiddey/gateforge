@@ -216,7 +216,6 @@ describe('route-folder plane proposals (problem 13)', () => {
       // to begin with, and the pure call left it that way.
       expect(proposal?.linkedModels).toEqual(['accounts']);
       expect(existsSync(join(repo.root, OWNER_ANSWERS_PATH))).toBe(false);
-      expect(existsSync(join(repo.root, '.gateforge/planes.json'))).toBe(false);
     });
   });
 

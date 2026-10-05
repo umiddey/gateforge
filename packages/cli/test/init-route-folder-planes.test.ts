@@ -6,7 +6,8 @@
  * NOTHING and writes NOTHING for routes — it names every folder that
  * still has unresolved endpoints and prints the exact
  * `gateforge classify plane` command for it. The model-folder rules are
- * still inferred and written as before, into the same file.
+ * still inferred and written as before, into the same `planes:` section
+ * of the owner-answers document (0.11.0 — it was `.gateforge/planes.json`).
  *
  * Two properties this guards, both of which the old code had backwards:
  * - a route folder with unresolved endpoints is NAMED, so the owner is
@@ -17,7 +18,8 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { withTempRepo } from '@gate-forge/core';
+import { OWNER_ANSWERS_PATH, withTempRepo } from '@gate-forge/core';
+import { parse as parseYaml } from 'yaml';
 import { runCli } from './helpers.js';
 
 /** A SQLAlchemy model: discovery sees a table with no answered plane. */
@@ -47,6 +49,18 @@ def list_orders():
 
 interface PlanesFile {
   rules: Array<{ match?: string; plane?: string; reason?: string }>;
+}
+
+/**
+ * The `planes:` rules the owner-answers document declares. Since 0.11.0
+ * the plane answer is a SECTION of that one document, so a fixture that
+ * read a `.gateforge/planes.json` file no longer describes any real home.
+ */
+function planeRulesOf(repo: { path: (relative: string) => string }): PlanesFile['rules'] {
+  const document = parseYaml(readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8')) as
+    | { planes?: PlanesFile }
+    | null;
+  return document?.planes?.rules ?? [];
 }
 
 describe('init --planes names the route folders it cannot infer (D1)', () => {
@@ -90,24 +104,23 @@ describe('init --planes names the route folders it cannot infer (D1)', () => {
 
       // And nothing was written for routes — the model rule is all that
       // the inference produced, exactly as before.
-      const written = JSON.parse(readFileSync(repo.path('.gateforge/planes.json'), 'utf8')) as PlanesFile;
-      expect(written.rules.map((rule) => rule.match)).toEqual(['app/*.py']);
+      expect(planeRulesOf(repo).map((rule) => rule.match)).toEqual(['app/*.py']);
     });
   });
 
-  it('leaves a reviewed planes file completely alone', async () => {
+  it('leaves a reviewed planes section completely alone', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles({ 'app/models.py': MODELS, 'app/main.py': ROUTES });
       const first = await runCli(repo, ['init', '--no-scan', '--preset', 'light', '--planes']);
       expect(first.code, first.stderr).toBe(0);
-      const before = readFileSync(repo.path('.gateforge/planes.json'), 'utf8');
+      const before = readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8');
 
       const second = await runCli(repo, ['init', '--no-scan', '--preset', 'light', '--planes']);
       expect(second.code, second.stderr).toBe(0);
       expect(second.stdout).toContain('exists, leaving untouched');
       // A reviewed document is never re-proposed or rewritten.
       expect(second.stdout).not.toContain('route folders with no answered plane');
-      expect(readFileSync(repo.path('.gateforge/planes.json'), 'utf8')).toBe(before);
+      expect(readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8')).toBe(before);
     });
   });
 });

@@ -83,9 +83,16 @@ trustedInternalEntryPoints: []
 internalRules: []
 `;
 
-const PLANES_JSON = JSON.stringify({
-  rules: [{ match: 'backend/api/v1/**', plane: 'tenant', reason: 'tenant router tree' }],
-});
+/**
+ * The plane answer, as the `planes:` SECTION of the owner-answers
+ * document. Since 0.11.0 it is no longer a `.gateforge/planes.json` file.
+ */
+const PLANES_SECTION = `planes:
+  rules:
+    - match: backend/api/v1/**
+      plane: tenant
+      reason: tenant router tree
+`;
 
 const LITERAL_PATH = '/accounts/export';
 const PARAM_PATH = '/accounts/123';
@@ -133,8 +140,7 @@ function installRoutesRepo(repo: TempRepo): void {
   repo.writeFiles({
     '.gateforge.yml': configYml({ include: "['backend/**/*.py']" }),
     '.gateforge/policies.yml': HTTP_POLICIES_YML,
-    '.gateforge/classification-policy.yml': HTTP_CLASSIFICATION_POLICY_YML,
-    '.gateforge/planes.json': PLANES_JSON,
+    '.gateforge/classification-policy.yml': `${HTTP_CLASSIFICATION_POLICY_YML}${PLANES_SECTION}`,
     'plugin.mjs': HTTP_PLUGIN_SOURCE,
     'backend/api/v1/accounts.py': '# router fixture\n',
   });

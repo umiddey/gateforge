@@ -27,17 +27,17 @@
  *     `prefix="/api/v1"` yields its routes and the finding disappears
  *     (also pinned by the pack's own real-detector test,
  *     `pack-fastapi/test/subprocess.test.ts`);
- *   - a capability rule in `.gateforge/endpoints.json` CANNOT match — the
- *     detector emits no route fact at all for a computed prefix, so there
- *     is no method/path to key a rule on;
+ *   - a capability rule in the `endpoints:` section of the owner-answers
+ *     document CANNOT match — the detector emits no route fact at all for
+ *     a computed prefix, so there is no method/path to key a rule on;
  *   - `gateforge waive` CANNOT reach it — the finding resolves no
  *     obligation (`waive: no obligation resolves for …`, exit 2);
- * - `.gateforge/fastapi.json`'s `importRoots` does NOT apply to THIS
- *   finding: it resolves imports, and a computed prefix is not an import
- *   problem. It DOES apply to the same code's other reason — a target
- *   the scanner cannot follow — which is verified against the real python
- *   detector in `pack-fastapi/test/template-mount.test.ts` and printed by
- *   the block below.
+ * - `scan.fastapi`'s `importRoots` in `.gateforge.yml` does NOT apply to
+ *   THIS finding: it resolves imports, and a computed prefix is not an
+ *   import problem. It DOES apply to the same code's other reason — a
+ *   target the scanner cannot follow — which is verified against the real
+ *   python detector in `pack-fastapi/test/template-mount.test.ts` and
+ *   printed by the block below.
  *
  * So the block names the literal-prefix fix and nothing else, and the
  * missing declaration key is reported to the pack owner rather than
@@ -91,7 +91,8 @@ describe('gateforge next: a computed FastAPI router prefix is answerable', () =>
       expect(stdout).toContain('literal');
       expect(stdout).toContain('backend/app/main.py');
       // Nothing that does not work for THIS finding.
-      expect(stdout).not.toContain('endpoints.json');
+      expect(stdout).not.toContain('scan.fastapi');
+      expect(stdout).not.toContain('`endpoints:` section');
       expect(stdout).not.toContain('importRoots');
       expect(stdout).not.toContain('gateforge waive');
     });
@@ -194,12 +195,13 @@ describe('gateforge next: an unfollowable include_router target names importRoot
       // derived from the file the finding names.
       expect(stdout).toContain('importRoots');
       expect(stdout).toContain('"backend"');
-      expect(stdout).toContain('fastapi.json');
+      expect(stdout).toContain('scan.fastapi');
+      expect(stdout).toContain('.gateforge.yml');
       // The advice for the OTHER reason cannot apply: this mount has no
       // prefix at all, so "make it literal" is not an answer.
       expect(stdout).not.toContain('literal string prefix');
       expect(stdout).not.toContain('this mount writes its prefix from an expression');
-      expect(stdout).not.toContain('endpoints.json');
+      expect(stdout).not.toContain('`endpoints:` section');
       expect(stdout).not.toContain('gateforge waive');
     });
   });

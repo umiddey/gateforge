@@ -16,14 +16,17 @@
  * zero obligations (the F7 escape) and the joined-frontend unclassified
  * block is dropped — these tests fail there and pass after the fix.
  */
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  OWNER_ANSWERS_PATH,
   loadConfig,
   withTempRepo,
   type BlockingEntry,
   type Obligation,
   type ResourceGraph,
 } from '@gate-forge/core';
+import { setSection } from '../src/yaml-section.js';
 import { evaluateRun } from '../src/evaluate.js';
 import {
   computeEvaluationScope,
@@ -160,54 +163,85 @@ describe('F7: policy-only staged change expands check --changed to all', () => {
     });
   });
 
-  it('planes config creation and deletion expand (gate-defining pack input)', async () => {
+  it('a plane answer added to the owner-answers document expands, naming that document', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       repo.commitFiles({}, 'base');
-      repo.writeFiles({ '.gateforge/planes.json': '{"rules": []}\n' });
-      repo.stage(['.gateforge/planes.json']);
-      {
-        const { code, stdout } = await runCli(repo, ['check', '--changed', '--format', 'json']);
-        expect(code).toBe(1);
-        const report = parseScopeReport(stdout);
-        expect(report.scope?.mode).toBe('all');
-        expect(report.scope?.expandedBecause).toContain('.gateforge/planes.json');
-        expect(report.verdicts).toHaveLength(2);
-      }
-      repo.commitFiles({}, 'planes added');
-      repo.git(['rm', '--quiet', '.gateforge/planes.json']);
-      {
-        const { code, stdout } = await runCli(repo, ['check', '--changed', '--format', 'json']);
-        expect(code).toBe(1);
-        const report = parseScopeReport(stdout);
-        expect(report.scope?.mode).toBe('all');
-        expect(report.scope?.expandedBecause).toContain('.gateforge/planes.json');
-        expect(report.verdicts).toHaveLength(2);
+      // 0.11.0: the plane rules are the `planes:` SECTION of the ONE
+      // owner-answers document (they were `.gateforge/planes.json`), so
+      // the expansion reason names the document the answer now lives in —
+      // never a pack-specific file no command reads.
+      const answered = setSection(
+        readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8'),
+        ['planes'],
+        { rules: [{ match: 'src/accounts.txt', plane: 'tenant', reason: 'Owner-reviewed tenant data.' }] },
+        OWNER_ANSWERS_PATH,
+      );
+      repo.writeFiles({ [OWNER_ANSWERS_PATH]: answered });
+      repo.stage([OWNER_ANSWERS_PATH]);
+
+      const { code, stdout } = await runCli(repo, ['check', '--changed', '--format', 'json']);
+      expect(code).toBe(1);
+      const report = parseScopeReport(stdout);
+      expect(report.scope?.mode).toBe('all');
+      expect(report.scope?.expandedBecause).toContain(OWNER_ANSWERS_PATH);
+      expect(report.verdicts).toHaveLength(2);
+    });
+  });
+  it('the moved pack files no longer widen a --changed run', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.commitFiles({}, 'base');
+      // The pre-0.11 owner-answer files are not gate-defining inputs
+      // anymore: no command reads them, so a `--changed` run must not
+      // re-grade every obligation because one of them appears in a diff.
+      const config = loadConfig(repo.path('.gateforge.yml'));
+      for (const moved of [
+        '.gateforge/planes.json',
+        '.gateforge/endpoints.json',
+        '.gateforge/http-clients.json',
+        '.gateforge/fastapi.json',
+      ]) {
+        expect(computeEvaluationScope({ config, changedFiles: [moved] }).mode, moved).toBe(
+          'changed',
+        );
       }
     });
   });
 
-  it('http-clients and fastapi creation expand', async () => {
+  it('http-clients and fastapi sections added to the config expand', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
       repo.commitFiles({}, 'base');
-      repo.writeFiles({ '.gateforge/http-clients.json': '{}\n' });
-      repo.stage(['.gateforge/http-clients.json']);
+      // 0.11.0: both scanner settings are SECTIONS of `.gateforge.yml`
+      // (they were `.gateforge/http-clients.json` / `.gateforge/fastapi.json`),
+      // and the document that carries them is a gate-defining input.
+      const configPath = '.gateforge.yml';
+      const withClients = setSection(
+        readFileSync(repo.path(configPath), 'utf8'),
+        ['scan', 'httpClients'],
+        { clientScanRoots: ['src'], serverScanRoots: ['src'] },
+        configPath,
+      );
+      repo.writeFiles({ [configPath]: withClients });
+      repo.stage([configPath]);
       const created = await runCli(repo, ['check', '--changed', '--format', 'json']);
       expect(created.code).toBe(1);
       expect(parseScopeReport(created.stdout).scope?.mode).toBe('all');
-      expect(parseScopeReport(created.stdout).scope?.expandedBecause).toContain(
-        '.gateforge/http-clients.json',
-      );
+      expect(parseScopeReport(created.stdout).scope?.expandedBecause).toContain(configPath);
       repo.commitFiles({}, 'http-clients added');
-      repo.writeFiles({ '.gateforge/fastapi.json': '{}\n' });
-      repo.stage(['.gateforge/fastapi.json']);
+      const withFastapi = setSection(
+        readFileSync(repo.path(configPath), 'utf8'),
+        ['scan', 'fastapi'],
+        { importRoots: ['app'] },
+        configPath,
+      );
+      repo.writeFiles({ [configPath]: withFastapi });
+      repo.stage([configPath]);
       const fastapi = await runCli(repo, ['check', '--changed', '--format', 'json']);
       expect(fastapi.code).toBe(1);
       expect(parseScopeReport(fastapi.stdout).scope?.mode).toBe('all');
-      expect(parseScopeReport(fastapi.stdout).scope?.expandedBecause).toContain(
-        '.gateforge/fastapi.json',
-      );
+      expect(parseScopeReport(fastapi.stdout).scope?.expandedBecause).toContain(configPath);
     });
   });
 
@@ -591,15 +625,13 @@ describe('F7: scope decision unit matrix (segment matching, deletions)', () => {
       expect(decide(['.gateforge/classification-policy.yml']).expandedBecause).toEqual([
         '.gateforge/classification-policy.yml',
       ]);
-      expect(decide(['.gateforge/planes.json']).expandedBecause).toEqual([
-        '.gateforge/planes.json',
-      ]);
-      expect(decide(['.gateforge/http-clients.json']).expandedBecause).toEqual([
-        '.gateforge/http-clients.json',
-      ]);
-      expect(decide(['.gateforge/fastapi.json']).expandedBecause).toEqual([
-        '.gateforge/fastapi.json',
-      ]);
+      // 0.11.0: the four moved owner-answer files are no longer
+      // gate-defining inputs. Their new homes — `.gateforge.yml` and the
+      // owner-answers document — are asserted above.
+      expect(decide(['.gateforge/planes.json']).mode).toBe('changed');
+      expect(decide(['.gateforge/endpoints.json']).mode).toBe('changed');
+      expect(decide(['.gateforge/http-clients.json']).mode).toBe('changed');
+      expect(decide(['.gateforge/fastapi.json']).mode).toBe('changed');
       expect(decide(['.gateforge/adapters/orders.mjs']).expandedBecause).toEqual([
         '.gateforge/adapters',
       ]);
@@ -614,7 +646,7 @@ describe('F7: scope decision unit matrix (segment matching, deletions)', () => {
       expect(decide(['sub/.gitignore']).expandedBecause).toEqual(['sub/.gitignore']);
       expect(decide(['.gitattributes']).expandedBecause).toEqual(['.gitattributes']);
       // Deleted files are still in the changed list and must trigger.
-      expect(decide(['.gateforge/planes.json']).mode).toBe('all');
+      expect(decide(['.gateforge/baselines/obligations.json']).mode).toBe('all');
       // Segment, not substring: sibling directories never match.
       expect(decide(['.gateforge/adapters2/evil.mjs']).mode).toBe('changed');
       expect(decide(['.gateforge/waivers-backup/x.json']).mode).toBe('changed');

@@ -1,8 +1,0 @@
-{
-  "rules": [
-    { "match": "behavior/server.js", "method": "GET", "paths": ["/admin/accounts", "/admin/accounts/:id/edit", "/profile/accounts", "/profile/accounts/:id/edit", "/api/accounts", "/api/accounts/:id"], "capability": "crud-read", "reason": "These example routes display or return account records." },
-    { "match": "behavior/server.js", "method": "POST", "paths": ["/admin/accounts/:id", "/profile/accounts/:id"], "capability": "crud-update", "reason": "These example routes update an existing account." },
-    { "match": "behavior/server.js", "method": "GET", "paths": ["/imports/accounts"], "capability": "crud-read", "reason": "This example route displays the import form." },
-    { "match": "behavior/server.js", "method": "POST", "paths": ["/imports/accounts"], "capability": "crud-create", "reason": "This example route creates accounts from submitted rows." }
-  ]
-}

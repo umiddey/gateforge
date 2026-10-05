@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { attestationMac, ledgerMac, loadConfig, recordIdOf, withTempRepo } from '@gate-forge/core';
 import {
+  CLASSIFICATION_POLICY_YML,
   classificationsYml,
   configYml,
   currentInputDigest,
@@ -407,12 +408,23 @@ describe('gateforge check', () => {
           '});',
           '',
         ].join('\n'),
-        '.gateforge/planes.json': JSON.stringify({
-          rules: [{ match: 'src/server.js', plane: 'tenant', reason: 'The fixture route is tenant-scoped.' }],
-        }),
-        '.gateforge/endpoints.json': JSON.stringify({
-          rules: [{ match: 'src/server.js', paths: ['/api/accounts'], method: 'GET', capability: 'crud-read', reason: 'The route reads account records.' }],
-        }),
+        // 0.11.0: the plane and endpoint answers are SECTIONS of the one
+        // owner-answers document, not `.gateforge/planes.json` /
+        // `.gateforge/endpoints.json`.
+        '.gateforge/classification-policy.yml': `${CLASSIFICATION_POLICY_YML}planes:
+  rules:
+    - match: src/server.js
+      plane: tenant
+      reason: The fixture route is tenant-scoped.
+endpoints:
+  rules:
+    - match: src/server.js
+      paths:
+        - /api/accounts
+      method: GET
+      capability: crud-read
+      reason: The route reads account records.
+`,
       });
 
       const result = await runCli(repo, ['check']);

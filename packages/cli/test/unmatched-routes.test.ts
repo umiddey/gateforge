@@ -81,9 +81,16 @@ trustedInternalEntryPoints: []
 internalRules: []
 `;
 
-const PLANES_JSON = JSON.stringify({
-  rules: [{ match: 'backend/api/v1/**', plane: 'tenant', reason: 'tenant router tree' }],
-});
+/**
+ * The plane answer, as the `planes:` SECTION of the owner-answers
+ * document. Since 0.11.0 it is no longer a `.gateforge/planes.json` file.
+ */
+const PLANES_SECTION = `planes:
+  rules:
+    - match: backend/api/v1/**
+      plane: tenant
+      reason: tenant router tree
+`;
 
 /**
  * Installs the fixture repository, optionally declaring the owner's
@@ -94,8 +101,7 @@ function installRepo(repo: TempRepo, endpointsBlock: string): void {
   repo.writeFiles({
     '.gateforge.yml': `${configYml({ include: "['backend/**/*.py']" })}${endpointsBlock}`,
     '.gateforge/policies.yml': POLICIES_YML,
-    '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,
-    '.gateforge/planes.json': PLANES_JSON,
+    '.gateforge/classification-policy.yml': `${CLASSIFICATION_POLICY_YML}${PLANES_SECTION}`,
     'plugin.mjs': PLUGIN_SOURCE,
     'backend/api/v1/reports.py': '# router fixture\n',
   });

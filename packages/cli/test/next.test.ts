@@ -3,10 +3,11 @@
  * navigation, not the gate. Exit 0 clean, 1 next action, 2 config/usage.
  */
 import { describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { fingerprint, withTempRepo } from '@gate-forge/core';
+import { fingerprint, OWNER_ANSWERS_PATH, withTempRepo, type TempRepo } from '@gate-forge/core';
 import {
+  CLASSIFICATION_POLICY_YML,
   installFixture,
   LIFECYCLE,
   OBLIGATION_ACCOUNTS,
@@ -15,6 +16,54 @@ import {
   POLICY_ID,
   runCli,
 } from './helpers.js';
+import { declaresSection, removeTopLevelSection, setSection } from '../src/yaml-section.js';
+
+/**
+ * Rewrites the owner-answers document so it declares exactly `value`
+ * under the named top-level section — through the production section
+ * writer, so a fixture can never build a document a run would refuse.
+ *
+ * @param repo the temp repository under test
+ * @param key the top-level section name
+ * @param value the plain-data body to declare
+ */
+function setOwnerSection(
+  repo: TempRepo,
+  key: string,
+  value: unknown,
+): void {
+  const current = readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8');
+  repo.writeFiles({
+    [OWNER_ANSWERS_PATH]: setSection(current, [key], value, OWNER_ANSWERS_PATH),
+  });
+}
+
+/**
+ * Cuts one section out of the owner-answers document entirely.
+ *
+ * @param repo the temp repository under test
+ * @param key the top-level section name
+ */
+function removeOwnerSection(repo: TempRepo, key: string): void {
+  const current = readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8');
+  const removal = removeTopLevelSection(current, key, OWNER_ANSWERS_PATH);
+  if (removal !== null) repo.writeFiles({ [OWNER_ANSWERS_PATH]: removal.text });
+}
+
+/**
+ * Whether the owner-answers document declares the named section.
+ *
+ * @param repo the temp repository under test
+ * @param key the top-level section name
+ * @returns true when the section is declared
+ */
+function declaresOwnerSection(repo: TempRepo, key: string): boolean {
+  return declaresSection(
+    readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8'),
+    [key],
+    OWNER_ANSWERS_PATH,
+  );
+}
 
 /** A valid, unexpired waiver for one fixture obligation. */
 function waiverJson(resourceId: string): string {
@@ -273,10 +322,10 @@ describe('gateforge next', () => {
         // checked from the baseline the guidance prints for it: the
         // prerequisite run, with no rule chosen yet. A command that only
         // works after a sibling command ran is not runnable as printed.
-        rmSync(join(repo.root, '.gateforge/planes.json'), { force: true });
+        removeOwnerSection(repo, 'planes');
         const prerequisite = await runCli(repo, ['init', '--planes']);
         expect(prerequisite.code, `init --planes exited ${prerequisite.code}`).toBe(0);
-        expect(existsSync(join(repo.root, '.gateforge/planes.json'))).toBe(true);
+        expect(declaresOwnerSection(repo, 'planes')).toBe(true);
         const run = await runCli(repo, parsePrintedCommand(command).slice(1));
         expect(run.code, `${command} exited ${run.code}: ${run.stderr}`).not.toBe(2);
       }
@@ -615,9 +664,14 @@ function withDelegatedRoute(repo: Parameters<typeof installFixture>[0]): void {
   installFixture(repo);
   repo.writeFiles({
     'plugin.mjs': DELEGATED_ROUTE_PLUGIN_SOURCE,
-    '.gateforge/planes.json': JSON.stringify({
-      rules: [{ match: 'src/http.ts', plane: 'tenant', reason: 'Owner review confirms the plane.' }],
-    }),
+    // 0.11.0: the plane answer is the `planes:` SECTION of the one
+    // owner-answers document, not `.gateforge/planes.json`.
+    [OWNER_ANSWERS_PATH]: `${CLASSIFICATION_POLICY_YML}planes:
+  rules:
+    - match: src/http.ts
+      plane: tenant
+      reason: Owner review confirms the plane.
+`,
   });
 }
 
@@ -632,14 +686,14 @@ function firstCodeBlock(stdout: string): string {
 }
 
 describe('gateforge next: an unresolved endpoint is answerable from the output alone', () => {
-  it('prints the exact endpoints.json entry for THAT endpoint plus the verify command', async () => {
+  it('prints the exact `endpoints:` entry for THAT endpoint plus the verify command', async () => {
     await withTempRepo({}, async (repo) => {
       withDelegatedRoute(repo);
       const { code, stdout } = await runCli(repo, ['next']);
       expect(code).toBe(1);
       expect(stdout).toContain('ENDPOINT_SEMANTICS_UNRESOLVED');
       // The printed action changes state — it is not a read-only dump.
-      expect(stdout).toContain('.gateforge/endpoints.json');
+      expect(stdout).toContain('`endpoints:` section');
       // The entry names THIS endpoint's own method and canonical path.
       expect(stdout).toContain('"method": "POST"');
       expect(stdout).toContain('"paths": ["/things/{thing_id}/render"]');
@@ -672,7 +726,7 @@ describe('gateforge next: an unresolved endpoint is answerable from the output a
           '"<owner-written reason and evidence: what this handler really does>"',
           '"Owner read: the handler renders the stored record."',
         );
-      repo.writeFiles({ '.gateforge/endpoints.json': `${declaration}\n` });
+      setOwnerSection(repo, 'endpoints', JSON.parse(declaration));
       const after = await runCli(repo, ['next']);
       expect(after.stdout).not.toContain('ENDPOINT_SEMANTICS_UNRESOLVED');
       // The verify command the guidance printed actually proves it.
@@ -681,7 +735,7 @@ describe('gateforge next: an unresolved endpoint is answerable from the output a
       ) as string;
       const explain = await runCli(repo, parsePrintedCommand(verify).slice(1));
       expect(explain.code, explain.stderr).toBe(0);
-      expect(explain.stdout).toContain('endpoints.json');
+      expect(explain.stdout).toContain('endpoints:');
       expect(explain.stdout).toContain('crud-update');
     });
   });
@@ -705,7 +759,7 @@ describe('gateforge next: an unresolved endpoint is answerable from the output a
       installFixture(repo);
       const { code, stdout } = await runCli(repo, ['next']);
       expect(code).toBe(1);
-      expect(stdout).not.toContain('.gateforge/endpoints.json');
+      expect(stdout).not.toContain('`endpoints:` section');
       const json = await runCli(repo, ['next', '--json']);
       const parsed = JSON.parse(json.stdout) as Record<string, unknown>;
       expect(parsed['endpointSemanticsGuidance']).toBeUndefined();
@@ -750,17 +804,17 @@ describe('gateforge next: copy-pasteable output and honest prerequisites', () =>
     });
   });
 
-  it('prints the planes prerequisite only while the planes file is absent', async () => {
+  it('prints the planes prerequisite only while the `planes:` section is absent', async () => {
     await withTempRepo({}, async (repo) => {
       await withUnresolvedRoute(repo);
-      rmSync(join(repo.root, '.gateforge/planes.json'), { force: true });
+      removeOwnerSection(repo, 'planes');
       const first = await runCli(repo, ['next']);
       expect(first.stdout).toContain('gateforge init --planes');
     });
     await withTempRepo({}, async (repo) => {
       await withUnresolvedRoute(repo);
       expect((await runCli(repo, ['init', '--planes'])).code).toBe(0);
-      expect(existsSync(join(repo.root, '.gateforge/planes.json'))).toBe(true);
+      expect(declaresOwnerSection(repo, 'planes')).toBe(true);
       const second = await runCli(repo, ['next']);
       expect(second.stdout).toContain('question:');
       expect(second.stdout).not.toContain('gateforge init --planes');
@@ -795,7 +849,12 @@ describe('gateforge next: a definitionally blocked resource names its causes', (
       expect(stdout).toContain('has no effective classification');
       // The block that actually holds this resource is named, not a dump.
       expect(stdout).toContain('[DELETE_SEMANTICS_UNRESOLVED]');
-      expect(stdout).toContain('endpoints.json');
+      // 0.11.0 ("one answer per fact"): the hard-vs-archive answer is not
+      // an `endpoints:` capability rule any more — it is the owner's
+      // `deleteRules`, written by this one command.
+      expect(stdout).toContain('gateforge classify delete');
+      expect(stdout).toContain('deleteRules');
+      expect(stdout).not.toContain('endpoints.json');
       expect(stdout).not.toContain('do: gateforge classify --json');
     });
   });

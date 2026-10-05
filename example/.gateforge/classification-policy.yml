@@ -24,3 +24,45 @@ trustedInternalEntryPoints:
     patterns: ['**/scripts/maintenance/**']
 # Organization internal rules — certificate INPUTS, never overrides.
 internalRules: []
+# Plane answers: which data plane owns the records a source file operates
+# on. These rules moved here from `.gateforge/planes.json` in 0.11.0.
+planes:
+  rules:
+    - match: behavior/server.js
+      plane: tenant
+      reason: The example routes operate on tenant-owned accounts.
+# Endpoint capability answers: what an HTTP route actually does when the
+# detector cannot see it through service-layer delegation. These rules
+# moved here from `.gateforge/endpoints.json` in 0.11.0.
+endpoints:
+  rules:
+    - match: behavior/server.js
+      method: GET
+      paths:
+        - /admin/accounts
+        - /admin/accounts/:id/edit
+        - /profile/accounts
+        - /profile/accounts/:id/edit
+        - /api/accounts
+        - /api/accounts/:id
+      capability: crud-read
+      reason: These example routes display or return account records.
+    - match: behavior/server.js
+      method: POST
+      paths:
+        - /admin/accounts/:id
+        - /profile/accounts/:id
+      capability: crud-update
+      reason: These example routes update an existing account.
+    - match: behavior/server.js
+      method: GET
+      paths:
+        - /imports/accounts
+      capability: crud-read
+      reason: This example route displays the import form.
+    - match: behavior/server.js
+      method: POST
+      paths:
+        - /imports/accounts
+      capability: crud-create
+      reason: This example route creates accounts from submitted rows.

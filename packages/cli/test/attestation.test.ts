@@ -84,6 +84,13 @@ const PING_CLASSIFICATION_POLICY_YML = `\
 schemaVersion: 1
 trustedInternalEntryPoints: []
 internalRules: []
+# The plane answer is a SECTION of the owner-answers document since
+# 0.11.0 (it was the file .gateforge/planes.json).
+planes:
+  rules:
+    - match: backend/api/v1/**
+      plane: tenant
+      reason: tenant router tree
 `;
 
 /** Installs the single-route transport fixture. */
@@ -93,9 +100,6 @@ function installPingRepo(repo: TempRepo): void {
     '.gateforge.yml': configYml({ include: "['backend/**/*.py']" }),
     '.gateforge/policies.yml': PING_POLICIES_YML,
     '.gateforge/classification-policy.yml': PING_CLASSIFICATION_POLICY_YML,
-    '.gateforge/planes.json': JSON.stringify({
-      rules: [{ match: 'backend/api/v1/**', plane: 'tenant', reason: 'tenant router tree' }],
-    }),
     'plugin.mjs': PING_PLUGIN_SOURCE,
     'backend/api/v1/accounts.py': '# accounts router fixture\n',
   });

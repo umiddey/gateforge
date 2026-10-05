@@ -11,7 +11,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { loadConfig, withTempRepo } from '@gate-forge/core';
+import { OWNER_ANSWERS_PATH, loadConfig, withTempRepo } from '@gate-forge/core';
+import { declaresSection } from '../src/yaml-section.js';
 import {
   CHOOSE_ANOTHER_GOAL_ADVICE,
   INIT_PRESETS,
@@ -153,7 +154,13 @@ describe('init --preset', () => {
       expect(stdout).toContain('preset strict:');
       expect(stdout).toContain('undo:');
       // A preset never writes a waiver, an adopted baseline or a plane rule.
-      expect(existsSync(repo.path('.gateforge/planes.json'))).toBe(false);
+      expect(
+        declaresSection(
+          readFileSync(repo.path(OWNER_ANSWERS_PATH), 'utf8'),
+          ['planes'],
+          OWNER_ANSWERS_PATH,
+        ),
+      ).toBe(false);
       expect(readFileSync(repo.path('.gateforge/baselines/obligations.json'), 'utf8')).toContain(
         '"fingerprints": []',
       );

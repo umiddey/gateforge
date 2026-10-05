@@ -1,9 +1,0 @@
-{
-  "rules": [
-    {
-      "match": "behavior/server.js",
-      "plane": "tenant",
-      "reason": "The example routes operate on tenant-owned accounts."
-    }
-  ]
-}
