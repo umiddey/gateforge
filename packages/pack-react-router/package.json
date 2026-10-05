@@ -1,15 +1,47 @@
 {
   "name": "@gate-forge/pack-react-router",
-  "version": "0.13.0",
+  "version": "0.12.0",
   "license": "Apache-2.0",
-  "description": "Generic React Router page reader",
+  "description": "Generic React Router page reader: JSX and object route trees become ui.page resources (page:loads, page:data-ok obligations).",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "main": "./dist/index.js",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" }, "./package.json": "./package.json" },
-  "files": ["README.md", "dist"],
-  "scripts": { "build": "tsc -p tsconfig.build.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run" },
-  "dependencies": { "@gate-forge/core": "^0.11.0", "@gate-forge/plugin-protocol": "^0.11.0", "typescript": "^5.9.2", "yaml": "^2.9.0", "zod": "^4.1.5" },
-  "publishConfig": { "access": "public" },
-  "repository": { "type": "git", "url": "git+https://github.com/umiddey/gateforge.git", "directory": "packages/pack-react-router" }
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "README.md",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gate-forge/core": "^0.12.0",
+    "@gate-forge/plugin-protocol": "^0.12.0",
+    "typescript": "^5.9.2",
+    "yaml": "^2.9.0",
+    "zod": "^4.1.5"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/gateforge.git",
+    "directory": "packages/pack-react-router"
+  },
+  "bugs": {
+    "url": "https://github.com/umiddey/gateforge/issues"
+  },
+  "homepage": "https://github.com/umiddey/gateforge#readme"
 }
